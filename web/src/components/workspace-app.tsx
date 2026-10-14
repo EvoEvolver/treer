@@ -7,6 +7,7 @@ import { MachineOverviewView } from "@/components/machine-view"
 import { OrganizationSettingsView } from "@/components/organization-settings-view"
 import { SettingsDialog } from "@/components/settings"
 import { TerminalPane, type TerminalPaneHandle } from "@/components/terminal-pane"
+import { TreeResizer, useTreeWidth } from "@/components/tree-resizer"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
@@ -101,6 +102,7 @@ function WorkspaceAppContent() {
   const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches)
   const [ctrlArmed, setCtrlArmed] = useState(false)
   const terminalPaneRef = useRef<TerminalPaneHandle>(null)
+  const treeWidth = useTreeWidth(user?.user_id, () => requestAnimationFrame(() => terminalPaneRef.current?.fit()))
   const interfaceFrameRef = useRef<HTMLIFrameElement>(null)
   const themeRef = useRef(theme)
   themeRef.current = theme
@@ -1147,8 +1149,8 @@ function WorkspaceAppContent() {
   if (!user) return <AuthScreen onAuthenticated={setUser} />
 
   return <TooltipProvider delayDuration={350}>
-      <main className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[272px_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto")}>
-        <aside className={cn("flex min-h-0 flex-col border-b bg-sidebar md:border-b-0 md:border-r", mobileSidebarHidden && "hidden md:flex")}>
+      <main style={treeWidth.style} className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[var(--tree-width)_8px_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto")}>
+        <aside id="tree-sidebar" className={cn("flex min-h-0 min-w-0 flex-col border-b bg-sidebar md:border-b-0", mobileSidebarHidden && "hidden md:flex")}>
         {preview && <div className="treer-tour-banner"><span>Tour preview · empty first-run account, no server writes</span></div>}
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
@@ -1171,8 +1173,9 @@ function WorkspaceAppContent() {
           </DropdownMenu>
         </div>
       </aside>
+      <TreeResizer settings={treeWidth} />
 
-      <section className={cn("min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]", mobileTerminalIdle ? "hidden md:grid" : "grid")}>
+      <section className={cn("min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:grid" : "grid")}>
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
             {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}

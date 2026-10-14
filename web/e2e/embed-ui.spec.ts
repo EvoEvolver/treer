@@ -270,6 +270,28 @@ test("selecting an agent with an embedded UI shows the iframe instead of the ter
   await expect(innerHeading).toBeVisible()
 })
 
+test('tree resizing protects embedded iframe events and matches dark theme', async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 })
+  await page.addInitScript(() => localStorage.setItem('treer-theme', 'dark'))
+  await page.goto('/')
+  await page.getByRole('button', { name: /^dashboard / }).click()
+  const frame = page.locator("iframe[title='/dashboard interface']")
+  await expect(frame).toBeVisible()
+  const bar = page.getByRole('separator', { name: 'Resize tree sidebar' })
+  const box = (await bar.boundingBox())!
+  await page.mouse.move(box.x + box.width / 2, box.y + 100)
+  await page.mouse.down()
+  await page.mouse.move(box.x + box.width / 2 + 150, box.y + 100, { steps: 10 })
+  await expect(bar).toHaveAttribute('aria-valuenow', '422')
+  await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'none')
+  await page.mouse.up()
+  await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'auto')
+  await expect(frame).toBeVisible()
+  await expect(page.locator('html')).toHaveClass(/dark/)
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: testInfo.outputPath('tree-resizer-dark-embed.png') })
+})
+
 test("selecting an embedded UI agent on an offline machine does not load the iframe", async ({ page }) => {
   await page.unroute("**/api/workspaces/ws-1/snapshot")
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {

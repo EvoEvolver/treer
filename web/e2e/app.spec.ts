@@ -316,6 +316,110 @@ test.beforeEach(async ({ page }) => {
   await mockApi(page)
 })
 
+test.describe('resizable tree sidebar', () => {
+  test.use({ viewport: { width: 1280, height: 900 } })
+  const key = 'treer:tree-width:v1:u1'
+  const separator = (page: Page) => page.getByRole('separator', { name: 'Resize tree sidebar' })
+  async function drag(page: Page, delta: number) {
+    const box = (await separator(page).boundingBox())!
+    await page.mouse.move(box.x + box.width / 2, box.y + 200)
+    await page.mouse.down()
+    await page.mouse.move(box.x + box.width / 2 + delta, box.y + 200, { steps: 8 })
+  }
+  test('drag persists across refresh/workspaces, protects terminal, and double click resets', async ({ page }, testInfo) => {
+    const resizeColumns: number[] = []
+    let initialColumns = 0
+    await page.routeWebSocket(/\/agents\/[^/]+\/terminal(?:\?.*)?$/, (ws) => {
+      initialColumns = Number(new URL(ws.url()).searchParams.get('cols'))
+      ws.onMessage((message) => { if (typeof message === 'string') { const control = JSON.parse(message); if (control.type === 'resize') resizeColumns.push(control.cols) } })
+      ws.send(JSON.stringify({ type: 'ready', stream_epoch: 'resize', revision: 0, replay_chunks: 0 }))
+    })
+    await page.goto('/')
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
+    await page.getByRole('button', { name: /^api-server / }).click()
+    await expect.poll(() => initialColumns).toBeGreaterThan(0)
+    await drag(page, 96)
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '368')
+    await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'none')
+    await page.mouse.up()
+    await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'auto')
+    await expect.poll(() => resizeColumns.at(-1)!).toBeLessThan(initialColumns)
+    expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe('368')
+    await page.screenshot({ path: testInfo.outputPath('tree-resizer-desktop.png') })
+    await page.reload()
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '368')
+    await page.goto('/orgs/org-2/workspaces/ws-2')
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '368')
+    await separator(page).dblclick()
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
+    await page.reload()
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
+  })
+  test('keyboard exposes separator values, clamps on resize and stays hidden at 390px', async ({ page }, testInfo) => {
+    await page.goto('/')
+    const bar = separator(page)
+    await expect(bar).toHaveAttribute('aria-orientation', 'vertical')
+    await bar.focus()
+    await page.keyboard.press('ArrowRight')
+    await expect(bar).toHaveAttribute('aria-valuenow', '288')
+    await page.keyboard.press('ArrowLeft')
+    await expect(bar).toHaveAttribute('aria-valuenow', '272')
+    await page.keyboard.press('Home')
+    await expect(bar).toHaveAttribute('aria-valuenow', '240')
+    await page.keyboard.press('End')
+    await expect(bar).toHaveAttribute('aria-valuenow', '480')
+    await page.setViewportSize({ width: 800, height: 900 })
+    await expect(bar).toHaveAttribute('aria-valuemax', '360')
+    await expect(bar).toHaveAttribute('aria-valuenow', '360')
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(bar).toHaveCount(0)
+    await expect(page.locator('aside')).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: testInfo.outputPath('tree-resizer-mobile.png') })
+  })
+  for (const failure of ['getter', 'read', 'write']) {
+    test(`storage ${failure} failure retains usable default and resizing`, async ({ page }) => {
+      await page.addInitScript((failure) => {
+        if (failure === 'getter') Object.defineProperty(window, 'localStorage', { get() { throw new Error('disabled') } })
+        else Object.defineProperty(Storage.prototype, failure === 'read' ? 'getItem' : 'setItem', { value() { throw new Error('disabled') } })
+      }, failure)
+      await page.goto('/')
+      await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
+      await separator(page).press('ArrowRight')
+      await expect(separator(page)).toHaveAttribute('aria-valuenow', '288')
+    })
+  }
+  test('width belongs to the signed in user and invalid cache uses default', async ({ page }) => {
+    await page.addInitScript(() => { localStorage.setItem('treer:tree-width:v1:other-user', '480'); localStorage.setItem('treer:tree-width:v1:u1', 'invalid') })
+    await page.goto('/')
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
+    await separator(page).press('ArrowRight')
+    expect(await page.evaluate(() => localStorage.getItem('treer:tree-width:v1:other-user'))).toBe('480')
+  })
+  test('touch pointer drag resizes on a large touch screen', async ({ page, context }) => {
+    await page.goto('/')
+    const box = (await separator(page).boundingBox())!
+    const session = await context.newCDPSession(page)
+    const start = { x: box.x + box.width / 2, y: box.y + 200 }
+    await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [start] })
+    await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ ...start, x: start.x + 80 }] })
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '352')
+    await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'auto')
+  })
+  test('losing window focus ends protection and the terminal remains usable', async ({ page }) => {
+    await page.goto('/')
+    await drag(page, 48)
+    await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'none')
+    await page.evaluate(() => dispatchEvent(new Event('blur')))
+    await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'auto')
+    await page.mouse.up()
+    await separator(page).press('Home')
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '240')
+  })
+})
+
 for (const mobile of [false, true]) {
   test.describe(`startup command on ${mobile ? "mobile" : "desktop"}`, () => {
     test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile })

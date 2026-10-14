@@ -18,6 +18,7 @@ interface TerminalPaneProps {
 export interface TerminalPaneHandle {
   focus: () => void
   send: (data: string) => void
+  fit: () => void
 }
 
 interface StreamCursor {
@@ -68,12 +69,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
   const hostRef = useRef<HTMLDivElement>(null)
   const focusRef = useRef<() => void>(() => undefined)
   const sendRef = useRef<(data: string) => void>(() => undefined)
+  const fitRef = useRef<() => void>(() => undefined)
   const transformInputRef = useRef(transformInput)
   transformInputRef.current = transformInput
 
   useImperativeHandle(ref, () => ({
     focus: () => focusRef.current(),
     send: (data) => sendRef.current(data),
+    fit: () => fitRef.current(),
   }), [])
 
   useEffect(() => {
@@ -203,6 +206,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       const coarsePointer = window.matchMedia("(pointer: coarse)").matches
       const heightNoiseThreshold = coarsePointer ? 96 : 0
       if (!widthChanged && (heightDelta < 0.5 || heightDelta <= heightNoiseThreshold)) return
+      lastHostWidth = width
+      lastHostHeight = height
+      fit.fit()
+      sendResize()
+    }
+    fitRef.current = () => {
+      if (disposed) return
+      const { width, height } = host.getBoundingClientRect()
       lastHostWidth = width
       lastHostHeight = height
       fit.fit()
@@ -386,6 +397,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
       terminal.dispose()
       focusRef.current = () => undefined
       sendRef.current = () => undefined
+      fitRef.current = () => undefined
     }
   }, [workspaceId, agentId, active, onStatusChange])
 

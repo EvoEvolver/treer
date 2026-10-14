@@ -27,6 +27,23 @@ collapsed preferences, so a user can collapse the selected Agent's folder and
 reload without reopening it. The current console has no Agent deep-link route;
 a future explicit deep-link selection should use the same reveal behavior.
 
+The desktop Tree sidebar has a focusable vertical separator with a 24px mouse/touch
+target. Drag to resize immediately; Left/Right change 16px (Shift: 64px), Home/End
+select the limits, and double-click restores 272px. The minimum is 240px; the
+maximum is the smallest of 480px, 45% of the viewport and the space left after
+reserving 400px for main content plus the 8px separator. Window resizing clamps
+the displayed width while retaining the preferred width for larger windows.
+Preferences use `treer:tree-width:v1:<user_id>` in localStorage across workspaces.
+Unavailable storage falls back to the default on load and allows in-memory
+resizing. Pointer capture and a temporary overlay protect drags across terminals
+and embedded iframes; release/cancel/focus loss removes protection and fits the
+terminal after layout commits. Separator colors use theme tokens.
+
+Below 768px the separator is hidden and the existing mobile layout stays intact.
+Managed App/Agent Interface embeds retain the same surrounding console sidebar.
+Native iOS/Android screens and their separate Agent WebViews do not render this
+sidebar; no native source or embedded Agent-owned interface is changed.
+
 **Edit startup command** reads the current argv and saves it through one restart
 operation. The editor scrolls on short mobile screens and preserves input after
 a denied operation. Managed Apps have separate settings; their startup editing
