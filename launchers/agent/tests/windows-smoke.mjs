@@ -35,7 +35,7 @@ const cli = join(fixture, windows ? "fake-treer.exe" : "fake-treer");
 execFileSync("rustc", [join(launcher, "tests/fake-treer.rs"), "-o", cli], { env: hermeticEnv(), stdio: "pipe" });
 const contract = JSON.parse(readFileSync(join(launcher, "interface-contract.json"), "utf8"));
 const controller = { git_commit: "a".repeat(40), protocol: contract.protocol, capabilities: contract.capabilities, features: contract.required_features,
-  minimum_launcher_security_epoch: contract.launcher_security_epoch, machine: { root: machine, server_id: "srv_smoke", workspace_id: "ws_smoke" } };
+  minimum_launcher_security_epoch: contract.launcher_security_epoch, machine: { root: machine, name: "windows_smoke", server_id: "srv_smoke", workspace_id: "ws_smoke" } };
 writeFileSync(join(fixture, "contract.json"), JSON.stringify(controller));
 const env = hermeticEnv({ HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, TEMP: temp, TMP: temp,
   FIXTURE_ROOT: fixture, FIXTURE_NODE: process.execPath, FIXTURE_TREER_SCRIPT: join(launcher, "tests/fake-treer.mjs"), PATH: "",
@@ -98,6 +98,11 @@ async function start() {
   providerPids = JSON.parse(readFileSync(env.FAKE_ACP_CHILD_PID_FILE));
 }
 const headers = { "x-treer-interface-source": "controller-api", "x-treer-agent-id": env.TREER_AGENT_ID, "x-treer-interface-instance": env.AGENT_UI_INSTANCE_ID };
+// Reproduce a workspace already using the launcher on a different machine.
+const profileDefinitions = JSON.parse(readFileSync(join(launcher, "profiles.json"))).profiles;
+const foreignProfile = JSON.stringify({ command: "/Users/other-machine/treer-agent.sh", cwd: "project", args: ["--owner-choice"] });
+for (const profile of profileDefinitions) writeFileSync(join(fixture, profile.name + ".json"), foreignProfile);
+const installedProfileName = "Codex + UI (windows_smoke)";
 try {
   if (windows) {
     // Both targets exceed MAX_PATH. A junction to a sibling of the machine
@@ -114,20 +119,22 @@ try {
       "--source", join(fixture, "missing-legacy-source")], { env: { ...env, PATH: fixture }, stdio: "pipe" });
     assert.throws(() => legacy("outside-cwd"), /Profile cwd must be relative and inside machine.root/);
     assert.throws(() => install("install", undefined, "outside-cwd"), options.controller ? /launcher installer failed/ : /Profile cwd must stay inside machine root/);
-    assert.equal(existsSync(join(fixture, "Codex + UI.json")), false);
+    assert.equal(readFileSync(join(fixture, "Codex + UI.json"), "utf8"), foreignProfile);
     const insideCwd = join(...longParts);
     // Reaching source resolution proves the valid long cwd passed validation;
     // this source-only installer is not the supported Windows installation path.
     assert.throws(() => legacy(insideCwd), /ENOENT.*missing-legacy-source/s);
     assert.equal(install("install", undefined, insideCwd).profiles.length, 6);
-    assert.equal(JSON.parse(readFileSync(join(fixture, "Codex + UI.json"))).cwd, insideCwd);
+    assert.equal(JSON.parse(readFileSync(join(fixture, installedProfileName + ".json"))).cwd, insideCwd);
     console.log("Long-path cwd: both installers reject outside junction; accept inside root (legacy validation only)");
   }
   const installed = install("install"); assert.equal(installed.portable, true); assert.equal(installed.profiles.length, 6);
   assert.equal(install("install").version, installed.version); assert.equal(install("update").version, installed.version);
   assert.equal(install("status").versions[0].compatibility.status, "compatible");
   assert.equal(install("rollback", installed.version).version, installed.version);
-  const profile = JSON.parse(readFileSync(join(fixture, "Codex + UI.json")));
+  assert.deepEqual(installed.profiles, profileDefinitions.map(profile => `${profile.name} (windows_smoke)`));
+  for (const profile of profileDefinitions) assert.equal(readFileSync(join(fixture, profile.name + ".json"), "utf8"), foreignProfile);
+  const profile = JSON.parse(readFileSync(join(fixture, installedProfileName + ".json")));
   // Rust's Windows canonical path may use the \\?\ prefix. Compare identities,
   // not spelling, while still requiring the installed profile's absolute Node.
   assert.ok(isAbsolute(profile.command)); assert.equal(realpathSync.native(profile.command), realpathSync.native(process.execPath));
@@ -167,6 +174,7 @@ try {
   assert.equal(JSON.parse(readFileSync(stateFile)).threadId, "sess-new");
   await stop(windows ? "SIGTERM" : "SIGHUP");
   const report = { platform: process.platform, embedded_controller: Boolean(options.controller), portable_install: true, profiles: 6,
+    profile_scope: "machine-qualified; other machine profiles unchanged through install/update/rollback",
     registration: "exact manifest/CLI contract", prompt: "passed", transcript: "passed", session_save_resume: "passed", process_tree_cleanup: "passed",
     windows_acl_and_long_paths: windows ? "passed" : "not tested on macOS/Linux", windows_cwd_junction_boundary: windows ? "outside rejected, inside accepted" : "not tested on macOS/Linux", provider: windows ? "npm .cmd via absolute Node" : "explicit JS via absolute Node",
     runtime_path: "empty", real_agents_touched: 0, real_credentials: false };
