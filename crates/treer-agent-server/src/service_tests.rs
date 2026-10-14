@@ -104,6 +104,15 @@ async fn windows_isolated_host_fixture() {
     new_enrollment_root(None).unwrap();
     let root = env::temp_dir().join(format!("treer-windows-host-{}", Uuid::new_v4().simple()));
     treer_platform::secure_directory(&root).unwrap();
+    // Match run_server's canonical-root precondition. On Windows the temp
+    // path can be a plain/short drive path while canonicalize(cwd) uses a
+    // verbatim prefix. Comparing that canonical cwd to a raw fixture root
+    // falsely rejects even ".". Do not weaken the production root check.
+    let raw_root = root;
+    let root = fs::canonicalize(&raw_root).unwrap();
+    let cwd = fs::canonicalize(root.join(".")).unwrap();
+    assert!(cwd.is_dir() && cwd.starts_with(&root));
+    eprintln!("windows-host-root raw-equals-canonical={} raw-contains-canonical-cwd={} canonical-contains-cwd={}", raw_root == root, cwd.starts_with(&raw_root), cwd.starts_with(&root));
     let binaries = env::current_exe()
         .unwrap()
         .parent()
@@ -187,6 +196,18 @@ async fn windows_isolated_host_fixture() {
     )
     .unwrap();
     let old_epoch = windows_wait_controller_epoch(&fixture.1, None).await;
+    assert!(
+        runtime
+            .exec_machine(treer_protocol::MachineExecRequest {
+                cwd: "..".into(),
+                command: "node.exe".into(),
+                args: vec![],
+                timeout_ms: 30_000,
+            })
+            .await
+            .is_err_and(|error| error.code == "invalid_machine_path"),
+        "parent traversal must still be rejected"
+    );
     windows_check_process_paths(&runtime, &host, &fixture.0.executable, &fixture.1.workspace).await;
     windows_wait_controller_epoch(&fixture.1, Some(&old_epoch)).await;
     let spawn = HostSpawnRequest {
