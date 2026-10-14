@@ -44,3 +44,11 @@ jobs:
         if: ${{ !cancelled() }}
         shell: powershell
         run: ./scripts/diag-windows-nested-shell.ps1
+      - name: Parent argument variants under pwsh 7
+        if: ${{ !cancelled() }}
+        shell: pwsh
+        run: ./scripts/diag-windows-parent-args.ps1
+      - name: Parent argument variants under Windows PowerShell 5.1
+        if: ${{ !cancelled() }}
+        shell: powershell
+        run: ./scripts/diag-windows-parent-args.ps1
