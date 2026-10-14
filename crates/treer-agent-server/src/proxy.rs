@@ -1324,10 +1324,12 @@ mod tests {
         // startup result on the SAME Proxy socket releases it: no sleeps/race.
         let child_started = Arc::new(Notify::new());
         let release_child = Arc::new(Notify::new());
+        let child_requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let http = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
         let url = format!("http://{}/", http.local_addr().unwrap());
         let started = child_started.clone();
         let release = release_child.clone();
+        let requests = child_requests.clone();
         let http_task = tokio::spawn(async move {
             axum::serve(
                 http,
@@ -1336,7 +1338,9 @@ mod tests {
                     get(move || {
                         let started = started.clone();
                         let release = release.clone();
+                        let requests = requests.clone();
                         async move {
+                            requests.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                             started.notify_one();
                             release.notified().await;
                             "complete"
@@ -1404,6 +1408,11 @@ mod tests {
                 .await
                 .unwrap();
             child_started.notified().await;
+            // A replay while exec is pending shares the original execution.
+            socket
+                .send(Message::Text(serde_json::to_string(&exec).unwrap().into()))
+                .await
+                .unwrap();
             let nested = ProxyMessage::Command {
                 envelope: CommandEnvelope {
                     command_id: "nested-startup".into(),
@@ -1446,6 +1455,24 @@ mod tests {
                     }
                 }
             }
+            // After completion, replay gets the cached result, never a new child.
+            socket
+                .send(Message::Text(serde_json::to_string(&exec).unwrap().into()))
+                .await
+                .unwrap();
+            loop {
+                if let Message::Text(text) = socket.next().await.unwrap().unwrap() {
+                    if let AgentServerMessage::CommandResult { result } =
+                        serde_json::from_str(&text).unwrap()
+                    {
+                        assert_eq!(result.command_id, "outer-exec");
+                        assert!(result.error.is_none());
+                        assert_eq!(result.data.unwrap()["exit_code"], 0);
+                        break;
+                    }
+                }
+            }
+            assert_eq!(child_requests.load(std::sync::atomic::Ordering::SeqCst), 1);
         });
         let connection = tokio::spawn(async move { client.run_connection().await });
         let outcome = tokio::time::timeout(Duration::from_secs(5), proxy_task).await;

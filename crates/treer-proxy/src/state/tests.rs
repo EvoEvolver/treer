@@ -1,6 +1,97 @@
 use super::*;
 
 #[tokio::test]
+async fn interleaved_exec_and_startup_results_use_command_ids_not_arrival_order() {
+    let state = AppState::new();
+    let connection_id = Uuid::new_v4();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            connection_id,
+            "correlation-fixture".into(),
+            vec![
+                treer_protocol::CAPABILITY_MACHINE_EXEC.into(),
+                treer_protocol::CAPABILITY_AGENT_STARTUP_ADMIN.into(),
+            ],
+            tx,
+        )
+        .await
+        .unwrap();
+    let mut waiting = Vec::new();
+    let mut ids = Vec::new();
+    for command in [
+        AgentCommand::Exec {
+            request: treer_protocol::MachineExecRequest {
+                cwd: ".".into(),
+                command: "fixture".into(),
+                args: vec![],
+                timeout_ms: 1000,
+            },
+        },
+        AgentCommand::Exec {
+            request: treer_protocol::MachineExecRequest {
+                cwd: ".".into(),
+                command: "fixture".into(),
+                args: vec![],
+                timeout_ms: 1000,
+            },
+        },
+        AgentCommand::StartupAdminGet {
+            agent_id: "fixture-agent".into(),
+        },
+    ] {
+        let state = state.clone();
+        waiting.push(tokio::spawn(async move {
+            state.send_command("alpha", "server", command).await
+        }));
+        let ProxyMessage::Command { envelope } =
+            serde_json::from_str(&expect_text(rx.recv().await.unwrap())).unwrap()
+        else {
+            panic!("expected command");
+        };
+        ids.push(envelope.command_id);
+    }
+    assert_eq!(state.inner.pending.lock().await.len(), 3);
+    // Startup responds first, then the second exec, then the first exec.
+    // Duplicate and unknown results must not consume another pending request.
+    for index in [2, 1, 0] {
+        let result = CommandResult::success(
+            ids[index].clone(),
+            serde_json::json!({"request_index":index}),
+        );
+        state
+            .complete_command_from("alpha", "server", connection_id, result.clone())
+            .await
+            .unwrap();
+        state
+            .complete_command_from("alpha", "server", connection_id, result)
+            .await
+            .unwrap();
+        state
+            .complete_command_from(
+                "alpha",
+                "server",
+                connection_id,
+                CommandResult::success("unknown-command", serde_json::json!({"unexpected":true})),
+            )
+            .await
+            .unwrap();
+        let pending = state.inner.pending.lock().await;
+        assert_eq!(pending.len(), index);
+        for remaining in &ids[..index] {
+            assert!(pending.contains_key(remaining));
+        }
+    }
+    for (index, result) in waiting.into_iter().enumerate() {
+        assert_eq!(
+            result.await.unwrap().unwrap(),
+            serde_json::json!({"request_index":index})
+        );
+    }
+}
+
+#[tokio::test]
 async fn old_controller_refuses_creation_preflight_without_mutating_or_disconnect() {
     let state = AppState::new();
     let (tx, mut rx) = mpsc::unbounded_channel();
