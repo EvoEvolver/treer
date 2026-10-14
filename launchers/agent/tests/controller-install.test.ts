@@ -118,6 +118,10 @@ test("bundle integrity, path traversal, symlink escape and concurrent locks fail
   const alias = fixture(t), linkedRoot = join(alias.root, "linked-machine");
   symlinkSync(alias.machine, linkedRoot, "dir");
   assert.throws(() => alias.call({ root: linkedRoot }), /Machine root must be a physical path/);
+  const cwdEscape = fixture(t);
+  symlinkSync(cwdEscape.root, join(cwdEscape.machine, "outside-cwd"), "dir");
+  assert.throws(() => cwdEscape.call({ cwd: "outside-cwd" }), /Profile cwd must stay inside machine root/);
+  assert.equal(existsSync(join(cwdEscape.root, "calls")), false);
   const h = fixture(t); h.call(); mkdirSync(join(h.base, ".install-lock")); assert.throws(() => h.call(), /owns the lock/);
   const k = fixture(t); const manifest = JSON.parse(readFileSync(join(k.bundle, "bundle-manifest.json"), "utf8")); manifest.files[0].path = "../escape";
   writeFileSync(join(k.bundle, "bundle-manifest.json"), JSON.stringify(manifest)); k.request.version = `sha256-${digest(readFileSync(join(k.bundle, "bundle-manifest.json")))}`;

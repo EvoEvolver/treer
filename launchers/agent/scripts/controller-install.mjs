@@ -38,7 +38,7 @@ export function controllerInstall(request) {
   const physicalRoot = realpathSync.native(request.root);
   if (toNamespacedPath(physicalRoot) !== toNamespacedPath(resolve(request.root))) throw new Error("Machine root must be a physical path");
   const cwd = request.cwd ?? ".", cwdInside = relative(physicalRoot, realpathSync.native(resolve(physicalRoot, cwd)));
-  if (isAbsolute(cwd) || cwdInside === ".." || cwdInside.startsWith(`..${sep}`)) throw new Error("Profile cwd must stay inside machine root");
+  if (isAbsolute(cwd) || isAbsolute(cwdInside) || cwdInside === ".." || cwdInside.startsWith(`..${sep}`)) throw new Error("Profile cwd must stay inside machine root");
   let root = physicalRoot;
   for (const name of [".treer", "launchers", "agent"]) { root = join(root, name); directory(root); }
   const pointerPath = join(root, "current.json"), lock = join(root, ".install-lock");

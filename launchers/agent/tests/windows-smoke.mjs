@@ -2,7 +2,7 @@
 // No provider credentials, network install, real Agent creation or restart.
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve, toNamespacedPath } from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { hermeticEnv, localFetch } from "./hermetic.mjs";
@@ -43,11 +43,11 @@ const env = hermeticEnv({ HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPP
   AGENT_UI_MESSAGE_WATCH: "0", FAKE_ACP_CALLS: join(fixture, "acp-calls.jsonl"), FAKE_ACP_CHILD_PID_FILE: join(fixture, "provider-pids.json") });
 for (const name of Object.keys(env)) if (/^NODE_/i.test(name)) delete env[name];
 const installBase = join(machine, ".treer/launchers/agent");
-function install(operation, version) {
-  if (options.controller) return JSON.parse(execFileSync(options.controller, ["launcher", "--node", process.execPath, "--treer", cli, operation, ...(version ? [version] : [])], { env, encoding: "utf8", stdio: "pipe", timeout: 360000 }));
+function install(operation, version, cwd = ".") {
+  if (options.controller) return JSON.parse(execFileSync(options.controller, ["launcher", "--node", process.execPath, "--treer", cli, operation, ...(version ? [version] : []), ...(["install", "update"].includes(operation) ? ["--cwd", cwd] : [])], { env, encoding: "utf8", stdio: "pipe", timeout: 360000 }));
   const manifest = readFileSync(join(options.bundle, "bundle-manifest.json"));
   const request = { schema: "treer.launcher-install/v1", operation, bundle_dir: options.bundle, version: `sha256-${digest(manifest)}`,
-    source_commit: JSON.parse(manifest).source_commit, root: windows ? toNamespacedPath(machine) : machine, cwd: ".", agents: [], node: windows ? toNamespacedPath(process.execPath) : process.execPath, treer: cli, controller, allow_network: false, rollback_version: version };
+    source_commit: JSON.parse(manifest).source_commit, root: windows ? toNamespacedPath(machine) : machine, cwd, agents: [], node: windows ? toNamespacedPath(process.execPath) : process.execPath, treer: cli, controller, allow_network: false, rollback_version: version };
   // Development-only JS mode is explicitly reported; not native embedded proof.
   protectDirectory(machine);
   // Mirror the Controller's extract_payload prerequisite: it creates and
@@ -99,6 +99,21 @@ async function start() {
 }
 const headers = { "x-treer-interface-source": "controller-api", "x-treer-agent-id": env.TREER_AGENT_ID, "x-treer-interface-instance": env.AGENT_UI_INSTANCE_ID };
 try {
+  if (windows) {
+    // Both targets exceed MAX_PATH. A junction to a sibling of the machine
+    // must fail even if native realpath and the root spell their prefixes differently.
+    const longParts = Array.from({ length: 5 }, (_, i) => `cwd-${i}-` + "y".repeat(45));
+    const inside = join(machine, ...longParts), outside = join(fixture, "outside-machine", ...longParts);
+    mkdirSync(inside, { recursive: true }); mkdirSync(outside, { recursive: true });
+    assert.ok(inside.length > 260 && outside.length > 260);
+    symlinkSync(toNamespacedPath(outside), join(machine, "outside-cwd"), "junction");
+    assert.throws(() => install("install", undefined, "outside-cwd"), options.controller ? /launcher installer failed/ : /Profile cwd must stay inside machine root/);
+    assert.equal(existsSync(join(fixture, "Codex + UI.json")), false);
+    const insideCwd = join(...longParts);
+    assert.equal(install("install", undefined, insideCwd).profiles.length, 6);
+    assert.equal(JSON.parse(readFileSync(join(fixture, "Codex + UI.json"))).cwd, insideCwd);
+    console.log("Long-path cwd: outside junction rejected; inside root accepted");
+  }
   const installed = install("install"); assert.equal(installed.portable, true); assert.equal(installed.profiles.length, 6);
   assert.equal(install("install").version, installed.version); assert.equal(install("update").version, installed.version);
   assert.equal(install("status").versions[0].compatibility.status, "compatible");
@@ -144,7 +159,7 @@ try {
   await stop(windows ? "SIGTERM" : "SIGHUP");
   const report = { platform: process.platform, embedded_controller: Boolean(options.controller), portable_install: true, profiles: 6,
     registration: "exact manifest/CLI contract", prompt: "passed", transcript: "passed", session_save_resume: "passed", process_tree_cleanup: "passed",
-    windows_acl_and_long_paths: windows ? "passed" : "not tested on macOS/Linux", provider: windows ? "npm .cmd via absolute Node" : "explicit JS via absolute Node",
+    windows_acl_and_long_paths: windows ? "passed" : "not tested on macOS/Linux", windows_cwd_junction_boundary: windows ? "outside rejected, inside accepted" : "not tested on macOS/Linux", provider: windows ? "npm .cmd via absolute Node" : "explicit JS via absolute Node",
     runtime_path: "empty", real_agents_touched: 0, real_credentials: false };
   writeFileSync(join(options.screenshots, "windows-smoke.json"), JSON.stringify(report, null, 2)); console.log(JSON.stringify(report));
 } finally {

@@ -742,7 +742,9 @@ It does not replace a real Host/ConPTY integration test, enroll a machine, or
 touch running Agents. Its JSON report records the actual operating system;
 running it on macOS is not Windows validation.
 Windows installation accepts the Controller's canonical `\\?\` Node/root paths
-using native filesystem resolution; symlink roots remain rejected. Development
+using native filesystem resolution; symlink roots remain rejected. Profile cwd
+checks also reject absolute relative-path results (including prefix mismatches)
+and junctions escaping the machine root, while allowing long paths within it. Development
 `--bundle` smoke also exercises these spellings and mirrors the Controller's
 private parent ACL setup, but reports `embedded_controller: false` and cannot
 substitute for the matching official Controller smoke.
