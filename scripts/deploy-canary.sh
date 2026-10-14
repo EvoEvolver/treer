@@ -68,8 +68,14 @@ proxy_deploy=$(railway up "$upload" --path-as-root --no-gitignore --detach --jso
     --project "$project_id" \
     --environment "$environment" \
     --service "$proxy_service" \
-    --message "canary $short_commit")
-proxy_deployment_id=$(printf '%s' "$proxy_deploy" | jq -er '.deploymentId // .id')
+    --message "canary $short_commit") || {
+    echo "railway up failed: $(printf '%s' "$proxy_deploy" | sh "$root/scripts/railway-error-summary.sh")" >&2
+    exit 1
+}
+proxy_deployment_id=$(printf '%s' "$proxy_deploy" | jq -er '.deploymentId // .id') || {
+    echo "railway up returned no deployment id: $(printf '%s' "$proxy_deploy" | sh "$root/scripts/railway-error-summary.sh")" >&2
+    exit 1
+}
 
 (cd web && pnpm exec wrangler deploy --env "$worker_environment" \
     --message "canary $commit" --tag "$short_commit")
