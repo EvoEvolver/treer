@@ -41,7 +41,11 @@ def main() -> int:
         state.setdefault("calls", [])
         state.setdefault("prompts", [])
         arguments = sys.argv[1:]
-        stdin = sys.stdin.read() if "--body-file" in arguments else ""
+        files = options(arguments, "--external-source-file") + options(arguments, "--body-file")
+        stdin = sys.stdin.read() if "-" in files else ""
+        if any(value != "-" for value in files):
+            print(json.dumps({"error": {"code": "cli_failed", "message": "client-local files cannot be read by the Controller; pipe the contents to stdin and use '-' instead"}}), file=sys.stderr)
+            return 1
         state["calls"].append({"argv": arguments, "stdin": stdin})
 
         if arguments[:2] == ["message", "send"]:
@@ -55,7 +59,7 @@ def main() -> int:
                 source_file = option(arguments, "--external-source-file")
                 external_source = None
                 if source_file:
-                    external_source = json.loads(Path(source_file).read_text(encoding="utf-8"))
+                    external_source = json.loads(stdin)
                 message = {
                     "schema_version": 1,
                     "message_id": message_id,
@@ -66,7 +70,7 @@ def main() -> int:
                         for target in options(arguments, "--to")
                     ],
                     "context_ids": options(arguments, "--context"),
-                    "body": stdin,
+                    "body": option(arguments, "--body") if "--body" in arguments else stdin,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "external_source": external_source,
                 }
