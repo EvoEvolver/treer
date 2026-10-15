@@ -6,7 +6,15 @@ set -eu
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
 commit=$(git rev-parse "${1:?candidate commit is required}^{commit}")
-requested=${2:-}
+requested=
+check_only=0
+shift
+for argument in "$@"; do
+    case "$argument" in
+        --check-only) check_only=1 ;;
+        *) requested=$argument ;;
+    esac
+done
 [ ! -e dist ] || { echo "dist already exists; refusing to replace it" >&2; exit 1; }
 common=$(git rev-parse --path-format=absolute --git-common-dir)
 checkouts=${TREER_ARTIFACT_REUSE_ROOT:-$(dirname "$common")/.treer/canary-checkouts}
@@ -55,6 +63,10 @@ for source in $(candidates); do
         echo "not reusing $source: its artifacts failed verification" >&2
         continue
     }
+    if [ "$check_only" = 1 ]; then
+        echo "reusable: native artifacts of $source can be reused for $commit"
+        exit 0
+    fi
     # If the passed release itself reused earlier binaries, keep the commit they
     # were really built from as the source and record the passed release apart.
     built=$source

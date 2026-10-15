@@ -7,6 +7,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 
 
 def run(*args, cwd, capture=False, **kwargs):
@@ -33,12 +34,64 @@ def candidate(root, revision):
     return commit, checkout
 
 
+def wait_ci(root, commit, timeout=None, sleep=time.sleep, clock=time.monotonic):
+    """Return only when the exact commit has a successful push/dispatch CI run."""
+    timeout = int(os.environ.get("TREER_RELEASE_CI_TIMEOUT", "2700")) if timeout is None else timeout
+    deadline = clock() + timeout
+    while True:
+        runs = json.loads(run("gh", "run", "list", "--workflow", "ci.yml", "--commit", commit,
+                              "--limit", "20", "--json", "databaseId,status,conclusion,url,event,headSha",
+                              cwd=root, capture=True))
+        # A pull-request run, or a run for another commit, is not the gate for this release.
+        runs = [item for item in runs
+                if item["event"] in ("push", "workflow_dispatch") and item["headSha"] == commit]
+        if runs:
+            latest = max(runs, key=lambda item: item["databaseId"])
+            if latest["status"] == "completed":
+                if latest["conclusion"] != "success":
+                    raise RuntimeError(f"CI {latest['conclusion']} for {commit}: {latest['url']}; "
+                                       "fix it before publishing, no deployment started")
+                print(f"Exact-commit CI passed: {latest['url']}")
+                return latest["url"]
+        if clock() >= deadline:
+            raise RuntimeError(f"no successful CI run for {commit} within {timeout}s; no deployment started")
+        sleep(15)
+
+
+def native_ready(checkout, commit):
+    """Native artifacts must already be green for this commit or verifiably reusable."""
+    dist = checkout / "dist"
+    if dist.is_dir():
+        run("sh", "scripts/verify-machine-artifacts.sh", commit, str(dist), cwd=checkout)
+        print("Native artifacts: existing dist verified")
+        return
+    runs = json.loads(run("gh", "run", "list", "--workflow", "build-release-artifacts.yml", "--limit", "100",
+                          "--json", "databaseId,status,conclusion,url,displayTitle,headSha",
+                          cwd=checkout, capture=True))
+    runs = [item for item in runs
+            if item["displayTitle"] == f"Machine artifacts {commit}" or item["headSha"] == commit]
+    if runs:
+        latest = max(runs, key=lambda item: item["databaseId"])
+        if latest["status"] == "completed" and latest["conclusion"] == "success":
+            print(f"Native artifacts: build passed {latest['url']}")
+            return
+        raise RuntimeError(f"native artifact build for {commit} is {latest['status']}/{latest['conclusion']}: "
+                           f"{latest['url']}; it must be green before publishing")
+    # No build exists: only a verified reuse of a canary_passed anchor may stand in for one.
+    try:
+        run("sh", "scripts/reuse-machine-artifacts.sh", commit, "--check-only", cwd=checkout)
+    except subprocess.CalledProcessError:
+        raise RuntimeError(f"no green native build and no verifiable reuse anchor for {commit}; "
+                           "dispatch the Build release artifacts workflow and wait for it") from None
+
+
 def deploy(root, args):
     commit, checkout = candidate(root, args.revision)
     if args.dry_run:
         print(json.dumps({"commit": commit, "worktree": str(checkout),
                           "push": args.push, "resume": args.resume,
                           "notify": args.notify, "expected_agent": args.agent,
+                          "requires": ["green exact-commit CI", "green or verified-reused native artifacts"],
                           "local_runtime_changes": False}, indent=2))
         return
     required = ["git", "gh", "railway", "pnpm", "docker", "just", "jq", "curl"]
@@ -73,6 +126,8 @@ def deploy(root, args):
         else:
             checkout.parent.mkdir(parents=True, exist_ok=True)
             run("git", "worktree", "add", "--detach", str(checkout), commit, cwd=root)
+        wait_ci(root, commit)
+        native_ready(checkout, commit)
         run("pnpm", "--dir", "web", "install", "--frozen-lockfile", cwd=checkout)
         env = os.environ.copy()
         env["TREER_RELEASE_RESUME"] = "1" if args.resume else "0"
@@ -102,6 +157,7 @@ def main():
     parser.add_argument("--push", action="store_true", help="fast-forward origin/main to the candidate")
     parser.add_argument("--resume", action="store_true", help="reuse a matching completed local gate")
     parser.add_argument("--dry-run", action="store_true", help="print the local plan; no writes or network calls")
+    parser.add_argument("--check-ci", action="store_true", help="only wait for successful exact-commit CI, then exit")
     parser.add_argument("--notify", metavar="AGENT", help="send completion to this Agent after success")
     parser.add_argument("--agent", metavar="SELF", help="required caller name/ID when --notify is used")
     args = parser.parse_args()
@@ -109,7 +165,10 @@ def main():
         parser.error("--notify requires --agent to verify the sender identity")
     root = Path(__file__).resolve().parent.parent
     try:
-        deploy(root, args)
+        if args.check_ci:
+            wait_ci(root, git(root, "rev-parse", "--verify", f"{args.revision}^{{commit}}"))
+        else:
+            deploy(root, args)
     except (RuntimeError, subprocess.CalledProcessError, OSError, KeyError, ValueError) as error:
         print(f"Canary release failed: {error}", file=sys.stderr)
         print("Fix the failure, then rerun the same revision with --resume. No local runtime was restarted.",

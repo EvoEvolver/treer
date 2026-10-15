@@ -267,6 +267,16 @@ class ReuseTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("25 file hashes", result.stderr)
 
+    def test_check_only_reports_reusability_without_creating_dist(self):
+        commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        result = self.reuse(None, "--check-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("reusable", result.stdout)
+        self.assertFalse((self.repo / "dist").exists())
+        commit_files(self.repo, {"crates/core/lib.rs": "native"}, "native")
+        self.assertNotEqual(self.reuse(None, "--check-only").returncode, 0)
+        self.assertFalse((self.repo / "dist").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

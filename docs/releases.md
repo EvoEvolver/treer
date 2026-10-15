@@ -314,6 +314,15 @@ release manifest for inspection and retry. `--dry-run` only prints the local
 plan; it performs no writes or network calls. The wrapper never updates local
 CLI binaries, restarts a local Host/Controller, or promotes Production.
 
+Before it starts any release step the wrapper refuses to publish unless the exact
+commit has a completed successful `CI` run (push or manual dispatch; a pull-request
+run or a run for another commit does not count, the latest run decides, and it waits
+up to `TREER_RELEASE_CI_TIMEOUT` seconds, 2700 by default) and its native artifacts are
+green: a verified existing `dist/`, a successful `Machine artifacts <commit>` run, or
+a verified reuse anchor (`scripts/reuse-machine-artifacts.sh --check-only`). Dispatch
+the native workflow and let CI finish before running `just canary`;
+`python3 scripts/canary-release.py <commit> --check-ci` waits for CI alone.
+
 `--resume` reuses the completed local gate only when its receipt matches the
 exact commit and unchanged frontend SHA-256. Missing or mismatched receipts
 rerun the full gate; deployment, artifact verification, and two-machine tests
