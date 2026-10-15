@@ -151,7 +151,7 @@ pub(super) async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     Json(json!({
         "status": "ok",
         "service": "treer-agent-server",
-        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY, treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER],
+        "cli_capabilities": [treer_protocol::CAPABILITY_AGENT_PATH_TARGETS, treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY, treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE],
         "workspace_id": state.workspace_id,
         "server_id": state.server_id,
         "controller_epoch": state.controller_epoch,
@@ -929,6 +929,26 @@ pub(super) async fn create_app_deployment(
         state
             .post_as(
                 "apps/placed",
+                &serde_json::to_value(request)
+                    .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
+                source_agent.as_ref(),
+            )
+            .await?,
+    ))
+}
+
+pub(super) async fn update_app_deployment(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(app_id): Path<String>,
+    Json(request): Json<treer_protocol::UpdateAppDeploymentRequest>,
+) -> Result<Json<Value>, LocalApiError> {
+    let source_agent = validated_source_agent(&state, &headers)?;
+    state.require_app_update().await?;
+    Ok(Json(
+        state
+            .post_as(
+                &format!("apps/{app_id}/update"),
                 &serde_json::to_value(request)
                     .map_err(|error| LocalApiError::bad_request(error.to_string()))?,
                 source_agent.as_ref(),

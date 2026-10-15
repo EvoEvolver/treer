@@ -73,6 +73,9 @@ pub(crate) fn app_deployment_from_row(
         }
     };
     Ok(AppDeployment {
+        startup_revision: u64::try_from(row.get::<i64, _>("startup_revision")).map_err(|_| {
+            AuthFailure::internal("database_error", "invalid App startup revision".into())
+        })?,
         app_id: row.get("app_id"),
         workspace_id: row.get("workspace_id"),
         name: row.get("name"),

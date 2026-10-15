@@ -236,6 +236,17 @@ pub struct LocalApiState {
     runtime: ControllerRuntime,
 }
 
+fn require_proxy_app_update(health: &Value) -> Result<(), LocalApiError> {
+    if !health["capabilities"].as_array().is_some_and(|caps| {
+        caps.iter()
+            .any(|cap| cap == treer_protocol::CAPABILITY_APP_UPDATE)
+    }) {
+        return Err(LocalApiError { status: StatusCode::CONFLICT,
+            error: ProtocolError::new("app_update_unsupported", "Proxy does not advertise app.update.v1; upgrade it before updating (no request was dispatched)") });
+    }
+    Ok(())
+}
+
 fn require_proxy_creation_placement(health: &Value) -> Result<(), LocalApiError> {
     if !health["capabilities"].as_array().is_some_and(|caps| {
         caps.iter()
@@ -249,6 +260,14 @@ fn require_proxy_creation_placement(health: &Value) -> Result<(), LocalApiError>
 
 impl LocalApiState {
     async fn require_creation_placement(&self) -> Result<(), LocalApiError> {
+        require_proxy_creation_placement(&self.proxy_health().await?)
+    }
+
+    async fn require_app_update(&self) -> Result<(), LocalApiError> {
+        require_proxy_app_update(&self.proxy_health().await?)
+    }
+
+    async fn proxy_health(&self) -> Result<Value, LocalApiError> {
         let url = self
             .proxy_http
             .join("/api/health")
@@ -266,7 +285,7 @@ impl LocalApiState {
             .json()
             .await
             .map_err(|e| LocalApiError::bad_gateway(e.to_string()))?;
-        require_proxy_creation_placement(&health)
+        Ok(health)
     }
 
     pub fn new(
@@ -456,6 +475,7 @@ pub fn router(state: LocalApiState) -> Router {
         .route("/api/apps/{app_id}/start", post(start_app_deployment))
         .route("/api/apps/{app_id}/stop", post(stop_app_deployment))
         .route("/api/apps/{app_id}/restart", post(restart_app_deployment))
+        .route("/api/apps/{app_id}/update", post(update_app_deployment))
         .route(
             "/api/launch-profiles",
             get(list_agent_launch_profiles).post(create_agent_launch_profile),

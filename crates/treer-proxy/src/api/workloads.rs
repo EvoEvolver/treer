@@ -146,12 +146,25 @@ pub(super) async fn ensure_app_workload(
         publish_ports: Vec::new(),
         recipe: None,
     };
-    let command = |credential| AgentCommand::EnsureLifecycle {
-        agent_id: id.to_string(),
-        workload_credential: credential,
-        request: request.clone(),
-        enabled: app.desired_state == AppDesiredState::Running,
-        start_missing,
+    let command = |credential| {
+        if app.startup_revision > 0 {
+            AgentCommand::AppEnsureLifecycle {
+                agent_id: id.to_owned(),
+                workload_credential: credential,
+                request: request.clone(),
+                enabled: app.desired_state == AppDesiredState::Running,
+                start_missing,
+                revision: app.startup_revision,
+            }
+        } else {
+            AgentCommand::EnsureLifecycle {
+                agent_id: id.to_string(),
+                workload_credential: credential,
+                request: request.clone(),
+                enabled: app.desired_state == AppDesiredState::Running,
+                start_missing,
+            }
+        }
     };
     let mut result = state
         .send_command(&app.workspace_id, &app.server_id, command(credential))

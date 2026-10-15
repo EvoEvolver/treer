@@ -49,6 +49,16 @@ Host is used for adversarial validation.
 
 ## Supported Claims
 
+Managed App startup edits require `agent.startup.manage` on the stable runtime
+ID plus ordinary restart permissions. Controller `app.update.v1` preflight
+validates root-relative directories and recognized Treer credentials before the
+Proxy saves launch fields. Revision and generation fencing serialize updates
+with lifecycle operations; identity, workload credentials and ingress records
+are not replaced. Startup specifications are plaintext, not secret storage:
+arbitrary third-party secrets cannot be detected reliably. Use private App
+configuration. Audit events identify the App and routing metadata, never argv
+or configuration contents. Failed launch retains the newly saved specification.
+
 - Controller hot updates authenticate the signed release channel and manifest
   against a preconfigured local Ed25519 public key, then verify both binary
   lengths and SHA256 hashes before executing either binary, including `--help`.

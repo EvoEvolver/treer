@@ -173,6 +173,23 @@ recovery. Enabled Apps retry exited processes; ordinary Agents do not restart
 automatically on the same Host. Stop prevents automatic recovery until an
 explicit start or restart.
 
+Edit managed App launch fields through the deployment, preserving its stable
+ID, credential, service and public origin:
+
+```bash
+treer app update /infra/issues --cwd apps-deployed/issues --command ./start.sh --clear-args
+treer app update /infra/issues --command python3 -- issues.py
+```
+
+Omitted fields remain unchanged (even args when only command changes).
+Arguments after `--` replace the full array; `--clear-args` empties it.
+`cwd` must exist beneath the machine root. A running App restarts once; a stopped
+App remains stopped. This requires `agent.startup.manage` plus ordinary restart
+permissions. `app_update_unsupported`, `unsupported_command` / `app.update.v1`, or a missing Proxy route
+means upgrade; do not delete/recreate as a workaround. Failed launch leaves the
+new specification saved for repair/start/restart or explicit rollback. Keep
+secrets/environment in private entry configuration, never argv.
+
 Names are workspace-visible labels; agent IDs and server IDs do not change.
 
 Organize Agents and Apps in the shared workspace tree:

@@ -56,6 +56,47 @@ fn lifecycle_declaration_defaults_to_starting_missing_for_older_senders() {
 use super::*;
 
 #[test]
+fn app_update_commands_round_trip_and_require_capability() {
+    let request = ReplaceAgentStartupRequest {
+        cwd: Some("releases/v2".into()),
+        command: "node".into(),
+        args: vec!["entry.mjs".into()],
+    };
+    for command in [
+        serde_json::from_value(serde_json::json!({
+            "action":"app_ensure_lifecycle", "agent_id":"app_stable", "workload_credential":null,
+            "enabled":true, "start_missing":false, "revision":7,
+            "request":{"kind":"app", "name":"stable", "cwd":".", "args":["node","entry.mjs"]}
+        }))
+        .unwrap(),
+        AgentCommand::AppStartupCheck {
+            agent_id: "app_stable".into(),
+            request: request.clone(),
+        },
+        AgentCommand::AppStartupUpdate {
+            agent_id: "app_stable".into(),
+            request,
+            revision: 7,
+        },
+    ] {
+        assert_eq!(command.required_capability(), Some(CAPABILITY_APP_UPDATE));
+        assert_eq!(
+            serde_json::from_value::<AgentCommand>(serde_json::to_value(&command).unwrap())
+                .unwrap(),
+            command
+        );
+    }
+    assert!(serde_json::from_value::<UpdateAppDeploymentRequest>(
+        serde_json::json!({"env":{"SECRET":"not-accepted"}})
+    )
+    .is_err());
+    let legacy: ValidateAgentStartupResponse =
+        serde_json::from_value(serde_json::json!({"active_agent_ids":[],"stopped_agent_ids":[]}))
+            .unwrap();
+    assert!(legacy.app_startups.is_empty());
+}
+
+#[test]
 fn admin_startup_commands_round_trip_and_require_a_new_capability() {
     let request = ReplaceAgentStartupRequest {
         cwd: None,

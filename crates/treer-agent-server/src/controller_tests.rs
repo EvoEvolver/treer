@@ -285,6 +285,21 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
             let mut bytes = vec![0; length as usize];
             stream.read_exact(&mut bytes).await.unwrap();
             let request: HostRequest = decode_message(&bytes).unwrap();
+            if matches!(&request.command, HostCommand::Spawn { request } if request.command == "fail-command")
+            {
+                let encoded = encode_message(&HostMessage::Response {
+                    request_id: request.request_id,
+                    response: None,
+                    error: Some(treer_host_protocol::HostError::new(
+                        "spawn_failed",
+                        "synthetic failure",
+                    )),
+                })
+                .unwrap();
+                stream.write_u32(encoded.len() as u32).await.unwrap();
+                stream.write_all(&encoded).await.unwrap();
+                continue;
+            }
             let response = match request.command {
                 HostCommand::Sync { .. } => {
                     let HostResponse::Synced {
@@ -331,8 +346,8 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
                         .unwrap()
                         .get(&process_id)
                         .unwrap();
-                    assert_eq!(
-                        saved.spec.command, "new-command",
+                    assert!(
+                        ["new-command", "fail-command"].contains(&saved.spec.command.as_str()),
                         "new argv must be durable before stopping the old process"
                     );
                     let process = processes
@@ -504,6 +519,146 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
             .code,
         "app_startup_managed"
     );
+    // Managed App updates use the same lock/generation boundary, but have a
+    // separate durable Proxy revision. Stopped Apps must remain stopped.
+    let stopped_generation = runtime.get_startup("stable-id").unwrap().generation;
+    let stopped = runtime
+        .update_app_startup("app-update-1", "stable-id", replace(), 1)
+        .await
+        .unwrap();
+    assert!(!stopped.enabled);
+    assert_eq!(stopped.generation, stopped_generation);
+    assert_eq!(spawns.lock().unwrap().len(), 3);
+    runtime
+        .inner
+        .startup_store
+        .update("stable-id", |entry| entry.spec.enabled = true)
+        .unwrap();
+    let (updated, restarted) = tokio::join!(
+        runtime.update_app_startup("app-update-2", "stable-id", replace(), 2),
+        runtime.start("app-restart", "stable-id", true),
+    );
+    updated.unwrap();
+    restarted.unwrap();
+    assert_eq!(
+        runtime.get_startup("stable-id").unwrap().generation,
+        stopped_generation + 2
+    );
+    assert_eq!(spawns.lock().unwrap().len(), 5);
+    runtime
+        .update_app_startup("duplicate-update", "stable-id", replace(), 2)
+        .await
+        .unwrap();
+    assert_eq!(
+        spawns.lock().unwrap().len(),
+        5,
+        "same revision must not restart twice"
+    );
+    assert_eq!(
+        runtime
+            .update_app_startup("stale-update", "stable-id", replace(), 1)
+            .await
+            .unwrap_err()
+            .code,
+        "stale_app_startup"
+    );
+    let mut conflicting = replace();
+    conflicting.args.clear();
+    assert_eq!(
+        runtime
+            .update_app_startup("conflicting-update", "stable-id", conflicting, 2)
+            .await
+            .unwrap_err()
+            .code,
+        "app_revision_conflict"
+    );
+    let saved = StartupStore::load(saved_path.clone())
+        .unwrap()
+        .get("stable-id")
+        .unwrap();
+    assert_eq!(saved.app_revision, 2);
+    assert_eq!(saved.workload_credential, credential);
+    for launch in &spawns.lock().unwrap()[3..] {
+        assert_eq!(launch.process_id, "stable-id");
+        assert_eq!(launch.env["TREER_WORKLOAD_CREDENTIAL"], credential);
+        assert_eq!(launch.command, "new-command");
+    }
+    let declaration: CreateAgentRequest = serde_json::from_value(serde_json::json!({
+        "kind":"app", "name":"target", "cwd":"repo",
+        "args":["new-command", "literal $() ' spaces"], "cols":80, "rows":24
+    }))
+    .unwrap();
+    let before = runtime.get_startup("stable-id").unwrap().generation;
+    runtime
+        .ensure_app_lifecycle(
+            "reconnect-new-revision",
+            "stable-id".into(),
+            None,
+            declaration.clone(),
+            true,
+            true,
+            Some(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.get_startup("stable-id").unwrap().generation,
+        before + 1
+    );
+    runtime
+        .ensure_app_lifecycle(
+            "reconnect-duplicate",
+            "stable-id".into(),
+            None,
+            declaration.clone(),
+            true,
+            true,
+            Some(3),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        runtime.get_startup("stable-id").unwrap().generation,
+        before + 1
+    );
+    assert_eq!(
+        runtime
+            .ensure_app_lifecycle(
+                "reconnect-stale",
+                "stable-id".into(),
+                None,
+                declaration,
+                true,
+                true,
+                Some(2)
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "stale_app_startup"
+    );
+    let mut broken = replace();
+    broken.command = "fail-command".into();
+    assert_eq!(
+        runtime
+            .update_app_startup("failed-app-replacement", "stable-id", broken, 4)
+            .await
+            .unwrap_err()
+            .code,
+        "host_error"
+    );
+    let saved = StartupStore::load(saved_path.clone())
+        .unwrap()
+        .get("stable-id")
+        .unwrap();
+    assert_eq!(saved.spec.command, "fail-command");
+    assert_eq!(saved.app_revision, 4);
+    assert_eq!(saved.workload_credential, credential);
+    runtime
+        .update_app_startup("repair-app-replacement", "stable-id", replace(), 5)
+        .await
+        .unwrap();
+    assert_eq!(runtime.list()[0].agent_id, "stable-id");
     task.abort();
     runtime.inner.workload_proxies.remove("stable-id");
     drop(runtime);
@@ -1266,6 +1421,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
             .inner
             .startup_store
             .upsert(StoredAgentStartup {
+                app_revision: 0,
                 spec: AgentStartupSpec {
                     agent_id: id.into(),
                     server_id: "server".into(),

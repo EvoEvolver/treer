@@ -165,6 +165,27 @@ Start, stop, restart, delete, list, and show are available through the browser,
 public API, Controller-local API, and `treer app` CLI. User-triggered lifecycle
 changes append workspace audit events.
 
+`POST /api/workspaces/{workspace_id}/apps/{app_id}/update` (and the authenticated
+`/agent/workspaces/...` equivalent) patches `cwd`, `command`, and/or `args`.
+Omitted fields remain unchanged; an empty args array clears arguments. The Proxy
+requires `agent.startup.manage` and normal restart permissions (`agent.stop` on
+the App runtime, `agent.create` on its machine), holds the shared workload
+lifecycle advisory lock, and asks for side-effect-free `app.update.v1` preflight.
+Only then does it persist the full launch specification and a monotonically
+increasing startup revision before sending the replacement command. App/runtime
+IDs, credentials, service/virtual host, public origin and desired state remain
+unchanged. A stopped App stays stopped; a running App gets one replacement
+generation under the Controller's recovery lock. Duplicate revisions do not
+restart, conflicting or older revisions fail closed. Reconnect declarations and
+startup validation reconcile the durable Proxy revision before recovery.
+
+Failure after persistence leaves the new specification saved; it does not
+silently roll back code or data. Use start/restart after repair, or explicitly
+update back to the previous fields. Capability preflight rejects older
+Controllers before writing the deployment; older Proxies have no update route.
+The API accepts no environment or credential fields. Private App entry
+configuration remains the place for secrets and mutable environment settings.
+
 The human UI treats Managed Apps as Agent-owned deployments: it lists and
 operates existing Apps but does not offer App creation. Selecting an App in the
 workload tree embeds its human HTML root through the authenticated

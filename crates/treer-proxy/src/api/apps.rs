@@ -244,6 +244,7 @@ pub(super) async fn record_app_audit(
                 "server_id": &app.server_id,
                 "service_id": &app.service_id,
                 "hostname": &app.hostname,
+                "startup_revision": app.startup_revision,
                 "access": app.access,
             }),
         })
@@ -571,6 +572,119 @@ pub(super) async fn restart_app_deployment(
     .await;
     hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn update_app_deployment(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Extension(policy): Extension<PolicyEngine>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+    Json(patch): Json<treer_protocol::UpdateAppDeploymentRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    let current = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
+    let subject = control_policy_subject(
+        &state,
+        machine.as_ref().map(|value| &value.0),
+        &headers,
+        &workspace_id,
+    )
+    .await?;
+    require_machine_target(subject.as_ref(), &current.server_id)?;
+    let resource = agent_policy_resource(&app_workload_agent(&current));
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_STARTUP_MANAGE,
+        resource.clone(),
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_STOP,
+        resource,
+    )
+    .await?;
+    authorize_control(
+        &policy,
+        &workspace_id,
+        subject.as_ref(),
+        ACTION_AGENT_CREATE,
+        PolicyResource::new(RESOURCE_MACHINE, &current.server_id),
+    )
+    .await?;
+    let id = current
+        .runtime_agent_id
+        .as_deref()
+        .unwrap_or(&current.app_id);
+    let guard = auth.workload_lifecycle_guard(&workspace_id, id).await?;
+    let current = auth
+        .resolve_app_deployment(&workspace_id, &current.app_id)
+        .await?;
+    let request = patch.apply(&current)?;
+    // Negotiated, side-effect-free preflight before saving anything. An old
+    // Controller must never silently accept a spec it cannot apply.
+    state
+        .send_command(
+            &workspace_id,
+            &current.server_id,
+            AgentCommand::AppStartupCheck {
+                agent_id: id.to_owned(),
+                request: request.clone(),
+            },
+        )
+        .await?;
+    let actor = app_mutation_actor(session.as_deref(), subject.as_ref());
+    let mut app = auth
+        .update_app_startup(&workspace_id, &current.app_id, &request, actor)
+        .await?;
+    // Audit the committed change even if spawn/transport later fails. No argv,
+    // credentials or file contents are included in this event.
+    record_app_audit(
+        &auth,
+        session.as_deref(),
+        subject.as_ref(),
+        "app.startup.updated",
+        &app,
+    )
+    .await;
+    let result = state
+        .send_command(
+            &workspace_id,
+            &app.server_id,
+            AgentCommand::AppStartupUpdate {
+                agent_id: id.to_owned(),
+                request,
+                revision: app.startup_revision,
+            },
+        )
+        .await;
+    auth.set_app_last_error(
+        &workspace_id,
+        &app.app_id,
+        result
+            .as_ref()
+            .err()
+            .map(|_| "new startup saved; apply failed; repair or retry start/restart"),
+    )
+    .await?;
+    guard
+        .commit()
+        .await
+        .map_err(|error| ApiFailure::internal("lifecycle_lock_failed", &error.to_string()))?;
+    result.map_err(|error| ProtocolError::new(error.code,
+        format!("App startup revision {} was saved, but replacement failed; repair then start/restart, or explicitly update back to the previous specification", app.startup_revision)))?;
+    app.last_error = None;
+    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_public_url(&auth, &config, &mut app).await?;
+    Ok(Json(json!({"app": app})))
 }
 
 #[allow(clippy::too_many_arguments)]

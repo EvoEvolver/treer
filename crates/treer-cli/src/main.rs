@@ -398,6 +398,7 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
     ensure_path_target_capability(&health)?;
     ensure_prompt_delivery_capability(&health, &connection.argv)?;
     ensure_creation_placement_capability(&health, &connection.argv)?;
+    ensure_app_update_capability(&health, &connection.argv)?;
     ensure_file_transfer_capability(&health, &connection.argv)?;
     let mut url = connection.url.join("/api/cli/session")?;
     let scheme = match url.scheme() {
@@ -690,6 +691,16 @@ fn ensure_prompt_delivery_capability(
     Ok(())
 }
 
+fn ensure_app_update_capability(health: &serde_json::Value, argv: &[String]) -> anyhow::Result<()> {
+    if argv.first().is_some_and(|arg| arg == "app")
+        && argv.get(1).is_some_and(|arg| arg == "update")
+    {
+        anyhow::ensure!(health["cli_capabilities"].as_array().is_some_and(|caps| caps.iter().any(|cap| cap == treer_protocol::CAPABILITY_APP_UPDATE)),
+            "app_update_unsupported: Controller does not advertise app.update.v1; upgrade before updating (no command was dispatched)");
+    }
+    Ok(())
+}
+
 fn ensure_creation_placement_capability(
     health: &serde_json::Value,
     argv: &[String],
@@ -720,6 +731,21 @@ fn ensure_path_target_capability(health: &serde_json::Value) -> anyhow::Result<(
 
 #[cfg(test)]
 mod path_capability_tests {
+    #[test]
+    fn app_update_capability_is_required_only_for_update() {
+        let argv = vec!["app".into(), "update".into(), "app_stable".into()];
+        assert!(super::ensure_app_update_capability(&serde_json::json!({}), &argv).is_err());
+        assert!(super::ensure_app_update_capability(
+            &serde_json::json!({"cli_capabilities":[treer_protocol::CAPABILITY_APP_UPDATE]}),
+            &argv
+        )
+        .is_ok());
+        assert!(super::ensure_app_update_capability(
+            &serde_json::json!({}),
+            &["app".into(), "show".into()]
+        )
+        .is_ok());
+    }
     #[test]
     fn old_controller_cannot_silently_place_new_workloads_at_root() {
         for args in [

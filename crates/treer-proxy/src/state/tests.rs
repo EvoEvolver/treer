@@ -354,6 +354,54 @@ async fn legacy_controller_rejects_startup_admin_without_losing_connection() {
         .await;
     assert_eq!(waiting.await.unwrap().unwrap()["still_connected"], true);
 }
+#[tokio::test]
+async fn legacy_controller_rejects_app_update_without_dispatch() {
+    let state = AppState::new();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            Uuid::new_v4(),
+            "old".into(),
+            vec![treer_protocol::CAPABILITY_AGENT_LIFECYCLE.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let request = treer_protocol::ReplaceAgentStartupRequest {
+        cwd: None,
+        command: "sh".into(),
+        args: vec![],
+    };
+    for command in [
+        serde_json::from_value(serde_json::json!({
+            "action":"app_ensure_lifecycle", "agent_id":"app_stable", "workload_credential":null,
+            "enabled":true, "start_missing":true, "revision":1,
+            "request":{"kind":"app", "name":"stable", "cwd":".", "args":["sh"]}
+        }))
+        .unwrap(),
+        AgentCommand::AppStartupCheck {
+            agent_id: "app_stable".into(),
+            request: request.clone(),
+        },
+        AgentCommand::AppStartupUpdate {
+            agent_id: "app_stable".into(),
+            request,
+            revision: 1,
+        },
+    ] {
+        let error = state
+            .send_command("alpha", "server", command)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, "unsupported_command");
+        assert!(error
+            .message
+            .contains(treer_protocol::CAPABILITY_APP_UPDATE));
+        assert!(rx.try_recv().is_err());
+    }
+    assert_eq!(state.snapshot("alpha").await.unwrap().servers.len(), 1);
+}
 use treer_protocol::AgentStatus;
 
 fn expect_text(frame: SocketFrame) -> String {

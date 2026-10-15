@@ -469,6 +469,7 @@ CREATE TABLE IF NOT EXISTS app_deployments (
     FOREIGN KEY(service_id) REFERENCES machine_services(service_id) ON DELETE CASCADE
 );
 DROP INDEX IF EXISTS app_deployments_workspace_name_lower;
+ALTER TABLE app_deployments ADD COLUMN IF NOT EXISTS startup_revision BIGINT NOT NULL DEFAULT 0 CHECK(startup_revision >= 0);
 CREATE INDEX IF NOT EXISTS app_deployments_workspace_name ON app_deployments(workspace_id, name);
 CREATE UNIQUE INDEX IF NOT EXISTS app_deployments_workspace_hostname_lower
     ON app_deployments(workspace_id, lower(hostname));

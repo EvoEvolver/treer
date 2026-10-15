@@ -29,6 +29,7 @@ pub const WORKLOAD_CREATE_ROOT: &str = "/";
 pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
 pub const CAPABILITY_AGENT_STARTUP: &str = "agent.startup.v1";
 pub const CAPABILITY_AGENT_STARTUP_ADMIN: &str = "agent.startup-admin.v1";
+pub const CAPABILITY_APP_UPDATE: &str = "app.update.v1";
 pub const CAPABILITY_AGENT_PROMPT_DELIVERY: &str = "agent.prompt-delivery.v1";
 pub const CAPABILITY_AGENT_LIFECYCLE: &str = "agent.lifecycle.v1";
 pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
@@ -45,6 +46,7 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,
     CAPABILITY_AGENT_STARTUP_ADMIN,
+    CAPABILITY_APP_UPDATE,
     CAPABILITY_AGENT_PROMPT_DELIVERY,
     CAPABILITY_AGENT_LIFECYCLE,
     CAPABILITY_MACHINE_EXEC,

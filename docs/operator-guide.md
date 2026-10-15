@@ -182,6 +182,45 @@ Receipts omit argv, tokens and application content; they contain paths, App
 identity, versions, health URLs and backup hashes. Same-account processes can
 read/change these files; use separate OS accounts/containers for isolation.
 
+Change an existing App's launch fields without recreating its identity or routes:
+
+```bash
+treer app update /docs --cwd apps-deployed/docs/releases/COMMIT --command python3 -- server.py
+treer app update /docs --cwd apps-deployed/docs/current
+treer app update /docs --clear-args
+```
+
+Omitted fields are preserved, including arguments when only `--command` changes.
+Arguments after `--` replace the whole argument array; `--clear-args` empties it.
+The directory is relative to the enrolled machine root and must exist inside it.
+Running Apps restart once; stopped Apps keep their stopped intent. App/runtime
+IDs, credentials, service/virtual host and public origin stay fixed. Startup
+management and ordinary restart Policy permissions are required. Older
+Controllers/Proxies return `app_update_unsupported` during CLI/local preflight
+(or `unsupported_command` naming `app.update.v1` for a remote target Controller).
+Direct API calls to older Proxies return a missing-route error. Upgrade rather
+than falling back to delete/create.
+If launch fails after saving, the new fields remain saved: repair and start or
+restart, or explicitly update back to the old specification. Treer does not
+roll back application data. Put environment/secrets in private entry configuration,
+never command arguments; this update API does not accept environment fields.
+
+Before deploying, save the previous launch fields in private storage so the
+deployment script can explicitly restore them if health checks fail. For example,
+`(umask 077; treer app show /docs > previous-app.json)` saves a local snapshot;
+keep it private, since existing arguments may contain sensitive information.
+Restoring launch fields does not restore application data or its schema.
+
+Coordinate Proxy database backups with Controller startup state. If an older
+database backup has a lower startup revision than the Controller, reconciliation
+fails closed with `stale_app_startup`; do not delete Controller state or recreate
+the App to bypass it. Restore matching state, or explicitly publish the desired
+specification until its Proxy revision exceeds the retained Controller revision.
+A single update is not sufficient when the revision gap is larger than one.
+Update preflight and application each have a 35-second command-response timeout;
+the App lifecycle lock remains held during those requests. A timeout after saving
+does not prove that the Controller did not apply the new specification.
+
 When wildcard ingress is configured, every Managed App receives a stable
 `public_url` on its own origin. It requires Workspace authentication by default;
 an Agent can explicitly pass `--public` at creation time to allow anonymous

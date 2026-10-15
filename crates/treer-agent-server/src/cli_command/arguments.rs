@@ -181,6 +181,23 @@ pub(super) enum AppCommand {
     Stop { target: String },
     #[command(about = "Replace an App runtime while preserving its service and virtual host")]
     Restart { target: String },
+    #[command(
+        about = "Save App launch fields and replace its running process; keep identity and routes"
+    )]
+    Update {
+        target: String,
+        #[arg(long)]
+        cwd: Option<String>,
+        #[arg(
+            long,
+            help = "Replacement executable (arguments are preserved unless -- or --clear-args is used)"
+        )]
+        command: Option<String>,
+        #[arg(long, conflicts_with = "args")]
+        clear_args: bool,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     #[command(about = "Stop and permanently delete an App and its routes")]
     Delete { target: String },
 }
