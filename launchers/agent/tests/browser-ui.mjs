@@ -379,6 +379,12 @@ try {
   await expect(tree.getByRole("treeitem", { name: "src", exact: true })).toHaveAttribute("aria-expanded", "true");
   await expect(tree.getByRole("treeitem", { name: "deep", exact: true })).toHaveAttribute("aria-expanded", "true");
   await expect(tree.getByRole("treeitem", { name: "inner.txt", exact: true })).toHaveAttribute("aria-selected", "true");
+  await expect(tree.locator(".trow.sel")).toHaveCount(1);
+  await expect(tree.getByRole("treeitem", { name: "greeting.ts", exact: true })).toHaveAttribute("aria-selected", "false");
+  // Keep the pointer off tree rows: opening the panel can place an unrelated
+  // row underneath it, giving that row a hover fill in the screenshot.
+  await page.mouse.move(720, 20);
+  await expect(tree.getByRole("treeitem", { name: "greeting.ts", exact: true })).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
   await page.screenshot({ path: join(screenshots, "file-link-desktop.png") });
   await filesPanel.getByRole("button", { name: "Close file browser" }).click();
   await expect(nestedLink).toBeFocused();
