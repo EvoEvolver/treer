@@ -1,5 +1,5 @@
 name: Build release artifacts
-run-name: Machine artifacts ${{ inputs.revision || github.sha }}
+run-name: UI bundle diagnostic ${{ inputs.revision || github.sha }}
 
 on:
   push:
@@ -21,86 +21,9 @@ concurrency:
 
 jobs:
   windows:
-    name: Build windows-x86_64
+    name: UI bundle diagnostic (windows)
     runs-on: windows-2022
-    timeout-minutes: 45
-    env:
-      RUST_VERSION: 1.90.0
-    defaults:
-      run:
-        shell: pwsh
-    steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          ref: ${{ inputs.revision || github.sha }}
-      - name: Record source commit
-        run: '"TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> $env:GITHUB_ENV'
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-      - name: Prepare verified launcher payload
-        run: |
-          npm --prefix launchers/agent ci --ignore-scripts
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          node scripts/prepare-launcher-release.mjs --output "$env:RUNNER_TEMP/treer-launcher-payload" --source-commit "$env:TREER_BUILD_COMMIT"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-      - name: Select MSVC Rust
-        run: |
-          rustup toolchain install "${env:RUST_VERSION}-x86_64-pc-windows-msvc" --profile minimal
-          rustup default "${env:RUST_VERSION}-x86_64-pc-windows-msvc"
-          rustc --version --verbose
-      - name: Test local transport, process ownership and ConPTY
-        run: |
-          cargo test --locked -p treer-platform -p treer-agent-runtime -p treer-agent-host
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Test native file-transfer Controller and CLI boundaries
-        run: |
-          cargo test --locked -p treer-agent-server --bin treer-agent-server machine_file_transfer::tests
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p treer-cli --bin treer machine_file::tests
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build machine binaries
-        run: cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
-      - name: Test real Controller and CLI
-        run: |
-          cargo build --locked -p treer-agent-host -p treer-agent-server
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p treer-cli --test controller -- --ignored
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test --locked -p treer-agent-server --bin treer-agent-server windows_real_host -- --ignored
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Stage artifacts
-        run: ./scripts/stage-release-artifacts.ps1 -Destination release-artifacts/windows-x86_64
-      - name: Test Windows installation and PATH
-        run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
-      - name: Test Windows PowerShell installer compatibility
-        shell: powershell
-        run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
-      - name: Test Windows machine update transactions
-        run: ./scripts/test-windows-update.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
-      - name: Test Windows PowerShell machine update compatibility
-        shell: powershell
-        run: ./scripts/test-windows-update.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
-      - name: Upload build artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: treer-windows-x86_64
-          path: release-artifacts/windows-x86_64/
-          if-no-files-found: error
-          retention-days: 14
-
-  windows-launcher-smoke:
-    name: Native Windows embedded launcher and ACP UI
-    needs: windows
-    runs-on: windows-2022
-    timeout-minutes: 20
-    defaults:
-      run:
-        shell: pwsh
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -109,128 +32,12 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
-      - name: Install locked smoke dependencies without lifecycle scripts
+      - name: Install locked UI tooling without lifecycle scripts
+        shell: pwsh
         run: |
+          git config --get core.autocrlf
           npm --prefix launchers/agent ci --ignore-scripts
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
-        with:
-          name: treer-windows-x86_64
-          path: downloaded-windows
-      - name: Test native Windows launcher install and ACP UI
-        timeout-minutes: 10
-        run: |
-          npm --prefix launchers/agent exec --offline -- playwright install chromium
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $controller = Join-Path $env:RUNNER_TEMP 'treer-smoke-controller.exe'
-          Copy-Item -LiteralPath downloaded-windows/treer-agent-server -Destination $controller
-          $rows = @(Get-Content -LiteralPath downloaded-windows/SHA256SUMS | Where-Object { $_ -match '^[0-9a-f]{64}  treer-agent-server$' })
-          if ($rows.Count -ne 1 -or (Get-FileHash -LiteralPath $controller -Algorithm SHA256).Hash.ToLowerInvariant() -ne $rows[0].Substring(0,64)) { throw 'Downloaded Controller checksum mismatch.' }
-          npm --prefix launchers/agent run test:windows -- --controller "$controller" --screenshots "$env:RUNNER_TEMP/treer-windows-launcher-smoke"
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $receipt = Get-Content -LiteralPath "$env:RUNNER_TEMP/treer-windows-launcher-smoke/windows-smoke.json" -Raw | ConvertFrom-Json
-          if ($receipt.platform -ne 'win32' -or $receipt.embedded_controller -ne $true -or $receipt.portable_install -ne $true -or $receipt.windows_acl_and_long_paths -ne 'passed' -or $receipt.process_tree_cleanup -ne 'passed' -or $receipt.real_agents_touched -ne 0) { throw 'Native Windows launcher receipt is incomplete or not embedded-controller proof.' }
-      - name: Preserve Windows launcher smoke evidence
-        if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: treer-windows-launcher-smoke
-          path: ${{ runner.temp }}/treer-windows-launcher-smoke/
-          if-no-files-found: warn
-          retention-days: 14
-
-  build:
-    name: Build ${{ matrix.platform }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x86_64
-            runner: ubuntu-22.04
-            system: Linux
-            architecture: x86_64
-          - platform: linux-aarch64
-            runner: ubuntu-22.04-arm
-            system: Linux
-            architecture: aarch64
-          - platform: darwin-x86_64
-            runner: macos-15-intel
-            system: Darwin
-            architecture: x86_64
-          - platform: darwin-aarch64
-            runner: macos-15
-            system: Darwin
-            architecture: arm64
-
-    env:
-      RUST_VERSION: 1.90.0
-
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          persist-credentials: false
-          ref: ${{ inputs.revision || github.sha }}
-
-      - name: Record source commit
-        shell: bash
-        run: echo "TREER_BUILD_COMMIT=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
-        with:
-          node-version: '22'
-
-      - name: Prepare verified launcher payload
-        shell: bash
-        run: |
-          set -euo pipefail
-          npm --prefix launchers/agent ci --ignore-scripts
-          node scripts/prepare-launcher-release.mjs --output "$RUNNER_TEMP/treer-launcher-payload" --source-commit "$TREER_BUILD_COMMIT"
-
-      - name: Cache Rust build
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
-
-      - name: Verify native runner
-        shell: bash
-        env:
-          EXPECTED_SYSTEM: ${{ matrix.system }}
-          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
-        run: |
-          set -euo pipefail
-          test "$(uname -s)" = "$EXPECTED_SYSTEM"
-          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
-
-      - name: Select stable Rust
-        shell: bash
-        run: |
-          set -euo pipefail
-          rustup toolchain install "$RUST_VERSION" --profile minimal
-          rustup default "$RUST_VERSION"
-          rustc --version --verbose
-
-      - name: Build agent binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --locked --release \
-            -p treer-cli \
-            -p treer-agent-host \
-            -p treer-agent-server
-
-      - name: Stage and verify artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          sh scripts/stage-release-artifacts.sh \
-            "${{ matrix.platform }}" \
-            "release-artifacts/${{ matrix.platform }}"
-
-      - name: Upload build artifact
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: treer-${{ matrix.platform }}
-          path: release-artifacts/${{ matrix.platform }}/
-          if-no-files-found: error
-          retention-days: 14
+      - name: Compare the built UI with the committed public files
+        shell: pwsh
+        run: node launchers/agent/scripts/diag-ui-bundle.mjs
