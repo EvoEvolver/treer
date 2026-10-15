@@ -284,22 +284,51 @@ nicer but is out of scope.)
 
 ## 6. Security surface
 
-* No `dangerouslySetInnerHTML` except in **one** component, `Markdown`, which
-  sets `innerHTML` from the existing `renderMarkdown` (marked → DOMPurify with
-  the current config). A lint-style test greps the built source tree for any
-  other `dangerouslySetInnerHTML`/`innerHTML`/`eval`/`new Function`/`document.write`.
-* File names, paths, diffs, tool output, errors, queue text: React text nodes only.
-* No token or secret is read or rendered; `localStorage` holds only theme/locale.
-* CSP unchanged: `script-src 'self'` (no inline, no eval — esbuild output with
-  no `eval`, `new Function` or `import()` from data); `style-src` already allows
-  `'unsafe-inline'` for the legacy UI. React uses `style=` props sparingly (CSS
-  variables for dynamic heights). **Proposal for security-claude**: once the
-  legacy UI is deleted, drop `'unsafe-inline'` from `style-src`, which requires
-  that no code path in the React UI uses `style=` attributes. Cheap if decided
-  now (use `CSSStyleDeclaration.setProperty` from a ref instead); costly later.
-  Recommendation: yes, do it; this is a CSP tightening, not a relaxation.
-* ImageViewer displays only `data:` and `blob:` images (already the CSP limit).
-* Text export and clipboard are client-only and read data already in the page.
+Incorporates security-claude review round 1 (d4893f3); starred items are
+implementation gates.
+
+* **One HTML sink.** `Markdown.tsx` is the only component that sets `innerHTML`
+  (existing marked -> DOMPurify). DOMPurify config stays as today plus explicit
+  `FORBID_ATTR: ["style"]`, no `ADD_ATTR`/`ADD_TAGS`, and every link gets
+  `rel="noopener noreferrer"`. File names, paths, diffs, tool output, errors,
+  queue text, sender/name, goal `syncError`: React text nodes only. i18n rich text
+  uses component slots, never raw HTML.
+* **★ Static checks on source, not the bundle.** ESLint (`react/no-danger`
+  allowlisting only `Markdown.tsx`; ban `eval`, `new Function`, `document.write`).
+  Scanning the built bundle would false-positive on React/marked/DOMPurify.
+* **★ Runtime checks in Playwright.** Fail on any `securitypolicyviolation` or
+  console error; XSS fixture strings (`<img onerror>`, `javascript:` links,
+  `<svg onload>`, `style=`, `data:` URLs) injected through markdown, file names,
+  diffs, task output, errors, queue text, goal `syncError`, and i18n
+  interpolation must stay inert.
+* **★ `safeUrl()`.** Any `href`/`src` driven by data other than the markdown
+  pipeline (file links, image viewer, task-output links) goes through one shared
+  `safeUrl()`: http(s)/mailto only; images only `data:image/(png|jpeg|gif|webp)`
+  or `blob:`. ImageViewer shows SVG only through `<img>`, never inline, and
+  revokes blob URLs after use. The WebSocket URL is `new URL("ws",
+  document.baseURI)`; no URL from page data is accepted.
+* **★ Prototype-pollution safety.** UI state keyed by server strings (item id,
+  queue id, task id, file path) lives in `Map` or `Object.create(null)`; no deep
+  merge or `Object.assign` of server JSON into shared config. `localStorage`
+  holds only theme and locale and both are allowlist-validated on read; never a
+  token, URL or content.
+* **CSP.** `script-src 'self'` unchanged (no inline scripts, no eval). At the
+  switch, drop `'unsafe-inline'` from `style-src` and add `object-src 'none';
+  base-uri 'self'; form-action 'none'`. React sets styles through CSSOM, which
+  `style-src` does not restrict, so `style={{...}}` is allowed; what CSP blocks
+  is `style="..."` in markup and `<style>` elements, which is desirable for
+  markdown. `frame-ancestors` is not hardcoded; launcher-dev/Proxy set it with the
+  embedding headers. Later hardening candidate: `require-trusted-types-for
+  'script'` (feasible because of the single sink); not required now.
+* **Migration period.** While both UIs coexist the legacy CSP must not leak into
+  the new page: serve the strict policy for `ui.html` (per-path) or the stricter
+  of the two. The commit that deletes the legacy UI tightens the header and adds
+  a regression assertion that the response header lacks `'unsafe-inline'`.
+  **[LD]**
+* No token or secret is read, rendered or stored. UI is not an authentication
+  source (Proxy forwarding markers + Host/Origin guards remain); `api/session/export`
+  stays unexposed to the browser. Text export and clipboard are client-only and
+  read data already in the page.
 
 ## 7. Dependencies (each reviewed)
 
@@ -313,10 +342,17 @@ nicer but is out of scope.)
 Not added: router, state library, icon library (≈ 15 inline SVG paths as
 components), CSS-in-JS, class-name helper, date library (`Intl`), virtualization
 library (see risk R2), testing-library (Playwright suite already exists; unit
-tests use `node:test` + `react-dom/server`). Vulnerability status and exact
-versions/lockfile integrity are to be re-checked with `npm audit` at the time the
-lock is edited and attached to the security review; I make no claim about them
-today.
+tests use `node:test` + `react-dom/server`). **Dependency gates (security-claude, round 1).**
+* Exact versions pinned (no `^`/`~`); `package-lock.json` committed with
+  integrity hashes; installs use `npm ci --ignore-scripts`.
+* The review list includes transitive dependencies (e.g. `scheduler`) with
+  licenses, and the output of `npm ls` and `npm pkg get scripts` showing no
+  install/postinstall scripts.
+* When the lock is edited: `npm audit --omit=dev` over react, react-dom, marked
+  and dompurify, with the output attached. I make no claim about vulnerability
+  status today.
+* Upgrading marked or dompurify (the only HTML-injection surface) needs its own
+  review.
 
 ## 8. Build, artifacts, payload **[LD]**
 
@@ -329,6 +365,14 @@ today.
   folded into `ui.js` (the legacy `markdown.js` stays until deletion). Relative
   `<base href="./">`; the script tag is `<script src="ui.js" defer>` (classic IIFE
   avoids module-MIME and base-URL edge cases in the iframe tunnel).
+* **Reproducibility gate (security-claude).** CI rebuilds with the pinned
+  Node, esbuild and lockfile and compares byte-for-byte with the committed
+  `ui.js`/`ui.css`/`ui.html`; any difference fails. Production `define`, no source
+  map, no timestamps, legal comments either off or collected into a LICENSES file;
+  an `esbuild --metafile` audit asserts no absolute paths, hostnames or test
+  fixture strings in the output. Changes to the artifacts and the lock need CODEOWNERS
+  review. The manifest stays an exact file set with sha256; bundle-contract limits
+  are not relaxed.
 * **Artifacts are committed**, same as `markdown.js` today. Reason:
   `bootstrap.sh` installs by sparse git checkout + `npm ci --omit=dev`, i.e.
   with no esbuild present, so the checkout must already contain the built UI.
@@ -432,8 +476,8 @@ viewer, split workbench, account/device sharing.
 2. **[LD]** Provide optional `usage`, `endedAt`, `parentId` per §4 — which
    harnesses can fill them? Claude Code transcripts carry usage; Codex and ACP
    unknown.
-3. **[security-claude]** Drop `'unsafe-inline'` from `style-src` at the switch?
-   (§6, recommended.)
+3. **[security-claude]** Resolved: drop `'unsafe-inline'`, add `object-src 'none'; base-uri
+   'self'; form-action 'none'` (§6).
 4. **[leader/user]** Manual theme toggle persisted in `localStorage`: acceptable?
 5. **[leader/user]** Default locale: browser language, or English unless
    `?lang=zh`? (Recommended: browser language.)
