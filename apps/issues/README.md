@@ -139,11 +139,19 @@ which prints every command and its rollback point; run it before touching a live
    is rolled back automatically together with the pre-deploy SQLite backup.
 
 Use the App's stable ID or tree path (`/infra/issues`), not a bare name, with `treer app`.
-`init` resolves the interpreter to its real path and writes it into the saved command.
-With a version-numbered path (for example a uv-managed `cpython-3.12.15`) an interpreter
-upgrade or cleanup makes the App fail on its next restart: do not upgrade or remove that
-interpreter, or first `treer app update --command` to a stable one. App-deploy needs
-Python 3.11 or newer.
+`init` records the interpreter path exactly as given (since #51), so pass a stable shim such
+as `/Users/dooms/.local/bin/python3.12`, which keeps following interpreter updates; the
+interpreter is outside the release hashes, so keep the shim and its targets writable only by
+trusted operators. App-deploy needs Python 3.11 or newer. A root created before #51 holds a
+resolved, version-numbered path (for example `cpython-3.12.15`) in both `command` and
+`launcher_command` of its `config.json`, which breaks when that interpreter is upgraded or
+removed. Switch such a root explicitly: write the stable path into both fields of
+`ROOT/config.json` (atomic replace, mode 0600, keep a copy), then
+`treer app update /infra/issues --command <stable path>` (arguments and cwd are preserved and
+the process restarts), and check `/deployment-health`, the unchanged App ID and that
+`app-deploy`'s identity check still passes. The saved command and `launcher_command` must
+stay identical or `deploy` refuses with `app_not_using_stable_entry`. Production was switched
+this way after #51.
 
 ## Configuration
 
