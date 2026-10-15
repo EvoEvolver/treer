@@ -68,7 +68,12 @@ artifact_source=$commit
 if [ -f dist/artifact-provenance.json ]; then
     artifact_source=$(jq -er '.source_commit' dist/artifact-provenance.json)
 fi
-artifact_hashes=$(sh scripts/machine-artifact-hashes.sh dist)
+artifact_hashes=$(sh scripts/machine-artifact-hashes.sh dist) || {
+    echo "cannot record the machine artifact hashes" >&2; exit 1;
+}
+printf '%s' "$artifact_hashes" | jq -e 'length == 25 and all(.[]; test("^[0-9a-f]{64}$"))' >/dev/null || {
+    echo "machine artifact hash receipt is incomplete" >&2; exit 1;
+}
 jq -n \
     --arg commit "$commit" \
     --arg created_at "$tested_at" \

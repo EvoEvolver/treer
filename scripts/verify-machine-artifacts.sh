@@ -17,8 +17,13 @@ if [ -e "$directory/artifact-provenance.json" ]; then
     }
     built_commit=$(jq -r '.source_commit' "$directory/artifact-provenance.json")
     # Recorded hashes pin the bytes that were verified when the artifacts were copied.
-    recorded=$(jq -S '.files // empty' "$directory/artifact-provenance.json")
-    [ -z "$recorded" ] || [ "$recorded" = "$(sh "$root/scripts/machine-artifact-hashes.sh" "$directory" | jq -S .)" ] || {
+    jq -e '.files | type == "object" and length == 25' "$directory/artifact-provenance.json" >/dev/null || {
+        echo "artifact provenance must record all 25 file hashes" >&2; exit 1;
+    }
+    actual=$(sh "$root/scripts/machine-artifact-hashes.sh" "$directory") || {
+        echo "cannot hash the artifact files" >&2; exit 1;
+    }
+    [ "$(jq -S '.files' "$directory/artifact-provenance.json")" = "$(printf '%s' "$actual" | jq -S .)" ] || {
         echo "artifact bytes differ from the recorded provenance hashes" >&2; exit 1;
     }
     git -C "$root" merge-base --is-ancestor "$built_commit" "$commit" || {

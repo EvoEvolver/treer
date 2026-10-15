@@ -135,8 +135,9 @@ class ReuseTest(unittest.TestCase):
     def test_forged_provenance_cannot_launder_a_native_change(self):
         candidate = commit_files(self.repo, {"crates/core/lib.rs": "evil"}, "native change")
         build_dist(self.repo / "dist", self.source)
-        (self.repo / "dist" / "artifact-provenance.json").write_text(json.dumps(
-            {"schema_version": 1, "source_commit": self.source, "candidate_commit": candidate}))
+        forged = {"schema_version": 1, "source_commit": self.source, "candidate_commit": candidate,
+                  "files": self.expected_hashes(self.repo / "dist")}
+        (self.repo / "dist" / "artifact-provenance.json").write_text(json.dumps(forged))
         result = subprocess.run(["sh", "scripts/verify-machine-artifacts.sh", candidate, "dist"], cwd=self.repo, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("native inputs changed", result.stderr)
@@ -223,6 +224,48 @@ class ReuseTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("recorded at canary_passed", result.stderr)
         self.assertFalse((self.repo / "dist").exists())
+
+    def hashes(self, directory):
+        return subprocess.run(["sh", "scripts/machine-artifact-hashes.sh", str(directory)], cwd=self.repo, capture_output=True, text=True)
+
+    def test_hash_helper_fails_closed_with_no_partial_output(self):
+        dist = self.checkouts / self.source / "dist"
+        self.assertEqual(len(json.loads(self.hashes(dist).stdout)), 25)
+        (dist / "linux-x86_64" / "treer-agent-host").unlink()
+        result = self.hashes(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        self.assertIn("missing linux-x86_64/treer-agent-host", result.stderr)
+
+    def test_hash_helper_fails_when_a_file_cannot_be_read_or_is_a_symlink(self):
+        dist = self.checkouts / self.source / "dist"
+        unreadable = dist / "darwin-aarch64" / "treer"
+        unreadable.chmod(0)
+        try:
+            result = self.hashes(dist)
+        finally:
+            unreadable.chmod(0o755)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+        link = dist / "windows-x86_64" / "SHA256SUMS"
+        data = link.read_bytes()
+        link.unlink()
+        (dist / "real-sums").write_bytes(data)
+        link.symlink_to(dist / "real-sums")
+        result = self.hashes(dist)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_provenance_without_the_full_hash_set_is_rejected(self):
+        candidate = commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        self.assertEqual(self.reuse().returncode, 0)
+        path = self.repo / "dist" / "artifact-provenance.json"
+        provenance = json.loads(path.read_text())
+        for broken in ({k: v for k, v in provenance.items() if k != "files"}, {**provenance, "files": {}}):
+            path.write_text(json.dumps(broken))
+            result = subprocess.run(["sh", "scripts/verify-machine-artifacts.sh", candidate, "dist"], cwd=self.repo, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("25 file hashes", result.stderr)
 
 
 if __name__ == "__main__":
