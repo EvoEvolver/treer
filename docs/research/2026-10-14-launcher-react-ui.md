@@ -55,7 +55,8 @@ App
 │  │   └─ JumpLatest (appears when scrolled up)
 │  ├─ FilesPanel    side drawer ≥ 900px, bottom sheet / full tab view on mobile
 │  └─ TasksPanel    same drawer slot (they share one slot, as today)
-├─ Composer         GoalBar · Queue · one editor (compact ⇄ expanded) · model/effort chip · Send / Steer / Queue / Stop
+├─ Composer         one frame: StatusStrip (Goal · Plan n/m · Queue n) over one editor (compact ⇄ expanded) · model/effort chip · Send / Steer / Queue / Stop
+│   └─ StatusPopover  one of Goal / Plan / Queue, above the frame (bottom sheet ≤ 640px)
 └─ Dialogs          GoalEditor · TextDialog (long text) · ImageViewer
 ```
 
@@ -100,16 +101,48 @@ To keep click targets from moving on blur→click, controls are anchored to the
 bottom-right with fixed size, and expansion is triggered by `:focus-within` /
 a `data-layout` attribute rather than by conditional unmounting (the editor and
 its draft never remount). Model name + effort (10px) sit inside the box as one
-button opening a small popover (native `<select>`s on mobile, 16px). Queued
-prompts render **above** the box. Goal bar sits above the queue as today.
+button opening a small popover (native `<select>`s on mobile, 16px). Goal, plan progress and queued prompts no longer stack above the editor; see
+§2.2a.
 Behavior preserved verbatim: Enter submit, Shift+Enter newline, Tab queues a
 non-empty draft, IME composition guard, `/goal` and `/goal clear` interception,
 draft retained on failure, steer→queue downgrade notice.
 
+### 2.2a Status strip (replaces the Goal bar + Queue stack)
+
+The prototype review showed that a stacked goal bar, plan card, queue rows and a
+floating "Jump to latest" crowd the bottom edge at every width. Rules:
+
+1. **One 32px strip** is the top row of the composer frame; the frame is the only
+   thing floating over the thread. Segments: **Goal** (status word + one-line
+   objective, truncated), **Plan n/m** (only when a plan exists), **Queue n**
+   (only when non-empty). With no data the strip is not rendered.
+2. **One popover at a time.** Clicking a segment opens its popover above the
+   frame and closes any other; click again, Esc, the close button or an outside
+   click closes it and returns focus to the segment (`aria-expanded`,
+   `aria-controls`). It overlays the thread (the thread never resizes), height
+   <= `min(320px, 40vh)`. At <= 640px it is a fixed bottom sheet, <= 40vh, with a
+   close button.
+3. **Needs-attention beats tidiness.** Goal states `blocked`, `stale`,
+   `usageLimited`, `budgetLimited`, `syncStatus != synced` or a goal error turn the
+   Goal segment danger-colored with its status word; it stays visible without
+   opening. Popovers never open on their own, so layout never jumps under the
+   user's hands; the clear-goal confirmation happens inside the Goal popover.
+4. **Queue is count-first.** The Queue segment always shows the count; cancel
+   buttons and sender paths live in its popover. A polite live region announces
+   count changes. This deliberately changes the old always-visible queue rows:
+   `browser*.mjs` assertions move to "open Queue popover, then cancel" (parity
+   item, section 11).
+5. **Plan** stays in the timeline in order as history; the strip/popover shows
+   the latest plan's progress only.
+6. **Jump to latest** is pinned to the bottom-right of the scroll pane at
+   `bottom: dock height + 12px`, never inside a card. The dock height is
+   written to a CSS variable by a `ResizeObserver` on the composer, which also
+   sets the thread's bottom padding to `dock height + 24px`.
+
 ### 2.3 Thread scroll
 
-* Bottom padding equals composer height (ResizeObserver) so nothing hides behind
-  the floating box.
+* Bottom padding equals the dock height + 24px (ResizeObserver) so nothing hides
+  behind the floating frame.
 * Stick-to-bottom only when within 120px of the end (current rule). New content
   while scrolled up does **not** pull; a "Jump to latest" pill appears (with a
   dot if new content arrived). Loading older history preserves the scroll anchor
@@ -167,6 +200,7 @@ no shadows (separation by border and surface step):
 | `--g-3` hover/muted | `oklch(.92 .012 220)` | `oklch(.26 .011 235)` |
 | `--g-line` | `oklch(.86 .012 220)` | `oklch(.3 .012 235)` |
 | `--g-line-strong` | `oklch(.74 .02 220)` | `oklch(.42 .016 235)` |
+| `--g-line-ui` (control borders, 3:1) | `oklch(.62 .026 220)` | `oklch(.55 .02 235)` |
 | `--g-fg` | `oklch(.24 .012 235)` | `oklch(.93 .006 235)` |
 | `--g-fg-soft` | `oklch(.40 .016 235)` | `oklch(.80 .01 235)` |
 | `--g-fg-muted` | `oklch(.50 .018 235)` | `oklch(.68 .012 235)` |
@@ -182,10 +216,21 @@ Semantic aliases (what components use; switching theme = remapping these):
 Type: system stack (no remote fonts) with CJK fallbacks; 14px body, 12px meta,
 11px/10px for usage and effort; code 12.5px mono. Spacing 4px grid.
 
-Contrast is verified by a script in the test suite (pairs `fg*`/`accent-text`
-against `bg/panel/sunken/hover` in both themes ≥ 4.5:1; large/UI ≥ 3:1) — the
-numbers above are provisional until that script runs; the prototype shows the
-visual intent.
+Contrast is verified by `2026-10-14-launcher-react-ui/contrast.mjs` (reads the
+token values from `prototype.html`; WCAG 2.1 relative luminance on OKLCH to sRGB).
+Rules: text >= 4.5:1; UI component borders, focus ring and icons >= 3:1; both
+themes. **Result: 67 checks, all pass.** Covered: `fg`, `fg-soft`, `fg-muted`,
+`accent-text`, `ok`, `danger` on page/panel/sunken/hover; accent-fg on the amber
+fill; `fg` on diff add/delete backgrounds; `line-ui` on page/panel/sunken;
+`accent-text` (focus ring, icons) on panel/sunken/hover.
+The first run found 5 failures, now fixed in the tokens: `line-strong` was only
+2.1-2.3:1 as a control border (added `--g-line-ui` for control edges;
+`line-strong` is decorative only), and the amber *fill* is 2.5:1 on the panel
+(amber is therefore never used alone as an icon/text color; `accent-text`
+is, and the amber fill always carries dark text). Not covered by the script:
+text over images, `prefers-contrast`, and forced-colors; these are manual checks
+before the switch. At implementation time the script moves to the test suite and
+reads `tokens.css` instead of the prototype.
 
 Theme selection is unchanged: `data-theme` on `<html>` set by a tiny module
 (same logic as `theme.js`: `?theme=`, `treer:embed-theme` message with
@@ -336,7 +381,7 @@ today.
 ## 11. Parity matrix (must all pass before the switch)
 
 Transcript + older-page append with scroll anchor · streaming · steer/queue/Tab ·
-queue cancel · draft retention on failure · steer downgrade notice · interrupt ·
+queue count + cancel (via the Queue popover) · draft retention on failure · steer downgrade notice · interrupt ·
 model/effort (hidden when no efforts; "Default" placeholder) · goal set/edit/
 pause/resume/clear-confirm/retry/reconcile, `/goal` commands, completion notices,
 budget/usage · tasks panel + output tail polling · files browse/preview/refresh/
@@ -379,7 +424,8 @@ viewer, split workbench, account/device sharing.
 
 ## 14. Open questions
 
-0. Resolved with launcher-dev: output names are `ui.js`/`ui.css` (fixed, no hash
+0. Review round 1 (leader): status strip (section 2.2a) and contrast results
+   (section 3) added. Resolved with launcher-dev: output names are `ui.js`/`ui.css` (fixed, no hash
    chunks); no invented durations/hierarchy (§2.1); images stay self/data/blob.
 1. **[LD]** Commit built `ui.js`/`ui.css` (recommended, §8) vs. build in
    `prepare-bundle` only (breaks `bootstrap.sh` git installs).
@@ -396,11 +442,13 @@ viewer, split workbench, account/device sharing.
 
 ## 15. Static prototype
 
-`2026-10-14-launcher-react-ui/prototype.html` is hand-written HTML/CSS (no
-React, no JS) showing the thread, collapsed/expanded activity group, diff, plan,
-goal bar, queue, compact composer with model/effort chip, jump-to-latest, and the
-file drawer. Screenshots (2x): `desktop-{light,dark}.png` (1280px) and
-`390-{light,dark}.png` (390px, bottom bar, 16px input, no horizontal overflow —
-checked programmatically). It is a visual-intent mock only: the expanded
-composer layout, mobile bottom sheets, zh strings and focus states are not drawn,
-and the contrast numbers in §3 are not yet script-verified.
+`2026-10-14-launcher-react-ui/prototype.html` is hand-written HTML/CSS plus a
+small mock-only script (no React) that toggles states via query strings.
+`screenshots.mjs` regenerates every PNG (`<viewport>-<state>-<theme>.png`,
+viewports `desktop` 1280px and `390`, 2x). States: `default`, `plan`, `queue`,
+`goal` (popovers; plan in light and dark), `expanded` (multi-line composer),
+`scrolled` (jump-to-latest), `zh` and `zh-plan`, `focus` (keyboard focus ring on
+Steer), `files` (390px full-screen files with Browse/Preview tabs). 390px has no
+horizontal overflow in any state (checked by the script). Known gaps: the
+mock does not show the tasks panel, goal editor dialog, image viewer, error
+states, or the model/effort popover.
