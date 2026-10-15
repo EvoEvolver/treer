@@ -1135,8 +1135,8 @@ test("audit view presents versioned traffic as billable usage", async ({ page })
   await page.getByRole("button", { name: "Organization settings" }).click()
   await page.getByRole("button", { name: "Open audit" }).click()
 
-  await expect(page.getByText("Billable usage")).toBeVisible()
-  await expect(page.getByText("Data frames")).toBeVisible()
+  await expect(page.getByRole("group", { name: "Traffic totals" }).getByText("Billable usage", { exact: true })).toBeVisible()
+  await expect(page.getByRole("group", { name: "Traffic totals" }).getByText("Data frames", { exact: true })).toBeVisible()
   await expect(page.getByText("Machine", { exact: true })).toHaveCount(2)
 })
 

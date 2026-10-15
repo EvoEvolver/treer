@@ -17,7 +17,7 @@ import { Textarea } from "@/components/ui/textarea"
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { WorkloadTree, type NewAgentFolder } from "@/components/workload-tree"
 import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
-import { ApiError, api, machineName, proxyUrl, websocketUrl, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkloadTreeState } from "@/lib/api"
+import { ApiError, api, machineName, proxyUrl, websocketUrl, type Agent, type AgentLaunchProfile, type AppDeployment, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkloadTreeState } from "@/lib/api"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { DeleteTarget, MainView, PREVIEW_CONNECT, PREVIEW_INSTALL, PREVIEW_ORG, PREVIEW_PROFILES, PREVIEW_USER, PREVIEW_WORKSPACE, RenameTarget, TerminalState, activeStatuses, arrayBufferToBase64, authorizationReturnUrl, controlCharacter, defaultAgentName, defaultProfileAgentName, formatBytes, initials, machineOnline, replaceWorkspace, visibleWorkspaceSnapshot, workspacePath } from "@/lib/control-plane"
 import { ErrorToast } from "@/components/error-toast"
@@ -182,7 +182,7 @@ function WorkspaceAppContent() {
   const [groupName, setGroupName] = useState("")
   const [auditEvents, setAuditEvents] = useState<OrganizationAuditEvent[]>([])
   const [traffic, setTraffic] = useState<MachineTrafficRecord[]>([])
-  const [agentTraffic, setAgentTraffic] = useState<AgentTrafficRecord[]>([])
+  const [auditRefreshRevision, setAuditRefreshRevision] = useState(0)
   const [auditLoading, setAuditLoading] = useState(false)
   const [virtualHosts, setVirtualHosts] = useState<VirtualNetworkHost[]>([])
   const [services, setServices] = useState<MachineService[]>([])
@@ -1162,28 +1162,23 @@ function WorkspaceAppContent() {
     const requestedWorkspaceId = workspaceId
     if (!requestedWorkspaceId) {
       setTraffic([])
-      setAgentTraffic([])
       return
     }
     const data = await api<{ traffic: MachineTrafficRecord[] }>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/traffic?hours=24`)
-    const detail = await api<{ traffic: AgentTrafficRecord[] }>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/traffic/agents?hours=24`).catch((error: unknown) => {
-      if (error instanceof ApiError && error.status === 404) return { traffic: [] }
-      throw error
-    })
     if (workspaceIdRef.current === requestedWorkspaceId) {
       setTraffic(data.traffic)
-      setAgentTraffic(detail.traffic)
     }
   }, [workspaceId])
 
   const refreshAudit = useCallback(() => {
-    void Promise.all([loadAudit(), loadTraffic()]).catch(showError)
-  }, [loadAudit, loadTraffic, showError])
+    setAuditRefreshRevision((value) => value + 1)
+    void loadAudit().catch(showError)
+  }, [loadAudit, showError])
 
   useEffect(() => {
     if (mainView === "audit") loadAudit().catch(showError)
     if (mainView === "machine") loadNetwork().catch(showError)
-    if (mainView !== "audit" && mainView !== "machine") return
+    if (mainView !== "machine") return
     loadTraffic().catch(showError)
     const timer = window.setInterval(() => loadTraffic().catch(showError), 10_000)
     return () => window.clearInterval(timer)
@@ -1305,7 +1300,7 @@ function WorkspaceAppContent() {
               </div>
             </div>}
           </div>
-        </div> : mainView === "workspace" ? <WorkspaceSettingsView key={workspaceId} workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} agentTraffic={agentTraffic} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
+        </div> : mainView === "workspace" ? <WorkspaceSettingsView key={workspaceId} workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} workspaceId={workspaceId!} refreshRevision={auditRefreshRevision} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
       </section>
     </main>
 

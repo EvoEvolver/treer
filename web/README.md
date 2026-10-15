@@ -55,6 +55,29 @@ operation. The editor scrolls on short mobile screens and preserves input after
 a denied operation. Managed Apps have separate settings; their startup editing
 requires the forthcoming App update API.
 
+## Audit traffic
+
+Audit shows workspace traffic for the last 6 hours, 24 hours (default), 7 days,
+or 30 days. Range changes query both machine usage and Agent detail with the same
+`hours` value; they do not filter a cached 24-hour response. The existing Core API
+supports up to 720 hours. Machine overview keeps its independent 24-hour summary.
+
+The SVG trend switches between billable bytes and data frames. Short ranges use
+hourly buckets; longer ranges group those records into UTC days. The current hour
+and edge days may be incomplete. Unrecorded windows display zero, which does not
+prove there was no traffic or guarantee historical coverage. Direct traffic is
+machine-reported and its frames are excluded. Agent detail is included in machine
+usage, never added to the billable total; route rows display payload bytes.
+
+Bars expose values on hover or keyboard focus. The expandable data table provides
+the same values as text; theme colors and layout adapt to dark mode and narrow
+screens. No chart dependency or build change is required. The existing ten-second
+refresh cadence remains; requests never overlap within a range, and leaving the
+view or changing workspace/range cancels them. The Refresh audit button reloads
+the selected range. Failures show a retry button instead of stale totals; an older
+Proxy without Agent detail is explicitly identified while machine usage remains
+available. Selecting a different workspace starts at the default range.
+
 ## Terminal replay
 
 The shared desktop/mobile browser terminal and Managed App logs swallow historical
