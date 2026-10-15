@@ -107,6 +107,22 @@ restart, or explicitly update back to the old specification. Treer does not
 roll back application data. Put environment/secrets in private entry configuration,
 never command arguments; this update API does not accept environment fields.
 
+Before deploying, save the previous launch fields in private storage so the
+deployment script can explicitly restore them if health checks fail. For example,
+`(umask 077; treer app show /docs > previous-app.json)` saves a local snapshot;
+keep it private, since existing arguments may contain sensitive information.
+Restoring launch fields does not restore application data or its schema.
+
+Coordinate Proxy database backups with Controller startup state. If an older
+database backup has a lower startup revision than the Controller, reconciliation
+fails closed with `stale_app_startup`; do not delete Controller state or recreate
+the App to bypass it. Restore matching state, or explicitly publish the desired
+specification until its Proxy revision exceeds the retained Controller revision.
+A single update is not sufficient when the revision gap is larger than one.
+Update preflight and application each have a 35-second command-response timeout;
+the App lifecycle lock remains held during those requests. A timeout after saving
+does not prove that the Controller did not apply the new specification.
+
 When wildcard ingress is configured, every Managed App receives a stable
 `public_url` on its own origin. It requires Workspace authentication by default;
 an Agent can explicitly pass `--public` at creation time to allow anonymous
