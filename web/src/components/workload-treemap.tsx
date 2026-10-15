@@ -1,15 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react"
-import { ArrowLeft, ChevronRight, Folder, Layers3, Terminal } from "lucide-react"
+import { ArrowLeft, ChevronRight, Folder, Layers3 } from "lucide-react"
+import { WorkloadIcon } from "@/components/workload-icon"
 import { Button } from "@/components/ui/button"
 import { machineName, type Agent, type Machine, type WorkloadTreeState } from "@/lib/api"
 import { agentPath, folderPath, workloadKind } from "@/lib/workload-path"
-import { treemap, type Rectangle } from "@/lib/treemap"
 import "./workload-treemap.css"
 
-type Branch = { id: string; label: string; path: string; agent?: Agent; children: Branch[]; weight: number; count: number; parent?: Branch }
+type Branch = { id: string; label: string; path: string; agent?: Agent; children: Branch[]; count: number; nodes: number; parent?: Branch }
 
 function forest(tree: WorkloadTreeState, agents: Agent[]) {
-  const folders = new Map<string, Branch>(tree.folders.map((folder) => [folder.folder_id, { id: folder.folder_id, label: folder.name, path: folderPath(folder, tree.folders), children: [], weight: 1, count: 0 }]))
+  const folders = new Map<string, Branch>(tree.folders.map((folder) => [folder.folder_id, { id: folder.folder_id, label: folder.name, path: folderPath(folder, tree.folders), children: [], count: 0, nodes: 1 }]))
   const parents = new Map(tree.folders.map((folder) => [folder.folder_id, folder.parent_id]))
   const roots: Branch[] = []
   for (const folder of tree.folders) {
@@ -27,7 +27,7 @@ function forest(tree: WorkloadTreeState, agents: Agent[]) {
   }
   const placements = new Map(tree.placements.map((entry) => [entry.agent_id, entry.folder_id]))
   for (const agent of agents) {
-    const branch: Branch = { id: agent.agent_id, label: agent.name, path: agentPath(agent, tree), agent, children: [], weight: 1, count: 1, parent: folders.get(placements.get(agent.agent_id) ?? "") }
+    const branch: Branch = { id: agent.agent_id, label: agent.name, path: agentPath(agent, tree), agent, children: [], count: 1, nodes: 1, parent: folders.get(placements.get(agent.agent_id) ?? "") }
     if (branch.parent) branch.parent.children.push(branch)
     else roots.push(branch)
   }
@@ -36,7 +36,7 @@ function forest(tree: WorkloadTreeState, agents: Agent[]) {
   for (let index = 0; index < all.length; index++) all.push(...all[index].children)
   for (let index = all.length - 1; index >= 0; index--) {
     all[index].children.sort((a, b) => Number(Boolean(a.agent)) - Number(Boolean(b.agent)) || a.label.localeCompare(b.label, undefined, { numeric: true, sensitivity: "base" }) || a.id.localeCompare(b.id))
-    all[index].weight = Math.max(1, all[index].children.reduce((sum, child) => sum + child.weight, 0))
+    all[index].nodes = 1 + all[index].children.reduce((sum, child) => sum + child.nodes, 0)
     if (!all[index].agent) all[index].count = all[index].children.reduce((sum, child) => sum + child.count, 0)
   }
   roots.sort((a, b) => Number(Boolean(a.agent)) - Number(Boolean(b.agent)) || a.label.localeCompare(b.label))
@@ -52,9 +52,9 @@ export default function WorkloadTreeMap({ tree, agents, machines, selectedId, on
   const [detail, setDetail] = useState("")
   const container = useRef<HTMLDivElement>(null)
   const breadcrumbs = useRef<HTMLElement>(null)
-  const [size, setSize] = useState({ width: 0, height: 0 })
+  const [size, setSize] = useState({ width: 0 })
   useEffect(() => {
-    const observer = new ResizeObserver(([entry]) => setSize({ width: entry.contentRect.width, height: entry.contentRect.height }))
+    const observer = new ResizeObserver(([entry]) => setSize({ width: entry.contentRect.width }))
     if (container.current) observer.observe(container.current)
     return () => observer.disconnect()
   }, [])
@@ -62,43 +62,61 @@ export default function WorkloadTreeMap({ tree, agents, machines, selectedId, on
   const chain: Branch[] = []
   for (let branch = current; branch; branch = branch.parent) chain.unshift(branch)
   const children = current?.children ?? roots
-  const count = children.reduce((sum, child) => sum + child.weight, 0)
+  // Bound nested previews, not explicit drill-down. Very large branches remain
+  // counted folder tiles rather than allocating an enormous empty canvas.
+  const LEAF_BUDGET = 48
+  const NODE_BUDGET = 96
   const narrow = size.width < 600
-  // Keep touch targets and three-line labels readable. Large inventories scroll
-  // vertically rather than reducing every agent to an unusable sliver.
-  const height = Math.max(size.height, narrow ? count * 112 + children.filter((child) => !child.agent).length * 60 : Math.ceil(count * 29000 / Math.max(1, size.width)) + 120)
+  let remainingLeaves = Math.max(0, LEAF_BUDGET - children.filter((child) => child.agent).length)
+  let remainingNodes = Math.max(0, NODE_BUDGET - children.length)
+  function summary(item: Branch) {
+    const counts = new Map<string, number>()
+    const queue = [item]
+    for (let index = 0; index < queue.length; index++) {
+      const entry = queue[index]
+      if (entry.agent) {
+        const state = machines.find((machine) => machine.server_id === entry.agent!.server_id)?.status === "online" ? entry.agent.status : "offline"
+        counts.set(state, (counts.get(state) ?? 0) + 1)
+      } else queue.push(...entry.children)
+    }
+    return { states: [...counts].sort(([a], [b]) => a.localeCompare(b)).map(([state, count]) => `${state} ${count}`).join(" · "),
+      tags: [...new Map([...item.children.slice(0, 2), ...queue.filter((entry) => entry.agent).slice(0, 3)].map((entry) => [entry.id, entry])).values()].slice(0, 4) }
+  }
   function navigate(id: string | null) {
     setFolderId(id); setDetail(""); container.current?.scrollTo({ top: 0 })
     breadcrumbs.current?.focus()
   }
-  function render(items: Branch[], bounds: Rectangle, depth: number): React.ReactNode {
-    let offset = 0
-    const total = Math.max(1, items.reduce((sum, child) => sum + child.weight, 0))
-    const rectangles = narrow ? items.map((item) => {
-      const rect = { x: bounds.x, y: bounds.y + offset, width: bounds.width, height: item.weight / total * bounds.height }
-      offset += rect.height
-      return rect
-    }) : treemap(items.map((item) => item.weight), bounds)
-    return items.map((item, index) => {
-      const rect = rectangles[index]
-      const style = { left: rect.x + 4, top: rect.y + 4, width: Math.max(0, rect.width - 8), height: Math.max(0, rect.height - 8) }
+  function render(items: Branch[], depth: number): React.ReactNode {
+    return <div className="grid grid-cols-[repeat(auto-fill,minmax(min(100%,180px),1fr))] content-start items-start gap-2">{items.map((item) => {
       if (item.agent) {
         const machine = machines.find((entry) => entry.server_id === item.agent!.server_id)
         const online = machine?.status === "online"
         const status = online ? item.agent.status : "offline"
         const running = online && ["running", "idle", "working", "starting"].includes(status)
         const description = `${item.path} · ${workloadKind(item.agent)} · ${machineName(machine, item.agent.server_id)} · ${status}`
-        return <button key={`agent:${item.id}`} style={style} title={description} aria-label={`Open ${description}`} aria-current={item.id === selectedId ? "true" : undefined} className="treemap-agent absolute flex min-w-0 flex-col justify-between overflow-hidden rounded-md border bg-card p-3 text-left transition-colors hover:border-primary focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onMouseEnter={() => setDetail(description)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(description)} onBlur={() => setDetail("")} onClick={() => onOpen(item.id)}>
-          <span className="flex w-full min-w-0 items-center gap-2 text-xs font-medium"><Terminal aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{item.label}</span></span>
-          <span className="block w-full min-w-0 pt-2 text-[10px] leading-relaxed text-muted-foreground"><span className="block truncate">{workloadKind(item.agent)} · {machineName(machine, item.agent.server_id)}</span><span className="flex items-center gap-1.5"><span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${running ? "bg-[hsl(var(--status-online))]" : "bg-muted-foreground"}`} />{status}</span></span>
+        return <button key={`agent:${item.id}`} title={description} aria-label={`Open ${description}`} aria-current={item.id === selectedId ? "true" : undefined} className="treemap-agent flex h-[72px] min-w-0 flex-col justify-start gap-1 overflow-hidden rounded-md border bg-card p-2 text-left transition-colors hover:border-primary focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onMouseEnter={() => setDetail(description)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(description)} onBlur={() => setDetail("")} onClick={() => onOpen(item.id)}>
+          <span className="flex w-full min-w-0 items-center gap-2 text-xs font-medium"><WorkloadIcon kind={workloadKind(item.agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{item.label}</span></span>
+          <span className="block w-full min-w-0 text-[10px] leading-4 text-muted-foreground"><span className="block truncate">{workloadKind(item.agent)} · {machineName(machine, item.agent.server_id)}</span><span className="flex items-center gap-1.5"><span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${running ? "bg-[hsl(var(--status-online))]" : "bg-muted-foreground"}`} />{status}</span></span>
         </button>
       }
-      const preview = depth < 2 && rect.width >= 180 && rect.height >= 180 && item.children.length > 0
-      return <section key={`folder:${item.id}`} aria-label={`Folder ${item.path}`} className={`treemap-folder absolute overflow-hidden rounded-lg border ${depth % 2 ? "bg-background" : "bg-muted/60"}`} style={style}>
-        <button title={item.path} aria-label={`Explore folder ${item.path}`} className="flex h-12 w-full min-w-0 items-center gap-2 border-b px-3 text-left text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => navigate(item.id)} onMouseEnter={() => setDetail(item.path)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(item.path)} onBlur={() => setDetail("")}><Folder aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{item.label}</span><span className="text-[10px] text-muted-foreground">{item.count}</span><ChevronRight aria-hidden="true" className="size-3" /></button>
-        {preview ? render(item.children, { x: 4, y: 52, width: Math.max(0, rect.width - 24), height: Math.max(0, rect.height - 68) }, depth + 1) : <button className="flex h-[calc(100%-3rem)] w-full flex-col items-center justify-center gap-2 p-2 text-xs text-muted-foreground hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" aria-label={`View contents of ${item.path}`} onClick={() => navigate(item.id)}><Layers3 aria-hidden="true" className="size-5 opacity-50" /><span>{item.children.length ? `${item.count} ${item.count === 1 ? "agent" : "agents"} · Explore` : "Empty folder"}</span></button>}
+      const preview = item.children.length > 0 && item.count <= remainingLeaves && item.nodes - 1 <= remainingNodes
+        && size.width - depth * (narrow ? 12 : 20) >= 180
+      if (preview) {
+        remainingNodes -= item.children.length
+        remainingLeaves -= item.children.filter((child) => child.agent).length
+      }
+      const folded = !preview ? summary(item) : null
+      return <section key={`folder:${item.id}`} aria-label={`Folder ${item.path}`} className={`treemap-folder col-span-full min-w-0 overflow-hidden rounded-lg border ${depth % 2 ? "bg-background" : "bg-muted/60"}`}>
+        <button title={item.path} aria-label={`Explore folder ${item.path}`} className="flex min-h-11 w-full min-w-0 items-center gap-2 px-2 text-left text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => navigate(item.id)} onMouseEnter={() => setDetail(item.path)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(item.path)} onBlur={() => setDetail("")}><Folder aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{item.label}</span><span className="text-[10px] text-muted-foreground">{item.count} {item.count === 1 ? "agent" : "agents"}</span><ChevronRight aria-hidden="true" className="size-3" /></button>
+        {preview ? <div className="border-t p-1.5 sm:p-2">{render(item.children, depth + 1)}</div> : <div className="space-y-2 border-t p-2">
+          {item.children.length ? <>
+            <p className="break-words text-[10px] leading-4 text-muted-foreground">{folded?.states}</p>
+            <div className="flex min-w-0 flex-wrap gap-1" aria-label={`Preview of ${item.path}`}>{folded?.tags.map((child) => <span key={child.id} title={child.path} className="flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-1 text-[10px] text-muted-foreground">{child.agent ? <WorkloadIcon kind={workloadKind(child.agent)} className="size-3 shrink-0" /> : <Folder aria-hidden="true" className="size-3 shrink-0" />}<span className="max-w-40 truncate">{child.label}</span></span>)}</div>
+          </> : <p className="text-xs text-muted-foreground">Empty folder</p>}
+          <Button variant="outline" size="sm" aria-label={`View contents of ${item.path}`} onClick={() => navigate(item.id)}><Layers3 aria-hidden="true" className="size-3.5" />{item.children.length ? `Expand · ${item.count} ${item.count === 1 ? "agent" : "agents"}` : "Open folder"}</Button>
+        </div>}
       </section>
-    })
+    })}</div>
   }
   return <div className="flex min-h-0 flex-1 flex-col">
     <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 sm:px-5">
@@ -107,8 +125,8 @@ export default function WorkloadTreeMap({ tree, agents, machines, selectedId, on
       <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{agents.length} agents</span>
     </div>
     <div ref={container} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-background p-2 sm:p-3" role="group" aria-label="Workspace treemap">
-      {children.length ? size.width > 0 && <div className="relative" style={{ width: "100%", height }}>{render(children, { x: 0, y: 0, width: Math.max(0, size.width), height }, 0)}</div> : <p role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">{current ? "This folder is empty" : "No workloads in this workspace"}</p>}
+      {children.length ? size.width > 0 && <div className="w-full">{render(children, 0)}</div> : <p role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">{current ? "This folder is empty" : "No workloads in this workspace"}</p>}
     </div>
-    <p className="min-h-10 shrink-0 truncate border-t px-5 py-3 text-[10px] text-muted-foreground" title={detail}>{detail || "Equal-weight agents · Empty folders stay visible"}</p>
+    <p className="min-h-10 shrink-0 truncate border-t px-5 py-3 text-[10px] text-muted-foreground" title={detail}>{detail || "Compact tiles · Folder previews adapt to space"}</p>
   </div>
 }

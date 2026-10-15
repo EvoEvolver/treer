@@ -53,3 +53,21 @@ export async function mockTreeMapApi(page: Page) {
   })
 }
 
+
+export async function mockDeepTreeMapApi(page: Page, large: boolean | "medium", depth = 4) {
+  await mockTreeMapApi(page)
+  const nestedFolders = Array.from({ length: depth }, (_, index) => ({
+    folder_id: `level-${index}`, name: ['Team', 'Research', 'Experiments', 'Lab'][index] ?? `Level-${index}`, parent_id: index ? `level-${index - 1}` : null,
+  }))
+  const nestedAgents = Array.from({ length: large === "medium" ? 20 : large ? 80 : 3 }, (_, index) => ({
+    agent_id: `deep-${index}`, name: `agent-${String(index + 1).padStart(2, '0')}`, kind: index % 2 ? 'codex' : 'command',
+    status: index % 3 ? 'idle' : 'working', server_id: index % 11 === 10 ? 'remote' : 'local',
+  }))
+  await page.route('**/snapshot', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+    ...mapSnapshot, agents: [{ agent_id: 'app-runtime', name: 'dashboard', kind: 'app', status: 'running', server_id: 'local' }, ...nestedAgents],
+  }) }))
+  await page.route('**/workload-tree', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+    folders: large === "medium" ? [...nestedFolders, { folder_id: "operations", name: "Operations", parent_id: null }, { folder_id: "product", name: "Product", parent_id: null }] : nestedFolders,
+    placements: nestedAgents.map((agent, position) => ({ agent_id: agent.agent_id, folder_id: large === "medium" && position >= 6 ? position < 13 ? "operations" : "product" : `level-${depth - 1}`, position })),
+  }) }))
+}

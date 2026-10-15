@@ -9,6 +9,8 @@ import { agentPath, workloadKind, folderPath as resolveFolderPath } from "@/lib/
 import { readFolderExpansion, writeFolderExpansion, type FolderExpansion } from "@/lib/folder-expansion"
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
+import { WorkloadIcon } from "@/components/workload-icon"
+
 import TreeMap from "@/components/workload-treemap"
 
 export interface NewAgentFolder { folderId: string; path: string }
@@ -288,7 +290,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       }
       setDragged(null); setDropTarget(null)
     }} className={`flex min-h-12 items-center gap-1 rounded px-2 py-1 hover:bg-accent ${selectedId === agent.agent_id ? "bg-accent" : ""} ${dropTarget?.id === agent.agent_id ? dropTarget.after ? "shadow-[inset_0_-2px_0_hsl(var(--primary))]" : "shadow-[inset_0_2px_0_hsl(var(--primary))]" : ""}`}>
-      <button data-tree-primary="" data-tree-key={agent.agent_id} className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="block truncate text-xs font-medium">{agent.name}</span><span className="block truncate text-[9px] text-muted-foreground">{workloadKind(agent)} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
+      <button data-tree-primary="" data-tree-key={agent.agent_id} className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="flex min-w-0 items-center gap-1.5 text-xs font-medium"><WorkloadIcon kind={workloadKind(agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{agent.name}</span></span><span className="block truncate text-[9px] text-muted-foreground">{workloadKind(agent)} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
     </div> })}</>
   }
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-tour="agents-tab">
