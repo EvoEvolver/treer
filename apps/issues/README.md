@@ -103,6 +103,48 @@ fallback callback. For externally managed servers or a Policy that denies App li
 explicitly after registering the service. Never select a service audience from
 request headers or bodies.
 
+## Deploy from a version directory (production layout)
+
+The production App runs through `scripts/app-deploy` instead of a source checkout:
+a stable entry executes `releases/<FULL SHA>` (selected by `current`), the database
+lives in `ROOT/state/app.sqlite3`, and later releases are staged, health-checked and
+rolled back by the tool (see the operator guide, "Deploy new Apps from version
+directories"). Issues supports it with two additions:
+
+- `GET /deployment-health` (unauthenticated, `no-store`, GET/HEAD only):
+  `{"version": APP_DEPLOY_VERSION, "app_id": TREER_AGENT_ID, "ready": …, "database_ready": …}`;
+  503 when the database does not answer. It exposes only a commit SHA and the App ID,
+  and the probe result is cached for two seconds.
+- `--proxy-url URL` overrides `ISSUES_PROXY_URL`. The deployment's saved command
+  cannot carry environment variables, so the Proxy URL travels in the fixed arguments
+  written by `init` (`… --db-env ISSUES_DB -- --proxy-url https://proxy.example.com/`).
+  The entry sets `ISSUES_DB` and `APP_DEPLOY_VERSION` itself.
+
+Migrating an existing App (rehearsed end to end by `tests/rehearse_migration.py`,
+which prints every command and its rollback point; run it before touching a live App):
+
+1. Back up the database with the online backup API (see *Backup and recovery*) and
+   record `treer app show APP` in a private snapshot.
+2. `app-deploy init`, `stage` (the component's tests run in the exported tree) and
+   `bootstrap` — no downtime; deleting `ROOT` undoes it.
+3. `treer app stop APP`; copy the old database into `ROOT/state/app.sqlite3` with the
+   backup API and compare `integrity_check` and row counts; `treer app update APP --cwd
+   <ROOT relative to the machine root> --command <the interpreter init printed> -- ROOT/entry.py
+   run --root ROOT`; `treer app start APP`; check `/deployment-health` on loopback **and**
+   through the Treer route, the unchanged App/service IDs and `/v1/issues`.
+4. Rollback (the old database file is never modified): stop, `treer app update` back
+   to the saved legacy command/cwd/args, start. Writes made on the new database after
+   the cutover do not return to the old one.
+5. Later upgrades: `app-deploy stage …` then `app-deploy deploy …`; a failing release
+   is rolled back automatically together with the pre-deploy SQLite backup.
+
+Use the App's stable ID or tree path (`/infra/issues`), not a bare name, with `treer app`.
+`init` resolves the interpreter to its real path and writes it into the saved command.
+With a version-numbered path (for example a uv-managed `cpython-3.12.15`) an interpreter
+upgrade or cleanup makes the App fail on its next restart: do not upgrade or remove that
+interpreter, or first `treer app update --command` to a stable one. App-deploy needs
+Python 3.11 or newer.
+
 ## Configuration
 
 | Variable | Default | Meaning |
