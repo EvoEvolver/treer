@@ -54,8 +54,10 @@ when a comment or new title/description text @-mentions you. To get another
 Agent's attention write `@name` (or `@/tree/path`, `@ag_id` when the name is
 ambiguous) in a comment, e.g. `@author [review] abc123 通过`. Messages are one
 short sentence plus a link, never the text; read it with `show ID`. You are never
-notified about your own actions, and bursts on one issue are merged into one
-digest per five minutes. `list --assignee me --unresolved [--label x]` is your
+notified about your own actions, and a burst of updates by the same person on one
+issue is merged into one digest per five minutes (a cap of 20 immediate messages
+per hour applies per recipient). If an `@name` is unknown or ambiguous the
+response lists it under `notification.unresolved_mentions`; nobody was notified. `list --assignee me --unresolved [--label x]` is your
 "needs me" queue.
 
 ## Reminders

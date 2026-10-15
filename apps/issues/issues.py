@@ -11,7 +11,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
-from notify import Digest, enabled as notify_enabled
+from notify import Digest, enabled as notify_enabled, hourly_limit
 from reminders import Reminders, enabled as reminders_enabled
 from store import Store, fields, fail
 
@@ -69,7 +69,7 @@ class Application:
             return self.auth
 
     def mutation(self, issue_id, action, body, actor, directory, token):
-        issue_id, event_id, event, recipients, notice = self.store.mutate(issue_id, action, body, actor, directory)
+        issue_id, event_id, event, recipients, notice, missed = self.store.mutate(issue_id, action, body, actor, directory)
         notification = {'status': 'not_requested'}
         if action in ('create', 'update', 'comment'):
             if not notify_enabled():
@@ -78,7 +78,8 @@ class Application:
                 notification = {'status': 'no_recipients'}
             else:
                 # One Message per event: this is the only notification path, so nothing is sent twice.
-                send, merged = self.store.claim_notifications(issue_id, recipients, notice, self.store.clock())
+                now = self.store.clock()
+                send, merged = self.store.claim_notifications(issue_id, recipients, notice, now, actor['id'], hourly_limit())
                 if not send:
                     notification = {'status': 'coalesced', 'coalesced': len(merged)}
                 else:
@@ -90,9 +91,11 @@ class Application:
                             'idempotency_key': f'issues-event-{event_id}'})
                         notification = {'status': 'sent', **({'coalesced': len(merged)} if merged else {})}
                     except Error as exc:
-                        self.store.release_notifications(issue_id, send)
+                        self.store.release_notifications(issue_id, send, actor['id'], now)
                         notification = {'status': 'disabled' if exc.code == 'core_messages_disabled' else 'unavailable',
                                         'code': exc.code, 'message': 'Change saved; Core Message notification was not delivered'}
+        if missed:
+            notification = dict(notification, unresolved_mentions=missed)
         self.store.notification(event_id, notification)
         return dict(self.store.show(issue_id), notification=notification)
 

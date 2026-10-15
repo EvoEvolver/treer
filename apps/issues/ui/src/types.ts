@@ -10,7 +10,7 @@ export interface Issue {
   created_at: string; updated_at: string; version: number; claim: Claim | null;
   progress: Progress; unresolved_dependencies: number[];
 }
-export interface Notification { status: string; code?: string; message?: string }
+export interface Notification { status: string; code?: string; message?: string; unresolved_mentions?: string[] }
 export interface ActivityEvent {
   id: number; actor: string; kind: string; at: string; summary: string;
   changes?: Record<string, unknown>; body?: string; notification: Notification;

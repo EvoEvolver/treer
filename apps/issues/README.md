@@ -115,6 +115,7 @@ request headers or bodies.
 | `ISSUES_WORKSPACE_ID` | injected workspace or own record | Workspace boundary; required for external supervision |
 | `TREER_BIN` | `treer` | CLI used only for own Managed App identity discovery |
 | `ISSUES_URL` | `http://issues.treer/` | Client-side root override for the `issues` CLI |
+| `ISSUES_NOTIFY_HOURLY_LIMIT` | `20` | Immediate Messages per recipient per hour before updates fold into one digest |
 | `ISSUES_NOTIFY` | `on` | `0`/`off`/`false`/`no` disables issue-change notifications and digests |
 | `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the hourly reminder poller |
 
@@ -170,19 +171,40 @@ event produces at most one Message. Each event has a stable idempotency key
 activity and API response; issue writes still succeed. The browser displays
 failed/disabled/pending delivery in the timeline.
 
-**Anti-spam window.** Per (recipient, issue) the first event is delivered
-immediately and opens a five-minute window. Later events in the window are only
-recorded (`notification: coalesced`); when the window ends the App sends **one**
-digest (`Issue #N · 3 more updates in the last 5 minutes: …`) with
-`treer message send` under the App's own identity (there is no caller token any
-more; the App's Policy must allow it; recipients are only people who already got
-the immediate Message for that issue) and starts a new quiet window, so a
-recipient gets at most one immediate and one digest Message per issue per five
-minutes. A failed immediate send does not open a window; a failed digest is
-retried at most three times and then dropped. `ISSUES_NOTIFY=off` disables all
-issue-change notifications (activity shows `notification: off`); it is
-independent of `ISSUES_REMINDERS`. Pending digests live in the SQLite
-`notify_windows` table and survive restarts.
+**Anti-spam window.** Per (recipient, issue, **actor**) the first event is delivered
+immediately with that actor's own token and opens a five-minute window. Later
+events *by the same actor* in the window are only recorded
+(`notification: coalesced`); when the window ends the App sends **one** digest
+(`Issue #N · 3 more updates in the last 5 minutes: …`; at most the last 50
+events are kept and the count reflects that) with `treer message send` under the
+App's own identity and starts a new quiet window. Windows are keyed by actor on
+purpose: the digest has no caller token, so it may only carry events of an actor
+whose own token Core already allowed to message that recipient. An event by a
+different actor never joins someone else's window; it is sent with its own token
+(and refused by Core if that actor's Policy forbids it). A failed immediate send
+discards its window together with anything merged into it meanwhile, so nothing
+Core did not authorise is ever delivered later. A failed digest is retried at most
+three times and then dropped. The App's Policy must allow the digest Message.
+
+**Per-recipient cap.** Each recipient also has an hourly budget of immediate
+Messages (`ISSUES_NOTIFY_HOURLY_LIMIT`, default 20, 1–1000). Beyond it, updates
+from any number of issues are folded into one per-recipient digest per window
+(`Issues · N more updates (over the hourly limit)…`), so the total sent to one
+Agent is bounded whatever anyone @-mentions. A single comment @-mentions at most
+10 Agents.
+
+**Names in Messages.** Directory names are attacker-influenced text, so a name
+appears in a Message only if it is 1–24 characters of `A–Z a–z 0–9 space . _ / -`;
+otherwise the stable ID is shown instead. Titles, descriptions and comment bodies
+never appear.
+
+**Unresolved mentions.** An `@name` that matches no Agent or several is ignored,
+and the write response and activity say so (`notification.unresolved_mentions`;
+the UI toast lists them), so an author does not assume the Agent was reached.
+
+`ISSUES_NOTIFY=off` disables all issue-change notifications (activity shows
+`notification: off`); it is independent of `ISSUES_REMINDERS`. Pending digests
+live in the SQLite `notify_windows`/`notify_budget` tables and survive restarts.
 
 ## Hourly reminders
 

@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from auth import Error
-from notify import WINDOW, notice_for, recipients_for, resolve_mentions
+from notify import WINDOW, notice_for, recipients_for, resolve_mentions, unresolved_mentions
 
 STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed')
 PRIORITIES = ('low', 'normal', 'high', 'urgent')
@@ -54,8 +54,11 @@ class Store:
                 CREATE TABLE IF NOT EXISTS oauth(state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires REAL NOT NULL, browser TEXT);
                 CREATE TABLE IF NOT EXISTS reminders(slot INTEGER NOT NULL, assignee TEXT NOT NULL, issue_ids TEXT NOT NULL,
                     sent_at REAL NOT NULL, PRIMARY KEY(slot, assignee));
-                CREATE TABLE IF NOT EXISTS notify_windows(recipient TEXT NOT NULL, issue_id INTEGER NOT NULL, window_start REAL NOT NULL,
-                    pending TEXT NOT NULL DEFAULT '[]', attempts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(recipient, issue_id));
+                CREATE TABLE IF NOT EXISTS notify_windows(recipient TEXT NOT NULL, issue_id INTEGER NOT NULL, actor TEXT NOT NULL,
+                    window_start REAL NOT NULL, pending TEXT NOT NULL DEFAULT '[]', attempts INTEGER NOT NULL DEFAULT 0,
+                    PRIMARY KEY(recipient, issue_id, actor));
+                CREATE TABLE IF NOT EXISTS notify_budget(recipient TEXT NOT NULL, hour INTEGER NOT NULL, immediate INTEGER NOT NULL,
+                    PRIMARY KEY(recipient, hour));
                 CREATE TABLE IF NOT EXISTS sessions(secret TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
             ''')
         with self.connect() as db:
@@ -288,53 +291,80 @@ class Store:
             db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(issue), issue_id))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
             names = {p['id']: p.get('name', p['id']) for p in directory}
-            notice = notice_for(action, actor.get('name', actor['id']), before, issue, changed, [names[m] for m in mentions], lambda i: names.get(i, i))
+            notice = notice_for(action, actor, before, issue, changed, mentions, names)
             recipients = recipients_for(action, issue, old_assignee, changed, mentions, actor['id']) if notice else []
-        return issue_id, event_id, event, recipients, notice
+            missed = unresolved_mentions(mention_text, directory) if mention_text != earlier else []
+        return issue_id, event_id, event, recipients, notice, missed
 
-    def claim_notifications(self, issue_id, recipients, summary, now):
-        """Split recipients into (send now, coalesced). A recipient with an open window - or an expired one that
-        still has pending updates for the digest worker - only gets the summary recorded."""
+    def _overflow(self, db, recipient, text, now):
+        row = db.execute("SELECT pending FROM notify_windows WHERE recipient=? AND issue_id=0 AND actor=''", (recipient,)).fetchone()
+        pending = json.loads(row['pending']) if row else []
+        if row and pending:
+            db.execute("UPDATE notify_windows SET pending=? WHERE recipient=? AND issue_id=0 AND actor=''", (json.dumps((pending + [text])[-50:]), recipient))
+        else:   # no pending updates: this one starts a fresh window
+            db.execute("INSERT OR REPLACE INTO notify_windows(recipient,issue_id,actor,window_start,pending,attempts) VALUES(?,0,'',?,?,0)",
+                       (recipient, now, json.dumps([text])))
+
+    def claim_notifications(self, issue_id, recipients, summary, now, actor_id, limit=20):
+        """Split recipients into (send now, coalesced). Windows are per (recipient, issue, ACTOR): an event is only
+        ever merged into a window opened by a send that the same actor's token already got Core to accept, so a
+        digest (sent under the App identity) can never carry an actor's event to someone their Policy denies.
+        Each recipient also has an hourly budget of immediate Messages; the excess goes to one per-recipient
+        digest, which bounds the total regardless of how many issues are touched."""
         send, merged = [], []
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             for recipient in recipients:
-                row = db.execute('SELECT window_start,pending FROM notify_windows WHERE recipient=? AND issue_id=?', (recipient, issue_id)).fetchone()
+                row = db.execute('SELECT window_start,pending FROM notify_windows WHERE recipient=? AND issue_id=? AND actor=?',
+                                 (recipient, issue_id, actor_id)).fetchone()
                 pending = json.loads(row['pending']) if row else []
                 if row and (now < row['window_start'] + WINDOW or pending):
-                    db.execute('UPDATE notify_windows SET pending=? WHERE recipient=? AND issue_id=?',
-                               (json.dumps((pending + [summary])[-50:]), recipient, issue_id))
+                    db.execute('UPDATE notify_windows SET pending=? WHERE recipient=? AND issue_id=? AND actor=?',
+                               (json.dumps((pending + [summary])[-50:]), recipient, issue_id, actor_id))
                     merged.append(recipient)
-                else:
-                    db.execute('INSERT OR REPLACE INTO notify_windows(recipient,issue_id,window_start,pending,attempts) VALUES(?,?,?,?,0)',
-                               (recipient, issue_id, now, '[]'))
-                    send.append(recipient)
+                    continue
+                hour = int(now // 3600)
+                used = db.execute('SELECT immediate FROM notify_budget WHERE recipient=? AND hour=?', (recipient, hour)).fetchone()
+                if used and used['immediate'] >= limit:
+                    self._overflow(db, recipient, f'#{issue_id} {summary}', now)
+                    merged.append(recipient)
+                    continue
+                db.execute('INSERT INTO notify_budget(recipient,hour,immediate) VALUES(?,?,1) ON CONFLICT(recipient,hour) DO UPDATE SET immediate=immediate+1',
+                           (recipient, hour))
+                db.execute('INSERT OR REPLACE INTO notify_windows(recipient,issue_id,actor,window_start,pending,attempts) VALUES(?,?,?,?,?,0)',
+                           (recipient, issue_id, actor_id, now, '[]'))
+                send.append(recipient)
         return send, merged
 
-    def release_notifications(self, issue_id, recipients):
-        """A failed immediate send must not open a window: drop empty claims so the next event retries."""
+    def release_notifications(self, issue_id, recipients, actor_id, now):
+        """A failed immediate send proved nothing: drop the claim INCLUDING anything merged into it meanwhile (it was
+        never authorised by Core) and give the budget back, so the next event simply retries."""
         with self.connect() as db:
             for recipient in recipients:
-                db.execute("DELETE FROM notify_windows WHERE recipient=? AND issue_id=? AND pending='[]'", (recipient, issue_id))
+                db.execute('DELETE FROM notify_windows WHERE recipient=? AND issue_id=? AND actor=?', (recipient, issue_id, actor_id))
+                db.execute('UPDATE notify_budget SET immediate=MAX(0,immediate-1) WHERE recipient=? AND hour=?', (recipient, int(now // 3600)))
 
     def due_digests(self, now):
         with self.connect() as db:
-            rows = db.execute("SELECT recipient,issue_id,window_start,pending FROM notify_windows WHERE pending!='[]' AND window_start+?<=?",
+            rows = db.execute("SELECT recipient,issue_id,actor,window_start,pending FROM notify_windows WHERE pending!='[]' AND window_start+?<=?",
                               (WINDOW, now)).fetchall()
-        return [{'recipient': r['recipient'], 'issue_id': r['issue_id'], 'start': r['window_start'], 'pending': json.loads(r['pending'])} for r in rows]
+        return [{'recipient': r['recipient'], 'issue_id': r['issue_id'], 'actor': r['actor'], 'start': r['window_start'],
+                 'pending': json.loads(r['pending'])} for r in rows]
 
-    def digest_done(self, recipient, issue_id, now):
+    def digest_done(self, recipient, issue_id, actor, now):
         with self.connect() as db:
-            db.execute("UPDATE notify_windows SET window_start=?, pending='[]', attempts=0 WHERE recipient=? AND issue_id=?", (now, recipient, issue_id))
+            db.execute("UPDATE notify_windows SET window_start=?, pending='[]', attempts=0 WHERE recipient=? AND issue_id=? AND actor=?",
+                       (now, recipient, issue_id, actor))
 
-    def digest_failed(self, recipient, issue_id, limit):
+    def digest_failed(self, recipient, issue_id, actor, limit):
         with self.connect() as db:
-            db.execute('UPDATE notify_windows SET attempts=attempts+1 WHERE recipient=? AND issue_id=?', (recipient, issue_id))
-            db.execute("UPDATE notify_windows SET pending='[]' WHERE recipient=? AND issue_id=? AND attempts>=?", (recipient, issue_id, limit))
+            db.execute('UPDATE notify_windows SET attempts=attempts+1 WHERE recipient=? AND issue_id=? AND actor=?', (recipient, issue_id, actor))
+            db.execute("UPDATE notify_windows SET pending='[]' WHERE recipient=? AND issue_id=? AND actor=? AND attempts>=?", (recipient, issue_id, actor, limit))
 
     def prune_windows(self, now):
         with self.connect() as db:
             db.execute("DELETE FROM notify_windows WHERE pending='[]' AND window_start+?<=?", (WINDOW, now))
+            db.execute('DELETE FROM notify_budget WHERE hour < ?', (int(now // 3600) - 2,))
 
     def unresolved_by_assignee(self, prefix='ag_'):
         """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix."""

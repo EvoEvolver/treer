@@ -21,7 +21,9 @@ interface Filters { status: string; assignee: string; label: string; unresolved:
 
 const resultNotice = (result: MutationResult) => {
   const n = result.notification;
-  return n?.message ? `${n.message} (${n.status})` : "Saved. Notifications: " + (n?.status ?? "best effort");
+  const base = n?.message ? `${n.message} (${n.status})` : "Saved. Notifications: " + (n?.status ?? "best effort");
+  // An @name that matched nobody (or several Agents) notified no one: say so instead of implying it did.
+  return n?.unresolved_mentions?.length ? `${base} · not notified (unknown or ambiguous): ${n.unresolved_mentions.map((m) => "@" + m).join(", ")}` : base;
 };
 
 export function App() {
