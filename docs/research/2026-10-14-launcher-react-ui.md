@@ -612,6 +612,10 @@ processes (looks x themes, CSP violations limited to the two inline handlers the
 fixture plants, phone layout without overflow). The Windows smoke UI step passes in bundle
 mode on macOS against the prepared payload.
 
+**Long transcripts (risk R2).** A fixture with 3,045 rendered messages (about 11,000 DOM nodes,
+reached by 60 "Load earlier" clicks in 4.2 s) kept typing frames at about 17 ms and the heap at
+13 MB, so no virtualization was added; unchanged turns keep their identity across snapshots.
+
 **Parity matrix result.** Transcript and older paging, streaming, steer/queue/Tab, queue
 cancel, draft retention, steer downgrade notice, interrupt, model and effort, goal
 (set, edit, pause/resume, confirm-clear, retry, reconcile, `/goal` commands, completion
