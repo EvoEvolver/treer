@@ -20,18 +20,26 @@ if [ -e "$directory/artifact-provenance.json" ]; then
     jq -e '.files | type == "object" and length == 25' "$directory/artifact-provenance.json" >/dev/null || {
         echo "artifact provenance must record all 25 file hashes" >&2; exit 1;
     }
-    actual=$(sh "$root/scripts/machine-artifact-hashes.sh" "$directory") || {
+    # The hashing helper sits beside this script, in a checkout (scripts/) and in the hosted image (/).
+    helper=$(dirname -- "$0")/machine-artifact-hashes.sh
+    [ -f "$helper" ] || helper="$root/scripts/machine-artifact-hashes.sh"
+    actual=$(sh "$helper" "$directory") || {
         echo "cannot hash the artifact files" >&2; exit 1;
     }
     [ "$(jq -S '.files' "$directory/artifact-provenance.json")" = "$(printf '%s' "$actual" | jq -S .)" ] || {
         echo "artifact bytes differ from the recorded provenance hashes" >&2; exit 1;
     }
-    git -C "$root" merge-base --is-ancestor "$built_commit" "$commit" || {
-        echo "artifact source $built_commit is not an ancestor of $commit" >&2; exit 1;
-    }
-    changed=$(git -C "$root" diff --no-renames --no-ext-diff --name-only "$built_commit" "$commit")
-    if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Evq '^(web|apps|docs)/'; then
-        echo "native inputs changed since artifact source $built_commit" >&2; exit 1
+    # Ancestry and the path allowlist need the repository. The hosted image build has none:
+    # there TREER_ARTIFACT_VERIFY_NO_GIT=1 is set by Dockerfile.hosted, and stage-hosted-proxy.sh has
+    # already run this full check against the repository before the upload was created.
+    if [ "${TREER_ARTIFACT_VERIFY_NO_GIT:-0}" != 1 ]; then
+        git -C "$root" merge-base --is-ancestor "$built_commit" "$commit" || {
+            echo "artifact source $built_commit is not an ancestor of $commit" >&2; exit 1;
+        }
+        changed=$(git -C "$root" diff --no-renames --no-ext-diff --name-only "$built_commit" "$commit")
+        if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Evq '^(web|apps|docs)/'; then
+            echo "native inputs changed since artifact source $built_commit" >&2; exit 1
+        fi
     fi
 fi
 for platform in linux-x86_64 linux-aarch64 darwin-x86_64 darwin-aarch64 windows-x86_64; do

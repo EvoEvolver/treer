@@ -184,7 +184,9 @@ release itself reused earlier binaries, the original build commit stays the
 source and the ancestry and path checks run against it. `verify-machine-artifacts.sh` accepts artifacts built for
 another commit only with that file and re-derives ancestry and the path
 allowlist from git itself, so a forged provenance file cannot launder a native
-change, and bytes altered after the copy fail the recorded hashes even if the
+change (the hosted image's artifacts stage has no repository, so there it re-checks
+the bytes, hashes and metadata only, with `TREER_ARTIFACT_VERIFY_NO_GIT=1`; the
+ancestry and allowlist check ran on the host in `stage-hosted-proxy.sh`), and bytes altered after the copy fail the recorded hashes even if the
 checksum files were rewritten. The Canary manifest records
 `machine_artifacts: {source_commit, reused, files}` for every release (the same
 25 hashes), the Proxy serves the reused bytes, and installed binaries and the

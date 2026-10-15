@@ -305,6 +305,56 @@ class ReuseTest(unittest.TestCase):
         (self.repo / "dist" / "artifact-provenance.json").unlink()
         self.assertNotEqual(self.verify_dist().returncode, 0)
 
+    def image_dir(self):
+        """A directory with no repository, like the hosted image's artifacts stage."""
+        image = Path(self.temp.name) / "image"
+        image.mkdir()
+        for name in ("verify-machine-artifacts.sh", "machine-artifact-hashes.sh"):
+            shutil.copy(SCRIPTS / name, image / name)
+        return image
+
+    def run_in_image(self, image, commit, directory, flag=True):
+        env = {k: v for k, v in os.environ.items() if k != "TREER_ARTIFACT_VERIFY_NO_GIT"}
+        if flag:
+            env["TREER_ARTIFACT_VERIFY_NO_GIT"] = "1"
+        return subprocess.run(["sh", str(image / "verify-machine-artifacts.sh"), commit, str(directory)],
+                              cwd=image, capture_output=True, text=True, env=env)
+
+    def test_hosted_image_verification_checks_bytes_without_git_but_only_when_asked(self):
+        candidate = commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        self.assertEqual(self.reuse().returncode, 0)
+        image = self.image_dir()
+        ok = self.run_in_image(image, candidate, self.repo / "dist")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        # Without the explicit image flag the git checks are mandatory and fail closed outside a repository.
+        self.assertNotEqual(self.run_in_image(image, candidate, self.repo / "dist", flag=False).returncode, 0)
+
+    def test_hosted_image_verification_still_rejects_tampering_and_foreign_provenance(self):
+        candidate = commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        self.assertEqual(self.reuse().returncode, 0)
+        image = self.image_dir()
+        dist = self.repo / "dist"
+        provenance = json.loads((dist / "artifact-provenance.json").read_text())
+        # Another candidate commit in the provenance.
+        (dist / "artifact-provenance.json").write_text(json.dumps({**provenance, "candidate_commit": "f" * 40}))
+        self.assertNotEqual(self.run_in_image(image, candidate, dist).returncode, 0)
+        (dist / "artifact-provenance.json").write_text(json.dumps(provenance))
+        # Missing hashes.
+        (dist / "artifact-provenance.json").write_text(json.dumps({k: v for k, v in provenance.items() if k != "files"}))
+        self.assertNotEqual(self.run_in_image(image, candidate, dist).returncode, 0)
+        (dist / "artifact-provenance.json").write_text(json.dumps(provenance))
+        # Binary changed after the copy, checksum file rewritten to match.
+        folder = dist / "linux-x86_64"
+        (folder / "treer").write_bytes(b"\x7fELFswapped")
+        sums = subprocess.run(["shasum", "-a", "256", *BINARIES], cwd=folder, check=True, capture_output=True, text=True).stdout
+        (folder / "SHA256SUMS").write_text(sums)
+        self.assertNotEqual(self.run_in_image(image, candidate, dist).returncode, 0)
+
+    def test_dockerfile_hosted_gives_the_image_stage_the_helper_and_the_no_git_flag(self):
+        text = (SCRIPTS.parent / "Dockerfile.hosted").read_text()
+        self.assertIn("COPY scripts/verify-machine-artifacts.sh scripts/machine-artifact-hashes.sh /", text)
+        self.assertIn("TREER_ARTIFACT_VERIFY_NO_GIT=1 sh /verify-machine-artifacts.sh", text)
+
 
 if __name__ == "__main__":
     unittest.main()
