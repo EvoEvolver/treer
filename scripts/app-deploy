@@ -215,21 +215,28 @@ def run(argv, cwd=None, env=None, timeout=45):
                 process.stdout.close()
 
 
+def executable_path(value):
+    require(Path(value).is_absolute(), "absolute_command_required")
+    # Validate the current target, but keep the operator's stable shim path.
+    regular(Path(value).resolve(strict=True))
+    require(os.access(value, os.X_OK), "executable_command_required")
+    return value
+
+
 def initialize(options):
     machine = directory(options.machine_root)
     require(Path(options.root).is_absolute(), "absolute_root_required")
     require(Path(os.path.abspath(options.root)).is_relative_to(machine),
             "deployment_outside_machine_root")
     root = layout(options.root)
-    require(Path(options.command).is_absolute(), "absolute_command_required")
-    command = str(Path(options.command).resolve(strict=True))
-    regular(command)
+    command = executable_path(options.command)
+    launcher_command = executable_path(sys.executable)
     relative(options.entry)
     require(re.fullmatch(r"[A-Z][A-Z0-9_]*", options.db_env) is not None
             and not options.db_env.startswith(("TREER_", "AGENT_UI_", "CODEX_UI_")),
             "invalid_database_environment_name")
     config = {"schema": 1, "command": command,
-              "launcher_command": str(Path(sys.executable).resolve(strict=True)), "entry": options.entry,
+              "launcher_command": launcher_command, "entry": options.entry,
               "args": options.args, "db_env": options.db_env}
     with locked(root):
         path = root / "config.json"

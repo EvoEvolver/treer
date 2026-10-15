@@ -40,6 +40,51 @@ server.serve_forever()
 
 
 @unittest.skipUnless(os.name == "posix", "POSIX deployment only")
+class CommandPathTests(unittest.TestCase):
+    def test_initialize_preserves_command_and_launcher_shims_across_target_updates(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            machine = Path(temporary).resolve()
+            root = machine / "deployment"
+            first, second = machine / "python-3.12.15", machine / "python-3.12.16"
+            for target, label in [(first, "old"), (second, "new")]:
+                target.write_text(f"#!/bin/sh\nprintf '%s' {label}\n")
+                target.chmod(0o700)
+            command, launcher = machine / "python3.12", machine / "python-launcher"
+            command.symlink_to(first)
+            launcher.symlink_to(first)
+            argv = ["init", "--root", str(root), "--machine-root", str(machine),
+                    "--command", str(command), "--entry", "app.py", "--db-env", "EXAMPLE_DB"]
+            with patch.object(deploy.sys, "executable", str(launcher)):
+                result = deploy.main(argv)
+                config = json.loads((root / "config.json").read_text())
+                self.assertEqual(config["command"], str(command))
+                self.assertEqual(config["launcher_command"], str(launcher))
+                self.assertEqual(result["command"], str(launcher))
+                self.assertNotIn(str(first), json.dumps([config, result]))
+                for shim in [command, launcher]:
+                    shim.unlink()
+                    shim.symlink_to(second)
+                first.unlink()
+                self.assertEqual(deploy.main(argv), result)
+                for key in ["command", "launcher_command"]:
+                    self.assertEqual(subprocess.check_output([config[key]]), b"new")
+
+    def test_executable_validation_rejects_relative_missing_directory_and_nonexecutable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary).resolve()
+            plain = root / "not-executable"
+            plain.write_text("fixture")
+            plain.chmod(0o600)
+            for value, error in [("python3", "absolute_command_required"),
+                                 (str(root), "regular_file_required"),
+                                 (str(plain), "executable_command_required")]:
+                with self.subTest(value=value), self.assertRaisesRegex(deploy.Failure, error):
+                    deploy.executable_path(value)
+            with self.assertRaises(FileNotFoundError):
+                deploy.executable_path(str(root / "missing"))
+
+
+@unittest.skipUnless(os.name == "posix", "POSIX deployment only")
 class DeploymentTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
@@ -64,7 +109,7 @@ class DeploymentTests(unittest.TestCase):
         self.app = {"app_id": "app_fixture", "runtime_agent_id": "app_fixture",
                     "service_id": "svc_fixture", "server_id": "srv_fixture",
                     "hostname": "example", "desired_state": "running",
-                    "command": str(Path(sys.executable).resolve()),
+                    "command": sys.executable,
                     "args": [str(self.root / "entry.py"), "run", "--root", str(self.root)],
                     "cwd": str(self.root.relative_to(self.machine))}
         self.start_process()
