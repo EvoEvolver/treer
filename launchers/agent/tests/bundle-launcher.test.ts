@@ -6,10 +6,16 @@ import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { hermeticEnv } from "./hermetic.mjs";
 import { digest } from "../scripts/bundle-contract.mjs";
+import { nodeEntry } from "../scripts/bundle-launcher.mjs";
 
 const launcher = resolve(import.meta.dirname, ".."), entry = join(launcher, "scripts/bundle-launcher.mjs");
 const temp = () => realpathSync.native(mkdtempSync(join(tmpdir(), "bundle-delivery-")));
 const prepared = temp();
+test("Node entry normalization only removes a Windows drive verbatim prefix", () => {
+  assert.equal(nodeEntry("\\\\?\\C:\\private\\run.mjs"), "C:\\private\\run.mjs");
+  assert.equal(nodeEntry("\\\\?\\UNC\\server\\share\\run.mjs"), "\\\\?\\UNC\\server\\share\\run.mjs");
+  assert.equal(nodeEntry("/private/run.mjs"), "/private/run.mjs");
+});
 execFileSync(process.execPath, [join(launcher, "scripts/prepare-bundle.mjs"), "--output", prepared, "--source-commit", "a".repeat(40)], { env: hermeticEnv(), stdio: "pipe" });
 test.after(() => rmSync(prepared, { recursive: true, force: true }));
 
@@ -138,6 +144,20 @@ test("leader/foreign machine/custom startup and incompatible bundle are rejected
   f.change((db) => { db.controller.capabilities = []; });
   assert.match((await f.install()).error, /lacks launcher capabilities/);
   assert.equal(f.read().calls.filter((args: string[]) => args[2] === "restart").length, 0);
+});
+
+test("installation rejects roots outside the enrolled root and new rollouts refuse an incomplete rollback", async (t) => {
+  const f = await fixture(t);
+  f.change((db) => { db.controller.machine.root = join(f.root, "other-machine"); });
+  mkdirSync(join(f.root, "other-machine"));
+  assert.match((await f.install()).error, /inside the enrolled machine root/);
+  f.change((db) => { db.controller.machine.root = f.machine; });
+  assert.equal((await f.install()).status, 0);
+  await f.agent("ag_preview"); f.revise();
+  const directory = join(f.machine, ".treer/launchers/agent/rollouts"); mkdirSync(directory);
+  writeFileSync(join(directory, "earlier.json"), JSON.stringify({ status: "rollback-failed" }));
+  assert.match((await f.rollout(["ag_preview"], ["--apply"])).error, /earlier rollback is incomplete/);
+  assert.equal(f.read().agents.ag_preview.run_generation, 1);
 });
 
 test("a crashed operator resumes the already-accepted restart without repeating it or its continuation", async (t) => {

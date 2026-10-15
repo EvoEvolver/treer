@@ -92,7 +92,8 @@ installer's contract checks, immutable content versions, profile ownership
 receipts, save/readback transaction and atomic `current.json` pointer. It neither
 creates nor restarts Agents. It saves the normal six profiles unless narrowed
 with repeated `--agent` or explicitly disabled with `--skip-profiles` (useful for
-isolated previews). `--root ABS` chooses a separate physical installation root;
+isolated previews). `--root ABS` chooses a separate physical installation root
+inside the enrolled machine root; paths outside that boundary are rejected;
 otherwise the authenticated Controller's enrolled root is used. There are no
 Git/npm/network dependencies at installation time, and no shell requirement on
 Windows. Prepared bundles must be runtime-ready, regular files only, and match
@@ -128,6 +129,9 @@ consume it. There are no automatic workspace-wide targets.
 The private `rollouts/ID.json` journal stores original/replacement startups and
 phase checkpoints under the installation directory (0700/current-user+SYSTEM
 ACL, files 0600); it can contain sensitive saved argv and must not be published.
+Keep sensitive ACP parameters in provider configuration/environment, not argv.
+After a completed rollout or successful rollback has been checked, the operator
+may delete its journal; doing so also removes its replay/recovery history.
 Reusing the same ID/arguments reconciles completed restarts from real run
 generation/instance state, reuses the continuation idempotency key, and skips
 completed steps. Different plans cannot reuse an ID. On a failure, later batches

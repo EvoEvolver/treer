@@ -2,7 +2,7 @@
 // Local bundle delivery is an explicit operator action, not an official release.
 // The same installer owns profile receipts, immutable assets and current.json.
 import { randomUUID } from "node:crypto";
-import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
 import { get } from "node:http";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep, toNamespacedPath } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,9 +71,16 @@ function context(options) {
   const controller = cli(options, ["interface", "contract"]);
   if (!controller.machine?.server_id || !isAbsolute(controller.machine.root || "")) throw new Error("Running Controller must report an authenticated machine context");
   const root = physicalDirectory(options.root ?? controller.machine.root);
+  const inside = relative(toNamespacedPath(physicalDirectory(controller.machine.root)), toNamespacedPath(root));
+  if (isAbsolute(inside) || inside === ".." || inside.startsWith(`..${sep}`)) throw new Error("Installation root must remain inside the enrolled machine root");
   const base = join(root, ".treer", "launchers", "agent");
   physicalDirectory(base, true); protectDirectory(base);
   return { controller, root, base };
+}
+// Node's entry-point loader rejects drive-letter verbatim paths before JS runs.
+// Only normalize the script argument; filesystem/ACL operations retain native paths.
+export function nodeEntry(path) {
+  return path.replace(/^\\\\\?\\([A-Za-z]:\\)/, "$1");
 }
 function bundle(options, controller) {
   if (!isAbsolute(options.bundle || "") || !/^[a-f0-9]{64}$/.test(options.sha256 || "")) throw new Error("A prepared --bundle directory and independently checked --sha256 manifest hash are required");
@@ -126,7 +133,7 @@ function replacement(startup, snapshot, ctx) {
   if (!preserved.includes("--harness")) preserved.push("--harness", snapshot.harness.id);
   if (preserved[preserved.indexOf("--harness") + 1] !== snapshot.harness.id) throw new Error("Saved provider differs from the running harness; refusing to overwrite it");
   return { command: realpathSync.native(process.execPath), cwd: startup.cwd,
-    args: [join(ctx.base, "run.mjs"), ...preserved, "--session-id", snapshot.thread.id, "--cwd", snapshot.thread.cwd] };
+    args: [nodeEntry(join(ctx.base, "run.mjs")), ...preserved, "--session-id", snapshot.thread.id, "--cwd", snapshot.thread.cwd] };
 }
 const specification = (startup) => JSON.stringify({ command: startup.command, cwd: startup.cwd, args: startup.args ?? [] });
 function saveStartup(options, target, startup) {
@@ -141,7 +148,7 @@ async function healthy(options, ctx, item, contract, timeout, requireNew = true)
       const { agent, state } = await inspect(options, item.id, ctx), iface = agent.interface;
       if (state.thread.id !== item.session) throw new Error("Native session changed during rollout");
       const manifest = await localGet(iface.port, "/v1/manifest"); await localGet(iface.port, "/");
-      if ((!requireNew || iface.instance_id !== item.oldInstance) && manifest.instance_id === iface.instance_id && manifest.ui_path === "/" && manifest.protocol === contract.protocol && JSON.stringify([...manifest.capabilities].sort()) === JSON.stringify([...contract.capabilities].sort())) return;
+      if (Date.now() < deadline && (!requireNew || iface.instance_id !== item.oldInstance) && manifest.instance_id === iface.instance_id && manifest.ui_path === "/" && manifest.protocol === contract.protocol && JSON.stringify([...manifest.capabilities].sort()) === JSON.stringify([...contract.capabilities].sort())) return;
     } catch { /* Only fixed diagnostics are emitted; no response bodies/credentials. */ }
     await sleep(200);
   }
@@ -156,6 +163,11 @@ async function rollout(options, ctx, selected) {
   const file = join(directory, options.rolloutId + ".json"), lock = join(directory, ".lock");
   try { mkdirSync(lock, { mode: 0o700 }); } catch { throw new Error("A rollout owns the lock; inspect its journal before manual crash recovery"); }
   try {
+    for (const name of readdirSync(directory)) {
+      if (!name.endsWith(".json") || name === options.rolloutId + ".json") continue;
+      const previous = JSON.parse(regular(join(directory, name), 2 * 1024 * 1024));
+      if (["rolling-back", "rollback-failed"].includes(previous.status)) throw new Error("An earlier rollback is incomplete; inspect its journal and recover before starting a new rollout");
+    }
     const fingerprint = digest(JSON.stringify({ version: selected.version, targets, preview: options.preview, root: ctx.root, agents: options.agents, skipProfiles: options.skipProfiles, cwd: options.cwd ?? ".", treer: options.treer, node: process.execPath, batchSize: options.batchSize, timeout: options.timeout }));
     let journal;
     if (existsSync(file)) {
