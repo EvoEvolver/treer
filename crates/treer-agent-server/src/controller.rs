@@ -79,6 +79,11 @@ struct AgentLaunch {
     publish_ports: Vec<u16>,
 }
 
+enum StartupRestoreOutcome {
+    Started(AgentInfo),
+    Attached(AgentInfo),
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct AgentMetadata {
     agent_id: String,
@@ -1244,6 +1249,25 @@ impl ControllerRuntime {
         &self,
         active_agent_ids: &[String],
     ) -> Vec<(String, Result<AgentInfo, ProtocolError>)> {
+        self.restore_startup_outcomes(active_agent_ids)
+            .await
+            .into_iter()
+            .map(|(id, result)| {
+                (
+                    id,
+                    result.map(|outcome| match outcome {
+                        StartupRestoreOutcome::Started(info)
+                        | StartupRestoreOutcome::Attached(info) => info,
+                    }),
+                )
+            })
+            .collect()
+    }
+
+    async fn restore_startup_outcomes(
+        &self,
+        active_agent_ids: &[String],
+    ) -> Vec<(String, Result<StartupRestoreOutcome, ProtocolError>)> {
         let _guard = self.inner.recovery_lock.lock().await;
         let mut running_ids = HashSet::new();
         // A spawn ACK can be lost. The Host inventory, rather than cached
@@ -1302,7 +1326,10 @@ impl ControllerRuntime {
                 if let Ok(agent) = self.get(&agent_id) {
                     if let Ok(agent) = agent.lock() {
                         if !agent.info.status.is_terminal() {
-                            results.push((agent_id, Ok(agent.info.clone())));
+                            results.push((
+                                agent_id,
+                                Ok(StartupRestoreOutcome::Attached(agent.info.clone())),
+                            ));
                             continue;
                         }
                     }
@@ -1322,7 +1349,7 @@ impl ControllerRuntime {
                     .update(&agent_id, |current| {
                         current.last_host_epoch.clone_from(&self.inner.host_epoch)
                     })
-                    .map(|()| info)
+                    .map(|()| StartupRestoreOutcome::Started(info))
                     .map_err(startup_store_error),
                 Err(error) => Err(error),
             };
@@ -1371,20 +1398,16 @@ impl ControllerRuntime {
 
     pub async fn restore_runtime(&self, active: &[String]) -> treer_protocol::RuntimeRestoreReport {
         use treer_protocol::{RuntimeRestoreItem, RuntimeRestoreReport, RuntimeRestoreState};
-        let requested_at = Utc::now();
-        let results = self.restore_startup_agents(active).await;
+        // Capture the actual action under recovery_lock. Host timestamps have
+        // millisecond wire precision and cannot order a spawn against this call
+        // (nor can wall clocks reliably order concurrent recovery requests).
+        let results = self.restore_startup_outcomes(active).await;
         let mut items: Vec<_> = results
             .into_iter()
             .map(|(id, result)| {
                 let (state, message) = match result {
-                    Ok(info) => (
-                        if info.started_at <= requested_at {
-                            RuntimeRestoreState::Attached
-                        } else {
-                            RuntimeRestoreState::Started
-                        },
-                        None,
-                    ),
+                    Ok(StartupRestoreOutcome::Started(_)) => (RuntimeRestoreState::Started, None),
+                    Ok(StartupRestoreOutcome::Attached(_)) => (RuntimeRestoreState::Attached, None),
                     Err(error) => (
                         RuntimeRestoreState::Failed,
                         Some(format!("{}: {}", error.code, error.message)),
