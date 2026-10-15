@@ -6,7 +6,7 @@
   --fg:#292724;--fg2:#4a4843;--fg3:#66645e;
   --accent:#18725a;--accent-fg:#ffffff;--accent-soft:#e2efe9;
   --danger:#a63a30;--warn:#7f500a;--ok:#1d6f4b;--add:#e3f1e8;--del:#f7e8e5;
-  --r:14px;--rs:10px;--font-ui:"Avenir Next","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
+  --r:14px;--rs:10px;--nav-r:99px;--font-ui:"Avenir Next","Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
   --font-prose:"Iowan Old Style","Palatino Linotype",Palatino,"Source Han Serif SC","Noto Serif CJK SC","Songti SC","STSong",Georgia,serif;
   --font-mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,monospace;
   --menu-top:66px;--fs:13.5px;--lh:1.55;--icon:18px;--stroke:1.7;--dur:220ms;--sheet-r:20px;
@@ -130,12 +130,10 @@ pre{margin:0 0 14px;padding:14px 16px;background:var(--sunken);border-radius:var
 @keyframes rise{from{opacity:0;transform:translateY(6px)}}
 @media (max-width:900px){.panel{border-radius:0;border:0;background:var(--panel)}}
 @media (max-width:640px){
-  .app{grid-template-rows:56px minmax(0,1fr) auto}
+  .app{grid-template-rows:56px minmax(0,1fr)}:root{--menu-top:62px}
   .top{grid-template-columns:auto 1fr auto;gap:10px;padding:0 12px}.mark{width:28px;height:28px;font-size:15px}.cwd{display:none}.status .status-t{display:none}.actions .tbtn{display:none}
   .actions .tbtn[data-act=theme]{display:inline-flex;width:34px;padding:0;justify-content:center}
   .thread{padding-top:24px;padding-inline:16px}:root{--gap:22px}.msg .body{font-size:16px}.msg.user{max-width:90%}
-  .tabbar{display:flex;justify-content:space-around;padding:6px 12px calc(8px + env(safe-area-inset-bottom));background:var(--panel);border-top:1px solid var(--b-div)}
-  .tabbar button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;min-width:76px;min-height:46px;border-radius:14px;font-size:11px;color:var(--fg2)}.tabbar [aria-expanded=true]{background:var(--accent-soft);color:var(--accent)}
   .dock{padding:30px 10px 8px}.strip{padding:0 2px 8px;gap:6px;flex-wrap:nowrap;overflow:auto}.seg .tx{display:none}.seg.goal .tx{display:inline;max-width:9ch}
   .box{padding:8px 8px 8px 16px;border-radius:22px}.pop{border-radius:20px 20px 0 0;padding-bottom:24px;box-shadow:none}
 }

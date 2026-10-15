@@ -134,10 +134,7 @@ pre code{background:none;padding:0}
 .task pre{margin-top:8px;padding:8px 10px;background:var(--sunken);border:0;border-radius:var(--rs);max-height:200px;font-size:11.5px}
 @media (max-width:900px){.files,.tasks{background:var(--panel)}}
 @media (max-width:640px){
-  .app{grid-template-columns:minmax(0,1fr);grid-template-rows:40px minmax(0,1fr) auto;grid-template-areas:"top" "main" "bar"}
-  .tabbar{grid-area:bar;border-top:1px solid var(--b-div);background:var(--panel);justify-content:space-around;padding:2px 0 max(4px,env(safe-area-inset-bottom))}
-  .tabbar button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:72px;min-height:48px;font-size:11px;color:var(--fg2)}
-  .tabbar [aria-expanded=true]{color:var(--accent)}
+  .app{grid-template-columns:minmax(0,1fr);grid-template-rows:40px minmax(0,1fr);grid-template-areas:"top" "main"}
   .top{padding:0 12px}.cwd{display:none}.status .status-t{display:none}.actions .tbtn{display:none}.thread{padding-top:18px;padding-inline:12px}:root{--gap:16px}
   .dock{padding:28px 8px 8px}.pop{padding-bottom:20px}
   .titles{min-width:0}

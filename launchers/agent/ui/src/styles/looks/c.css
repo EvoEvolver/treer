@@ -138,12 +138,9 @@ pre{margin:0 0 8px;padding:8px 12px;background:var(--sunken);border:1px solid va
 .task .td{font-weight:700}.ts{font-size:11px;color:var(--fg3)}.ts.run{color:var(--ok)}.ts.run::before{content:"● "}.tm{font-size:11px;color:var(--fg3)}
 .task pre{margin:6px 0 0;padding:6px 8px;background:var(--sunken);border:1px solid var(--line);max-height:200px;font-size:11.5px}
 @media (max-width:640px){
-  .app{grid-template-rows:36px minmax(0,1fr) auto}
+  .app{grid-template-rows:36px minmax(0,1fr)}
   .cwd{display:none}.actions .tbtn{display:none}.actions .tbtn[data-act=theme]{display:inline-flex}.status-t{display:none}
   .thread{padding-top:12px;padding-inline:10px}
-  .tabbar{display:flex;border-top:1px solid var(--edge);background:var(--sunken)}
-  .tabbar button{flex:1;display:flex;align-items:center;justify-content:center;gap:6px;min-height:44px;font-size:12px;border-right:1px solid var(--line)}.tabbar .i{display:none}
-  .tabbar button span::before{content:"["}.tabbar button span::after{content:"]"}.tabbar [aria-expanded=true]{background:var(--fg);color:var(--bg)}
   .box{padding:6px 10px}.dock{padding:12px 8px 8px}.jump{right:12px}
   .seg{padding:0 8px}.seg .tx{display:none}.seg.goal .tx{display:inline;max-width:10ch}
 }

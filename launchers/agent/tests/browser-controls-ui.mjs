@@ -6,6 +6,11 @@ import { expect } from "@playwright/test";
 import { WebSocketServer } from "ws";
 
 // The same pure HTTP/WS contract fixture as the former browser-controls.mjs, driving the React UI. Never starts a harness or reads credentials.
+async function phoneNav(page, item) {
+  await page.getByRole("button", { name: "Menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: item, exact: true }).click();
+}
+
 export async function testRuntimeControlsUi(browser, screenshots, pageName = "index.html") {
   let state = {
     type: "state", ready: true, runtime: { state: "idle" }, modelOptions: [],
@@ -344,14 +349,14 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     await page.getByRole("button", { name: "Queue message", exact: true }).click();
     await expect(strip.getByRole("button", { name: /Queue/ })).toContainText("1");
     // Phone: files and tasks share one full-screen slot and stay clear of the bottom bar.
-    await page.getByRole("button", { name: "Files", exact: true }).click();
+    await phoneNav(page, "Files");
     await expect(page.locator("#files")).toBeVisible();
-    await page.getByRole("button", { name: "Tasks", exact: true }).click();
+    await phoneNav(page, "Tasks");
     await expect(page.locator("#tasks")).toBeVisible();
     await expect(page.locator("#files")).toBeHidden();
-    assert.ok(await page.evaluate(() => document.querySelector("#tasks .tlist").getBoundingClientRect().bottom <= document.querySelector(".tabbar").getBoundingClientRect().top + 1), "The task panel stays above the bottom bar");
+    assert.ok(await page.evaluate(() => document.querySelector("#tasks .tlist").getBoundingClientRect().bottom <= document.querySelector("#tasks").getBoundingClientRect().bottom + 1), "The task panel fills the area under the top bar");
     await page.screenshot({ path: join(screenshots, "controls-ui-mobile-tasks.png") });
-    await page.getByRole("button", { name: "Files", exact: true }).click();
+    await phoneNav(page, "Files");
     await expect(page.locator("#tasks")).toBeHidden();
     await expect(page.locator("#files")).toBeVisible();
     await page.getByRole("button", { name: "Close file browser" }).click();

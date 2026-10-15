@@ -1,4 +1,4 @@
-import { forwardRef } from "react";
+import { forwardRef, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { t } from "../i18n";
 import { toggleTheme } from "../appearance";
 import { useStore } from "../state/store";
@@ -52,19 +52,49 @@ export function Header({ menuOpen, onToggleMenu, lookRef, panels, onPanel }: { m
         <button type="button" className="tbtn" aria-expanded={panels.files} aria-controls="files" aria-label={t("header.filesAria")} onClick={(event) => onPanel("files", event.currentTarget)}><Icon name="folder" /><span className="lbl">{t("header.files")}</span></button>
         <LookButton ref={lookRef} className="tbtn" open={menuOpen} onToggle={onToggleMenu} />
         <button type="button" className="tbtn" aria-label={t("appearance.toggleTheme")} title={t("appearance.toggleTheme")} onClick={toggleTheme}><Icon name="theme" /></button>
+        <NavMenu panels={panels} onPanel={onPanel} onAppearance={onToggleMenu} />
       </div>
     </header>
   );
 }
 
-export function Tabbar({ menuOpen, onToggleMenu, panels, onPanel }: { menuOpen: boolean; onToggleMenu: () => void } & PanelProps) {
+/** Phone-only menu in the header (the bottom bar is gone): Files, Tasks, Appearance and Theme in one keyboard-reachable menu. */
+export function NavMenu({ panels: _panels, onPanel, onAppearance }: PanelProps & { onAppearance: () => void }) {
   const tasks = useTasks();
+  const [open, setOpen] = useState(false);
+  const button = useRef<HTMLButtonElement>(null);
+  const list = useRef<HTMLDivElement>(null);
+  const close = (returnFocus: boolean) => { setOpen(false); if (returnFocus) button.current?.focus(); };
+  useEffect(() => {
+    if (!open) return;
+    list.current?.querySelector<HTMLElement>("[role=menuitem]")?.focus();
+    const onPointer = (event: PointerEvent) => { const target = event.target as Element | null; if (!list.current?.contains(target) && !button.current?.contains(target)) close(false); };
+    document.addEventListener("pointerdown", onPointer);
+    return () => document.removeEventListener("pointerdown", onPointer);
+  }, [open]);
+  function onKeyDown(event: KeyboardEvent<HTMLDivElement>) {
+    const items = [...(list.current?.querySelectorAll<HTMLElement>("[role=menuitem]") ?? [])];
+    const index = items.indexOf(document.activeElement as HTMLElement);
+    const go = (i: number) => { event.preventDefault(); items[(i + items.length) % items.length]?.focus(); };
+    if (event.key === "Escape") { event.preventDefault(); close(true); }
+    else if (event.key === "ArrowDown") go(index + 1);
+    else if (event.key === "ArrowUp") go(index - 1);
+    else if (event.key === "Home") go(0);
+    else if (event.key === "End") go(items.length - 1);
+    else if (event.key === "Tab") close(false);
+  }
+  const choose = (action: () => void) => () => { close(false); action(); };
   return (
-    <nav className="tabbar" aria-label={t("tabbar.label")}>
-      <button type="button" aria-expanded={panels.files} aria-controls="files" onClick={(event) => onPanel("files", event.currentTarget)}><Icon name="folder" /><span>{t("tabbar.files")}</span></button>
-      {tasks.available && <button type="button" aria-expanded={panels.tasks} aria-controls="tasks" onClick={(event) => onPanel("tasks", event.currentTarget)}><Icon name="tasks" /><span>{t("tabbar.tasks")}</span></button>}
-      <button type="button" aria-haspopup="dialog" aria-expanded={menuOpen} aria-controls="appearance" onClick={onToggleMenu}><Icon name="look" /><span>{t("tabbar.look")}</span></button>
-      <button type="button" onClick={toggleTheme}><Icon name="theme" /><span>{t("tabbar.theme")}</span></button>
-    </nav>
+    <>
+      <button ref={button} type="button" className="nav-btn" aria-haspopup="menu" aria-expanded={open} aria-controls="navmenu" aria-label={t("nav.menu")} title={t("nav.menu")} onClick={() => setOpen((value) => !value)}><Icon name="menu" /></button>
+      {open && (
+        <div className="navmenu" id="navmenu" role="menu" aria-label={t("nav.menu")} ref={list} onKeyDown={onKeyDown}>
+          <button type="button" role="menuitem" className="navitem" onClick={choose(() => button.current && onPanel("files", button.current))}><Icon name="folder" /><span>{t("nav.files")}</span></button>
+          {tasks.available && <button type="button" role="menuitem" className="navitem" onClick={choose(() => button.current && onPanel("tasks", button.current))}><Icon name="tasks" /><span>{t("nav.tasks")}</span>{tasks.running > 0 && <span className="navcount">{tasks.running}</span>}</button>}
+          <button type="button" role="menuitem" className="navitem" onClick={choose(onAppearance)}><Icon name="look" /><span>{t("nav.appearance")}</span></button>
+          <button type="button" role="menuitem" className="navitem" onClick={choose(toggleTheme)}><Icon name="theme" /><span>{t("nav.theme")}</span></button>
+        </div>
+      )}
+    </>
   );
 }

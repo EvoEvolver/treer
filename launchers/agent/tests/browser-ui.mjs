@@ -46,6 +46,11 @@ async function startServer(name, extra, harness = "codex") {
   assert.ok(base, logs);
   return base;
 }
+// Phones have no bottom bar: Files, Tasks, Appearance and Theme live in the Menu button in the header.
+async function phoneNav(page, item) {
+  await page.getByRole("button", { name: "Menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: item, exact: true }).click();
+}
 let browser;
 try {
   const base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1" });
@@ -330,7 +335,7 @@ try {
   await expect(filesButton).toBeFocused();
   // Phone: the panel is full screen with Browse / Preview tabs.
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await phoneNav(page, "Files");
   await expect(filesPanel).toBeVisible();
   await filesPanel.getByRole("treeitem", { name: "greeting.ts" }).click(); // src stayed expanded from the desktop session
   await expect(filesPanel.locator(".preview")).toBeVisible();
@@ -410,11 +415,41 @@ try {
     assert.equal(desktop.rail, false, "no side rail in any look");
     orders[look] = desktop.labels.join("|");
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(`${claude}/${page_}?look=${look}`);
-    await expect(page.locator(".tabbar button", { hasText: "Tasks" })).toBeVisible();
-    const phone = await page.evaluate(() => ({ tabs: [...document.querySelectorAll(".tabbar button")].map((b) => b.textContent.trim()), headerButtons: [...document.querySelectorAll("header.top .actions button")].filter((b) => b.offsetParent !== null).length }));
-    assert.deepEqual(phone.tabs, ["Files", "Tasks", "Look", "Theme"], `bottom bar in ${look}`);
-    assert.equal(phone.headerButtons, 0, `no duplicate header buttons on phones in ${look}`);
+    await page.goto(`${claude}/${page_}?look=${look}&theme=light`);
+    const menuButton = page.getByRole("button", { name: "Menu", exact: true });
+    await expect(menuButton).toBeVisible();
+    assert.equal(await page.locator(".tabbar").count(), 0, `no bottom bar in ${look}`);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll("header.top .actions button")].filter((b) => b.offsetParent !== null).length), 1, `the Menu button is the only header action on a phone in ${look}`);
+    // Keyboard and aria: Enter opens, the first item takes focus, arrows move, Esc closes and returns focus.
+    await menuButton.focus();
+    await expect(menuButton).toHaveAttribute("aria-haspopup", "menu");
+    await expect(menuButton).toHaveAttribute("aria-expanded", "false");
+    await page.keyboard.press("Enter");
+    await expect(menuButton).toHaveAttribute("aria-expanded", "true");
+    const items = page.getByRole("menu", { name: "Menu" }).getByRole("menuitem");
+    await expect(items).toHaveText(["Files", "Tasks", "Appearance", "Theme"]);
+    await expect(items.first()).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(items.nth(1)).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(items.last()).toBeFocused();
+    await page.screenshot({ path: join(screenshots, `phone-menu-open-${look}-light.png`) });
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(menuButton).toBeFocused();
+    const bar = await page.evaluate(() => { const r = document.querySelector("header.top").getBoundingClientRect(), m = document.querySelector(".nav-btn").getBoundingClientRect(); return m.right <= r.right && m.top >= r.top && m.bottom <= r.bottom; });
+    assert.ok(bar, `the Menu button sits inside the top bar in ${look}`);
+    // Theme and Appearance work from the menu in both themes.
+    const before = await page.getAttribute("html", "data-theme");
+    await phoneNav(page, "Theme");
+    assert.notEqual(await page.getAttribute("html", "data-theme"), before, `Theme from the menu toggles in ${look}`);
+    await menuButton.click();
+    await page.screenshot({ path: join(screenshots, `phone-menu-open-${look}-dark.png`) });
+    await page.keyboard.press("Escape");
+    await phoneNav(page, "Appearance");
+    await expect(page.getByRole("dialog", { name: "Appearance" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.screenshot({ path: join(screenshots, `phone-menu-${look}.png`) });
   }
   assert.equal(new Set(Object.values(orders)).size, 1, "all looks order the header actions identically");
 
@@ -456,7 +491,7 @@ try {
   for (const look of ["a", "b", "c"]) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(url(`?look=${look}`));
-    await expect(page.locator(".tabbar")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Menu", exact: true })).toBeVisible();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `no horizontal overflow in look ${look}`);
     await page.getByRole("toolbar", { name: "Run status" }).getByRole("button", { name: /Plan/ }).click();
     const sheet = await page.locator("#pop-plan").boundingBox();
