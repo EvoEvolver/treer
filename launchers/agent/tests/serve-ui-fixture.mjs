@@ -20,7 +20,7 @@ await mkdir(join(cwd, "src"));
 await writeFile(join(cwd, "src/greeting.ts"), "export const greeting = 'Hello, Treer';\n");
 await writeFile(join(cwd, "README.md"), "# Workspace\nSmall tools, thoughtful interfaces.\n");
 const env = hermeticEnv({ TREER_AGENT_ID: "ag_ui_fixture", AGENT_UI_INSTANCE_ID: "ui-fixture", CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: upstream,
-  CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80" });
+  CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("FAKE_"))) });
 const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "inherit" });
 const identity = { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_ui_fixture", "x-treer-interface-instance": "ui-fixture" };
 const proxy = createServer((req, res) => {

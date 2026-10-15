@@ -11,18 +11,19 @@ import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 const app = resolve(import.meta.dirname, "..");
 const pageArgIndex = process.argv.indexOf("--page");
 const page_ = pageArgIndex > 0 ? process.argv[pageArgIndex + 1] : "ui.html";
-const cwd = await mkdtemp(join(tmpdir(), "ui-browser-"));
 const screenshots = process.env.UI_SCREENSHOTS || await mkdtemp(join(tmpdir(), "ui-shots-"));
 await mkdir(screenshots, { recursive: true });
-await mkdir(join(cwd, "src"));
-const env = hermeticEnv({ TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0", CODEX_UI_PORT_FILE: join(cwd, "port"),
-  CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80" });
-const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "pipe" });
-let logs = "";
-server.stderr.on("data", (chunk) => { logs += chunk; });
-server.stdout.on("data", (chunk) => { logs += chunk; });
-let browser;
-try {
+const servers = [];
+async function startServer(name, extra) {
+  const cwd = await mkdtemp(join(tmpdir(), `ui-browser-${name}-`));
+  await mkdir(join(cwd, "src"));
+  const env = hermeticEnv({ TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0", CODEX_UI_PORT_FILE: join(cwd, "port"),
+    CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", ...extra });
+  const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "pipe" });
+  let logs = "";
+  server.stderr.on("data", (chunk) => { logs += chunk; });
+  server.stdout.on("data", (chunk) => { logs += chunk; });
+  servers.push({ server, cwd });
   let base;
   for (let attempt = 0; attempt < 100; attempt++) {
     if (server.exitCode !== null) throw new Error(logs);
@@ -33,6 +34,11 @@ try {
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.ok(base, logs);
+  return base;
+}
+let browser;
+try {
+  const base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1" });
   const url = (query = "") => `${base}/${page_}${query}`;
 
   // Headers: the React page gets the strict policy, the legacy page is unchanged.
@@ -156,12 +162,128 @@ try {
   assert.equal(JSON.parse(response.request().postData()).prompt, "hello from the react ui");
   await expect(box).toHaveValue("");
 
+  // Composer and status strip on the real API: goal lifecycle, plan, one popover at a time, model settings.
+  await page.goto(url("?look=b"));
+  const strip = page.getByRole("toolbar", { name: "Run status" });
+  await expect(strip.getByRole("button", { name: /Plan/ })).toContainText("1/3");
+  await strip.getByRole("button", { name: "Set goal" }).click();
+  const dialog = page.getByRole("dialog", { name: "Set goal" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Objective").fill("Ship the React UI");
+  await dialog.getByLabel("Token budget (optional)").fill("0");
+  await dialog.getByRole("button", { name: "Save goal" }).click();
+  await expect(dialog).toBeVisible(); // native validation (min=1) blocks the submit
+  assert.equal(await dialog.getByLabel("Token budget (optional)").evaluate((input) => input.validity.valid), false);
+  await dialog.getByLabel("Token budget (optional)").fill("5000");
+  await dialog.getByRole("button", { name: "Save goal" }).click();
+  await expect(dialog).toBeHidden();
+  const goalSegment = strip.getByRole("button", { name: /^Goal/ });
+  await expect(goalSegment).toContainText("Ship the React UI");
+  await goalSegment.click();
+  const goalPop = page.getByRole("region", { name: "Goal" });
+  await expect(goalPop).toContainText("Ship the React UI");
+  await expect(goalPop.getByRole("progressbar", { name: "Goal token budget" })).toBeVisible();
+  await goalPop.getByRole("button", { name: "Pause goal" }).click();
+  await expect(goalPop).toContainText("Paused");
+  await goalPop.getByRole("button", { name: "Resume goal" }).click();
+  await expect(goalPop).toContainText("Active");
+  await goalPop.getByRole("button", { name: "Clear goal", exact: true }).click();
+  await expect(goalPop.getByRole("group", { name: "Confirm clear goal" })).toBeVisible();
+  await goalPop.getByRole("button", { name: "Keep goal" }).click();
+  await expect(goalPop.getByRole("group", { name: "Confirm clear goal" })).toHaveCount(0);
+  // One popover at a time; Esc closes and returns focus to the segment that opened it.
+  await strip.getByRole("button", { name: /Plan/ }).click();
+  await expect(page.getByRole("region", { name: "Goal" })).toHaveCount(0);
+  await expect(page.locator("#pop-plan").locator("li")).toHaveCount(3);
+  await page.keyboard.press("Escape");
+  await expect(page.locator("#pop-plan")).toHaveCount(0);
+  await expect(strip.getByRole("button", { name: /Plan/ })).toBeFocused();
+  // Slash commands manage the goal instead of being sent as chat.
+  const composerBox = page.getByRole("textbox", { name: /Message/ });
+  await composerBox.fill("/goal clear");
+  await composerBox.press("Enter");
+  const confirm = page.getByRole("region", { name: "Goal" }).getByRole("group", { name: "Confirm clear goal" });
+  await expect(confirm).toBeVisible();
+  await confirm.getByRole("button", { name: "Confirm clear goal" }).click();
+  await expect(strip.getByRole("button", { name: "Set goal" })).toBeVisible();
+  await expect(composerBox).toHaveValue("");
+  await composerBox.fill("/goal Second objective");
+  await composerBox.press("Enter");
+  await expect(strip.getByRole("button", { name: /^Goal/ })).toContainText("Second objective");
+  await expect(composerBox).toHaveValue("");
+  // Model and effort through the settings API.
+  await page.getByRole("button", { name: /^Model/ }).click();
+  const modelPop = page.getByRole("region", { name: "Model and effort" });
+  const settings = page.waitForRequest((request) => request.url().endsWith("/api/settings") && request.method() === "POST");
+
+  await modelPop.locator("select").first().selectOption("gpt-b");
+  assert.equal(JSON.parse((await settings).postData()).model, "gpt-b");
+  await expect(page.getByRole("button", { name: /^Model GPT B/ })).toBeVisible();
+  await page.keyboard.press("Escape");
+  await page.screenshot({ path: join(screenshots, "composer-b-light.png") });
+
+  // A running agent: separate Steer and Queue buttons, queued messages, interrupt.
+  const live = await startServer("live", { FAKE_CODEX_LIVE: "1", FAKE_CODEX_MODELS: "1" });
+  await page.goto(`${live}/${page_}?look=a`);
+  const liveBox = page.getByRole("textbox", { name: /Message/ });
+  await expect(page.getByRole("button", { name: "Stop current run" })).toBeEnabled();
+  await liveBox.fill("steer me");
+  const steered = page.waitForRequest((request) => request.url().endsWith("/api/prompt"));
+  await page.getByRole("button", { name: "Steer current run" }).click();
+  assert.equal(JSON.parse((await steered).postData()).mode, "steer");
+  await expect(liveBox).toHaveValue("");
+  await liveBox.fill("later please");
+  const queued = page.waitForRequest((request) => request.url().endsWith("/api/prompt"));
+  await page.getByRole("button", { name: "Queue", exact: true }).click();
+  assert.equal(JSON.parse((await queued).postData()).mode, "queue");
+  const queueSegment = page.getByRole("toolbar", { name: "Run status" }).getByRole("button", { name: /Queue/ });
+  await expect(queueSegment).toContainText("1");
+  await liveBox.fill("tab queues");
+  const tabbed = page.waitForRequest((request) => request.url().endsWith("/api/prompt"));
+  await liveBox.press("Tab");
+  assert.equal(JSON.parse((await tabbed).postData()).mode, "queue");
+  await expect(queueSegment).toContainText("2");
+  await queueSegment.click();
+  const queuePop = page.getByRole("region", { name: "Queued messages" });
+  await expect(queuePop.locator(".qrow")).toHaveCount(2);
+  const cancelled = page.waitForRequest((request) => request.method() === "DELETE" && request.url().includes("/api/queue/"));
+  await queuePop.getByRole("button", { name: /Cancel queued message: later please/ }).click();
+  await cancelled;
+  await expect(queuePop.locator(".qrow")).toHaveCount(1);
+  const stopped = page.waitForRequest((request) => request.url().endsWith("/api/interrupt"));
+  await page.getByRole("button", { name: "Stop current run" }).click();
+  await stopped;
+  await page.screenshot({ path: join(screenshots, "composer-a-running.png") });
+
+  // A finished goal leaves a notice in the conversation (the fake completes a goal when its first turn starts).
+  const done = await startServer("done", {});
+  await page.goto(`${done}/${page_}?look=c`);
+  const doneStrip = page.getByRole("toolbar", { name: "Run status" });
+  await doneStrip.getByRole("button", { name: "Set goal" }).click();
+  await page.getByRole("dialog", { name: "Set goal" }).getByLabel("Objective").fill("Finish the migration");
+  await page.getByRole("dialog", { name: "Set goal" }).getByRole("button", { name: "Save goal" }).click();
+  await expect(page.locator(".goal-done")).toContainText("Goal complete: Finish the migration");
+
+  // Chinese interface: dictionary strings, interpolation, English fallback for a missing key, and no raw keys on screen.
+  await page.goto(url("?look=b&lang=zh"));
+  await expect(page.locator("html")).toHaveAttribute("lang", "zh-Hans");
+  await expect(page.getByRole("textbox", { name: "给 Codex 发消息" })).toBeVisible();
+  await expect(page.locator(".status-t")).toHaveText("空闲");
+  await expect(page.locator(".grp .t").first()).toHaveText("活动");
+  assert.equal(await page.evaluate(() => /\b(?:composer|status|activity|goal|plan|queue|tool|thread|appearance)\.[a-zA-Z.]+\b/.test(document.body.innerText)), false, "no raw message keys on screen");
+
   // Narrow screen: bottom bar, no horizontal overflow, in every look.
   for (const look of ["a", "b", "c"]) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(url(`?look=${look}`));
     await expect(page.locator(".tabbar")).toBeVisible();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `no horizontal overflow in look ${look}`);
+    await page.getByRole("toolbar", { name: "Run status" }).getByRole("button", { name: /Plan/ }).click();
+    const sheet = await page.locator("#pop-plan").boundingBox();
+    assert.ok(sheet && sheet.height <= 844 * 0.4 + 1 && Math.abs(sheet.y + sheet.height - 844) < 2, `plan popover is a bottom sheet of at most 40vh in look ${look}`);
+    await page.screenshot({ path: join(screenshots, `mobile-${look}-plan.png`) });
+    await page.keyboard.press("Escape");
+
     await page.screenshot({ path: join(screenshots, `mobile-${look}.png`) });
   }
   // The only expected violations are the hostile fixture's two inline handlers (img onerror, svg onload): DOMPurify's inert
@@ -172,8 +294,10 @@ try {
   console.log(`React UI browser checks passed. Screenshots: ${screenshots}`);
 } finally {
   await browser?.close();
-  const exited = server.exitCode === null ? new Promise((resolve) => server.once("exit", resolve)) : Promise.resolve();
-  server.kill("SIGTERM");
-  await exited;
-  await rm(cwd, { recursive: true, force: true });
+  for (const { server, cwd } of servers) {
+    const exited = server.exitCode === null ? new Promise((resolve) => server.once("exit", resolve)) : Promise.resolve();
+    server.kill("SIGTERM");
+    await exited;
+    await rm(cwd, { recursive: true, force: true });
+  }
 }

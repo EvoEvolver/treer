@@ -56,7 +56,7 @@ test("unchanged turns keep their identity across snapshots; changed turns do not
 });
 
 test("a late HTTP snapshot never shrinks a history window the reader widened", () => {
-  const start: State = { snapshot: snapshot([turn("1", "a")], 150), connected: true, error: null, notice: null, submitting: false, loadingOlder: false };
+  const start: State = { snapshot: snapshot([turn("1", "a")], 150), connected: true, error: null, notice: null, submitting: false, loadingOlder: false, settingsBusy: false, goalBusy: false, notices: [] };
   assert.equal(reducer(start, { type: "snapshot", snapshot: snapshot([turn("1", "a")], 50), source: "http" }), start);
   assert.equal(reducer(start, { type: "snapshot", snapshot: snapshot([turn("1", "a")], 50), source: "ws" }).snapshot?.history.limit, 50);
 });

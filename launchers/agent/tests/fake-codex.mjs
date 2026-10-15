@@ -58,7 +58,10 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     if (request.method === "thread/goal/clear") { goal = null; writeFileSync(goalFile, "null"); }
     result = request.method === "thread/goal/clear" ? { cleared: true } : { goal };
   }
-  if (request.method === "model/list") result = { data: [] };
+  if (request.method === "model/list") result = { data: process.env.FAKE_CODEX_MODELS ? [
+    { id: "gpt-a", model: "gpt-a", displayName: "GPT A", description: "", isDefault: true, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }, { reasoningEffort: "high", description: "" }], defaultReasoningEffort: "low" },
+    { id: "gpt-b", model: "gpt-b", displayName: "GPT B", description: "", isDefault: false, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "" }], defaultReasoningEffort: "medium" },
+  ] : [] };
   if (request.method === "turn/start") result = { turn: { id: "turn-new" } };
   if (request.method === "thread/resume") {
     if (request.params.threadId === "missing") {
@@ -82,7 +85,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   }
   console.log(JSON.stringify({ id: request.id, result }));
   if (request.method === "thread/goal/set" || request.method === "thread/goal/clear") console.log(JSON.stringify({ method: goal ? "thread/goal/updated" : "thread/goal/cleared", params: { threadId, goal } }));
-  if (request.method === "turn/start" && goal) {
+  if (request.method === "turn/start" && goal && !process.env.FAKE_CODEX_GOAL_ACTIVE) {
     goal = { ...goal, status: "complete", tokensUsed: 42, timeUsedSeconds: 2 };
     writeFileSync(goalFile, JSON.stringify(goal));
     console.log(JSON.stringify({ method: "thread/goal/updated", params: { threadId, turnId: "turn-new", goal } }));
