@@ -6,6 +6,7 @@ import { activityStats, compact, duration, plural, toolState } from "../lib/form
 import { useOpen } from "../state/open";
 import type { HistoryItem, TurnDto } from "../types";
 import { Diff } from "./Diff";
+import { useDialogs } from "./Dialogs";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
 
@@ -47,6 +48,7 @@ function ToolRow({ turnId, item }: { turnId: string; item: HistoryItem }) {
   const key = `${turnId}:${item.id}`;
   const detail = item.kind === "reasoning" ? item.text : item.detailText && item.detailText !== item.text ? item.detailText : "";
   const [open, toggle] = useOpen(`row:${key}`, false);
+  const { openText } = useDialogs();
   const state = toolState(item.status);
   const icon = item.kind === "commandExecution" ? "term" : item.kind === "fileChange" ? "edit" : item.kind === "reasoning" ? "spark" : "term";
   const label = item.kind === "reasoning" ? t("activity.reasoning") : item.kind === "fileChange" && item.changes?.length ? item.changes.map((change) => change.path).join(", ") : item.text || item.kind;
@@ -62,7 +64,12 @@ function ToolRow({ turnId, item }: { turnId: string; item: HistoryItem }) {
       <div className={`tool${state === "failed" ? " failed" : ""}${item.kind === "reasoning" ? " think" : ""}`}>
         {detail ? <button type="button" className="tool-btn" aria-expanded={open} onClick={toggle}>{content}</button> : content}
       </div>
-      {detail && open && (item.kind === "reasoning" ? <div className="tool-detail"><Markdown text={detail} /></div> : <pre className="tool-detail">{detail}</pre>)}
+      {detail && open && (
+        <div className="tool-detail-wrap">
+          {item.kind === "reasoning" ? <div className="tool-detail"><Markdown text={detail} /></div> : <pre className="tool-detail">{detail}</pre>}
+          <button type="button" className="btn tool-open" onClick={() => openText(label, detail)}>{t("tool.openText")}</button>
+        </div>
+      )}
       {item.kind === "fileChange" && (item.changes?.length ? item.changes.map((change, index) => <Diff key={index} change={change} />) : <p className="file-notice">{t("diff.noFiles")}</p>)}
     </>
   );

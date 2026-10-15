@@ -115,3 +115,6 @@ export interface Snapshot {
 }
 
 export type PromptMode = "steer" | "queue";
+
+export interface FileEntry { name: string; path: string; kind: "file" | "directory" | string; size?: number; has_children?: boolean }
+export interface FilePreview { path: string; name: string; content: string; size: number; truncated: boolean }
