@@ -168,7 +168,10 @@ this way after #51.
 | `ISSUES_NOTIFY_HOURLY_LIMIT` | `20` | Immediate Messages per recipient per hour before updates fold into one digest |
 | `ISSUES_NOTIFY` | `on` | `0`/`off`/`false`/`no` disables issue-change notifications and digests |
 | `ISSUES_REMINDER_SKIP_LABELS` | `epic` | Comma-separated labels (case-insensitive) whose issues are never counted by reminders; empty = none |
-| `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the hourly reminder poller |
+| `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the reminder poller |
+| `ISSUES_REMINDER_FIRST` | `10m` | First reminder this long after an issue starts needing one (1m–24h) |
+| `ISSUES_REMINDER_FACTOR` | `2` | Each later interval = previous × factor (1–10) |
+| `ISSUES_REMINDER_MAX` | `24h` | Interval cap (≥ FIRST, ≤ 30d) |
 
 Protect the database directory: sessions contain short-lived human access
 tokens. Startup uses restrictive umask and database mode `0600`. OAuth uses
@@ -275,36 +278,55 @@ the UI toast lists them), so an author does not assume the Agent was reached.
 `notification: off`); it is independent of `ISSUES_REMINDERS`. Pending digests
 live in the SQLite `notify_windows`/`notify_budget` tables and survive restarts.
 
-## Hourly reminders
+## Reminders (exponential backoff)
 
-> **On by default.** Upgrading a deployment starts the poller; set
-> `ISSUES_REMINDERS=off` (and restart only this App) to disable it. Anyone who
-> may edit an issue can set its assignee, so being able to assign an issue to an
-> Agent also lets that person make the App message that Agent once per hour. The
-> Message text is fixed (issue IDs and a link only), is sent as the App's own
-> identity, and remains subject to Treer's Message authorization and Policy.
+> **On by default.** Set `ISSUES_REMINDERS=off` (and restart only this App) to disable
+> the poller. Anyone who may edit an issue can set its assignee, so being able to assign
+> an issue to an Agent also lets that person make the App message that Agent. The
+> Message text is fixed (issue IDs and a link only), is sent as the App's own identity,
+> and remains subject to Treer's Message authorization and Policy.
 
-On every full hour (epoch hour) the App collects issues that are not `done` or
-`closed` and carry none of the labels in `ISSUES_REMINDER_SKIP_LABELS` (default
-`epic`, so long-lived epics are never nagged about) and whose assignee is an Agent (stable ID `ag_…`; humans are never
-messaged). For each such Agent it runs `treer agent show ID` and, only when the
-Agent's `status` is `idle` and it is not busy, sends **one** Message listing up
-to ten issue IDs (`+N more` beyond that) plus the App link (only a plain `http(s)` URL is
-ever included; anything else is omitted) with
-`treer message send` under the App's own runtime identity. Bodies never contain
-titles, descriptions or comments. No token is read, logged or put on a command
-line; the CLI resolves identity from the inherited environment.
+An issue **needs a reminder** while it is not `done`/`closed`, its assignee is an Agent
+(stable ID `ag_…`; humans are never messaged) and it carries none of the labels in
+`ISSUES_REMINDER_SKIP_LABELS` (default `epic`). For each such (assignee, issue) the App keeps
+a backoff in SQLite (`reminder_backoff`, so restarts keep it): the first reminder is due
+`ISSUES_REMINDER_FIRST` (default `10m`) after the issue started needing one, and every
+later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) capped at
+`ISSUES_REMINDER_MAX` (default `24h`): **10m, 20m, 40m, 1h20m, 2h40m, 5h20m, 10h40m,
+21h20m, then every 24h**.
 
-Anti-spam: at most one Message per Agent per hour. A `(hour, Agent)` row in the
-SQLite `reminders` table survives restarts, and the Message idempotency key
-`issues-reminder-AGENT-HOUR` makes a crash between send and record harmless. A
-busy, unknown or unreachable Agent is skipped until the next hour; a failed send
-is not recorded, so a restart within five minutes after the hour retries it. A
-restart later in the hour does not catch up. Resolving, closing or reassigning
-an issue stops reminders at the next hour. Set `ISSUES_REMINDERS=off` and restart
-only this App to disable the poller. The App's Policy must allow `agent show`
-and Messages to the assignee Agents; denials are skipped and logged by exit
-status only.
+- **Reset.** Any real activity on the issue (a comment, status or assignee change, an
+  edit, a lease) restarts the sequence at the first interval, counted from when the
+  activity happened; a new assignee starts from scratch and the old state is dropped. An
+  issue that stops needing reminders (resolved, labelled `epic`, unassigned, assigned to a
+  human) loses its state and starts fresh if it returns. Note that comments reset the
+  clock: they count as activity, including comments by other people.
+- **Only when idle.** At the due time the App runs `treer agent show ID`; only when the
+  Agent's `status` is `idle` and it is not busy does it send. A busy, unknown or
+  unreachable Agent gets nothing and its interval does **not** grow; the next poll looks
+  again. Polling runs every minute (or at the nearest FUTURE due time) and only Agents that
+  have something due are probed; an Agent found busy or unreachable is not probed again
+  within the same minute, however many other wake-ups there are.
+- **One Message per Agent per moment.** Everything due for the same Agent at the same poll
+  is one Message listing up to ten issue IDs (`+N more` beyond that) plus the App link
+  (only a plain `http(s)` URL is ever included) sent with `treer message send` under the
+  App's own runtime identity; each issue keeps its own backoff. Bodies never contain titles,
+  descriptions or comments. No token is read, logged or put on a command line.
+- **Idempotent and honest about failure.** The Message idempotency key covers the Agent,
+  the issue set and each issue's version and backoff step, so a crash between send and
+  record cannot duplicate a reminder, different steps never collide, and a reset issue
+  never reuses the key of its earlier first reminder. A failed send is not recorded;
+  the next poll retries with the same key.
+- **Deployment.** Issues unresolved when this version first runs simply start their first
+  interval then; nobody receives a burst. The old hourly `reminders` table is no longer
+  written (it is left in place and harmless).
+- **Configuration is strict.** `ISSUES_REMINDER_FIRST` 1m–24h, `ISSUES_REMINDER_FACTOR`
+  1–10 and `ISSUES_REMINDER_MAX` at least FIRST and at most 30d, written as `90s`, `10m`,
+  `1.5h`, `24h`. An invalid value stops the App at start-up with the variable named; it is
+  never silently replaced by a default.
+
+The App's Policy must allow `agent show` and Messages to the assignee Agents; denials are
+skipped and logged by exit status only.
 
 ## Agent client
 
@@ -385,7 +407,7 @@ Each database test uses a random schema; do not select a shared database.
 This App targets small trusted teams. Graph operations load workspace issue
 metadata into memory; no full-text search, pagination snapshot, attachments,
 email, kanban, deletion or per-issue privacy is provided. The only background
-work is the hourly reminder pass and the five-minute digest worker described
+work is the reminder poller and the five-minute digest worker described
 above; neither has a retry queue beyond the limits stated there.
 The tree represents the currently loaded/filter-matching issues; load more to
 include additional branches. Activity and child collections page separately.
