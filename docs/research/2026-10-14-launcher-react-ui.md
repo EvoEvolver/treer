@@ -182,87 +182,43 @@ from `?lang=`, else `navigator.language` (`zh*` → zh). Server-provided text (h
 names, item text, errors) is never translated. Dates use `<time datetime>` with
 `Intl.DateTimeFormat`.
 
-### 2.7 Visual language (round 2, after user feedback)
+### 2.7 Visual language (round 3: open)
 
-* Header: one 46px flat row on `panel`: title, muted cwd (hidden <= 640px),
-  status dot + word, ghost buttons (tasks count, files, theme). No brand mark.
-* Thread canvas is `--theme-surface`; turns are edge-to-edge text, no
-  bubbles. A user message is a quiet left-aligned block on `surface-strong`.
-  Assistant prose has no container.
-* Activity is a muted summary row with a trailing 1px rule
-  (`Worked for 18s · 3 commands · 1 file change ———`); expanded rows are
-  monospace 13px `fg-soft` with a tiny muted status. Diffs are a bordered block
-  with a `surface-strong` header and low-saturation add/delete rows plus a `+`/`-`
-  gutter (never color alone).
-* The composer is one `panel` frame with the `border-contrast` edge, the status
-  strip on `surface-strong` above the editor, and a single amber button.
-* Popovers and the jump pill are `panel` with `border-strong`; no shadows anywhere.
+History: round 1 kept the existing launcher look; round 2 adopted the reference
+palette (amber, cool/warm grey); the user rejected both and asked the UI designer
+for a free, good-looking design, with **three candidate directions** to choose from.
+Round 1/2 palettes and the old prototype are discarded (see git history). The
+user's choice (or a blend) will replace section 3 with the final token table.
+
+Candidates (interactive, `directions/`; built into the preview directory with
+`node directions/build.mjs ABSOLUTE_DIR`):
+
+| | Intent | Layout signature | Type | Accent | Radius / icons / motion |
+| --- | --- | --- | --- | --- | --- |
+| A Quiet Editor | calm, dense, out of the way | left icon rail; strip is the top row of the composer frame | system sans 13.5px, tabular figures | ink blue | 8/5px; 16px 1.5 stroke; 120ms colour only |
+| B Warm Paper | readable, unhurried | centered title; pill chips above a rounded composer; floating panel cards | serif prose 16.5px/1.8 + sans UI | oxblood (light) / rose (dark) | 14/10px, pills; 18px 1.7 stroke; 220ms fades |
+| C Terminal Contrast | legible at a glance | glyph gutters (`❯ ● $ [x]`), inverse status line for goal/plan/queue | monospace throughout 13px | blue (light) / mint (dark) | square; 15px 2px square-cap; blink cursor only |
+
+Engineering baselines common to all (not aesthetics): structure (status strip with
+one popover at a time, jump-to-latest, collapsible activity, keyboard file tree with
+filter, bottom sheets at <= 640px), `prefers-reduced-motion`, visible focus, three
+theme sources only, zero external resources, 390px without horizontal overflow,
+inline SVG icons from one shared sprite, empty/loading/error states per direction.
 
 ## 3. Design tokens
 
-**Decision record (2026-10-15, user feedback).** The user judged the first
-prototype, which kept the existing launcher's look, "quite ugly" and explicitly
-released the visual design: **the current launcher art style is not preserved.**
-The palette now follows the reference implementation's token *values* (facts; the
-CSS blocks and markup are our own). Visual principles: flat (no shadows; layers
-by 1px borders and adjacent surface lightness), radius `0.625rem` with
-`0.4rem` for small controls, conversation first, machine activity quiet,
-amber only for the primary action and small emphasis (Steer/Send, current plan
-item, focus ring, progress), everything else neutral cool-grey (light) or warm
-grey (dark).
+Pending the direction choice. All three candidates implement one semantic token
+contract, so the React UI swaps direction by remapping values; components read only
+these: `--bg --panel --sunken --line --line-strong --edge --fg --fg2 --fg3 --accent
+--accent-fg --accent-soft --danger --warn --ok --add --del`, radii `--r --rs`, fonts
+`--font-ui --font-prose --font-mono`, `--fs --lh`, `--icon --stroke --cap --join`,
+`--dur` (values per direction in `directions/{a,b,c}.css`).
 
-Three layers; components read **only** `--theme-*`:
-
-1. Neutral base (shadcn-style): `--radius: .625rem`, `--destructive`
-   (light `oklch(.577 .245 27.325)`, dark `oklch(.704 .191 22.216)`).
-2. Product palette `--gc-*` (values below).
-3. Semantic aliases `--theme-*`: `bg`, `panel`, `surface` (= workspace, the
-   thread canvas), `surface-strong` (user blocks, strips, code headers), `muted`,
-   `hover`, `border`, `border-strong`, `border-contrast`, `fg`, `fg-soft`,
-   `fg-muted`, `accent-solid`, `accent-solid-hover`, `accent-solid-fg`,
-   `accent-soft`, `accent-strong`, `accent-border`, `shadow` (`none`), plus
-   `danger`, `ok`, `add`, `del`.
-
-| `--gc-*` | Light (hue 220/235, amber 76) | Dark (warm grey, hue 95/90) |
-| --- | --- | --- |
-| bg | `.965 .006 220` | `.155 .008 95` |
-| panel | `.988 .004 220` | `.19 .009 95` |
-| workspace (`surface`) | `.95 .008 220` | `.175 .008 95` |
-| surface (`surface-strong`) | `.925 .011 220` | `.22 .01 95` |
-| muted | `.9 .012 220` | `.245 .01 95` |
-| hover | `.92 .016 220` | `.255 .013 90` |
-| border | `.85 .014 220` | `.285 .012 95` |
-| border-strong | `.77 .02 220` | `.34 .015 95` |
-| border-contrast | `.62 .026 220` | `.52 .018 95` (**reference .45**) |
-| fg / fg-soft / fg-muted | `.22 .012 235` / `.38 .018 235` / `.5 .02 235` | `.94 .008 90` / `.79 .012 90` / `.64 .014 90` |
-| primary (`accent-solid`) / hover / fg | `.7 .145 76` / `.65 .15 72` / `.19 .025 76` | `.78 .14 76` / `.83 .13 76` / `.19 .025 76` |
-| accent-soft / strong / border | `.93 .04 76` / `.48 .12 70` / `.67 .11 76` | `.265 .04 76` / `.84 .115 76` / `.48 .085 76` |
-| ok *(ours)* | `.45 .1 160` | `.78 .12 160` |
-| add / del *(ours)* | `.93 .05 155` / `.93 .04 25` | `.28 .05 155` / `.28 .05 25` |
-| danger-text *(ours)* | `.48 .2 27` (**destructive .577 fails**) | `.704 .191 22.216` |
-
-Type: the reference system stack plus CJK fallbacks (`-apple-system,
-BlinkMacSystemFont, "Segoe UI", system-ui, ui-sans-serif, "Noto Sans CJK SC",
-"Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
-sans-serif`; no remote fonts), system monospace for code. Body `0.875rem`, meta
-`0.75rem`, usage/effort `0.6875rem`/10px, line height 1.5-1.6.
-
-Contrast is verified by `2026-10-14-launcher-react-ui/contrast.mjs` (reads the
-palette and aliases from `prototype.html`; WCAG 2.1, OKLCH to sRGB). Rules: text
->= 4.5:1 on every surface it can sit on (panel, surface, surface-strong, hover,
-muted); UI control borders and the focus ring >= 3:1. **Result: 75 checks, all
-pass.** Deviations from the reference palette, all required by the check:
-* `danger` as text: the shadcn destructive fails AA on the tinted surfaces in
-  light (3.5-4.1:1), so a darker `danger-text` is used for text; the original
-  stays for fills.
-* Dark `border-contrast` raised `.45 -> .52` (2.5:1 on panel with the reference
-  value); it is used only for the composer frame and the filter input, which must
-  be identifiable as controls. Ordinary borders stay at `border`/`border-strong`.
-* `fg-muted` on `muted` is 4.44:1, so it is never placed there (rule enforced in
-  the script's pair list).
-Not covered by the script: text over images, `prefers-contrast`, forced-colors
-(manual checks before the switch). At implementation time the script moves into the
-test suite and reads `tokens.css` instead of the prototype.
+Contrast: `directions/contrast.mjs` reads the hex tokens of all three files and
+checks light and dark: text >= 4.5:1 on bg/panel/sunken, accent on accent-soft,
+diff text and gutters, the inverse status line (C); input edges (`--edge`) and the
+focus ring >= 3:1. **Result: 202 checks, all pass.** `--line-strong` is decorative and
+is never the only boundary of a text input; inputs use `--edge`.
 
 Theme selection is unchanged: `data-theme` on `<html>` set by a tiny module
 (same logic as `theme.js`: `?theme=`, `treer:embed-theme` message with
@@ -516,15 +472,12 @@ viewer, split workbench, account/device sharing.
 6. Mobile "bottom bar": proposed content = Files, Tasks, Theme; Model/effort stays
    in the composer chip. Confirm with prototype.
 
-## 15. Static prototype
+## 15. Static prototypes
 
-`2026-10-14-launcher-react-ui/prototype.html` is hand-written HTML/CSS (round 2: new palette and flat visual language, section 3) plus a
-small mock-only script (no React) that toggles states via query strings.
-`screenshots.mjs` regenerates every PNG (`<viewport>-<state>-<theme>.png`,
-viewports `desktop` 1280px and `390`, 2x). States: `default`, `plan`, `queue`,
-`goal` (popovers; plan in light and dark), `expanded` (multi-line composer),
-`scrolled` (jump-to-latest), `zh` and `zh-plan`, `focus` (keyboard focus ring on
-Steer), `files` (390px full-screen files with Browse/Preview tabs). 390px has no
-horizontal overflow in any state (checked by the script). Known gaps: the
-mock does not show the tasks panel, goal editor dialog, image viewer, error
-states, or the model/effort popover.
+`2026-10-14-launcher-react-ui/directions/` holds the sources of three interactive
+static prototypes (shared `template.html`, `shared.css`, `app.js`; per-direction
+`a.css`, `b.css`, `c.css`; `build.mjs`; `contrast.mjs`). They are mock-only
+HTML/CSS/JS (no framework, no network). Views: chat, empty, loading, error;
+panels: files (keyboard tree, filter, preview), tasks; Goal/Plan/Queue popovers;
+compact/expanded composer; light/dark; 390px layout with bottom sheets and tab
+bar. Not drawn: goal editor dialog, image viewer, model/effort menu, `zh` strings.
