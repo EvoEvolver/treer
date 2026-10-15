@@ -1,7 +1,7 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type Dispatch, type ReactNode } from "react";
 import { request, socketUrl } from "../api";
 import { t } from "../i18n";
-import type { PromptMode, Snapshot } from "../types";
+import type { PromptMode, Snapshot, TurnDto } from "../types";
 
 // Server truth (snapshot, connection) and UI-local transient state share one reducer. A snapshot always replaces the
 // previous one wholesale; there is no client-side merging. Messages are plain strings so no HTML ever enters state.
@@ -11,15 +11,38 @@ export interface State {
   error: string | null;
   notice: string | null;
   submitting: boolean;
+  loadingOlder: boolean;
 }
 export type Action =
   | { type: "snapshot"; snapshot: Snapshot; source: "http" | "ws" }
   | { type: "connected"; value: boolean }
   | { type: "error"; message: string | null }
   | { type: "notice"; message: string | null }
-  | { type: "submitting"; value: boolean };
+  | { type: "submitting"; value: boolean }
+  | { type: "loadingOlder"; value: boolean };
 
-const initial: State = { snapshot: null, connected: false, error: null, notice: null, submitting: false };
+const initial: State = { snapshot: null, connected: false, error: null, notice: null, submitting: false, loadingOlder: false };
+
+// Every snapshot is a fresh object graph. Turns whose content did not change keep their previous identity so memoized
+// components skip them while a long conversation streams.
+const serialized = new WeakMap<TurnDto, string>();
+function json(turn: TurnDto): string {
+  let text = serialized.get(turn);
+  if (text === undefined) { text = JSON.stringify(turn); serialized.set(turn, text); }
+  return text;
+}
+export function shareTurns(previous: Snapshot | null, next: Snapshot): Snapshot {
+  const old = previous?.thread?.turns;
+  if (!old || !next.thread) return next;
+  const byId = new Map(old.map((turn) => [turn.id, turn]));
+  let changed = false;
+  const turns = next.thread.turns.map((turn) => {
+    const before = byId.get(turn.id);
+    if (before && json(before) === JSON.stringify(turn)) { changed = true; return before; }
+    return turn;
+  });
+  return changed ? { ...next, thread: { ...next.thread, turns } } : next;
+}
 
 export function reducer(state: State, action: Action): State {
   switch (action.type) {
@@ -27,12 +50,13 @@ export function reducer(state: State, action: Action): State {
       // A late HTTP response must not shrink a history window the user already widened.
       const current = state.snapshot?.history.limit ?? 0;
       if (action.source === "http" && action.snapshot.history.limit < current) return state;
-      return { ...state, snapshot: action.snapshot, error: null };
+      return { ...state, snapshot: shareTurns(state.snapshot, action.snapshot), error: null };
     }
     case "connected": return { ...state, connected: action.value };
     case "error": return { ...state, error: action.message };
     case "notice": return { ...state, notice: action.message };
     case "submitting": return { ...state, submitting: action.value };
+    case "loadingOlder": return { ...state, loadingOlder: action.value };
   }
 }
 
@@ -41,6 +65,8 @@ export interface Actions {
   retry(): void;
   prompt(text: string, mode: PromptMode): Promise<boolean>;
   interrupt(): Promise<void>;
+  /** Resolves true when a wider history window arrived. */
+  loadOlder(): Promise<boolean>;
 }
 const StoreContext = createContext<Store | null>(null);
 export function useStore(): Store {
@@ -56,6 +82,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
   const stateRef = useRef(state);
   stateRef.current = state;
   const reconnect = useRef<() => void>(() => undefined);
+  const socketRef = useRef<WebSocket | null>(null);
 
   useEffect(() => {
     let socket: WebSocket | null = null;
@@ -67,6 +94,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     function connect() {
       clearTimeout(timer);
       socket = new WebSocket(socketUrl());
+      socketRef.current = socket;
       socket.addEventListener("open", () => {
         dispatch({ type: "connected", value: true });
         // Re-send the widened history window after every reconnect.
@@ -111,6 +139,20 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       } finally {
         dispatch({ type: "submitting", value: false });
       }
+    },
+    async loadOlder() {
+      const current = stateRef.current;
+      if (current.loadingOlder || !current.snapshot?.thread?.hasOlderItems) return false;
+      dispatch({ type: "loadingOlder", value: true });
+      dispatch({ type: "error", message: null });
+      try {
+        const next = await request<Snapshot>("api/history/older", { method: "POST", body: JSON.stringify({ limit: historyLimit(current) }) });
+        dispatch({ type: "snapshot", snapshot: next, source: "http" });
+        const socket = socketRef.current;
+        if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify({ type: "history-limit", limit: next.history.limit, respond: false }));
+        return true;
+      } catch (error) { dispatch({ type: "error", message: (error as Error).message }); return false; }
+      finally { dispatch({ type: "loadingOlder", value: false }); }
     },
     async interrupt() {
       try {
