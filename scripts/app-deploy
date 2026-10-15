@@ -1,0 +1,643 @@
+#!/usr/bin/env python3
+"""Local, explicit Managed App deployment. POSIX only; no implicit remote exec."""
+import argparse
+import contextlib
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path, PurePosixPath
+import re
+import selectors
+import shutil
+import sqlite3
+import stat
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.parse
+import urllib.request
+import uuid
+
+
+class Failure(Exception):
+    pass
+
+
+def require(condition, code):
+    if not condition:
+        raise Failure(code)
+
+
+def regular(path):
+    info = Path(path).lstat()
+    require(stat.S_ISREG(info.st_mode), "regular_file_required")
+    return info
+
+
+def directory(path, create=False):
+    path = Path(os.path.abspath(path))
+    for part in [*reversed(path.parents), path]:
+        try:
+            info = part.lstat()
+        except FileNotFoundError:
+            require(create, "directory_missing")
+            part.mkdir(mode=0o700)
+            info = part.lstat()
+        require(stat.S_ISDIR(info.st_mode), "directory_symlink_or_special")
+    return path
+
+
+def private(path):
+    path = directory(path, create=True)
+    info = path.stat()
+    require(info.st_uid == os.getuid() and info.st_mode & 0o077 == 0,
+            "private_directory_required")
+    return path
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def atomic(path, data):
+    path = Path(path)
+    temporary = path.with_name(".tmp-" + uuid.uuid4().hex)
+    try:
+        with temporary.open("xb") as file:
+            os.chmod(temporary, 0o600)
+            file.write(data)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temporary, path)
+        sync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def document(path):
+    require(regular(path).st_size <= 2 * 1024 * 1024, "document_too_large")
+    return json.loads(Path(path).read_text())
+
+
+def write_document(path, value):
+    data = (json.dumps(value, sort_keys=True, indent=2) + "\n").encode()
+    require(len(data) <= 2 * 1024 * 1024, "document_too_large")
+    atomic(path, data)
+
+
+def digest(path):
+    regular(path)
+    with Path(path).open("rb") as file:
+        return hashlib.file_digest(file, "sha256").hexdigest()
+
+
+def relative(value):
+    path = PurePosixPath(value)
+    require(value and "\\" not in value and not path.is_absolute()
+            and all(part not in (".", "..", "") for part in value.split("/"))
+            and "\x00" not in value, "invalid_relative_path")
+    return path
+
+
+def version(value):
+    require(re.fullmatch(r"[a-f0-9]{40}", value) is not None, "full_commit_required")
+    return value
+
+
+@contextlib.contextmanager
+def locked(root):
+    import fcntl
+    path = root / "deploy.lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+    try:
+        require(stat.S_ISREG(os.fstat(fd).st_mode), "invalid_lock")
+        os.fchmod(fd, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Failure("deployment_locked") from None
+        yield
+    finally:
+        os.close(fd)
+
+
+def layout(root):
+    root = private(root)
+    for name in ("releases", "state", "backups", "receipts"):
+        private(root / name)
+    return root
+
+
+def pointer(root, name="current"):
+    path = root / name
+    if not path.is_symlink():
+        require(not path.exists(), "invalid_version_pointer")
+        return None
+    target = os.readlink(path)
+    require(re.fullmatch(r"releases/[a-f0-9]{40}", target) is not None,
+            "invalid_version_pointer")
+    release = directory(root / target)
+    require(release.parent == root / "releases", "invalid_version_pointer")
+    return release.name
+
+
+def point(root, name, commit):
+    version(commit)
+    directory(root / "releases" / commit)
+    temporary = root / (".link-" + uuid.uuid4().hex)
+    try:
+        temporary.symlink_to("releases/" + commit)
+        os.replace(temporary, root / name)
+        sync_directory(root)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def files(release):
+    found = {}
+    for parent, dirs, names in os.walk(release, followlinks=False):
+        for name in dirs:
+            directory(Path(parent) / name)
+        for name in names:
+            path = Path(parent) / name
+            if path == release / ".app-deploy-manifest.json":
+                continue
+            info = regular(path)
+            require(info.st_nlink == 1, "hardlink_not_allowed")
+            found[path.relative_to(release).as_posix()] = {
+                "sha256": digest(path), "size": info.st_size,
+                "executable": bool(info.st_mode & 0o111),
+            }
+    return found
+
+
+def verified(root, commit):
+    release = directory(root / "releases" / version(commit))
+    manifest = document(release / ".app-deploy-manifest.json")
+    require(manifest.get("schema") == 1 and manifest.get("commit") == commit
+            and manifest.get("files") == files(release), "release_integrity_failed")
+    return release
+
+
+def run(argv, cwd=None, env=None, timeout=45):
+    process = None
+    try:
+        process = subprocess.Popen(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
+                                   stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        end, result = time.monotonic() + timeout, bytearray()
+        with selectors.DefaultSelector() as selector:
+            selector.register(process.stdout, selectors.EVENT_READ)
+            while selector.get_map():
+                remaining = end - time.monotonic()
+                require(remaining > 0, "command_failed_or_timed_out")
+                for key, _ in selector.select(remaining):
+                    chunk = os.read(key.fd, 65536)
+                    if not chunk:
+                        selector.unregister(key.fd)
+                    result.extend(chunk)
+                    require(len(result) <= 2 * 1024 * 1024, "command_output_too_large")
+        require(process.wait(timeout=max(.01, end - time.monotonic())) == 0, "command_failed")
+        return bytes(result)
+    except (OSError, subprocess.TimeoutExpired):
+        raise Failure("command_failed_or_timed_out") from None
+    finally:
+        if process:
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            if process.stdout:
+                process.stdout.close()
+
+
+def initialize(options):
+    machine = directory(options.machine_root)
+    require(Path(options.root).is_absolute(), "absolute_root_required")
+    require(Path(os.path.abspath(options.root)).is_relative_to(machine),
+            "deployment_outside_machine_root")
+    root = layout(options.root)
+    require(Path(options.command).is_absolute(), "absolute_command_required")
+    command = str(Path(options.command).resolve(strict=True))
+    regular(command)
+    relative(options.entry)
+    require(re.fullmatch(r"[A-Z][A-Z0-9_]*", options.db_env) is not None
+            and not options.db_env.startswith(("TREER_", "AGENT_UI_", "CODEX_UI_")),
+            "invalid_database_environment_name")
+    config = {"schema": 1, "command": command,
+              "launcher_command": str(Path(sys.executable).resolve(strict=True)), "entry": options.entry,
+              "args": options.args, "db_env": options.db_env}
+    with locked(root):
+        path = root / "config.json"
+        if path.exists() or path.is_symlink():
+            require(document(path) == config, "configuration_already_exists")
+            require(digest(root / "entry.py") == digest(__file__), "entry_already_customized")
+        else:
+            atomic(root / "entry.py", Path(__file__).read_bytes())
+            write_document(path, config)
+    return {"command": config["launcher_command"],
+            "args": [str(root / "entry.py"), "run", "--root", str(root)],
+            "cwd": str(root.relative_to(machine))}
+
+
+def stage(options):
+    root = layout(options.root)
+    commit = version(options.commit)
+    relative(options.component)
+    check = json.loads(options.check_json)
+    require(isinstance(check, list) and check and all(isinstance(v, str) for v in check)
+            and Path(check[0]).is_absolute(), "absolute_check_command_required")
+    require(Path(options.git).is_absolute(), "absolute_git_required")
+    regular(Path(options.git).resolve(strict=True))
+    environment = {key: os.environ[key] for key in ("HOME", "PATH", "LANG", "TMPDIR")
+                   if key in os.environ}
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    with locked(root):
+        # Only committed content is exported: never checkout/reset the live repo.
+        resolved = run([options.git, "-C", options.repo, "rev-parse", commit + "^{commit}"], env=environment)
+        require(resolved.decode().strip() == commit, "commit_mismatch")
+        release = root / "releases" / commit
+        if release.exists() or release.is_symlink():
+            verified(root, commit)
+            require(document(release / ".app-deploy-manifest.json")["component"]
+                    == options.component, "release_component_conflict")
+            return {"version": commit, "reused": True}
+        temporary = root / "releases" / (".stage-" + uuid.uuid4().hex)
+        temporary.mkdir(mode=0o700)
+        process = None
+        try:
+            process = subprocess.Popen([options.git, "-C", options.repo, "archive", "--format=tar",
+                                        commit + ":" + options.component],
+                                       stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=environment)
+            total = count = 0
+            with tarfile.open(fileobj=process.stdout, mode="r|") as archive:
+                for item in archive:
+                    count += 1
+                    total += item.size
+                    require(count <= 10000 and total <= 256 * 1024 * 1024
+                            and item.size <= 64 * 1024 * 1024, "archive_limit_exceeded")
+                    name = str(relative(item.name.rstrip("/")))
+                    require(name != ".app-deploy-manifest.json", "reserved_manifest_name")
+                    destination = temporary / name
+                    require(item.isdir() or item.isfile(), "archive_link_or_special")
+                    directory(destination.parent, create=True)
+                    if item.isdir():
+                        directory(destination, create=True)
+                    else:
+                        with archive.extractfile(item) as source, destination.open("xb") as out:
+                            shutil.copyfileobj(source, out, 65536)
+                            out.flush()
+                            os.fsync(out.fileno())
+                        destination.chmod(0o700 if item.mode & 0o111 else 0o600)
+            require(process.wait(timeout=20) == 0, "git_archive_failed")
+            run(check, cwd=temporary, env=environment, timeout=options.check_timeout)
+            config = document(root / "config.json")
+            regular(temporary / str(relative(config["entry"])))
+            write_document(temporary / ".app-deploy-manifest.json", {
+                "schema": 1, "commit": commit, "component": options.component,
+                "files": files(temporary),
+            })
+            os.rename(temporary, release)
+            sync_directory(release.parent)
+        finally:
+            if process and process.poll() is None:
+                process.kill()  # Only this invocation's git child, never other processes.
+                process.wait()
+            if process and process.stdout:
+                process.stdout.close()
+            if temporary.exists():
+                shutil.rmtree(temporary)
+    return {"version": commit, "reused": False}
+
+
+def launch(root):
+    root = layout(root)
+    config = document(root / "config.json")
+    commit = pointer(root)
+    require(commit is not None, "bootstrap_required")
+    release = verified(root, commit)  # Resolve once; no subsequent asset reads through current.
+    entry = release / str(relative(config["entry"]))
+    regular(entry)
+    environment = dict(os.environ)
+    environment[config["db_env"]] = str(root / "state/app.sqlite3")
+    environment["APP_DEPLOY_VERSION"] = commit
+    environment["PYTHONDONTWRITEBYTECODE"] = "1"
+    os.umask(0o077)
+    os.chdir(release)
+    os.execve(config["command"], [config["command"], str(entry), *config["args"]], environment)
+
+
+def integrity(path):
+    regular(path)
+    with contextlib.closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as database:
+        require(database.execute("PRAGMA integrity_check").fetchall() == [("ok",)],
+                "database_integrity_failed")
+
+
+def backup(root, operation):
+    source = root / "state/app.sqlite3"
+    if not source.exists() and not source.is_symlink():
+        return None
+    regular(source)
+    target = root / "backups" / (operation + ".sqlite3")
+    temporary = root / "backups" / (".backup-" + uuid.uuid4().hex)
+    try:
+        end = time.monotonic() + 120
+        def progress(*_):
+            require(time.monotonic() <= end, "database_backup_timeout")
+        with contextlib.closing(sqlite3.connect(source.as_uri() + "?mode=ro", uri=True)) as before:
+            with contextlib.closing(sqlite3.connect(temporary)) as after:
+                temporary.chmod(0o600)
+                before.backup(after, pages=256, progress=progress)
+        integrity(temporary)
+        with temporary.open("rb") as file:
+            os.fsync(file.fileno())
+        os.replace(temporary, target)
+        sync_directory(target.parent)
+        return {"name": target.name, "sha256": digest(target)}
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def restore(root, saved):
+    target = root / "state/app.sqlite3"
+    # Caller has confirmed stop; no live process may have an SQLite connection.
+    for path in (target, Path(str(target) + "-wal"), Path(str(target) + "-shm")):
+        if path.exists() or path.is_symlink():
+            regular(path)
+    def clear_sidecars():
+        # Never publish an old main file beside the candidate's WAL. Persist
+        # their removal before replacing the main file, including on recovery.
+        Path(str(target) + "-wal").unlink(missing_ok=True)
+        Path(str(target) + "-shm").unlink(missing_ok=True)
+        sync_directory(target.parent)
+    if saved:
+        require(re.fullmatch(r"[A-Za-z0-9_-]+\.sqlite3", saved["name"]) is not None,
+                "invalid_backup_name")
+        source = root / "backups" / saved["name"]
+        require(digest(source) == saved["sha256"], "backup_integrity_failed")
+        integrity(source)
+        temporary = target.with_name(".restore-" + uuid.uuid4().hex)
+        try:
+            with source.open("rb") as before, temporary.open("xb") as after:
+                os.chmod(temporary, 0o600)
+                shutil.copyfileobj(before, after, 65536)
+                after.flush()
+                os.fsync(after.fileno())
+            clear_sidecars()
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+    else:
+        clear_sidecars()
+        target.unlink(missing_ok=True)
+    sync_directory(target.parent)
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_):
+        raise Failure("health_redirect_refused")
+
+
+def check_url(url, local):
+    parsed = urllib.parse.urlsplit(url)
+    require(not parsed.username and not parsed.password and not parsed.fragment
+            and not parsed.query and parsed.scheme in ("http", "https"), "invalid_health_url")
+    loopback = False
+    try:
+        loopback = ipaddress.ip_address(parsed.hostname or "").is_loopback
+    except ValueError:
+        pass
+    require(not local or loopback, "loopback_health_required")
+    require(parsed.scheme == "https" or loopback or
+            (not local and (parsed.hostname or "").endswith(".treer")), "https_route_required")
+    return url
+
+
+def health(receipt, commit, timeout):
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        try:
+            for url, local in ((receipt["health_url"], True), (receipt["route_url"], False)):
+                check_url(url, local)
+                # App route may use the caller's identity-bound HTTP proxy.
+                handlers = [NoRedirect()]
+                if local:
+                    handlers.append(urllib.request.ProxyHandler({}))
+                with urllib.request.build_opener(*handlers).open(
+                        urllib.request.Request(url, headers={"Accept": "application/json",
+                                                            "Cache-Control": "no-cache"}),
+                        timeout=max(0.01, min(2, end - time.monotonic()))) as response:
+                    body = response.read(65537)
+                    require(len(body) <= 65536, "health_response_too_large")
+                    data = json.loads(body)
+                    require(isinstance(data, dict), "health_mismatch")
+                    require(data.get("version") == commit and data.get("ready") is True
+                            and data.get("database_ready") is True
+                            and data.get("app_id") == receipt["app_id"], "health_mismatch")
+            require(time.monotonic() <= end, "health_timeout")
+            return
+        except (OSError, ValueError, Failure):
+            time.sleep(min(0.1, max(0, end - time.monotonic())))
+    raise Failure("health_timeout")
+
+
+def cli(options, *args):
+    require(Path(options.treer).is_absolute(), "absolute_treer_required")
+    regular(Path(options.treer).resolve(strict=True))
+    return json.loads(run([options.treer, *args]))
+
+
+def app_identity(options, root, expected=None):
+    contract = cli(options, "interface", "contract")
+    machine = contract["machine"]
+    require(root.is_relative_to(directory(machine["root"])), "deployment_outside_machine_root")
+    value = cli(options, "app", "show", options.app)
+    app = value["app"]
+    require(app["server_id"] == machine["server_id"], "app_not_local")
+    config = document(root / "config.json")
+    require(app["command"] == config["launcher_command"]
+            and app["args"] == [str(root / "entry.py"), "run", "--root", str(root)]
+            and (directory(machine["root"]) / app["cwd"]).resolve() == root,
+            "app_not_using_stable_entry")
+    identity = {key: app.get(key) for key in (
+        "app_id", "runtime_agent_id", "service_id", "server_id", "hostname")}
+    if expected is not None:
+        require(identity == expected, "app_identity_changed")
+    return app, identity
+
+
+def action(options, root, receipt, name):
+    # Recheck stable identity/spec before every mutation; never delete/recreate.
+    app_identity(options, root, receipt["identity"])
+    result = cli(options, "app", name, receipt["app_id"])["app"]
+    require(result["app_id"] == receipt["app_id"], "app_identity_changed")
+    require(result["desired_state"] == ("stopped" if name == "stop" else "running"),
+            "app_lifecycle_not_confirmed")
+
+
+def rollback(options, root, receipt, save):
+    receipt["status"] = "rolling_back"
+    save()
+    try:
+        require(pointer(root) in (receipt["old"], receipt["new"]), "pointer_changed_externally")
+        verified(root, receipt["old"])
+        action(options, root, receipt, "stop")
+        if receipt.get("backup_complete"):
+            restore(root, receipt.get("backup"))
+        point(root, "current", receipt["old"])
+        action(options, root, receipt, "start")
+        health(receipt, receipt["old"], options.timeout)
+        app_identity(options, root, receipt["identity"])
+        receipt["status"] = "rolled_back"
+    except Exception as error:
+        receipt["status"] = "rollback_failed"
+        receipt["rollback_failure"] = str(error) if isinstance(error, Failure) else "operation_failed"
+    save()
+
+
+def deploy(options, recover=False):
+    root = layout(options.root)
+    require(re.fullmatch(r"[A-Za-z0-9_-]{1,64}", options.operation_id) is not None,
+            "invalid_operation_id")
+    with locked(root):
+        file = root / "receipts" / (options.operation_id + ".json")
+        def save():
+            receipt["updated_at"] = time.time()
+            write_document(file, receipt)
+        if file.exists() or file.is_symlink():
+            receipt = document(file)
+            require(receipt.get("schema") == 1 and receipt["root"] == str(root)
+                    and receipt["target"] == options.app, "operation_conflict")
+            if not recover:
+                require(receipt["new"] == options.release
+                        and receipt["health_url"] == options.health_url
+                        and receipt["route_url"] == options.route_url, "operation_conflict")
+            if receipt["status"] == "completed":
+                require(pointer(root) == receipt["new"], "pointer_changed_externally")
+                app_identity(options, root, receipt["identity"])
+                health(receipt, receipt["new"], options.timeout)
+                return receipt
+            if receipt["status"] == "rolled_back":
+                require(recover, "rolled_back")
+                return receipt
+            require(recover, "operation_incomplete_run_recover")
+            rollback(options, root, receipt, save)
+            require(receipt["status"] == "rolled_back", "rollback_failed")
+            return receipt
+        require(not recover, "receipt_missing")
+        for other in (root / "receipts").iterdir():
+            if re.fullmatch(r"\.tmp-[a-f0-9]{32}", other.name):
+                regular(other)  # Unpublished atomic writes may survive SIGKILL.
+                continue
+            require(other.suffix == ".json", "unexpected_receipt_file")
+            require(document(other).get("status") in ("completed", "rolled_back"),
+                    "unfinished_deployment_run_recover")
+        verified(root, options.release)
+        old = pointer(root)
+        require(old is not None and old != options.release, "distinct_bootstrap_required")
+        verified(root, old)
+        app, identity = app_identity(options, root)
+        require(app["desired_state"] == "running", "running_app_required")
+        binding = root / "binding.json"
+        if binding.exists() or binding.is_symlink():
+            require(document(binding) == identity, "deployment_bound_to_another_app")
+        else:
+            write_document(binding, identity)
+        receipt = {"schema": 1, "root": str(root), "target": options.app,
+                   "app_id": app["app_id"], "identity": identity,
+                   "created_at": time.time(),
+                   "old": old, "new": options.release, "status": "planned",
+                   "health_url": check_url(options.health_url, True),
+                   "route_url": check_url(options.route_url, False)}
+        # Verify old App/route identity before stopping anything.
+        health(receipt, old, options.timeout)
+        save()
+        try:
+            receipt["status"] = "stopping"
+            save()
+            action(options, root, receipt, "stop")
+            receipt["backup"] = backup(root, options.operation_id)
+            receipt["backup_complete"] = True
+            receipt["status"] = "switching"
+            save()
+            point(root, "previous", old)
+            point(root, "current", options.release)
+            receipt["status"] = "starting"
+            save()
+            action(options, root, receipt, "start")
+            health(receipt, options.release, options.timeout)
+            app_identity(options, root, identity)
+            receipt["status"] = "completed"
+            save()
+        except (Exception, KeyboardInterrupt) as error:
+            receipt["failed_phase"] = receipt["status"]
+            receipt["failure"] = str(error) if isinstance(error, Failure) else "operation_failed"
+            rollback(options, root, receipt, save)
+            raise Failure(receipt["status"]) from None
+        return receipt
+
+
+def main(argv=None):
+    require(os.name == "posix", "posix_only_windows_not_supported")
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="operation", required=True)
+    for name in ("init", "stage", "bootstrap", "deploy", "recover", "run"):
+        child = commands.add_parser(name)
+        child.add_argument("--root", required=True)
+        if name == "init":
+            child.add_argument("--machine-root", required=True)
+            child.add_argument("--command", required=True)
+            child.add_argument("--entry", required=True)
+            child.add_argument("--db-env", required=True)
+            child.add_argument("args", nargs="*")
+        if name == "stage":
+            child.add_argument("--repo", required=True)
+            child.add_argument("--git", default="/usr/bin/git")
+            child.add_argument("--commit", required=True)
+            child.add_argument("--component", required=True)
+            child.add_argument("--check-json", required=True)
+            child.add_argument("--check-timeout", type=float, default=120)
+        if name in ("bootstrap", "deploy"):
+            child.add_argument("--release", required=True, type=version)
+        if name in ("deploy", "recover"):
+            child.add_argument("--app", required=True)
+            child.add_argument("--treer", required=True)
+            child.add_argument("--operation-id", required=True)
+            child.add_argument("--timeout", type=float, default=20)
+        if name == "deploy":
+            child.add_argument("--health-url", required=True)
+            child.add_argument("--route-url", required=True)
+    options = parser.parse_args(argv)
+    require(Path(options.root).is_absolute(), "absolute_root_required")
+    if hasattr(options, "timeout"):
+        require(0 < options.timeout <= 300, "invalid_health_timeout")
+    if options.operation == "init":
+        return initialize(options)
+    if options.operation == "stage":
+        require(0 < options.check_timeout <= 600, "invalid_check_timeout")
+        return stage(options)
+    if options.operation == "run":
+        return launch(options.root)
+    if options.operation == "bootstrap":
+        root = layout(options.root)
+        with locked(root):
+            verified(root, options.release)
+            require(pointer(root) in (None, options.release), "bootstrap_already_set")
+            point(root, "current", options.release)
+        return {"version": options.release}
+    return deploy(options, recover=options.operation == "recover")
+
+
+if __name__ == "__main__":
+    try:
+        print(json.dumps(main(), sort_keys=True))
+    except Exception as error:
+        # Subprocess/HTTP/SQLite errors may contain code, paths or credentials.
+        print(json.dumps({"error": str(error) if isinstance(error, Failure)
+                          else "deployment_operation_failed"}), file=sys.stderr)
+        sys.exit(1)
