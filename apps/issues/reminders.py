@@ -16,6 +16,7 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 
 HOUR = 3600
 CATCH_UP = 300          # a restart within 5 minutes after the hour still runs that hour's pass
@@ -63,12 +64,23 @@ class Reminders:
             return False
         return isinstance(info, dict) and info.get('agent_id') == agent and info.get('status') == 'idle' and info.get('busy') is not True
 
+    def safe_link(self):
+        """The App link for the Message; anything that is not a plain http(s) URL is dropped, not sent."""
+        try:
+            value = str(self.base_url() or '')
+        except Exception:
+            return ''
+        parts = urllib.parse.urlsplit(value)
+        if parts.scheme not in ('http', 'https') or not parts.netloc or parts.username or parts.password or any(c.isspace() for c in value):
+            return ''
+        return value
+
     def body(self, issue_ids, link):
         shown = ', '.join(f'#{i}' for i in issue_ids[:MAX_LISTED])
         more = f' (+{len(issue_ids) - MAX_LISTED} more)' if len(issue_ids) > MAX_LISTED else ''
         noun = 'issue' if len(issue_ids) == 1 else 'issues'
         return (f'Issues reminder: you are idle and have {len(issue_ids)} unresolved {noun} assigned to you: {shown}{more}.\n'
-                f'{link}')
+                f'{link}'.rstrip('\n'))
 
     def tick(self, now=None):
         """One pass for the current hour. Safe to repeat: already reminded Agents are skipped."""
@@ -81,7 +93,7 @@ class Reminders:
             if not self.idle(agent):
                 skipped += 1
                 continue
-            link = link or self.base_url()   # resolved once per pass, and only when something is to be sent
+            link = link or self.safe_link()  # resolved once per pass, and only when something is to be sent
             status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body(issue_ids, link),
                                      '--idempotency-key', f'issues-reminder-{agent}-{slot}'])
             if status != 0:

@@ -52,6 +52,10 @@ Each full hour, if you are idle and an unresolved (not `done`/`closed`) issue is
 assigned to you, Issues sends you one Message listing the issue IDs and a link.
 It never includes titles or descriptions; use `show ID` to read an issue. You
 get at most one per hour. Resolve, close or reassign the issue to stop them.
+The poller is on by default (operators disable it with `ISSUES_REMINDERS=off`).
+Anyone who may edit an issue can assign it to you, and so can trigger these
+messages; the text is fixed and the Message is subject to Treer's authorization
+and Policy.
 
 ## Authentication and permissions
 

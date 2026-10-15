@@ -151,11 +151,19 @@ The browser displays failed/disabled/pending delivery in the timeline.
 
 ## Hourly reminders
 
+> **On by default.** Upgrading a deployment starts the poller; set
+> `ISSUES_REMINDERS=off` (and restart only this App) to disable it. Anyone who
+> may edit an issue can set its assignee, so being able to assign an issue to an
+> Agent also lets that person make the App message that Agent once per hour. The
+> Message text is fixed (issue IDs and a link only), is sent as the App's own
+> identity, and remains subject to Treer's Message authorization and Policy.
+
 On every full hour (epoch hour) the App collects issues that are not `done` or
 `closed` and whose assignee is an Agent (stable ID `ag_…`; humans are never
 messaged). For each such Agent it runs `treer agent show ID` and, only when the
 Agent's `status` is `idle` and it is not busy, sends **one** Message listing up
-to ten issue IDs (`+N more` beyond that) plus the App link with
+to ten issue IDs (`+N more` beyond that) plus the App link (only a plain `http(s)` URL is
+ever included; anything else is omitted) with
 `treer message send` under the App's own runtime identity. Bodies never contain
 titles, descriptions or comments. No token is read, logged or put on a command
 line; the CLI resolves identity from the inherited environment.

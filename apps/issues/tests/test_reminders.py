@@ -143,6 +143,24 @@ class ReminderTest(unittest.TestCase):
         self.reminders(FakeTreer({}), link=lambda: calls.append(1) or 'http://x/').tick()
         self.assertEqual(calls, [])
 
+    def test_only_plain_http_links_are_put_in_messages(self):
+        self.issue(assignee='ag_a')
+        for bad in ('javascript:alert(1)', 'file:///etc/passwd', 'issues.example/', '', None, 'https://u:p@host/', 'http://a b/', 'data:text/html,x'):
+            treer = FakeTreer({'ag_a': 'idle'})
+            self.now += HOUR
+            self.reminders(treer, link=lambda bad=bad: bad).tick()
+            body = treer.sends()[0][treer.sends()[0].index('--body') + 1]
+            self.assertTrue(body.endswith('.'), (bad, body))   # no link line at all, the reminder still goes out
+        treer = FakeTreer({'ag_a': 'idle'})
+        self.now += HOUR
+        self.reminders(treer, link=lambda: (_ for _ in ()).throw(RuntimeError())).tick()
+        self.assertEqual(len(treer.sends()), 1)
+        for good in ('http://issues.treer/', 'https://issues.example/x/'):
+            treer = FakeTreer({'ag_a': 'idle'})
+            self.now += HOUR
+            self.reminders(treer, link=lambda good=good: good).tick()
+            self.assertTrue(treer.sends()[0][treer.sends()[0].index('--body') + 1].endswith(good))
+
     def test_hour_arithmetic_and_switch(self):
         self.assertEqual(next_boundary(T0), T0 + HOUR)
         self.assertEqual(next_boundary(T0 + HOUR - 0.5), T0 + HOUR)
