@@ -13,7 +13,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
-from notify import Digest, TreePaths, candidates, enabled as notify_enabled, hourly_limit, path_tokens
+from notify import Digest, candidates, enabled as notify_enabled, hourly_limit, path_tokens
 from reminders import Reminders, backoff as reminder_backoff, enabled as reminders_enabled
 from store import Store, fields, fail
 
@@ -46,7 +46,6 @@ class Application:
         self.store, self.auth = store, auth
         self.lock = threading.Lock()
         self.health_at, self.health_value = -1e9, None
-        self.tree_paths = TreePaths(os.environ.get('TREER_BIN', 'treer'))
 
     def identity_provider(self):
         with self.lock:
@@ -100,23 +99,6 @@ class Application:
                 if isinstance(entry, dict) and entry.get('kind') == 'agent' and isinstance(entry.get('id'), str):
                     resolved[path.lower()] = entry['id']
         return resolved
-
-    def path_verifier(self, token, budget=10):
-        """verify(path, agent_id): does Core, asked with the AUTHOR's token, resolve this tree path to that Agent?
-        At most `budget` Core calls per event; anything unverifiable counts as no."""
-        left = [budget]
-
-        def verify(path, agent_id):
-            if left[0] <= 0:
-                return False
-            left[0] -= 1
-            try:
-                auth = self.identity_provider()
-                answer = auth.request('POST', f'/api/apps/{auth.service_id}/recipients/resolve', token, body={'recipients': [path]})
-            except Error:
-                return False
-            return any(isinstance(e, dict) and e.get('kind') == 'agent' and e.get('id') == agent_id for e in answer.get('recipients') or [])
-        return verify
 
     HEALTH_TTL = 2.0
 
@@ -174,8 +156,7 @@ class Application:
                     notification['throttled'] = len(throttled)
         if missed:
             notification = dict(notification, unresolved_mentions=missed)
-            verify = self.path_verifier(token)
-            options = {t: c for t in missed if (c := candidates(t, directory, self.tree_paths.get, verify))}
+            options = {t: c for t in missed if (c := candidates(t, directory))}
             if options:
                 notification['mention_candidates'] = options
         self.store.notification(event_id, notification)

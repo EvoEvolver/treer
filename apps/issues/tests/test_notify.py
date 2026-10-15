@@ -11,7 +11,7 @@ clean = hermetic_env(); os.environ.clear(); os.environ.update(clean)
 sys.path.insert(0, str(ROOT))
 from auth import Error
 from issues import Application
-from notify import WINDOW, Digest, TreePaths, candidates, digest_body, enabled, path_tokens, resolve_mentions
+from notify import WINDOW, Digest, candidates, digest_body, enabled, path_tokens, resolve_mentions
 from store import Store
 
 DIRECTORY = [
@@ -346,7 +346,6 @@ class PolicyAndInjectionTest(Base):
 
 NOPATH = [{k: v for k, v in p.items() if k != 'path'} for p in DIRECTORY] + [
     {'id': 'ag_lead1', 'kind': 'agent', 'name': 'leader'}, {'id': 'ag_lead2', 'kind': 'agent', 'name': 'leader'}]
-TREE = {'ag_lead1': '/treer-dev-team/leader', 'ag_lead2': '/mariana/forjador/leader', 'ag_hidden': '/secret/leader'}
 
 
 class PathMentionTest(Base):
@@ -394,57 +393,19 @@ class PathMentionTest(Base):
         self.mutate(id, 'comment', {'body': '@/dev/author'}, LEAD)
         self.assertEqual(self.last()['recipients'], ['ag_author', 'ag_work'])
 
-    def test_ambiguous_names_offer_path_candidates_the_author_may_see(self):
-        self.app.tree_paths = TreePaths(runner=lambda args: (0, json.dumps({'agents': [{'agent_id': k, 'path': v} for k, v in TREE.items()]})), clock=lambda: self.now)
+    def test_candidates_use_only_paths_core_put_in_the_authors_directory(self):
+        """Resolvable is not readable: without agent.tree.read Core gives no directory path, and nothing else is consulted."""
         self.auth.resolvable.update({'/treer-dev-team/leader': 'ag_lead1', '/mariana/forjador/leader': 'ag_lead2'})
+        self.assertEqual(candidates('leader', NOPATH), ['ag_lead1', 'ag_lead2'])
+        self.assertEqual(candidates('author', NOPATH), [], 'a unique name needs no candidates')
+        self.assertEqual(candidates('@x/y', NOPATH), [])
+        mixed = NOPATH[:-2] + [{'id': 'ag_lead1', 'kind': 'agent', 'name': 'leader', 'path': '/a/leader'}, {'id': 'ag_lead2', 'kind': 'agent', 'name': 'leader', 'path': None}]
+        self.assertEqual(candidates('leader', mixed), ['/a/leader', 'ag_lead2'])
         id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
         self.now += WINDOW + 1
         result = self.mutate_np(id, 'comment', {'body': 'cc @leader'}, LEAD)
-        self.assertEqual(result['notification']['unresolved_mentions'], ['leader'])
-        self.assertEqual(result['notification']['mention_candidates'], {'leader': ['/treer-dev-team/leader', '/mariana/forjador/leader']},
-                         'only Agents in the author\'s directory are offered; the hidden one is not')
-        self.assertEqual(result['activity'][0]['notification']['mention_candidates'], result['notification']['mention_candidates'])
-        self.assertEqual({t for t, _ in self.auth.resolve_calls}, {'token-usr_lead'}, 'every path was verified with the author\'s own token')
-
-    def test_candidate_paths_the_author_cannot_resolve_are_never_disclosed(self):
-        """Policy agent.tree.read: the App identity can list every path, the author may not see them."""
-        self.app.tree_paths = TreePaths(runner=lambda args: (0, json.dumps({'agents': [{'agent_id': k, 'path': v} for k, v in TREE.items()]})), clock=lambda: self.now)
-        self.auth.resolvable.update({'/treer-dev-team/leader': 'ag_lead1'})          # lead2's path is denied/invisible to the author
-        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
-        self.now += WINDOW + 1
-        result = self.mutate_np(id, 'comment', {'body': 'cc @leader'}, LEAD)
-        self.assertEqual(result['notification']['mention_candidates'], {'leader': ['/treer-dev-team/leader', 'ag_lead2']})
-        self.assertNotIn('mariana', json.dumps(result), 'a path the author cannot resolve appears nowhere in the response')
-        self.auth.resolvable.clear()                                                 # nothing resolvable: IDs only
-        self.now += WINDOW + 1
-        result = self.mutate_np(id, 'comment', {'body': 'cc @leader again'}, LEAD)
-        self.assertEqual(result['notification']['mention_candidates'], {'leader': ['ag_lead1', 'ag_lead2']})
-        self.assertNotIn('/', json.dumps(result['notification']['mention_candidates']))
-
-    def test_a_resolve_that_returns_a_different_agent_does_not_verify_the_path(self):
-        self.app.tree_paths = TreePaths(runner=lambda args: (0, json.dumps({'agents': [{'agent_id': 'ag_lead1', 'path': '/treer-dev-team/leader'}]})), clock=lambda: self.now)
-        self.auth.resolvable['/treer-dev-team/leader'] = 'ag_lead2'
-        verify = self.app.path_verifier('t')
-        self.assertFalse(verify('/treer-dev-team/leader', 'ag_lead1'))
-        self.assertTrue(verify('/treer-dev-team/leader', 'ag_lead2'))
-        small = self.app.path_verifier('t', budget=1)
-        self.assertTrue(small('/treer-dev-team/leader', 'ag_lead2'))
-        self.assertFalse(small('/treer-dev-team/leader', 'ag_lead2'), 'verification calls are capped per event')
-
-    def test_candidates_fall_back_to_ids_when_paths_are_unavailable_and_never_call_needlessly(self):
-        calls = []
-        tree = TreePaths(runner=lambda args: calls.append(args) or (1, ''), clock=lambda: self.now)
-        self.assertEqual(candidates('leader', NOPATH, tree.get), ['ag_lead1', 'ag_lead2'])
-        self.assertEqual(candidates('leader', NOPATH, tree.get), ['ag_lead1', 'ag_lead2'])
-        self.assertEqual(len(calls), 1, 'cached, even a failure, for a minute')
-        self.assertEqual(calls[0], ['agent', 'ls', '-R', '/'])
-        self.assertEqual(candidates('author', NOPATH, lambda: 1 / 0), [], 'a unique name needs no candidates and no lookup')
-        self.assertEqual(candidates('@x/y', NOPATH, lambda: 1 / 0), [])
-        self.assertEqual(candidates('leader', DIRECTORY + [{'id': 'ag_a', 'kind': 'agent', 'name': 'leader', 'path': '/a/leader'},
-                                                           {'id': 'ag_b', 'kind': 'agent', 'name': 'leader', 'path': '/b/leader'}], lambda: 1 / 0),
-                         ['/a/leader', '/b/leader'], 'directory paths need no CLI')
-        bad = TreePaths(runner=lambda args: (0, 'not json'), clock=lambda: self.now)
-        self.assertEqual(bad.get(), {})
+        self.assertNotIn('/', json.dumps(result['notification'].get('mention_candidates', {})))
+        self.assertEqual(self.auth.resolve_calls, [], 'no Core lookups are made to find candidate paths')
 
     def test_no_core_calls_when_notifications_are_off_or_there_is_no_path(self):
         id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
