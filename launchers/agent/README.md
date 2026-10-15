@@ -122,9 +122,11 @@ and ACP provider arguments are retained; the native session and cwd are pinned,
 never replaced by a new session. Before advancing, each target must register a
 fresh interface instance, serve matching `/v1/manifest` and UI HTTP 200, become
 ready and keep the same native session ID within 90 seconds (`--timeout
-1000..300000` milliseconds). It then receives one idempotent Treer message to
-continue its previous task; the normal message watcher must be enabled to
-consume it. There are no automatic workspace-wide targets.
+1000..300000` milliseconds). It then receives one queued continuation through
+its local AIS, with a stable operation ID. This explicit local operator action
+asserts no sender and requests no completion notification; it also works from
+Controller exec without an Agent identity or message watcher. There are no
+automatic workspace-wide targets.
 
 The private `rollouts/ID.json` journal stores original/replacement startups and
 phase checkpoints under the installation directory (0700/current-user+SYSTEM
@@ -133,14 +135,14 @@ Keep sensitive ACP parameters in provider configuration/environment, not argv.
 After a completed rollout or successful rollback has been checked, the operator
 may delete its journal; doing so also removes its replay/recovery history.
 Reusing the same ID/arguments reconciles completed restarts from real run
-generation/instance state, reuses the continuation idempotency key, and skips
+generation/instance state, reuses the continuation operation ID, and skips
 completed steps. Different plans cannot reuse an ID. On a failure, later batches
 stop; the previous launcher pointer and changed startups are restored, only this
 rollout's restarted targets are restarted again, and their old sessions/UI are
 health-checked. Concurrent startup/pointer edits are preserved and reported as
 rollback failures; stopped intent is respected. The journal records the failed
 stage and rollback result. A rollback does not undo model/tool actions or recall
-already delivered continuation messages.
+already submitted continuation prompts.
 Install and rollout locks reject concurrent operations. After a process crash,
 confirm that the recorded operator process is gone before manually removing its
 stale `rollouts/.lock` directory and repeating the same command. An interrupted

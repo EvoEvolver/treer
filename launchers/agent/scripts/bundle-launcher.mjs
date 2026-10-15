@@ -3,7 +3,7 @@
 // The same installer owns profile receipts, immutable assets and current.json.
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, lstatSync, mkdirSync, openSync, readdirSync, realpathSync, renameSync, rmSync, rmdirSync, writeFileSync } from "node:fs";
-import { get } from "node:http";
+import { get, request } from "node:http";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep, toNamespacedPath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compatibility, digest, regular, verifyBundle } from "./bundle-contract.mjs";
@@ -108,6 +108,22 @@ function localGet(port, path) {
       });
     });
     request.setTimeout(2000, () => request.destroy(new Error("Agent interface request timed out"))); request.on("error", fail);
+  });
+}
+function continueTarget(agent, operationId) {
+  const body = JSON.stringify({ operation_id: operationId, delivery: "queue", text: "Launcher update completed and your native session was preserved. Continue your previous task." });
+  return new Promise((done, fail) => {
+    // Explicit local operator action. No sender identity is asserted, and no
+    // notification is requested; the target's durable queue owns deduplication.
+    const req = request({ hostname: "127.0.0.1", port: agent.interface.port, path: "/v1/prompts", method: "POST", headers: {
+      "content-type": "application/json", "content-length": Buffer.byteLength(body),
+      "x-treer-interface-source": "controller-api", "x-treer-agent-id": agent.agent_id, "x-treer-interface-instance": agent.interface.instance_id,
+    } }, (response) => {
+      let bytes = 0;
+      response.on("data", chunk => { bytes += chunk.length; if (bytes > 2 * 1024 * 1024) req.destroy(new Error("Continuation response exceeds limit")); });
+      response.on("error", fail); response.on("end", () => response.statusCode >= 200 && response.statusCode < 300 ? done() : fail(new Error("Target queue rejected the continuation")));
+    });
+    req.setTimeout(2000, () => req.destroy(new Error("Continuation queue request timed out"))); req.on("error", fail); req.end(body);
   });
 }
 async function inspect(options, target, ctx) {
@@ -223,7 +239,8 @@ async function rollout(options, ctx, selected) {
           journal.stage = `health:${item.id}`; atomic(file, journal);
           await healthy(options, ctx, item, selected.contract, options.timeout);
           item.phase = "continuing"; journal.stage = `continue:${item.id}`; atomic(file, journal);
-          cli(options, ["message", "send", "--to", item.id, "--idempotency-key", `launcher-rollout/${journal.id}/${item.id}/continue`], true, "Launcher update completed and your native session was preserved. Continue your previous task.\n");
+          const current = cli(options, ["agent", "show", item.id]);
+          await continueTarget(current, `launcher-rollout/${journal.id}/${item.id}/continue`);
           item.phase = "continued"; atomic(file, journal);
         }
       }

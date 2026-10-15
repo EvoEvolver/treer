@@ -34,7 +34,8 @@ else throw Error('Unexpected fixture operation');
 const fakeHttp = `import http from 'node:http';import fs from 'node:fs';
 const file=process.env.DELIVERY_FIXTURE;
 const server=http.createServer((req,res)=>{const db=JSON.parse(fs.readFileSync(file,'utf8')), item=Object.values(db.agents).find(a=>a.interface.port===server.address().port)||Object.values(db.agents)[0], id=item.agent_id;res.setHeader('Content-Type','application/json');
-if(req.url==='/api/state')res.end(JSON.stringify({ready:!(db.fail===id&&item.run_generation===2),harness:{id:'acp'},thread:{id:'session-'+id+(db.wrongSession===id&&item.run_generation===2?'-changed':''),cwd:db.controller.machine.root}}));
+if(req.url==='/v1/prompts'){let body='';req.on('data',c=>body+=c);req.on('end',()=>{const prompt=JSON.parse(body);if(req.headers['x-treer-interface-source']!=='controller-api'||req.headers['x-treer-agent-id']!==id||req.headers['x-treer-interface-instance']!==item.interface.instance_id||prompt.delivery!=='queue'||prompt.sender||prompt.notify){res.statusCode=403;res.end('{}');return;}db.calls.push(['local-prompt',id,prompt.operation_id]);db.messages[prompt.operation_id]=true;const tmp=file+'.http';fs.writeFileSync(tmp,JSON.stringify(db));fs.renameSync(tmp,file);res.end(JSON.stringify({accepted:true}));});}
+else if(req.url==='/api/state')res.end(JSON.stringify({ready:!(db.fail===id&&item.run_generation===2),harness:{id:'acp'},thread:{id:'session-'+id+(db.wrongSession===id&&item.run_generation===2?'-changed':''),cwd:db.controller.machine.root}}));
 else if(req.url==='/v1/manifest')res.end(JSON.stringify({...db.contract,instance_id:item.interface.instance_id}));
 else res.end('UI');});
 server.listen(0,'127.0.0.1',()=>console.log(server.address().port));
@@ -107,7 +108,7 @@ test("rollout dry-run never changes startup/restarts; apply preserves provider/s
   const result = await f.rollout(["ag_preview", "ag_second", "ag_third"], ["--apply"]);
   assert.equal(result.status, 0, result.error); assert.equal(JSON.parse(result.output).status, "completed");
   const calls = f.read().calls;
-  const previewMessage = calls.findIndex((args: string[]) => args[0] === "message" && args.includes("ag_preview"));
+  const previewMessage = calls.findIndex((args: string[]) => args[0] === "local-prompt" && args.includes("ag_preview"));
   const secondRestart = calls.findIndex((args: string[]) => args[2] === "restart" && args[3] === "ag_second");
   assert.ok(previewMessage >= 0 && secondRestart > previewMessage);
   for (const id of ["ag_preview", "ag_second", "ag_third"]) {
