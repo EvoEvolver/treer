@@ -36,6 +36,13 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
             exit 0
         fi
     elif [ "$dispatched" = false ]; then
+        # No native run exists for this exact commit. If only web/, apps/ or docs/
+        # changed since a canary_passed commit, its verified binaries are reused;
+        # any doubt falls through to the normal native build.
+        if [ "${TREER_REUSE_NATIVE_ARTIFACTS:-1}" = 1 ] && sh scripts/reuse-machine-artifacts.sh "$commit"; then
+            sh scripts/verify-machine-artifacts.sh "$commit" "$root/dist"
+            exit 0
+        fi
         gh workflow run "$workflow" --repo "$repository" --ref "$workflow_ref" -f revision="$commit"
         echo "building native artifacts for $commit"
         dispatched=true

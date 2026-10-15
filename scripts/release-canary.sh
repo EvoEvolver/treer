@@ -64,17 +64,23 @@ TREER_CANARY_KEEP_RESOURCES=0 TREER_CANARY_SKIP_PUBLIC=0 \
 
 tested_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 manifest="$release_root/manifest.json"
+artifact_source=$commit
+if [ -f dist/artifact-provenance.json ]; then
+    artifact_source=$(jq -er '.source_commit' dist/artifact-provenance.json)
+fi
 jq -n \
     --arg commit "$commit" \
     --arg created_at "$tested_at" \
     --arg artifact_path ".treer/releases/$commit/app/index.html" \
     --arg artifact_sha256 "$artifact_sha" \
+    --arg artifact_source "$artifact_source" \
     --slurpfile canary "$release_root/canary-deploy.json" \
     '{schema_version: 1,
       status: "canary_passed",
       commit: $commit,
       created_at: $created_at,
       app_artifact: {path: $artifact_path, sha256: $artifact_sha256},
+      machine_artifacts: {source_commit: $artifact_source, reused: ($artifact_source != $commit)},
       canary: ($canary[0] + {tested_at: $created_at})}' > "$manifest"
 
 echo "Canary release passed: $manifest"

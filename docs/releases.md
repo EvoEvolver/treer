@@ -154,6 +154,35 @@ After deployment, all twelve public downloads must return HTTP 200 without a
 redirect and match the collected bytes. This prevents macOS installs from
 silently falling back to an older GitHub `latest` Release.
 
+### Reusing native artifacts for web, apps and docs changes
+
+The CLI, Host and Controller are built from `crates/`, the Cargo and toolchain
+files, `skills/` and `launchers/agent`. When a candidate changes only paths under
+`web/`, `apps/` or `docs/` since an earlier `canary_passed` commit, waiting for a
+new five-platform build adds nothing. `scripts/ensure-machine-artifacts.sh` then
+calls `scripts/reuse-machine-artifacts.sh` before dispatching a native run, but
+only when no native run exists for the exact commit. It reuses the `dist/` of the
+newest `canary_passed` commit in `.treer/canary-checkouts/` that is an ancestor of
+the candidate, and only if all of the following hold:
+
+- `git diff --no-renames --name-only` between the two commits lists only
+  `web/`, `apps/` and `docs/` paths (a rename out of a native path is a change;
+  any other or unknown path forces the normal build);
+- that commit's manifest is `canary_passed` and its `dist/` passes the same
+  metadata, checksum, executable-bit and version verification as a fresh build;
+- the copy is verified again for the candidate before use.
+
+The reused `dist/` carries `artifact-provenance.json` (`source_commit`,
+`candidate_commit`). `verify-machine-artifacts.sh` accepts artifacts built for
+another commit only with that file and re-derives ancestry and the path
+allowlist from git itself, so a forged provenance file cannot launder a native
+change. The Canary manifest records `machine_artifacts: {source_commit, reused}`,
+the Proxy serves the reused bytes, and installed binaries keep reporting the
+commit they were actually built from. Set `TREER_REUSE_NATIVE_ARTIFACTS=0` to
+force a native build. The hosted Proxy and the Cloudflare Worker are always built
+or deployed from the candidate, so changes to `apps/policy` (embedded in the
+Proxy) and to the frontend still ship.
+
 ## Workspace Apps
 
 Both Proxy Docker build contexts include the Policy client and all other embedded
@@ -180,7 +209,7 @@ make a release stricter.
 | --- | --- | --- |
 | `docs/`, root `*.md` only | `node scripts/check-docs.mjs` | not required |
 | `apps/` only | docs check plus each changed App's own tests and `npm run check` | not required; the App owner deploys the App after CI |
-| `web/`, `mobile/` | web typecheck, build and Playwright | required before machines or Canary use the build |
+| `web/`, `mobile/` | web typecheck, build and Playwright | Canary and the Policy check required; the native build is reused from the previous `canary_passed` commit when [allowed](#reusing-native-artifacts-for-web-apps-and-docs-changes) |
 | `launchers/` | `just agent-launcher-test` | required: the Controller embeds the launcher payload |
 | `scripts/`, `.github/`, `justfile` that are not part of the release pipeline | `just check` | not required |
 | release pipeline: canary, deploy, promote, artifact staging/verification, machine-update scripts and `build-release-artifacts.yml`/`publish-ghcr.yml` | `just check` | required; ships alone |
