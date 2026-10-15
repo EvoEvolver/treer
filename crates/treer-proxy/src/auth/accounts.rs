@@ -6,6 +6,245 @@ pub(super) const LOGIN_ATTEMPT_LIMIT: i32 = 10;
 const LOGIN_ATTEMPT_WINDOW_SECONDS: i64 = 15 * 60;
 
 impl AuthStore {
+    pub(super) async fn retain_pending_invitation(
+        &self,
+        session: &CurrentSession,
+        token: &str,
+    ) -> Result<(), AuthFailure> {
+        let preview = self.preview_invitation(token).await?;
+        if preview.status != "valid" || preview.kind.as_deref() != Some("organization") {
+            return Ok(());
+        }
+        sqlx::query("DELETE FROM pending_organization_invitations WHERE expires_at <= now()")
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("INSERT INTO pending_organization_invitations(session_hash,pending_id,user_id,invite_hash,expires_at) VALUES($1,$2,$3,$4,now()+interval '10 minutes') ON CONFLICT(session_hash) DO UPDATE SET pending_id=excluded.pending_id,invite_hash=excluded.invite_hash,expires_at=excluded.expires_at")
+            .bind(fast_secret_hash(&session.token)).bind(format!("{}{}",Uuid::new_v4().simple(),Uuid::new_v4().simple()))
+            .bind(&session.user_id).bind(fast_secret_hash(token)).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        if let Some(organization_id) = preview.organization_id {
+            audit::insert(
+                &mut tx,
+                NewAuditEvent {
+                    organization_id: &organization_id,
+                    workspace_id: None,
+                    actor_kind: "user",
+                    actor_id: Some(&session.user_id),
+                    source: "oauth",
+                    action: "invitation.pending",
+                    resource_kind: "organization",
+                    resource_id: &organization_id,
+                    resource_name: None,
+                    payload: json!({"replaces_session_pending":true,"invitation_ref":fast_secret_hash(token)}),
+                },
+            )
+            .await
+            .map_err(AuthFailure::database)?;
+        }
+        tx.commit().await.map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
+    pub(super) async fn pending_invitation(
+        &self,
+        session: &CurrentSession,
+    ) -> Result<Option<Value>, AuthFailure> {
+        let row = sqlx::query("SELECT p.pending_id,i.token FROM pending_organization_invitations p JOIN invitations i ON encode(sha256(convert_to(i.token,'UTF8')),'hex')=p.invite_hash WHERE p.session_hash=$1 AND p.user_id=$2 AND p.expires_at>now() AND i.used_at IS NULL")
+            .bind(fast_secret_hash(&session.token)).bind(&session.user_id).fetch_optional(&self.pool).await.map_err(AuthFailure::database)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let preview = self
+            .preview_invitation(&row.get::<String, _>("token"))
+            .await?;
+        let mut value = serde_json::to_value(preview)
+            .map_err(|_| AuthFailure::bad_request("invalid_invitation", "invalid invitation"))?;
+        value["pending_id"] = json!(row.get::<String, _>("pending_id"));
+        Ok(Some(value))
+    }
+
+    pub(super) async fn discard_pending_invitation(
+        &self,
+        session: &CurrentSession,
+    ) -> Result<(), AuthFailure> {
+        sqlx::query(
+            "DELETE FROM pending_organization_invitations WHERE session_hash=$1 AND user_id=$2",
+        )
+        .bind(fast_secret_hash(&session.token))
+        .bind(&session.user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
+    pub(super) async fn consume_pending_invitation(
+        &self,
+        session: &CurrentSession,
+        id: &str,
+    ) -> Result<String, AuthFailure> {
+        if id.len() != 64 || !id.bytes().all(|v| v.is_ascii_hexdigit()) {
+            return Err(invalid_invitation());
+        }
+        let hash: String = sqlx::query_scalar("DELETE FROM pending_organization_invitations WHERE session_hash=$1 AND user_id=$2 AND pending_id=$3 AND expires_at>now() RETURNING invite_hash")
+            .bind(fast_secret_hash(&session.token)).bind(&session.user_id).bind(id).fetch_optional(&self.pool).await.map_err(AuthFailure::database)?.ok_or_else(invalid_invitation)?;
+        sqlx::query_scalar(
+            "SELECT token FROM invitations WHERE encode(sha256(convert_to(token,'UTF8')),'hex')=$1",
+        )
+        .bind(hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(invalid_invitation)
+    }
+
+    pub(super) async fn reserve_invitation_attempt(&self, source: &str) -> Result<(), AuthFailure> {
+        for (bucket, limit) in [
+            ("global".into(), 600),
+            (format!("ip:{}", fast_secret_hash(source)), 60),
+        ] {
+            let count: i32 = sqlx::query_scalar("INSERT INTO invitation_attempts(bucket,attempts,window_started_at) VALUES($1,1,now()) ON CONFLICT(bucket) DO UPDATE SET attempts=CASE WHEN invitation_attempts.window_started_at <= now()-interval '1 minute' THEN 1 ELSE invitation_attempts.attempts+1 END, window_started_at=CASE WHEN invitation_attempts.window_started_at <= now()-interval '1 minute' THEN now() ELSE invitation_attempts.window_started_at END RETURNING attempts")
+                .bind(bucket).fetch_one(&self.pool).await.map_err(AuthFailure::database)?;
+            if count > limit {
+                return Err(AuthFailure::too_many_requests(
+                    "invitation_rate_limited",
+                    "too many invitation requests; try again later",
+                ));
+            }
+        }
+        sqlx::query("DELETE FROM invitation_attempts WHERE bucket IN (SELECT bucket FROM invitation_attempts WHERE window_started_at < now()-interval '1 day' LIMIT 100 FOR UPDATE SKIP LOCKED) AND window_started_at < now()-interval '1 day'")
+            .execute(&self.pool).await.map_err(AuthFailure::database)?;
+        Ok(())
+    }
+
+    /// Possession of the invitation permits this minimal preview, not membership.
+    pub(super) async fn preview_invitation(
+        &self,
+        token: &str,
+    ) -> Result<treer_protocol::InvitationPreview, AuthFailure> {
+        let row = if token.is_empty() || token.len() > 256 {
+            None
+        } else {
+            sqlx::query("SELECT i.kind,o.organization_id,o.name FROM invitations i LEFT JOIN organizations o ON o.organization_id=i.organization_id WHERE i.token=$1 AND i.used_at IS NULL")
+                .bind(token).fetch_optional(&self.pool).await.map_err(AuthFailure::database)?
+        };
+        Ok(treer_protocol::InvitationPreview {
+            capabilities: vec![treer_protocol::ORGANIZATION_INVITATION_CAPABILITY.into()],
+            status: if row.is_some() { "valid" } else { "invalid" }.into(),
+            kind: row.as_ref().map(|r| r.get("kind")),
+            organization_id: row.as_ref().and_then(|r| r.get("organization_id")),
+            organization_name: row.as_ref().and_then(|r| r.get("name")),
+        })
+    }
+
+    pub(super) async fn accept_invitation(
+        &self,
+        token: &str,
+        user_id: &str,
+    ) -> Result<treer_protocol::InvitationAcceptance, AuthFailure> {
+        if token.is_empty() || token.len() > 256 {
+            return Err(invalid_invitation());
+        }
+        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let invitation = sqlx::query("SELECT kind,organization_id,role,used_at,used_by FROM invitations WHERE token=$1 FOR UPDATE")
+            .bind(token).fetch_optional(&mut *tx).await.map_err(AuthFailure::database)?
+            .ok_or_else(invalid_invitation)?;
+        if invitation.get::<String, _>("kind") != "organization" {
+            if invitation.get::<Option<String>, _>("used_at").is_some() {
+                return Err(invalid_invitation());
+            }
+            return Err(AuthFailure::bad_request(
+                "not_organization_invite",
+                "only organization invitations can be accepted after login",
+            ));
+        }
+        let organization_id: String = invitation.get("organization_id");
+        let used = invitation.get::<Option<String>, _>("used_at").is_some();
+        if used && invitation.get::<Option<String>, _>("used_by").as_deref() != Some(user_id) {
+            return Err(invalid_invitation());
+        }
+        let existing: Option<String> = sqlx::query_scalar(
+            "SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2",
+        )
+        .bind(&organization_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(AuthFailure::database)?;
+        if let Some(role) = existing {
+            audit::insert(
+                &mut tx,
+                NewAuditEvent {
+                    organization_id: &organization_id,
+                    workspace_id: None,
+                    actor_kind: "user",
+                    actor_id: Some(user_id),
+                    source: "api",
+                    action: "invitation.accepted",
+                    resource_kind: "organization",
+                    resource_id: &organization_id,
+                    resource_name: None,
+                    payload: json!({"role":role,"already_member":true,"invitation_ref":fast_secret_hash(token)}),
+                },
+            )
+            .await
+            .map_err(AuthFailure::database)?;
+            tx.commit().await.map_err(AuthFailure::database)?;
+            return Ok(treer_protocol::InvitationAcceptance {
+                organization_id,
+                role,
+                already_member: true,
+            });
+        }
+        if used {
+            return Err(invalid_invitation());
+        }
+        let inserted = sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES($1,$2,$3,$4) ON CONFLICT(organization_id,user_id) DO NOTHING")
+            .bind(&organization_id).bind(user_id).bind("member").bind(Utc::now().to_rfc3339())
+            .execute(&mut *tx).await.map_err(AuthFailure::database)?.rows_affected() == 1;
+        let role: String = sqlx::query_scalar(
+            "SELECT role FROM organization_members WHERE organization_id=$1 AND user_id=$2",
+        )
+        .bind(&organization_id)
+        .bind(user_id)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(AuthFailure::database)?;
+        if inserted {
+            sqlx::query("UPDATE invitations SET used_at=$1,used_by=$2 WHERE token=$3")
+                .bind(Utc::now().to_rfc3339())
+                .bind(user_id)
+                .bind(token)
+                .execute(&mut *tx)
+                .await
+                .map_err(AuthFailure::database)?;
+        }
+        audit::insert(
+            &mut tx,
+            NewAuditEvent {
+                organization_id: &organization_id,
+                workspace_id: None,
+                actor_kind: "user",
+                actor_id: Some(user_id),
+                source: "api",
+                action: "invitation.accepted",
+                resource_kind: "organization",
+                resource_id: &organization_id,
+                resource_name: None,
+                payload: json!({"role":role,"already_member":!inserted,"invitation_ref":fast_secret_hash(token)}),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        tx.commit().await.map_err(AuthFailure::database)?;
+        Ok(treer_protocol::InvitationAcceptance {
+            organization_id,
+            role,
+            already_member: !inserted,
+        })
+    }
+
     /// Atomically count this attempt before any password hashing so parallel
     /// guesses cannot overshoot the limit. Successful sign-in clears the bucket.
     /// The bucket key is normalized by PostgreSQL's `lower()`, the same function
@@ -696,6 +935,7 @@ impl AuthStore {
             "github": self.oauth.github.is_some(),
             "google": self.oauth.google.is_some(),
             "invitation_required": self.oauth.invitation_required,
+            "capabilities": [treer_protocol::ORGANIZATION_INVITATION_CAPABILITY],
         })
     }
 
@@ -711,6 +951,8 @@ impl AuthStore {
         &self,
         provider: &str,
         invite: Option<&str>,
+        join_organization: bool,
+        browser: &str,
     ) -> Result<Url, AuthFailure> {
         let config = self
             .oauth
@@ -729,14 +971,16 @@ impl AuthStore {
             .await
             .map_err(AuthFailure::database)?;
         sqlx::query(
-            "INSERT INTO oauth_states(state, provider, invite_token, created_at, expires_at) \
-             VALUES($1, $2, $3, $4, $5)",
+            "INSERT INTO oauth_states(state, provider, invite_hash, created_at, expires_at, browser_hash, join_organization) \
+             VALUES($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(&state)
         .bind(provider)
-        .bind(invite)
+        .bind(invite.map(fast_secret_hash))
         .bind(&now_text)
         .bind((now + Duration::minutes(OAUTH_STATE_TTL_MINUTES)).to_rfc3339())
+        .bind(fast_secret_hash(browser))
+        .bind(join_organization)
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
@@ -769,21 +1013,33 @@ impl AuthStore {
         &self,
         provider: &str,
         state: &str,
-    ) -> Result<Option<String>, AuthFailure> {
+        browser: &str,
+    ) -> Result<PendingOAuthInvite, AuthFailure> {
         if state.len() != 64 || !state.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             return Err(invalid_oauth_state());
         }
-        sqlx::query_scalar::<_, Option<String>>(
+        let pending = sqlx::query(
             "DELETE FROM oauth_states WHERE state = $1 AND provider = $2 AND expires_at > $3 \
-             RETURNING invite_token",
+             AND browser_hash=$4 RETURNING invite_hash,join_organization",
         )
         .bind(state)
         .bind(provider)
         .bind(Utc::now().to_rfc3339())
+        .bind(fast_secret_hash(browser))
         .fetch_optional(&self.pool)
         .await
         .map_err(AuthFailure::database)?
-        .ok_or_else(invalid_oauth_state)
+        .ok_or_else(invalid_oauth_state)?;
+        let invite = if let Some(hash) = pending.get::<Option<String>, _>("invite_hash") {
+            Some(sqlx::query_scalar("SELECT token FROM invitations WHERE encode(sha256(convert_to(token,'UTF8')),'hex')=$1")
+                .bind(hash).fetch_optional(&self.pool).await.map_err(AuthFailure::database)?.ok_or_else(invalid_invitation)?)
+        } else {
+            None
+        };
+        Ok(PendingOAuthInvite {
+            invite,
+            join_organization: pending.get("join_organization"),
+        })
     }
 
     pub(super) async fn exchange_oauth_code(
@@ -939,6 +1195,7 @@ impl AuthStore {
         &self,
         profile: OAuthProfile,
         invite: Option<&str>,
+        join_organization: bool,
     ) -> Result<CurrentSession, AuthFailure> {
         let now = Utc::now().to_rfc3339();
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
@@ -1011,7 +1268,7 @@ impl AuthStore {
             )
         } else {
             let invitation = self
-                .load_registration_invitation(&mut transaction, invite)
+                .load_registration_invitation(&mut transaction, invite, join_organization)
                 .await?;
             let password_hash = hash_password(&format!(
                 "{}{}",
@@ -1090,7 +1347,7 @@ impl AuthStore {
         let password_hash = hash_password(&password)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let invitation = self
-            .load_registration_invitation(&mut transaction, invite)
+            .load_registration_invitation(&mut transaction, invite, false)
             .await?;
         let now = Utc::now().to_rfc3339();
         let user_id = insert_user(
@@ -1125,6 +1382,7 @@ impl AuthStore {
         preferred_name: &str,
         password: &str,
         client: Option<NativeClientAttribution>,
+        join_organization: bool,
     ) -> Result<CurrentSession, AuthFailure> {
         let email = normalize_email(email)?;
         let preferred_name = validate_preferred_name(preferred_name)?;
@@ -1132,7 +1390,7 @@ impl AuthStore {
         let password_hash = hash_password(&password)?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let invitation = self
-            .load_registration_invitation(&mut transaction, invite)
+            .load_registration_invitation(&mut transaction, invite, join_organization)
             .await?;
         let now = Utc::now().to_rfc3339();
         let user_id = insert_user(
@@ -1164,6 +1422,7 @@ impl AuthStore {
         &self,
         transaction: &mut Transaction<'_, Postgres>,
         invite: Option<&str>,
+        join_organization: bool,
     ) -> Result<Option<RegistrationInvitation>, AuthFailure> {
         let Some(invite) = invite.filter(|value| !value.is_empty()) else {
             if self.oauth.invitation_required {
@@ -1183,11 +1442,13 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?
         .ok_or_else(invalid_invitation)?;
+        if invitation.get::<String, _>("kind") == "organization" && !join_organization {
+            return Ok(None);
+        }
         Ok(Some(RegistrationInvitation {
             token: invite.to_string(),
             kind: invitation.get("kind"),
             organization_id: invitation.get("organization_id"),
-            role: invitation.get("role"),
         }))
     }
 
@@ -1252,8 +1513,7 @@ pub(super) async fn apply_registration_membership(
 ) -> Result<(), AuthFailure> {
     if let Some(invitation) = &invitation {
         let result = sqlx::query(
-            "UPDATE invitations SET used_at = $1, used_by = $2 \
-             WHERE token = $3 AND used_at IS NULL",
+            "UPDATE invitations SET used_at=$1,used_by=$2 WHERE token=$3 AND used_at IS NULL",
         )
         .bind(now)
         .bind(user_id)
@@ -1293,28 +1553,28 @@ pub(super) async fn apply_registration_membership(
             .map_err(AuthFailure::database)?;
         }
         Some("organization") => {
-            let invitation = invitation.as_ref().expect("matched invitation");
-            let organization_id = invitation.organization_id.as_deref().ok_or_else(|| {
-                AuthFailure::internal(
-                    "invalid_invitation_state",
-                    "organization invitation has no organization".to_string(),
-                )
-            })?;
-            let role = invitation.role.as_deref().ok_or_else(|| {
-                AuthFailure::internal(
-                    "invalid_invitation_state",
-                    "organization invitation has no role".to_string(),
-                )
-            })?;
-            sqlx::query(
-                "INSERT INTO organization_members(organization_id, user_id, role, joined_at) \
-                 VALUES($1, $2, $3, $4)",
+            let invitation = invitation.as_ref().ok_or_else(invalid_invitation)?;
+            let organization_id = invitation
+                .organization_id
+                .as_deref()
+                .ok_or_else(invalid_invitation)?;
+            sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES($1,$2,'member',$3)")
+                .bind(organization_id).bind(user_id).bind(now).execute(&mut **transaction).await.map_err(AuthFailure::database)?;
+            audit::insert(
+                transaction,
+                NewAuditEvent {
+                    organization_id,
+                    workspace_id: None,
+                    actor_kind: "user",
+                    actor_id: Some(user_id),
+                    source: "api",
+                    action: "invitation.accepted",
+                    resource_kind: "organization",
+                    resource_id: organization_id,
+                    resource_name: None,
+                    payload: json!({"role":"member","registration":true,"invitation_ref":fast_secret_hash(&invitation.token)}),
+                },
             )
-            .bind(organization_id)
-            .bind(user_id)
-            .bind(role)
-            .bind(now)
-            .execute(&mut **transaction)
             .await
             .map_err(AuthFailure::database)?;
         }

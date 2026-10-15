@@ -40,6 +40,23 @@ CREATE TABLE IF NOT EXISTS oauth_states (
     expires_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS oauth_states_expires_at ON oauth_states(expires_at);
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS invite_hash TEXT;
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS browser_hash TEXT;
+ALTER TABLE oauth_states ADD COLUMN IF NOT EXISTS join_organization BOOLEAN NOT NULL DEFAULT FALSE;
+
+CREATE TABLE IF NOT EXISTS invitation_attempts (
+    bucket TEXT PRIMARY KEY,
+    attempts INTEGER NOT NULL,
+    window_started_at TIMESTAMPTZ NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pending_organization_invitations (
+    session_hash TEXT PRIMARY KEY,
+    pending_id TEXT NOT NULL UNIQUE,
+    user_id TEXT NOT NULL,
+    invite_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS organizations (
     organization_id TEXT PRIMARY KEY,

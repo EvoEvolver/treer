@@ -128,6 +128,52 @@ the Host terminal contract while preserving ordinary `prompt` authorization and
 audit behavior. The queue endpoint accepts only the bridge Agent's own workload
 credential and rejects attempts to read another Agent's queue.
 
+## Organization invitation consent
+
+The public auth configuration and invitation previews advertise
+`organization.invitation-accept.v1`. Console must require that capability before
+using this flow; an old Proxy's 404 is unsupported, never successful joining.
+Upgrade every Proxy replica before activating the new Console flow: old replicas
+do not enforce the new explicit-consent registration contract.
+
+`POST /api/invitations/preview` accepts JSON `{ "token": "inv_…" }` and returns
+flat `capabilities`, `status` (`valid` or `invalid`), `kind`, `organization_id`,
+and `organization_name`. Unknown, used or deleted invitations return the same
+invalid body with null metadata. Preview does not consume anything.
+`POST /api/invitations/accept` accepts exactly one of `token` or `pending_id` and
+returns `{organization_id, role, already_member}`. It requires a human session
+cookie and the exact Console Origin; Authorization headers and cross-site
+requests are rejected. A locked invitation row serializes membership insertion,
+single-use consumption and audit in one PostgreSQL transaction. Organization
+invites grant only `member`, including legacy invitations storing higher roles.
+Existing members retain their role and do not consume an unused invite. Personal
+invites return `not_organization_invite`; invalid invites return
+`invalid_invitation`. Repeating acceptance by the consuming member is idempotent.
+
+Registration consumes an organization invite and joins in the account-creation
+transaction only with `join_organization:true`. Without that explicit flag it
+creates the personal account/organization and leaves the org invite unused.
+`POST /api/auth/oauth/{provider}/start` accepts JSON with `invite_token` and
+`join_organization` (`true`/`false`), requires `X-Treer-Console: 1` and the exact
+Console Origin, and returns `{authorization_url}`. Console validates HTTPS and
+the selected IdP's exact origin before navigating; CSP remains unchanged.
+GET start supports only the no-invite flow. PostgreSQL
+stores an invitation hash, consent flag, state, browser-cookie hash and ten-minute
+expiry; the state is consumed once only with the matching browser cookie. The
+invitation never enters the IdP or callback URL. New OAuth accounts honor the
+explicit join flag in the creation transaction; existing accounts never autojoin.
+
+After OAuth, a still-valid invitation is retained as one opaque pending ID per
+human session, with its invitation hash, user ID and ten-minute expiry. Console
+returns to its root without an invitation token or pending ID in the URL.
+`GET /api/invitations/pending` (cookie-only, no-store) returns the preview fields
+plus `pending_id`, or 204 when absent, expired or unusable. Acceptance of that ID
+is session/user-bound and consumes the pending entry once, even if subsequent
+joining fails; it cannot be replayed by another session. Successful acceptance
+clears pending state; `DELETE /api/invitations/pending` declines with 204 and the
+same cookie/Origin checks. Replacement is audited; no audit contains raw tokens.
+All replicas use shared PostgreSQL state, not process-local pending storage.
+
 ## App Identity
 
 An enabled workspace service uses its stable `service_id` as OAuth client ID.

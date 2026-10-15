@@ -352,6 +352,8 @@ pub struct LoginRequest {
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     invite: Option<String>,
+    #[serde(default)]
+    join_organization: bool,
     email: String,
     preferred_name: String,
     password: String,
@@ -379,9 +381,17 @@ pub struct ResetPasswordRequest {
     password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 pub struct OAuthStartQuery {
+    #[serde(alias = "invite_token")]
     invite: Option<String>,
+    #[serde(default)]
+    join_organization: bool,
+}
+
+struct PendingOAuthInvite {
+    invite: Option<String>,
+    join_organization: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -403,8 +413,11 @@ struct RegistrationInvitation {
     token: String,
     kind: String,
     organization_id: Option<String>,
-    role: Option<String>,
 }
+
+#[cfg(test)]
+#[path = "auth/invitation_tests.rs"]
+mod invitation_tests;
 
 #[derive(Debug, Deserialize)]
 struct OAuthTokenResponse {

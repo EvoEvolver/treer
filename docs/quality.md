@@ -1,5 +1,17 @@
 # Quality And Maintenance
 
+### Organization invitation consent checks
+
+The PostgreSQL-backed Proxy invitation tests use synthetic invitations in
+isolated schemas. They cover explicit registration consent, member-only legacy
+roles, concurrent single-use acceptance, unchanged existing members, cookie/Origin
+and Bearer rejection, JSON OAuth start with the Console custom header, state and
+browser-cookie binding, hash-only handoff records, expiry/replay, and session-bound
+pending preview/accept/decline. CORS tests retain the exact Console-origin allowlist
+and permit its OAuth custom header without permitting native-client headers.
+These fixtures do not log into a real IdP, consume a user's invitation, or prove
+mixed-version rollout safety; upgrade all Proxy replicas before enabling the flow.
+
 ### App-layer deployment checks
 
 `python3 -m unittest discover -s scripts/tests -p test_app_deploy.py -v` runs

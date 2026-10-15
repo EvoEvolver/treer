@@ -732,7 +732,10 @@ pub fn router(
         )
         .route("/api/auth/login", post(auth::login))
         .route("/api/auth/config", get(auth::oauth_config))
-        .route("/api/auth/oauth/{provider}/start", get(auth::oauth_start))
+        .route(
+            "/api/auth/oauth/{provider}/start",
+            get(auth::oauth_start).post(auth::oauth_start_json),
+        )
         .route(
             "/api/auth/oauth/{provider}/callback",
             get(auth::oauth_callback),
@@ -743,6 +746,12 @@ pub fn router(
         )
         .route("/api/auth/reset-password", post(auth::reset_password))
         .route("/api/auth/register", post(auth::register))
+        .route("/api/invitations/preview", post(auth::preview_invitation))
+        .route("/api/invitations/accept", post(auth::accept_invitation))
+        .route(
+            "/api/invitations/pending",
+            get(auth::pending_invitation).delete(auth::discard_pending_invitation),
+        )
         .route("/api/admin/login", post(auth::admin_login))
         .route("/agent/connect", get(agent_socket::upgrade))
         .merge(agent_control)
