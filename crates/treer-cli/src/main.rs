@@ -131,7 +131,9 @@ fn connection_with_environment(
     let operator = environment("TREER_OPERATOR_CREDENTIAL").filter(|value| !value.is_empty());
     // An explicit connection flag must never redirect an environment-bound
     // workload/operator credential. Reject before discovery or network I/O.
-    if managed || (operator.is_some() && (bound_workspace.is_some() || bound_url.is_some())) {
+    // Independent clients may select an endpoint when neither binding exists.
+    // Partial bindings still fail closed rather than accepting a missing half.
+    if (managed || operator.is_some()) && (bound_workspace.is_some() || bound_url.is_some()) {
         let label = |value: Option<&str>| {
             value
                 .filter(|s| {
@@ -567,6 +569,64 @@ mod configuration_tests {
         )
         .unwrap();
         assert_eq!(selected.url.as_str(), "http://127.0.0.1:8791/");
+    }
+
+    #[test]
+    fn unbound_agent_can_select_endpoint_but_partial_bindings_fail_closed() {
+        let context = |key: &str| match key {
+            "TREER_IDENTITY_MODE" => Some("agent".into()),
+            "TREER_AGENT_ID" => Some("ag_fixture".into()),
+            "TREER_WORKLOAD_CREDENTIAL" => Some("synthetic-secret".into()),
+            _ => None,
+        };
+        for argv in [
+            vec!["--url", "http://127.0.0.1:8791", "status"],
+            vec![
+                "--workspace=ws_two",
+                "--url=http://127.0.0.1:8791",
+                "status",
+            ],
+        ] {
+            let selected = super::connection_with_environment(
+                argv.into_iter().map(str::to_owned).collect(),
+                context,
+                || panic!("independent Agent must not discover operator credentials"),
+            )
+            .unwrap();
+            assert_eq!(selected.url.as_str(), "http://127.0.0.1:8791/");
+            assert_eq!(selected.argv, ["status"]);
+            assert_eq!(selected.headers.len(), 2);
+        }
+        for (binding, value, argv) in [
+            (
+                "TREER_WORKSPACE_ID",
+                "ws_one",
+                vec!["--url=http://127.0.0.1:8791", "status"],
+            ),
+            (
+                "TREER_AGENT_SERVER_URL",
+                "http://127.0.0.1:8790",
+                vec!["--workspace=ws_two", "status"],
+            ),
+        ] {
+            let error = super::connection_with_environment(
+                argv.into_iter().map(str::to_owned).collect(),
+                |key| {
+                    if key == binding {
+                        Some(value.into())
+                    } else {
+                        context(key)
+                    }
+                },
+                || panic!("binding conflict must fail before discovery"),
+            )
+            .err()
+            .expect("partial binding must reject the missing counterpart")
+            .to_string();
+            assert!(error.contains("current identity belongs to workspace"));
+            assert!(!error.contains("synthetic-secret"));
+            assert!(!error.contains("127.0.0.1"));
+        }
     }
 
     #[test]

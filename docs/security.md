@@ -18,8 +18,11 @@ network requests or credential forwarding. These are accidental-misdirection
 checks, not protection against a same-account process replacing its environment
 or reading another account-owned installation. Independent Agent clients should
 set `TREER_WORKSPACE_ID` and `TREER_AGENT_SERVER_URL` along with their credentials;
-without a bound value an explicit override fails closed, while flag-free use is
-unchanged. Errors never describe the destination installation or its credentials.
+if either binding exists, an explicit override of a missing or different binding
+fails closed. With neither binding, an independent Agent client may select its
+connection explicitly: its credentials are sent to that explicit URL, which the
+caller must trust. Flag-free use is unchanged. Errors never describe the
+destination installation or its credentials.
 This consistency guard applies only to managed identities or operators with an
 environment-bound workspace/URL; a pure operator with no such binding is expected
 to select its connection using explicit `--workspace`/`--url` and is not restricted

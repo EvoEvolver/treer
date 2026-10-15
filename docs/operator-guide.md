@@ -283,6 +283,9 @@ credentials. Use an operator terminal configured with the destination
 workspace's own credentials instead; flag-free managed CLI behavior is unchanged.
 The guard applies only to managed identities or bound operators; a pure operator
 with no workspace/URL binding can use explicit `--workspace`/`--url` normally.
+An independent Agent client with neither binding may also explicitly select its
+connection; its credentials are sent to the explicit URL, which it must trust.
+If either binding exists, explicitly overriding a missing counterpart is rejected.
 
 **One OS account = one trust domain.** Same-account workspaces/Controllers are
 mutually trusted: A's exec/Agent can read and impersonate B's local identities.
