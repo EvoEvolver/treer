@@ -134,6 +134,16 @@ the revision remains local to a Proxy process rather than a durable global clock
 
 ### Output retention and recovery
 
+Controller command-resolution regressions cover absolute-only PATH lookup for
+Agent/App starts and recovery. Unix and Windows run an isolated child with a
+cwd executable decoy, empty/relative PATH entries and no PATH; all fail closed.
+Other cases cover fixed Windows `.exe`/`.com` selection, rejected UNC/device
+search directories, regular/executable files, relative-command rejection and
+unchanged explicit absolute commands. The mock Host startup/restart/App-update
+fixture asserts absolute commands cross the Host boundary while logical command
+names remain in durable startup intent. Native Windows execution remains a
+release gate; a cross-target compilation is not native execution evidence.
+
 Controller inventory reconciliation must preserve the cached output and its
 revision for the same process generation and stream epoch, including exited
 Agent and App instances. An inventory-only update is not an empty transcript.

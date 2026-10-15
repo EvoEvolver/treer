@@ -495,6 +495,8 @@ impl ControllerRuntime {
                 "Proxy supplied an invalid workload credential",
             ));
         }
+        let mut env = self.process_environment(Some((&agent_id, &workload_credential)));
+        let command = resolve_agent_command(&launch.command, &env)?;
         // Persist the resolved launch, rather than a mutable profile reference,
         // before asking the Host to start the workload.
         if self.inner.startup_store.get(&agent_id).is_none() {
@@ -543,7 +545,6 @@ impl ControllerRuntime {
             workload_credential: workload_credential.clone(),
             http_proxy_port: Some(proxy_port),
         };
-        let mut env = self.process_environment(Some((&agent_id, &workload_credential)));
         crate::workload_proxy::inject_environment(&mut env, proxy_port);
         let response = self
             .inner
@@ -552,7 +553,7 @@ impl ControllerRuntime {
                 HostCommand::Spawn {
                     request: HostSpawnRequest {
                         process_id: agent_id.clone(),
-                        command: launch.command,
+                        command,
                         args: launch.args,
                         cwd: request.cwd,
                         env,
@@ -1430,6 +1431,8 @@ impl ControllerRuntime {
             return Err(ProtocolError::new("startup_migration_required", "legacy namespace port publications cannot be restored; update the startup command and register an explicit machine service"));
         }
         let agent_id = &entry.spec.agent_id;
+        let mut env = self.process_environment(Some((agent_id, &entry.workload_credential)));
+        let command = resolve_agent_command(&entry.spec.command, &env)?;
         let proxy_port =
             self.inner
                 .workload_proxies
@@ -1445,7 +1448,6 @@ impl ControllerRuntime {
             workload_credential: entry.workload_credential.clone(),
             http_proxy_port: Some(proxy_port),
         };
-        let mut env = self.process_environment(Some((agent_id, &entry.workload_credential)));
         crate::workload_proxy::inject_environment(&mut env, proxy_port);
         let launch = AgentLaunch {
             command: entry.spec.command.clone(),
@@ -1460,7 +1462,7 @@ impl ControllerRuntime {
                 HostCommand::Spawn {
                     request: HostSpawnRequest {
                         process_id: agent_id.clone(),
-                        command: launch.command,
+                        command,
                         args: launch.args,
                         cwd: entry.spec.cwd.clone(),
                         env,

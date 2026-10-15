@@ -256,6 +256,31 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
         &Uuid::new_v4().simple().to_string()[..12]
     ));
     std::fs::create_dir_all(root.join("repo")).unwrap();
+    let bin = root.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let executable_name = |name: &str| {
+        if cfg!(windows) {
+            format!("{name}.exe")
+        } else {
+            name.into()
+        }
+    };
+    for name in ["old-command", "new-command", "fail-command"] {
+        let path = bin.join(executable_name(name));
+        std::fs::write(&path, b"mock Host executable").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
+    }
+    // A workload-local decoy must never take precedence over absolute PATH.
+    std::fs::write(
+        root.join("repo").join(executable_name("old-command")),
+        b"decoy",
+    )
+    .unwrap();
+    let expected_new_command = bin.join(executable_name("new-command"));
     #[cfg(unix)]
     let socket = root.join("host.sock");
     #[cfg(windows)]
@@ -285,7 +310,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
             let mut bytes = vec![0; length as usize];
             stream.read_exact(&mut bytes).await.unwrap();
             let request: HostRequest = decode_message(&bytes).unwrap();
-            if matches!(&request.command, HostCommand::Spawn { request } if request.command == "fail-command")
+            if matches!(&request.command, HostCommand::Spawn { request } if Path::new(&request.command).file_stem().and_then(|name| name.to_str()) == Some("fail-command"))
             {
                 let encoded = encode_message(&HostMessage::Response {
                     request_id: request.request_id,
@@ -384,7 +409,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
             server_id: "server".into(),
             agent_server_url: "http://127.0.0.1:1".into(),
             proxy_public_url: "https://proxy.example/".into(),
-            treer_binary: None,
+            treer_binary: Some(bin.join("treer")),
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: saved_path.clone(),
             root: std::fs::canonicalize(&root).unwrap(),
@@ -413,6 +438,14 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
         .await
         .unwrap();
     let generation = original.run_generation;
+    assert_eq!(
+        runtime.get_startup("stable-id").unwrap().command,
+        "old-command"
+    );
+    assert_eq!(
+        spawns.lock().unwrap()[0].command,
+        bin.join(executable_name("old-command")).to_str().unwrap()
+    );
     let replace = || ReplaceAgentStartupRequest {
         cwd: None,
         command: "new-command".into(),
@@ -461,7 +494,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
     let launches = spawns.lock().unwrap().clone();
     assert_eq!(launches.len(), 3);
     for launch in &launches[1..] {
-        assert_eq!(launch.command, "new-command");
+        assert_eq!(launch.command, expected_new_command.to_str().unwrap());
         assert_eq!(launch.args, replace().args);
         assert_eq!(launch.env["TREER_WORKLOAD_CREDENTIAL"], credential);
         assert_eq!(launch.cols, 80);
@@ -581,7 +614,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
     for launch in &spawns.lock().unwrap()[3..] {
         assert_eq!(launch.process_id, "stable-id");
         assert_eq!(launch.env["TREER_WORKLOAD_CREDENTIAL"], credential);
-        assert_eq!(launch.command, "new-command");
+        assert_eq!(launch.command, expected_new_command.to_str().unwrap());
     }
     let declaration: CreateAgentRequest = serde_json::from_value(serde_json::json!({
         "kind":"app", "name":"target", "cwd":"repo",
@@ -1273,6 +1306,14 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
         decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
     };
     use treer_protocol::RuntimeRestoreState;
+    // The mock Host does not execute it, but the Controller now requires a
+    // platform-valid absolute command before sending a spawn.
+    let executable = std::env::current_exe()
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string();
+    let host_executable = executable.clone();
     let root = std::env::temp_dir().join(format!("trr-{}", Uuid::new_v4().simple()));
     std::fs::create_dir_all(&root).unwrap();
     #[cfg(unix)]
@@ -1333,7 +1374,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
                         request.process_id, "recover",
                         "stopped or revoked workload was spawned"
                     );
-                    assert_eq!(request.command, "/bin/sh");
+                    assert_eq!(request.command, host_executable);
                     assert_eq!(request.cols, 80);
                     assert_eq!(request.rows, 24);
                     assert_eq!(
@@ -1428,7 +1469,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
                     kind: "command".into(),
                     name: id.into(),
                     cwd: ".".into(),
-                    command: "/bin/sh".into(),
+                    command: executable.clone(),
                     args: vec![],
                     publish_ports: vec![],
                     enabled,
