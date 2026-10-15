@@ -289,6 +289,12 @@ Controller) gets an `[Acceptance]` ticket blocked by the release. A gate that
 fails once and passes on its permitted rerun additionally gets a `flaky` ticket
 (see [Graded gates](#graded-gates-and-staging-batches)).
 
+When a Canary candidate reused native artifacts, the machines run binaries that
+report their real build commit, not the candidate's. The Policy check therefore
+takes that commit explicitly (`--controller-commit`, the manifest's
+`machine_artifacts.source_commit`), and the receipt records it; for a fresh native
+build it stays the candidate commit.
+
 `python3 scripts/release-tickets.py --name <release> --parent <epic>
 --release-owner <id> --review ROLE=<id> --acceptance ROLE=<id>` prints the
 `issues create` commands in dependency order; add `--create` to create them. The
