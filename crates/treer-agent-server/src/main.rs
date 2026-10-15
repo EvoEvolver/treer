@@ -465,12 +465,12 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         &mut input,
         &mut output,
     )?;
-    service::save_machine_identity(&identity)?;
     let proxy = normalize_http_url(args.proxy.clone())?;
     let selection = service::preflight_registration(&enrollment.workspace_id, args.service_mode)?;
     selection.announce();
     let network = select_network_mode(None)?;
     if let Some(mut config) = service::registered_config(&enrollment.workspace_id)? {
+        service::warn_shared_account(&config.server_id)?;
         if let Some(root) = &args.root {
             if std::fs::canonicalize(root)? != std::fs::canonicalize(&config.root)? {
                 anyhow::bail!("existing enrollment root is unchanged; stop the Host and use service relocate-root --root ... --accept-workload-migration explicitly");
@@ -487,6 +487,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
                 proxy
             );
         }
+        service::save_machine_identity(&identity)?;
         let response = claim_machine_enrollment(
             &proxy,
             &args.enrollment_key,
@@ -526,12 +527,14 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
     let root = service::new_enrollment_root(args.root.as_deref())?;
     let listen = service::resolve_listen(&enrollment.workspace_id, args.listen).await?;
     let install_hostname = service::current_hostname()?;
+    service::save_machine_identity(&identity)?;
     let response = claim_machine_enrollment(&proxy, &args.enrollment_key, &identity, None).await?;
     if response.workspace_id != enrollment.workspace_id {
         anyhow::bail!("Proxy returned a workspace that does not match the enrollment key");
     }
     let host_socket = service::host_socket_path(&response.server_id)?;
     let workspace = response.workspace_id.clone();
+    service::warn_shared_account(&response.server_id)?;
     service::register(service::ServiceConfig {
         proxy: proxy.to_string(),
         workspace: workspace.clone(),

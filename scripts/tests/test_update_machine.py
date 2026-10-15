@@ -121,6 +121,7 @@ else:
         state['agents'][0]['pid']+=1
         state['agents'][0]['run_generation']+=1
     state_path.write_text(json.dumps(state))
+    if {failure!r} == 'activation' and COMMIT == {self.new!r}: sys.exit(4)
 '''
         path.write_text(source)
         path.chmod(0o755)
@@ -224,16 +225,188 @@ else:
         self.assertTrue(result["host_changed"])
         self.assertEqual(result["agents"]["ag_fixture"]["generation"], 4)
 
-    def test_hot_download_path_and_single_install_guard(self):
+    def test_hot_download_path_and_ambiguous_install_guard(self):
         self.config["artifacts"] = None
         code, result = self.invoke()
         self.assertEqual(code, 0, result)
         (self.configdir / "other-controller.json").write_text(self.configpath.read_text())
-        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+        with self.assertRaisesRegex(RuntimeError, "select --workspace explicitly"):
             update.installed(self.configdir)
+
+    def other_install(self):
+        other = self.configdir / "srv_other-controller.json"
+        value = json.loads(self.configpath.read_text())
+        value.update(workspace="ws_other", server_id="srv_other")
+        other.write_text(json.dumps(value))
+        return other
+
+    def test_multiple_installs_need_selection_and_confirmation_before_any_update(self):
+        other = self.other_install()
+        original = other.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "--workspace ws_other --config-dir"):
+            update.installed(self.configdir)
+        for confirmation in (False, None, "true", 1):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "require --accept-shared-binaries"):
+                update.installed(self.configdir, "ws_fixture", confirmation)
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            update.installed(self.configdir, "ws_missing", True)
+        self.assertEqual(update.installed(self.configdir, "ws_other", True)[0], other)
+        with patch.object(update, "fetch", side_effect=AssertionError("must fail before fetching")):
+            code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertIn("--accept-shared-binaries", result["error"])
+        self.assertEqual(json.loads(self.state.read_text())["events"], [])
+        self.assertIn(self.old, (self.bindir / "treer").read_text())
+        self.assertEqual(other.read_bytes(), original)
+
+    def test_confirmed_multi_install_updates_selected_controller_only(self):
+        other = self.other_install()
+        original = other.read_bytes()
+        self.config["accept_shared_binaries"] = True
+        warning = io.StringIO()
+        with contextlib.redirect_stderr(warning):
+            code, result = self.invoke()
+        self.assertEqual(code, 0, result)
+        self.assertIn("other workspaces", warning.getvalue())
+        self.assertIn("next start", warning.getvalue())
+        self.assertNotIn("test-only-secret", warning.getvalue())
+        self.assertEqual(other.read_bytes(), original)
+        self.assertEqual(json.loads(self.state.read_text())["events"], ["bbbbbbb:restart-controller"])
+
+    def test_confirmed_multi_install_activation_failure_rolls_back_selected_controller_only(self):
+        # Give the second workspace its own endpoint and state so accidentally
+        # polling it cannot be hidden by two configurations sharing a listener.
+        other_requests = []
+        other_state = {"controller_epoch": "other-epoch", "agents": [
+            {"agent_id": "ag_other", "pid": 555, "run_generation": 7}]}
+
+        class OtherController(BaseHTTPRequestHandler):
+            def do_GET(self):
+                other_requests.append(self.path)
+                data = json.dumps(other_state).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), OtherController)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        other = self.other_install()
+        value = json.loads(other.read_text())
+        value["listen"] = f"127.0.0.1:{server.server_port}"
+        other.write_text(json.dumps(value))
+        original_config = other.read_bytes()
+        original_state = json.dumps(other_state, sort_keys=True)
+        originals = {name: (self.bindir / name).read_bytes() for name in update.BINARIES}
+        self.config["accept_shared_binaries"] = True
+        # The real fake executable records an attempted activation, then exits
+        # unsuccessfully; rollback must execute the restored old Controller.
+        self.binary(self.artifacts / "treer-agent-server", self.new, "activation")
+        self.refresh_sums()
+        with contextlib.redirect_stderr(io.StringIO()), patch.object(update, "run", wraps=update.run) as run:
+            code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "rolled_back", result)
+        self.assertIsNone(result["rollback_error"])
+        self.assertEqual(originals, {name: (self.bindir / name).read_bytes() for name in update.BINARIES})
+        activations = [call.args[0] for call in run.call_args_list if "service" in call.args[0]]
+        self.assertEqual(activations, [[str(self.bindir / "treer-agent-server"), "service",
+            "--workspace", "ws_fixture", "restart-controller"]] * 2)
+        selected = json.loads(self.state.read_text())
+        self.assertEqual(selected["events"], ["bbbbbbb:restart-controller", "aaaaaaa:restart-controller"])
+        self.assertTrue(selected["epoch"].startswith(self.old))
+        self.assertEqual(selected["agents"], self.initial["agents"])
+        self.assertEqual(other.read_bytes(), original_config)
+        self.assertEqual(json.dumps(other_state, sort_keys=True), original_state)
+        self.assertEqual(other_requests, [])
+
+    def test_candidates_only_select_workspace_and_never_execute_updates(self):
+        self.other_install()
+        with self.assertRaises(RuntimeError) as failure:
+            update.installed(self.configdir)
+        diagnostic = str(failure.exception)
+        self.assertIn("--workspace ws_other --config-dir", diagnostic)
+        self.assertNotIn("--accept-shared-binaries", diagnostic)
+        self.assertNotIn("--apply", diagnostic)
+        probe = json.dumps({"home": str(self.home), "system": "Linux", "arch": "x86_64",
+                            "controller": str(self.bindir / "treer-agent-server"),
+                            "config_base": str(self.home / ".config")})
+        selection = json.dumps({"error": diagnostic, "shared": True})
+        warning = io.StringIO()
+        with patch.object(sys, "argv", [str(SCRIPT), "--machine", "local", "--apply"]), \
+             patch.object(update.Machine, "python", side_effect=[probe, "", selection]) as python, \
+             patch.object(update.Machine, "upload") as upload, \
+             patch.object(update.subprocess, "run") as execute, \
+             patch.object(update, "replace_file") as replace, \
+             contextlib.redirect_stderr(warning):
+            with self.assertRaisesRegex(RuntimeError, "select --workspace explicitly"):
+                update.main()
+            # Discovery uploads only its worker for read-only inspection; no
+            # candidate command, artifact upload or detached worker is started.
+            self.assertEqual(upload.call_count, 1)
+            self.assertEqual(python.call_count, 3)
+            self.assertFalse(any("Popen(" in call.args[0] for call in python.call_args_list))
+            execute.assert_not_called()
+            replace.assert_not_called()
+            self.assertNotIn(update.SHARED_BINARIES_NOTICE, warning.getvalue())
+        self.assertEqual(json.loads(self.state.read_text())["events"], [])
+
+    def test_apply_in_operator_argv_is_not_a_shared_binary_confirmation(self):
+        self.other_install()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(RuntimeError) as failure:
+            update.installed(self.configdir, "ws_fixture")
+        diagnostic = str(failure.exception)
+        self.assertIn("--accept-shared-binaries", diagnostic)
+        probe = json.dumps({"home": str(self.home), "system": "Linux", "arch": "x86_64",
+                            "controller": str(self.bindir / "treer-agent-server"),
+                            "config_base": str(self.home / ".config")})
+        selection = json.dumps({"error": diagnostic, "shared": True})
+        warning = io.StringIO()
+        with patch.object(sys, "argv", [str(SCRIPT), "--machine", "local", "--workspace", "ws_fixture", "--apply"]), \
+             patch.object(update.Machine, "python", side_effect=[probe, "", selection]) as python, \
+             patch.object(update.Machine, "upload") as upload, \
+             patch.object(update.subprocess, "run") as execute, \
+             patch.object(update, "replace_file") as replace, \
+             contextlib.redirect_stderr(warning):
+            with self.assertRaisesRegex(RuntimeError, "--accept-shared-binaries"):
+                update.main()
+            self.assertIn("other workspaces", warning.getvalue())
+            self.assertEqual(upload.call_count, 1)
+            self.assertFalse(any("Popen(" in call.args[0] for call in python.call_args_list))
+            execute.assert_not_called()
+            replace.assert_not_called()
+
+    def test_workspace_selection_keeps_duplicate_and_foreign_hostname_guards(self):
+        other = self.other_install()
+        value = json.loads(other.read_text())
+        value["install_hostname"] = "foreign-machine"
+        other.write_text(json.dumps(value))
+        self.assertEqual(update.installed(self.configdir)[0], self.configpath)
+        other.write_text(self.configpath.read_text())
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            update.installed(self.configdir, "ws_fixture", True)
 
 
 class TransportTest(unittest.TestCase):
+    def test_windows_update_is_rejected_before_job_or_binary_writes(self):
+        # Native Windows has detached services/shared locked .exe files. This
+        # Unix updater must not pretend that Unix rename/activation is supported.
+        probe = json.dumps({"home": r"C:\Users\fixture", "system": "Windows", "arch": "AMD64",
+                            "controller": r"C:\Users\fixture\Treer\bin\treer-agent-server.exe",
+                            "config_base": r"C:\Users\fixture\AppData\Local"})
+        with patch.object(sys, "argv", [str(SCRIPT), "--machine", "local", "--apply", "--workspace", "ws_fixture", "--accept-shared-binaries"]), \
+             patch.object(update.Machine, "python", return_value=probe) as python, \
+             patch.object(update.Machine, "upload") as upload:
+            with self.assertRaisesRegex(RuntimeError, "require a Unix machine"):
+                update.main()
+            self.assertEqual(python.call_count, 1)
+            upload.assert_not_called()
+
     def test_remote_exec_uses_no_stdin_short_timeout_and_checks_envelope(self):
         with patch.object(update.subprocess, "run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, json.dumps({"exit_code": 0,

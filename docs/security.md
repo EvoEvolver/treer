@@ -3,6 +3,31 @@
 Treer's current supported tier is trusted or mostly trusted machines and
 workspace members. It is not a safe multi-tenant execution sandbox.
 
+**One OS account is one trust domain.** Multiple workspaces/Controllers under
+the same account are mutually trusted: A's exec/Agent can read B's local
+credential files and impersonate B. Unix 0700/0600 and Windows current-SID/SYSTEM
+ACLs do not isolate processes belonging to that same user. Separate roots,
+workspace credentials, Policy and loopback ports do not change this boundary.
+Use independent OS users or containers for mutually untrusted workspaces.
+Connect warns when another local enrollment filename exists; this is a
+name-only existence check, not inspection of its credentials.
+
+For environment-bound CLI identities, explicit `--workspace`/`--url` cannot
+switch the bound workspace/Controller. Conflicting flags fail before discovery,
+network requests or credential forwarding. These are accidental-misdirection
+checks, not protection against a same-account process replacing its environment
+or reading another account-owned installation. Independent Agent clients should
+set `TREER_WORKSPACE_ID` and `TREER_AGENT_SERVER_URL` along with their credentials;
+if either binding exists, an explicit override of a missing or different binding
+fails closed. With neither binding, an independent Agent client may select its
+connection explicitly: its credentials are sent to that explicit URL, which the
+caller must trust. Flag-free use is unchanged. Errors never describe the
+destination installation or its credentials.
+This consistency guard applies only to managed identities or operators with an
+environment-bound workspace/URL; a pure operator with no such binding is expected
+to select its connection using explicit `--workspace`/`--url` and is not restricted
+by this guard.
+
 On Windows, local Named Pipes reject remote clients and use explicit current-user
 and SYSTEM DACLs. Credential-bearing configuration and recovery files use the
 same user boundary, with atomic file replacement. SID-scoped startup mutexes and

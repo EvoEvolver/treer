@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import re
 import shutil
+import shlex
 import socket
 import stat
 import subprocess
@@ -127,19 +128,41 @@ def source_commit(value):
     return match[0]
 
 
-def installed(config_dir, workspace=None):
+SHARED_BINARIES_NOTICE = ("Shared binaries will be replaced: this affects other workspaces on this machine "
+                          "on their next start. Only the selected workspace's Controller is activated; "
+                          "coordinate other Controllers and version compatibility before continuing.")
+
+
+def installed_configs(config_dir):
     configs = []
-    for path in Path(config_dir).glob("*-controller.json"):
+    for path in sorted(Path(config_dir).glob("*-controller.json")):
         config = json.loads(path.read_text())
         if config.get("install_hostname") != socket.gethostname():
             continue
         configs.append((path, config))
-    # CLI/binaries are shared: updating one while leaving another old parser is unsafe.
-    if len(configs) != 1:
-        raise RuntimeError("require exactly one local install; coordinate shared-binary multi-workspace updates separately")
-    path, config = configs[0]
-    if workspace and config["workspace"] != workspace:
-        raise RuntimeError("workspace does not match the installed machine")
+    return configs
+
+
+def installed(config_dir, workspace=None, accept_shared_binaries=False, machine="local"):
+    configs = installed_configs(config_dir)
+    if len(configs) > 1 and not workspace:
+        choices = []
+        for _, config in configs:
+            identifier = config.get("workspace", "")
+            if not re.fullmatch(r"ws_[A-Za-z0-9_-]{1,96}", identifier):
+                continue
+            choices.append(f"python3 scripts/update-machine.py --machine {shlex.quote(machine)} "
+                           f"--workspace {shlex.quote(identifier)} "
+                           f"--config-dir {shlex.quote(str(config_dir))}")
+        raise RuntimeError("multiple local installs; select --workspace explicitly. Candidates:\n" + "\n".join(choices))
+    matches = [(path, config) for path, config in configs if not workspace or config["workspace"] == workspace]
+    if len(matches) != 1:
+        raise RuntimeError("workspace selection must match exactly one local install; no binaries were changed")
+    if len(configs) > 1:
+        print(SHARED_BINARIES_NOTICE, file=sys.stderr, flush=True)
+        if accept_shared_binaries is not True:
+            raise RuntimeError("multiple local installs require --accept-shared-binaries; no binaries were changed")
+    path, config = matches[0]
     host, _, port = config["listen"].rpartition(":")
     host = host.strip("[]")
     if not ipaddress.ip_address(host).is_loopback or not port.isdigit():
@@ -217,7 +240,8 @@ def check_agents(before, after, cold=False):
 def transaction(job, config):
     home, bindir = Path(config["home"]), Path(config["bin_dir"])
     names = BINARIES if config["host"] else BINARIES[:2]
-    config_path, service = installed(config["config_dir"], config.get("workspace"))
+    config_path, service = installed(config["config_dir"], config.get("workspace"),
+                                     config.get("accept_shared_binaries", False))
     health = wait_ready(config_path, config["timeout"])
     before = inventory(config_path)
     endpoint = f"{config['proxy'].rstrip('/')}/artifacts/{config['platform']}/"
@@ -368,6 +392,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--machine", required=True, help="local / 本机, or a stable machine ID/name such as mariana")
     parser.add_argument("--workspace", help="installed workspace; inferred only for a unique local install")
+    parser.add_argument("--accept-shared-binaries", action="store_true",
+                        help="confirm replacing binaries also used by other installed workspaces on their next start")
     parser.add_argument("--artifacts", help="local dist directory (platform subdirectories also accepted)")
     parser.add_argument("--proxy", default=CANARY, help="Canary checksum authority (HTTPS; loopback HTTP for tests)")
     parser.add_argument("--bin-dir", help="target installed binary directory; default resolved treer-agent-server parent")
@@ -404,6 +430,20 @@ def main():
         job = str(Path(home) / ".local/share/treer-updates" / ("job-" + uuid.uuid4().hex))
         machine.python(f"from pathlib import Path; Path({job!r}).mkdir(parents=True,mode=0o700)")
         machine.upload(Path(__file__).resolve(), Path(job) / "worker.py")
+        configdir = args.config_dir or str(Path(probe["config_base"]) / "treer/agent-servers")
+        # Preflight on the target before staging/activation. The worker repeats
+        # this under the binary lock in case installation topology has changed.
+        selection = json.loads(machine.python(
+            f"import runpy,json; m=runpy.run_path({str(Path(job) / 'worker.py')!r})\n"
+            f"shared=len(m['installed_configs']({configdir!r}))>1\n"
+            f"try:\n p,c=m['installed']({configdir!r},{args.workspace!r},{args.accept_shared_binaries!r},{args.machine!r}); "
+            "result={'workspace':c['workspace'],'shared':shared}\n"
+            "except RuntimeError as error:\n result={'error':str(error),'shared':shared}\n"
+            "print(json.dumps(result))"))
+        if selection["shared"] and args.workspace:
+            print(SHARED_BINARIES_NOTICE, file=sys.stderr, flush=True)
+        if selection.get("error"):
+            raise RuntimeError(selection["error"])
         artifacts = None
         if args.artifacts:
             source = Path(args.artifacts).resolve()
@@ -416,8 +456,8 @@ def main():
                 if name == "treer-agent-host" and not args.host:
                     continue
                 machine.upload(source / name, Path(artifacts) / name)
-        config = {"home": home, "bin_dir": bindir, "config_dir": args.config_dir or
-                  str(Path(probe["config_base"]) / "treer/agent-servers"), "workspace": args.workspace,
+        config = {"home": home, "bin_dir": bindir, "config_dir": configdir,
+                  "workspace": selection["workspace"], "accept_shared_binaries": args.accept_shared_binaries,
                   "host": args.host, "proxy": args.proxy, "platform": system + "-" + arch,
                   "artifacts": artifacts, "timeout": args.timeout}
         machine.python("import json; from pathlib import Path; "

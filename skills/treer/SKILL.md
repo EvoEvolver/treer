@@ -31,7 +31,12 @@ The Controller supplies the command tree, help, and skills. The thin client
 preserves argv and streams stdin and output. Set `TREER_IDENTITY_MODE=agent`
 for independently configured Agent clients: missing identity or credentials
 fail without reading operator credentials. Connection options belong before
-the business command. The Controller must be online for business help:
+the business command. With neither `TREER_WORKSPACE_ID` nor
+`TREER_AGENT_SERVER_URL` set, independent clients may explicitly select their
+connection: credentials are sent to the explicit URL, which the caller must
+trust. If either binding exists, explicit connection flags must match their
+corresponding binding; overriding a missing counterpart also fails closed.
+The Controller must be online for business help:
 
 ```bash
 treer --help

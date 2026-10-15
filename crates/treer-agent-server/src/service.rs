@@ -299,6 +299,10 @@ impl ServiceConfig {
 pub async fn resolve_listen(workspace: &str, requested: Option<SocketAddr>) -> Result<SocketAddr> {
     validate_workspace(workspace)?;
     if let Some(requested) = requested {
+        anyhow::ensure!(
+            address_is_available(requested),
+            "requested local Controller port is already in use; choose a different --listen or omit it for automatic allocation (enrollment key was not exchanged). This is a best-effort preflight: a concurrent bind after the check can still make activation fail closed"
+        );
         return Ok(requested);
     }
 
@@ -315,6 +319,32 @@ pub async fn resolve_listen(workspace: &str, requested: Option<SocketAddr>) -> R
     }
 
     allocate_loopback_address()
+}
+
+/// Names only: do not read another enrollment's config or credentials.
+pub fn has_other_controller_config(directory: &Path, server_id: &str) -> Result<bool> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error).context("cannot inspect local enrollment names"),
+    };
+    let own_name = format!("{server_id}-controller.json");
+    for entry in entries {
+        let entry = entry?;
+        if let Some(name) = entry.file_name().to_str() {
+            if name.ends_with("-controller.json") && name != own_name {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
+}
+
+pub fn warn_shared_account(server_id: &str) -> Result<()> {
+    if has_other_controller_config(&config_dir()?, server_id)? {
+        eprintln!("Warning: another Treer enrollment exists under this OS account. One OS account is one trust domain: its workspace Agents/exec can read and impersonate other local workspace identities. Use separate OS accounts or containers for isolation.");
+    }
+    Ok(())
 }
 
 fn allocate_loopback_address() -> Result<SocketAddr> {

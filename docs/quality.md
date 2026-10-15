@@ -13,6 +13,27 @@ native Windows test covers argv, environment, input, resize, and process stop.
 
 ### Service environment and recovery validation
 
+The macOS [multi-workspace fixture](research/fixtures/multi-workspace-per-machine.mjs)
+builds two fresh workspace enrollments on an isolated Proxy/Postgres/NATS stack,
+using private HOME/config/state/bin/root/socket paths. It covers separate machine
+IDs, Agent/App creation, exec, put/get, launcher profiles, targeted lifecycle,
+explicit bound-identity workspace/URL rejection, port-conflict preflight plus
+same-key retry, and updater workspace/confirmation guards. It never operates on
+real enrolled services. Build the four sibling debug binaries first, then run
+`node docs/research/fixtures/multi-workspace-per-machine.mjs` from a private
+worktree with Node 22+/npm, Docker and system Python available.
+
+The known same-account boundary is tested using synthetic identities and only
+booleans/status codes: A's exec can test readability of B's configuration
+(`true`), connect B's Host socket (`true`, without sending a command), and reach
+B's authenticated loopback API without credentials (`401`). No credential
+contents are printed. These expected results document absence of same-OS-user
+isolation; they are not claims that workspace credentials or 0600 provide a
+sandbox. Windows/Linux multi-enrollment OS-service-manager execution remains a
+separate native validation task. Python fake-machine tests cover confirmed
+multi-install update ordering/rollback and rejection before activation without
+confirmation; native Windows update is explicitly unsupported by that script.
+
 Machine file-transfer coverage includes a bounded multi-chunk CLI round trip,
 checksum rejection without publication, destination preservation/explicit force,
 Controller caller/path/workspace binding, expiry/disconnect cleanup and a real
