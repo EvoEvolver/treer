@@ -182,49 +182,106 @@ from `?lang=`, else `navigator.language` (`zh*` → zh). Server-provided text (h
 names, item text, errors) is never translated. Dates use `<time datetime>` with
 `Intl.DateTimeFormat`.
 
-### 2.7 Visual language (round 3: open)
+### 2.7 Looks: three visual identities, user-selectable (decided)
 
-History: round 1 kept the existing launcher look; round 2 adopted the reference
-palette (amber, cool/warm grey); the user rejected both and asked the UI designer
-for a free, good-looking design, with **three candidate directions** to choose from.
-Round 1/2 palettes and the old prototype are discarded (see git history). The
-user's choice (or a blend) will replace section 3 with the final token table.
+**Decision (2026-10-15).** The user rejected the first two visual attempts (the
+existing launcher style kept as-is; the reference palette with amber), then
+chose to **keep all three** free-design directions as selectable *looks* after
+seeing them, once B was recoloured to match the existing launcher (green accent,
+warm greys). A look is a theme pack: tokens + font strategy + shape/spacing
+language + icon stroke style + small decorative differences, over **shared
+component structure**. Looks are orthogonal to light/dark: 3 looks x 2 themes = 6
+variants.
 
-Candidates (interactive, `directions/`; built into the preview directory with
-`node directions/build.mjs ABSOLUTE_DIR`):
-
-| | Intent | Layout signature | Type | Accent | Radius / icons / motion |
+| | Intent | Layout signature | Type | Accent (light / dark) | Radius / icons / motion |
 | --- | --- | --- | --- | --- | --- |
-| A Quiet Editor | calm, dense, out of the way | left icon rail; strip is the top row of the composer frame | system sans 13.5px, tabular figures | ink blue | 8/5px; 16px 1.5 stroke; 120ms colour only |
-| B Warm Paper | readable, unhurried | centered title; pill chips above a rounded composer; floating panel cards | serif prose 16.5px/1.8 + sans UI | oxblood (light) / rose (dark) | 14/10px, pills; 18px 1.7 stroke; 220ms fades |
-| C Terminal Contrast | legible at a glance | glyph gutters (`❯ ● $ [x]`), inverse status line for goal/plan/queue | monospace throughout 13px | blue (light) / mint (dark) | square; 15px 2px square-cap; blink cursor only |
+| A Quiet Editor | calm, dense, out of the way | left icon rail; strip is the top row of the composer frame | system sans 13.5px, tabular figures | ink blue `#3358d4` / `#7ea3ff` | 8/5px; 16px 1.5 stroke; 120ms colour only |
+| **B Warm Paper (default)** | readable, unhurried, closest to today's launcher | centered title; pill chips above a rounded composer; floating panel cards | serif prose 16.5px/1.8 + sans UI | launcher green `#18725a` / `#58b99a` | 14/10px, pills; 18px 1.7 stroke; 220ms fades |
+| C Terminal Contrast | legible at a glance | glyph gutters (`❯ ● $ [x]`), inverse status line for goal/plan/queue | monospace throughout 13px | blue `#0a47c4` / mint `#4de3a2` | square; 15px 2px square-cap; blink cursor only |
 
-Engineering baselines common to all (not aesthetics): structure (status strip with
-one popover at a time, jump-to-latest, collapsible activity, keyboard file tree with
-filter, bottom sheets at <= 640px), `prefers-reduced-motion`, visible focus, three
-theme sources only, zero external resources, 390px without horizontal overflow,
-inline SVG icons from one shared sprite, empty/loading/error states per direction.
+**B recolour** (from the oxblood/rose draft): page `#f5f5f3`, panel `#ffffff`,
+sunken `#eeefeb`, line `#d8d8d3`, text `#292724`, muted `#66645e` (the launcher's
+`#716f69` darkened for AA on `#eeefeb`), accent `#18725a` (unchanged hue and
+lightness; passes AA as text), shadow neutral `rgb(25 24 21/8%)`; dark: page
+`#191b1c`, panel `#222526`, sunken `#1b1e1f`, line `#3a3d3e`, text `#ecebe8`,
+accent `#58b99a`. **Restrained danger in all looks**: B `#a63a30`/`#eb8f87`,
+A `#b3302c`/`#f0847f`, C `#a5302a`/`#f08880`; diff delete tints are paler; errors
+are a neutral panel with a 3-4px danger left bar (no red fills; the C connection
+banner is neutral with a danger bar and `!`).
+
+**Structure (what is shared).** One component tree and one markup. Looks differ
+by CSS only, scoped as `:root[data-look="a|b|c"] ...` inside one `ui.css`, plus
+a few markup slots that every look contains and the others hide (brand mark,
+empty-state copy). Layout differences (rail vs header actions, strip position,
+status line) are grid/flex/`order` changes, not different React trees; the
+semantic contract (section 3) and the behaviour (one popover at a time, jump to
+latest, keyboard tree, bottom sheets <= 640px) never vary per look.
+
+**Switching mechanism.**
+* Entry: an **Appearance** button (desktop: header right / A's left rail; mobile:
+  bottom bar next to Theme, opening a bottom sheet <= 40vh). The panel is a
+  dialog with a Look radio group (swatch + name) and a Theme radio group
+  (System / Light / Dark). Esc closes and returns focus.
+* Look source, in order: `?look=a|b|c` (whitelisted; not persisted) >
+  `localStorage["treer-launcher-look"]` (whitelist-validated, every access in
+  try/catch) > default **b**.
+* Theme source, in order: parent `postMessage {type:"treer:embed-theme"}` (only
+  from `window.parent`) or `?theme=light|dark` (explicit, not persisted) > stored
+  manual mode `localStorage["treer-launcher-theme"]` (`system|light|dark`) >
+  `prefers-color-scheme`. The header theme button toggles light/dark and stores
+  the mode.
+* A tiny synchronous `boot.js` in `<head>` sets `data-look` and `data-theme` on
+  `<html>` before first paint (no flash) and exposes a small API used by the React
+  UI. No inline scripts.
+
+**One file or per-look files?** One `ui.css`. Measured on the prototype
+(unminified sources, gzip in brackets): shared 10.0 KB (3.2), A 12.3 (3.4), B
+13.8 (3.9), C 12.8 (3.5); built `ui.css` 58.3 KB (10.8); esbuild-minified
+57.3 KB (10.2), since the sources are already compact. Splitting per look would
+save about 26 KB raw / 7 KB gzip for a user who never switches, but costs files
+against the budget (<= 5), a loading flash on first switch and an async-load
+failure mode on the theme path. Not worth it at this size; revisit with a fourth
+look.
+
+**Costs and mitigations.** Three looks triple the visual surface to test and
+maintain. (1) Tokens and markup are shared; looks are CSS only, so logic bugs are
+fixed once. (2) **Test matrix**: 3 looks x light/dark x desktop/390px x key states
+(chat, empty, loading, error, expanded composer, each popover, files, tasks,
+appearance menu) with screenshot regression plus no-overflow, no-console-error and
+no-CSP-violation assertions. (3) The contrast script covers every look and theme
+on every build. (4) New components use only the token contract and ship styles
+for all three looks in the same change. (5) Dropping a look later is deleting one
+scoped section.
+
+**Default look recommendation: B.** B is the continuity choice (the green, warm
+greys and white panels users know), the most readable for long transcripts, and the
+user's favourite. Counter-argument on record: A is denser and friendlier to
+narrow panes (embedded iframes), so it may suit power users better; the default is
+one constant in `boot.js`. The user decides.
 
 ## 3. Design tokens
 
-Pending the direction choice. All three candidates implement one semantic token
-contract, so the React UI swaps direction by remapping values; components read only
-these: `--bg --panel --sunken --line --line-strong --edge --fg --fg2 --fg3 --accent
---accent-fg --accent-soft --danger --warn --ok --add --del`, radii `--r --rs`, fonts
-`--font-ui --font-prose --font-mono`, `--fs --lh`, `--icon --stroke --cap --join`,
-`--dur` (values per direction in `directions/{a,b,c}.css`).
+All looks implement one semantic token contract; components read only these:
+`--bg --panel --sunken --line --line-strong --edge --fg --fg2 --fg3 --accent
+--accent-fg --accent-soft --danger --warn --ok --add --del`, radii `--r --rs`,
+fonts `--font-ui --font-prose --font-mono`, `--fs --lh`, `--icon --stroke --cap
+--join`, `--dur`, `--menu-top`, `--sheet-r`. Values per look live in
+`directions/{a,b,c}.css` today and in `ui/src/looks/*.css` once implementation
+starts. `--line-strong` is decorative; text-input and composer boundaries use
+`--edge` (>= 3:1).
 
-Contrast: `directions/contrast.mjs` reads the hex tokens of all three files and
-checks light and dark: text >= 4.5:1 on bg/panel/sunken, accent on accent-soft,
-diff text and gutters, the inverse status line (C); input edges (`--edge`) and the
-focus ring >= 3:1. **Result: 202 checks, all pass.** `--line-strong` is decorative and
-is never the only boundary of a text input; inputs use `--edge`.
+Contrast: `directions/contrast.mjs` reads the hex tokens of every look and theme
+and checks text >= 4.5:1 on bg/panel/sunken, accent on accent-soft, diff text and
+gutters, the inverse status line (C), input edges and the focus ring >= 3:1.
+**Result: 202 checks, all pass.** It moves into the test suite at implementation
+time and runs on every build.
 
 Theme selection is unchanged: `data-theme` on `<html>` set by a tiny module
 (same logic as `theme.js`: `?theme=`, `treer:embed-theme` message with
-`event.source === window.parent`, `matchMedia`). A manual toggle (system / light
-/ dark) is added in the header and stored in `localStorage` only when the page
-is not embedding-controlled (an explicit `?theme=` or parent message wins).
+`event.source === window.parent`, `matchMedia`). The Appearance panel and header button are the manual path; the mode is stored
+in `localStorage["treer-launcher-theme"]`, and an explicit `?theme=` or parent
+message wins for the session. Look is stored in `treer-launcher-look`. Both
+values are allowlist-validated on read (section 6).
 
 ## 4. Types and DTO extensions
 
@@ -348,7 +405,7 @@ tests use `node:test` + `react-dom/server`). **Dependency gates (security-claude
   (bundle, minify, `format=iife`, `target=es2022`, `jsx=automatic`,
   `define NODE_ENV=production`, `legalComments=inline`, deterministic, no
   sourcemap in the payload).
-* Output: `public/ui.html`, `public/ui.js`, `public/ui.css` — **3 files, short
+* Output: `public/ui.html`, `public/boot.js`, `public/ui.js`, `public/ui.css` — **4 files, short
   names, flat** (no nested dirs → Windows long-path safe). `markdown.js` is
   folded into `ui.js` (the legacy `markdown.js` stays until deletion). Relative
   `<base href="./">`; the script tag is `<script src="ui.js" defer>` (classic IIFE
@@ -466,7 +523,7 @@ viewer, split workbench, account/device sharing.
    unknown.
 3. **[security-claude]** Resolved: drop `'unsafe-inline'`, add `object-src 'none'; base-uri
    'self'; form-action 'none'` (§6).
-4. **[leader/user]** Manual theme toggle persisted in `localStorage`: acceptable?
+4. Resolved: look and theme mode persist in `localStorage` (guarded); default look B.
 5. **[leader/user]** Default locale: browser language, or English unless
    `?lang=zh`? (Recommended: browser language.)
 6. Mobile "bottom bar": proposed content = Files, Tasks, Theme; Model/effort stays

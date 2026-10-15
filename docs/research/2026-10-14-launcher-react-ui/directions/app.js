@@ -5,17 +5,14 @@
   const $$ = (s, r = document) => [...r.querySelectorAll(s)];
   const app = $("#app"), root = document.documentElement;
 
-  // Theme: only three sources — system preference, ?theme=, parent postMessage (+ the preview's manual override).
-  const valid = (t) => t === "light" || t === "dark";
-  const media = matchMedia("(prefers-color-scheme: dark)");
-  let chosen = new URLSearchParams(location.search).get("theme");
-  function applyTheme() {
-    root.dataset.theme = valid(chosen) ? chosen : media.matches ? "dark" : "light";
-    $$("[data-theme-set]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.themeSet === (valid(chosen) ? chosen : "system"))));
-  }
-  media.addEventListener("change", () => { if (!valid(chosen)) applyTheme(); });
-  addEventListener("message", (e) => { if (e.source === parent && e.data?.type === "treer:embed-theme" && valid(e.data.theme)) { chosen = e.data.theme; applyTheme(); } });
-  applyTheme();
+  // Appearance (look + theme) lives in boot.js; the UI only reflects it.
+  const A = window.TreerAppearance;
+  A.subscribe(({ look, mode, locked }) => {
+    $$("[data-look-set]").forEach((b) => { const on = b.dataset.lookSet === look; b.setAttribute("aria-checked", String(on)); b.setAttribute("aria-pressed", String(on)); });
+    $$("[data-theme-set]").forEach((b) => { const on = b.dataset.themeSet === mode; b.setAttribute("aria-checked", String(on)); b.setAttribute("aria-pressed", String(on)); });
+    $$("[data-act=look]").forEach((b) => { b.hidden = locked; });
+  });
+  function setMenu(open) { $("#menu").hidden = !open; $$("[data-act=look]").forEach((b) => b.setAttribute("aria-expanded", String(open))); if (open) $("#menu [aria-checked=true]")?.focus({ preventScroll: true }); }
 
   // Views
   function setView(v) { app.dataset.view = v; $$("[data-view-set]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.viewSet === v))); }
@@ -36,22 +33,26 @@
     else if (focusBack && lastSeg) lastSeg.focus();
   }
   document.addEventListener("click", (e) => {
-    const t = e.target.closest("button, a"); if (!t) { return; }
+    const t = e.target.closest("button, a"); if (!t) { if (!$("#menu").hidden && !e.target.closest("#menu")) setMenu(false); return; }
     if (t.dataset.act === "files" || t.dataset.act === "tasks") { const p = $("#" + t.dataset.act); setPanel(t.dataset.act, p.hidden); }
-    else if (t.dataset.act === "theme") { chosen = root.dataset.theme === "dark" ? "light" : "dark"; applyTheme(); }
+    else if (t.dataset.act === "theme") A.toggleTheme();
+    else if (t.dataset.act === "look") setMenu($("#menu").hidden);
+    else if (t.hasAttribute("data-close-menu")) { setMenu(false); $$("[data-act=look]").find((b) => b.offsetParent)?.focus(); }
+    else if (t.dataset.lookSet) A.setLook(t.dataset.lookSet);
     else if (t.dataset.close) setPanel(t.dataset.close, false);
     else if (t.dataset.pop) { lastSeg = t; pop(t.getAttribute("aria-expanded") === "true" ? "" : t.dataset.pop, true); }
     else if (t.dataset.popSet) { lastSeg = null; pop(t.dataset.popSet); }
     else if (t.hasAttribute("data-close-pop")) pop("", true);
-    else if (t.dataset.themeSet) { chosen = t.dataset.themeSet; applyTheme(); }
+    else if (t.dataset.themeSet) A.setTheme(t.dataset.themeSet);
     else if (t.dataset.viewSet) setView(t.dataset.viewSet);
     else if (t.classList.contains("sum")) { const g = t.closest(".grp"), o = g.dataset.open !== "true"; g.dataset.open = String(o); t.setAttribute("aria-expanded", String(o)); }
     else if (t.dataset.ftab) { $("#files").dataset.ftab = t.dataset.ftab; $$("[data-ftab]").forEach((b) => b.setAttribute("aria-pressed", String(b === t))); }
     else if (t.id === "jump") thread.scrollTo({ top: thread.scrollHeight });
     else if (t.id === "pv-exp") { forceExp = !forceExp; syncExp(); }
     else if (!t.closest(".pop") && !t.closest(".strip") && $$(".pop").some((p) => !p.hidden) && !t.closest(".pv")) pop("");
+    if (!$("#menu").hidden && !t.closest("#menu") && t.dataset.act !== "look") setMenu(false);
   });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if ($$(".pop").some((p) => !p.hidden)) pop("", true); else if (!$("#files").hidden && innerWidth <= 900) setPanel("files", false); } });
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape") { if (!$("#menu").hidden) { setMenu(false); $$("[data-act=look]").find((b) => b.offsetParent)?.focus(); } else if ($$(".pop").some((p) => !p.hidden)) pop("", true); else if (!$("#files").hidden && innerWidth <= 900) setPanel("files", false); } });
   $("#pv").open = innerWidth > 700;
 
   // Composer: one real textarea; compact when idle, expanded when focused or multi-line.
@@ -134,6 +135,7 @@
   if (q.get("view")) setView(q.get("view"));
   if (q.get("panel")) setPanel(q.get("panel"), true);
   if (q.get("pop")) pop(q.get("pop"));
+  if (q.get("menu")) setMenu(true);
   if (q.get("composer") === "expanded") { forceExp = true; syncExp(); }
   if (q.get("pv") === "0") { $("#pv").open = false; document.body.dataset.pv = "off"; }
   setTimeout(() => { thread.scrollTop = thread.scrollHeight; jump(); }, 30);

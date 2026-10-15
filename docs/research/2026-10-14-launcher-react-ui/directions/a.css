@@ -4,17 +4,17 @@
   --bg:#fafafb;--panel:#ffffff;--sunken:#f2f3f5;--line:#e6e8ec;--line-strong:#c4cad3;--edge:#7f8899;
   --fg:#15171c;--fg2:#454b57;--fg3:#5d6572;
   --accent:#3358d4;--accent-fg:#ffffff;--accent-soft:#e9eefc;
-  --danger:#bf222b;--warn:#8f520a;--ok:#17703f;--add:#e7f5ec;--del:#fdecee;
+  --danger:#b3302c;--warn:#8f520a;--ok:#17703f;--add:#e7f5ec;--del:#fbeeed;
   --r:8px;--rs:5px;--font-ui:-apple-system,"SF Pro Text","Segoe UI Variable Text","Segoe UI",system-ui,"Noto Sans CJK SC","Noto Sans SC","PingFang SC","Microsoft YaHei",sans-serif;
   --font-mono:ui-monospace,"SF Mono","Cascadia Mono",Menlo,Consolas,"Liberation Mono",monospace;
-  --fs:13.5px;--lh:1.6;--icon:16px;--stroke:1.5;--dur:120ms;
+  --menu-top:44px;--fs:13.5px;--lh:1.6;--icon:16px;--stroke:1.5;--dur:120ms;
 }
 [data-theme=dark]{
   color-scheme:dark;
   --bg:#0e1014;--panel:#14171d;--sunken:#0a0c0f;--line:#222733;--line-strong:#3a4252;--edge:#5f6a7e;
   --fg:#e9ebef;--fg2:#a8aebb;--fg3:#8c94a3;
   --accent:#7ea3ff;--accent-fg:#0a1020;--accent-soft:#1a2340;
-  --danger:#ff7f87;--warn:#f2b866;--ok:#62d39b;--add:#0f2c1d;--del:#381a1e;
+  --danger:#f0847f;--warn:#f2b866;--ok:#62d39b;--add:#0f2c1d;--del:#33201f;
 }
 body{letter-spacing:-.003em}
 .app{display:grid;grid-template-columns:48px minmax(0,1fr);grid-template-rows:40px minmax(0,1fr);grid-template-areas:"rail top" "rail main"}
@@ -67,7 +67,7 @@ pre code{background:none;padding:0}
 .dl.add{background:var(--add);border-left-color:var(--ok)}.dl.del{background:var(--del);border-left-color:var(--danger)}
 .dl.add .g{color:var(--ok);font-weight:700}.dl.del .g{color:var(--danger);font-weight:700}
 .dl.hunk{color:var(--fg3);background:var(--sunken)}
-.turn-error{padding:10px 12px;border:1px solid var(--danger);border-radius:var(--r);color:var(--danger);background:var(--panel);font-size:12.5px}
+.turn-error{padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--danger);border-radius:var(--r);color:var(--fg);background:var(--panel);font-size:12.5px}.turn-error .i{color:var(--danger)}
 .banner{padding:10px 12px;border:1px solid var(--warn);border-radius:var(--r);background:var(--panel);color:var(--warn);font-size:12.5px;margin-bottom:20px}
 .banner .link{margin-left:auto;color:var(--accent);text-decoration:underline;text-underline-offset:2px}
 .plan{border:1px solid var(--line);border-radius:var(--r);background:var(--panel);padding:12px 14px}

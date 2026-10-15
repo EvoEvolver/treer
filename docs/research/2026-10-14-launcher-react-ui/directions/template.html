@@ -1,14 +1,14 @@
 <!doctype html>
-<html lang="en" data-theme="light">
+<html lang="en" data-theme="light" data-look="{{LOOK}}"{{LOCK}}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="light dark">
 <title>Agent · {{NAME}} (static prototype)</title>
-<link rel="stylesheet" href="shared.css">
-<link rel="stylesheet" href="style.css">
+<script src="{{ROOT}}boot.js"></script>
+<link rel="stylesheet" href="{{ROOT}}ui.css">
 </head>
-<body data-dir="{{DIR}}">
+<body>
 <svg width="0" height="0" style="position:absolute" aria-hidden="true" focusable="false">
   <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
   <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v4h4"/></symbol>
@@ -30,6 +30,7 @@
   <symbol id="i-queue" viewBox="0 0 24 24"><path d="M12 4l8 4-8 4-8-4zM4 12l8 4 8-4M4 16l8 4 8-4"/></symbol>
   <symbol id="i-goal" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="4"/><path d="M12 12h.01"/></symbol>
   <symbol id="i-plan" viewBox="0 0 24 24"><path d="M5 6h3M5 12h3M5 18h3M11 6h8M11 12h8M11 18h8"/></symbol>
+  <symbol id="i-look" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M8.5 11h.01M12 7.5h.01M15.5 11h.01" stroke-width="2.2"/></symbol>
   <symbol id="i-agent" viewBox="0 0 24 24"><rect x="5" y="8" width="14" height="10" rx="2"/><path d="M12 4v4M9 13h.01M15 13h.01"/></symbol>
 </svg>
 
@@ -38,6 +39,7 @@
   <div class="pv-row">
     <span class="pv-g" role="group" aria-label="Theme">Theme
       <button data-theme-set="system">System</button><button data-theme-set="light">Light</button><button data-theme-set="dark">Dark</button></span>
+    {{LOOKCTL}}
     <span class="pv-g" role="group" aria-label="View">View
       <button data-view-set="chat" aria-pressed="true">Chat</button><button data-view-set="empty">Empty</button><button data-view-set="loading">Loading</button><button data-view-set="error">Error</button></span>
     <span class="pv-g" role="group" aria-label="Open">Open
@@ -49,13 +51,14 @@
 <div class="app" id="app" data-view="chat">
   <header class="top">
     <div class="brand">
-      <span class="mark" aria-hidden="true">{{MARK}}</span>
+      <span class="mark" aria-hidden="true"><span class="m-a">&#9679;</span><span class="m-b">A</span><span class="m-c">&#9612;</span></span>
       <div class="titles"><h1>Refactor the queue module</h1><p class="cwd">/Users/dev/projects/treer</p></div>
     </div>
     <div class="actions">
       <span class="status" role="status"><i class="dot"></i><span class="status-t">Running</span></span>
       <button class="tbtn" data-act="tasks" aria-expanded="false" aria-controls="tasks"><svg class="i"><use href="#i-tasks"/></svg><span class="lbl">2 running</span></button>
       <button class="tbtn" data-act="files" aria-expanded="false" aria-controls="files" aria-label="Browse files"><svg class="i"><use href="#i-folder"/></svg><span class="lbl">Files</span></button>
+      <button class="tbtn" data-act="look" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu" aria-label="Appearance"><svg class="i"><use href="#i-look"/></svg></button>
       <button class="tbtn" data-act="theme" aria-label="Toggle theme"><svg class="i"><use href="#i-theme"/></svg></button>
     </div>
   </header>
@@ -64,6 +67,7 @@
     <button class="rbtn" data-act="files" aria-expanded="false" aria-controls="files" aria-label="Browse files" title="Files"><svg class="i"><use href="#i-folder"/></svg></button>
     <button class="rbtn" data-act="tasks" aria-expanded="false" aria-controls="tasks" aria-label="Background tasks" title="Tasks"><svg class="i"><use href="#i-tasks"/></svg><span class="badge">2</span></button>
     <span class="rail-sp"></span>
+    <button class="rbtn" data-act="look" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu" aria-label="Appearance" title="Appearance"><svg class="i"><use href="#i-look"/></svg></button>
     <button class="rbtn" data-act="theme" aria-label="Toggle theme" title="Theme"><svg class="i"><use href="#i-theme"/></svg></button>
   </nav>
 
@@ -85,7 +89,7 @@
           <div class="banner" role="alert"><svg class="i"><use href="#i-warn"/></svg><div><b>Connection lost.</b> Reconnecting… your draft is kept.</div><button class="link">Retry now</button></div>
           <div class="v-empty">
             <div class="empty"><span class="empty-mark" aria-hidden="true"><svg class="i"><use href="#i-agent"/></svg></span>
-              <h2>{{EMPTY_T}}</h2><p>{{EMPTY_P}}</p></div>
+              <h2><span data-l="a">Start a session</span><span data-l="b">What shall we work on?</span><span data-l="c">agent ready</span></h2><p><span data-l="a">Messages, tool activity and file changes will appear here.</span><span data-l="b">Describe the change you want. I will read, plan and edit, and show my work as I go.</span><span data-l="c">Type a message below. Enter steers the run; Tab queues it.</span></p></div>
           </div>
           <div class="v-loading" aria-label="Loading conversation" role="status">
             <div class="sk sk-user"></div><div class="sk sk-l1"></div><div class="sk sk-l2"></div><div class="sk sk-l3"></div><div class="sk sk-row"></div>
@@ -170,7 +174,7 @@ const queue = new PromptQueue(runtime, store);</code></pre>
             <button class="seg" data-pop="queue" aria-expanded="false" aria-controls="pop-queue"><svg class="i"><use href="#i-queue"/></svg><b>Queue</b><span>1</span></button>
           </div>
           <div class="box" id="box">
-            <span class="prompt-glyph" aria-hidden="true">{{PROMPT}}</span>
+            <span class="prompt-glyph" aria-hidden="true">&#10095;</span>
             <textarea id="ta" rows="1" aria-label="Message agent" placeholder="Message agent" aria-describedby="hint"></textarea>
             <div class="ctl">
               <button class="model" aria-label="Model opus-5, effort high"><span>opus-5</span><small>high</small></button>
@@ -200,12 +204,28 @@ const queue = new PromptQueue(runtime, store);</code></pre>
     </aside>
   </div>
 
+
+  <div class="menu" id="menu" role="dialog" aria-label="Appearance" hidden>
+    <header class="mh"><h2>Appearance</h2><button class="xbtn" data-close-menu aria-label="Close appearance"><svg class="i"><use href="#i-close"/></svg></button></header>
+    <div class="mgroup" role="radiogroup" aria-labelledby="ml-look">
+      <p class="mlabel" id="ml-look">Look</p>
+      <button class="mopt" role="radio" aria-checked="false" data-look-set="a"><span class="sw sw-a" aria-hidden="true"><i></i></span><span class="mt"><b>Quiet Editor</b><small>Dense, calm, ink blue</small></span></button>
+      <button class="mopt" role="radio" aria-checked="false" data-look-set="b"><span class="sw sw-b" aria-hidden="true"><i></i></span><span class="mt"><b>Warm Paper</b><small>Readable, serif, green</small></span></button>
+      <button class="mopt" role="radio" aria-checked="false" data-look-set="c"><span class="sw sw-c" aria-hidden="true"><i></i></span><span class="mt"><b>Terminal Contrast</b><small>Monospace, high contrast</small></span></button>
+    </div>
+    <div class="mgroup mtheme" role="radiogroup" aria-labelledby="ml-theme">
+      <p class="mlabel" id="ml-theme">Theme</p>
+      <div class="mrow"><button class="mchip" role="radio" aria-checked="false" data-theme-set="system">System</button><button class="mchip" role="radio" aria-checked="false" data-theme-set="light">Light</button><button class="mchip" role="radio" aria-checked="false" data-theme-set="dark">Dark</button></div>
+    </div>
+  </div>
+
   <nav class="tabbar" aria-label="Panels">
     <button data-act="files" aria-expanded="false" aria-controls="files"><svg class="i"><use href="#i-folder"/></svg><span>Files</span></button>
     <button data-act="tasks" aria-expanded="false" aria-controls="tasks"><svg class="i"><use href="#i-tasks"/></svg><span>Tasks</span></button>
+    <button data-act="look" aria-haspopup="dialog" aria-expanded="false" aria-controls="menu"><svg class="i"><use href="#i-look"/></svg><span>Look</span></button>
     <button data-act="theme"><svg class="i"><use href="#i-theme"/></svg><span>Theme</span></button>
   </nav>
 </div>
-<script src="app.js"></script>
+<script src="{{ROOT}}app.js"></script>
 </body>
 </html>
