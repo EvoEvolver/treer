@@ -52,14 +52,14 @@ export function Header({ menuOpen, onToggleMenu, lookRef, panels, onPanel }: { m
         <button type="button" className="tbtn" aria-expanded={panels.files} aria-controls="files" aria-label={t("header.filesAria")} onClick={(event) => onPanel("files", event.currentTarget)}><Icon name="folder" /><span className="lbl">{t("header.files")}</span></button>
         <LookButton ref={lookRef} className="tbtn" open={menuOpen} onToggle={onToggleMenu} />
         <button type="button" className="tbtn" aria-label={t("appearance.toggleTheme")} title={t("appearance.toggleTheme")} onClick={toggleTheme}><Icon name="theme" /></button>
-        <NavMenu panels={panels} onPanel={onPanel} onAppearance={onToggleMenu} />
+        <NavMenu onPanel={onPanel} onAppearance={onToggleMenu} />
       </div>
     </header>
   );
 }
 
 /** Phone-only menu in the header (the bottom bar is gone): Files, Tasks, Appearance and Theme in one keyboard-reachable menu. */
-export function NavMenu({ panels: _panels, onPanel, onAppearance }: PanelProps & { onAppearance: () => void }) {
+export function NavMenu({ onPanel, onAppearance }: Pick<PanelProps, "onPanel"> & { onAppearance: () => void }) {
   const tasks = useTasks();
   const [open, setOpen] = useState(false);
   const button = useRef<HTMLButtonElement>(null);
@@ -86,7 +86,7 @@ export function NavMenu({ panels: _panels, onPanel, onAppearance }: PanelProps &
   const choose = (action: () => void) => () => { close(false); action(); };
   return (
     <>
-      <button ref={button} type="button" className="nav-btn" aria-haspopup="menu" aria-expanded={open} aria-controls="navmenu" aria-label={t("nav.menu")} title={t("nav.menu")} onClick={() => setOpen((value) => !value)}><Icon name="menu" /></button>
+      <button ref={button} type="button" className="nav-btn" aria-haspopup="menu" aria-expanded={open} aria-controls={open ? "navmenu" : undefined} aria-label={t("nav.menu")} title={t("nav.menu")} onClick={() => setOpen((value) => !value)}><Icon name="menu" /></button>
       {open && (
         <div className="navmenu" id="navmenu" role="menu" aria-label={t("nav.menu")} ref={list} onKeyDown={onKeyDown}>
           <button type="button" role="menuitem" className="navitem" onClick={choose(() => button.current && onPanel("files", button.current))}><Icon name="folder" /><span>{t("nav.files")}</span></button>
