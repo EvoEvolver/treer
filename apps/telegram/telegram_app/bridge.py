@@ -26,7 +26,15 @@ from .common import (
     _thread_value,
     split_telegram_text,
 )
+from .poc import CHANNEL, PocError, PocService, conversation_key, parse_control
 from .state import StateStore
+
+LIMIT_NOTICES = {
+    "per_user_per_hour": "You are sending too many messages; please try again later.",
+    "per_conversation_per_minute": "This chat is receiving messages too quickly; please wait a minute.",
+    "max_unreplied": "The point of contact has not answered your earlier messages yet; please wait for a reply.",
+}
+
 
 class TelegramBridge:
     def __init__(
@@ -44,6 +52,14 @@ class TelegramBridge:
         self.bot = bot
         self.bot_id = bot_id
         self.state_dir = state_dir
+        # The configuration only seeds the registry; afterwards bindings and users live in SQLite.
+        state.seed_registry(
+            CHANNEL,
+            bot_id,
+            [(conversation_key(b.chat_id, b.thread_id), b.target_agent_id, b.wake_agent) for b in config.bindings],
+            [(str(user), config.user_label(user)) for user in sorted(config.allowed_user_ids)],
+        )
+        self.poc = PocService(state, cli, bot_id, config.user_admin_agent_ids)
 
     def run_inbound_once(self, timeout: int | None = None) -> int:
         offset = self.state.last_update_id() + 1
@@ -76,27 +92,46 @@ class TelegramBridge:
         thread_id = message.get("message_thread_id")
         if thread_id is not None:
             thread_id = _integer(thread_id, "message thread ID")
-        binding = self.config.binding(chat_id, thread_id)
+        conversation = conversation_key(chat_id, thread_id)
+        binding = self.state.get_binding(CHANNEL, self.bot_id, conversation)
+        user = self.state.get_user(CHANNEL, self.bot_id, str(user_id))
+        text = message.get("text")
+        command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if isinstance(text, str) and text.strip() else ""
         if sender.get("is_bot") is True:
             self.state.complete_update(update_id, bot_id=self.bot_id, error="bot sender ignored")
             return
-        if user_id not in self.config.allowed_user_ids or binding is None:
+        admitted = user is not None and user[1]
+        if not admitted or (binding is None and command != "/poc"):
             if self.config.respond_to_denied:
                 self._safe_notice(str(chat_id), thread_id, "This Telegram identity or chat is not allowed.")
             self.state.complete_update(update_id, bot_id=self.bot_id, error="Telegram identity denied")
             return
-        text = message.get("text")
+        label = user[0] if user else f"user-{user_id}"
         if not isinstance(text, str) or not text:
             self._safe_notice(str(chat_id), thread_id, "Treer Telegram currently accepts text messages only.")
             self.state.complete_update(update_id, bot_id=self.bot_id, error="non-text message ignored")
             return
-        command = text.split(maxsplit=1)[0].split("@", 1)[0].lower()
-        if command in {"/start", "/help", "/target", "/status"}:
-            self._process_command(update_id, command, binding, str(chat_id), thread_id)
+        if command in {"/start", "/help", "/target", "/status", "/poc"}:
+            self._process_command(update_id, command, binding, str(chat_id), thread_id, text=text, conversation=conversation,
+                                  actor=f"telegram:{user_id}({label})")
+            return
+        if binding is not None and not binding.enabled:
+            self._safe_notice(str(chat_id), thread_id, "This chat's POC is switched off. Send /poc on to turn it back on.")
+            self.state.complete_update(update_id, bot_id=self.bot_id, error="POC disabled")
             return
         if len(text.encode("utf-8")) > MAX_CORE_BODY_BYTES:
             self._safe_notice(str(chat_id), thread_id, "Message is too large for Treer Core.")
             self.state.complete_update(update_id, bot_id=self.bot_id, error="message too large")
+            return
+        limited = self.state.admit_inbound(
+            CHANNEL, self.bot_id, str(user_id), conversation,
+            per_user_per_hour=self.config.per_user_per_hour,
+            per_conversation_per_minute=self.config.per_conversation_per_minute,
+            max_unreplied=self.config.max_unreplied,
+        )
+        if limited:
+            self._safe_notice(str(chat_id), thread_id, LIMIT_NOTICES[limited])
+            self.state.complete_update(update_id, bot_id=self.bot_id, error=f"rate limited: {limited}")
             return
 
         context_ids: list[str] = []
@@ -115,7 +150,7 @@ class TelegramBridge:
             "account_id": self.bot_id,
             "conversation_id": f"{chat_id}:{thread_id if thread_id is not None else 0}",
             "message_id": str(telegram_message_id),
-            "metadata": {"user_id": str(user_id), "update_id": str(update_id)},
+            "metadata": {"user_id": str(user_id), "user_label": label, "update_id": str(update_id)},
         }
         source_path = self._write_source(update_id, source)
         arguments = ["message", "send", "--to", binding.target_agent_id]
@@ -140,6 +175,7 @@ class TelegramBridge:
                 pass
         core_message = _object(response.get("message"), "Core Message")
         core_message_id = _string(core_message.get("message_id"), "Core Message ID", 256)
+        self.state.record_inbound(CHANNEL, self.bot_id, str(user_id), conversation)
         self.state.complete_update(
             update_id,
             bot_id=self.bot_id,
@@ -156,13 +192,19 @@ class TelegramBridge:
         self,
         update_id: int,
         command: str,
-        binding: Binding,
+        binding: Any,
         chat_id: str,
         thread_id: int | None,
+        *,
+        text: str = "",
+        conversation: str = "",
+        actor: str = "",
     ) -> None:
-        if command == "/status":
+        if command == "/poc":
+            notice = self._poc_command(text, binding, conversation, actor)
+        elif command == "/status":
             try:
-                response = self.cli.run(["agent", "get", binding.target_agent_id])
+                response = self.cli.run(["agent", "show", binding.target_agent_id])
                 name = str(response.get("name") or binding.target_agent_id)
                 status = str(response.get("status") or "unknown")
                 notice = f"Treer target {name} is {status}."
@@ -173,10 +215,32 @@ class TelegramBridge:
         else:
             notice = (
                 f"Treer bridge ready. Target: {binding.target_agent_id}. "
-                "Send text or reply to a bridged message."
+                "Send text or reply to a bridged message. /poc shows or changes the point of contact."
             )
         self.bot.send_message(chat_id, thread_id, notice, None)
         self.state.complete_update(update_id, bot_id=self.bot_id)
+
+    def _poc_command(self, text: str, binding: Any, conversation: str, actor: str) -> str:
+        """`/poc` shows, `/poc AGENT` (ID or tree path) sets, `/poc off|on` pauses/resumes this chat's POC."""
+        parts = text.split(maxsplit=1)
+        argument = parts[1].strip() if len(parts) > 1 else ""
+        usage = "Change it with /poc <agent ID or tree path>; pause or resume with /poc off or /poc on."
+        try:
+            if not argument:
+                if binding is None:
+                    return f"This chat has no point of contact yet. Set one with /poc <agent ID or tree path>."
+                state = "on" if binding.enabled else "off"
+                return f"POC for this chat: {binding.target_agent_id} ({state}). {usage}"
+            if argument.lower() in {"on", "off"}:
+                if binding is None:
+                    return "This chat has no point of contact yet. Set one with /poc <agent ID or tree path>."
+                _, new = self.poc.set_poc(conversation, None, actor=actor, via="telegram", op=f"poc.{argument.lower()}",
+                                          enabled=argument.lower() == "on")
+                return f"POC {new.target_agent_id} is now {argument.lower()} for this chat."
+            _, new = self.poc.set_poc(conversation, argument, actor=actor, via="telegram", op="poc.set", enabled=True)
+            return f"POC for this chat is now {new.target_agent_id}."
+        except PocError as error:
+            return f"Could not change the POC: {error.message}"
 
     def _safe_notice(self, chat_id: str, thread_id: int | None, text: str) -> None:
         try:
@@ -244,6 +308,12 @@ class TelegramBridge:
         core_message_id = _string(message.get("message_id"), "Core Message ID", 256)
         body = _string(message.get("body"), "Core Message body", MAX_CORE_BODY_BYTES)
         contexts = [_string(value, "context ID", 256) for value in _list(message.get("context_ids", []), "contexts")]
+        control = parse_control(body)
+        if control is not None:
+            # A Core control message (POC read/change): never relayed to the chat; the result goes back to its sender.
+            self.poc.handle_control(delivery_id, message, control)
+            self._ack_delivery(delivery_id)
+            return
         route = self.state.first_mapping_for_contexts(self.bot_id, contexts)
         if route:
             chat_id = str(route["chat_id"])
@@ -252,14 +322,13 @@ class TelegramBridge:
         else:
             sender = _object(message.get("sender"), "Core sender")
             sender_id = _string(sender.get("id"), "Core sender ID", 256)
-            candidates = [binding for binding in self.config.bindings if binding.target_agent_id == sender_id]
+            candidates = self.state.bindings_for_agent(CHANNEL, self.bot_id, sender_id)
             if len(candidates) != 1:
                 raise BridgeError(
                     f"delivery {delivery_id} has no unambiguous Telegram route; it remains unacknowledged"
                 )
-            binding = candidates[0]
-            chat_id = binding.chat_id
-            thread_id = binding.thread_id
+            chat_id, _, thread = candidates[0].conversation.rpartition(":")
+            thread_id = None if thread == "0" else int(thread)
             native_reply_to = None
         rendered = body
         if len(contexts) > 1:

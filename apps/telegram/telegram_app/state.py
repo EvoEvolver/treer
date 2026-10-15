@@ -7,8 +7,9 @@ import time
 from pathlib import Path
 
 from .common import BridgeError, _bounded_error, _sha256, _thread_key, _thread_value
+from .registry import REGISTRY_SCHEMA, RegistryMixin
 
-class StateStore:
+class StateStore(RegistryMixin):
     def __init__(self, path: Path) -> None:
         self.path = path
         self._lock = threading.RLock()
@@ -78,6 +79,7 @@ class StateStore:
                 );
                 """
             )
+            connection.executescript(REGISTRY_SCHEMA)
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=15)
