@@ -280,7 +280,11 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/v1/me' and method == 'GET':
                 self.json(200, {'principal': actor, 'notifications': 'Best effort; delivery status is recorded on each activity and mutation'})
             elif path == '/v1/directory' and method == 'GET':
-                self.json(200, {'principals': directory})
+                # Agent `path` is Core's canonical path for display and location only (null: hidden or unplaced; authorization
+                # always uses the stable ID). `paths` tells a Proxy without app.directory-paths.v1 apart from a null path.
+                capabilities = sorted(getattr(directory, 'capabilities', ()))
+                self.json(200, {'principals': directory, 'capabilities': capabilities,
+                                'paths': 'supported' if 'app.directory-paths.v1' in capabilities else 'unsupported'})
             elif path == '/v1/issues' and method == 'GET':
                 if query.get('assignee') == 'me':
                     query['assignee'] = actor['id']

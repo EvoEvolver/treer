@@ -212,10 +212,15 @@ Core evaluates that caller's Message Policy:
 | Any other edit (priority, labels, text…) | assignee |
 | `@name` in a comment, or newly added to a title/description | the mentioned Agent, in addition to the above |
 
+Agent paths shown in the UI come only from Core's directory (`path` is the
+canonical path for display and location; `null` when hidden or unplaced, in which
+case the stable ID is shown; authorization always uses the ID). `GET /v1/directory`
+adds `capabilities` and `paths: supported|unsupported`; a Proxy without
+`app.directory-paths.v1` is reported as unsupported rather than guessed around.
 Claims/leases and updates that change nothing send nothing. A mention is
 `@name` (must match exactly one Agent name, case-insensitive), `@/tree/path` or
 `@ag_id`. Paths are resolved by Core's `recipients/resolve` with the **author's
-own token** before the write (the Issues directory carries no paths), so the
+own token** before the write, so the
 author's Policy decides what a path means; the result must also be an Agent in
 the author's directory. At most 10 paths are resolved per event, and none when
 notifications are off. An ambiguous or unknown mention is ignored and reported:

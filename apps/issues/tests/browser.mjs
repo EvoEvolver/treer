@@ -63,7 +63,7 @@ for (const width of [1280, 390]) test(`OAuth fallback with a contract double, is
     assert.match(await page.locator('#detail .assignee-trigger').innerText(), /Reviewer[\s\S]*\/design\/Reviewer/);
     assert.doesNotMatch(await page.locator('#detail .assignee-trigger').innerText(), /engineering/);
     await assign(page,'ag_no_path');
-    assert.match(await page.locator('#detail .assignee-trigger').innerText(), /Path unavailable · ag_no_path/);
+    assert.match(await page.locator('#detail .assignee-trigger').innerText(), /Unplaced\s+ag_no_path/);
     await assign(page,'ag_a');
     assert.match(await page.locator('#detail .assignee-trigger').innerText(), /\/engineering\/backend\/Builder/);
     assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'Selected full path fits narrow screen');

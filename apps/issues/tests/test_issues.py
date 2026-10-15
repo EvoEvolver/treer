@@ -36,6 +36,18 @@ class IssuesTest(unittest.TestCase):
         except urllib.error.HTTPError as exc:return exc.code,json.load(exc)
     def create(self,**values):
         status,result=self.req('v1/issues','POST',dict(title='Test issue',**values));self.assertEqual(status,201,result);return result['issue']['id']
+    def test_directory_reports_paths_without_guessing_missing_ones(self):
+        status,result=self.req('v1/directory');self.assertEqual(status,200)
+        self.assertEqual(result['paths'],'supported');self.assertEqual(result['capabilities'],['app.directory-paths.v1'])
+        paths={p['id']:p.get('path') for p in result['principals'] if p['kind']=='agent'}
+        self.assertEqual(paths['ag_a'],'/engineering/backend/Builder');self.assertIsNone(paths['ag_no_path'])
+    def test_directory_from_a_proxy_without_the_capability_is_marked_unsupported(self):
+        from auth import Auth, Directory
+        auth=Auth.__new__(Auth);auth.service_id='svc_issues'
+        auth.request=lambda method,path,token,body=None:{'principals':[{'kind':'agent','id':'ag_a','name':'A'}]}
+        old=auth.directory('t');self.assertIsInstance(old,Directory);self.assertEqual(old.capabilities,frozenset())
+        auth.request=lambda method,path,token,body=None:{'principals':[],'capabilities':['app.directory-paths.v1',7]}
+        self.assertEqual(auth.directory('t').capabilities,frozenset({'app.directory-paths.v1'}))
     def test_identity_and_permissions(self):
         for token in (None,'forged','wrong-audience','wrong-workspace','removed-agent'):
             status,_=self.req('v1/issues',token=token);self.assertIn(status,(401,403))

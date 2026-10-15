@@ -1,7 +1,7 @@
 export type Status = "open" | "in_progress" | "blocked" | "done" | "closed";
 export type Priority = "low" | "normal" | "high" | "urgent";
 
-export interface Principal { id: string; kind: "human" | "agent"; name: string; role?: string; path?: string }
+export interface Principal { id: string; kind: "human" | "agent"; name: string; role?: string; path?: string | null }
 export interface Claim { holder: string; expires_at: string }
 export interface Progress { total: number; completed: number; by_status: Record<string, number> }
 export interface Issue {

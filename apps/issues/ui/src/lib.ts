@@ -9,7 +9,7 @@ export const NOT_ALLOWED = "Only the creator, assignee, lease holder or an admin
 export const words = (value: string) => value.replaceAll("_", " ");
 
 export const principalContext = (person: Principal) =>
-  person.kind === "agent" ? person.path || `Path unavailable · ${person.id}` : "Human";
+  person.kind === "agent" ? person.path || person.id : "Human";
 
 export function displayName(people: Principal[], id: string | null): string {
   const person = people.find((p) => p.id === id);
