@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
 from notify import Digest, TreePaths, candidates, enabled as notify_enabled, hourly_limit, path_tokens
-from reminders import Reminders, enabled as reminders_enabled
+from reminders import Reminders, backoff as reminder_backoff, enabled as reminders_enabled
 from store import Store, fields, fail
 
 ROOT = Path(__file__).resolve().parent
@@ -348,6 +348,7 @@ def main(argv=None):
     proxy = urllib.parse.urlsplit(os.environ['ISSUES_PROXY_URL'])
     if proxy.scheme not in ('http', 'https') or not proxy.netloc or proxy.username or proxy.password:
         raise ValueError('ISSUES_PROXY_URL must be an HTTP(S) URL without credentials')
+    schedule = reminder_backoff() if reminders_enabled() else None   # invalid reminder settings stop the start-up, before any side effect
     host, port = os.environ.get('ISSUES_LISTEN', '127.0.0.1:9440').rsplit(':', 1)
     application = Application(Store(os.environ.get('ISSUES_DB', '.treer/apps/issues/issues.sqlite3')))
     server = Server((host, int(port)), application)
@@ -366,8 +367,9 @@ def main(argv=None):
                 return application.identity_provider().public_url
             except Error:
                 return os.environ.get('ISSUES_PUBLIC_URL') or 'http://issues.treer/'
-        Reminders(application.store, link, os.environ.get('TREER_BIN', 'treer')).start()
-        print('Issues hourly reminders enabled (ISSUES_REMINDERS=off disables)', flush=True)
+        Reminders(application.store, link, os.environ.get('TREER_BIN', 'treer'), schedule=schedule).start()
+        print(f'Issues reminders enabled with exponential backoff first={schedule.first:g}s factor={schedule.factor:g} max={schedule.maximum:g}s '
+              '(ISSUES_REMINDERS=off disables)', flush=True)
     server.serve_forever()
 
 

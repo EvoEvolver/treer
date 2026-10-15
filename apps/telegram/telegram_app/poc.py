@@ -3,7 +3,8 @@
 Anyone who can reach the bridge Agent with a Core Message (Message Policy decides) may read or change POC bindings -
 including a POC handing a conversation over to another Agent - because the authority is the verified Core sender,
 which is recorded in the audit trail. There is deliberately no human confirmation gate. Admitting new IM users is a
-bigger trust decision and is limited to the Agents listed in `control.user_admin_agent_ids` (default: nobody).
+wider than choosing a POC; by default nobody may do it through control messages, `control.user_admin_agent_ids` lists the Agents
+that may, and the literal "any" opens it to any sender the bridge accepts (a deployment decision, audited like POC changes).
 Control messages are JSON objects with an `im` key, e.g. {"im":"poc.set","conversation":"-10042:9","to":"/team/builder"}.
 They are never relayed to the chat; the result is sent back to the sender as a Core Message in the same context.
 """
@@ -69,7 +70,7 @@ class PocError(Exception):
 
 
 class PocService:
-    def __init__(self, state: StateStore, cli: TreerCli, account_id: str, user_admin_agent_ids: frozenset[str] = frozenset()) -> None:
+    def __init__(self, state: StateStore, cli: TreerCli, account_id: str, user_admin_agent_ids: frozenset[str] | None = frozenset()) -> None:
         self.state, self.cli, self.account_id = state, cli, account_id
         self.user_admin_agent_ids = user_admin_agent_ids
 
@@ -156,9 +157,9 @@ class PocService:
             limit = control.get("limit", 20)
             return {"events": state.audit_list(CHANNEL, account, limit if isinstance(limit, int) and 1 <= limit <= 200 else 20)}
         if op == "users.list":
-            return {"users": state.list_users(CHANNEL, account)}
+            return {"users": state.list_users(CHANNEL, account), "user_admission": ("open" if self.user_admin_agent_ids is None else "restricted" if self.user_admin_agent_ids else "closed")}
         if op == "users.set":
-            if sender_id not in self.user_admin_agent_ids:
+            if self.user_admin_agent_ids is not None and sender_id not in self.user_admin_agent_ids:
                 raise PocError("forbidden", "only agents listed in control.user_admin_agent_ids may manage IM users")
             user_id, label, enabled = control.get("user_id"), control.get("label"), control.get("enabled", True)
             if not isinstance(user_id, (str, int)) or isinstance(user_id, bool) or not str(user_id).lstrip("-").isdigit():

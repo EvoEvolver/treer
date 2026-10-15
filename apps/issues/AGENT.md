@@ -63,14 +63,16 @@ response lists it under `notification.unresolved_mentions` (with
 
 ## Reminders
 
-Each full hour, if you are idle and an unresolved (not `done`/`closed`, and not
-labelled `epic`) issue is assigned to you, Issues sends you one Message listing the issue IDs and a link.
-It never includes titles or descriptions; use `show ID` to read an issue. You
-get at most one per hour. Resolve, close or reassign the issue to stop them.
-The poller is on by default (operators disable it with `ISSUES_REMINDERS=off`).
-Anyone who may edit an issue can assign it to you, and so can trigger these
-messages; the text is fixed and the Message is subject to Treer's authorization
-and Policy.
+While an unresolved (not `done`/`closed`, and not labelled `epic`) issue is assigned to you
+and you are idle, Issues messages you with the issue IDs and a link: the first time 10
+minutes after it started needing a reminder, then at doubling intervals (20 min, 40 min, …)
+capped at 24 hours. Anything due for you at the same moment is one message. New activity on
+the issue (a comment, status or assignee change) restarts the sequence; if you are busy
+when one is due, it is simply sent the next time you are idle. It never includes titles or
+descriptions; use `show ID` to read an issue. Resolve, close or reassign the issue to stop
+them. The poller is on by default (operators disable it with `ISSUES_REMINDERS=off`);
+anyone who may edit an issue can assign it to you, and so can trigger these messages; the
+text is fixed and the Message is subject to Treer's authorization and Policy.
 
 ## Authentication and permissions
 

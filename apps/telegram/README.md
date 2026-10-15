@@ -21,7 +21,11 @@ reconciles** the POC registry (below): `bindings` (chat/topic → target Agent) 
 change made at runtime (in the chat, by a control message, `users.set`) is
 runtime-owned and is never overwritten by the file. See *Revoking access*. At least one of `allowed_user_ids`/`users` is required;
 `bindings` may be empty because a chat can be bound with `/poc`. Inbound Messages are authored by the bridge Agent, not by a trusted Treer human
-identity. Keep the bot token outside configuration and logs.
+identity. Keep the bot token outside configuration and logs: put it in a private file and
+name it with `"bot_token_file": "/absolute/path"` in the configuration (used when
+`TELEGRAM_BOT_TOKEN` is not set). The file must be a regular file (not a symlink) owned by
+the bridge's user with mode 0600, hold one ASCII token of at most 512 bytes, and its content
+is never echoed in an error; the token then appears in neither argv nor the environment.
 
 Back up `telegram-state.sqlite3` with its WAL files or SQLite's online backup
 API. One active instance should own a bot token and state database. Ambiguous
@@ -85,10 +89,11 @@ Redelivery is safe: the audit row is unique per Core delivery, so a change is
 applied once and the result is re-sent under the same idempotency key. A relayed
 reply whose whole body happens to be JSON with an `im` key is treated as control.
 
-**Admitting IM users** is a bigger trust decision than choosing a POC, so
-`users.set` (and `im-poc user-set`) works only for Agent IDs listed in
-`control.user_admin_agent_ids` (default none); otherwise edit the config's
-`users` and restart. Unknown or disabled users are refused.
+**Admitting IM users** (`users.set`, `im-poc user-set`) is closed by default: nobody may do it through control
+messages. `control.user_admin_agent_ids` is either a list of the Agent IDs that may, or the string `"any"` to let any sender
+the bridge accepts do it (an explicit deployment decision, logged at start-up and reported by `users.list` as
+`user_admission`, audited like POC changes). Admitting an external person to talk to the POC is a wider trust decision than
+choosing a POC. Unknown or disabled users are refused either way; the settings App and `/pair` are the other ways in.
 
 ## Limits, audit and revoking access
 
@@ -144,3 +149,85 @@ identity may `message receive` has not been verified. `/status` and `/poc AGENT`
 use `treer agent show`, so the bridge needs Policy to read the Agents it routes to.
 Slack and other adapters are not implemented; the registry and control protocol are
 channel-agnostic, the Telegram delivery state and Bot API client are not yet.
+
+## Running the bridge from a release directory
+
+The bridge is a long-running process, not an App: run it as a managed Agent (kind `command`)
+whose saved startup command points at an immutable export of `apps/telegram` at a full commit,
+so the Agent never executes a mutable checkout:
+
+```sh
+SHA=<full 40-character commit on origin/main>
+ROOT=/Users/dooms/apps-deployed/telegram-bridge
+git -C /path/to/repo archive --prefix="releases/$SHA/" "$SHA:apps/telegram" | tar -x -C "$ROOT"
+python3 -m unittest discover -s "$ROOT/releases/$SHA/tests" -p 'test_*.py'   # optional gate
+ln -sfn "releases/$SHA" "$ROOT/current"
+treer agent admin startup set /infra/telegram-bridge --cwd apps-deployed/telegram-bridge -- \
+  env TREER_APP_CONFIG=/Users/dooms/.config/treer/telegram/config.json \
+      TREER_APP_STATE_DIR=/Users/dooms/.local/share/treer/apps/telegram \
+      /absolute/stable/python3 current/telegram.py
+```
+
+Upgrade by exporting the next commit, repointing `current` and `treer agent restart`; keep the
+previous release for rollback (the SQLite state, including bindings and audit, lives in
+`TREER_APP_STATE_DIR` and is independent of the release). Config example (the placeholder
+user/binding `0` never matches a real Telegram ID; replace it with the real numeric user ID,
+which is also the chat ID of that user's private chat, and restart. Removing an entry disables
+the registry row it created):
+
+```json
+{
+  "bot_token_file": "/Users/dooms/.config/treer/telegram/bot-token",
+  "users": [{"id": 0, "label": "REPLACE-with-the-telegram-user-id"}],
+  "bindings": [{"chat_id": 0, "target_agent_id": "ag_POC_AGENT_ID", "wake_agent": false}]
+}
+```
+
+## Settings App (token, pairing and POCs in the browser)
+
+`telegram-settings.py` is a small Managed App with a React page (`ui/` builds to the committed `dist/`, `npm --prefix
+apps/telegram run check` verifies it byte for byte, exactly like Issues) for everything an operator would otherwise do in a
+terminal. It runs next to the bridge Agent and shares its private state directory: the bridge keeps the Agent identity it needs
+to send and receive Core Messages, the App provides Treer login. Nothing talks to Telegram's update stream except the bridge.
+
+- **Who may open it.** Every route, including the read-only status, needs a short-lived Treer service token verified by the Proxy for
+  this App's service and workspace (the page gets it from Treer's forwarded identity; there are no sessions, cookies or OAuth
+  here). Allowed: human workspace `owner`/`admin`, and Agents listed in `settings.admin_agent_ids` of the configuration.
+  Hiding a button is not authorization: members and other Agents get 403 from the API itself. Writes also require the
+  `X-Telegram-Settings: 1` header (humans), a trusted `Origin` and same-site Fetch Metadata.
+- **Bot token (write-only).** Paste the BotFather token once: it is checked with Telegram's `getMe` (fixed host, no redirects,
+  short timeout) *before* anything is stored, written to `STATE_DIR/bot-token` (mode 0600, atomic, symlinks refused) and the
+  input is cleared at once. The API and page only ever show the bot's username and the token's last four characters; the token
+  is never returned, logged, put in an error (only exception types are logged) or sent to a log/argv/env. Replace and Remove
+  work (Remove overwrites the file, stops the bridge and invalidates open pairing codes). Saving a token that belongs to a
+  *different* bot than the one this bridge was set up with is refused. Attempts are limited to 5/minute per person and 20 per ten
+  minutes overall, so the endpoint cannot be used to probe tokens. `TELEGRAM_BOT_TOKEN` and `bot_token_file` remain as fallbacks
+  (order: environment, settings file, `bot_token_file`); with none of them the bridge waits (`needs_token`) and loads a token
+  saved later within seconds, rebuilding itself when it changes.
+- **Pairing.** *Generate pairing code* shows a one-time code once (10 symbols from a 30-letter alphabet, ~49 bits, ten minutes,
+  salted hash stored, bound to its creator and a POC). In Telegram, in a **private chat** with the bot, send `/pair CODE`: that
+  Telegram user is admitted and the chat is bound to the POC. The check and the spending happen in one transaction (no replay),
+  a Telegram user is blocked after 5 failures in ten minutes (even with the right code) and 20 failures overall invalidate every
+  open code. Group chats never consume a code. Success is audited (`pair.user`, `poc.pair`) and the POC and the person who
+  created the code receive a fixed short Message.
+- **Also on the page:** the conversations table (change a POC, the wake flag, pause/resume one conversation), the allowed users
+  (add, relabel, disable), a bridge-wide pause (stops forwarding both ways; messages wait), bridge state with a heartbeat
+  (`offline` after 30 s of silence) and the last 50 audited changes with their actors. Everything user-controlled is rendered as
+  text. There is deliberately no "export configuration".
+
+Configuration needs one extra block, read only by the settings App (the bridge ignores it); the Treer Proxy URL is a start-up
+argument because an App's saved command cannot carry environment variables:
+
+```json
+{ "settings": { "admin_agent_ids": [], "default_poc": "ag_POC_AGENT_ID" } }
+```
+
+```sh
+treer app create --machine <server-id> --name telegram-settings --folder /infra --cwd apps-deployed/telegram-bridge \
+  --port 9441 env -- TREER_APP_CONFIG=/Users/dooms/.config/treer/telegram/config.json \
+  TREER_APP_STATE_DIR=/Users/dooms/.local/share/treer/apps/telegram \
+  /absolute/stable/python3 current/telegram-settings.py --proxy-url https://PROXY.example/
+```
+
+Do not use `--public`. The page is the only place a token is entered; give the App and the bridge the same OS user and
+state directory (mode 0700). Whoever can administer that user can read the token file - the usual limit of a same-user App.

@@ -145,16 +145,26 @@
       "additionalProperties": false,
       "properties": {
         "user_admin_agent_ids": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256
-          },
-          "default": [],
-          "description": "Agents allowed to admit/disable IM users through control messages. POC changes need no such list."
+          "description": "Who may admit/disable IM users through control messages. Absent or []: nobody (default). A list: only these Agent IDs. The string \"any\": any sender the bridge accepts (explicit opt-in). POC changes are never restricted by this.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            {
+              "const": "any"
+            }
+          ]
         }
       }
+    },
+    "bot_token_file": {
+      "type": "string",
+      "description": "Absolute path of a private (0600, owned by the bridge's user, not a symlink) file holding the bot token. Used when TELEGRAM_BOT_TOKEN is not set; keeps the token out of argv, the environment and this configuration."
     }
   },
   "anyOf": [
