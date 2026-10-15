@@ -11,6 +11,7 @@ const system = (subtype, rest = {}) => send({ type: "system", subtype, ...rest }
 let hold = false;
 let timer;
 let goalTimer;
+let stepGoalHook;
 let sequence = 0;
 let usageTotal = args.includes("--session-usage-baseline") ? Number(arg("--session-usage-baseline")) : 0;
 let clearCommands = 0;
@@ -52,6 +53,7 @@ for await (const line of createInterface({ input: process.stdin })) {
   }
   if (input.type !== "user") continue;
   const value = input.message.content[0].text;
+  if (value === "fixture:reject-goal" && stepGoalHook) { stepGoalHook(); continue; }
   system("init", { model: currentModel });
   system("session_state_changed", { state: "running" });
   // Real Claude does not echo ordinary user inputs to stdout, but saves them.
@@ -65,15 +67,18 @@ for await (const line of createInterface({ input: process.stdin })) {
       // A Stop-blocked turn does not consume an ordinary queued clear. An
       // interrupt control request must release it first.
       if (hold && process.argv.includes("--real-goal-wire")) continue;
+      const delay = process.argv.includes("--clear-ack-delay-ms") ? Number(arg("--clear-ack-delay-ms")) : 0;
+      if (delay) await new Promise(done => setTimeout(done, delay));
     } else if (hold && process.argv.includes("--real-goal-wire")) message("assistant", [{ type: "text", text: "[Request interrupted by user]" }]);
     const output = args === "clear" ? process.argv.includes("--clear-no-goal") ? "No goal set" : process.env.FAKE_CLAUDE_OLD_GOAL ? "Goal cleared: old condition" : "Goal cleared" : args ? `Goal set: ${args}` : "No goal set. Usage: `/goal <condition>`";
     const uuid = `goal-${randomUUID()}`;
     persist({ type: "system", subtype: "local_command", uuid, content: `<local-command-stdout>${output}</local-command-stdout>`, commandRun: { command: "goal", args } });
     send({ type: "assistant", uuid, message: { model: "<synthetic>", id: uuid, content: [{ type: "text", text: output }] }, local_command_source: `<local-command-stdout>${output}</local-command-stdout>`, local_command_run: { command: "goal", args } });
-    if (args === "clear") clearInterval(goalTimer);
+    if (args === "clear") { clearInterval(goalTimer); stepGoalHook = undefined; }
     if (args.startsWith("reject-loop") || args.startsWith("progress-loop") || args.startsWith("token-loop") || args.startsWith("impossible-loop")) {
       let count = 0;
-      goalTimer = setInterval(() => {
+      const rejectGoal = () => {
+        if (process.argv.includes("--step-goal-hooks")) hold = true;
         count++;
         if (args.startsWith("progress-loop")) message("assistant", [{ type: "tool_use", id: `progress-${count}`, name: "Read", input: { file_path: `evidence-${count}` } }]);
         if (args.startsWith("token-loop")) message("assistant", [{ type: "text", text: "still working" }], `usage-${count}`, { message: { id: `usage-${count}`, role: "assistant", model: currentModel, content: [{ type: "text", text: "still working" }], usage: { input_tokens: 100, output_tokens: 100 } } });
@@ -83,7 +88,9 @@ for await (const line of createInterface({ input: process.stdin })) {
           hook_infos: [{ command: "prompt", prompt_text: args }],
           hook_errors: [], has_output: true, prevented_continuation: true });
         else send(event);
-      }, 30);
+      };
+      if (process.argv.includes("--step-goal-hooks")) stepGoalHook = rejectGoal;
+      else goalTimer = setInterval(rejectGoal, 30);
       continue;
     }
     if (args && args !== "clear") {
