@@ -69,7 +69,7 @@ class Config:
     per_user_per_hour: int = 60
     per_conversation_per_minute: int = 20
     max_unreplied: int = 50
-    user_admin_agent_ids: frozenset[str] = frozenset()
+    user_admin_agent_ids: frozenset[str] | None = frozenset()   # default: nobody; a set restricts to those Agents; None (config "any"): any accepted sender
 
     def user_label(self, user_id: int) -> str:
         return dict(self.user_labels).get(user_id, f"user-{user_id}")

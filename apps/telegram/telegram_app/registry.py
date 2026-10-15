@@ -7,10 +7,19 @@ messages survive restarts and later config edits.
 """
 from __future__ import annotations
 
+import hashlib
+import hmac
+import secrets
 import sqlite3
 import time
 from dataclasses import dataclass
 
+PAIR_TTL = 600.0               # a pairing code lives ten minutes
+PAIR_ALPHABET = "ABCDEFGHJKMNPQRSTVWXYZ23456789"   # 30 symbols, no look-alikes: 10 characters ~ 49 bits
+PAIR_LENGTH = 10
+PAIR_USER_FAILURES = 5          # failed attempts per Telegram user per window before that user is blocked
+PAIR_GLOBAL_FAILURES = 20       # failed attempts overall per window before every open code is invalidated
+PAIR_WINDOW = 600.0
 AUDIT_KEEP = 5000      # changes only; rejected requests go to their own small ring so they cannot flush this
 REJECT_KEEP = 200
 RATE_KEEP_SECONDS = 3700
@@ -42,6 +51,29 @@ CREATE TABLE IF NOT EXISTS poc_notices (
     at REAL NOT NULL,
     PRIMARY KEY(conversation, recipient)
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS pairings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    salt TEXT NOT NULL,
+    code_hash TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    poc_agent_id TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    expires_at REAL NOT NULL,
+    used_at REAL,
+    used_by TEXT,
+    invalidated_at REAL
+);
+CREATE TABLE IF NOT EXISTS pair_attempts (
+    user_id TEXT NOT NULL,
+    at REAL NOT NULL,
+    ok INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS pair_attempts_at ON pair_attempts(at);
 CREATE TABLE IF NOT EXISTS poc_rejects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at REAL NOT NULL,
@@ -215,13 +247,14 @@ class RegistryMixin:
                              (channel, account, user_id)).fetchone()
         return (row["label"], bool(row["enabled"])) if row else None
 
-    def set_user(self, channel: str, account: str, user_id: str, label: str, enabled: bool, *, actor: str, delivery_id: str | None = None) -> None:
+    def set_user(self, channel: str, account: str, user_id: str, label: str, enabled: bool, *, actor: str, delivery_id: str | None = None,
+                 via: str = "control", op: str = "users.set") -> None:
         """Runtime-owned from now on (source 'control'): the config no longer overrides it. Audited in the same transaction."""
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             db.execute("""INSERT INTO im_users VALUES (?,?,?,?,?,'control') ON CONFLICT(channel, account_id, user_id)
                           DO UPDATE SET label=excluded.label, enabled=excluded.enabled, source='control'""", (channel, account, user_id, label, int(enabled)))
-            self._audit(db, time.time(), delivery_id, actor, "control", "users.set", channel, account, None, None, f"user:{user_id}:{'on' if enabled else 'off'}", "ok")
+            self._audit(db, time.time(), delivery_id, actor, via, op, channel, account, None, None, f"user:{user_id}:{'on' if enabled else 'off'}", "ok")
             db.commit()
 
     def claim_notice(self, conversation: str, recipient: str, window: float = 300.0, now: float | None = None) -> bool:
@@ -295,3 +328,92 @@ class RegistryMixin:
                                  WHERE chat_id=? AND thread_key=? AND direction='outbound'""", (chat, thread_key)).fetchone()[0]
         return db.execute("""SELECT COUNT(*) FROM message_mappings WHERE chat_id=? AND thread_key=? AND direction='inbound'
                              AND created_at > ?""", (chat, thread_key, last_out)).fetchone()[0]
+
+    # --- shared settings (written by the settings App and the bridge process) ------------------------
+
+    def get_setting(self, key: str, default: str | None = None) -> str | None:
+        with self._lock, self._connect() as db:
+            row = db.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return row["value"] if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._lock, self._connect() as db:
+            db.execute("INSERT INTO settings VALUES (?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                       (key, value[:512], time.time()))
+
+    def delete_settings(self, *keys: str) -> None:
+        with self._lock, self._connect() as db:
+            for key in keys:
+                db.execute("DELETE FROM settings WHERE key=?", (key,))
+
+    def settings_with_age(self, prefix: str = "") -> dict[str, tuple[str, float]]:
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT key, value, updated_at FROM settings WHERE key LIKE ?", (prefix + "%",)).fetchall()
+        return {row["key"]: (row["value"], row["updated_at"]) for row in rows}
+
+    # --- pairing codes ---------------------------------------------------------------------------
+
+    @staticmethod
+    def _normalise_code(value: str) -> str:
+        return "".join(ch for ch in value.upper() if ch not in " -_\t\n")
+
+    @staticmethod
+    def _code_hash(salt: str, code: str) -> str:
+        return hashlib.sha256((salt + ":" + code).encode()).hexdigest()
+
+    def create_pairing(self, created_by: str, poc_agent_id: str, ttl: float = PAIR_TTL, now: float | None = None) -> tuple[str, float]:
+        """A fresh one-time code bound to its creator and target POC. Every earlier open code dies at once. The code
+        is returned exactly once; only a salted hash is stored."""
+        now = time.time() if now is None else now
+        code = "".join(secrets.choice(PAIR_ALPHABET) for _ in range(PAIR_LENGTH))
+        salt = secrets.token_hex(8)
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("UPDATE pairings SET invalidated_at=? WHERE used_at IS NULL AND invalidated_at IS NULL", (now,))
+            db.execute("INSERT INTO pairings(salt, code_hash, created_by, poc_agent_id, created_at, expires_at) VALUES (?,?,?,?,?,?)",
+                       (salt, self._code_hash(salt, code), created_by[:256], poc_agent_id, now, now + ttl))
+            db.commit()
+        return f"{code[:5]}-{code[5:]}", now + ttl
+
+    def pairing_status(self, now: float | None = None) -> dict | None:
+        now = time.time() if now is None else now
+        with self._lock, self._connect() as db:
+            row = db.execute("""SELECT created_by, poc_agent_id, created_at, expires_at FROM pairings
+                                WHERE used_at IS NULL AND invalidated_at IS NULL AND expires_at > ? ORDER BY id DESC LIMIT 1""", (now,)).fetchone()
+        return dict(row) if row else None
+
+    def invalidate_pairings(self, now: float | None = None) -> int:
+        now = time.time() if now is None else now
+        with self._lock, self._connect() as db:
+            return db.execute("UPDATE pairings SET invalidated_at=? WHERE used_at IS NULL AND invalidated_at IS NULL", (now,)).rowcount
+
+    def redeem_pairing(self, code: str, user_id: str, now: float | None = None) -> tuple[str, dict | None]:
+        """Checks and spends a code in ONE transaction (so a replay cannot succeed). Returns ('ok', row),
+        ('invalid', None), ('blocked', None) - this user failed too often - or ('locked', None) - too many failures
+        overall, every open code has been invalidated. A blocked user is refused even with the right code."""
+        now = time.time() if now is None else now
+        wanted = self._normalise_code(code)
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("DELETE FROM pair_attempts WHERE at < ?", (now - 3600,))
+            window = now - PAIR_WINDOW
+            if db.execute("SELECT COUNT(*) FROM pair_attempts WHERE ok=0 AND at>?", (window,)).fetchone()[0] >= PAIR_GLOBAL_FAILURES:
+                db.execute("UPDATE pairings SET invalidated_at=? WHERE used_at IS NULL AND invalidated_at IS NULL", (now,))
+                db.commit()
+                return "locked", None
+            if db.execute("SELECT COUNT(*) FROM pair_attempts WHERE ok=0 AND user_id=? AND at>?", (user_id, window)).fetchone()[0] >= PAIR_USER_FAILURES:
+                db.commit()
+                return "blocked", None
+            match = None
+            for row in db.execute("""SELECT * FROM pairings WHERE used_at IS NULL AND invalidated_at IS NULL AND expires_at > ?""", (now,)).fetchall():
+                # compare every open code in constant time; there is at most one in practice
+                if hmac.compare_digest(row["code_hash"], self._code_hash(row["salt"], wanted)) and len(wanted) == PAIR_LENGTH and match is None:
+                    match = row
+            if match is None:
+                db.execute("INSERT INTO pair_attempts VALUES (?,?,0)", (user_id, now))
+                db.commit()
+                return "invalid", None
+            db.execute("UPDATE pairings SET used_at=?, used_by=? WHERE id=?", (now, user_id, match["id"]))
+            db.execute("INSERT INTO pair_attempts VALUES (?,?,1)", (user_id, now))
+            db.commit()
+        return "ok", dict(match)

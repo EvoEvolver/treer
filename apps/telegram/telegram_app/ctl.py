@@ -57,7 +57,7 @@ def parser() -> argparse.ArgumentParser:
     a = sub.add_parser("audit")
     a.add_argument("--limit", type=int, default=20)
     sub.add_parser("users")
-    u = sub.add_parser("user-set", help="admit/rename/disable an IM user (only agents in control.user_admin_agent_ids)")
+    u = sub.add_parser("user-set", help="admit/rename/disable an IM user (any accepted sender unless control.user_admin_agent_ids restricts it)")
     u.add_argument("user_id", type=int)
     u.add_argument("label")
     u.add_argument("--disabled", action="store_true")
