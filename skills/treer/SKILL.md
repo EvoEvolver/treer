@@ -36,6 +36,11 @@ the business command. With neither `TREER_WORKSPACE_ID` nor
 connection: credentials are sent to the explicit URL, which the caller must
 trust. If either binding exists, explicit connection flags must match their
 corresponding binding; overriding a missing counterpart also fails closed.
+The client displays `status`, `agent ls`, and `machine list` as tables only when
+stdout is a terminal; pipes retain original JSON. Use `--format json` before
+these commands when parsing their full response in an interactive terminal,
+or `--format table` for a compact display. This display flag is not forwarded.
+
 The Controller must be online for business help:
 
 ```bash
