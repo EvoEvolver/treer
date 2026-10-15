@@ -38,6 +38,11 @@ newer ticket comment disagree, the ticket wins and this file should be updated.
 
 ## Practices learned in use
 
+- **Do not wait to be woken when idle.** After every finished item, and every
+  time you become idle, immediately query your queue (assigned to you and
+  unresolved, for example `GET /v1/issues?assignee=<your id>&status=open`) and
+  start the next item by priority. Stand by only when nothing in the queue is
+  actionable. Once every agent sat idle while workable tickets remained.
 - Change the ticket **status** when state changes, not only the comments, so
   list views and "assigned to me" queries stay accurate.
 - Hand a ticket over by changing the assignee and commenting why. The new
