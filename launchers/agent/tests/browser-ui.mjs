@@ -16,7 +16,7 @@ const screenshots = process.env.UI_SCREENSHOTS || await mkdtemp(join(tmpdir(), "
 await mkdir(screenshots, { recursive: true });
 await mkdir(join(cwd, "src"));
 const env = hermeticEnv({ TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0", CODEX_UI_PORT_FILE: join(cwd, "port"),
-  CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1" });
+  CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80" });
 const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "pipe" });
 let logs = "";
 server.stderr.on("data", (chunk) => { logs += chunk; });
@@ -45,7 +45,7 @@ try {
 
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "light", extraHTTPHeaders: { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_browser_ui", "x-treer-interface-instance": "browser-ui" } });
-  await context.addInitScript(() => { window.__violations = []; document.addEventListener("securitypolicyviolation", (event) => window.__violations.push(`${event.violatedDirective} ${event.blockedURI}`)); });
+  await context.addInitScript(() => { window.__violations = []; document.addEventListener("securitypolicyviolation", (event) => window.__violations.push(`${event.violatedDirective} ${event.blockedURI} ${event.sample} ${event.sourceFile}:${event.lineNumber}`)); });
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
@@ -61,6 +61,56 @@ try {
   assert.equal(await page.evaluate(() => document.querySelectorAll("script:not([src])").length), 0, "no inline scripts");
   const inlineStyles = await page.evaluate(() => [...document.querySelectorAll("[style]")].map((e) => `${e.tagName.toLowerCase()}: ${e.getAttribute("style")}`).filter((style) => !/^textarea: height:\s*[\d.]+px;?$|^html: --dock-h:\s*[\d.]+px;?$/.test(style)));
   assert.deepEqual(inlineStyles, [], "only CSSOM-set composer height and --dock-h exist; no markup styles");
+
+  // Conversation body: markdown through the one sanitized sink, collapsed activity, diffs, plans, failures.
+  const chat = page.locator(".chat");
+  await expect(chat.locator(".msg.asst strong", { hasText: "src/" })).toHaveCount(1);
+  await expect(chat.locator(".markdown h2", { hasText: "Result" })).toHaveCount(1);
+  await expect(chat.locator(".markdown table td")).toHaveCount(2);
+  await expect(chat.locator(".markdown pre code")).toContainText("const a = 1;");
+  await expect(chat.locator(".markdown a", { hasText: "the docs" })).toHaveAttribute("rel", "noopener noreferrer");
+  await expect(chat.locator(".markdown a", { hasText: "the docs" })).toHaveAttribute("target", "_blank");
+  assert.deepEqual(await page.evaluate(() => ({ xss: window.xss ?? null, scripts: document.querySelectorAll(".chat script").length, handlers: document.querySelectorAll(".chat [onerror], .chat [onload]").length, js: document.querySelectorAll('.chat a[href^="javascript"]').length, remote: document.querySelectorAll('.chat img[src^="http"]').length })), { xss: null, scripts: 0, handlers: 0, js: 0, remote: 0 }, "hostile markdown must stay inert");
+  const groups = chat.locator(".grp");
+  await expect(groups).toHaveCount(2);
+  await expect(groups.first().locator(".sum")).toHaveAttribute("aria-expanded", "false");
+  await expect(groups.first().locator(".t")).toHaveText("Activity");
+  await expect(groups.first()).toContainText("1 file change");
+  await groups.first().locator(".sum").click();
+  await expect(groups.first().locator(".sum")).toHaveAttribute("aria-expanded", "true");
+  await expect(groups.first().locator(".diff")).toHaveCount(2);
+  await expect(groups.first().locator(".diff").first().locator(".dl.add")).toContainText("Hello, Treer");
+  await expect(groups.first().locator(".diff").first().locator(".dl.del")).toContainText("Hello");
+  await expect(groups.last()).toHaveAttribute("data-warn", "true");
+  await expect(groups.last()).toContainText("1 failed");
+  await groups.last().locator(".sum").click();
+  await groups.last().locator(".tool-btn", { hasText: "durable-queue" }).click();
+  await expect(groups.last().locator(".tool-detail")).toContainText("not ok 1 - fixture path");
+  await groups.last().locator(".tool-btn", { hasText: "Reasoning" }).click().catch(() => undefined);
+  await expect(chat.locator(".plan li")).toHaveCount(3);
+  await expect(chat.locator(".plan li.done")).toHaveCount(1);
+  await expect(chat.locator(".plan li.cur")).toHaveCount(1);
+  assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight && document.documentElement.scrollTop === 0), "the page itself never scrolls; only the thread does");
+  await page.screenshot({ path: join(screenshots, "conversation-b-light.png") });
+
+  // Paging: 80 older turns exist; "Load earlier messages" keeps the reader's place and the window grows.
+  await expect(page.locator(".older .btn")).toBeVisible();
+  const before = await page.locator(".chat .msg.user").count();
+  const probe = page.locator(".chat .msg.user").first();
+  const probeText = await probe.textContent();
+  const probeTop = (await probe.boundingBox()).y;
+  const thread = page.locator("#thread");
+  await thread.evaluate((element) => { element.scrollTop = 0; });
+  await expect(page.locator("#jump")).toBeVisible();
+  await page.locator(".older .btn").click();
+  await expect.poll(() => page.locator(".chat .msg.user").count()).toBeGreaterThan(before);
+  const same = page.locator(".chat .msg.user", { hasText: probeText.replace(/^You/, "").trim() }).first();
+  const scrollTopAfter = await thread.evaluate((element) => element.scrollTop);
+  assert.ok(scrollTopAfter > 100, "scroll position must be anchored, not reset to the top");
+  await same.scrollIntoViewIfNeeded();
+  await page.locator("#jump").click();
+  await expect.poll(() => thread.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(40);
+  await expect(page.locator("#jump")).toHaveCount(0);
 
   // 3 looks x light/dark, persisted look, whitelisted ?look, theme sources.
   const menuButton = { click: () => page.locator('button[aria-controls="appearance"]:visible').first().click() };
@@ -114,8 +164,11 @@ try {
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `no horizontal overflow in look ${look}`);
     await page.screenshot({ path: join(screenshots, `mobile-${look}.png`) });
   }
-  assert.deepEqual(await page.evaluate(() => window.__violations), [], "no CSP violations");
-  assert.deepEqual(errors, []);
+  // The only expected violations are the hostile fixture's two inline handlers (img onerror, svg onload): DOMPurify's inert
+  // parse trips script-src-attr and then strips them. Anything else, or a different count, is a real policy failure.
+  const violations = await page.evaluate(() => window.__violations);
+  assert.deepEqual(violations.map((line) => line.split(" ").slice(0, 2).join(" ")), ["script-src-attr inline", "script-src-attr inline"], violations.join("\n"));
+  assert.deepEqual(errors.filter((message) => !/inline event handler/.test(message)), []);
   console.log(`React UI browser checks passed. Screenshots: ${screenshots}`);
 } finally {
   await browser?.close();

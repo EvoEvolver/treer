@@ -4,7 +4,7 @@
   "version": "0.1.2",
   "type": "module",
   "scripts": {
-    "test": "tsx --test tests/*.test.ts",
+    "test": "tsx --test tests/*.test.ts ui/tests/*.test.ts",
     "test:live": "node tests/live.mjs",
     "test:claude": "tsx tests/live-claude.ts",
     "test:goal:live": "node tests/browser-goal-live.mjs",
