@@ -176,7 +176,15 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     await expect(page.locator("#hint")).toContainText("Enter to queue (steering unavailable)");
     await prompt.press("Enter");
     await expect(feedback).toContainText("does not support steering");
+    await expect(prompt).toHaveValue("");
+    assert.deepEqual(state.queue.map((entry) => entry.text), ["keep this draft"], "the unsupported-steer fallback must queue this draft exactly once");
     assert.equal(prompts.at(-1).mode, "queue");
+    await expect(strip.getByRole("button", { name: /Queue/ })).toContainText("1");
+    // This mock has no harness to consume the fallback message. Model that
+    // consumption explicitly, so the later phone queue check cannot pass on
+    // this stale badge before its own POST finishes (or fail with Queue 2).
+    setState({ queue: [] });
+    await expect(strip.getByRole("button", { name: /Queue/ })).toHaveCount(0);
     await prompt.fill("line one");
     const countBeforeNewline = prompts.length;
     await prompt.press("Shift+Enter");
@@ -347,6 +355,8 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     await page.keyboard.press("Escape");
     await prompt.fill("touch queued");
     await page.getByRole("button", { name: "Queue message", exact: true }).click();
+    await expect.poll(() => prompts.at(-1)?.prompt).toBe("touch queued");
+    assert.deepEqual(state.queue.map((entry) => entry.text), ["touch queued"], "the mobile scenario must enqueue exactly its own message");
     await expect(strip.getByRole("button", { name: /Queue/ })).toContainText("1");
     // Phone: files and tasks share one full-screen slot and stay clear of the bottom bar.
     await phoneNav(page, "Files");
