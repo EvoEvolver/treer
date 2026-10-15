@@ -10,8 +10,8 @@ import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 
 const filters = [
-  { key: "attention" as const, label: "need attention", color: "text-destructive" },
-  { key: "working" as const, label: "working", color: "text-primary" },
+  { key: "attention" as const, label: "need attention", color: "text-status-attention" },
+  { key: "working" as const, label: "working", color: "text-status-working" },
   { key: "idle" as const, label: "idle", color: "text-muted-foreground" },
 ]
 
@@ -36,7 +36,7 @@ export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loa
   return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
     <div className="mb-5 flex flex-wrap items-start justify-between gap-4"><div><LayoutDashboard aria-hidden="true" className="mb-4 size-5 text-muted-foreground" /><h1 className="text-2xl font-semibold">Workspace overview</h1><p className="mt-2 text-xs text-muted-foreground">{workspace?.name ?? "Choose a workspace"}</p></div>{workspace && <Button variant="outline" onClick={onNewAgent}><Plus />Add agent</Button>}</div>
     {!workspace ? <p className="rounded-md border p-5 text-sm text-muted-foreground">Choose or create a workspace from the Tree to get started.</p> : loading ? <p role="status" className="py-8 text-sm text-muted-foreground">Loading workspace…</p> : <>
-      <div role="group" aria-label="Attention filters" className="mb-4 flex flex-wrap gap-2">{filters.map(({ key, label, color }) => <button key={key} type="button" aria-pressed={filter === key} aria-label={`Filter ${label}`} onClick={() => toggleFilter(key)} className={cn("flex min-h-10 items-center gap-2 rounded-full border px-3 text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", filter === key && "border-primary bg-primary/10 ring-1 ring-primary")}><CircleDot aria-hidden="true" className={cn("size-3", color)} /><span className="tabular-nums">{groups[key].length}</span>{label}</button>)}<span className="flex min-h-10 items-center rounded-full border px-3 text-xs text-muted-foreground">{machines.filter((machine) => machine.status === "online").length}/{machines.length} machines online</span></div>
+      <div role="group" aria-label="Attention filters" className="mb-4 flex flex-wrap gap-2">{filters.map(({ key, label, color }) => <button key={key} type="button" aria-pressed={filter === key} aria-label={`Filter ${label}`} onClick={() => toggleFilter(key)} className={cn("flex min-h-10 items-center gap-2 rounded-full border px-3 text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", filter === key && "border-primary bg-primary/10 ring-1 ring-primary")}><CircleDot aria-hidden="true" className={cn("size-3", color)} /><span className="tabular-nums">{groups[key].length}</span>{label}</button>)}<span className="flex min-h-10 cursor-default items-center px-1 text-xs text-muted-foreground">{machines.filter((machine) => machine.status === "online").length}/{machines.length} machines online</span></div>
       <p role="status" className="mb-5 text-xs leading-5 text-muted-foreground">{filter ? "Showing matching agents and their folders. Select the filter again to clear." : "Active folders expand by default; idle folders stay collapsed. Your toggles take priority."}</p>
       {workloads.length === 0 && <div className="mb-6 rounded-md border bg-muted/20 p-5"><h2 className="text-sm font-medium">Your workspace is ready</h2><p className="mt-2 text-xs text-muted-foreground">{machines.length ? "Add your first agent to start working." : "Connect a machine, then add your first agent."}</p>{!machines.length && <Button variant="outline" className="mt-4" onClick={onWorkspaceSettings}>Set up a machine</Button>}</div>}
       <section aria-label="Workspace overview tree" className="min-w-0">
@@ -49,10 +49,10 @@ export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loa
           </button></li>
           const agent = node.agent, machine = inventory.get(agent.server_id), needsAttention = attention.has(agent.agent_id), isWorking = working.has(agent.agent_id)
           const status = machine?.status === "online" || ["blocked", "failed", "exited", "stopped"].includes(agent.status) ? agent.status : "machine offline"
-          return <li key={key} style={indent}><button type="button" onClick={() => onOpen(agent.agent_id)} aria-label={`Open ${node.path}`} title={`${node.path} · ${workloadKind(agent)} · ${machineName(machine, agent.server_id)} · ${status}`} className={cn("flex min-h-14 w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", needsAttention && "bg-destructive/[0.07]")}>
+          return <li key={key} style={indent}><button type="button" onClick={() => onOpen(agent.agent_id)} aria-label={`Open ${node.path}`} title={`${node.path} · ${workloadKind(agent)} · ${machineName(machine, agent.server_id)} · ${status}`} className={cn("flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", needsAttention && "bg-destructive/[0.07]")}>
             <span className="w-3.5 shrink-0" aria-hidden="true" /><WorkloadIcon kind={agent.kind} className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3"><span className="block truncate text-xs font-medium">{node.name}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground sm:mt-0 sm:text-xs">{workloadKind(agent)} · {machineName(machine, agent.server_id)}</span></span>
-            <span className={cn("max-w-[112px] shrink-0 rounded border px-1.5 py-1 text-[10px]", needsAttention ? "border-destructive/40 text-destructive" : isWorking ? "border-primary/40 text-primary" : "text-muted-foreground")}>{status}</span>
+            <span className={cn("max-w-[112px] shrink-0 rounded border px-1.5 py-1 text-[10px]", needsAttention ? "border-destructive/40 text-status-attention" : isWorking ? "border-primary/40 text-status-working" : "text-muted-foreground")}>{status}</span>
           </button></li>
         })}</ul> : <p className="rounded-md border p-5 text-xs text-muted-foreground">{filter ? "No agents match this filter." : "No workloads in this workspace."}</p>}
       </section>

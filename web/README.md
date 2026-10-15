@@ -72,6 +72,9 @@ those ancestors. Clear a filter to restore the unfiltered manual toggles. Filter
 subtree counts include only matches. Machines online is informational. Folder
 and Agent controls are native keyboard buttons; complete paths are in accessible
 labels and hover titles. Repeated labels remain addressable by stable IDs.
+Small attention/working text uses separate foreground tokens, checked at 4.5:1
+against default and hover backgrounds in both themes (`pnpm check:contrast` and
+the overview browser tests); button fill colors remain independent.
 
 Selecting an Agent opens its existing Interface UI when available, otherwise its
 terminal; the Tree menu's Logs action remains the PTY fallback. Live snapshots

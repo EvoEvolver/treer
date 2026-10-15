@@ -21,6 +21,8 @@
     --accent: 45 6% 92%;
     --accent-foreground: 45 5% 20%;
     --status-online: 150 47% 38%;
+    --status-working-text: 209 80% 39%;
+    --status-attention-text: 2 72% 42%;
     --destructive: 2 72% 48%;
     --destructive-foreground: 0 0% 100%;
     --border: 45 6% 86%;
@@ -48,6 +50,8 @@
     --accent: 40 6% 18%;
     --accent-foreground: 45 10% 90%;
     --status-online: 150 46% 56%;
+    --status-working-text: 209 80% 64%;
+    --status-attention-text: 2 70% 70%;
     --destructive: 2 62% 48%;
     --destructive-foreground: 0 0% 100%;
     --border: 40 6% 22%;

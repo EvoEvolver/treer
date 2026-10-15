@@ -28,6 +28,25 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     expect(backend.terminals).toEqual([])
     await expect(page.locator('.xterm')).toHaveCount(0)
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    // Check the rendered small text against its composited background, not just
+    // token values: attention rows are tinted and hover changes the row fill.
+    const statusText = page.getByRole('region', { name: 'Workspace overview tree' }).locator('[class*="text-status-"]')
+    const contrast = () => statusText.evaluateAll((elements) => elements.map((element) => {
+      const rgba = (value: string) => value.match(/[\d.]+/g)!.map(Number)
+      const luminance = (rgb: number[]) => rgb.slice(0, 3).reduce((sum, value, i) => {
+        const c = value / 255
+        return sum + [0.2126, 0.7152, 0.0722][i] * (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4)
+      }, 0)
+      const layers: number[][] = []
+      for (let ancestor: Element | null = element; ancestor; ancestor = ancestor.parentElement) layers.push(rgba(getComputedStyle(ancestor).backgroundColor))
+      const background = layers.reverse().reduce((base, color) => base.map((channel, i) => channel * (1 - (color[3] ?? 1)) + color[i] * (color[3] ?? 1)), [255, 255, 255])
+      const foreground = luminance(rgba(getComputedStyle(element).color)), back = luminance(background)
+      return (Math.max(foreground, back) + 0.05) / (Math.min(foreground, back) + 0.05)
+    }))
+    expect(Math.min(...await contrast())).toBeGreaterThanOrEqual(4.5)
+    await page.getByRole('button', { name: 'Open /Product/reviewer', exact: true }).hover()
+    expect(Math.min(...await contrast())).toBeGreaterThanOrEqual(4.5)
+    await page.mouse.move(0, 0)
     await page.screenshot({ path: info.outputPath(`overview-${theme}-${mobile ? '390' : 'desktop'}.png`) })
     const attentionFilter = page.getByRole('button', { name: 'Filter need attention', exact: true })
     await attentionFilter.focus()
