@@ -234,6 +234,12 @@ pub(super) enum MessageCommand {
         trace_id: Option<String>,
         #[arg(long, value_name = "PATH")]
         external_source_file: Option<PathBuf>,
+        #[arg(
+            long,
+            conflicts_with_all = ["body", "body_file", "external_source_file"],
+            help = "Read one JSON object {body, external_source} from stdin; keeps message content out of argv"
+        )]
+        stdin_envelope: bool,
     },
     #[command(about = "Reply with a context edge to an existing Message")]
     Reply {

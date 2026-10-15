@@ -1,5 +1,29 @@
 use super::*;
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MessageStdinEnvelope {
+    pub body: String,
+    pub external_source: Option<MessageExternalSource>,
+}
+
+pub(super) fn read_message_envelope(input: impl StdRead) -> anyhow::Result<MessageStdinEnvelope> {
+    const MAX_ENVELOPE_BYTES: u64 = 1024 * 1024;
+    let mut bytes = Vec::new();
+    input
+        .take(MAX_ENVELOPE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read message stdin envelope")?;
+    if bytes.len() as u64 > MAX_ENVELOPE_BYTES {
+        bail!("message stdin envelope exceeds 1 MiB");
+    }
+    // Serde errors can quote supplied values or unknown field names. Do not leak
+    // message text through the CLI error channel.
+    serde_json::from_slice(&bytes).map_err(|_| anyhow::anyhow!(
+        "invalid message stdin envelope: expected one JSON object with body (string) and optional external_source"
+    ))
+}
+
 pub(super) async fn run_message_command(
     client: &ApiClient,
     command: MessageCommand,
@@ -15,18 +39,28 @@ pub(super) async fn run_message_command(
             correlation_id,
             trace_id,
             external_source_file,
+            stdin_envelope,
         } => {
+            let (body, external_source) = if stdin_envelope {
+                let envelope = read_message_envelope(std::io::stdin().lock())?;
+                (envelope.body, envelope.external_source)
+            } else {
+                (
+                    read_message_body(body, body_file)?,
+                    read_external_source(external_source_file)?,
+                )
+            };
             let request = SendMessageRequest {
                 recipients,
                 context_ids,
-                body: read_message_body(body, body_file)?,
+                body,
                 expires_at: expires_at
                     .map(|value| parse_rfc3339(&value, "message expiry"))
                     .transpose()?,
                 idempotency_key,
                 correlation_id,
                 trace_id,
-                external_source: read_external_source(external_source_file)?,
+                external_source,
             };
             client
                 .value(

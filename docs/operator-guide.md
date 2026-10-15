@@ -1502,6 +1502,16 @@ printf '%s\n' 'I addressed the comments.' | \
 treer message ack <delivery-id> --operation-id ack-review-42
 ```
 
+Bridges can pipe one JSON object with `body` and optional
+`external_source` to `treer message send --to TARGET --stdin-envelope` so neither
+message text nor external metadata enters process arguments. Generate this JSON
+in the bridge itself; interpolating private text into shell commands defeats the
+protection. The envelope accepts at most 1 MiB and retains the ordinary Message
+validation and authenticated sender. It cannot be combined with `--body`,
+`--body-file`, or `--external-source-file`; existing plain-stdin sends are unchanged.
+An older Controller rejects the new flag without sending; upgrade rather than
+retrying with a private `--body` argument.
+
 Use stable recipient IDs, paths, or sibling names and a sender-scoped idempotency key for
 retryable sends. A reply creates an ordinary immutable Message whose first
 `context_id` is the parent; contexts can have several ordered parents and form a
