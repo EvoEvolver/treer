@@ -93,6 +93,8 @@ Folder context menus retain their existing creation actions and destinations.
 
 **Expand tree map** opens a read-only treemap in a large dialog.
 Folders contain equally weighted Agent blocks; empty folders keep a placeholder.
+Tree rows and map blocks share a Bot icon for Agents and a window icon for Apps.
+Block name, category, machine and status are grouped at the top with compact padding.
 Both Tree rows and map blocks display only **agent** or **app**, including their
 accessible labels; runtime shell/command/harness kinds remain internal. Green dots indicate running/idle/working/starting Agents on online machines;
 other states use muted dots and always have a text label. Names, workload category,
@@ -100,7 +102,10 @@ machine and state are text, with full paths on hover/focus. Opening an Agent use
 its stable ID and closes the dialog. Folder headers drill down; breadcrumbs and
 the back button return to ancestors. Drill-down does not change sidebar expansion
 preferences or send mutations. Narrow screens stack proportional blocks and
-scroll vertically; deeper/tight containers offer drill-down instead of tiny labels.
+scroll vertically. Nested previews have a 48-leaf / 96-node budget and require
+child cells of at least 112×76px; there is no fixed two-level cutoff. Small deep
+trees expand directly, while large/tight branches show counted drill-down tiles.
+Opening a folder explicitly still lists all of its immediate children.
 The dialog traps focus, supports native button keyboard actions and Escape, and
 returns focus to its trigger on dismissal. It has no new library dependency.
 
