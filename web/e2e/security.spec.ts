@@ -1,29 +1,9 @@
 import { test, expect } from '@playwright/test'
-import { spawn, type ChildProcess } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
-import { join } from 'node:path'
-import { tmpdir } from 'node:os'
 import { securityHeaders } from '../worker/security-headers'
 import { postEmbedTheme } from '../src/lib/embed-ui'
 import { mockTreeMapApi } from './fixtures/treemap'
 import { formatCommandLine, parseCommandLine } from '../src/lib/command-line'
-
-const origin = 'http://127.0.0.1:4199'
-let worker: ChildProcess
-let state: string
-
-test.beforeAll(async () => {
-  state = mkdtempSync(join(tmpdir(), 'treer-worker-security-'))
-  worker = spawn(process.execPath, ['node_modules/wrangler/bin/wrangler.js', 'dev', '--local', '--port', '4199', '--persist-to', state,
-    '--var', 'TREER_PROXY_PUBLIC_URL:http://127.0.0.1:4199'], {
-    env: { PATH: process.env.PATH, HOME: state, TMPDIR: process.env.TMPDIR, WRANGLER_SEND_METRICS: 'false', BROWSER: 'none' }, stdio: 'ignore',
-  })
-  await expect.poll(async () => { try { return (await fetch(origin + '/health')).status } catch { return 0 } }, { timeout: 30_000 }).toBe(200)
-})
-test.afterAll(async () => {
-  if (worker && worker.exitCode === null) { worker.kill('SIGTERM'); await new Promise<void>((resolve) => worker.once('exit', () => resolve())) }
-  if (state) rmSync(state, { recursive: true, force: true })
-})
+import { workerOrigin as origin } from './ports'
 
 test('CSP restricts scripts, framing, and configured connection origins', () => {
   const csp = securityHeaders('https://proxy.example.test/', 'synthetic-nonce').get('content-security-policy')!
