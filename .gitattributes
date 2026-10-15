@@ -1,0 +1,6 @@
+# The launcher UI is committed as generated output and verified byte-for-byte
+# against a fresh build (npm run check:ui, payload preparation). Check both the
+# sources and the output out with LF everywhere so a Windows checkout cannot
+# rewrite them to CRLF and make a correct bundle look stale.
+launchers/agent/public/** text eol=lf
+launchers/agent/ui/** text eol=lf
