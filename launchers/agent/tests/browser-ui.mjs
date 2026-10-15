@@ -14,11 +14,18 @@ const page_ = pageArgIndex > 0 ? process.argv[pageArgIndex + 1] : "ui.html";
 const screenshots = process.env.UI_SCREENSHOTS || await mkdtemp(join(tmpdir(), "ui-shots-"));
 await mkdir(screenshots, { recursive: true });
 const servers = [];
-async function startServer(name, extra) {
+async function startServer(name, extra, harness = "codex") {
   const cwd = await mkdtemp(join(tmpdir(), `ui-browser-${name}-`));
-  await mkdir(join(cwd, "src"));
-  const env = hermeticEnv({ TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0", CODEX_UI_PORT_FILE: join(cwd, "port"),
-    CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", ...extra });
+  await mkdir(join(cwd, "src/deep"), { recursive: true });
+  await mkdir(join(cwd, "empty"));
+  await writeFile(join(cwd, "src/greeting.ts"), "export const greeting = 'Hello, Treer';\n// <script>window.fileXSS = true</script>\n");
+  await writeFile(join(cwd, "src/deep/inner.txt"), "inner file\n");
+  await writeFile(join(cwd, "README.md"), "# Workspace\nSmall tools, thoughtful interfaces.\n");
+  await writeFile(join(cwd, "large.txt"), "x".repeat(65537));
+  const common = { TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0" };
+  const env = hermeticEnv(harness === "claude"
+    ? { ...common, AGENT_UI_HARNESS: "claude", AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: join(cwd, "port"), AGENT_UI_PUBLIC_DIR: join(app, "public"), CLAUDE_BIN: join(app, "tests/fake-claude.mjs"), ...extra }
+    : { ...common, CODEX_UI_CWD: cwd, CODEX_UI_PORT_FILE: join(cwd, "port"), CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", ...extra });
   const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "pipe" });
   let logs = "";
   server.stderr.on("data", (chunk) => { logs += chunk; });
@@ -255,6 +262,128 @@ try {
   await stopped;
   await page.screenshot({ path: join(screenshots, "composer-a-running.png") });
 
+  // Files: lazy folders, keyboard tree, filter, immediate read-only preview, errors that stay local, mobile tabs.
+  const fileRequests = [];
+  page.on("request", (request) => { if (request.url().includes("/v1/files")) fileRequests.push(new URL(request.url()).pathname + new URL(request.url()).search); });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(url("?look=b"));
+  assert.equal(fileRequests.length, 0, "no file request before the panel opens");
+  const filesButton = page.getByRole("button", { name: "Browse files" });
+  await filesButton.click();
+  const filesPanel = page.locator("#files");
+  await expect(filesPanel).toBeVisible();
+  const tree = filesPanel.getByRole("tree", { name: "Files" });
+  await expect(tree.getByRole("treeitem", { name: "src", exact: true })).toBeVisible();
+  assert.deepEqual(fileRequests, ["/v1/files/tree?path="], "only the root is listed");
+  await expect(tree.getByRole("treeitem", { name: "greeting.ts" })).toHaveCount(0);
+  await tree.getByRole("treeitem", { name: "src", exact: true }).click();
+  await expect(tree.getByRole("treeitem", { name: "greeting.ts" })).toBeVisible();
+  await tree.getByRole("treeitem", { name: "greeting.ts" }).click();
+  await expect(filesPanel.locator(".preview pre")).toContainText("<script>window.fileXSS = true</script>");
+  assert.equal(await page.evaluate(() => window.fileXSS), undefined, "file content is text, never markup");
+  await expect(filesPanel.locator(".preview")).toContainText("Read-only");
+  await tree.getByRole("treeitem", { name: "large.txt" }).click();
+  await expect(filesPanel.locator(".preview")).toContainText("Truncated to 64 KiB");
+  assert.equal((await filesPanel.locator(".preview pre").textContent()).length, 65536);
+  // Keyboard: arrows move, Right/Left expand and collapse, Home/End jump.
+  await tree.getByRole("treeitem", { name: "src", exact: true }).focus();
+  await page.keyboard.press("ArrowLeft");
+  await expect(tree.getByRole("treeitem", { name: "src", exact: true })).toHaveAttribute("aria-expanded", "false");
+  await page.keyboard.press("ArrowRight");
+  await expect(tree.getByRole("treeitem", { name: "src", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await page.keyboard.press("ArrowDown");
+  await expect(tree.getByRole("treeitem", { name: "deep", exact: true })).toBeFocused();
+  await page.keyboard.press("End");
+  await expect(tree.getByRole("treeitem").last()).toBeFocused();
+  await page.keyboard.press("Home");
+  await expect(tree.getByRole("treeitem").first()).toBeFocused();
+  // Filter works on what is loaded and never lists anything new.
+  const listed = fileRequests.length;
+  await filesPanel.getByRole("searchbox", { name: "Filter files" }).fill("greet");
+  await expect(tree.getByRole("treeitem")).toHaveCount(2);
+  await filesPanel.getByRole("searchbox", { name: "Filter files" }).fill("zzz");
+  await expect(filesPanel.locator(".tree-empty")).toContainText("zzz");
+  await filesPanel.getByRole("searchbox", { name: "Filter files" }).fill("");
+  assert.equal(fileRequests.length, listed, "filtering never requests more listings");
+  await tree.getByRole("treeitem", { name: "empty", exact: true }).click();
+  await expect(filesPanel.locator(".tree-empty", { hasText: "Empty folder" })).toBeVisible();
+  // A failing preview stays inside the preview; the tree and the page are untouched.
+  await page.route("**/v1/files?path=README.md", (route) => route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: { message: "disk exploded" } }) }));
+  await tree.getByRole("treeitem", { name: "README.md" }).click();
+  await expect(filesPanel.getByRole("status").filter({ hasText: "disk exploded" })).toBeVisible();
+  await expect(filesPanel.locator(".preview")).toContainText("Preview unavailable");
+  await expect(tree.getByRole("treeitem", { name: "src", exact: true })).toBeVisible();
+  await page.unroute("**/v1/files?path=README.md");
+  await page.screenshot({ path: join(screenshots, "files-b-light.png") });
+  const refreshed = fileRequests.length;
+  await filesPanel.getByRole("button", { name: "Refresh" }).click();
+  await expect.poll(() => fileRequests.length).toBeGreaterThan(refreshed);
+  await page.keyboard.press("Escape");
+  await expect(filesPanel).toBeHidden();
+  await expect(filesButton).toBeFocused();
+  // Phone: the panel is full screen with Browse / Preview tabs.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await expect(filesPanel).toBeVisible();
+  await filesPanel.getByRole("treeitem", { name: "greeting.ts" }).click(); // src stayed expanded from the desktop session
+  await expect(filesPanel.locator(".preview")).toBeVisible();
+  await expect(tree).toBeHidden();
+  await filesPanel.getByRole("button", { name: "Browse", exact: true }).click();
+  await expect(tree).toBeVisible();
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "no overflow with the files panel on a phone");
+  await page.screenshot({ path: join(screenshots, "files-mobile-b.png") });
+  await filesPanel.getByRole("button", { name: "Close file browser" }).click();
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Long text and images open in dialogs; the conversation can be exported as Markdown.
+  await page.goto(url("?look=a"));
+  const failedGroup = page.locator(".grp").last();
+  await failedGroup.locator(".sum").click();
+  await failedGroup.locator(".tool-btn", { hasText: "durable-queue" }).click();
+  await failedGroup.getByRole("button", { name: "Open in a dialog" }).click();
+  const textDialog = page.getByRole("dialog", { name: /durable-queue/ });
+  await expect(textDialog).toContainText("not ok 1 - fixture path");
+  await textDialog.getByRole("button", { name: "Copy" }).click();
+  await page.keyboard.press("Escape");
+  await expect(textDialog).toBeHidden();
+  const pixel = page.locator('.markdown img[alt="pixel"]');
+  await pixel.scrollIntoViewIfNeeded();
+  await pixel.click();
+  const viewer = page.getByRole("dialog", { name: "pixel" });
+  await expect(viewer.locator("img")).toBeVisible();
+  await viewer.getByRole("button", { name: "Actual size" }).click();
+  await viewer.getByRole("button", { name: "Zoom in" }).click();
+  await expect(viewer.locator("img.zoomed")).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(viewer).toBeHidden();
+  await page.locator('button[aria-controls="appearance"]:visible').first().click();
+  const download = page.waitForEvent("download");
+  await page.getByRole("button", { name: "Export as Markdown" }).click();
+  const exported = await readFile(await (await download).path(), "utf8");
+  assert.match(exported, /^# /);
+  for (const expected of ["## You", "remember 1", "```diff", "- [x] Inspect the workspace", "$ npm test", "![pixel]"]) assert.ok(exported.includes(expected), `export lacks ${expected}`);
+
+  // Background tasks (Claude harness): status, output tail, polling, panel focus.
+  const claude = await startServer("claude", {}, "claude");
+  await page.goto(`${claude}/${page_}?look=c`);
+  await page.getByRole("textbox", { name: /Message/ }).fill("report the tasks");
+  await page.getByRole("textbox", { name: /Message/ }).press("Enter");
+  const tasksButton = page.getByRole("button", { name: /^Background tasks/ });
+  await expect(tasksButton).toBeVisible();
+  await tasksButton.click();
+  const tasksPanel = page.locator("#tasks");
+  await expect(tasksPanel).toBeVisible();
+  await expect(tasksPanel.locator(".task")).not.toHaveCount(0);
+  const shell = tasksPanel.locator(".task", { hasText: "Background shell" });
+  await expect(shell).toContainText("Completed");
+  await shell.locator("summary").click();
+  await expect(shell.locator(".task-output")).toContainText("TASK_DONE");
+  await expect(tasksPanel.locator(".task", { hasText: "Failed helper" })).toContainText("Failed");
+  await page.screenshot({ path: join(screenshots, "tasks-c.png") });
+  await page.keyboard.press("Escape");
+  await expect(tasksPanel).toBeHidden();
+  await expect(tasksButton).toBeFocused();
+
   // A finished goal leaves a notice in the conversation (the fake completes a goal when its first turn starts).
   const done = await startServer("done", {});
   await page.goto(`${done}/${page_}?look=c`);
@@ -290,7 +419,7 @@ try {
   // parse trips script-src-attr and then strips them. Anything else, or a different count, is a real policy failure.
   const violations = await page.evaluate(() => window.__violations);
   assert.deepEqual(violations.map((line) => line.split(" ").slice(0, 2).join(" ")), ["script-src-attr inline", "script-src-attr inline"], violations.join("\n"));
-  assert.deepEqual(errors.filter((message) => !/inline event handler/.test(message)), []);
+  assert.deepEqual(errors.filter((message) => !/inline event handler|status of 500/.test(message)), []); // the 500 is the injected preview failure
   console.log(`React UI browser checks passed. Screenshots: ${screenshots}`);
 } finally {
   await browser?.close();

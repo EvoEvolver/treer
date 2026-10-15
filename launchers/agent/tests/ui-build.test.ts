@@ -39,6 +39,7 @@ test("the source scanner rejects HTML sinks, eval and unsafe URLs, and accepts t
     "export const b = <a href={link}>x</a>;",
     "export const c = <a href=\"javascript:alert(1)\">x</a>;",
     "export const d = <a href={safeUrl(link)}>ok</a>;",
+    "const vetted = safeUrl(link); export const e = <a href={vetted}>ok</a>; export const f = <Viewer src={link} />;",
     "eval('1'); new Function('1'); document.write('x'); el.innerHTML = 'x'; setTimeout('1', 1);",
     "fetch('/absolute'); fetch('https://example.test'); fetch('api/state');",
   ].join("\n"));
@@ -47,5 +48,6 @@ test("the source scanner rejects HTML sinks, eval and unsafe URLs, and accepts t
   for (const expected of ["dangerouslySetInnerHTML outside", "href must go through safeUrl", "href literal must be relative", "eval is forbidden", "new Function", "document.write", "innerHTML outside", "string-argument timers", "network paths must be relative"]) assert.match(problems, new RegExp(expected), expected);
   assert.doesNotMatch(problems, /Markdown\.tsx/);
   assert.doesNotMatch(problems, /bad\.tsx:4/);
+  assert.doesNotMatch(problems, /bad\.tsx:5/, "a variable initialised from safeUrl and a component prop are accepted");
   assert.equal(scanSource(join(root, "ui/src")).length, 0);
 });

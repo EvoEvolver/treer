@@ -6,6 +6,7 @@ import { activityStats, compact, duration, plural, toolState } from "../src/lib/
 import { safeImageUrl, safeUrl } from "../src/lib/url";
 import { reducer, shareTurns, type State } from "../src/state/store";
 import { t } from "../src/i18n";
+import { exportName, toMarkdown } from "../src/lib/export";
 import type { HistoryItem, Snapshot, TurnDto } from "../src/types";
 
 const item = (id: string, kind: HistoryItem["kind"], extra: Partial<HistoryItem> = {}): HistoryItem => ({ id, kind, text: id, ...extra });
@@ -59,4 +60,18 @@ test("a late HTTP snapshot never shrinks a history window the reader widened", (
   const start: State = { snapshot: snapshot([turn("1", "a")], 150), connected: true, error: null, notice: null, submitting: false, loadingOlder: false, settingsBusy: false, goalBusy: false, notices: [] };
   assert.equal(reducer(start, { type: "snapshot", snapshot: snapshot([turn("1", "a")], 50), source: "http" }), start);
   assert.equal(reducer(start, { type: "snapshot", snapshot: snapshot([turn("1", "a")], 50), source: "ws" }).snapshot?.history.limit, 50);
+});
+
+test("the Markdown export covers messages, activity, diffs and plans with safe fences", () => {
+  const turns: TurnDto[] = [{ id: "1", startedAt: null, status: "completed", error: "stopped", items: [
+    item("u", "userMessage", { text: "[来自 /team/a，排队于 2026-10-15T00:00:00Z]\nhello" }),
+    item("c", "commandExecution", { text: "npm test", status: "completed" }),
+    item("f", "fileChange", { text: "File change", changes: [{ path: "a.ts", kind: "update", diff: "@@ -1 +1 @@\n-a\n+b\n```" }] }),
+    item("p", "plan", { text: "Plan", steps: [{ step: "One", status: "completed" }, { step: "Two", status: "inProgress" }] }),
+    item("a", "agentMessage", { text: "done" }),
+  ] }];
+  const markdown = toMarkdown(snapshot(turns));
+  for (const expected of ["# T", "## From /team/a", "hello", "$ npm test", "- [x] One", "- [ ] Two (in progress)", "> Error: stopped", "done"]) assert.ok(markdown.includes(expected), expected);
+  assert.ok(markdown.includes("````diff"), "a diff containing a fence is wrapped in a longer fence");
+  assert.match(exportName(snapshot(turns), new Date("2026-10-15T12:00:00Z")), /^t-2026-10-15\.md$/);
 });
