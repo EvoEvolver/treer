@@ -92,6 +92,17 @@ class IssuesTest(unittest.TestCase):
         self.assertEqual(message['recipients'],['ag_b']);self.assertIn(f'#issue={id}',message['body'])
         self.assertNotIn('SECRET',message['body']);self.assertTrue(message['idempotency_key'].startswith('issues-event-'))
         self.req('test/disable',base=self.proxy)
+    def test_needs_me_view_filters(self):
+        label='needs-me-label'
+        mine=self.create(assignee='ag_a',labels=[label]);self.create(assignee='ag_a',labels=[label],status='done')
+        self.create(assignee='ag_a',labels=[label],status='closed');theirs=self.create(assignee='ag_b',labels=[label]);self.create(labels=[label])
+        ids=lambda path,token='agent-a':[i['id'] for i in self.req(path,token=token)[1]['issues']]
+        self.assertEqual(ids(f'v1/issues?assignee=me&unresolved=1&label={label}'),[mine],'me is the caller; done/closed are resolved')
+        self.assertEqual(ids(f'v1/issues?assignee=me&unresolved=1&label={label}','agent-b'),[theirs])
+        self.assertEqual(self.req(f'v1/issues?assignee=me&label={label}')[1]['total'],3,'without unresolved every status is listed')
+        self.assertEqual(self.req(f'v1/issues?assignee=me&unresolved=0&label={label}')[1]['total'],3)
+        self.assertEqual(self.req('v1/issues?unresolved=maybe')[0],400)
+        self.assertEqual(self.req(f'v1/issues?assignee=me&unresolved=1&label={label}',token='human')[1]['total'],0,'a human with no assignments sees nothing')
     def test_validation_pagination_and_cli(self):
         for body in ({'title':'x','labels':'bad'},{'title':'x','status':'wat'},{'title':'x','parent_id':999999},{'title':'x','blocked_by':[True]}):
             self.assertIn(self.req('v1/issues','POST',body)[0],(400,404))
@@ -116,7 +127,7 @@ class IssuesTest(unittest.TestCase):
         proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Inject);threading.Thread(target=proxy.serve_forever,daemon=True).start()
         try:
             env=hermetic_env({'http_proxy':f'http://127.0.0.1:{proxy.server_port}'})
-            for command in (['list','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli']):
+            for command in (['list','--label',label],['list','--assignee','me','--unresolved','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli']):
                 r=subprocess.run([sys.executable,str(ROOT/'issues'),*command],env=env,capture_output=True,text=True,timeout=10)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIsInstance(json.loads(r.stdout),dict)
         finally:proxy.shutdown();proxy.server_close()

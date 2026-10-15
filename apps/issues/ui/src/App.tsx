@@ -10,13 +10,14 @@ import { COLLAPSED_BY_DEFAULT, STATUSES, canEdit, issueFromHash, NOT_ALLOWED } f
 import type { Issue, IssueDetailResult, IssuePage, MutationResult, Principal, Route, Toast, ToastAction } from "./types";
 
 const NAV = {
-  "nav-all": { title: "All issues", glyph: "◉", status: "", mine: false, view: "list" },
-  "nav-mine": { title: "Assigned to me", glyph: "◎", status: "", mine: true, view: "list" },
-  "nav-active": { title: "In progress", glyph: "◐", status: "in_progress", mine: false, view: "list" },
-  "nav-tree": { title: "Hierarchy", glyph: "⌥", status: "", mine: false, view: "tree" },
+  "nav-all": { title: "All issues", glyph: "◉", status: "", mine: false, unresolved: false, view: "list" },
+  "nav-needs": { title: "Needs me", glyph: "◈", status: "", mine: true, unresolved: true, view: "list" },
+  "nav-mine": { title: "Assigned to me", glyph: "◎", status: "", mine: true, unresolved: false, view: "list" },
+  "nav-active": { title: "In progress", glyph: "◐", status: "in_progress", mine: false, unresolved: false, view: "list" },
+  "nav-tree": { title: "Hierarchy", glyph: "⌥", status: "", mine: false, unresolved: false, view: "tree" },
 } as const;
 type NavId = keyof typeof NAV;
-interface Filters { status: string; assignee: string; label: string }
+interface Filters { status: string; assignee: string; label: string; unresolved: boolean }
 
 const resultNotice = (result: MutationResult) => {
   const n = result.notification;
@@ -28,7 +29,7 @@ export function App() {
   const [ready, setReady] = useState(false), [needLogin, setNeedLogin] = useState(false);
   const [items, setItems] = useState<Issue[]>([]), [hasMore, setHasMore] = useState(false);
   const [nav, setNav] = useState<NavId>("nav-all"), [view, setView] = useState<View>("list");
-  const [filters, setFilters] = useState<Filters>({ status: "", assignee: "", label: "" });
+  const [filters, setFilters] = useState<Filters>({ status: "", assignee: "", label: "", unresolved: false });
   const [labelDraft, setLabelDraft] = useState(""), [search, setSearch] = useState("");
   const [collapsed, setCollapsed] = useState<Set<(typeof STATUSES)[number]>>(new Set(COLLAPSED_BY_DEFAULT));
   const [route, setRoute] = useState<Route>(() => { const id = issueFromHash(); return id ? { kind: "issue", id } : { kind: "none" }; });
@@ -49,6 +50,7 @@ export function App() {
   const load = useCallback(async (reset = true) => {
     const params = new URLSearchParams({ limit: "100", offset: reset ? "0" : String(nextOffset.current ?? 0) });
     for (const key of ["status", "assignee", "label"] as const) if (filtersRef.current[key]) params.set(key, filtersRef.current[key]);
+    if (filtersRef.current.unresolved) params.set("unresolved", "1");
     const seq = ++loadSeq.current;
     const result = await api<IssuePage>("v1/issues?" + params);
     if (seq !== loadSeq.current) return;
@@ -157,7 +159,7 @@ export function App() {
   const applyNav = (id: NavId) => {
     const spec = NAV[id];
     setNav(id);
-    setFilters({ status: spec.status, assignee: spec.mine && me ? me.id : "", label: "" });
+    setFilters({ status: spec.status, assignee: spec.mine && me ? me.id : "", label: "", unresolved: spec.unresolved });
     setLabelDraft("");
     setView(spec.view);
   };
@@ -212,14 +214,14 @@ export function App() {
         <section id="tracker" hidden={!ready}>
           <div className="filters">
             <label>Status
-              <select id="filter-status" aria-label="Status filter" value={filters.status} onChange={(e) => { setNav("nav-all"); setFilters((f) => ({ ...f, status: e.target.value })); }}>
+              <select id="filter-status" aria-label="Status filter" value={filters.status} onChange={(e) => { setNav("nav-all"); setFilters((f) => ({ ...f, status: e.target.value, unresolved: false })); }}>
                 <option value="">All</option>{STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
               </select>
             </label>
             <div className="field-inline"><span>Assignee</span>
               <div id="assignee-filter">
                 <AssigneePicker key={filters.assignee} value={filters.assignee} prompt="Anyone" ariaLabel="Assignee filter"
-                    onChange={(assignee) => { setNav("nav-all"); setFilters((f) => ({ ...f, assignee })); }} />
+                    onChange={(assignee) => { setNav("nav-all"); setFilters((f) => ({ ...f, assignee, unresolved: false })); }} />
               </div>
             </div>
             <label>Label

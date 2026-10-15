@@ -43,6 +43,10 @@ unless the viewer is the creator, assignee, live lease holder or a human
 owner/admin (a live lease held by someone else blocks everyone else). The server
 still enforces permissions; the UI only explains them.
 
+The **Needs me** view lists issues assigned to you that are not done/closed
+(the API form is `GET /v1/issues?assignee=me&unresolved=1`; add `&label=x` or the
+Label filter to narrow it).
+
 Shortcuts: `J`/`K` move, `Enter`/`O` open, `X` close, `E` edit, `C` new issue,
 `/` search, `Esc` back, `?` help.
 
@@ -111,6 +115,7 @@ request headers or bodies.
 | `ISSUES_WORKSPACE_ID` | injected workspace or own record | Workspace boundary; required for external supervision |
 | `TREER_BIN` | `treer` | CLI used only for own Managed App identity discovery |
 | `ISSUES_URL` | `http://issues.treer/` | Client-side root override for the `issues` CLI |
+| `ISSUES_NOTIFY` | `on` | `0`/`off`/`false`/`no` disables issue-change notifications and digests |
 | `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the hourly reminder poller |
 
 Protect the database directory: sessions contain short-lived human access
@@ -140,14 +145,44 @@ done. Human administrators can edit after a lease expires, but cannot steal it.
 This is a shared workspace tracker, not a per-issue ACL system. Treer's network
 Policy and App permissions remain additional upstream gates.
 
-Edits (including assignment/status) and comments notify creator and old/new
-assignee, excluding the actor, through `/api/apps/SERVICE/messages` using the
-**verified caller's** service token. Core therefore evaluates that caller's
-Message Policy. Notification body contains only issue ID, link and one action
-summary; titles, descriptions and comment bodies are excluded. Each event has
-a stable Message idempotency key. Core disabled, denied or unavailable results
-are recorded in the activity and API response; issue writes still succeed.
-The browser displays failed/disabled/pending delivery in the timeline.
+Edits and comments notify the people they concern, never the actor, through
+`/api/apps/SERVICE/messages` using the **verified caller's** service token, so
+Core evaluates that caller's Message Policy:
+
+| Event | Who is notified |
+| --- | --- |
+| Issue created | assignee |
+| Comment | assignee |
+| Status or assignee change | assignee, creator, and the previous assignee on reassignment |
+| Any other edit (priority, labels, text…) | assignee |
+| `@name` in a comment, or newly added to a title/description | the mentioned Agent, in addition to the above |
+
+Claims/leases and updates that change nothing send nothing. `@name` must match
+exactly one Agent name (case-insensitive); an ambiguous name is ignored, so use
+`@/tree/path` or `@ag_id` to disambiguate. Only Agents can be mentioned; the
+creator therefore hears plain comments only when mentioned (`@author`).
+
+A Message is one short fixed sentence plus a link, for example
+`Issue #22 · Status open→done · by security-claude`; it never contains titles,
+descriptions or comment bodies. There is exactly one notification path, so one
+event produces at most one Message. Each event has a stable idempotency key
+(`issues-event-ID`). Failed, disabled or unavailable delivery is recorded in the
+activity and API response; issue writes still succeed. The browser displays
+failed/disabled/pending delivery in the timeline.
+
+**Anti-spam window.** Per (recipient, issue) the first event is delivered
+immediately and opens a five-minute window. Later events in the window are only
+recorded (`notification: coalesced`); when the window ends the App sends **one**
+digest (`Issue #N · 3 more updates in the last 5 minutes: …`) with
+`treer message send` under the App's own identity (there is no caller token any
+more; the App's Policy must allow it; recipients are only people who already got
+the immediate Message for that issue) and starts a new quiet window, so a
+recipient gets at most one immediate and one digest Message per issue per five
+minutes. A failed immediate send does not open a window; a failed digest is
+retried at most three times and then dropped. `ISSUES_NOTIFY=off` disables all
+issue-change notifications (activity shows `notification: off`); it is
+independent of `ISSUES_REMINDERS`. Pending digests live in the SQLite
+`notify_windows` table and survive restarts.
 
 ## Hourly reminders
 
@@ -258,14 +293,14 @@ Each database test uses a random schema; do not select a shared database.
 This App targets small trusted teams. Graph operations load workspace issue
 metadata into memory; no full-text search, pagination snapshot, attachments,
 email, kanban, deletion or per-issue privacy is provided. The only background
-work is the hourly reminder pass above, which has no retry queue beyond the
-five-minute catch-up window.
+work is the hourly reminder pass and the five-minute digest worker described
+above; neither has a retry queue beyond the limits stated there.
 The tree represents the currently loaded/filter-matching issues; load more to
 include additional branches. Activity and child collections page separately.
 Concurrent UI edits send an optimistic version; API callers should do likewise.
 Create/comment are not idempotent: inspect after an uncertain response before
-retrying. Notifications are best effort after commit, without a background
-outbox or retry; an interrupted send remains pending in activity. Issue state
+retrying. Immediate notifications are best effort after commit, without an outbox or
+retry (the next event retries); an interrupted send remains pending in activity. Issue state
 is canonical only in this App's SQLite file. Claims are coordination leases,
 not execution isolation, fencing tokens, status resets or automatic Agent runs.
 A workspace operator can administer the machine and data directly.

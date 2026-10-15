@@ -236,6 +236,19 @@ for (const width of [1280, 390]) test(`close buttons, keyboard, permissions and 
     await page.screenshot({path:`${screenshotDir}/issues-list-${width}-dark.png`,fullPage:true});
     await page.getByRole('button',{name:'Theme',exact:true}).click();
 
+    // "Needs me": assigned to me and unresolved, combinable with the label filter.
+    await page.locator('#nav-needs').click();
+    await page.waitForFunction(()=>document.querySelectorAll('#list .issue-row').length===1);
+    assert.match(await page.locator('#list .issue-row').first().getAttribute('aria-label'),/^ISS-3 /);
+    assert.equal(await page.locator('#list-title').innerText(),'Needs me');
+    await page.getByLabel('Label',{exact:true}).fill('docs');await page.getByLabel('Label',{exact:true}).press('Enter');
+    await page.getByText('No issues match. Create an issue to begin.',{exact:true}).waitFor();
+    await page.getByLabel('Label',{exact:true}).fill('ui');await page.getByLabel('Label',{exact:true}).press('Enter');
+    await page.waitForFunction(()=>document.querySelectorAll('#list .issue-row').length===1);
+    await page.screenshot({path:`${screenshotDir}/issues-needs-me-${width}.png`,fullPage:true});
+    await page.locator('#nav-all').click();
+    await page.waitForFunction(()=>document.querySelectorAll('#list .issue-row').length===6);
+
     // One-click Close from a list row, with undo.
     await page.getByRole('button',{name:'Close ISS-6',exact:true}).click();
     await page.getByRole('status').getByText('Closed ISS-6').waitFor();

@@ -30,6 +30,27 @@ def enabled(environ=None):
     return value not in ('0', 'off', 'false', 'no', 'disabled')
 
 
+def run_cli(treer_bin, args):
+    """Run the Treer CLI; returns (exit status, stdout). stdout/stderr are never logged."""
+    try:
+        result = subprocess.run([treer_bin, *args], capture_output=True, text=True, timeout=TIMEOUT, stdin=subprocess.DEVNULL)
+    except (OSError, subprocess.SubprocessError):
+        return 127, ''
+    return result.returncode, result.stdout
+
+
+def safe_link(base_url):
+    """The App link for a Message; anything that is not a plain http(s) URL is dropped, not sent."""
+    try:
+        value = str(base_url() or '')
+    except Exception:
+        return ''
+    parts = urllib.parse.urlsplit(value)
+    if parts.scheme not in ('http', 'https') or not parts.netloc or parts.username or parts.password or any(c.isspace() for c in value):
+        return ''
+    return value
+
+
 def slot_of(now):
     return int(now // HOUR)
 
@@ -47,12 +68,7 @@ class Reminders:
         self.thread = None
 
     def run_treer(self, args):
-        """Run the Treer CLI; returns (exit status, stdout). stderr/stdout are never logged."""
-        try:
-            result = subprocess.run([self.treer_bin, *args], capture_output=True, text=True, timeout=TIMEOUT, stdin=subprocess.DEVNULL)
-        except (OSError, subprocess.SubprocessError):
-            return 127, ''
-        return result.returncode, result.stdout
+        return run_cli(self.treer_bin, args)
 
     def idle(self, agent):
         status, output = self.runner(['agent', 'show', agent])
@@ -63,17 +79,6 @@ class Reminders:
         except ValueError:
             return False
         return isinstance(info, dict) and info.get('agent_id') == agent and info.get('status') == 'idle' and info.get('busy') is not True
-
-    def safe_link(self):
-        """The App link for the Message; anything that is not a plain http(s) URL is dropped, not sent."""
-        try:
-            value = str(self.base_url() or '')
-        except Exception:
-            return ''
-        parts = urllib.parse.urlsplit(value)
-        if parts.scheme not in ('http', 'https') or not parts.netloc or parts.username or parts.password or any(c.isspace() for c in value):
-            return ''
-        return value
 
     def body(self, issue_ids, link):
         shown = ', '.join(f'#{i}' for i in issue_ids[:MAX_LISTED])
@@ -93,7 +98,7 @@ class Reminders:
             if not self.idle(agent):
                 skipped += 1
                 continue
-            link = link or self.safe_link()  # resolved once per pass, and only when something is to be sent
+            link = link or safe_link(self.base_url)  # resolved once per pass, and only when something is to be sent
             status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body(issue_ids, link),
                                      '--idempotency-key', f'issues-reminder-{agent}-{slot}'])
             if status != 0:

@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from auth import Error
+from notify import WINDOW, notice_for, recipients_for, resolve_mentions
 
 STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed')
 PRIORITIES = ('low', 'normal', 'high', 'urgent')
@@ -53,6 +54,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS oauth(state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires REAL NOT NULL, browser TEXT);
                 CREATE TABLE IF NOT EXISTS reminders(slot INTEGER NOT NULL, assignee TEXT NOT NULL, issue_ids TEXT NOT NULL,
                     sent_at REAL NOT NULL, PRIMARY KEY(slot, assignee));
+                CREATE TABLE IF NOT EXISTS notify_windows(recipient TEXT NOT NULL, issue_id INTEGER NOT NULL, window_start REAL NOT NULL,
+                    pending TEXT NOT NULL DEFAULT '[]', attempts INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(recipient, issue_id));
                 CREATE TABLE IF NOT EXISTS sessions(secret TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
             ''')
         with self.connect() as db:
@@ -104,7 +107,7 @@ class Store:
         return result
 
     def list(self, filters):
-        allowed = ('status', 'assignee', 'label', 'parent_id', 'limit', 'offset')
+        allowed = ('status', 'assignee', 'label', 'parent_id', 'unresolved', 'limit', 'offset')
         fields(filters, allowed)
         try:
             limit, offset = int(filters.get('limit', 50)), int(filters.get('offset', 0))
@@ -115,11 +118,16 @@ class Store:
         with self.connect() as db:
             items = self.all(db)
         result = sorted(items.values(), key=lambda i: i['id'], reverse=True)
-        for key in ('status', 'assignee', 'label', 'parent_id'):
+        for key in ('status', 'assignee', 'label', 'parent_id', 'unresolved'):
             if key not in filters:
                 continue
             value = filters[key]
-            if key == 'label':
+            if key == 'unresolved':
+                if value not in ('1', 'true', '0', 'false'):
+                    fail('invalid_field', 'unresolved must be 1 or 0')
+                if value in ('1', 'true'):
+                    result = [i for i in result if i['status'] not in ('done', 'closed')]
+            elif key == 'label':
                 result = [i for i in result if value in i['labels']]
             elif key == 'parent_id':
                 try:
@@ -216,10 +224,12 @@ class Store:
                 issue_id = db.execute('INSERT INTO issues(data) VALUES(?)', ('{}',)).lastrowid
                 issue['id'] = issue_id
                 old_assignee = None
+                before = {}
                 summary = 'Issue created'
             else:
                 issue = self.get(items, issue_id)
                 old_assignee = issue['assignee']
+                before = dict(issue)
                 claim = self.active_claim(issue)
                 if action != 'comment' and claim and claim['holder'] != actor['id']:
                     fail('claim_owned', 'Another principal holds the active lease', 409)
@@ -252,6 +262,15 @@ class Store:
                     summary = 'Lease ' + operation
                 else:
                     fail('route_not_found', 'Unknown action', 404)
+            changed = {k for k, v in body.items() if k not in ('version', 'body') and before.get(k) != v} if action == 'update' else set()
+            if action == 'comment':
+                mention_text, earlier = body['body'], ''
+            elif action in ('create', 'update'):
+                mention_text = issue['title'] + '\n' + issue['description']
+                earlier = before.get('title', '') + '\n' + before.get('description', '')
+            else:
+                mention_text = earlier = ''
+            mentions = sorted(resolve_mentions(mention_text, directory) - resolve_mentions(earlier, directory) - {actor['id']})
             if action in ('create', 'update') and issue['status'] in ('in_progress', 'done'):
                 if any(items[d]['status'] not in ('done', 'closed') for d in issue['blocked_by']):
                     fail('dependencies_unresolved', 'Resolve blocking issues before starting or completing', 409)
@@ -264,10 +283,58 @@ class Store:
                      'notification': {'status': 'pending' if action in ('create', 'update', 'comment') else 'not_requested'}}
             if action == 'comment':
                 event['body'] = body['body']
+            if mentions:
+                event['mentions'] = mentions
             db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(issue), issue_id))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
-            recipients = sorted({issue['creator'], old_assignee, issue['assignee']} - {None, actor['id']})
-        return issue_id, event_id, event, recipients
+            names = {p['id']: p.get('name', p['id']) for p in directory}
+            notice = notice_for(action, actor.get('name', actor['id']), before, issue, changed, [names[m] for m in mentions], lambda i: names.get(i, i))
+            recipients = recipients_for(action, issue, old_assignee, changed, mentions, actor['id']) if notice else []
+        return issue_id, event_id, event, recipients, notice
+
+    def claim_notifications(self, issue_id, recipients, summary, now):
+        """Split recipients into (send now, coalesced). A recipient with an open window - or an expired one that
+        still has pending updates for the digest worker - only gets the summary recorded."""
+        send, merged = [], []
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for recipient in recipients:
+                row = db.execute('SELECT window_start,pending FROM notify_windows WHERE recipient=? AND issue_id=?', (recipient, issue_id)).fetchone()
+                pending = json.loads(row['pending']) if row else []
+                if row and (now < row['window_start'] + WINDOW or pending):
+                    db.execute('UPDATE notify_windows SET pending=? WHERE recipient=? AND issue_id=?',
+                               (json.dumps((pending + [summary])[-50:]), recipient, issue_id))
+                    merged.append(recipient)
+                else:
+                    db.execute('INSERT OR REPLACE INTO notify_windows(recipient,issue_id,window_start,pending,attempts) VALUES(?,?,?,?,0)',
+                               (recipient, issue_id, now, '[]'))
+                    send.append(recipient)
+        return send, merged
+
+    def release_notifications(self, issue_id, recipients):
+        """A failed immediate send must not open a window: drop empty claims so the next event retries."""
+        with self.connect() as db:
+            for recipient in recipients:
+                db.execute("DELETE FROM notify_windows WHERE recipient=? AND issue_id=? AND pending='[]'", (recipient, issue_id))
+
+    def due_digests(self, now):
+        with self.connect() as db:
+            rows = db.execute("SELECT recipient,issue_id,window_start,pending FROM notify_windows WHERE pending!='[]' AND window_start+?<=?",
+                              (WINDOW, now)).fetchall()
+        return [{'recipient': r['recipient'], 'issue_id': r['issue_id'], 'start': r['window_start'], 'pending': json.loads(r['pending'])} for r in rows]
+
+    def digest_done(self, recipient, issue_id, now):
+        with self.connect() as db:
+            db.execute("UPDATE notify_windows SET window_start=?, pending='[]', attempts=0 WHERE recipient=? AND issue_id=?", (now, recipient, issue_id))
+
+    def digest_failed(self, recipient, issue_id, limit):
+        with self.connect() as db:
+            db.execute('UPDATE notify_windows SET attempts=attempts+1 WHERE recipient=? AND issue_id=?', (recipient, issue_id))
+            db.execute("UPDATE notify_windows SET pending='[]' WHERE recipient=? AND issue_id=? AND attempts>=?", (recipient, issue_id, limit))
+
+    def prune_windows(self, now):
+        with self.connect() as db:
+            db.execute("DELETE FROM notify_windows WHERE pending='[]' AND window_start+?<=?", (WINDOW, now))
 
     def unresolved_by_assignee(self, prefix='ag_'):
         """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix."""
