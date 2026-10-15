@@ -71,6 +71,23 @@ class ReleaseGradeTest(unittest.TestCase):
         self.assertEqual(grade.plan(["README.md.bak"])["components"], ["core"])
         self.assertEqual(grade.plan(["docs-extra/x"])["components"], ["core"])
 
+    def test_app_npm_check_is_suggested_only_when_the_package_defines_it(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name, scripts in (("withcheck", {"check": "tsc"}), ("nocheck", {"build": "x"}), ("broken", None)):
+                app = root / "apps" / name
+                app.mkdir(parents=True)
+                (app / "package.json").write_text("{not json" if scripts is None else json.dumps({"scripts": scripts}))
+            original = grade.ROOT
+            grade.ROOT = root
+            try:
+                _, gates = grade.app_gates(["apps/withcheck/a.py", "apps/nocheck/a.py", "apps/broken/a.py"])
+            finally:
+                grade.ROOT = original
+        self.assertEqual(gates, ["npm --prefix apps/withcheck run check"])
+
 
 if __name__ == "__main__":
     unittest.main()

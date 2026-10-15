@@ -61,7 +61,13 @@ def app_gates(paths):
             gates.append(f"python3 -m unittest discover -s apps/{name}/tests -p 'test_*.py' -v")
         package = ROOT / "apps" / name / "package.json"
         if package.is_file():
-            gates.append(f"npm --prefix apps/{name} run check")
+            try:
+                scripts = json.loads(package.read_text()).get("scripts", {})
+            except (OSError, ValueError):
+                scripts = {}
+            # Only suggest a gate that exists: an App can have a package.json without a check script.
+            if isinstance(scripts, dict) and "check" in scripts:
+                gates.append(f"npm --prefix apps/{name} run check")
     return names, gates
 
 
