@@ -33,13 +33,19 @@ select the limits, and double-click restores 272px. The minimum is 240px; the
 maximum is the smallest of 480px, 45% of the viewport and the space left after
 reserving 400px for main content plus the 8px separator. Window resizing clamps
 the displayed width while retaining the preferred width for larger windows.
-Preferences use `treer:tree-width:v1:<user_id>` in localStorage across workspaces.
+The arrow button at the top of the separator collapses/expands the sidebar,
+including via Enter/Space, and exposes `aria-expanded` and `aria-controls`.
+A narrow rail keeps the expand button available while collapsed. The original
+width is restored on expansion, and the terminal is fitted after either toggle.
+Preferences use `treer:tree-width:v1:<user_id>` and
+`treer:tree-collapsed:v1:<user_id>` in localStorage across workspaces.
 Unavailable storage falls back to the default on load and allows in-memory
-resizing. Pointer capture and a temporary overlay protect drags across terminals
+resizing and toggling. Collapse defaults to off when not cached. Pointer capture and a temporary overlay protect drags across terminals
 and embedded iframes; release/cancel/focus loss removes protection and fits the
 terminal after layout commits. Separator colors use theme tokens.
 
-Below 768px the separator is hidden and the existing mobile layout stays intact.
+Below 768px the separator and arrow are hidden, desktop collapse is ignored,
+and the existing mobile layout stays intact.
 Managed App/Agent Interface embeds retain the same surrounding console sidebar.
 Native iOS/Android screens and their separate Agent WebViews do not render this
 sidebar; no native source or embedded Agent-owned interface is changed.

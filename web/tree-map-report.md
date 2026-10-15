@@ -32,8 +32,8 @@ level 9; these are bundle measurements, not live network timings.
 | Payload | Raw bytes | gzip bytes |
 | --- | ---: | ---: |
 | Before: index.html | 956,335 | 269,467 |
-| After: index.html | 968,172 | 272,706 |
-| Difference | +11,837 (+1.24%) | +3,239 (+1.20%) |
+| After: index.html | 969,220 | 272,992 |
+| Difference | +12,885 (+1.35%) | +3,525 (+1.31%) |
 
 Per the final requirement the small map component uses a normal static import;
 only its dialog DOM/layout is mounted when opened. No build, dependency, Worker,
@@ -82,3 +82,37 @@ Follow-up checks passed: full hermetic Playwright **203/203** (2 workers),
 `/tmp/treer-tree-map-issues-typecheck.log`. Updated light/dark desktop and 390px
 screenshots are retained under the ignored local directory
 `/Users/dooms/treer-tree-map/.treer/reviews/tree-map-issues7-4/`.
+
+## Issue #9: collapsible desktop sidebar
+
+A small arrow at the top of the existing separator toggles the sidebar; its
+native button supports Enter/Space and reports `aria-expanded`/`aria-controls`.
+When hidden, a 24px rail keeps expansion reachable; invisible sidebar content is
+removed from keyboard navigation by CSS visibility. The Tree stays mounted, so
+selection and folder expansion state are preserved. The resize handle is removed
+while collapsed and restored on expansion, retaining its original keyboard and
+pointer semantics. The arrow avoids the separator midpoint so double-click reset
+remains available. Toggle completion fits the active terminal after layout.
+
+Collapse is saved per user, across workspaces, in
+`treer:tree-collapsed:v1:<user_id>` alongside the existing numeric width key.
+Separate keys preserve existing width caches. Missing/invalid collapse values
+mean expanded; storage errors allow in-memory toggling. Collapse does not overwrite
+the saved width. Below 768px, the arrow/rail are hidden and desktop collapse is
+ignored; native mobile and Agent-owned WebViews are unchanged. The shared Console
+iframe/embed presentation uses the same controls.
+
+Regression tests cover mouse and keyboard toggles, focus retention, refresh and
+workspace switching, saved width restoration, user-scoped/invalid caches, storage
+getter/read/write failures, terminal fit in both directions, iframe continuity,
+and 390px navigation without horizontal overflow. No dependencies, build
+configuration, Worker headers, or release mechanics changed.
+
+Issue #9 checks passed: full hermetic Playwright **204/204** (2 workers),
+`pnpm build`, isolated `pnpm typecheck`, documentation and diff checks. The
+full browser log is `/tmp/treer-tree-collapse-e2e.log`; build/typecheck logs are
+`/tmp/treer-tree-collapse-build.log` and
+`/tmp/treer-tree-collapse-typecheck.log`. Visually checked desktop collapsed and
+390px screenshots are saved under the ignored local review directory
+`/Users/dooms/treer-tree-map/.treer/reviews/tree-collapse/`. Relative to 92371db,
+the single-file bundle grows by 1,048 raw bytes / 286 gzip bytes (Python level 9).

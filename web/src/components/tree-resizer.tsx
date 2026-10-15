@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type KeyboardEvent } from "react"
 
+import { ChevronLeft, ChevronRight } from "lucide-react"
+
 const DEFAULT_WIDTH = 272
 const MIN_WIDTH = 240
 const MAX_WIDTH = 480
@@ -7,23 +9,28 @@ const clamp = (value: number, max: number) => Math.round(Math.max(MIN_WIDTH, Mat
 
 export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
   const [preference, setPreference] = useState(DEFAULT_WIDTH)
+  const [collapsed, setCollapsed] = useState(false)
   const [viewport, setViewport] = useState(() => window.innerWidth)
   const [dragging, setDragging] = useState(false)
   const drag = useRef<{ id: number; x: number; width: number } | null>(null)
   const finishRef = useRef(onFinish)
   finishRef.current = onFinish
   const key = userId ? `treer:tree-width:v1:${userId}` : null
+  const collapsedKey = userId ? `treer:tree-collapsed:v1:${userId}` : null
   const max = Math.max(MIN_WIDTH, Math.min(MAX_WIDTH, Math.floor(viewport * 0.45), viewport - 408))
   const width = clamp(preference, max)
 
   useEffect(() => {
     let value = DEFAULT_WIDTH
+    let hidden = false
     try {
       const stored = key ? window.localStorage.getItem(key) : null
       if (stored && Number.isFinite(Number(stored))) value = clamp(Number(stored), MAX_WIDTH)
+      hidden = collapsedKey ? window.localStorage.getItem(collapsedKey) === "true" : false
     } catch { /* Browser storage is optional. */ }
     setPreference(value)
-  }, [key])
+    setCollapsed(hidden)
+  }, [key, collapsedKey])
 
   function finish() {
     if (!drag.current) return
@@ -44,8 +51,15 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
     try { if (key) window.localStorage.setItem(key, String(next)) } catch { /* Keep in-memory resizing. */ }
   }
   return {
-    width, max, dragging,
-    style: { "--tree-width": `${width}px` } as CSSProperties,
+    width, max, dragging, collapsed,
+    toggle() {
+      finish()
+      const next = !collapsed
+      setCollapsed(next)
+      try { if (collapsedKey) window.localStorage.setItem(collapsedKey, String(next)) } catch { /* Keep in-memory toggling. */ }
+      finishRef.current()
+    },
+    style: { "--tree-width": collapsed ? "0px" : `${width}px`, "--tree-divider": collapsed ? "24px" : "8px" } as CSSProperties,
     separator: {
       role: "separator", tabIndex: 0, "aria-label": "Resize tree sidebar", "aria-orientation": "vertical" as const,
       "aria-controls": "tree-sidebar", "aria-valuemin": MIN_WIDTH, "aria-valuemax": max, "aria-valuenow": width,
@@ -77,7 +91,10 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
 
 export function TreeResizer({ settings }: { settings: ReturnType<typeof useTreeWidth> }) {
   return <div className="relative hidden min-h-0 bg-sidebar md:block">
-    <div {...settings.separator} className="absolute inset-y-0 -left-2 z-20 w-6 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-2 before:w-2 before:border-x before:border-border hover:before:bg-accent focus-visible:before:bg-ring/30" />
+    {!settings.collapsed && <div {...settings.separator} className="absolute inset-y-0 -left-2 z-20 w-6 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-2 before:w-2 before:border-x before:border-border hover:before:bg-accent focus-visible:before:bg-ring/30" />}
+    <button type="button" aria-label={settings.collapsed ? "Expand tree sidebar" : "Collapse tree sidebar"} aria-expanded={!settings.collapsed} aria-controls="tree-sidebar" title={settings.collapsed ? "Expand tree sidebar" : "Collapse tree sidebar"} onClick={settings.toggle} className="absolute left-1/2 top-3 z-30 flex h-10 w-6 -translate-x-1/2 items-center justify-center rounded border bg-sidebar text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+      {settings.collapsed ? <ChevronRight className="size-3.5" /> : <ChevronLeft className="size-3.5" />}
+    </button>
     {settings.dragging && <div aria-hidden="true" className="fixed inset-0 z-[200] cursor-col-resize touch-none" />}
   </div>
 }
