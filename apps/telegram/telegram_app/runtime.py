@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import signal
 import stat
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +27,7 @@ from .common import (
     _string,
 )
 from .state import StateStore
+from .tokenstore import TokenStore
 
 def read_token_file(path: str) -> str:
     """The bot token from a private file, so it never appears in argv, the environment or the configuration.
@@ -51,7 +54,20 @@ def read_token_file(path: str) -> str:
         raise BridgeError("bot_token_file cannot be read as an ASCII token") from error
 
 
-def load_config() -> tuple[Config, Path, str, str]:
+def resolve_token(token_file: Any, state_dir: Path) -> str | None:
+    """The bot token, in order: TELEGRAM_BOT_TOKEN, the file the settings App maintains in the state directory,
+    the `bot_token_file` named in the configuration. None when none is configured yet (the bridge then waits)."""
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if token is None:
+        token = TokenStore(state_dir).read()
+    if token is None and token_file is not None:
+        if not isinstance(token_file, str) or not token_file:
+            raise BridgeError("bot_token_file must be a non-empty path")
+        token = read_token_file(token_file)
+    return token
+
+
+def load_config() -> tuple[Config, Path, str, str | None]:
     config_path = os.environ.get("TREER_APP_CONFIG")
     state_value = os.environ.get("TREER_APP_STATE_DIR")
     cli = os.environ.get("TREER_CLI", "treer")
@@ -61,13 +77,10 @@ def load_config() -> tuple[Config, Path, str, str]:
         value = json.load(handle)
     if not isinstance(value, dict):
         raise BridgeError("Telegram config must contain a JSON object")
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if token is None:
-        token_file = value.get("bot_token_file")
-        if not isinstance(token_file, str) or not token_file:
-            raise BridgeError("the bot token is required: TELEGRAM_BOT_TOKEN or bot_token_file in the config")
-        token = read_token_file(token_file)
-    if not token or len(token) > 256 or any(character.isspace() for character in token):
+    state_dir = Path(state_value)
+    state_dir.mkdir(parents=True, exist_ok=True)
+    token = resolve_token(value.get("bot_token_file"), state_dir)
+    if token is not None and (not token or len(token) > 256 or any(character.isspace() for character in token)):
         raise BridgeError("the bot token is invalid")
     allowed_keys = {
         "bot_token_file",
@@ -84,6 +97,7 @@ def load_config() -> tuple[Config, Path, str, str]:
         "users",
         "limits",
         "control",
+        "settings",
     }
     unknown = set(value) - allowed_keys
     if unknown:
@@ -103,8 +117,6 @@ def load_config() -> tuple[Config, Path, str, str]:
         user_id = _integer(item.get("id"), "Telegram user ID")
         labels[user_id] = " ".join(_string(item.get("label"), "user label", 64).split())
         allowed_ids.append(user_id)
-    if not allowed_ids:
-        raise BridgeError("configure at least one of allowed_user_ids or users")
     allowed_users = frozenset(allowed_ids)
     if len(allowed_users) != len(allowed_ids):
         raise BridgeError("Telegram user IDs must be unique")
@@ -154,8 +166,6 @@ def load_config() -> tuple[Config, Path, str, str]:
         raise BridgeError("control has unknown fields")
     # Absent: any sender the bridge accepts may admit IM users (like POC changes). A list restricts it; [] means nobody.
     admins = _list(control["user_admin_agent_ids"], "user_admin_agent_ids") if "user_admin_agent_ids" in control else None
-    state_dir = Path(state_value)
-    state_dir.mkdir(parents=True, exist_ok=True)
     return (
         Config(
             api_base_url=base_url,
@@ -180,45 +190,102 @@ def load_config() -> tuple[Config, Path, str, str]:
     )
 
 
-def build_bridge() -> TelegramBridge:
-    config, state_dir, cli_path, token = load_config()
+STATUS_CODES = ("needs_token", "starting", "running", "paused", "error")
+
+
+def record_status(state: StateStore, status: str, error: str = "") -> None:
+    """The bridge's state as the settings App shows it. Only fixed words are stored, never an exception text."""
+    state.set_setting("bridge_state", status)
+    state.set_setting("bridge_error", error)
+    state.set_setting("bridge_heartbeat", repr(time.time()))
+
+
+def build_bridge(config: Config, state_dir: Path, cli_path: str, token: str) -> TelegramBridge:
     bot = BotApi(config.api_base_url, token)
     me = bot.get_me()
     bot_id = str(_integer(me.get("id"), "bot ID"))
     state = StateStore(state_dir / "telegram-state.sqlite3")
     state.bind_bot(bot_id)
     state.recover_sending(config.ambiguous_retry_seconds)
+    username = me.get("username")
+    state.set_setting("bot_id", bot_id)
+    if isinstance(username, str) and username.replace("_", "").isalnum() and len(username) <= 64:
+        state.set_setting("bot_username", username)
     return TelegramBridge(config, state, TreerCli(cli_path), bot, bot_id, state_dir)
 
 
-def run_forever(bridge: TelegramBridge) -> None:
-    stopped = threading.Event()
+def token_fingerprint(token: str | None) -> str | None:
+    return None if token is None else hashlib.sha256(token.encode()).hexdigest()
 
-    def stop(_signum: int, _frame: object) -> None:
-        stopped.set()
 
-    signal.signal(signal.SIGTERM, stop)
-    signal.signal(signal.SIGINT, stop)
+def run_supervised(stopped: threading.Event, load: Any = None, poll: float = 2.0) -> None:
+    """Runs until stopped. With no token the bridge waits (status needs_token) instead of exiting; when the token appears,
+    changes or is cleared (by the settings App, a file or the environment) the bridge is rebuilt within a few seconds."""
+    load = load or load_config
+    while not stopped.is_set():
+        config, state_dir, cli_path, token = load()
+        status_state = StateStore(state_dir / "telegram-state.sqlite3")
+        if token is None:
+            record_status(status_state, "needs_token")
+            stopped.wait(poll)
+            continue
+        record_status(status_state, "starting")
+        try:
+            bridge = build_bridge(config, state_dir, cli_path, token)
+        except BridgeError as error:
+            code = getattr(error, "code", "") or ("different_bot" if "different bot" in str(error) else "bot_unavailable")
+            record_status(status_state, "error", code if code in ("different_bot", "bot_unavailable", "telegram_unavailable", "telegram_request_rejected") else "bot_unavailable")
+            print(f"Treer Telegram could not start the bridge ({code}); retrying", file=sys.stderr, flush=True)
+            stopped.wait(5)
+            continue
+        run_workers(bridge, stopped, token_fingerprint(token), config, state_dir, poll)
+
+
+def run_workers(bridge: TelegramBridge, stopped: threading.Event, fingerprint: str | None, config: Config, state_dir: Path, poll: float) -> None:
+    halt = threading.Event()
+
+    def paused() -> bool:
+        return bridge.state.get_setting("paused") == "1"
 
     def loop(label: str, action: Any) -> None:
-        while not stopped.is_set():
+        while not stopped.is_set() and not halt.is_set():
+            if paused():
+                halt.wait(1)
+                continue
             try:
                 action()
             except BridgeError as error:
                 code = getattr(error, "code", type(error).__name__)
                 print(f"Treer Telegram {label} retrying after {code}", file=sys.stderr, flush=True)
-                stopped.wait(1)
+                halt.wait(1)
 
-    inbound = threading.Thread(target=loop, args=("inbound", bridge.run_inbound_once), daemon=True)
-    outbound = threading.Thread(target=loop, args=("outbound", bridge.run_outbound_once), daemon=True)
-    inbound.start()
-    outbound.start()
-    while not stopped.wait(0.25):
-        if not inbound.is_alive() or not outbound.is_alive():
-            raise BridgeError("Telegram worker thread exited unexpectedly")
-    inbound.join(timeout=2)
-    outbound.join(timeout=2)
+    threads = [threading.Thread(target=loop, args=("inbound", bridge.run_inbound_once), daemon=True),
+               threading.Thread(target=loop, args=("outbound", bridge.run_outbound_once), daemon=True)]
+    for thread in threads:
+        thread.start()
+    token_file = _token_file_hint(state_dir)
+    try:
+        while not stopped.wait(poll):
+            record_status(bridge.state, "paused" if paused() else "running")
+            try:
+                current = token_fingerprint(resolve_token(token_file, state_dir))
+            except BridgeError:
+                current = None
+            if current != fingerprint:
+                print("Treer Telegram: the bot token changed; restarting the bridge", file=sys.stderr, flush=True)
+                return
+            if not all(thread.is_alive() for thread in threads):
+                raise BridgeError("Telegram worker thread exited unexpectedly")
+    finally:
+        halt.set()      # the old workers wind down after their current call; they do nothing further
 
+
+def _token_file_hint(state_dir: Path) -> Any:
+    try:
+        with open(os.environ["TREER_APP_CONFIG"], "rb") as handle:
+            return json.load(handle).get("bot_token_file")
+    except (OSError, ValueError, KeyError, AttributeError):
+        return None
 
 
 def main() -> int:
@@ -226,12 +293,18 @@ def main() -> int:
     parser.add_argument("--once", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
     try:
-        bridge = build_bridge()
         if args.once:
+            config, state_dir, cli_path, token = load_config()
+            if token is None:
+                raise BridgeError("no bot token configured")
+            bridge = build_bridge(config, state_dir, cli_path, token)
             bridge.run_inbound_once(timeout=0)
             bridge.run_outbound_once(wait_milliseconds=0)
-        else:
-            run_forever(bridge)
+            return 0
+        stopped = threading.Event()
+        signal.signal(signal.SIGTERM, lambda *_: stopped.set())
+        signal.signal(signal.SIGINT, lambda *_: stopped.set())
+        run_supervised(stopped)
         return 0
     except KeyboardInterrupt:
         return 0

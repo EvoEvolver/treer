@@ -328,7 +328,8 @@ class ConfigTest(unittest.TestCase):
                          "control": {"user_admin_agent_ids": ["ag_x"]}})
         self.assertEqual((new.bindings, new.user_label(7), new.per_user_per_hour, new.max_unreplied, new.user_admin_agent_ids),
                          ((), "Ann Lee", 9, 4, frozenset({"ag_x"})))
-        for bad in ({}, {"users": [{"id": 1, "label": "x", "extra": 1}]}, {"allowed_user_ids": [1], "limits": {"nope": 1}},
+        self.assertEqual(self.load({}).allowed_user_ids, frozenset(), "no users configured: they join by pairing")
+        for bad in ({"users": [{"id": 1, "label": "x", "extra": 1}]}, {"allowed_user_ids": [1], "limits": {"nope": 1}},
                     {"allowed_user_ids": [1], "limits": {"per_user_per_hour": 0}}, {"allowed_user_ids": [1], "control": {"x": []}},
                     {"allowed_user_ids": [1, 1]}, {"users": [{"id": 1, "label": "a"}], "allowed_user_ids": [1]}):
             with self.assertRaises(BridgeError, msg=bad):
@@ -567,8 +568,7 @@ class TokenFileTest(unittest.TestCase):
             for content in (b"two words", b"1:a b"):
                 with self.assertRaises(BridgeError):
                     self.load({"bot_token_file": str(self.token_file(root, content))})
-        with self.assertRaises(BridgeError):
-            self.load({})                                         # neither the variable nor a file
+        self.assertIsNone(self.load({})[3], "nothing configured yet: the bridge waits for a token instead of failing")
         with self.assertRaises(BridgeError):
             self.load({"bot_token_file": ""})
 

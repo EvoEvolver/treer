@@ -56,6 +56,15 @@ class TreerCli:
         return value
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """The bot token travels in the URL path: never follow a redirect with it."""
+    def redirect_request(self, *args: Any, **kwargs: Any) -> None:
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect())
+
+
 class BotApi:
     def __init__(self, base_url: str, token: str, timeout_seconds: float = 65.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -71,7 +80,7 @@ class BotApi:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self.timeout_seconds) as response:
+            with _OPENER.open(request, timeout=self.timeout_seconds) as response:
                 raw = response.read(BOT_API_RESPONSE_LIMIT + 1)
         except urllib.error.HTTPError as error:
             raw = error.read(BOT_API_RESPONSE_LIMIT + 1)

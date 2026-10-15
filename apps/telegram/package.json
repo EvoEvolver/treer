@@ -1,0 +1,21 @@
+{
+  "name": "treer-telegram-settings-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "Build tooling for the Telegram settings page. The App itself runs on the Python standard library and does not need Node at runtime.",
+  "scripts": {
+    "typecheck": "tsc -p ui/tsconfig.json --noEmit",
+    "build:ui": "node scripts/build-ui.mjs",
+    "check:ui": "node scripts/check-ui.mjs",
+    "check": "npm run typecheck && npm run check:ui"
+  },
+  "devDependencies": {
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "esbuild": "0.28.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "typescript": "5.9.3"
+  }
+}

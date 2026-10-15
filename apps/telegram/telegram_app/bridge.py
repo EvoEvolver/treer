@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 import time
@@ -100,6 +101,9 @@ class TelegramBridge:
         command = text.split(maxsplit=1)[0].split("@", 1)[0].lower() if isinstance(text, str) and text.strip() else ""
         if sender.get("is_bot") is True:
             self.state.complete_update(update_id, bot_id=self.bot_id, error="bot sender ignored")
+            return
+        if command == "/pair":
+            self._pair(update_id, chat, sender, text, chat_id, thread_id, user_id)
             return
         admitted = user is not None and user[1]
         if not admitted or (binding is None and command != "/poc"):
@@ -220,6 +224,48 @@ class TelegramBridge:
             )
         self.bot.send_message(chat_id, thread_id, notice, None)
         self.state.complete_update(update_id, bot_id=self.bot_id)
+
+    def _pair(self, update_id: int, chat: dict[str, Any], sender: dict[str, Any], text: str, chat_id: int, thread_id: int | None, user_id: int) -> None:
+        """`/pair CODE`: redeems a one-time code made in the settings App, admits this Telegram user and binds this private chat
+        to the code's POC. Works for users who are not admitted yet - that is its purpose - but only in a private chat."""
+        if chat.get("type") != "private":
+            notice, outcome = "Pairing works only in a private chat with this bot. Open one and send /pair CODE there.", "pair refused: not private"
+        else:
+            parts = text.split(maxsplit=1)
+            status, row = self.state.redeem_pairing(parts[1] if len(parts) > 1 else "", str(user_id))
+            if status == "ok" and row is not None:
+                notice, outcome = self._complete_pairing(row, sender, chat_id, user_id), "paired"
+            elif status in ("blocked", "locked"):
+                if status == "locked":
+                    self.state.audit_reject(f"telegram:{user_id}", "pair", "pair_locked")
+                notice, outcome = "Too many failed attempts. Ask for a new pairing code later.", f"pair {status}"
+            else:
+                notice, outcome = "That pairing code is not valid or has expired.", "pair invalid"
+        self._safe_notice(str(chat_id), thread_id, notice)
+        self.state.complete_update(update_id, bot_id=self.bot_id, error=outcome)
+
+    @staticmethod
+    def _pair_label(sender: dict[str, Any], user_id: int) -> str:
+        username = sender.get("username")
+        return username if isinstance(username, str) and re.fullmatch(r"[A-Za-z0-9_]{1,32}", username) else f"user-{user_id}"
+
+    def _complete_pairing(self, row: dict[str, Any], sender: dict[str, Any], chat_id: int, user_id: int) -> str:
+        label = self._pair_label(sender, user_id)
+        actor = f"telegram:{user_id}({label})"
+        self.state.set_user(CHANNEL, self.bot_id, str(user_id), label, True, actor=actor, via="pair", op="pair.user")
+        try:
+            _, new = self.poc.set_poc(conversation_key(chat_id, None), row["poc_agent_id"], actor=actor, via="pair", op="poc.pair", enabled=True)
+        except PocError as error:
+            return f"You are paired, but the point of contact could not be set: {error.message}"
+        creator = re.sub(r"[^A-Za-z0-9:_-]", "?", str(row["created_by"]))[:128]
+        text = (f"Telegram user {label} (id {user_id}) was paired to this point of contact for chat {chat_id}; "
+                f"the pairing code was created by {creator}.")
+        for recipient in sorted({new.target_agent_id, creator.split(":", 1)[-1]} - {""}):
+            try:
+                self.cli.run(["message", "send", "--to", recipient, "--idempotency-key", f"im-pair-{row['id']}-{recipient}"[:200], "--body-file", "-"], stdin=text)
+            except BridgeError as error:
+                print(f"Treer Telegram pairing notice to {recipient} failed ({getattr(error, 'code', type(error).__name__)})", file=sys.stderr, flush=True)
+        return f"Paired. Your messages in this chat now go to {new.target_agent_id}."
 
     def _poc_command(self, text: str, binding: Any, conversation: str, actor: str) -> str:
         """`/poc` shows, `/poc AGENT` (ID or tree path) sets, `/poc off|on` pauses/resumes this chat's POC."""

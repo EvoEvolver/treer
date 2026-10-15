@@ -9,3 +9,5 @@ launchers/agent/ui/** text eol=lf
 # (npm --prefix apps/issues run check:ui compares a fresh build byte for byte).
 apps/issues/ui/** text eol=lf
 apps/issues/dist/** text eol=lf
+apps/telegram/ui/** text eol=lf
+apps/telegram/dist/** text eol=lf
