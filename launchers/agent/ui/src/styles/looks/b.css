@@ -25,7 +25,7 @@
 .top{display:grid;grid-template-columns:1fr auto 1fr;align-items:center;gap:16px;padding:0 20px}
 .brand{display:contents}
 .mark{display:grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--accent);color:var(--accent-fg);font:italic 600 17px var(--font-prose);justify-self:start}
-.titles{text-align:center;min-width:0}
+.titles{text-align:center;min-width:0;max-width:44vw}
 h1{margin:0;font:600 15px/1.25 var(--font-prose);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cwd{margin:2px 0 0;font-size:11px;color:var(--fg3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .actions{display:flex;align-items:center;justify-content:flex-end;gap:8px}

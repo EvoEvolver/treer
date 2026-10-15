@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
+import { testRuntimeControlsUi } from "./browser-controls-ui.mjs";
 
 // The React UI (public/ui.html) against the real launcher server and a fake Codex: no inference, no Treer mutations.
 // Usage: node tests/browser-ui.mjs [--page ui.html]   (the page name changes when the UI becomes the default)
@@ -420,6 +421,7 @@ try {
   const violations = await page.evaluate(() => window.__violations);
   assert.deepEqual(violations.map((line) => line.split(" ").slice(0, 2).join(" ")), ["script-src-attr inline", "script-src-attr inline"], violations.join("\n"));
   assert.deepEqual(errors.filter((message) => !/inline event handler|status of 500/.test(message)), []); // the 500 is the injected preview failure
+  await testRuntimeControlsUi(browser, screenshots, page_);
   console.log(`React UI browser checks passed. Screenshots: ${screenshots}`);
 } finally {
   await browser?.close();

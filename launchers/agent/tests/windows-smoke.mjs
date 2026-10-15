@@ -160,16 +160,31 @@ try {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, extraHTTPHeaders: { ...headers, "x-treer-interface-source": "proxy-ui" } });
   const page = await context.newPage(), errors = [];
   page.on("pageerror", error => errors.push(error.message));
-  await page.goto(base + "/?theme=light"); await expect(page.locator("#timeline")).toContainText("Done now.");
-  await page.getByRole("button", { name: "Browse files", exact: true }).click();
-  await page.getByRole("button", { name: "README.md", exact: true }).click();
-  await expect(page.locator("#file-content")).toContainText("Literal <script> content");
-  await page.screenshot({ path: join(options.screenshots, "windows-agent-desktop.png") });
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.screenshot({ path: join(options.screenshots, "windows-agent-390px.png") });
-  await page.getByRole("button", { name: "Close file browser" }).click();
-  await expect(page.locator("#timeline")).toContainText("Done now.");
-  await page.screenshot({ path: join(options.screenshots, "windows-agent-390px-chat.png") });
+  // WINDOWS_SMOKE_UI=react runs the same checks against the React page (public/ui.html); the legacy page stays the default until the switch.
+  if (process.env.WINDOWS_SMOKE_UI === "react") {
+    page.on("console", message => { if (message.type() === "error") errors.push(message.text()); });
+    await page.goto(base + "/ui.html?theme=light&look=b"); await expect(page.locator(".chat")).toContainText("Done now.");
+    await page.getByRole("button", { name: "Browse files", exact: true }).click();
+    await page.getByRole("treeitem", { name: "README.md", exact: true }).click();
+    await expect(page.locator("#files .preview pre")).toContainText("Literal <script> content");
+    await page.screenshot({ path: join(options.screenshots, "windows-agent-desktop.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: join(options.screenshots, "windows-agent-390px.png") });
+    await page.getByRole("button", { name: "Close file browser" }).click();
+    await expect(page.locator(".chat")).toContainText("Done now.");
+    await page.screenshot({ path: join(options.screenshots, "windows-agent-390px-chat.png") });
+  } else {
+    await page.goto(base + "/?theme=light"); await expect(page.locator("#timeline")).toContainText("Done now.");
+    await page.getByRole("button", { name: "Browse files", exact: true }).click();
+    await page.getByRole("button", { name: "README.md", exact: true }).click();
+    await expect(page.locator("#file-content")).toContainText("Literal <script> content");
+    await page.screenshot({ path: join(options.screenshots, "windows-agent-desktop.png") });
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.screenshot({ path: join(options.screenshots, "windows-agent-390px.png") });
+    await page.getByRole("button", { name: "Close file browser" }).click();
+    await expect(page.locator("#timeline")).toContainText("Done now.");
+    await page.screenshot({ path: join(options.screenshots, "windows-agent-390px-chat.png") });
+  }
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)); assert.deepEqual(errors, []);
   await browser.close(); browser = undefined;
   await stop(); await start();

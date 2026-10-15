@@ -4,7 +4,8 @@ import { useStore } from "../state/store";
 import { GoalEditor } from "./GoalEditor";
 import { Icon } from "./Icon";
 import { GoalPop, ModelPop, PlanPop, QueuePop } from "./Pops";
-import { Strip, type PopName } from "./Strip";
+import { currentGoal } from "../lib/goal";
+import { latestPlan, Strip, type PopName } from "./Strip";
 
 /** The composer: one real textarea (compact when idle, expanded when focused or multi-line), the status strip, and one popover at a time. */
 export function Dock() {
@@ -58,6 +59,12 @@ export function Dock() {
     document.addEventListener("pointercancel", onUp);
     return () => { clearTimeout(timer); document.removeEventListener("pointerup", onUp); document.removeEventListener("pointercancel", onUp); };
   }, []);
+
+  // A popover whose subject disappeared (queue drained, goal cleared, no plan) closes, so it never reopens by itself later.
+  const hasGoal = Boolean(snapshot && currentGoal(snapshot)), hasPlan = Boolean(snapshot && latestPlan(snapshot.thread?.turns ?? [])), hasQueue = (snapshot?.queue.length ?? 0) > 0;
+  useEffect(() => {
+    if ((pop === "goal" && !hasGoal) || (pop === "plan" && !hasPlan) || (pop === "queue" && !hasQueue)) { setPop(null); setPendingClear(null); }
+  }, [pop, hasGoal, hasPlan, hasQueue]);
 
   function closePop(returnFocus = true) {
     setPop(null);

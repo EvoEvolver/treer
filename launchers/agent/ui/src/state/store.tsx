@@ -94,6 +94,11 @@ export function useStore(): Store {
   return store;
 }
 
+/** Mutations may acknowledge with a full snapshot, a partial body or 204; anything that is not a snapshot is followed by a state read. */
+async function asSnapshot(payload: unknown): Promise<Snapshot> {
+  return payload && typeof payload === "object" && "harness" in payload ? (payload as Snapshot) : request<Snapshot>("api/state");
+}
+
 const historyLimit = (state: State) => state.snapshot?.history.limit ?? 50;
 
 export function StoreProvider({ children }: { children: ReactNode }) {
@@ -185,8 +190,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     },
     async cancelQueued(id) {
       try {
-        const payload = await request<Snapshot | { type?: string }>(`api/queue/${encodeURIComponent(id)}`, { method: "DELETE" });
-        dispatch({ type: "snapshot", snapshot: "harness" in payload ? payload as Snapshot : await request<Snapshot>("api/state"), source: "http" });
+        const payload = await request<unknown>(`api/queue/${encodeURIComponent(id)}`, { method: "DELETE" });
+        dispatch({ type: "snapshot", snapshot: await asSnapshot(payload), source: "http" });
         dispatch({ type: "error", message: null });
       } catch (error) { dispatch({ type: "error", message: (error as Error).message }); }
     },
@@ -199,7 +204,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       failedGoal.current = { value, id: operationId };
       try {
         const payload = await request<Snapshot>("api/goal", { method: "PUT", body: JSON.stringify({ ...input, operationId }) });
-        dispatch({ type: "snapshot", snapshot: "harness" in payload ? payload : await request<Snapshot>("api/state"), source: "http" });
+        dispatch({ type: "snapshot", snapshot: await asSnapshot(payload), source: "http" });
         failedGoal.current = null;
         return null;
       } catch (error) { return (error as Error).message; }
@@ -210,7 +215,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       dispatch({ type: "goalBusy", value: true });
       try {
         const payload = await request<Snapshot>("api/goal", { method: "DELETE" });
-        dispatch({ type: "snapshot", snapshot: "harness" in payload ? payload : await request<Snapshot>("api/state"), source: "http" });
+        dispatch({ type: "snapshot", snapshot: await asSnapshot(payload), source: "http" });
         return null;
       } catch (error) { return (error as Error).message; }
       finally { dispatch({ type: "goalBusy", value: false }); }
@@ -218,13 +223,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     async reconcileGoal() {
       try {
         const payload = await request<Snapshot>("api/goal/reconcile", { method: "POST" });
-        dispatch({ type: "snapshot", snapshot: "harness" in payload ? payload : await request<Snapshot>("api/state"), source: "http" });
+        dispatch({ type: "snapshot", snapshot: await asSnapshot(payload), source: "http" });
       } catch (error) { dispatch({ type: "error", message: (error as Error).message }); }
     },
     async retryGoalDelivery(id) {
       try {
         const payload = await request<Snapshot>("api/goal/retry", { method: "POST", body: JSON.stringify({ id }) });
-        dispatch({ type: "snapshot", snapshot: "harness" in payload ? payload : await request<Snapshot>("api/state"), source: "http" });
+        dispatch({ type: "snapshot", snapshot: await asSnapshot(payload), source: "http" });
       } catch (error) { dispatch({ type: "error", message: (error as Error).message }); }
     },
     async interrupt() {

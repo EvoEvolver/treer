@@ -106,20 +106,20 @@ export function ModelPop({ onClose }: { onClose: () => void }) {
   const busy = state.settingsBusy || !thread;
   return (
     <Pop name="model" title={t("model.title")} closeLabel={t("model.close")} onClose={onClose}>
-      <label className="field"><span>{t("model.model")}</span>
-        <select value={thread?.model ?? ""} disabled={busy || models.length === 0} onChange={(event) => void actions.settings({ model: event.target.value })}>
+      <div className="field"><label htmlFor="model-select">{t("model.model")}</label>
+        <select id="model-select" value={thread?.model ?? ""} disabled={busy || models.length === 0} onChange={(event) => void actions.settings({ model: event.target.value })}>
           {/* A harness may sit on its own default, which is not one of the choices. */}
           {!models.some((option) => option.model === thread?.model) && <option value="">{t("model.default")}</option>}
           {models.map((option) => <option key={option.id} value={option.model}>{option.displayName || option.model}</option>)}
         </select>
-      </label>
+      </div>
       {efforts.length > 0 && (
-        <label className="field"><span>{t("model.effort")}</span>
-          <select value={thread?.reasoningEffort ?? ""} disabled={busy} onChange={(event) => void actions.settings({ reasoningEffort: event.target.value || null })}>
+        <div className="field"><label htmlFor="effort-select">{t("model.effort")}</label>
+          <select id="effort-select" value={thread?.reasoningEffort ?? ""} disabled={busy} onChange={(event) => void actions.settings({ reasoningEffort: event.target.value || null })}>
             {!efforts.some((option) => option.reasoningEffort === thread?.reasoningEffort) && <option value="">{t("model.default")}</option>}
             {efforts.map((option) => <option key={option.reasoningEffort} value={option.reasoningEffort}>{option.reasoningEffort}</option>)}
           </select>
-        </label>
+        </div>
       )}
     </Pop>
   );

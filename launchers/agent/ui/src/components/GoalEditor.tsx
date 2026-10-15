@@ -45,8 +45,8 @@ export function GoalEditor({ open, onClose, onSaved }: { open: boolean; onClose:
     <dialog ref={dialog} className="goal-dialog" aria-labelledby="goal-editor-title" onClose={onClose} onCancel={onClose}>
       <form onSubmit={(event) => void submit(event)}>
         <header className="dialog-h"><h2 id="goal-editor-title">{goal ? t("goal.editor.editTitle") : t("goal.editor.setTitle")}</h2><button type="button" className="xbtn" aria-label={t("goal.editor.close")} onClick={onClose}><Icon name="close" /></button></header>
-        <label className="field"><span>{t("goal.editor.objective")}</span><textarea ref={objective} rows={3} required value={text} onChange={(event) => setText(event.target.value)} /></label>
-        {budgetSupported && <label className="field"><span>{t("goal.editor.budget")}</span><input type="number" min={1} step={1} inputMode="numeric" value={budget} onChange={(event) => setBudget(event.target.value)} /></label>}
+        <div className="field"><label htmlFor="goal-objective">{t("goal.editor.objective")}</label><textarea id="goal-objective" ref={objective} rows={3} required value={text} onChange={(event) => setText(event.target.value)} /></div>
+        {budgetSupported && <div className="field"><label htmlFor="goal-budget">{t("goal.editor.budget")}</label><input id="goal-budget" type="number" min={1} step={1} inputMode="numeric" value={budget} onChange={(event) => setBudget(event.target.value)} /></div>}
         {error && <p className="field-error" role="alert">{error}</p>}
         <div className="dialog-actions"><button type="button" className="btn" onClick={onClose}>{t("goal.editor.cancel")}</button><button type="submit" className="btn primary" disabled={state.goalBusy}>{t("goal.editor.save")}</button></div>
       </form>
