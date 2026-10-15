@@ -35,7 +35,7 @@ function fixture(t: { after: (fn: () => void) => void }) {
   const request = { schema: "treer.launcher-install/v1", operation: "install", bundle_dir: bundle,
     version: `sha256-${digest(readFileSync(join(bundle, "bundle-manifest.json")))}`, source_commit: "a".repeat(40), root: machine, cwd: ".", agents: [], node: process.execPath, treer, controller, allow_network: false };
   t.after(() => rmSync(root, { recursive: true, force: true }));
-  const call = (overrides = {}, env = {}) => JSON.parse(execFileSync(process.execPath, [join(launcher, "scripts/install.mjs"), "--controller-request"], { input: JSON.stringify({ ...request, ...overrides }), encoding: "utf8", env: hermeticEnv({ FIXTURE_ROOT: root, PATH: dirname(process.execPath), ...env }), stdio: "pipe" }));
+  const call = (overrides = {}, env = {}) => JSON.parse(execFileSync(process.execPath, [join(launcher, "scripts/install.mjs"), "--controller-request"], { input: JSON.stringify({ ...request, ...overrides }), encoding: "utf8", env: hermeticEnv({ HOME: root, LOCALAPPDATA: root, FIXTURE_ROOT: root, PATH: dirname(process.execPath), ...env }), stdio: "pipe" }));
   return { root, machine, bundle, request, call, base: join(machine, ".treer/launchers/agent") };
 }
 function revise(f: ReturnType<typeof fixture>) {
@@ -49,7 +49,7 @@ test("portable install is offline, saves all six profiles, idempotently retains 
   assert.equal(result.portable, true); assert.equal(result.profiles.length, 6);
   const installed = join(f.base, f.request.version); assert.equal(existsSync(join(installed, "node_modules")), false);
   const profile = JSON.parse(readFileSync(join(f.root, "Codex + UI.json"), "utf8"));
-  assert.equal(profile.command, process.execPath); assert.deepEqual(profile.args, [join(f.base, "run.mjs"), "--harness", "codex"]);
+  assert.equal(profile.command, "treer-agent"); assert.deepEqual(profile.args, ["--harness", "codex"]);
   const bytes = readFileSync(join(installed, "runtime.mjs")); f.call(); assert.deepEqual(readFileSync(join(installed, "runtime.mjs")), bytes);
   const previous = f.request.version; revise(f); f.call({ operation: "update" });
   assert.equal(f.call({ operation: "status" }).previous, previous);
@@ -62,30 +62,33 @@ test("failure verifying a later profile restores earlier profiles and the curren
   revise(f); assert.throws(() => f.call({ operation: "update" }, { BAD_SHOW: "Claude + UI" }), /Profile verification failed/);
   assert.equal(readFileSync(join(f.base, "current.json"), "utf8"), pointer); assert.equal(readFileSync(join(f.root, "Codex + UI.json"), "utf8"), profile);
 });
-test("other machines' workspace profiles stay untouched through install, update and rollback", (t) => {
+test("isolated skip-profiles installation does not create or redirect a per-user default shim", (t) => {
+  const f = fixture(t), result = f.call({ skip_profiles: true });
+  assert.equal(result.shim, null); assert.deepEqual(result.profiles, []);
+  assert.equal(existsSync(join(f.root, ".local/bin/treer-agent")), false);
+  assert.equal(existsSync(join(f.root, "Treer/bin/treer-agent.exe")), false);
+  assert.equal(existsSync(join(f.base, "profiles-receipt.json")), false);
+});
+test("recognized profiles from another machine converge to one portable profile through update and rollback", (t) => {
   const f = fixture(t), profiles = JSON.parse(readFileSync(join(f.bundle, "profiles.json"), "utf8")).profiles;
-  const foreign = JSON.stringify({ command: "/Users/mac/.treer/launcher.sh", cwd: "treer", args: ["owner choice"] });
-  for (const profile of profiles) writeFileSync(join(f.root, profile.name + ".json"), foreign);
-  const first = f.request.version, names = profiles.map((p: any) => `${p.name} (win_native)`);
+  for (const profile of profiles) writeFileSync(join(f.root, profile.name + ".json"), JSON.stringify({ command: "/Users/mac/.treer/launchers/agent/current/launchers/agent/scripts/treer-agent.sh", cwd: "treer", args: profile.args }));
+  const first = f.request.version, names = profiles.map((p: any) => p.name);
   assert.deepEqual(f.call().profiles, names);
   const receipt = JSON.parse(readFileSync(join(f.base, "profiles-receipt.json"), "utf8"));
-  assert.equal(receipt.$profile_names.codex, "Codex + UI (win_native)");
+  assert.equal(receipt.$profile_names.codex, "Codex + UI");
   revise(f);
-  const renamed = { ...f.request.controller, machine: { ...f.request.controller.machine, name: "renamed-host" } };
-  assert.deepEqual(f.call({ operation: "update", controller: renamed }).profiles, names);
-  assert.deepEqual(f.call({ operation: "rollback", rollback_version: first, controller: renamed }).profiles, names);
-  assert.equal(f.call({ operation: "status" }).current, first);
-  for (const profile of profiles) assert.equal(readFileSync(join(f.root, profile.name + ".json"), "utf8"), foreign);
+  assert.deepEqual(f.call({ operation: "update" }).profiles, names);
+  assert.deepEqual(f.call({ operation: "rollback", rollback_version: first }).profiles, names);
+  for (const profile of profiles) assert.deepEqual(JSON.parse(readFileSync(join(f.root, profile.name + ".json"), "utf8")), { command: "treer-agent", cwd: ".", args: profile.args });
 });
-test("qualified-name conflicts use stable machine ID without overwriting any existing profile", (t) => {
+test("custom profiles are protected rather than creating more machine-qualified names", (t) => {
   const f = fixture(t), foreign = JSON.stringify({ command: "/owner/script", cwd: ".", args: [] });
-  for (const name of ["Codex + UI", "Codex + UI (win_native)"]) writeFileSync(join(f.root, name + ".json"), foreign);
-  const name = "Codex + UI (win_native-srv_fixture)";
-  assert.deepEqual(f.call({ agents: ["codex"] }).profiles, [name]);
-  assert.deepEqual(f.call({ agents: ["codex"], operation: "update" }).profiles, [name]);
-  for (const name of ["Codex + UI", "Codex + UI (win_native)"]) assert.equal(readFileSync(join(f.root, name + ".json"), "utf8"), foreign);
+  writeFileSync(join(f.root, "Codex + UI.json"), foreign);
+  assert.throws(() => f.call({ agents: ["codex"] }), /customized/);
+  assert.equal(readFileSync(join(f.root, "Codex + UI.json"), "utf8"), foreign);
+  assert.equal(existsSync(join(f.base, "current.json")), false);
 });
-test("prototype property profile names are not mistaken for machine-owned receipts", (t) => {
+test("prototype names do not authorize adoption of custom profiles", (t) => {
   for (const name of ["constructor", "__proto__", "toString"]) {
     const f = fixture(t), path = join(f.bundle, "profiles.json"), profiles = JSON.parse(readFileSync(path, "utf8"));
     profiles.profiles.find((p: any) => p.id === "codex").name = name;
@@ -94,53 +97,24 @@ test("prototype property profile names are not mistaken for machine-owned receip
     const entry = manifest.files.find((file: any) => file.path === "profiles.json"), bytes = readFileSync(path);
     entry.size = bytes.length; entry.sha256 = digest(bytes); writeFileSync(manifestPath, JSON.stringify(manifest));
     f.request.version = `sha256-${digest(readFileSync(manifestPath))}`;
-    const foreign = JSON.stringify({ command: "/owner/agent", cwd: ".", args: [] });
     assert.deepEqual(f.call({ agents: ["codex"] }).profiles, [name]);
     assert.deepEqual(f.call({ agents: ["codex"], operation: "update" }).profiles, [name]);
-    assert.equal(Object.hasOwn(JSON.parse(readFileSync(join(f.base, "profiles-receipt.json"), "utf8")), name), true);
-    // Model a fresh second-machine installation using the same verified bundle.
-    rmSync(f.base, { recursive: true });
-    writeFileSync(join(f.root, name + ".json"), foreign);
-    assert.deepEqual(f.call({ agents: ["codex"] }).profiles, [`${name} (win_native)`]);
-    assert.deepEqual(f.call({ agents: ["codex"], operation: "update" }).profiles, [`${name} (win_native)`]);
-    const receipt = JSON.parse(readFileSync(join(f.base, "profiles-receipt.json"), "utf8"));
-    assert.equal(Object.hasOwn(receipt, name), false);
-    assert.equal(Object.hasOwn(receipt, `${name} (win_native)`), true);
-    assert.equal(readFileSync(join(f.root, name + ".json"), "utf8"), foreign);
+    const custom = JSON.stringify({ command: "/owner/agent", cwd: ".", args: [] });
+    writeFileSync(join(f.root, name + ".json"), custom);
+    assert.throws(() => f.call({ agents: ["codex"] }), /customized/);
+    assert.equal(readFileSync(join(f.root, name + ".json"), "utf8"), custom);
   }
 });
-test("failed qualified-profile verification restores foreign profiles and removes new profiles", (t) => {
-  const f = fixture(t), foreign = JSON.stringify({ command: "/another-machine/agent", cwd: ".", args: [] });
-  for (const name of ["Codex + UI", "Claude + UI"]) writeFileSync(join(f.root, name + ".json"), foreign);
-  assert.throws(() => f.call({ agents: ["codex", "claude"] }, { BAD_SHOW: "Claude + UI (win_native)" }), /Profile verification failed/);
-  for (const name of ["Codex + UI", "Claude + UI"]) {
-    assert.equal(readFileSync(join(f.root, name + ".json"), "utf8"), foreign);
-    assert.equal(existsSync(join(f.root, name + " (win_native).json")), false);
-  }
+test("first-install failure restores migrated profiles, pointer and shim", (t) => {
+  const f = fixture(t), profile = JSON.parse(readFileSync(join(f.bundle, "profiles.json"), "utf8")).profiles.find((p: any) => p.id === "codex");
+  const legacy = JSON.stringify({ command: join(f.base, "current/launchers/agent/scripts/treer-agent.sh"), cwd: ".", args: profile.args });
+  writeFileSync(join(f.root, "Codex + UI.json"), legacy);
+  assert.throws(() => f.call({ agents: ["codex", "claude"] }, { BAD_SHOW: "Claude + UI" }), /Profile verification failed/);
+  assert.deepEqual(JSON.parse(readFileSync(join(f.root, "Codex + UI.json"), "utf8")), JSON.parse(legacy));
+  assert.equal(existsSync(join(f.root, "Claude + UI.json")), false);
   assert.equal(existsSync(join(f.base, "current.json")), false);
   assert.equal(existsSync(join(f.base, "profiles-receipt.json")), false);
-});
-test("legacy local profiles retain names and operator installs discover names without Agent-only whoami", (t) => {
-  const f = fixture(t), profile = JSON.parse(readFileSync(join(f.bundle, "profiles.json"), "utf8")).profiles.find((p: any) => p.id === "codex");
-  writeFileSync(join(f.root, profile.name + ".json"), JSON.stringify({ command: join(f.base, "current/launchers/agent/scripts/treer-agent.sh"), cwd: ".", args: profile.args }));
-  assert.deepEqual(f.call({ agents: ["codex"] }).profiles, ["Codex + UI"]);
-  const g = fixture(t); writeFileSync(join(g.root, "Codex + UI.json"), JSON.stringify({ command: "/foreign", cwd: ".", args: [] }));
-  const oldContext = { ...g.request.controller, machine: { root: g.machine, server_id: "srv_fixture", workspace_id: "ws_fixture" } };
-  assert.deepEqual(g.call({ agents: ["codex"], controller: oldContext }).profiles, ["Codex + UI (win_native)"]);
-  assert.deepEqual(g.call({ agents: ["codex"], operation: "update", controller: oldContext }).profiles, ["Codex + UI (win_native)"]);
-  const calls = readFileSync(join(g.root, "calls"), "utf8").trim().split("\n").map((line) => JSON.parse(line));
-  assert.ok(calls.some((args) => args.join(" ") === "machine list"));
-  assert.ok(calls.every((args) => args[0] !== "whoami"));
-});
-test("invalid machine suffixes and identity disagreement fail before profile writes", (t) => {
-  for (const name of ["../outside", "bad\nname", "x".repeat(65), "host name"]) {
-    const f = fixture(t); writeFileSync(join(f.root, "Codex + UI.json"), JSON.stringify({ command: "/foreign", cwd: ".", args: [] }));
-    const controller = { ...f.request.controller, machine: { ...f.request.controller.machine, name } };
-    assert.throws(() => f.call({ agents: ["codex"], controller }), /1-64 ASCII/);
-    assert.equal(existsSync(join(f.base, "current.json")), false);
-  }
-  const f = fixture(t); writeFileSync(join(f.root, "Codex + UI.json"), JSON.stringify({ command: "/foreign", cwd: ".", args: [] }));
-  assert.throws(() => f.call({ agents: ["codex"], controller: { ...f.request.controller, machine: { server_id: "srv_wrong" } } }), /verify launcher machine name/);
+  assert.equal(existsSync(join(f.root, ".local/bin/treer-agent")), false);
 });
 test("capability disagreement, unknown old Controller and rollback incompatibility fail before mutation", (t) => {
   const f = fixture(t);

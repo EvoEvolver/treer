@@ -44,7 +44,7 @@ function fixture() {
   cpSync(launcher, join(source, "launchers/agent"), { recursive: true, filter: (path) => !path.split(/[\\/]/).includes("node_modules") });
   writeFileSync(join(bin, "treer"), mockTreer, { mode: 0o755 });
   writeFileSync(join(bin, "npm"), mockNpm, { mode: 0o755 });
-  const env = hermeticEnv({ FIXTURE_ROOT: root, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" });
+  const env = hermeticEnv({ HOME: root, LOCALAPPDATA: root, FIXTURE_ROOT: root, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" });
   const git = (...args: string[]) => execFileSync("git", ["-C", source, ...args], { env, encoding: "utf8" }).trim();
   git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "test@example.invalid");
   const commit = () => { git("add", "."); git("commit", "-qm", "fixture"); return git("rev-parse", "HEAD"); };
@@ -60,7 +60,7 @@ test("installer uses immutable committed source, verifies profiles, and updates 
   const firstRoot = realpathSync(join(f.base, "current"));
   assert.equal(firstRoot, join(f.base, f.first));
   const profile = JSON.parse(readFileSync(join(f.root, "Codex + UI.json"), "utf8"));
-  assert.deepEqual(profile, { cwd: ".", command: join(f.base, "current/launchers/agent/scripts/treer-agent.sh"), args: ["--harness", "codex"] });
+  assert.deepEqual(profile, { cwd: ".", command: "treer-agent", args: ["--harness", "codex"] });
   f.install();
   writeFileSync(join(f.source, "launchers/agent/dirty"), "not committed");
   f.install();
@@ -105,7 +105,7 @@ test("failure verifying a second profile restores earlier edits and removes new 
   const previous = readFileSync(join(f.root, "Codex + UI.json"), "utf8");
   const manifestPath = join(f.source, "launchers/agent/profiles.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
-  manifest.profiles.find((p: { id: string }) => p.id === "codex").args.push("--name", "Updated Codex");
+  manifest.profiles.find((p: { id: string }) => p.id === "codex").description = "Updated Codex";
   writeFileSync(manifestPath, JSON.stringify(manifest)); f.commit();
   assert.throws(() => f.install(["--source", f.source, "--agent", "codex", "--agent", "claude"], { BAD_SHOW_PROFILE: "Claude + UI" }), /Profile verification failed/);
   assert.equal(realpathSync(join(f.base, "current")), join(f.base, f.first));

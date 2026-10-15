@@ -68,5 +68,9 @@ export function profileTransaction(treer, log = console.log) {
     if (!serverId || matches.length !== 1) throw new Error("Unable to verify launcher machine name");
     return matches[0];
   }
-  return { show, saveProfile, restoreProfile, machine };
+  function deleteProfile(name) {
+    run(["agent", "admin", "profile", "delete", name]);
+    if (show(name) !== null) throw new Error("Profile deletion verification failed");
+  }
+  return { show, saveProfile, restoreProfile, machine, deleteProfile };
 }

@@ -1,6 +1,7 @@
 // Native acceptance: real embedded installer + sealed fake registration/ACP.
 // No provider credentials, network install, real Agent creation or restart.
 import assert from "node:assert/strict";
+import { shimPath } from "../scripts/path-shim.mjs";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { isAbsolute, join, resolve, toNamespacedPath } from "node:path";
@@ -19,7 +20,7 @@ if (Boolean(options.controller) === Boolean(options.bundle) || !options.screensh
 const launcher = resolve(import.meta.dirname, ".."), windows = process.platform === "win32";
 // Include literal argv, missing/escaping shim and actual descendant-cleanup
 // regressions in the native gate, not just Linux's full unit-test job.
-execFileSync(process.execPath, ["--import", "tsx", "--test", join(launcher, "tests/process.test.ts")], { cwd: launcher, env: hermeticEnv(), stdio: "inherit" });
+execFileSync(process.execPath, ["--import", "tsx", "--test", join(launcher, "tests/process.test.ts"), join(launcher, "tests/path-shim.test.ts")], { cwd: launcher, env: hermeticEnv(), stdio: "inherit" });
 const parent = windows ? process.env.LOCALAPPDATA : resolve(launcher, "../../.treer");
 if (!isAbsolute(parent || "")) throw new Error("An absolute LOCALAPPDATA is required on Windows");
 mkdirSync(parent, { recursive: true, mode: 0o700 });
@@ -90,7 +91,7 @@ async function start() {
   // Node's JS realpathSync EISDIR failure; exercise both cwd and provider input.
   const runtimeCwd = windows ? toNamespacedPath(machine) : machine;
   const provider = windows ? toNamespacedPath(shim) : entry;
-  child = spawnProvider(process.execPath, [join(installBase, "run.mjs"), "--harness", "acp", "--acp-command", provider, "--cwd", runtimeCwd], { cwd: runtimeCwd, env, stdio: "pipe", detached: !windows });
+  child = spawnProvider(shimPath(env), ["--harness", "acp", "--acp-command", provider, "--cwd", runtimeCwd], { cwd: runtimeCwd, env, stdio: "pipe", detached: !windows });
   child.stdout.on("data", data => logs += data); child.stderr.on("data", data => logs += data);
   await until(() => {
     if (child.exitCode !== null) throw new Error(`Fixture launcher exited: ${logs}`);
@@ -105,9 +106,8 @@ async function start() {
 const headers = { "x-treer-interface-source": "controller-api", "x-treer-agent-id": env.TREER_AGENT_ID, "x-treer-interface-instance": env.AGENT_UI_INSTANCE_ID };
 // Reproduce a workspace already using the launcher on a different machine.
 const profileDefinitions = JSON.parse(readFileSync(join(launcher, "profiles.json"))).profiles;
-const foreignProfile = JSON.stringify({ command: "/Users/other-machine/treer-agent.sh", cwd: "project", args: ["--owner-choice"] });
-for (const profile of profileDefinitions) writeFileSync(join(fixture, profile.name + ".json"), foreignProfile);
-const installedProfileName = "Codex + UI (windows_smoke)";
+for (const profile of profileDefinitions) writeFileSync(join(fixture, profile.name + ".json"), JSON.stringify({ command: "/Users/other-machine/.treer/launchers/agent/current/launchers/agent/scripts/treer-agent.sh", cwd: "project", args: profile.args }));
+const installedProfileName = "Codex + UI";
 try {
   if (windows) {
     // Both targets exceed MAX_PATH. A junction to a sibling of the machine
@@ -130,20 +130,20 @@ try {
     // this source-only installer is not the supported Windows installation path.
     assert.throws(() => legacy(insideCwd), /ENOENT.*missing-legacy-source/s);
     assert.equal(install("install", undefined, insideCwd).profiles.length, 6);
-    assert.equal(JSON.parse(readFileSync(join(fixture, installedProfileName + ".json"))).cwd, insideCwd);
+    assert.equal(JSON.parse(readFileSync(join(fixture, installedProfileName + ".json"))).cwd, ".");
     console.log("Long-path cwd: both installers reject outside junction; accept inside root (legacy validation only)");
   }
   const installed = install("install"); assert.equal(installed.portable, true); assert.equal(installed.profiles.length, 6);
   assert.equal(install("install").version, installed.version); assert.equal(install("update").version, installed.version);
   assert.equal(install("status").versions[0].compatibility.status, "compatible");
   assert.equal(install("rollback", installed.version).version, installed.version);
-  assert.deepEqual(installed.profiles, profileDefinitions.map(profile => `${profile.name} (windows_smoke)`));
-  for (const profile of profileDefinitions) assert.equal(readFileSync(join(fixture, profile.name + ".json"), "utf8"), foreignProfile);
+  assert.deepEqual(installed.profiles, profileDefinitions.map(profile => profile.name));
+  for (const definition of profileDefinitions) assert.deepEqual(JSON.parse(readFileSync(join(fixture, definition.name + ".json"))), { command: "treer-agent", cwd: ".", args: definition.args });
   const profile = JSON.parse(readFileSync(join(fixture, installedProfileName + ".json")));
   // Rust's Windows canonical path may use the \\?\ prefix. Compare identities,
   // not spelling, while still requiring the installed profile's absolute Node.
-  assert.ok(isAbsolute(profile.command)); assert.equal(realpathSync.native(profile.command), realpathSync.native(process.execPath));
-  assert.equal(profile.args[0], join(installBase, "run.mjs"));
+  assert.equal(profile.command, "treer-agent");
+  assert.deepEqual(profile.args, ["--harness", "codex"]);
   if (windows) { assert.ok(join(installBase, installed.version, "runtime.mjs").length > 260); aclCheck(installBase); }
   writeFileSync(join(machine, "README.md"), "# Windows fixture\nLiteral <script> content\n");
   await start();
@@ -180,7 +180,7 @@ try {
   assert.equal(JSON.parse(readFileSync(stateFile)).threadId, "sess-new");
   await stop(windows ? "SIGTERM" : "SIGHUP");
   const report = { platform: process.platform, embedded_controller: Boolean(options.controller), portable_install: true, profiles: 6,
-    profile_scope: "machine-qualified; other machine profiles unchanged through install/update/rollback",
+    profile_scope: "one portable profile per provider; legacy profiles converge through install/update/rollback",
     registration: "exact manifest/CLI contract", prompt: "passed", transcript: "passed", session_save_resume: "passed", process_tree_cleanup: "passed",
     windows_acl_and_long_paths: windows ? "passed" : "not tested on macOS/Linux", windows_verbatim_runtime: windows ? "cwd and npm shim; ready/files/queue/prompt/resume passed" : "not tested on macOS/Linux", windows_cwd_junction_boundary: windows ? "outside rejected, inside accepted" : "not tested on macOS/Linux", provider: windows ? "npm .cmd via absolute Node" : "explicit JS via absolute Node",
     runtime_path: "empty", real_agents_touched: 0, real_credentials: false };

@@ -51,7 +51,7 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
     for (const child of children) if (child.exitCode === null && child.signalCode === null) { const exit = new Promise((done) => child.once("exit", done)); child.kill(); await exit; }
     rmSync(root, { recursive: true, force: true });
   });
-  const env = hermeticEnv({ DELIVERY_FIXTURE: file, PATH: dirname(process.execPath) });
+  const env = hermeticEnv({ HOME: root, LOCALAPPDATA: root, DELIVERY_FIXTURE: file, PATH: dirname(process.execPath) });
   const call = (args: string[]) => new Promise<{ status: number | null; output: string; error: string }>((done) => {
     const child = spawn(process.execPath, [entry, ...args, "--treer", treer, "--root", machine, "--skip-profiles"], { env, stdio: "pipe" }); children.push(child);
     let output = "", error = ""; child.stdout!.on("data", (c) => output += c); child.stderr!.on("data", (c) => error += c);
