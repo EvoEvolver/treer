@@ -108,6 +108,9 @@ const headers = { "x-treer-interface-source": "controller-api", "x-treer-agent-i
 const profileDefinitions = JSON.parse(readFileSync(join(launcher, "profiles.json"))).profiles;
 for (const profile of profileDefinitions) writeFileSync(join(fixture, profile.name + ".json"), JSON.stringify({ command: "/Users/other-machine/.treer/launchers/agent/current/launchers/agent/scripts/treer-agent.sh", cwd: "project", args: profile.args }));
 const installedProfileName = "Codex + UI";
+const initialProfiles = profileDefinitions.map(profile => ({
+  name: profile.name, bytes: readFileSync(join(fixture, profile.name + ".json")),
+}));
 try {
   if (windows) {
     // Both targets exceed MAX_PATH. A junction to a sibling of the machine
@@ -124,7 +127,9 @@ try {
       "--source", join(fixture, "missing-legacy-source")], { env: { ...env, PATH: fixture }, stdio: "pipe" });
     assert.throws(() => legacy("outside-cwd"), /Profile cwd must be relative and inside machine.root/);
     assert.throws(() => install("install", undefined, "outside-cwd"), options.controller ? /launcher installer failed/ : /Profile cwd must stay inside machine root/);
-    assert.equal(readFileSync(join(fixture, "Codex + UI.json"), "utf8"), foreignProfile);
+    // A rejected cwd must not modify any existing workspace profile. Successful
+    // installation below intentionally migrates them to the shared command.
+    for (const profile of initialProfiles) assert.deepEqual(readFileSync(join(fixture, profile.name + ".json")), profile.bytes);
     const insideCwd = join(...longParts);
     // Reaching source resolution proves the valid long cwd passed validation;
     // this source-only installer is not the supported Windows installation path.
@@ -140,8 +145,7 @@ try {
   assert.deepEqual(installed.profiles, profileDefinitions.map(profile => profile.name));
   for (const definition of profileDefinitions) assert.deepEqual(JSON.parse(readFileSync(join(fixture, definition.name + ".json"))), { command: "treer-agent", cwd: ".", args: definition.args });
   const profile = JSON.parse(readFileSync(join(fixture, installedProfileName + ".json")));
-  // Rust's Windows canonical path may use the \\?\ prefix. Compare identities,
-  // not spelling, while still requiring the installed profile's absolute Node.
+  // The shared profile stays logical; the per-machine shim pins absolute Node.
   assert.equal(profile.command, "treer-agent");
   assert.deepEqual(profile.args, ["--harness", "codex"]);
   if (windows) { assert.ok(join(installBase, installed.version, "runtime.mjs").length > 260); aclCheck(installBase); }
