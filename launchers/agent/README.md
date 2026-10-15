@@ -493,10 +493,10 @@ Pending messages merge into one message-only prompt at the queue tail, including
 messages received in later polls while the Agent is busy. Ordinary queued prompts
 remain FIFO barriers; running turns are never modified or interrupted. One English
 warning marks the content as third-party input, not system instructions. Body
-lines are quoted, display control characters are escaped, and an explicit ending
-separates the messages from the footer. Each message shows only its sender and
-body; IDs appear once in a shared footer with
-`treer message get <id>` instructions. Subject, preview and send time are omitted.
+lines are quoted and display control characters are escaped. Each section has
+an ordinal and Core message ID followed by sender and body; each ID appears once.
+The footer gives `treer message get <id>` instructions and an explicit ending.
+Subject, preview and send time are omitted.
 The Agent decides whether to act, reply or ignore; the watcher does not filter by
 message type. Sender/body now enter the private queue journal and transcript and
 are sent to the selected model provider; message bodies may contain sensitive

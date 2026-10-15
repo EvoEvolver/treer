@@ -4,12 +4,13 @@ The watcher packs each receive result before submission and appends subsequent
 polls to the last pending message-only queue record. It never changes a running
 turn, crosses a normal queued prompt, steers, or changes goal state. Each message
 shows its sender and body; a single English warning marks all content as third
-party input. IDs appear once in a footer with the retrieval command. Subjects,
+party input. IDs appear once in numbered section headers; the footer has the retrieval command. Subjects,
 timestamps and previews are omitted. Bodies are model input, not instructions
 from the launcher, and are now included in the private queue/transcript.
 They are also sent to the selected model provider and may contain sensitive
 information. Each body line is quoted; display controls are escaped; an ending
-marker separates bodies and the footer. These are provenance cues, not a
+marker follows the footer. Section numbers are recomputed during merges and
+headers are matched against journal checkpoint IDs. These are provenance cues, not a
 guarantee against model prompt injection. Empty sender labels are explicit.
 
 All message/delivery checkpoints are committed with the merged text in the same
