@@ -64,7 +64,7 @@ export function submissionOptions(sender: unknown, notify: unknown): { sender: P
     if (!value || typeof value !== "object" || [value.agent_id, value.path, value.name].some((part) => typeof part !== "string" || !part || part.length > 1024 || /[\r\n\u0000]/.test(part)) || !value.path.startsWith("/")) throw new QueueError("Invalid attested sender");
     source = { agent_id: value.agent_id, path: value.path, name: value.name };
   }
-  let notification: PromptNotify | null = source ? { on: ["done", "failed", "interrupted"], to: source.agent_id } : null;
+  let notification: PromptNotify | null = null;
   if (notify != null) {
     const value = notify as PromptNotify;
     if (!value || typeof value !== "object" || Object.keys(value).some((key) => key !== "on" && key !== "to") || !Array.isArray(value.on) || value.on.some((outcome) => !["done", "failed", "interrupted"].includes(outcome)) || (value.to !== undefined && (typeof value.to !== "string" || !value.to || value.to.length > 1024 || /[\r\n\u0000]/.test(value.to)))) throw new QueueError("Invalid completion notification");

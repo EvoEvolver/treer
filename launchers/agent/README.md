@@ -718,8 +718,9 @@ Submission previews are bounded to 1,024 UTF-8 bytes (input) and 4,096 bytes
 (last assistant message). Source paths/times are prepended to model prompts and
 shown on user messages, so the native transcript also retains attribution.
 
-By default an attested sender receives `done`, `failed`, and `interrupted`
-notifications. Set `notify.on` to select outcomes (empty disables), and `to` to
+An attested sender does not receive completion notifications unless `notify`
+is explicitly requested (CLI `--notify`). Set `notify.on` to select outcomes
+(empty disables), and `to` to
 override the recipient; operators must explicitly supply a recipient. Terminal
 notifications use the Agent's own inherited identity via `treer message send`,
 including submission/turn IDs, outcome, error and assistant preview. At a turn's

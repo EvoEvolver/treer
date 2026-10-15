@@ -36,6 +36,18 @@ class Fake extends EventEmitter {
 const source = { agent_id: "ag_sender", path: "/team/sender", name: "sender" };
 const tick = () => new Promise((done) => setImmediate(done));
 const asRuntime = (runtime: Fake) => runtime as unknown as HarnessRuntime;
+test("sender attribution alone does not opt in to completion messages", async () => {
+  assert.equal(submissionOptions(source, undefined).notify, null);
+  assert.deepEqual(submissionOptions(source, { on: ["done"] }).notify, { on: ["done"], to: source.agent_id });
+  const runtime = new Fake();
+  const queue = new PromptQueue(asRuntime(runtime), () => {}, { notify: async () => { assert.fail("notification was not requested"); } });
+  try {
+    const first = await queue.submit("plain", "queue", { sender: source });
+    await queue.submit("steer without notify", "steer", { sender: source });
+    runtime.finish(); await tick();
+    assert.equal(queue.submission(first.id)!.state, "done");
+  } finally { queue.close(); }
+});
 async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "durable-queue-")));
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -45,8 +57,8 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
 test("journal restores FIFO, interrupts in-flight work, preserves receipts and deduplicates across restart", async (t) => {
   const { file } = await fixture(t), runtime = new Fake();
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { file });
-  const first = await queue.submit("first", "queue", { operationId: "one", sender: source });
-  const second = await queue.submit("second", "queue", { operationId: "two", sender: source });
+  const first = await queue.submit("first", "queue", { operationId: "one", sender: source, notify: { on: ["done", "failed", "interrupted"] } });
+  const second = await queue.submit("second", "queue", { operationId: "two", sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   const third = await queue.submit("third", "queue", { operationId: "three" });
   assert.equal(queue.submission(first.id)!.turn_id, "turn-1");
   assert.match(runtime.calls[0], /^\[来自 \/team\/sender，排队于 .*\]\nfirst$/);
@@ -57,9 +69,9 @@ test("journal restores FIFO, interrupts in-flight work, preserves receipts and d
   t.after(async () => recovered.close());
   assert.equal(recovered.submission(first.id)!.state, "interrupted");
   assert.deepEqual(recovered.entries.map((entry) => [entry.text, entry.position]), [["second", 1], ["third", 2]]);
-  const replay = await recovered.submit("second", "queue", { operationId: "two", sender: source });
+  const replay = await recovered.submit("second", "queue", { operationId: "two", sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   assert.equal(replay.id, second.id); assert.equal(replay.position, second.position);
-  await assert.rejects(recovered.submit("different", "queue", { operationId: "two", sender: source }), /different submission/);
+  await assert.rejects(recovered.submit("different", "queue", { operationId: "two", sender: source, notify: { on: ["done", "failed", "interrupted"] } }), /different submission/);
   recoveredRuntime.emit("state"); await tick();
   assert.match(recoveredRuntime.calls[0], /\nsecond$/);
   recoveredRuntime.finish(); await tick();
@@ -98,7 +110,7 @@ test("notification outbox survives restart, retries failures, and never redispat
   const logs: string[] = []; runtime.on("log", (message) => logs.push(message));
   let attempts = 0;
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { file, retryMs: 1, notify: async () => { attempts++; throw new Error("transport offline"); } });
-  const submission = await queue.submit("notify", "queue", { sender: source });
+  const submission = await queue.submit("notify", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   runtime.finish(); await tick(); queue.close();
   assert.equal(attempts, 1); assert.ok(logs.some((line) => line.includes("retrying")));
   const restoredRuntime = new Fake(); let delivered = 0;
@@ -164,8 +176,8 @@ for (const outcome of ["completed", "interrupted", "failed"] as const) test(`one
   } });
   t.after(async () => queue.close());
   const ids = [];
-  ids.push((await queue.submit("first", "queue", { sender: source })).id);
-  for (let i = 0; i < 5; i++) ids.push((await queue.submit(`steer ${i}`, "steer", { sender: source })).id);
+  ids.push((await queue.submit("first", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } })).id);
+  for (let i = 0; i < 5; i++) ids.push((await queue.submit(`steer ${i}`, "steer", { sender: source, notify: { on: ["done", "failed", "interrupted"] } })).id);
   const other = await queue.submit("other recipient", "steer", { sender: source, notify: { to: "ag_other", on: ["done", "failed", "interrupted"] } });
   const disabled = await queue.submit("no notify", "steer", { sender: source, notify: { on: [] } });
   const selected = await queue.submit("failed only", "steer", { sender: source, notify: { on: ["failed"] } });
@@ -192,8 +204,8 @@ test("a frozen completion retries across restart with identical membership/paylo
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { file, retryMs: 60_000, notify: async (record) => {
     sent.push(structuredClone(record)); throw new Error("send succeeded but its acknowledgement was lost");
   } });
-  const first = await queue.submit("one", "queue", { sender: source });
-  const second = await queue.submit("two", "steer", { sender: source });
+  const first = await queue.submit("one", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
+  const second = await queue.submit("two", "steer", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   runtime.finish(); await tick(); queue.close();
   assert.equal(sent.length, 1);
   assert.deepEqual(sent[0].notification!.batch!.submission_ids, [first.id, second.id]);
@@ -220,15 +232,15 @@ test("ACP-style sequential turns and restarted turn counters remain separate not
   runtime.harness.capabilities.steer = false;
   const options = { file, notify: async (record: SubmissionRecord) => { batches.push(structuredClone(record)); } };
   const queue = new PromptQueue(asRuntime(runtime), () => {}, options);
-  const first = await queue.submit("first", "queue", { sender: source });
-  const second = await queue.submit("not steerable", "steer", { sender: source });
+  const first = await queue.submit("first", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
+  const second = await queue.submit("not steerable", "steer", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   assert.equal(second.downgraded, true);
   runtime.finish(); await tick(); runtime.finish(); await tick(); queue.close();
   assert.equal(batches.length, 2);
   assert.deepEqual(batches.map((record) => record.notification!.batch!.submission_ids), [[first.id], [second.id]]);
   const restarted = new Fake(); restarted.harness.capabilities.steer = false;
   const recovered = new PromptQueue(asRuntime(restarted), () => {}, options); t.after(async () => recovered.close());
-  const third = await recovered.submit("new process uses turn-1 again", "queue", { sender: source });
+  const third = await recovered.submit("new process uses turn-1 again", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   restarted.finish(); await tick();
   assert.equal(batches.length, 3);
   assert.equal(batches[0].submission.turn_id, batches[2].submission.turn_id);
@@ -242,7 +254,7 @@ test("cancelled queued work and local commands without turn IDs keep independent
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { notify: async (record) => { sent.push(structuredClone(record)); } });
   t.after(async () => queue.close());
   const ids = [];
-  for (let i = 0; i < 2; i++) ids.push((await queue.submit("cancel", "queue", { sender: source })).id);
+  for (let i = 0; i < 2; i++) ids.push((await queue.submit("cancel", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } })).id);
   for (const id of ids) queue.remove(id);
   await tick(); await queue.flushNotifications();
   assert.equal(sent.length, 2);
@@ -257,9 +269,9 @@ test("an in-flight steer failure waits for the actual turn terminal state before
   const runtime = new Fake(), sent: SubmissionRecord[] = [];
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { notify: async (record) => { sent.push(structuredClone(record)); } });
   t.after(async () => queue.close());
-  const first = await queue.submit("first", "queue", { sender: source });
+  const first = await queue.submit("first", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   runtime.prompt = async () => { throw new Error("steer rejected"); };
-  const steer = await queue.submit("change", "steer", { sender: source });
+  const steer = await queue.submit("change", "steer", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   assert.equal(queue.submission(steer.id)!.state, "failed");
   await queue.flushNotifications(); assert.equal(sent.length, 0);
   runtime.finish(); await tick();
@@ -273,10 +285,10 @@ test("harness exit finishes a turn once even if an outstanding prompt rejects la
   const runtime = new Fake(), sent: SubmissionRecord[] = [];
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { notify: async (record) => { sent.push(structuredClone(record)); } });
   t.after(async () => queue.close());
-  await queue.submit("first", "queue", { sender: source });
+  await queue.submit("first", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   let reject!: (error: Error) => void;
   runtime.prompt = async () => new Promise<void>((_resolve, fail) => { reject = fail; });
-  const steering = queue.submit("in-flight", "steer", { sender: source });
+  const steering = queue.submit("in-flight", "steer", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   runtime.emit("exit"); await tick();
   assert.equal(sent.length, 1); assert.equal(sent[0].notification!.batch!.status, "interrupted");
   assert.equal(sent[0].notification!.batch!.submission_ids.length, 2);
@@ -287,8 +299,8 @@ test("harness exit finishes a turn once even if an outstanding prompt rejects la
 test("legacy delivered siblings suppress pending duplicates; unbatched pending siblings are coalesced", async (t) => {
   const { file } = await fixture(t), runtime = new Fake();
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { file });
-  const first = await queue.submit("first", "queue", { sender: source });
-  const second = await queue.submit("steer", "steer", { sender: source });
+  const first = await queue.submit("first", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
+  const second = await queue.submit("steer", "steer", { sender: source, notify: { on: ["done", "failed", "interrupted"] } });
   runtime.finish(); queue.close();
   const legacy = JSON.parse(await readFile(file, "utf8"));
   for (const record of legacy.records) delete record.turnScope;
@@ -307,7 +319,7 @@ test("legacy delivered siblings suppress pending duplicates; unbatched pending s
 test("journal rejects forged completion membership and recipient", async (t) => {
   const { file } = await fixture(t), runtime = new Fake();
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { file, retryMs: 60_000, notify: async () => { throw new Error("offline"); } });
-  await queue.submit("first", "queue", { sender: source }); runtime.finish(); await tick(); queue.close();
+  await queue.submit("first", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } }); runtime.finish(); await tick(); queue.close();
   const journal = JSON.parse(await readFile(file, "utf8")), batch = journal.records[0].notification.batch;
   batch.submission_ids.push("sub_missing"); await writeFile(file, JSON.stringify(journal));
   assert.throws(() => new QueueStore(file).load(), /completion membership/);
@@ -319,9 +331,9 @@ test("all 512 completion IDs fit Core's message limit, escaped previews are boun
   const runtime = new Fake(), sent: SubmissionRecord[] = [];
   const queue = new PromptQueue(asRuntime(runtime), () => {}, { limit: 1024, notify: async (record) => { sent.push(structuredClone(record)); } });
   t.after(async () => queue.close());
-  const ids = [(await queue.submit("first", "queue", { sender: source })).id];
-  for (let i = 1; i < 512; i++) ids.push((await queue.submit(`steer ${i}`, "steer", { sender: source })).id);
-  await assert.rejects(queue.submit("overflow", "steer", { sender: source }), (error: unknown) => error instanceof Error && "status" in error && error.status === 429 && /queue the prompt/.test(error.message));
+  const ids = [(await queue.submit("first", "queue", { sender: source, notify: { on: ["done", "failed", "interrupted"] } })).id];
+  for (let i = 1; i < 512; i++) ids.push((await queue.submit(`steer ${i}`, "steer", { sender: source, notify: { on: ["done", "failed", "interrupted"] } })).id);
+  await assert.rejects(queue.submit("overflow", "steer", { sender: source, notify: { on: ["done", "failed", "interrupted"] } }), (error: unknown) => error instanceof Error && "status" in error && error.status === 429 && /queue the prompt/.test(error.message));
   assert.equal(runtime.calls.length, 512);
   runtime.finish("failed", "\u0001".repeat(4096)); await tick();
   assert.equal(sent.length, 1);
