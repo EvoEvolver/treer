@@ -9,7 +9,7 @@ type Preview = { state: "idle" } | { state: "loading" } | { state: "ready"; file
 type Row = { kind: "entry"; entry: FileEntry; depth: number; open: boolean } | { kind: "notice"; key: string; depth: number; text: string; retry?: () => void };
 
 /** Read-only workspace browser: lazy folders, keyboard tree, client-side filter over what is loaded, immediate preview. */
-export function FilesPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; requestedFile?: { path: string; revision: number } | null; onClose: () => void }) {
   const [cache, setCache] = useState<ReadonlyMap<string, FileEntry[]>>(new Map());
   const [errors, setErrors] = useState<ReadonlyMap<string, string>>(new Map());
   const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
@@ -23,6 +23,7 @@ export function FilesPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const pendingRef = useRef(pending);
   const version = useRef(0);
   const list = useRef<HTMLUListElement>(null);
+  const closeButton = useRef<HTMLButtonElement>(null);
   const { openText } = useDialogs();
   cacheRef.current = cache;
   pendingRef.current = pending;
@@ -44,7 +45,7 @@ export function FilesPanel({ open, onClose }: { open: boolean; onClose: () => vo
   // Opening the panel starts on the tree (on a phone the preview is a separate tab); the folder cache and selection are kept.
   useEffect(() => { if (open) { void load(""); setTab("browse"); } }, [open, load]);
 
-  async function select(path: string) {
+  const select = useCallback(async (path: string) => {
     setSelected(path);
     setTab("preview");
     const mine = ++version.current;
@@ -55,7 +56,20 @@ export function FilesPanel({ open, onClose }: { open: boolean; onClose: () => vo
     } catch (error) {
       if (mine === version.current) setPreview({ state: "error", message: (error as Error).message });
     }
-  }
+  }, []);
+  useEffect(() => {
+    if (!requestedFile) return;
+    closeButton.current?.focus();
+    const path = requestedFile.path;
+    setFilter(""); setFocusPath(path);
+    const parts = path.split("/");
+    if (!path.startsWith("/") && !parts.includes("..") && !path.includes(":")) {
+      const parents = parts.slice(0, -1).map((_, index) => parts.slice(0, index + 1).join("/"));
+      setExpanded(current => new Set([...current, ...parents]));
+      for (const parent of parents) void load(parent);
+    }
+    void select(path);
+  }, [requestedFile, load, select]);
   function toggleDirectory(path: string) {
     setExpanded((current) => {
       const next = new Set(current);
@@ -119,7 +133,7 @@ export function FilesPanel({ open, onClose }: { open: boolean; onClose: () => vo
   const meta = preview.state === "loading" ? t("files.loading") : preview.state === "error" ? t("files.unavailable") : file ? `${t("files.bytes", { n: file.size.toLocaleString() })} · ${file.truncated ? t("files.truncated") : t("files.readOnly")}` : t("files.readOnly");
   return (
     <aside className="panel files" id="files" aria-label={t("files.title")} hidden={!open} data-ftab={tab} onKeyDown={(event) => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.preventDefault(); onClose(); } }}>
-      <header className="ph"><h2>{t("files.title")}</h2><span className="ph-tools"><button type="button" className="btn" title={t("files.refreshTitle")} onClick={refresh}>{t("files.refresh")}</button><button type="button" className="xbtn" aria-label={t("files.close")} onClick={onClose}><Icon name="close" /></button></span></header>
+      <header className="ph"><h2>{t("files.title")}</h2><span className="ph-tools"><button type="button" className="btn" title={t("files.refreshTitle")} onClick={refresh}>{t("files.refresh")}</button><button type="button" className="xbtn" ref={closeButton} aria-label={t("files.close")} onClick={onClose}><Icon name="close" /></button></span></header>
       <div className="ftabs" role="group" aria-label={t("files.title")}>
         <button type="button" aria-pressed={tab === "browse"} onClick={() => setTab("browse")}>{t("files.browse")}</button>
         <button type="button" aria-pressed={tab === "preview"} disabled={!selected} onClick={() => setTab("preview")}>{t("files.preview")}</button>

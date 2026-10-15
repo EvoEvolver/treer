@@ -23,6 +23,7 @@ async function startServer(name, extra, harness = "codex") {
   await writeFile(join(cwd, "src/greeting.ts"), "export const greeting = 'Hello, Treer';\n// <script>window.fileXSS = true</script>\n");
   await writeFile(join(cwd, "src/deep/inner.txt"), "inner file\n");
   await writeFile(join(cwd, "README.md"), "# Workspace\nSmall tools, thoughtful interfaces.\n");
+  await writeFile(join(cwd, "special # 100%.txt"), "literal percent and hash filename\n");
   await writeFile(join(cwd, "large.txt"), "x".repeat(65537));
   // The unique marker identifies exactly the processes this test started; they are stopped through their own handles only.
   const common = { UI_DEV_FIXTURE: randomUUID(), TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0" };
@@ -53,7 +54,7 @@ async function phoneNav(page, item) {
 }
 let browser;
 try {
-  const base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1" });
+  const base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1", FAKE_CODEX_FILE_LINKS: "1" });
   const url = (query = "") => `${base}/${page_}${query}`;
 
   // Headers: the React page gets the strict policy, the legacy page is unchanged.
@@ -73,7 +74,13 @@ try {
   const page = await context.newPage();
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => { if (message.type() === "error") errors.push(message.text()); });
+  page.on("console", (message) => {
+    if (message.type() !== "error") return;
+    const expectedFileFailures = new Map([[base + "/v1/files?path=missing.txt", 404], [base + "/v1/files?path=..%2Fescape.txt", 403]]);
+    const expectedStatus = expectedFileFailures.get(message.location().url);
+    if (expectedStatus && message.text().includes(`status of ${expectedStatus}`)) return;
+    errors.push(message.text());
+  });
 
   // First paint: boot.js has set look and theme, React renders the real conversation from the real API.
   await page.goto(url());
@@ -359,6 +366,51 @@ try {
   await expect(tree).toBeVisible();
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "no overflow with the files panel on a phone");
   await page.screenshot({ path: join(screenshots, "files-mobile-b.png") });
+  await filesPanel.getByRole("button", { name: "Close file browser" }).click();
+  await page.setViewportSize({ width: 1440, height: 900 });
+
+  // Transcript links open the existing read-only browser, never a file URL or a new page.
+  const nestedLink = page.getByRole("link", { name: "Nested source", exact: true });
+  const beforeFileLinkUrl = page.url();
+  const beforeFileLinkPages = context.pages().length;
+  await nestedLink.click();
+  await expect(filesPanel).toBeVisible();
+  await expect(filesPanel.locator(".preview pre")).toHaveText("inner file\n");
+  await expect(tree.getByRole("treeitem", { name: "src", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await expect(tree.getByRole("treeitem", { name: "deep", exact: true })).toHaveAttribute("aria-expanded", "true");
+  await expect(tree.getByRole("treeitem", { name: "inner.txt", exact: true })).toHaveAttribute("aria-selected", "true");
+  await page.screenshot({ path: join(screenshots, "file-link-desktop.png") });
+  await filesPanel.getByRole("button", { name: "Close file browser" }).click();
+  await expect(nestedLink).toBeFocused();
+  const repeatedPreview = page.waitForRequest(request => new URL(request.url()).searchParams.get("path") === "src/deep/inner.txt" && new URL(request.url()).pathname.endsWith("/v1/files"));
+  await page.keyboard.press("Enter");
+  await repeatedPreview;
+  await expect(filesPanel.locator(".preview pre")).toHaveText("inner file\n");
+  await expect(filesPanel.getByRole("button", { name: "Close file browser" })).toBeFocused();
+  await page.keyboard.press("Escape");
+  await expect(filesPanel).toBeHidden();
+  await expect(nestedLink).toBeFocused();
+  await page.getByRole("link", { name: "Absolute readme", exact: true }).click();
+  await expect(filesPanel.locator(".preview pre")).toContainText("Small tools, thoughtful interfaces.");
+  await page.getByRole("link", { name: "Local file URL", exact: true }).click();
+  await expect(filesPanel.locator(".preview pre")).toHaveText("literal percent and hash filename\n");
+  for (const [name, path, status] of [["Missing file", "missing.txt", 404], ["Outside file", "../escape.txt", 403]]) {
+    const failure = page.waitForResponse(response => new URL(response.url()).pathname.endsWith("/v1/files") && new URL(response.url()).searchParams.get("path") === path);
+    await page.getByRole("link", { name, exact: true }).click();
+    assert.equal((await failure).status(), status);
+    await expect(filesPanel.locator(".preview")).toContainText("Preview unavailable");
+    await expect(tree.getByRole("treeitem", { name: "src", exact: true })).toBeVisible();
+  }
+  assert.equal(page.url(), beforeFileLinkUrl);
+  assert.equal(context.pages().length, beforeFileLinkPages);
+  await filesPanel.getByRole("button", { name: "Close file browser" }).click();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await nestedLink.click();
+  await expect(filesPanel.locator(".preview")).toBeVisible();
+  await expect(filesPanel.locator(".preview pre")).toHaveText("inner file\n");
+  await expect(tree).toBeHidden();
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), "file-link preview has no phone overflow");
+  await page.screenshot({ path: join(screenshots, "file-link-mobile.png") });
   await filesPanel.getByRole("button", { name: "Close file browser" }).click();
   await page.setViewportSize({ width: 1440, height: 900 });
 

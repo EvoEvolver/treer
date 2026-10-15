@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AppearanceMenu } from "./components/AppearanceMenu";
 import { DialogsProvider } from "./components/Dialogs";
 import { Dock } from "./components/Dock";
@@ -10,12 +10,14 @@ import { TasksPanel } from "./components/TasksPanel";
 import { Thread } from "./components/Thread";
 import { StoreProvider, useStore } from "./state/store";
 import { t } from "./i18n";
+import { FileNavigation } from "./state/files";
 
 function Shell() {
   const { state } = useStore();
   const tasks = useTasks();
   const [menuOpen, setMenuOpen] = useState(false);
   const [panels, setPanels] = useState<Record<PanelName, boolean>>({ files: false, tasks: false });
+  const [requestedFile, setRequestedFile] = useState<{ path: string; revision: number } | null>(null);
   const lookRef = useRef<HTMLButtonElement>(null);
   const triggers = useRef<Record<PanelName, HTMLElement | null>>({ files: null, tasks: null });
   const closeMenu = useCallback(() => setMenuOpen(false), []);
@@ -37,13 +39,20 @@ function Shell() {
   }, []);
   useEffect(() => { if (!tasks.available) setPanels((current) => (current.tasks ? { ...current, tasks: false } : current)); }, [tasks.available]);
   const panelProps = { panels, onPanel: togglePanel };
+  const openFile = useCallback((path: string, trigger: HTMLElement) => {
+    triggers.current.files = trigger;
+    setRequestedFile(current => ({ path, revision: (current?.revision ?? 0) + 1 }));
+    setPanels(current => matchMedia("(max-width: 900px)").matches ? { files: true, tasks: false } : { ...current, files: true });
+  }, []);
+  const fileNavigation = useMemo(() => ({ cwd: state.snapshot?.thread?.cwd ?? "", openFile }), [state.snapshot?.thread?.cwd, openFile]);
   return (
+    <FileNavigation.Provider value={fileNavigation}>
     <DialogsProvider>
       <div className="app" id="app">
         <IconSprite />
         <Header menuOpen={menuOpen} onToggleMenu={toggleMenu} lookRef={lookRef} {...panelProps} />
         <div className="main">
-          <PanelBoundary><FilesPanel open={panels.files} onClose={() => closePanel("files")} /></PanelBoundary>
+          <PanelBoundary><FilesPanel open={panels.files} requestedFile={requestedFile} onClose={() => closePanel("files")} /></PanelBoundary>
           <main className="pane">
             <Thread />
             <Dock />
@@ -53,6 +62,7 @@ function Shell() {
         <AppearanceMenu open={menuOpen} onClose={closeMenu} />
       </div>
     </DialogsProvider>
+    </FileNavigation.Provider>
   );
 }
 
