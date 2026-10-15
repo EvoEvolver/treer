@@ -152,7 +152,7 @@ def installed(config_dir, workspace=None, accept_shared_binaries=False, machine=
             if not re.fullmatch(r"ws_[A-Za-z0-9_-]{1,96}", identifier):
                 continue
             choices.append(f"python3 scripts/update-machine.py --machine {shlex.quote(machine)} "
-                           f"--workspace {shlex.quote(identifier)} --accept-shared-binaries --apply "
+                           f"--workspace {shlex.quote(identifier)} "
                            f"--config-dir {shlex.quote(str(config_dir))}")
         raise RuntimeError("multiple local installs; select --workspace explicitly. Candidates:\n" + "\n".join(choices))
     matches = [(path, config) for path, config in configs if not workspace or config["workspace"] == workspace]
@@ -440,7 +440,7 @@ def main():
             "result={'workspace':c['workspace'],'shared':shared}\n"
             "except RuntimeError as error:\n result={'error':str(error),'shared':shared}\n"
             "print(json.dumps(result))"))
-        if selection["shared"]:
+        if selection["shared"] and args.workspace:
             print(SHARED_BINARIES_NOTICE, file=sys.stderr, flush=True)
         if selection.get("error"):
             raise RuntimeError(selection["error"])

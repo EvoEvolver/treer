@@ -555,6 +555,18 @@ mod configuration_tests {
             .is_err());
             assert!(connection_with_environment(vec!["status".into()], partial).is_ok());
         }
+        let pure_operator =
+            |key: &str| (key == "TREER_OPERATOR_CREDENTIAL").then(|| "synthetic-operator".into());
+        let selected = connection_with_environment(
+            vec![
+                "--workspace=ws_two".into(),
+                "--url=http://127.0.0.1:8791".into(),
+                "status".into(),
+            ],
+            pure_operator,
+        )
+        .unwrap();
+        assert_eq!(selected.url.as_str(), "http://127.0.0.1:8791/");
     }
 
     #[test]

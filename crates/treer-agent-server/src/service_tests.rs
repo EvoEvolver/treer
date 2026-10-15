@@ -11,6 +11,7 @@ async fn explicit_listen_conflict_fails_before_enrollment_and_allows_retry() {
         .await
         .unwrap_err();
     assert!(error.to_string().contains("port is already in use"));
+    assert!(error.to_string().contains("best-effort preflight"));
     drop(listener);
     assert_eq!(
         resolve_listen("ws_fixture", Some(address)).await.unwrap(),

@@ -281,6 +281,8 @@ explicit `--workspace` must match `TREER_WORKSPACE_ID`, and explicit `--url`
 must match its bound `TREER_AGENT_SERVER_URL`. A conflict fails before sending
 credentials. Use an operator terminal configured with the destination
 workspace's own credentials instead; flag-free managed CLI behavior is unchanged.
+The guard applies only to managed identities or bound operators; a pure operator
+with no workspace/URL binding can use explicit `--workspace`/`--url` normally.
 
 **One OS account = one trust domain.** Same-account workspaces/Controllers are
 mutually trusted: A's exec/Agent can read and impersonate B's local identities.
@@ -291,8 +293,9 @@ avoid shared launcher assets. Connect emits a non-blocking shared-account
 warning based only on other enrollment filenames, without reading their contents.
 New enrollment checks an explicit `--listen` for an occupied port before
 exchanging the key or saving enrollment identity/configuration; release the port
-or choose another and retry the same command/key. This preflight does not reserve
-the port against a concurrent bind after the check.
+or choose another and retry the same command/key. This is a best-effort preflight:
+it does not reserve the port, so a concurrent bind after the check can still
+make activation fail closed (the check/bind TOCTOU is not eliminated).
 
 The separate connection command contains a 10-minute, single-use enrollment key:
 
@@ -1624,6 +1627,11 @@ It verifies installed hashes and versions afterward. The Host is untouched;
 different Controller/Host versions, including an older locally built Host, are
 normal while the protocol remains compatible. With multiple local installs,
 `--workspace` is required and ambiguous selection fails with candidate commands.
+Candidate commands contain only workspace/machine/config-directory selection,
+never `--apply` or `--accept-shared-binaries`, and are never executed automatically.
+After selecting a workspace, applying still requires the operator to add those
+flags explicitly; printing a command or supplying `--apply` is not confirmation
+of shared-binary impact.
 Replacing the shared binaries affects other workspaces on their next start;
 the tool warns and requires `--accept-shared-binaries` before staging or
 activation. Only the selected Controller is activated. Coordinate compatibility

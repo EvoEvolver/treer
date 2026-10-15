@@ -301,7 +301,7 @@ pub async fn resolve_listen(workspace: &str, requested: Option<SocketAddr>) -> R
     if let Some(requested) = requested {
         anyhow::ensure!(
             address_is_available(requested),
-            "requested local Controller port is already in use; choose a different --listen or omit it for automatic allocation (enrollment key was not exchanged)"
+            "requested local Controller port is already in use; choose a different --listen or omit it for automatic allocation (enrollment key was not exchanged). This is a best-effort preflight: a concurrent bind after the check can still make activation fail closed"
         );
         return Ok(requested);
     }

@@ -20,6 +20,10 @@ or reading another account-owned installation. Independent Agent clients should
 set `TREER_WORKSPACE_ID` and `TREER_AGENT_SERVER_URL` along with their credentials;
 without a bound value an explicit override fails closed, while flag-free use is
 unchanged. Errors never describe the destination installation or its credentials.
+This consistency guard applies only to managed identities or operators with an
+environment-bound workspace/URL; a pure operator with no such binding is expected
+to select its connection using explicit `--workspace`/`--url` and is not restricted
+by this guard.
 
 On Windows, local Named Pipes reject remote clients and use explicit current-user
 and SYSTEM DACLs. Credential-bearing configuration and recovery files use the

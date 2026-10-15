@@ -242,7 +242,7 @@ else:
     def test_multiple_installs_need_selection_and_confirmation_before_any_update(self):
         other = self.other_install()
         original = other.read_bytes()
-        with self.assertRaisesRegex(RuntimeError, "--workspace ws_other --accept-shared-binaries --apply"):
+        with self.assertRaisesRegex(RuntimeError, "--workspace ws_other --config-dir"):
             update.installed(self.configdir)
         for confirmation in (False, None, "true", 1):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "require --accept-shared-binaries"):
@@ -271,6 +271,62 @@ else:
         self.assertNotIn("test-only-secret", warning.getvalue())
         self.assertEqual(other.read_bytes(), original)
         self.assertEqual(json.loads(self.state.read_text())["events"], ["bbbbbbb:restart-controller"])
+
+    def test_candidates_only_select_workspace_and_never_execute_updates(self):
+        self.other_install()
+        with self.assertRaises(RuntimeError) as failure:
+            update.installed(self.configdir)
+        diagnostic = str(failure.exception)
+        self.assertIn("--workspace ws_other --config-dir", diagnostic)
+        self.assertNotIn("--accept-shared-binaries", diagnostic)
+        self.assertNotIn("--apply", diagnostic)
+        probe = json.dumps({"home": str(self.home), "system": "Linux", "arch": "x86_64",
+                            "controller": str(self.bindir / "treer-agent-server"),
+                            "config_base": str(self.home / ".config")})
+        selection = json.dumps({"error": diagnostic, "shared": True})
+        warning = io.StringIO()
+        with patch.object(sys, "argv", [str(SCRIPT), "--machine", "local", "--apply"]), \
+             patch.object(update.Machine, "python", side_effect=[probe, "", selection]) as python, \
+             patch.object(update.Machine, "upload") as upload, \
+             patch.object(update.subprocess, "run") as execute, \
+             patch.object(update, "replace_file") as replace, \
+             contextlib.redirect_stderr(warning):
+            with self.assertRaisesRegex(RuntimeError, "select --workspace explicitly"):
+                update.main()
+            # Discovery uploads only its worker for read-only inspection; no
+            # candidate command, artifact upload or detached worker is started.
+            self.assertEqual(upload.call_count, 1)
+            self.assertEqual(python.call_count, 3)
+            self.assertFalse(any("Popen(" in call.args[0] for call in python.call_args_list))
+            execute.assert_not_called()
+            replace.assert_not_called()
+            self.assertNotIn(update.SHARED_BINARIES_NOTICE, warning.getvalue())
+        self.assertEqual(json.loads(self.state.read_text())["events"], [])
+
+    def test_apply_in_operator_argv_is_not_a_shared_binary_confirmation(self):
+        self.other_install()
+        with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(RuntimeError) as failure:
+            update.installed(self.configdir, "ws_fixture")
+        diagnostic = str(failure.exception)
+        self.assertIn("--accept-shared-binaries", diagnostic)
+        probe = json.dumps({"home": str(self.home), "system": "Linux", "arch": "x86_64",
+                            "controller": str(self.bindir / "treer-agent-server"),
+                            "config_base": str(self.home / ".config")})
+        selection = json.dumps({"error": diagnostic, "shared": True})
+        warning = io.StringIO()
+        with patch.object(sys, "argv", [str(SCRIPT), "--machine", "local", "--workspace", "ws_fixture", "--apply"]), \
+             patch.object(update.Machine, "python", side_effect=[probe, "", selection]) as python, \
+             patch.object(update.Machine, "upload") as upload, \
+             patch.object(update.subprocess, "run") as execute, \
+             patch.object(update, "replace_file") as replace, \
+             contextlib.redirect_stderr(warning):
+            with self.assertRaisesRegex(RuntimeError, "--accept-shared-binaries"):
+                update.main()
+            self.assertIn("other workspaces", warning.getvalue())
+            self.assertEqual(upload.call_count, 1)
+            self.assertFalse(any("Popen(" in call.args[0] for call in python.call_args_list))
+            execute.assert_not_called()
+            replace.assert_not_called()
 
     def test_workspace_selection_keeps_duplicate_and_foreign_hostname_guards(self):
         other = self.other_install()
