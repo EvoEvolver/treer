@@ -66,6 +66,23 @@ def wait_ci(root, commit, timeout=None, sleep=time.sleep, clock=time.monotonic):
         sleep(15)
 
 
+WINDOWS_JOB = "Native Windows embedded launcher and ACP UI"
+
+
+def windows_acceptance(checkout, commit, run_id):
+    """Same rule as collect-build-artifacts.sh: an overall success does not prove the Windows job ran."""
+    receipt = json.loads(run("gh", "run", "view", str(run_id), "--json",
+                             "status,conclusion,headSha,displayTitle,jobs", cwd=checkout, capture=True))
+    if receipt["status"] != "completed" or receipt["conclusion"] != "success" or not (
+            receipt["headSha"] == commit or receipt["displayTitle"] == f"Machine artifacts {commit}"):
+        raise RuntimeError(f"native run {run_id} is incomplete, failed or for another candidate")
+    workflow = run("git", "show", f"{commit}:.github/workflows/build-release-artifacts.yml", cwd=checkout, capture=True)
+    if any(line.startswith("  windows-launcher-smoke:") for line in workflow.splitlines()):
+        jobs = [job for job in receipt["jobs"] if job["name"] == WINDOWS_JOB]
+        if len(jobs) != 1 or jobs[0]["status"] != "completed" or jobs[0]["conclusion"] != "success":
+            raise RuntimeError(f"native Windows launcher/UI acceptance did not pass in run {run_id}")
+
+
 def native_ready(checkout, commit):
     """Native artifacts must be green for this exact commit or provably reused from a canary_passed release.
 
@@ -91,6 +108,7 @@ def native_ready(checkout, commit):
     if runs:
         latest = max(runs, key=lambda item: item["databaseId"])
         if latest["status"] == "completed" and latest["conclusion"] == "success":
+            windows_acceptance(checkout, commit, latest["databaseId"])
             if dist.is_dir():
                 run("sh", "scripts/verify-machine-artifacts.sh", commit, str(dist), cwd=checkout)
             print(f"Native artifacts: build passed {latest['url']}")

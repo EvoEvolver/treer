@@ -320,7 +320,9 @@ run or a run for another commit does not count, the latest run decides, and it w
 up to `TREER_RELEASE_CI_TIMEOUT` seconds, 2700 by default) and its native artifacts are
 green: a successful `Machine artifacts <commit>` run for that exact revision (the run
 title decides, so a dispatch on this ref that built another revision does not
-count; an existing `dist/` is still verified against it), or a verified reuse
+count; the run receipt must belong to the candidate and, when the candidate's
+workflow defines it, exactly one "Native Windows embedded launcher and ACP UI" job must be
+completed and successful; an existing `dist/` is still verified against it), or a verified reuse
 anchor (`scripts/reuse-machine-artifacts.sh --check-only`, or `--verify-dist` for a
 `dist/` that already carries reuse provenance). A local `dist/` alone is never
 evidence of a green native build. All `gh` calls are time-bounded. Dispatch

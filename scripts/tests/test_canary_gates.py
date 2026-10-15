@@ -79,13 +79,24 @@ class NativeReadyTest(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.checkout = Path(self.temp.name)
 
-    def check(self, runs, reuse_ok=False, verify_ok=True):
+    WORKFLOW = "jobs:\n  windows:\n    name: Build\n  windows-launcher-smoke:\n    name: Native Windows embedded launcher and ACP UI\n"
+    GREEN_JOB = {"name": "Native Windows embedded launcher and ACP UI", "status": "completed", "conclusion": "success"}
+
+    def check(self, runs, reuse_ok=False, verify_ok=True, jobs=None, workflow=None, view=None):
         calls = []
+        jobs = [self.GREEN_JOB] if jobs is None else jobs
+        workflow = self.WORKFLOW if workflow is None else workflow
 
         def fake_run(*args, **kwargs):
             calls.append(args)
+            if args[0] == "gh" and args[2] == "view":
+                receipt = {"status": "completed", "conclusion": "success", "headSha": COMMIT,
+                           "displayTitle": f"Machine artifacts {COMMIT}", "jobs": jobs}
+                return json.dumps(view or receipt)
             if args[0] == "gh":
                 return json.dumps(runs)
+            if args[0] == "git":
+                return workflow
             failing = (("reuse-machine-artifacts.sh" in args[1] and not reuse_ok) or
                        ("verify-machine-artifacts.sh" in args[1] and not verify_ok))
             if failing:
@@ -108,6 +119,31 @@ class NativeReadyTest(unittest.TestCase):
         for run in (native(2, conclusion="failure"), native(3, status="in_progress", conclusion=None)):
             with self.assertRaisesRegex(RuntimeError, "must be green"):
                 self.check([run])
+
+    def test_the_windows_launcher_job_must_exist_once_and_be_green_when_the_workflow_defines_it(self):
+        failing = dict(self.GREEN_JOB, conclusion="failure")
+        skipped = dict(self.GREEN_JOB, conclusion="skipped")
+        for jobs in ([], [failing], [skipped], [self.GREEN_JOB, self.GREEN_JOB], [dict(self.GREEN_JOB, status="in_progress", conclusion=None)]):
+            with self.subTest(jobs=jobs):
+                with self.assertRaisesRegex(RuntimeError, "Windows launcher/UI acceptance did not pass"):
+                    self.check([native(30)], jobs=jobs)
+        self.check([native(30)], jobs=[self.GREEN_JOB])
+
+    def test_an_old_workflow_without_the_windows_job_does_not_require_it(self):
+        self.check([native(31)], jobs=[], workflow="jobs:\n  windows:\n    name: Build\n")
+
+    def test_the_run_receipt_must_belong_to_the_candidate_and_be_green(self):
+        other = {"status": "completed", "conclusion": "success", "headSha": "e" * 40,
+                 "displayTitle": "Machine artifacts " + "e" * 40, "jobs": [self.GREEN_JOB]}
+        with self.assertRaisesRegex(RuntimeError, "another candidate"):
+            self.check([native(32)], view=other)
+        with self.assertRaisesRegex(RuntimeError, "another candidate"):
+            self.check([native(33)], view=dict(other, headSha=COMMIT, displayTitle="x", conclusion="failure"))
+
+    def test_an_existing_dist_also_goes_through_the_windows_acceptance(self):
+        self.make_dist()
+        with self.assertRaisesRegex(RuntimeError, "Windows launcher/UI acceptance did not pass"):
+            self.check([native(34)], jobs=[])
 
     def test_a_dispatch_on_this_ref_that_built_another_revision_does_not_count(self):
         # headSha matches the candidate but the title says revision B was built.
