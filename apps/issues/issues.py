@@ -11,7 +11,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
-from notify import Digest, enabled as notify_enabled, hourly_limit
+from notify import Digest, TreePaths, candidates, enabled as notify_enabled, hourly_limit, path_tokens
 from reminders import Reminders, enabled as reminders_enabled
 from store import Store, fields, fail
 
@@ -43,6 +43,7 @@ class Application:
     def __init__(self, store, auth=None):
         self.store, self.auth = store, auth
         self.lock = threading.Lock()
+        self.tree_paths = TreePaths(os.environ.get('TREER_BIN', 'treer'))
 
     def identity_provider(self):
         with self.lock:
@@ -68,8 +69,38 @@ class Application:
                 self.auth = Auth(self.store, os.environ['ISSUES_PROXY_URL'], service_id, workspace, public_url)
             return self.auth
 
+    def resolve_paths(self, action, body, token):
+        """`@/team/agent` mentions are resolved by Core with the AUTHOR's own token (their Policy decides what a path
+        means and whether it is visible), before the write transaction. Returns {lower-case path: agent ID}."""
+        if not notify_enabled() or not isinstance(body, dict):
+            return {}
+        if action == 'comment':
+            text = body.get('body')
+        elif action in ('create', 'update'):
+            text = '\n'.join(v for v in (body.get('title'), body.get('description')) if isinstance(v, str))
+        else:
+            return {}
+        tokens = path_tokens(text) if isinstance(text, str) else []
+        if not tokens:
+            return {}
+        try:
+            auth = self.identity_provider()
+        except Error:
+            return {}
+        resolved = {}
+        for path in tokens:
+            try:
+                answer = auth.request('POST', f'/api/apps/{auth.service_id}/recipients/resolve', token, body={'recipients': [path]})
+            except Error:
+                continue
+            for entry in answer.get('recipients') or []:
+                if isinstance(entry, dict) and entry.get('kind') == 'agent' and isinstance(entry.get('id'), str):
+                    resolved[path.lower()] = entry['id']
+        return resolved
+
     def mutation(self, issue_id, action, body, actor, directory, token):
-        issue_id, event_id, event, recipients, notice, missed = self.store.mutate(issue_id, action, body, actor, directory)
+        paths = self.resolve_paths(action, body, token)
+        issue_id, event_id, event, recipients, notice, missed = self.store.mutate(issue_id, action, body, actor, directory, paths)
         notification = {'status': 'not_requested'}
         if action in ('create', 'update', 'comment'):
             if not notify_enabled():
@@ -101,6 +132,9 @@ class Application:
                     notification['throttled'] = len(throttled)
         if missed:
             notification = dict(notification, unresolved_mentions=missed)
+            options = {t: c for t in missed if (c := candidates(t, directory, self.tree_paths.get))}
+            if options:
+                notification['mention_candidates'] = options
         self.store.notification(event_id, notification)
         return dict(self.store.show(issue_id), notification=notification)
 

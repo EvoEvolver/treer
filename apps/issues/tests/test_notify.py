@@ -11,7 +11,7 @@ clean = hermetic_env(); os.environ.clear(); os.environ.update(clean)
 sys.path.insert(0, str(ROOT))
 from auth import Error
 from issues import Application
-from notify import WINDOW, Digest, digest_body, enabled, resolve_mentions
+from notify import WINDOW, Digest, TreePaths, candidates, digest_body, enabled, path_tokens, resolve_mentions
 from store import Store
 
 DIRECTORY = [
@@ -31,7 +31,14 @@ class FakeAuth:
     service_id, public_url = 'svc_issues', 'https://issues.example/'
     def __init__(self):
         self.requests, self.fail, self.denied = [], None, set()
+        self.resolvable, self.resolve_calls = {}, []
     def request(self, method, path, token, body=None):
+        if path.endswith('/recipients/resolve'):
+            self.resolve_calls.append((token, body['recipients'][0]))
+            target = self.resolvable.get(body['recipients'][0])
+            if target is None:
+                raise Error(404, 'agent_not_found', 'x')
+            return {'recipients': [{'kind': 'agent', 'id': target, 'name': 'n'}]}
         if self.fail or token in self.denied:
             raise Error(503, self.fail or 'policy_denied', 'x')
         self.requests.append(body)
@@ -335,6 +342,105 @@ class PolicyAndInjectionTest(Base):
         self.assertEqual(result['activity'][0]['notification']['unresolved_mentions'], ['reviewer', 'nobody'])
         clean = self.mutate(id, 'comment', {'body': 'cc @author'}, LEAD)
         self.assertNotIn('unresolved_mentions', clean['notification'])
+
+
+NOPATH = [{k: v for k, v in p.items() if k != 'path'} for p in DIRECTORY] + [
+    {'id': 'ag_lead1', 'kind': 'agent', 'name': 'leader'}, {'id': 'ag_lead2', 'kind': 'agent', 'name': 'leader'}]
+TREE = {'ag_lead1': '/treer-dev-team/leader', 'ag_lead2': '/mariana/forjador/leader', 'ag_hidden': '/secret/leader'}
+
+
+class PathMentionTest(Base):
+    """Issue #38: the live directory carries no tree paths, so `@/team/agent` is resolved by Core for the author."""
+    def mutate_np(self, id, action, body, actor=LEAD, directory=NOPATH):
+        return self.app.mutation(id, action, body, actor, directory, 'token-' + actor['id'])
+
+    def test_path_token_extraction(self):
+        self.assertEqual(path_tokens('@/a/B and @/a/b, @/c/d. @name mail x@/y'), ['/a/B', '/c/d'])
+        self.assertEqual(len(path_tokens(' '.join(f'@/t/a{i}' for i in range(30)))), 10)
+        self.assertEqual(path_tokens('no mentions'), [])
+        self.assertEqual(path_tokens('@/bad<script>'), ['/bad'])
+
+    def test_path_mention_is_resolved_by_core_with_the_authors_token(self):
+        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
+        self.auth.resolvable['/dev/Author'] = 'ag_author'
+        self.now += WINDOW + 1
+        result = self.mutate_np(id, 'comment', {'body': 'cc @/dev/Author please'}, LEAD)
+        self.assertEqual(self.auth.resolve_calls, [('token-usr_lead', '/dev/Author')], 'asked once, with the author\'s own token, in the typed case')
+        self.assertEqual(self.last()['recipients'], ['ag_author', 'ag_work'])
+        self.assertEqual(result['activity'][0]['mentions'], ['ag_author'])
+        self.assertNotIn('unresolved_mentions', result['notification'])
+        self.now += WINDOW + 1
+        self.mutate_np(id, 'comment', {'body': 'again @/DEV/author'}, LEAD)
+        self.assertEqual(self.auth.resolve_calls[-1][1], '/DEV/author')
+
+    def test_unknown_or_denied_paths_are_reported_not_guessed(self):
+        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
+        self.now += WINDOW + 1
+        result = self.mutate_np(id, 'comment', {'body': 'cc @/no/such/agent'}, LEAD)
+        self.assertEqual(self.last()['recipients'], ['ag_work'])
+        self.assertEqual(result['notification']['unresolved_mentions'], ['/no/such/agent'])
+
+    def test_a_resolved_id_outside_the_authors_directory_is_ignored(self):
+        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
+        self.auth.resolvable['/secret/leader'] = 'ag_hidden'      # Core answered, but the author's directory cannot see it
+        self.now += WINDOW + 1
+        result = self.mutate_np(id, 'comment', {'body': '@/secret/leader'}, LEAD)
+        self.assertEqual(self.last()['recipients'], ['ag_work'])
+        self.assertEqual(result['notification']['unresolved_mentions'], ['/secret/leader'])
+
+    def test_directory_paths_still_work_without_a_core_call(self):
+        id = self.create(assignee='ag_work')
+        self.now += WINDOW + 1
+        self.mutate(id, 'comment', {'body': '@/dev/author'}, LEAD)
+        self.assertEqual(self.last()['recipients'], ['ag_author', 'ag_work'])
+
+    def test_ambiguous_names_offer_path_candidates(self):
+        self.app.tree_paths = TreePaths(runner=lambda args: (0, json.dumps({'agents': [{'agent_id': k, 'path': v} for k, v in TREE.items()]})), clock=lambda: self.now)
+        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
+        self.now += WINDOW + 1
+        result = self.mutate_np(id, 'comment', {'body': 'cc @leader'}, LEAD)
+        self.assertEqual(result['notification']['unresolved_mentions'], ['leader'])
+        self.assertEqual(result['notification']['mention_candidates'], {'leader': ['/treer-dev-team/leader', '/mariana/forjador/leader']},
+                         'only Agents in the author\'s directory are offered; the hidden one is not')
+        self.assertEqual(result['activity'][0]['notification']['mention_candidates'], result['notification']['mention_candidates'])
+
+    def test_candidates_fall_back_to_ids_when_paths_are_unavailable_and_never_call_needlessly(self):
+        calls = []
+        tree = TreePaths(runner=lambda args: calls.append(args) or (1, ''), clock=lambda: self.now)
+        self.assertEqual(candidates('leader', NOPATH, tree.get), ['ag_lead1', 'ag_lead2'])
+        self.assertEqual(candidates('leader', NOPATH, tree.get), ['ag_lead1', 'ag_lead2'])
+        self.assertEqual(len(calls), 1, 'cached, even a failure, for a minute')
+        self.assertEqual(calls[0], ['agent', 'ls', '-R', '/'])
+        self.assertEqual(candidates('author', NOPATH, lambda: 1 / 0), [], 'a unique name needs no candidates and no lookup')
+        self.assertEqual(candidates('@x/y', NOPATH, lambda: 1 / 0), [])
+        self.assertEqual(candidates('leader', DIRECTORY + [{'id': 'ag_a', 'kind': 'agent', 'name': 'leader', 'path': '/a/leader'},
+                                                           {'id': 'ag_b', 'kind': 'agent', 'name': 'leader', 'path': '/b/leader'}], lambda: 1 / 0),
+                         ['/a/leader', '/b/leader'], 'directory paths need no CLI')
+        bad = TreePaths(runner=lambda args: (0, 'not json'), clock=lambda: self.now)
+        self.assertEqual(bad.get(), {})
+
+    def test_no_core_calls_when_notifications_are_off_or_there_is_no_path(self):
+        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
+        self.mutate_np(id, 'comment', {'body': 'plain @author'}, LEAD)
+        self.assertEqual(self.auth.resolve_calls, [])
+        os.environ['ISSUES_NOTIFY'] = 'off'
+        self.mutate_np(id, 'comment', {'body': '@/dev/author'}, LEAD)
+        self.assertEqual(self.auth.resolve_calls, [])
+
+    def test_description_paths_count_only_when_new(self):
+        self.auth.resolvable['/dev/author'] = 'ag_author'
+        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
+        self.now += WINDOW + 1
+        self.mutate_np(id, 'update', {'description': 'owner @/dev/author'}, LEAD)
+        self.assertIn('ag_author', self.last()['recipients'])
+        self.now += WINDOW + 1
+        self.mutate_np(id, 'update', {'description': 'owner @/dev/author, more words'}, LEAD)
+        self.assertNotIn('ag_author', self.last()['recipients'])
+
+    def test_at_most_ten_resolutions_per_event(self):
+        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
+        self.mutate_np(id, 'comment', {'body': ' '.join(f'@/t/a{i}' for i in range(30))}, LEAD)
+        self.assertEqual(len(self.auth.resolve_calls), 10)
 
 
 class SwitchTest(Base):

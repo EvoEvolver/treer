@@ -159,10 +159,19 @@ Core evaluates that caller's Message Policy:
 | Any other edit (priority, labels, text…) | assignee |
 | `@name` in a comment, or newly added to a title/description | the mentioned Agent, in addition to the above |
 
-Claims/leases and updates that change nothing send nothing. `@name` must match
-exactly one Agent name (case-insensitive); an ambiguous name is ignored, so use
-`@/tree/path` or `@ag_id` to disambiguate. Only Agents can be mentioned; the
-creator therefore hears plain comments only when mentioned (`@author`).
+Claims/leases and updates that change nothing send nothing. A mention is
+`@name` (must match exactly one Agent name, case-insensitive), `@/tree/path` or
+`@ag_id`. Paths are resolved by Core's `recipients/resolve` with the **author's
+own token** before the write (the Issues directory carries no paths), so the
+author's Policy decides what a path means; the result must also be an Agent in
+the author's directory. At most 10 paths are resolved per event, and none when
+notifications are off. An ambiguous or unknown mention is ignored and reported:
+`notification.unresolved_mentions` lists it and, for a duplicated name,
+`notification.mention_candidates` offers the exact spellings (tree paths from
+`treer agent ls -R /` under the App identity, cached for a minute, otherwise
+stable IDs; only Agents the author can see are offered). The UI toast shows
+them. Only Agents can be mentioned; the creator therefore hears plain comments
+only when mentioned (`@author`).
 
 A Message is one short fixed sentence plus a link, for example
 `Issue #22 · Status open→done · by security-claude`; it never contains titles,
