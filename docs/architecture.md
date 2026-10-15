@@ -106,6 +106,18 @@ service-audience App token. The Proxy rechecks the registered service and human
 membership, maps the claims to the same Policy subject and Message principal,
 then uses the same Message implementation as the Agent routes.
 
+`GET /api/apps/{service_id}/directory` includes capability
+`app.directory-paths.v1`. Each visible Agent principal has its current canonical
+Tree `path`, resolved from the authenticated workspace, not from token claims or
+an App's name cache. Humans and unplaced legacy workloads return `path: null`.
+The existing Agent discovery/metadata and human-list Policy filters still apply;
+paths additionally require `agent.tree.read`, otherwise `path: null`. The
+capability promises permission-filtered paths, not a path for every principal.
+Names, folders and placements use a single read-only PostgreSQL REPEATABLE READ
+snapshot, without taking the Tree mutation's exclusive workspace-row lock.
+Clients requiring paths reject a missing capability as unsupported; same-name
+Agents are identified by stable IDs and distinguished by their returned paths.
+
 `TREER_ENABLE_CORE_MESSAGES` is a rollout switch, not an authorization or
 isolation boundary.
 
