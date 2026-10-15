@@ -32,6 +32,19 @@ for source in $(candidates); do
     manifest="$release/.treer/releases/$source/manifest.json"
     [ -f "$manifest" ] && [ -d "$release/dist" ] && [ ! -L "$release/dist" ] || continue
     jq -e --arg source "$source" '.status == "canary_passed" and .commit == $source' "$manifest" >/dev/null 2>&1 || continue
+    # Anchor the bytes to what the Canary run recorded: the manifest of the passed
+    # release must list all 25 file hashes and the dist must still match them.
+    # Older manifests without hashes are never a reuse source.
+    recorded=$(jq -cS '.machine_artifacts.files // empty' "$manifest" 2>/dev/null) || continue
+    [ -n "$recorded" ] && [ "$(printf '%s' "$recorded" | jq 'length')" = 25 ] || {
+        echo "not reusing $source: its manifest records no artifact hashes" >&2
+        continue
+    }
+    actual=$(sh scripts/machine-artifact-hashes.sh "$release/dist" 2>/dev/null | jq -cS .) || continue
+    [ "$actual" = "$recorded" ] || {
+        echo "not reusing $source: dist bytes differ from the hashes recorded at canary_passed" >&2
+        continue
+    }
     git merge-base --is-ancestor "$source" "$commit" 2>/dev/null || continue
     changed=$(git diff --no-renames --no-ext-diff --name-only "$source" "$commit") || continue
     if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Evq "$allowed"; then
@@ -60,7 +73,7 @@ for source in $(candidates); do
     if sh scripts/verify-machine-artifacts.sh "$commit" "$temporary/dist" >/dev/null 2>&1; then
         mv "$temporary/dist" dist
         rmdir "$temporary"
-        echo "reusing native artifacts of $source for $commit"
+        echo "reusing native artifacts of $source (built from $built) for $commit; $(printf '%s\n' "$changed" | grep -c .) changed paths, all under web/, apps/ or docs/"
         exit 0
     fi
     rm -rf "$temporary"

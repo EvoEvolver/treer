@@ -58,13 +58,18 @@ class ReuseTest(unittest.TestCase):
         self.checkouts = Path(self.temp.name) / "checkouts"
         self.install_source(self.source)
 
-    def install_source(self, commit, status="canary_passed", created="2026-10-15T00:00:00Z"):
+    def install_source(self, commit, status="canary_passed", created="2026-10-15T00:00:00Z", with_hashes=True):
         checkout = self.checkouts / commit
         shutil.rmtree(checkout / "dist", ignore_errors=True)
         build_dist(checkout / "dist", commit)
         manifest = checkout / ".treer" / "releases" / commit
         manifest.mkdir(parents=True, exist_ok=True)
-        (manifest / "manifest.json").write_text(json.dumps({"status": status, "commit": commit, "created_at": created}))
+        hashes = subprocess.run(["sh", str(SCRIPTS / "machine-artifact-hashes.sh"), str(checkout / "dist")], check=True,
+                                capture_output=True, text=True).stdout
+        record = {"status": status, "commit": commit, "created_at": created}
+        if with_hashes:
+            record["machine_artifacts"] = {"source_commit": commit, "reused": False, "files": json.loads(hashes)}
+        (manifest / "manifest.json").write_text(json.dumps(record))
 
     def reuse(self, candidate=None, *extra):
         candidate = candidate or git(self.repo, "rev-parse", "HEAD")
@@ -175,7 +180,10 @@ class ReuseTest(unittest.TestCase):
         shutil.rmtree(self.repo / "dist")
         manifest = self.checkouts / middle / ".treer" / "releases" / middle
         manifest.mkdir(parents=True)
-        (manifest / "manifest.json").write_text(json.dumps({"status": "canary_passed", "commit": middle, "created_at": "2026-10-16T00:00:00Z"}))
+        recorded = json.loads(subprocess.run(["sh", str(SCRIPTS / "machine-artifact-hashes.sh"), str(self.checkouts / middle / "dist")],
+                                             check=True, capture_output=True, text=True).stdout)
+        (manifest / "manifest.json").write_text(json.dumps({"status": "canary_passed", "commit": middle, "created_at": "2026-10-16T00:00:00Z",
+                                                            "machine_artifacts": {"source_commit": self.source, "reused": True, "files": recorded}}))
         candidate = commit_files(self.repo, {"web/index.html": "3"}, "ui 2")
         result = self.reuse()
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -192,9 +200,29 @@ class ReuseTest(unittest.TestCase):
         shutil.rmtree(self.repo / "dist")
         manifest = self.checkouts / middle / ".treer" / "releases" / middle
         manifest.mkdir(parents=True)
-        (manifest / "manifest.json").write_text(json.dumps({"status": "canary_passed", "commit": middle, "created_at": "2026-10-16T00:00:00Z"}))
+        recorded = json.loads(subprocess.run(["sh", str(SCRIPTS / "machine-artifact-hashes.sh"), str(self.checkouts / middle / "dist")],
+                                             check=True, capture_output=True, text=True).stdout)
+        (manifest / "manifest.json").write_text(json.dumps({"status": "canary_passed", "commit": middle, "created_at": "2026-10-16T00:00:00Z",
+                                                            "machine_artifacts": {"source_commit": self.source, "reused": True, "files": recorded}}))
         commit_files(self.repo, {"crates/core/lib.rs": "changed later"}, "native")
         self.assertNotEqual(self.reuse().returncode, 0)
+
+    def test_source_without_recorded_hashes_is_never_reused(self):
+        commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        self.install_source(self.source, with_hashes=False)
+        self.assertNotEqual(self.reuse().returncode, 0)
+        self.assertFalse((self.repo / "dist").exists())
+
+    def test_binary_and_checksum_file_rewritten_together_do_not_match_the_recorded_hashes(self):
+        commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        folder = self.checkouts / self.source / "dist" / "linux-x86_64"
+        (folder / "treer").write_bytes(b"\x7fELFreplaced")
+        sums = subprocess.run(["shasum", "-a", "256", *BINARIES], cwd=folder, check=True, capture_output=True, text=True).stdout
+        (folder / "SHA256SUMS").write_text(sums)
+        result = self.reuse()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recorded at canary_passed", result.stderr)
+        self.assertFalse((self.repo / "dist").exists())
 
 
 if __name__ == "__main__":

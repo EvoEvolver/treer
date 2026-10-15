@@ -168,8 +168,12 @@ the candidate, and only if all of the following hold:
 - `git diff --no-renames --name-only` between the two commits lists only
   `web/`, `apps/` and `docs/` paths (a rename out of a native path is a change;
   any other or unknown path forces the normal build);
-- that commit's manifest is `canary_passed` and its `dist/` passes the same
-  metadata, checksum, executable-bit and version verification as a fresh build;
+- that commit's manifest is `canary_passed`, records the SHA-256 of all 25
+  artifact files, and its `dist/` still matches those recorded hashes byte for
+  byte (a manifest without hashes, or a `dist/` whose binaries and checksum file
+  were both rewritten, is never reused);
+- its `dist/` also passes the same metadata, checksum, executable-bit and version
+  verification as a fresh build;
 - the copy is verified again for the candidate before use.
 
 The reused `dist/` carries `artifact-provenance.json` (`source_commit` = the
@@ -187,7 +191,12 @@ checksum files were rewritten. The Canary manifest records
 embedded launcher keep reporting the commit they were actually built from. The
 trust base is the operator's local `.treer/canary-checkouts/` state, as for any
 collected `dist/`: the recorded hashes pin what was verified at copy time, but
-they are not a signature or an independent pin of the previous release's bytes. Set `TREER_REUSE_NATIVE_ARTIFACTS=0` to
+they are not a signature or an independent pin of the previous release's bytes. `mobile/` is not on the allowlist, so a change there builds natively. The
+Proxy serves only the three binaries and `SHA256SUMS` per platform, so the
+provenance file is never downloaded by clients, and the installed binaries'
+reported commit (the build commit) is not treated as a downgrade of the
+candidate. The log names the chosen source and the number of changed paths, and
+the manifest records whether reuse was enabled. Set `TREER_REUSE_NATIVE_ARTIFACTS=0` to
 force a native build. The hosted Proxy and the Cloudflare Worker are always built
 or deployed from the candidate, so changes to `apps/policy` (embedded in the
 Proxy) and to the frontend still ship.
@@ -218,7 +227,7 @@ make a release stricter.
 | --- | --- | --- |
 | `docs/`, root `*.md` only | `node scripts/check-docs.mjs` | not required |
 | `apps/` only | docs check plus each changed App's own tests and `npm run check` | not required; the App owner deploys the App after CI |
-| `web/`, `mobile/` | web typecheck, build and Playwright | Canary and the Policy check required; the native build is reused from the previous `canary_passed` commit when [allowed](#reusing-native-artifacts-for-web-apps-and-docs-changes) |
+| `web/`, `mobile/` | web typecheck, build and Playwright | Canary and the Policy check required; for `web/` changes the native build is reused from a previous `canary_passed` commit when [allowed](#reusing-native-artifacts-for-web-apps-and-docs-changes) |
 | `launchers/` | `just agent-launcher-test` | required: the Controller embeds the launcher payload |
 | `scripts/`, `.github/`, `justfile` that are not part of the release pipeline | `just check` | not required |
 | release pipeline: canary, deploy, promote, artifact staging/verification, machine-update scripts and `build-release-artifacts.yml`/`publish-ghcr.yml` | `just check` | required; ships alone |

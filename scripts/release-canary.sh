@@ -76,13 +76,14 @@ jq -n \
     --arg artifact_sha256 "$artifact_sha" \
     --arg artifact_source "$artifact_source" \
     --argjson artifact_hashes "$artifact_hashes" \
+    --arg reuse_disabled "${TREER_REUSE_NATIVE_ARTIFACTS:-1}" \
     --slurpfile canary "$release_root/canary-deploy.json" \
     '{schema_version: 1,
       status: "canary_passed",
       commit: $commit,
       created_at: $created_at,
       app_artifact: {path: $artifact_path, sha256: $artifact_sha256},
-      machine_artifacts: {source_commit: $artifact_source, reused: ($artifact_source != $commit), files: $artifact_hashes},
+      machine_artifacts: {source_commit: $artifact_source, reused: ($artifact_source != $commit), files: $artifact_hashes, reuse_enabled: ($reuse_disabled == "1")},
       canary: ($canary[0] + {tested_at: $created_at})}' > "$manifest"
 
 echo "Canary release passed: $manifest"
