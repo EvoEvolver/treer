@@ -15,6 +15,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from datetime import datetime, timezone
 from dataclasses import dataclass, field
 from email.message import EmailMessage
 from pathlib import Path
@@ -89,13 +90,89 @@ class Application(mail.MailApplication):
         self.lock = threading.RLock()
         self.stop = threading.Event()
         self.migrate()
+        self.load_contact_override()
         with self.db() as db:
             db.executescript("""
+            CREATE TABLE IF NOT EXISTS contact_ids(id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS admin_audit(seq INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT NOT NULL, action TEXT NOT NULL, revision INTEGER, created REAL NOT NULL);
+            CREATE TABLE IF NOT EXISTS mail_batch_items(notification TEXT PRIMARY KEY, batch TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS mail_windows(thread TEXT NOT NULL, agent TEXT NOT NULL, recipient TEXT NOT NULL, sent_at REAL NOT NULL, PRIMARY KEY(thread,agent,recipient));
             CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY, agent TEXT NOT NULL, recipient TEXT NOT NULL, email TEXT NOT NULL, subject TEXT NOT NULL, contact TEXT);
             CREATE TABLE IF NOT EXISTS notifications(id TEXT PRIMARY KEY, agent TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, thread TEXT NOT NULL, parent TEXT, message TEXT, subject TEXT NOT NULL, summary TEXT NOT NULL, urgency TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_try REAL NOT NULL, created REAL NOT NULL, transport TEXT, error TEXT, UNIQUE(agent,key));
             CREATE TABLE IF NOT EXISTS thread_messages(seq INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, message TEXT UNIQUE NOT NULL);
             CREATE TABLE IF NOT EXISTS replies(principal TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, thread TEXT NOT NULL, parent TEXT, message TEXT, wake TEXT, PRIMARY KEY(principal,key));
             """)
+            db.executemany("INSERT OR IGNORE INTO contact_ids VALUES(?)", [(c["id"],) for c in self.contacts])
+
+    def load_contact_override(self):
+        with self.db() as db:
+            row = db.execute("SELECT value FROM endpoint_state WHERE key='contacts'").fetchone()
+        if row:
+            from dataclasses import replace
+            self.contacts = self.validate_contacts(replace(self.settings, contacts=json.loads(row[0]), members={}))
+
+    def contact_revision(self, db):
+        row = db.execute("SELECT value FROM endpoint_state WHERE key='contact_revision'").fetchone()
+        return int(row[0]) if row else 0
+
+    def audit(self, db, record, action, revision=None):
+        # Fixed action names and stable actors only; no addresses, bodies, tokens or labels.
+        db.execute("INSERT INTO admin_audit(actor,action,revision,created) VALUES(?,?,?,?)",
+                   (record.user_id, action, revision, time.time()))
+        db.execute("DELETE FROM admin_audit WHERE seq <= (SELECT COALESCE(max(seq),0)-1000 FROM admin_audit)")
+
+    def management(self, record):
+        self.require_admin(record)
+        people = self.api.request("GET", f"/api/apps/{self.config.service_id}/directory",
+                                  access_token=record.access_token)["principals"]
+        with self.lock, self.db() as db:
+            revision = self.contact_revision(db)
+            audit = [{"seq": r["seq"], "actor": r["actor"], "action": r["action"], "revision": r["revision"],
+                      "created_at": datetime.fromtimestamp(r["created"], timezone.utc).isoformat().replace("+00:00", "Z")}
+                     for r in db.execute("SELECT * FROM admin_audit ORDER BY seq DESC LIMIT 100")]
+            contacts = self.contact_view(record.access_token)
+        return {"revision": revision, "contacts": contacts,
+                "members": [{"id": p["id"], "name": p["name"]} for p in people if p["kind"] == "human"],
+                "mode": self.settings.mode, "allowlist": self.settings.allowlist,
+                "agent_limit": self.settings.agent_limit, "recipient_limit": self.settings.recipient_limit,
+                "audit": audit}
+
+    def save_contacts(self, record, request):
+        from dataclasses import replace
+        self.require_admin(record)
+        fields(request, ("revision", "contacts"), ("revision", "contacts"))
+        if type(request["revision"]) is not int or not isinstance(request["contacts"], list) or len(request["contacts"]) > 100:
+            raise Error(400, "Expected revision and at most 100 contacts", "request_invalid")
+        try:
+            contacts = self.validate_contacts(replace(self.settings, contacts=request["contacts"], members={}))
+        except (ValueError, TypeError):
+            raise Error(400, "Invalid contact configuration", "request_invalid")
+        active = {p["id"] for p in self.api.request("GET", f"/api/apps/{self.config.service_id}/directory",
+                  access_token=record.access_token)["principals"] if p["kind"] == "human"}
+        for c in contacts:
+            if c.get("user_id") and c["user_id"] not in active:
+                raise Error(400, "Binding requires a current workspace member", "member_invalid")
+        with self.lock, self.db() as db:
+            db.execute("BEGIN IMMEDIATE")
+            revision = self.contact_revision(db)
+            if request["revision"] != revision:
+                raise Error(409, "Contacts changed; reload before saving", "revision_conflict")
+            old = {c["id"]: c for c in self.contacts}
+            for c in contacts:
+                prev = old.get(c["id"])
+                if not prev and not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", c["id"]):
+                    raise Error(400, "New contact IDs require letters, digits, underscore or hyphen", "request_invalid")
+                if prev and (prev["email"], prev.get("user_id")) != (c["email"], c.get("user_id")):
+                    raise Error(409, "Address/member changes require a new contact ID", "binding_immutable")
+                if not prev and db.execute("SELECT 1 FROM contact_ids WHERE id=?", (c["id"],)).fetchone():
+                    raise Error(409, "Deleted contact IDs cannot be reused", "contact_retired")
+            db.execute("INSERT OR REPLACE INTO endpoint_state VALUES('contacts',?)", (json.dumps(contacts),))
+            db.execute("INSERT OR REPLACE INTO endpoint_state VALUES('contact_revision',?)", (str(revision + 1),))
+            db.executemany("INSERT OR IGNORE INTO contact_ids VALUES(?)", [(c["id"],) for c in contacts])
+            self.audit(db, record, "contacts_saved", revision + 1)
+            db.commit()
+            self.contacts = contacts
+        return {"revision": revision + 1}
 
     def deployment_health(self):
         try:
@@ -110,6 +187,8 @@ class Application(mail.MailApplication):
 
     @staticmethod
     def validate_contacts(settings):
+        if not isinstance(settings.contacts, list) or any(not isinstance(c, dict) for c in settings.contacts):
+            raise ValueError("Invalid contacts")
         contacts = [dict(c) for c in settings.contacts]
         bound = {c.get("user_id") for c in contacts}
         contacts += [{"id": "member-" + uid, "label": uid, "email": email,
@@ -212,6 +291,7 @@ class Application(mail.MailApplication):
         with self.lock, self.db() as db:
             db.execute("INSERT OR REPLACE INTO endpoint_state VALUES('activation',?)",
                        (json.dumps(request),))
+            self.audit(db, record, "sending_enabled" if request["enabled"] else "sending_disabled")
         return request
 
     def contact_view(self, token):
@@ -382,12 +462,12 @@ class Application(mail.MailApplication):
         urgency = request.get("urgency", "normal")
         if urgency not in ("normal", "high"):
             raise Error(400, "urgency must be normal or high", "request_invalid")
-        recipient, address, contact = self.recipient(target, token)
         fingerprint = hashlib.sha256(
             json.dumps(request, sort_keys=True).encode()
         ).hexdigest()
         with self.lock, self.db() as db:
             db.execute("BEGIN IMMEDIATE")
+            recipient, address, contact = self.recipient(target, token)
             old = db.execute(
                 "SELECT * FROM notifications WHERE agent=? AND key=?", (agent, key)
             ).fetchone()
@@ -643,7 +723,7 @@ class Application(mail.MailApplication):
         # Single active worker; SQLite serializes mutations with HTTP handlers.
         with self.lock, self.db() as db:
             rows = db.execute(
-                "SELECT n.*,t.email,t.recipient,t.contact FROM notifications n JOIN threads t ON t.id=n.thread WHERE n.status='queued' AND n.message IS NOT NULL AND n.next_try<=? ORDER BY n.created LIMIT 1",
+                "SELECT n.*,t.email,t.recipient,t.contact FROM notifications n JOIN threads t ON t.id=n.thread WHERE n.status='queued' AND n.message IS NOT NULL AND NOT EXISTS(SELECT 1 FROM mail_batch_items b WHERE b.notification=n.id AND b.batch!=n.id) AND n.next_try<=? ORDER BY n.created LIMIT 1",
                 (time.time(),),
             ).fetchall()
             for row in rows:
@@ -651,10 +731,23 @@ class Application(mail.MailApplication):
                 url = urllib.parse.urljoin(
                     self.config.public_url, "t/" + n["thread"] + "/"
                 )
-                subject = f"[{n['thread']}] {'HIGH: ' if n['urgency'] == 'high' else ''}{n['subject']}"
-                content = (
-                    n["summary"] + "\n\nRead and reply (Treer login required):\n" + url
-                )
+                window = db.execute("SELECT sent_at FROM mail_windows WHERE thread=? AND agent=? AND recipient=?",
+                                    (n["thread"], n["agent"], n["recipient"])).fetchone()
+                if window and time.time() < window[0] + 300:
+                    db.execute("UPDATE notifications SET next_try=? WHERE id=?", (window[0] + 300, n["id"]))
+                    db.commit()
+                    continue
+                ids = {r[0] for r in db.execute("SELECT notification FROM mail_batch_items WHERE batch=?", (n["id"],))}
+                if not ids:
+                    group = db.execute("SELECT id FROM notifications WHERE thread=? AND agent=? AND status='queued' AND message IS NOT NULL AND attempts=0 AND next_try<=? AND NOT EXISTS(SELECT 1 FROM mail_batch_items b WHERE b.notification=notifications.id)",
+                                       (n["thread"], n["agent"], time.time())).fetchall()
+                    ids = {r[0] for r in group} | {n["id"]}
+                    db.executemany("INSERT INTO mail_batch_items VALUES(?,?)", [(nid, n["id"]) for nid in ids])
+                    db.commit()  # Freeze membership before external transport/retries.
+                # Fixed text excludes user-controlled titles/bodies/summaries from email.
+                n["summary"] = f"Thread {n['thread']} · {len(ids)} new Agent message(s)."
+                subject = f"[{n['thread']}] Agent conversation update"
+                content = n["summary"] + "\n\nRead and reply (Treer login required):\n" + url
                 transport = self.settings.mode
                 error = None
                 try:
@@ -707,6 +800,14 @@ class Application(mail.MailApplication):
                         n["id"],
                     ),
                 )
+                if status == "failed":
+                    for nid in ids - {n["id"]}:
+                        db.execute("UPDATE notifications SET status='failed',error=? WHERE id=?", (error, nid))
+                if status == "sent":
+                    db.execute("INSERT OR REPLACE INTO mail_windows VALUES(?,?,?,?)",
+                               (n["thread"], n["agent"], n["recipient"], time.time()))
+                    for nid in ids - {n["id"]}:
+                        db.execute("UPDATE notifications SET status='coalesced',transport=?,error=NULL WHERE id=?", (transport, nid))
                 db.commit()
 
     def outbox(self, n, subject, content, url):
@@ -846,7 +947,15 @@ class Handler(mail.MailHandler):
                         return
                 self._json(200, app.overview(self._session()))
             elif path == "/v1/admin/activation" and method == "POST":
+                if self.headers.get("X-Requested-With") != "email-settings":
+                    raise Error(403, "Settings request header required", "csrf_denied")
                 self._json(200, app.activate(self._session(), self._json_body()))
+            elif path == "/v1/admin/settings" and method == "GET":
+                self._json(200, app.management(self._session()))
+            elif path == "/v1/admin/contacts" and method == "POST":
+                if self.headers.get("X-Requested-With") != "email-settings":
+                    raise Error(403, "Settings request header required", "csrf_denied")
+                self._json(200, app.save_contacts(self._session(), self._json_body()))
             elif path == "/v1/admin/outbox" and method == "GET":
                 self._json(200, app.admin(self._session()))
             elif re.fullmatch(r"/v1/threads/th_[a-f0-9]{32}", path):
@@ -954,7 +1063,9 @@ class Handler(mail.MailHandler):
             self._error(Error(500, "Email endpoint operation failed", "internal_error"))
 
     def _security_headers(self):
-        super()._security_headers()
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'")
         self.send_header("Cache-Control", "no-store")
 
 

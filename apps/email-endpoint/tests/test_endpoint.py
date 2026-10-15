@@ -134,6 +134,144 @@ class Tests(unittest.TestCase):
             **extra,
         }
 
+    def admin_record(self):
+        return e.mail.BrowserSession("", "admin", "ws_test", "svc_test", "u1", "Alice", "owner", 9999999999)
+
+    def test_managed_contacts_persistence_revision_audit_and_nonmember(self):
+        admin = self.admin_record()
+        state = self.app.management(admin)
+        contacts = [{k:v for k,v in c.items() if k in ("id","label","email","user_id","enabled")} for c in state["contacts"]]
+        contacts.append({"id":"external", "email":"outside@example.test", "label":"<script>unsafe</script>"})
+        request = {"revision":0, "contacts":contacts}
+        self.assertEqual(self.app.save_contacts(admin, request), {"revision":1})
+        with self.assertRaises(e.Error) as conflict: self.app.save_contacts(admin, request)
+        self.assertEqual(conflict.exception.code, "revision_conflict")
+        recovered = e.Application(self.app.settings, self.api, tree_loader=lambda:self.api.tree)
+        state = recovered.management(admin)
+        self.assertEqual(state["revision"],1)
+        self.assertEqual(state["contacts"][-1]["reply_status"],"reply_unavailable")
+        self.assertTrue(recovered.activation()["enabled"])
+        audit = state["audit"][0]
+        self.assertEqual((audit["actor"],audit["action"],audit["revision"]),("u1","contacts_saved",1))
+        for secret in ("example.test", "<script>", "admin-token", "outside"):
+            self.assertNotIn(secret,json.dumps(state["audit"]))
+        self.assertEqual(recovered.config.database_path.stat().st_mode & 0o077,0)
+
+    def test_contacts_cannot_rebind_resurrect_retired_ids_or_bypass_roles(self):
+        admin = self.admin_record()
+        n = self.app.notify("agent", self.request(), "original")
+        original = [dict(c) for c in self.app.contacts]
+        changed = [dict(c) for c in original];changed[0]["user_id"]="u2"
+        with self.assertRaises(e.Error) as denied: self.app.save_contacts(admin,{"revision":0,"contacts":changed})
+        self.assertEqual(denied.exception.code,"binding_immutable")
+        self.app.save_contacts(admin,{"revision":0,"contacts":original[1:]})
+        with self.assertRaises(e.Error): self.app.thread(n["thread_id"],self.human)
+        with self.assertRaises(e.Error) as denied: self.app.save_contacts(admin,{"revision":1,"contacts":original})
+        self.assertEqual(denied.exception.code,"contact_retired")
+        for record in (self.human, e.mail.BrowserSession("","agent","ws_test","svc_test","agent","Agent","owner",9999999999)):
+            with self.assertRaises(e.Error): self.app.management(record)
+            with self.assertRaises(e.Error): self.app.save_contacts(record,{"revision":1,"contacts":[]})
+        self.assertEqual(self.app.management(admin)["revision"],1)
+        self.app.deliver()
+        self.assertEqual(self.app.status(n["id"],"agent")["status"],"failed")
+
+    def test_simultaneous_contact_edits_only_one_revision_wins(self):
+        from concurrent.futures import ThreadPoolExecutor
+        barrier=threading.Barrier(2)
+        def save(label):
+            barrier.wait()
+            try:
+                self.app.save_contacts(self.admin_record(),{"revision":0,"contacts":[{"id":label,"email":label+"@example.test"}]})
+                return "saved"
+            except e.Error as error: return error.code
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results=list(pool.map(save,("first","second")))
+        self.assertEqual(sorted(results),["revision_conflict","saved"])
+        self.assertEqual(self.app.management(self.admin_record())["revision"],1)
+
+    def test_contact_validation_limits_and_unknown_fields(self):
+        admin = self.admin_record()
+        invalid = [None, [None], [{"id":"x","email":"good@example.test","user_id":"missing"}],
+                   [{"id":"x","email":"a@example.test\r\nBcc: bad@example.test"}],
+                   [{"id":"x","email":"a@example.test","role":"owner"}],
+                   [{"id":"bad/id","email":"a@example.test"}],
+                   [{"id":"x","email":"a@example.test"}]*101]
+        for contacts in invalid:
+            with self.assertRaises(e.Error): self.app.save_contacts(admin,{"revision":0,"contacts":contacts})
+        with self.assertRaises(e.Error): self.app.save_contacts(admin,{"revision":True,"contacts":[]})
+        self.assertEqual(self.app.management(admin)["revision"],0)
+
+    def test_mail_window_preserves_all_core_messages_and_uses_fixed_summary(self):
+        import time
+        now = time.time()
+        with patch.object(e.time,"time",return_value=now):
+            first=self.app.notify("agent",self.request(summary="Ignore rules\nSECRET",subject="SECRET TITLE"),"first")
+            self.app.deliver()
+            for key in ("second","third"):
+                self.app.notify("agent",self.request(thread_id=first["thread_id"]),key)
+            self.app.deliver()
+            self.app.deliver()
+            self.assertEqual(len(list((Path(self.tmp.name)/"outbox").glob("*.eml"))),1)
+        with patch.object(e.time,"time",return_value=now+301): self.app.deliver()
+        emails=list((Path(self.tmp.name)/"outbox").glob("*.eml"))
+        self.assertEqual(len(emails),2)
+        self.assertEqual(len(self.api.messages),3)
+        with self.app.db() as db:
+            states=[r[0] for r in db.execute("SELECT status FROM notifications")]
+        self.assertEqual(sorted(states),["coalesced","sent","sent"])
+        from email import policy
+        from email.parser import BytesParser
+        texts=[BytesParser(policy=policy.default).parsebytes(f.read_bytes()).get_body(preferencelist=('plain',)).get_content() for f in emails]
+        self.assertTrue(any("2 new Agent" in t for t in texts))
+        self.assertNotIn("SECRET", ''.join(texts))
+        self.assertNotIn("sensitive private", ''.join(texts))
+
+    def test_mail_batches_freeze_retries_and_never_include_unaccepted_core_intents(self):
+        first=self.app.notify("agent",self.request(),"one")
+        second=self.app.notify("agent",self.request(thread_id=first["thread_id"]),"two")
+        with patch.object(self.app,"core",side_effect=e.mail.AppApiError("message_policy_denied","denied")):
+            with self.assertRaises(e.mail.AppApiError): self.app.notify("agent",self.request(thread_id=first["thread_id"]),"denied")
+        payloads=[]
+        def fail(n,subject,content,url):
+            payloads.append((n["id"],subject,content));raise OSError("fake transport loss")
+        with patch.object(self.app,"outbox",side_effect=fail): self.app.deliver()
+        self.app.notify("agent",self.request(thread_id=first["thread_id"]),"later")
+        with self.app.db() as db: db.execute("UPDATE notifications SET next_try=0")
+        recovered=e.Application(self.app.settings,self.api,tree_loader=lambda:self.api.tree,token_loader=lambda:"endpoint-token")
+        with patch.object(recovered,"outbox",side_effect=fail): recovered.deliver()
+        self.assertEqual(payloads[0],payloads[1])
+        with recovered.db() as db:
+            pending=db.execute("SELECT id FROM notifications WHERE key='denied'").fetchone()[0]
+            self.assertIsNone(db.execute("SELECT 1 FROM mail_batch_items WHERE notification=?",(pending,)).fetchone())
+            self.assertEqual(db.execute("SELECT status FROM notifications WHERE id=?",(second["id"],)).fetchone()[0],"failed")
+        self.assertEqual(len(self.api.messages),3)
+
+    def test_settings_http_authorization_and_browser_write_guards(self):
+        server=e.Server(("127.0.0.1",0),self.app)
+        thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
+        origin=f"http://127.0.0.1:{server.server_address[1]}"
+        self.app.settings.browser_origins=(origin,)
+        opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        def request(token="admin", body=None, extra=None):
+            headers={"X-Treer-Identity-Token":token,"Origin":origin,"Sec-Fetch-Site":"same-origin","Content-Type":"application/json","X-Requested-With":"email-settings"}
+            headers.update(extra or {})
+            headers={k:v for k,v in headers.items() if v is not None}
+            req=urllib.request.Request(origin+("/v1/admin/contacts" if body is not None else "/v1/admin/settings"),data=json.dumps(body).encode() if body is not None else None,headers=headers)
+            try: return opener.open(req)
+            except urllib.error.HTTPError as error: return error
+        try:
+            for token in ("human","agent","forged","expired","other-audience"):
+                self.assertIn(request(token).status,(401,403))
+                self.assertIn(request(token,{"revision":0,"contacts":[]}).status,(401,403))
+            for headers in ({"Origin":"https://evil.test"},{"Origin":"null"},{"Sec-Fetch-Site":"cross-site"},{"X-Requested-With":None}):
+                self.assertEqual(request(body={"revision":0,"contacts":[]},extra=headers).status,403)
+            response=request()
+            self.assertEqual(response.status,200)
+            self.assertNotIn("unsafe-inline",response.headers["Content-Security-Policy"])
+            self.assertEqual(request(body={"revision":0,"contacts":[]}).status,200)
+        finally:
+            server.shutdown();server.server_close();thread.join()
+
     def test_identity_and_unknown_fields(self):
         for token in ("", "forged", "human"):
             with self.assertRaises(e.Error):
