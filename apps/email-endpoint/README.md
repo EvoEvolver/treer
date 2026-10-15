@@ -121,7 +121,9 @@ Audit retains latest 1,000 administration events, shows 100, and contains only
 stable actor, fixed action, revision and UTC timestamp. It excludes email
 addresses, labels, tokens and message contents. No tamper-evident audit guarantee.
 Transport credentials remain in Core: the UI has no credential read/write fields
-and cannot change transport mode, allowlist or rate limits. Consequently there
+and cannot change transport mode, allowlist or rate limits. An empty operator
+allowlist displays a warning: configure one before enabling real delivery; the
+fixed doomspec@outlook.com real-recipient guard still applies. Consequently there
 is no new local-secret storage/validation or SSRF destination introduced here.
 
 ## Deploy a fixed version (P0 production layout)
@@ -355,7 +357,10 @@ prefix, header stripping, XSS, contacts and admin placement activation. Screensh
 default to `/tmp/email-endpoint-browser`; override `EMAIL_ENDPOINT_SCREENSHOTS`.
 CLI tests use a fake `treer` executable and local HTTP proxy, no real machines.
 
-One process owns each instance database; no multi-process/HA guarantee. Transport config is
+One process owns each instance database; no multi-process/HA guarantee. Sends
+serialize with contact edits and the worker; slow Core/directory calls can delay
+other requests while the in-process lock is held. Contact audit records revision
+and action, not per-contact diffs; use matching private SQLite backups for recovery. Transport config is
 operator-managed and requires a coordinated App-only restart; contacts are
 managed live in SQLite with optimistic revisions. There is no guest
 access, public gateway, inbound email, attachment handling, per-contact OAuth

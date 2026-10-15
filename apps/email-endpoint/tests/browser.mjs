@@ -105,6 +105,7 @@ try {
     const frame=page.frameLocator('iframe');
     await frame.getByRole('button',{name:'Settings',exact:true}).click();
     await frame.getByRole('heading',{name:'Contact settings'}).waitFor();
+    await frame.getByRole('note').filter({hasText:'No operator allowlist is configured.'}).waitFor();
     await frame.getByRole('button',{name:'Add contact',exact:true}).click();
     await frame.getByRole('textbox',{name:'Label 3',exact:true}).fill('<script>window.XSS=true</script>');
     await frame.getByRole('textbox',{name:'Email address 3',exact:true}).fill(`new-${width}@example.test`);
