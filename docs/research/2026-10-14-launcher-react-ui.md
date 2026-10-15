@@ -467,6 +467,27 @@ tests use `node:test` + `react-dom/server`). **Dependency gates (security-claude
   Measured numbers will be posted after the first build; the budget gate is a
   test (`build:ui` fails over budget).
 
+**Stage 1 as built (measured).** Sources under `launchers/agent/ui/`; `npm run
+build:ui` writes `public/ui.html` 466 B, `boot.js` 1,041 B, `ui.js` 244,002 B
+(React 19.3.1 + react-dom + scheduler, minified), `ui.css` 57,940 B: **4 files,
+303,449 B total** against the 600,000 B budget. `npm run check:ui` is the
+reproducibility, budget, leaked-path and source-pattern gate; `prepare-bundle.mjs`
+re-runs the byte comparison; the UI tooling scripts are excluded from payloads.
+`ui.html` is served with `style-src 'self'; object-src 'none'; base-uri 'self';
+form-action 'none'` (legacy page unchanged until the switch).
+
+Dependency evidence (react 19.3.1, react-dom 19.3.1, `@types/react` 19.3.0,
+`@types/react-dom` 19.3.0, all pinned exactly, dev dependencies because they are
+bundled into the committed artifact): transitive `scheduler` 0.28.0 and `csstype`
+3.2.3 (types); all MIT; none declares an install/postinstall script (csstype lists
+only maintainer scripts such as `prepublish`, which npm does not run for
+dependencies); installs use `npm ci --ignore-scripts`. `npm audit` reports **one low
+advisory in the existing `dompurify@3.4.14`** (GHSA-p98j-92pf-mc4p and
+GHSA-6688-9rhm-gjv2, both about the `IN_PLACE` option, fixed in 3.4.17). The
+launcher's markdown pipeline calls `sanitize(string, ...)` without `IN_PLACE`, so it is
+not exercised, but the bump needs its own review (outside this change). No advisory
+affects react, react-dom, scheduler or marked.
+
 ## 9. Tests
 
 * Playwright suites `tests/browser*.mjs`, `windows-smoke.mjs`, `hermetic.mjs`
