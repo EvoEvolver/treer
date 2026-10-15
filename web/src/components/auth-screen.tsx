@@ -1,3 +1,4 @@
+import { oauthAuthorizationUrl } from "@/lib/oauth-start"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -15,14 +16,19 @@ export type AuthMode = "login" | "register" | "forgot" | "reset"
 
 export type AuthConfig = { github: boolean; google: boolean; invitation_required: boolean }
 
-export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) => void }) {
+export function AuthScreen({ onAuthenticated, inviteToken, initialMode, joinOrganization = false }: {
+  onAuthenticated: (user: User, mode?: AuthMode) => void
+  inviteToken?: string
+  initialMode?: AuthMode
+  joinOrganization?: boolean
+}) {
   const t = useT()
   const locale = useLocale()
   const parameters = new URLSearchParams(window.location.search)
-  const invite = parameters.get("invite")
+  const invite = inviteToken ?? parameters.get("invite")
   const resetToken = parameters.get("reset")
   const oauthError = parameters.get("oauth_error")
-  const [mode, setMode] = useState<AuthMode>(resetToken ? "reset" : invite ? "register" : "login")
+  const [mode, setMode] = useState<AuthMode>(resetToken ? "reset" : initialMode ?? (invite ? "register" : "login"))
   const [authConfig, setAuthConfig] = useState<AuthConfig>({ github: false, google: false, invitation_required: true })
   const [email, setEmail] = useState("")
   const [preferredName, setPreferredName] = useState("")
@@ -68,15 +74,17 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
       }
       const registering = mode === "register"
       const path = registering ? "/api/auth/register" : "/api/auth/login"
-      const body = registering ? { invite, email, preferred_name: preferredName, password } : { email, password }
+      const body = registering ? { invite, email, preferred_name: preferredName, password, ...(joinOrganization ? { join_organization: true } : {}) } : { email, password }
       const user = await api<User>(path, { method: "POST", body: JSON.stringify(body) })
-      const returnTo = authorizationReturnUrl()
+      // The invitation entry owns the post-auth confirmation and organization
+      // switch. Finish it before following any authorization return URL.
+      const returnTo = inviteToken === undefined ? authorizationReturnUrl() : null
       if (returnTo) {
         window.location.assign(returnTo)
         return
       }
-      window.history.replaceState(null, "", window.location.pathname)
-      onAuthenticated(user)
+      if (inviteToken === undefined) window.history.replaceState(null, "", window.location.pathname)
+      onAuthenticated(user, mode)
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : t("auth.err.failed"))
     } finally {
@@ -84,10 +92,20 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
     }
   }
 
-  function oauthUrl(provider: "github" | "google") {
-    const url = new URL(proxyUrl(`/api/auth/oauth/${provider}/start`))
-    if (invite) url.searchParams.set("invite", invite)
-    return url.toString()
+  async function startOAuth(provider: "github" | "google") {
+    if (submitting) return
+    const path = `/api/auth/oauth/${provider}/start`
+    if (!invite) { window.location.assign(proxyUrl(path)); return }
+    setSubmitting(true)
+    setError("")
+    try {
+      const { authorization_url } = await api<{ authorization_url: string }>(path, {
+        method: "POST", headers: { "X-Treer-Console": "1" },
+        body: JSON.stringify({ invite_token: invite, join_organization: joinOrganization }),
+      })
+      window.location.assign(oauthAuthorizationUrl(provider, authorization_url))
+    } catch { setError(t("auth.err.oauth")) }
+    finally { setSubmitting(false) }
   }
 
   const title = t(`auth.title.${mode}`)
@@ -99,8 +117,8 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
       <h1 className="text-xl font-semibold">{title}</h1>
       <p className="mt-1 text-sm text-muted-foreground">{description}</p>
       {(mode === "login" || mode === "register") && (authConfig.github || authConfig.google) && <div className="mt-6 space-y-2">
-        {authConfig.github && <Button type="button" variant="outline" className="w-full" onClick={() => { window.location.href = oauthUrl("github") }}><Github />{t("auth.github")}</Button>}
-        {authConfig.google && <Button type="button" variant="outline" className="w-full" onClick={() => { window.location.href = oauthUrl("google") }}><Mail />{t("auth.google")}</Button>}
+        {authConfig.github && <Button type="button" variant="outline" className="w-full" disabled={submitting} onClick={() => void startOAuth("github")}><Github />{t("auth.github")}</Button>}
+        {authConfig.google && <Button type="button" variant="outline" className="w-full" disabled={submitting} onClick={() => void startOAuth("google")}><Mail />{t("auth.google")}</Button>}
         <div className="flex items-center gap-3 py-2 text-[11px] text-muted-foreground"><span className="h-px flex-1 bg-border" /><span>{t("auth.orEmail")}</span><span className="h-px flex-1 bg-border" /></div>
       </div>}
       {mode !== "reset" && <div className={cn("space-y-2", (mode === "login" || mode === "register") && (authConfig.github || authConfig.google) ? "mt-2" : "mt-6")}><Label htmlFor="email">{t("auth.email")}</Label><Input id="email" type="email" autoComplete="email" value={email} maxLength={254} onChange={(event) => setEmail(event.target.value)} required autoFocus /></div>}
@@ -112,7 +130,7 @@ export function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: User) 
       {notice && <div className="mt-2 text-xs leading-5 text-emerald-700">{notice}</div>}
       <div className="mt-4 flex items-center justify-between gap-3">
         {(mode === "register" || mode === "forgot" || mode === "reset") && <Button type="button" variant="ghost" className="px-0 text-primary" onClick={() => showSignIn()}>{t("auth.backToSignIn")}</Button>}
-        {mode === "login" && !authConfig.invitation_required && <Button type="button" variant="ghost" className="px-0 text-primary" onClick={() => { setMode("register"); setError(""); setNotice("") }}>{t("auth.createAccount")}</Button>}
+        {mode === "login" && (!authConfig.invitation_required || Boolean(invite)) && <Button type="button" variant="ghost" className="px-0 text-primary" onClick={() => { setMode("register"); setError(""); setNotice("") }}>{t("auth.createAccount")}</Button>}
         <Button type="submit" className="ml-auto" disabled={submitting}>{submitting ? t("auth.wait") : mode === "register" ? t("auth.createAccount") : mode === "forgot" ? t("auth.sendReset") : mode === "reset" ? t("auth.updatePassword") : t("auth.signIn")}</Button>
       </div>
     </form>

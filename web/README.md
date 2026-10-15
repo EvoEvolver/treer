@@ -335,3 +335,46 @@ is active, and stay disabled for offline machines. On phones, the menu also
 contains full-screen opening and Back to workloads. App settings retain their
 existing lifecycle actions and authorization. No menu grants additional access;
 the Core API still authorizes mutations.
+
+### Organization invitation entry
+
+Opening `?invite=…` shows an organization preview even when the user is already
+signed in. Join is an explicit action: existing users confirm after signing in;
+new users confirm before opening the registration/OAuth form. Only that confirmed
+organization flow sends `join_organization: true`. Core creates the account,
+consumes the invitation and adds a member atomically; the console never supplies
+a role or grants membership itself. Personal account-registration invitations
+remain distinct and cannot be accepted as organization invitations.
+
+The preview and accept JSON endpoints are `/api/invitations/preview` and
+`/api/invitations/accept`. Preview must advertise
+`organization.invitation-accept.v1`; missing support fails closed with an upgrade
+notice, rather than falling back to the old registration behavior. Accept uses
+the human session cookie and Core's CSRF checks, not an Agent/App service token.
+All Proxy replicas must be upgraded before enabling this console flow; a mixed
+fleet of old and new Proxies does not provide the new consent guarantees.
+
+The console removes the invite query parameter with history replacement and
+keeps pending intent in component memory, never localStorage/sessionStorage.
+Invitation OAuth starts with a JSON POST (`invite_token` and the consent
+flag) and `X-Treer-Console: 1`, never a URL token. Core returns an authorization
+URL, which the console validates as HTTPS at the selected GitHub/Google origin
+before navigation. Credential URLs, fragments and invitation query parameters
+are rejected. Core retains the hash and consent in its browser/state-bound
+OAuth record. On return, an existing user gets a session-bound pending invitation
+through `GET /api/invitations/pending`; Join sends `{pending_id}` to accept, and
+Cancel clears it with `DELETE /api/invitations/pending`. An absent pending entry
+is 204. The console probes once per authenticated account; normal workspace
+changes do not poll this endpoint. Core controls the short TTL and single-use
+behavior. New OAuth accounts join atomically during account creation.
+
+Worker CSP is unchanged (`form-action 'self'`). Tests intercept or cancel OAuth
+navigation before network access and use synthetic API responses; they do not
+perform real IdP login or claim complete external OAuth compatibility.
+Preview and accept send tokens in JSON bodies and display only localized errors,
+not raw server responses. Organization names render as text. Unknown/used tokens
+share an unavailable message; the UI does not claim expiry or revocation states
+that the server does not implement. Reloading a pending in-memory confirmation
+requires reopening the invitation link. Invitation acceptance, invalid links,
+cancellation, legacy-server rejection, personal invitations, keyboard access and
+390px layouts are covered by hermetic Playwright mocks with synthetic tokens.

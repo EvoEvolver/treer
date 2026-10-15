@@ -36,6 +36,7 @@ export async function mockTreeMapApi(page: Page) {
   await page.routeWebSocket(/\/terminal(?:\?.*)?$/, () => {})
   await page.route('**/api/**', (route) => {
     const path = new URL(route.request().url()).pathname
+    if (path === "/api/invitations/pending") return route.fulfill({ status: 204 })
     let body: unknown = {}
     if (path.endsWith('/auth/me')) body = user
     else if (path.endsWith('/organizations')) body = { organizations: [{ organization_id: 'map-org', name: 'Studio', role: 'owner' }] }

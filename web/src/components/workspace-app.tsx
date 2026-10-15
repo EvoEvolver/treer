@@ -7,6 +7,7 @@ import { WorkspaceOverview } from "@/components/workspace-overview"
 import { LayoutDashboard, PanelLeft } from "lucide-react"
 import { AppSettingsView,AppsView } from "@/components/apps-view"
 import { AuditView } from "@/components/audit-view"
+import { InvitationEntry, readPendingInvitation, type InvitationIntent } from "@/components/invitation-entry"
 import { AuthScreen } from "@/components/auth-screen"
 import { IconButton } from "@/components/control-plane-ui"
 import { ErrorToast } from "@/components/error-toast"
@@ -56,8 +57,14 @@ export function WorkspaceApp() {
 
 function WorkspaceAppContent() {
   const { route, location, routeSelectionRef, routingRef, replaceWorkspaceRoute } = useWorkspaceRoute()
+  const [pendingInvite, setPendingInvite] = useState<InvitationIntent | null>(() => {
+    const token = new URLSearchParams(window.location.search).get("invite")
+    return token === null ? null : { token }
+  })
+  const [pendingInviteCheckedFor, setPendingInviteCheckedFor] = useState<string | null>(null)
   const preview = firstRunTourMode() === "preview"
   const [user, setUser] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
+  const pendingInviteChecked = preview || pendingInvite !== null || Boolean(user && pendingInviteCheckedFor === user.user_id)
   const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
   const [organizationId, setOrganizationId] = useState<string | null>(preview ? PREVIEW_ORG.organization_id : null)
   const organizationIdRef = useRef<string | null>(preview ? PREVIEW_ORG.organization_id : null)
@@ -110,7 +117,30 @@ function WorkspaceAppContent() {
   const createAgentOpenRef = useRef(false)
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
 
+  useEffect(() => {
+    const parameters = new URLSearchParams(location.search)
+    if (!parameters.has("invite")) return
+    setPendingInvite({ token: parameters.get("invite") ?? "" })
+    parameters.delete("invite")
+    routingRef.current.navigate({ pathname: location.pathname, search: parameters.toString(), hash: location.hash }, { replace: true })
+  }, [location.search, location.pathname, location.hash, routingRef])
+
   const showError = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : t("app.something_went_wrong")), [])
+
+  // Probe once per authenticated account, not on workspace navigation or polls.
+  // Existing servers return 404; the normal no-invitation console still works.
+  useEffect(() => {
+    if (!user) { setPendingInviteCheckedFor(null); return }
+    if (preview || pendingInvite !== null) { setPendingInviteCheckedFor(user.user_id); return }
+    let disposed = false
+    setPendingInviteCheckedFor(null)
+    readPendingInvitation().then((intent) => { if (!disposed && intent) setPendingInvite(intent) })
+      .catch((reason) => { if (!disposed) showError(reason) })
+      .finally(() => { if (!disposed) setPendingInviteCheckedFor(user.user_id) })
+    return () => { disposed = true }
+    // Pending intent is deliberately not a dependency: dismissing a token must
+    // not immediately retrieve it again. A new account gets its own probe.
+  }, [user?.user_id, preview, showError])
 
   useEffect(() => {
     if (preview) return
@@ -121,13 +151,14 @@ function WorkspaceAppContent() {
   }, [preview, showError])
 
   useEffect(() => {
-    if (!user) return
+    if (!user || pendingInvite !== null || !pendingInviteChecked) return
     const returnTo = authorizationReturnUrl()
     if (returnTo) window.location.assign(returnTo)
-  }, [user])
+  }, [user, pendingInvite, pendingInviteChecked])
 
-  const loadOrganizations = useCallback(async (preferred?: string) => {
+  const loadOrganizations = useCallback(async (preferred?: string, requirePreferred = false) => {
     const data = await api<{ organizations: Organization[] }>("/api/organizations")
+    if (requirePreferred && !data.organizations.some((item) => item.organization_id === preferred)) throw new Error(t("invite.switch_failed"))
     setOrganizations(data.organizations)
     const routeSelection = routeSelectionRef.current
     if (routingRef.current.hash === "#policy-provider" && routeSelection.organizationId && !data.organizations.some((item) => item.organization_id === routeSelection.organizationId)) {
@@ -145,7 +176,7 @@ function WorkspaceAppContent() {
     replaceWorkspaceRoute(selected, routeSelection.organizationId === selected ? routeSelection.workspaceId : null)
   }, [replaceWorkspaceRoute])
 
-  useEffect(() => { if (user && !preview) loadOrganizations().catch(showError) }, [user, preview, loadOrganizations, showError])
+  useEffect(() => { if (user && !preview && pendingInvite === null && pendingInviteChecked) loadOrganizations().catch(showError) }, [user, preview, pendingInvite, pendingInviteChecked, loadOrganizations, showError])
 
   const syncWorkspaces = useCallback(async () => {
     if (preview) return
@@ -926,7 +957,15 @@ function WorkspaceAppContent() {
     finally { window.location.href = "/" }
   }
 
-  if (user === undefined) return <div className="grid min-h-dvh place-items-center bg-sidebar text-sm text-muted-foreground">{t("app.loading_treer")}</div>
+  if (user === undefined || (user && pendingInvite === null && !pendingInviteChecked)) return <div className="grid min-h-dvh place-items-center bg-sidebar text-sm text-muted-foreground">{t("app.loading_treer")}</div>
+  if (pendingInvite !== null) return <InvitationEntry key={"token" in pendingInvite ? pendingInvite.token : pendingInvite.pending_id} intent={pendingInvite} user={user} onAuthenticated={setUser} onDismiss={() => setPendingInvite(null)} onJoined={async (id) => {
+    // Set route selection before releasing the gate so initial discovery cannot
+    // select an unrelated first organization after accepting the invitation.
+    routeSelectionRef.current = { organizationId: id, workspaceId: null }
+    replaceWorkspaceRoute(id, null)
+    await loadOrganizations(id, true)
+    setPendingInvite(null)
+  }} />
   if (!user) return <AuthScreen onAuthenticated={setUser} />
 
   return <TooltipProvider delayDuration={350}>

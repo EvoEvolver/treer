@@ -235,6 +235,7 @@ async function mockApi(page: Page) {
       }
     }
 
+    if (path === "/invitations/pending") return route.fulfill({ status: 204 })
     if (path === "/auth/me") return ok(route, currentUser)
     if (path === "/auth/profile" && route.request().method() === "PATCH") {
       const body = route.request().postDataJSON() as { email?: string; preferred_name?: string }
