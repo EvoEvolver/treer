@@ -2,6 +2,7 @@
 """Email notifications over canonical Core Messages; only channel metadata is local."""
 
 from __future__ import annotations
+import argparse
 import hashlib
 import html
 import json
@@ -28,6 +29,9 @@ ROOT = Path(__file__).resolve().parent
 mail.SESSION_COOKIE = "treer_email_endpoint_session"
 mail.API_TIMEOUT_SECONDS = 20
 Error = mail.MailError
+# Capture loaded source provenance, never a later mutable checkout.
+SOURCE_HASH = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+MAIL_HASH = hashlib.sha256(Path(mail.__file__).read_bytes()).hexdigest()
 
 
 @dataclass
@@ -63,6 +67,14 @@ def text(value, name, size):
 class Application(mail.MailApplication):
     def __init__(self, settings, api=None, tree_loader=None, token_loader=None):
         self.settings = settings
+        # A process serves one frontend snapshot even if an operator edits a checkout.
+        self.assets = {name: (ROOT / name).read_bytes() for name in
+                       ("web/index.html", "web/app.js", "web/style.css", "AGENT.md")}
+        self.asset_hash = hashlib.sha256(b"".join(name.encode() + b"\0" + self.assets[name]
+                                                for name in sorted(self.assets))).hexdigest()
+        self.version = os.environ.get("APP_DEPLOY_VERSION")
+        if self.version is not None and not re.fullmatch(r"[0-9a-f]{40}", self.version):
+            raise ValueError("Invalid deployment version")
         self.tree_loader = tree_loader or self.load_tree
         self.token_loader = token_loader or self.service_token
         self.contacts = self.validate_contacts(settings)
@@ -84,6 +96,17 @@ class Application(mail.MailApplication):
             CREATE TABLE IF NOT EXISTS thread_messages(seq INTEGER PRIMARY KEY AUTOINCREMENT, thread TEXT NOT NULL, message TEXT UNIQUE NOT NULL);
             CREATE TABLE IF NOT EXISTS replies(principal TEXT NOT NULL, key TEXT NOT NULL, fingerprint TEXT NOT NULL, thread TEXT NOT NULL, parent TEXT, message TEXT, wake TEXT, PRIMARY KEY(principal,key));
             """)
+
+    def deployment_health(self):
+        try:
+            with self.db() as db:
+                database = db.execute("SELECT count(*) FROM endpoint_state").fetchone()[0] > 0
+        except sqlite3.Error:
+            database = False
+        return {"version": self.version, "app_id": self.settings.runtime_id,
+                "ready": database, "database_ready": database, "api_version": 2,
+                "source_sha256": SOURCE_HASH, "mail_sha256": MAIL_HASH,
+                "assets_sha256": self.asset_hash}
 
     @staticmethod
     def validate_contacts(settings):
@@ -767,8 +790,7 @@ class Handler(mail.MailHandler):
         if path == "/":
             prefix = "../../" if self.path.startswith("/t/") else "./"
             content = (
-                (ROOT / "web/index.html")
-                .read_text()
+                self.server.application.assets["web/index.html"].decode()
                 .replace("../../app.js", prefix + "app.js")
                 .replace(
                     '<link id="css" rel="stylesheet">',
@@ -779,7 +801,10 @@ class Handler(mail.MailHandler):
                 200, "text/html; charset=utf-8", content.encode(), head=head, vary=vary
             )
         else:
-            super()._static(path, head=head, vary=vary)
+            types = {"/app.js": "text/javascript; charset=utf-8", "/style.css": "text/css; charset=utf-8"}
+            if path not in types:
+                raise Error(404, "Route not found", "route_not_found")
+            self._bytes(200, types[path], self.server.application.assets["web" + path], head=head, vary=vary)
 
     def _dispatch(self, method):
         app = self.server.application
@@ -861,6 +886,9 @@ class Handler(mail.MailHandler):
                 "/api/auth/logout",
             ):
                 super()._dispatch(method)
+            elif path == "/deployment-health" and method in ("GET", "HEAD"):
+                result = app.deployment_health()
+                self._json(200 if result["ready"] else 503, result, head=method == "HEAD")
             elif path == "/health" and method in ("GET", "HEAD"):
                 self._json(
                     200,
@@ -881,7 +909,7 @@ class Handler(mail.MailHandler):
                     self._bytes(
                         200,
                         "text/markdown; charset=utf-8",
-                        (ROOT / "AGENT.md").read_bytes(),
+                        app.assets["AGENT.md"],
                         head=method == "HEAD",
                         vary=True,
                     )
@@ -938,13 +966,13 @@ class Server(ThreadingHTTPServer):
         super().__init__(address, Handler)
 
 
-def load_settings():
-    path = Path(os.environ["EMAIL_ENDPOINT_CONFIG"])
+def load_settings(config_path=None, state_dir=None):
+    path = Path(config_path or os.environ["EMAIL_ENDPOINT_CONFIG"])
     if path.stat().st_mode & 0o077:
         raise ValueError("EMAIL_ENDPOINT_CONFIG must have permissions 600")
     value = json.loads(path.read_text())
     state = Path(
-        os.environ.get(
+        state_dir or os.environ.get(
             "EMAIL_ENDPOINT_STATE_DIR",
             value.get("state_dir", ".treer/apps/email-endpoint"),
         )
@@ -971,7 +999,7 @@ def load_settings():
         mail._normalized_url(value["public_url"], "public URL"),
         mail._normalized_url(value["proxy_public_url"], "Proxy URL"),
         ROOT / "web",
-        state / "email-endpoint.sqlite3",
+        Path(os.environ.get("EMAIL_ENDPOINT_DB", state / "email-endpoint.sqlite3")),
     )
     settings = Settings(
         c,
@@ -1005,8 +1033,12 @@ def load_settings():
 
 
 def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", help="Private configuration file (no credentials in argv)")
+    parser.add_argument("--state-dir", help="Private state/outbox directory")
+    args = parser.parse_args()
     try:
-        settings = load_settings()
+        settings = load_settings(args.config, args.state_dir)
         app = Application(settings)
         server = Server((settings.config.listen_host, settings.config.listen_port), app)
         threading.Thread(target=app.worker, daemon=True).start()

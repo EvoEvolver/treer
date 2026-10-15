@@ -78,6 +78,56 @@ Only configuration/state paths appear in deployment argv. Config/contact changes
 are read at process startup; leader/release-eng schedules any App-only restart.
 Do not restart anything during development or migrate the running deployment.
 
+## Deploy a fixed version (P0 production layout)
+
+Do not run production from the repository checkout. An old Python process can
+otherwise read new HTML/JavaScript from disk, then reject the new page's API
+requests with `Route not found`. The process now snapshots HTML, JavaScript,
+CSS and its Agent manual at startup. Existing processes must be replaced by an
+authorized App-only deployment to gain this protection; changing a checkout does
+not patch already-loaded Python code.
+
+Use `scripts/app-deploy` with a full frozen commit, an absolute stable Python
+shim, and a private deployment root. Export component **`apps`**, with entry
+`email-endpoint/email_endpoint.py`, so the maintained sibling `mail/mail.py`
+comes from the same release. Do not export only `apps/email-endpoint`: it omits
+the shared identity/session implementation. Only configuration **paths** belong
+in startup arguments, for example `--config /private/endpoint.json`; the existing
+`EMAIL_ENDPOINT_CONFIG` is still supported. Never put configuration contents or
+credentials in argv. `--state-dir` remains available for ordinary installations.
+
+For app-deploy, initialize `--db-env EMAIL_ENDPOINT_DB`: its injected path
+`ROOT/state/app.sqlite3` takes precedence over the ordinary state-directory DB.
+Outbox and pre-v2 migration backups live beside that DB, under the same private
+state directory. `/deployment-health` (GET/HEAD, no-store) reports the startup
+`APP_DEPLOY_VERSION`, stable App runtime ID, database readiness, API version 2,
+and SHA-256 hashes of loaded source/shared mail code and the frontend snapshot.
+It returns 503 on database failure. No tokens, contacts, paths or message bodies
+are returned. A source checkout has `version: null`; it cannot pass a release
+health check expecting an exact commit. `/health` remains the compatibility
+liveness endpoint, not release acceptance.
+
+First adoption is a coordinated **release operation**, not a development
+restart. The old checkout process has no versioned bootstrap/readiness contract,
+so do not claim `app-deploy deploy` can automatically roll back that first
+adoption. The releaser must record the old startup command, back up the entire
+private configuration/state/outbox, stage and test the new release, stop only
+this App, copy the stopped SQLite DB to `ROOT/state/app.sqlite3` and its outbox to
+`ROOT/state/outbox`, initialize/bootstrap the release pointer, and update the
+existing App startup to the `init` result. Keep its App/service ID and workspace
+access. Start and verify both local and routed `/deployment-health`, then the
+human root overview and thread/reply flow. If adoption fails, stop only this App
+and restore the old startup, code and full pre-adoption state/config. Retain both
+copies until acceptance. No Controller/Host/Agent restart is needed.
+
+Subsequent upgrades use `stage` then `deploy` with local and routed
+`/deployment-health`; the existing version provides app-deploy's rollback
+baseline. The tool backs up the managed SQLite file, **not configuration or
+outbox**, so snapshot those separately before any change that affects them.
+After v1-to-v2 migration, sending defaults to disabled until the owner confirms
+the current folder. Never silently enable it during deployment. Tests use
+outbox only; they do not send to any real recipient.
+
 ## Identity and OAuth limitations
 
 All human access uses Treer identity: per-request forwarded
@@ -221,7 +271,9 @@ npm run test:browser
 Browser tests also accept `EMAIL_ENDPOINT_PLAYWRIGHT_MODULE` pointing to an
 already-installed Playwright module. Fixtures clear inherited Treer/harness/App
 identity and proxy settings, use ephemeral signing keys, fake OAuth/PKCE and Core,
-local HTTP boundaries and outbox only. They cover desktop/390px, dark/light,
+local HTTP boundaries and outbox only. They cover startup frontend snapshots,
+release readiness and SQLite failure, v1 backup/restoration and disabled activation,
+root-overview-to-thread-to-reply navigation through both gateway paths, and desktop/390px, dark/light,
 OAuth login/reply, per-request signed identity through both ingress and embedded
 prefix, header stripping, XSS, contacts and admin placement activation. Screenshots
 default to `/tmp/email-endpoint-browser`; override `EMAIL_ENDPOINT_SCREENSHOTS`.

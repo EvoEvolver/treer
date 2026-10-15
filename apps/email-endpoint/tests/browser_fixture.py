@@ -135,8 +135,6 @@ class Gateway(BaseHTTPRequestHandler):
             content = (
                 '<!doctype html><iframe title="Email endpoint" style="width:100%;height:100vh;border:0" src="'
                 + prefix
-                + "/t/"
-                + n["thread_id"]
                 + '/"></iframe>'
             ).encode()
             self.send_response(200)
