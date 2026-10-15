@@ -70,6 +70,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       const delay = process.argv.includes("--clear-ack-delay-ms") ? Number(arg("--clear-ack-delay-ms")) : 0;
       if (delay) await new Promise(done => setTimeout(done, delay));
     } else if (hold && process.argv.includes("--real-goal-wire")) message("assistant", [{ type: "text", text: "[Request interrupted by user]" }]);
+    if (args !== "clear" && process.argv.includes("--goal-set-ack-delay-ms")) await new Promise(done => setTimeout(done, Number(arg("--goal-set-ack-delay-ms"))));
     const output = args === "clear" ? process.argv.includes("--clear-no-goal") ? "No goal set" : process.env.FAKE_CLAUDE_OLD_GOAL ? "Goal cleared: old condition" : "Goal cleared" : args ? `Goal set: ${args}` : "No goal set. Usage: `/goal <condition>`";
     const uuid = `goal-${randomUUID()}`;
     persist({ type: "system", subtype: "local_command", uuid, content: `<local-command-stdout>${output}</local-command-stdout>`, commandRun: { command: "goal", args } });
