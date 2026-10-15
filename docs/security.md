@@ -49,6 +49,36 @@ Host is used for adversarial validation.
 
 ## Supported Claims
 
+Organization invitation acceptance is explicit, human-cookie-only and requires
+the exact Console Origin. Agent, operator Bearer and service-audience credentials
+cannot join an organization through that endpoint. Organization invitations grant
+member only; existing membership roles are unchanged. Membership, invitation
+consumption and acceptance audit commit together. Preview exposes only the named
+organization/kind to someone already holding the invitation. Shared PostgreSQL
+rate budgets limit preview/accept to 60 attempts per TCP peer IP and 600 globally
+per minute. Forwarded IP headers are not trusted; users behind one reverse proxy
+may share a peer budget, and global exhaustion can deny invitation use temporarily.
+
+OAuth invitation/consent state stores only a hash of the invitation, is bound to
+an HttpOnly browser cookie, expires after ten minutes and is consumed once.
+Existing OAuth users do not autojoin; their pending invitation is bound to the
+new human session and must be explicitly accepted. The POST start body keeps
+invitation tokens out of navigation and IdP/callback URLs. Pending IDs/tokens
+must not be put in browser storage. The original invitation table still stores
+bearer tokens in plaintext and has no invitation expiry field: database access
+can expose unused invitations. Hashing the short-lived OAuth/pending records is
+not a claim that all invitation storage is hashed. In invitation-only deployments,
+an org invite without `join_organization:true` is rejected as `invalid_invitation`
+without creating an account or consuming the invite, for both password and new
+OAuth accounts. Open-registration deployments may still create a personal account
+without joining or consuming the org invite; that is open registration, not
+single-use invitation admission. Failure to retain pending state after successful
+OAuth login does not invalidate the session: only a fixed warning/code is logged
+at the handoff, and the user must reopen the invitation to join.
+Mixed old/new Proxy replicas are unsafe for
+the new consent contract; all replicas must upgrade before enabling the new web
+flow. Invitation payloads and tokens are excluded from acceptance/pending audit.
+
 Managed App startup edits require `agent.startup.manage` on the stable runtime
 ID plus ordinary restart permissions. Controller `app.update.v1` preflight
 validates root-relative directories and recognized Treer credentials before the

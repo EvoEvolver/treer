@@ -716,8 +716,24 @@ registers from an administrator invitation receives an organization named
 organization or workspace.
 
 Organization owners and administrators can create member invitations from
-**Members**. Registering from an organization invitation only joins that
-organization; it does not create another personal organization. Users sign in
+**Members**. Preview the named organization and explicitly choose **Join**.
+An existing user signs in, then accepts; signing in alone does not join.
+Registration with explicit `join_organization:true` consumes the invite and joins
+as member without creating another personal organization. Without that flag,
+invitation-only registration rejects the org invite without creating an account;
+open-registration deployments may create a personal organization and leave it unused.
+OAuth carries consent in a POST body and retains an unaccepted invitation for
+ten minutes in the human cookie session; returning users must choose Join.
+Declining clears that pending entry.
+If pending storage fails after OAuth login, login still succeeds; reopen the
+original invitation link to confirm joining. Preview/accept currently share a
+60-per-minute budget by TCP peer IP: reverse-proxy deployments may put all users
+in the same bucket because forwarded IP headers are not trusted.
+Invitations themselves currently have no expiry field; the pending handoff TTL
+is not an invitation expiry. Upgrade all
+Proxy replicas before deploying the new Console invitation flow, which requires
+`organization.invitation-accept.v1`; old endpoints must show unsupported rather
+than imply success. Users sign in
 with email/password or a configured GitHub or Google account, and can update
 their email or preferred name without changing their stable identity or
 organization access. Organization owners and administrators can also rename

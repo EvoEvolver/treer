@@ -3058,7 +3058,10 @@ async fn cors_preflight_allows_the_configured_app_with_credentials() {
                 .uri("/api/auth/login")
                 .header(header::ORIGIN, "https://app.treer.ai")
                 .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
-                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "content-type")
+                .header(
+                    header::ACCESS_CONTROL_REQUEST_HEADERS,
+                    "content-type,x-treer-console",
+                )
                 .body(Body::empty())
                 .expect("preflight request"),
         )
@@ -3076,6 +3079,7 @@ async fn cors_preflight_allows_the_configured_app_with_credentials() {
         Some(&HeaderValue::from_static("true"))
     );
     if let Some(allow_headers) = response.headers().get(header::ACCESS_CONTROL_ALLOW_HEADERS) {
+        assert!(allow_headers.to_str().unwrap().contains("x-treer-console"));
         assert!(
             !allow_headers
                 .to_str()

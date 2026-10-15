@@ -353,15 +353,18 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
     info!(address = %listen, %proxy_public_url, %app_public_url, ingress = ?ingress.public_url(), %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, core_messages_enabled = args.enable_core_messages, "treer proxy listening");
     let shutdown_traffic = traffic.clone();
-    let server = axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            if let Err(error) = shutdown_traffic.flush_pending().await {
-                warn!(%error, "failed to persist traffic usage counters during shutdown");
-            }
-        })
-        .await
-        .context("proxy server failed");
+    let server = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        shutdown_signal().await;
+        if let Err(error) = shutdown_traffic.flush_pending().await {
+            warn!(%error, "failed to persist traffic usage counters during shutdown");
+        }
+    })
+    .await
+    .context("proxy server failed");
     traffic
         .flush_pending()
         .await

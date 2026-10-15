@@ -299,7 +299,11 @@ impl BrowserAccess {
                 Method::PATCH,
                 Method::DELETE,
             ])
-            .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION])
+            .allow_headers([
+                header::CONTENT_TYPE,
+                header::AUTHORIZATION,
+                axum::http::HeaderName::from_static("x-treer-console"),
+            ])
     }
 
     fn validate_if_present(&self, headers: &HeaderMap) -> Result<(), ApiFailure> {

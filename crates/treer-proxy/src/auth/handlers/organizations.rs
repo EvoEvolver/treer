@@ -1,4 +1,101 @@
 use super::*;
+
+pub(crate) async fn preview_invitation(
+    Extension(auth): Extension<AuthStore>,
+    peer: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    Json(request): Json<treer_protocol::InvitationTokenRequest>,
+) -> Result<Response, AuthFailure> {
+    let source = peer
+        .map(|Extension(axum::extract::ConnectInfo(peer))| peer.ip().to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    auth.reserve_invitation_attempt(&source).await?;
+    let preview = auth.preview_invitation(&request.token).await?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)).into_response())
+}
+
+fn invitation_origin(auth: &AuthStore, headers: &HeaderMap) -> Result<(), AuthFailure> {
+    let origin = auth.app_public_url.origin().ascii_serialization();
+    if headers.get_all(header::ORIGIN).iter().count() != 1
+        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(origin.as_str())
+        || headers
+            .get("sec-fetch-site")
+            .is_some_and(|v| v != "same-origin" && v != "same-site")
+    {
+        return Err(AuthFailure::forbidden(
+            "csrf_denied",
+            "console origin required",
+        ));
+    }
+    Ok(())
+}
+
+async fn invitation_session(
+    auth: &AuthStore,
+    headers: &HeaderMap,
+) -> Result<CurrentSession, AuthFailure> {
+    if headers.contains_key(header::AUTHORIZATION) {
+        return Err(AuthFailure::unauthorized(
+            "authentication_required",
+            "browser session cookie required",
+        ));
+    }
+    let cookie = cookie_value(headers, SESSION_COOKIE).ok_or_else(|| {
+        AuthFailure::unauthorized("authentication_required", "browser session cookie required")
+    })?;
+    auth.session(&cookie).await?.ok_or_else(|| {
+        AuthFailure::unauthorized("authentication_required", "browser session cookie required")
+    })
+}
+
+pub(crate) async fn pending_invitation(
+    Extension(auth): Extension<AuthStore>,
+    headers: HeaderMap,
+) -> Result<Response, AuthFailure> {
+    let session = invitation_session(&auth, &headers).await?;
+    let response = match auth.pending_invitation(&session).await? {
+        Some(value) => Json(value).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    };
+    Ok(([(header::CACHE_CONTROL, "no-store")], response).into_response())
+}
+
+pub(crate) async fn discard_pending_invitation(
+    Extension(auth): Extension<AuthStore>,
+    headers: HeaderMap,
+) -> Result<Response, AuthFailure> {
+    invitation_origin(&auth, &headers)?;
+    let session = invitation_session(&auth, &headers).await?;
+    auth.discard_pending_invitation(&session).await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        StatusCode::NO_CONTENT,
+    )
+        .into_response())
+}
+
+pub(crate) async fn accept_invitation(
+    Extension(auth): Extension<AuthStore>,
+    peer: Option<Extension<axum::extract::ConnectInfo<std::net::SocketAddr>>>,
+    headers: HeaderMap,
+    Json(request): Json<treer_protocol::InvitationAcceptRequest>,
+) -> Result<Response, AuthFailure> {
+    // This is deliberately cookie-only, unlike generic native/operator APIs.
+    // Short-lived service-audience tokens cannot authorize joining an org.
+    invitation_origin(&auth, &headers)?;
+    let session = invitation_session(&auth, &headers).await?;
+    let source = peer
+        .map(|Extension(axum::extract::ConnectInfo(peer))| peer.ip().to_string())
+        .unwrap_or_else(|| "unavailable".into());
+    auth.reserve_invitation_attempt(&source).await?;
+    let token = match (request.token, request.pending_id) {
+        (Some(token), None) => token,
+        (None, Some(id)) => auth.consume_pending_invitation(&session, &id).await?,
+        _ => return Err(invalid_invitation()),
+    };
+    let accepted = auth.accept_invitation(&token, &session.user_id).await?;
+    auth.discard_pending_invitation(&session).await?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(accepted)).into_response())
+}
 pub(crate) async fn organizations(
     Extension(auth): Extension<AuthStore>,
     Extension(session): Extension<CurrentSession>,

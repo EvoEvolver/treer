@@ -58,6 +58,7 @@ pub(crate) async fn register(
             &request.preferred_name,
             &request.password,
             client,
+            request.join_organization,
         )
         .await?;
     Ok(session_response(&auth, &session, &headers))

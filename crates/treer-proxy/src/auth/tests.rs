@@ -1199,8 +1199,9 @@ async fn oauth_state_is_provider_scoped_and_single_use() {
         .expect("GitHub OAuth config");
     let mut store = AuthStore::for_test("owner-password").await;
     store.oauth = Arc::new(OAuthConfig::new(Some(github), None, true));
+    let (invite, _) = store.create_personal_invitation().await.unwrap();
     let authorization = store
-        .oauth_authorization_url("github", Some("invite-token"))
+        .oauth_authorization_url("github", Some(&invite), false, "browser-fixture")
         .await
         .expect("authorization URL");
     assert_eq!(authorization.host_str(), Some("github.com"));
@@ -1212,16 +1213,27 @@ async fn oauth_state_is_provider_scoped_and_single_use() {
         .query_pairs()
         .find_map(|(key, value)| (key == "state").then(|| value.into_owned()))
         .expect("OAuth state");
-    assert!(store.consume_oauth_state("google", &state).await.is_err());
+    assert!(store
+        .consume_oauth_state("google", &state, "browser-fixture")
+        .await
+        .is_err());
+    assert!(store
+        .consume_oauth_state("github", &state, "wrong-browser")
+        .await
+        .is_err());
     assert_eq!(
         store
-            .consume_oauth_state("github", &state)
+            .consume_oauth_state("github", &state, "browser-fixture")
             .await
             .expect("consume state")
+            .invite
             .as_deref(),
-        Some("invite-token")
+        Some(invite.as_str())
     );
-    assert!(store.consume_oauth_state("github", &state).await.is_err());
+    assert!(store
+        .consume_oauth_state("github", &state, "browser-fixture")
+        .await
+        .is_err());
 }
 
 #[tokio::test]
@@ -1237,6 +1249,7 @@ async fn oauth_merges_verified_email_and_keeps_stable_provider_identity() {
                 preferred_name: "Provider Name".to_string(),
             },
             None,
+            false,
         )
         .await
         .expect("merge by verified email");
@@ -1261,6 +1274,7 @@ async fn oauth_merges_verified_email_and_keeps_stable_provider_identity() {
                 preferred_name: "Changed Provider Name".to_string(),
             },
             None,
+            false,
         )
         .await
         .expect("login by stable provider identity");
@@ -1288,6 +1302,7 @@ async fn invitation_switch_controls_new_password_and_oauth_accounts() {
                 preferred_name: "New User".to_string(),
             },
             None,
+            false,
         )
         .await
         .is_err());
@@ -1302,6 +1317,7 @@ async fn invitation_switch_controls_new_password_and_oauth_accounts() {
                 preferred_name: "New User".to_string(),
             },
             None,
+            false,
         )
         .await
         .expect("OAuth registration without invite");
@@ -1537,9 +1553,20 @@ async fn workspace_deletion_requires_a_manager_and_revokes_credentials() {
         .await
         .expect("invite member");
     let member = store
-        .register(Some(&invite), "member@example.com", "Member", "password123")
+        .register_with_client(
+            Some(&invite),
+            "member@example.com",
+            "Member",
+            "password123",
+            None,
+            true,
+        )
         .await
         .expect("register member");
+    store
+        .accept_invitation(&invite, &member.user_id)
+        .await
+        .unwrap();
     assert!(
         store
             .delete_workspace("ws_deletable", &member.user_id)
@@ -1773,24 +1800,28 @@ async fn organization_roles_control_members_and_share_workspaces() {
         .await
         .expect("invite alice");
     let alice = store
-        .register(
+        .register_with_client(
             Some(&alice_invite),
             "alice@example.com",
             "Alice",
             "password123",
+            None,
+            true,
         )
         .await
         .expect("register alice");
+    store
+        .accept_invitation(&alice_invite, &alice.user_id)
+        .await
+        .unwrap();
     let alice_organizations = store
         .list_organizations(&alice.user_id)
         .await
         .expect("alice organizations");
     assert_eq!(alice_organizations.len(), 1);
-    assert_eq!(
-        alice_organizations[0].organization_id,
-        organization.organization_id
-    );
-    assert_ne!(alice_organizations[0].name, "Alice Personal");
+    assert!(alice_organizations
+        .iter()
+        .any(|o| o.organization_id == organization.organization_id));
 
     let workspaces = store
         .list_workspaces(&organization.organization_id, &alice.user_id)
@@ -1849,9 +1880,20 @@ async fn organization_roles_control_members_and_share_workspaces() {
         .await
         .expect("admin invite");
     let bob = store
-        .register(Some(&bob_invite), "bob@example.com", "Bob", "password123")
+        .register_with_client(
+            Some(&bob_invite),
+            "bob@example.com",
+            "Bob",
+            "password123",
+            None,
+            true,
+        )
         .await
         .expect("register bob");
+    store
+        .accept_invitation(&bob_invite, &bob.user_id)
+        .await
+        .unwrap();
     store
         .remove_member(&organization.organization_id, &alice.user_id, &bob.user_id)
         .await
@@ -1909,9 +1951,20 @@ async fn workspace_access_is_limited_to_organization_members() {
         .await
         .expect("personal organization invite");
     let alice = store
-        .register(Some(&invite), "alice@example.com", "Alice", "password123")
+        .register_with_client(
+            Some(&invite),
+            "alice@example.com",
+            "Alice",
+            "password123",
+            None,
+            true,
+        )
         .await
         .expect("register alice");
+    store
+        .accept_invitation(&invite, &alice.user_id)
+        .await
+        .unwrap();
     let private = store
         .create_organization(&owner.user_id, "Private")
         .await
@@ -1955,22 +2008,39 @@ async fn restricted_workspaces_support_user_and_group_grants() {
         .await
         .expect("invite alice");
     let alice = store
-        .register(
+        .register_with_client(
             Some(&alice_invite),
             "alice@example.com",
             "Alice",
             "password123",
+            None,
+            true,
         )
         .await
         .expect("register alice");
+    store
+        .accept_invitation(&alice_invite, &alice.user_id)
+        .await
+        .unwrap();
     let (bob_invite, _) = store
         .create_invitation(&organization.organization_id, &owner.user_id)
         .await
         .expect("invite bob");
     let bob = store
-        .register(Some(&bob_invite), "bob@example.com", "Bob", "password123")
+        .register_with_client(
+            Some(&bob_invite),
+            "bob@example.com",
+            "Bob",
+            "password123",
+            None,
+            true,
+        )
         .await
         .expect("register bob");
+    store
+        .accept_invitation(&bob_invite, &bob.user_id)
+        .await
+        .unwrap();
 
     store
         .update_workspace_access_mode("ws_restricted", &owner.user_id, "restricted")

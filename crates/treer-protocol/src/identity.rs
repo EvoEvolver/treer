@@ -1,5 +1,60 @@
 use super::*;
 
+pub const ORGANIZATION_INVITATION_CAPABILITY: &str = "organization.invitation-accept.v1";
+
+#[cfg(test)]
+mod invitation_contract_tests {
+    use super::*;
+
+    #[test]
+    fn invitation_accept_supports_token_or_pending_without_extra_fields() {
+        let token: InvitationAcceptRequest =
+            serde_json::from_value(serde_json::json!({"token":"inv_fixture"})).unwrap();
+        assert_eq!(token.token.as_deref(), Some("inv_fixture"));
+        assert!(token.pending_id.is_none());
+        let pending: InvitationAcceptRequest =
+            serde_json::from_value(serde_json::json!({"pending_id":"fixture"})).unwrap();
+        assert!(pending.token.is_none());
+        assert_eq!(
+            serde_json::to_value(pending).unwrap()["pending_id"],
+            "fixture"
+        );
+        assert!(serde_json::from_value::<InvitationAcceptRequest>(
+            serde_json::json!({"token":"inv_fixture","user_id":"forged"})
+        )
+        .is_err());
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvitationTokenRequest {
+    pub token: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InvitationAcceptRequest {
+    pub token: Option<String>,
+    pub pending_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct InvitationPreview {
+    pub capabilities: Vec<String>,
+    pub status: String,
+    pub kind: Option<String>,
+    pub organization_id: Option<String>,
+    pub organization_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct InvitationAcceptance {
+    pub organization_id: String,
+    pub role: String,
+    pub already_member: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceHuman {
     pub user_id: String,
