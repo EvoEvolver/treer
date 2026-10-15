@@ -27,6 +27,13 @@ name it with `"bot_token_file": "/absolute/path"` in the configuration (used whe
 the bridge's user with mode 0600, hold one ASCII token of at most 512 bytes, and its content
 is never echoed in an error; the token then appears in neither argv nor the environment.
 
+Inbound Telegram text and its source metadata reach Core over stdin
+(`treer message send --stdin-envelope`) so they never appear in argv, where a
+local `ps` could read them. The bridge probes `treer message send --help` once at
+start; a Controller without the flag (older than the #59 release) is served with the
+previous form, the source on stdin and the text as `--body=TEXT`, which does expose
+the text in argv. Upgrade the machine's CLI and Controller, then restart the bridge.
+
 Back up `telegram-state.sqlite3` with its WAL files or SQLite's online backup
 API. One active instance should own a bot token and state database. Ambiguous
 Bot API failures can still produce an external duplicate; Core delivery is not

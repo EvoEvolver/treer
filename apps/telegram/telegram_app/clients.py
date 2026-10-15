@@ -22,6 +22,19 @@ from .common import (
 class TreerCli:
     def __init__(self, executable: str) -> None:
         self.executable = executable
+        self._envelope: bool | None = None
+
+    def has_stdin_envelope(self) -> bool:
+        """Whether this Controller's `message send` accepts --stdin-envelope (body and source over stdin, nothing in
+        argv). Asked once per process; an unanswerable probe means no, and the older argv form is used."""
+        if self._envelope is None:
+            try:
+                completed = subprocess.run([self.executable, "message", "send", "--help"], capture_output=True, text=True,
+                                           timeout=CLI_TIMEOUT_SECONDS, check=False, env=os.environ.copy())
+                self._envelope = completed.returncode == 0 and "--stdin-envelope" in completed.stdout
+            except (OSError, subprocess.TimeoutExpired):
+                return False
+        return self._envelope
 
     def run(self, arguments: list[str], *, stdin: str | None = None) -> dict[str, Any]:
         try:

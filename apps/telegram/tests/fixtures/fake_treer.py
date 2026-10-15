@@ -44,12 +44,25 @@ def main() -> int:
         state.setdefault("calls", [])
         state.setdefault("prompts", [])
         arguments = sys.argv[1:]
+        has_envelope = not os.environ.get("FAKE_TREER_NO_ENVELOPE")  # an older Controller has no --stdin-envelope
+        if arguments == ["message", "send", "--help"]:
+            print("Send a durable Message\n\nOptions:\n      --to <RECIPIENTS>\n      --body <BODY>")
+            if has_envelope:
+                print("      --stdin-envelope  Read one JSON object {body, external_source} from stdin")
+            return 0
+        if "--stdin-envelope" in arguments and not has_envelope:
+            print(json.dumps({"error": {"code": "cli_failed", "message": "unknown option --stdin-envelope"}}), file=sys.stderr)
+            return 2
         problem = cli_contract.violation(arguments)
         if problem:
             print(json.dumps({"error": {"code": "cli_failed", "message": problem}}), file=sys.stderr)
             return 2
         files = options(arguments, "--external-source-file") + options(arguments, "--body-file")
-        stdin = sys.stdin.read() if "-" in files else ""
+        envelope = "--stdin-envelope" in arguments
+        if envelope and (files or option(arguments, "--body") or any(a.startswith("--body=") for a in arguments)):
+            print(json.dumps({"error": {"code": "cli_failed", "message": "--stdin-envelope excludes --body, --body-file and --external-source-file"}}), file=sys.stderr)
+            return 2
+        stdin = sys.stdin.read() if "-" in files or envelope else ""
         if any(value != "-" for value in files):
             print(json.dumps({"error": {"code": "cli_failed", "message": "client-local files cannot be read by the Controller; pipe the contents to stdin and use '-' instead"}}), file=sys.stderr)
             return 1
@@ -65,7 +78,11 @@ def main() -> int:
                 message_id = f"msg_{len(state['messages']) + 1}"
                 source_file = option(arguments, "--external-source-file")
                 external_source = None
-                if source_file:
+                if envelope:
+                    parsed = json.loads(stdin)
+                    external_source = parsed.get("external_source")
+                    stdin = parsed["body"]
+                elif source_file:
                     external_source = json.loads(stdin)
                 message = {
                     "schema_version": 1,

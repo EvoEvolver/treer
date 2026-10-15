@@ -235,6 +235,29 @@ class TelegramBridgeTest(unittest.TestCase):
         restarted.run_inbound_once(timeout=0)
         self.assertEqual(self.bot_state.offsets[-1], 1003)
 
+    def sent_calls(self) -> list[dict[str, Any]]:
+        return [c for c in self.cli_value()["calls"] if c["argv"][:2] == ["message", "send"]]
+
+    def test_inbound_text_and_source_travel_over_stdin_when_the_controller_supports_the_envelope(self) -> None:
+        self.bridge.process_update(self.inbound(3000, 300, "-secret --text"))
+        call = self.sent_calls()[-1]
+        self.assertIn("--stdin-envelope", call["argv"])
+        self.assertNotIn("secret", " ".join(call["argv"]))
+        self.assertFalse(any(a.startswith(("--body", "--external-source")) for a in call["argv"]))
+        message = self.cli_value()["messages"][-1]
+        self.assertEqual(message["body"], "-secret --text")
+        self.assertEqual(message["external_source"]["message_id"], "300")
+
+    def test_older_controller_without_the_envelope_keeps_the_argv_body_form(self) -> None:
+        os.environ["FAKE_TREER_NO_ENVELOPE"] = "1"
+        self.addCleanup(os.environ.pop, "FAKE_TREER_NO_ENVELOPE", None)
+        self.bridge.cli._envelope = None
+        self.bridge.process_update(self.inbound(3001, 301, "-1"))
+        call = self.sent_calls()[-1]
+        self.assertNotIn("--stdin-envelope", call["argv"])
+        self.assertIn("--body=-1", call["argv"])
+        self.assertEqual(self.cli_value()["messages"][-1]["body"], "-1")
+
     def test_text_starting_with_a_hyphen_is_delivered(self) -> None:
         for update_id, text in ((2000, "-1"), (2001, "--help"), (2002, "- item")):
             self.bridge.process_update(self.inbound(update_id, update_id, text))
