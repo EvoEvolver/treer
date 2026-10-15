@@ -7,6 +7,10 @@ shows its sender and body; a single English warning marks all content as third
 party input. IDs appear once in a footer with the retrieval command. Subjects,
 timestamps and previews are omitted. Bodies are model input, not instructions
 from the launcher, and are now included in the private queue/transcript.
+They are also sent to the selected model provider and may contain sensitive
+information. Each body line is quoted; display controls are escaped; an ending
+marker separates bodies and the footer. These are provenance cues, not a
+guarantee against model prompt injection. Empty sender labels are explicit.
 
 All message/delivery checkpoints are committed with the merged text in the same
 atomic journal save before delivery-ID acknowledgment. Per-message deduplication,
@@ -20,7 +24,7 @@ Before rolling back to a launcher with the old ten-additional-checkpoint limit,
 drain pending merged batches; that version will reject larger acknowledgment
 arrays rather than silently drop messages.
 
-Validation: 165/165 launcher tests, typecheck, reproducible UI artifact checks and
+Validation: 166/166 launcher tests, typecheck, reproducible UI artifact checks and
 the desktop/390px browser suite pass locally on macOS. Regressions cover multiple
 polls, restart/dedup, delivery-ID acknowledgments, original operation receipts,
 idle dispatch, FIFO barriers, byte/checkpoint bounds, partial commits and disk

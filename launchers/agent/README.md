@@ -492,11 +492,15 @@ existing interrupted-on-restart rule rather than executing uncertain work twice.
 Pending messages merge into one message-only prompt at the queue tail, including
 messages received in later polls while the Agent is busy. Ordinary queued prompts
 remain FIFO barriers; running turns are never modified or interrupted. One English
-warning marks the content as third-party input, not system instructions. Each
-message shows only its sender and body; IDs appear once in a shared footer with
+warning marks the content as third-party input, not system instructions. Body
+lines are quoted, display control characters are escaped, and an explicit ending
+separates the messages from the footer. Each message shows only its sender and
+body; IDs appear once in a shared footer with
 `treer message get <id>` instructions. Subject, preview and send time are omitted.
 The Agent decides whether to act, reply or ignore; the watcher does not filter by
-message type. Sender/body now enter the private queue journal and transcript.
+message type. Sender/body now enter the private queue journal and transcript and
+are sent to the selected model provider; message bodies may contain sensitive
+information. Quoting identifies provenance but cannot prevent model prompt injection.
 Prompts are bounded at 64 KiB/256 messages; larger backlogs split into batches.
 An individual body over 48 KiB is shortened on a UTF-8 boundary with an explicit
 notice to retrieve the original. Old ID-only pending notices remain readable.
