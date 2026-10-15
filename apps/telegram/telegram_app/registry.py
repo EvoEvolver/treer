@@ -11,7 +11,8 @@ import sqlite3
 import time
 from dataclasses import dataclass
 
-AUDIT_KEEP = 2000
+AUDIT_KEEP = 5000      # changes only; rejected requests go to their own small ring so they cannot flush this
+REJECT_KEEP = 200
 RATE_KEEP_SECONDS = 3700
 
 REGISTRY_SCHEMA = """
@@ -32,7 +33,15 @@ CREATE TABLE IF NOT EXISTS im_users (
     user_id TEXT NOT NULL,
     label TEXT NOT NULL,
     enabled INTEGER NOT NULL DEFAULT 1,
+    source TEXT NOT NULL DEFAULT 'config',
     PRIMARY KEY(channel, account_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS poc_rejects (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at REAL NOT NULL,
+    actor TEXT NOT NULL,
+    op TEXT NOT NULL,
+    code TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS poc_audit (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,14 +87,49 @@ def _binding(row: sqlite3.Row) -> PocBinding:
 class RegistryMixin:
     """Mixed into StateStore: uses its lock and connections."""
 
-    def seed_registry(self, channel: str, account: str, bindings: list[tuple[str, str, bool]], users: list[tuple[str, str]]) -> None:
+    def reconcile_registry(self, channel: str, account: str, bindings: list[tuple[str, str, bool]], users: list[tuple[str, str]]) -> list[str]:
+        """Aligns the config-owned rows with the configuration, and returns a log line per change.
+
+        Rows the configuration created and nobody has touched since (users with source 'config', bindings with
+        updated_by 'config') follow the file: new entries are inserted, changed ones updated, removed ones are
+        DISABLED (and audited) so deleting an entry and restarting revokes it. Anything changed at runtime - by /poc,
+        a control message or users.set - is runtime-owned and is never overwritten by the file."""
         now = time.time()
+        changes: list[str] = []
         with self._lock, self._connect() as db:
-            for conversation, target, wake in bindings:
-                db.execute("INSERT OR IGNORE INTO poc_bindings VALUES (?,?,?,?,?,1,?,?)",
-                           (channel, account, conversation, target, int(wake), now, "config"))
-            for user_id, label in users:
-                db.execute("INSERT OR IGNORE INTO im_users VALUES (?,?,?,?,1)", (channel, account, user_id, label))
+            db.execute("BEGIN IMMEDIATE")
+            wanted_users = dict(users)
+            for user_id, label in wanted_users.items():
+                row = db.execute("SELECT label, enabled, source FROM im_users WHERE channel=? AND account_id=? AND user_id=?", (channel, account, user_id)).fetchone()
+                if row is None:
+                    db.execute("INSERT INTO im_users VALUES (?,?,?,?,1,'config')", (channel, account, user_id, label))
+                elif row["source"] == "config" and (row["label"] != label or not row["enabled"]):
+                    db.execute("UPDATE im_users SET label=?, enabled=1 WHERE channel=? AND account_id=? AND user_id=?", (label, channel, account, user_id))
+                    self._audit(db, now, None, "config", "startup", "config.user", channel, account, None, None, f"user:{user_id}:on", "ok")
+                    changes.append(f"user {user_id} enabled from config")
+            for row in db.execute("SELECT user_id FROM im_users WHERE channel=? AND account_id=? AND source='config' AND enabled=1", (channel, account)).fetchall():
+                if row["user_id"] not in wanted_users:
+                    db.execute("UPDATE im_users SET enabled=0 WHERE channel=? AND account_id=? AND user_id=?", (channel, account, row["user_id"]))
+                    self._audit(db, now, None, "config", "startup", "config.revoke_user", channel, account, None, None, f"user:{row['user_id']}:off", "ok")
+                    changes.append(f"user {row['user_id']} removed from config: disabled")
+            wanted = {conversation: (target, wake) for conversation, target, wake in bindings}
+            for conversation, (target, wake) in wanted.items():
+                row = db.execute("SELECT * FROM poc_bindings WHERE channel=? AND account_id=? AND conversation=?", (channel, account, conversation)).fetchone()
+                if row is None:
+                    db.execute("INSERT INTO poc_bindings VALUES (?,?,?,?,?,1,?,'config')", (channel, account, conversation, target, int(wake), now))
+                elif row["updated_by"] == "config" and (row["target_agent_id"], bool(row["wake_agent"]), bool(row["enabled"])) != (target, wake, True):
+                    db.execute("UPDATE poc_bindings SET target_agent_id=?, wake_agent=?, enabled=1, updated_at=? WHERE channel=? AND account_id=? AND conversation=?",
+                               (target, int(wake), now, channel, account, conversation))
+                    self._audit(db, now, None, "config", "startup", "config.binding", channel, account, conversation, row["target_agent_id"], target, "ok")
+                    changes.append(f"binding {conversation} follows config")
+            for row in db.execute("SELECT conversation, target_agent_id FROM poc_bindings WHERE channel=? AND account_id=? AND updated_by='config' AND enabled=1",
+                                  (channel, account)).fetchall():
+                if row["conversation"] not in wanted:
+                    db.execute("UPDATE poc_bindings SET enabled=0, updated_at=? WHERE channel=? AND account_id=? AND conversation=?", (now, channel, account, row["conversation"]))
+                    self._audit(db, now, None, "config", "startup", "config.revoke_binding", channel, account, row["conversation"], row["target_agent_id"], None, "ok")
+                    changes.append(f"binding {row['conversation']} removed from config: disabled")
+            db.commit()
+        return changes
 
     def get_binding(self, channel: str, account: str, conversation: str) -> PocBinding | None:
         with self._lock, self._connect() as db:
@@ -165,10 +209,25 @@ class RegistryMixin:
                              (channel, account, user_id)).fetchone()
         return (row["label"], bool(row["enabled"])) if row else None
 
-    def set_user(self, channel: str, account: str, user_id: str, label: str, enabled: bool) -> None:
+    def set_user(self, channel: str, account: str, user_id: str, label: str, enabled: bool, *, actor: str, delivery_id: str | None = None) -> None:
+        """Runtime-owned from now on (source 'control'): the config no longer overrides it. Audited in the same transaction."""
         with self._lock, self._connect() as db:
-            db.execute("""INSERT INTO im_users VALUES (?,?,?,?,?) ON CONFLICT(channel, account_id, user_id)
-                          DO UPDATE SET label=excluded.label, enabled=excluded.enabled""", (channel, account, user_id, label, int(enabled)))
+            db.execute("BEGIN IMMEDIATE")
+            db.execute("""INSERT INTO im_users VALUES (?,?,?,?,?,'control') ON CONFLICT(channel, account_id, user_id)
+                          DO UPDATE SET label=excluded.label, enabled=excluded.enabled, source='control'""", (channel, account, user_id, label, int(enabled)))
+            self._audit(db, time.time(), delivery_id, actor, "control", "users.set", channel, account, None, None, f"user:{user_id}:{'on' if enabled else 'off'}", "ok")
+            db.commit()
+
+    def audit_reject(self, actor: str, op: str, code: str) -> None:
+        """Rejected or invalid requests: a small ring of their own, so cheap bad requests cannot push change records out."""
+        with self._lock, self._connect() as db:
+            db.execute("INSERT INTO poc_rejects(at, actor, op, code) VALUES (?,?,?,?)", (time.time(), actor[:256], op[:64], code[:64]))
+            db.execute("DELETE FROM poc_rejects WHERE id <= (SELECT MAX(id) FROM poc_rejects) - ?", (REJECT_KEEP,))
+
+    def rejects_list(self, limit: int = 20) -> list[dict]:
+        with self._lock, self._connect() as db:
+            rows = db.execute("SELECT at, actor, op, code FROM poc_rejects ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        return [dict(row) for row in rows]
 
     def list_users(self, channel: str, account: str) -> list[dict]:
         with self._lock, self._connect() as db:

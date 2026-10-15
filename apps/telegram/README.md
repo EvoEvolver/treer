@@ -15,11 +15,11 @@ TELEGRAM_BOT_TOKEN='...' \
 python3 apps/telegram/telegram.py
 ```
 
-`TREER_CLI` may override the `treer` executable. The configuration **seeds** the POC
-registry (below): `bindings` (chat/topic → target Agent) and `allowed_user_ids` /
-`users` (with labels) are inserted only when missing, and every later change made
-in the chat or through Core control messages survives restarts and is never
-overwritten by the file. At least one of `allowed_user_ids`/`users` is required;
+`TREER_CLI` may override the `treer` executable. The configuration **seeds and
+reconciles** the POC registry (below): `bindings` (chat/topic → target Agent) and
+`allowed_user_ids` / `users` (with labels) create the rows they describe, but every
+change made at runtime (in the chat, by a control message, `users.set`) is
+runtime-owned and is never overwritten by the file. See *Revoking access*. At least one of `allowed_user_ids`/`users` is required;
 `bindings` may be empty because a chat can be bound with `/poc`. Inbound Messages are authored by the bridge Agent, not by a trusted Treer human
 identity. Keep the bot token outside configuration and logs.
 
@@ -53,7 +53,7 @@ Telegram-specific delivery state is unchanged.
 | Command | Effect |
 | --- | --- |
 | `/poc` | Show this chat's POC and whether it is on |
-| `/poc AGENT` | Set the POC; `AGENT` is a stable ID, tree path or sibling name, resolved with the bridge Agent's own Policy. In a chat with no binding this creates one |
+| `/poc AGENT` | Set the POC; `AGENT` is a stable ID (`ag_…`) or an absolute tree path (`/team/agent`), resolved with `treer agent show` under the bridge Agent's own Policy. In a chat with no binding this creates one |
 | `/poc off` / `/poc on` | Pause/resume forwarding for this chat (messages get a notice, nothing is sent) |
 | `/target`, `/status` | Show the POC / its `treer agent show` status |
 
@@ -90,16 +90,43 @@ reply whose whole body happens to be JSON with an `im` key is treated as control
 `control.user_admin_agent_ids` (default none); otherwise edit the config's
 `users` and restart. Unknown or disabled users are refused.
 
-## Limits and audit
+## Limits, audit and revoking access
 
 Per admitted user `limits.per_user_per_hour` (default 60), per conversation
 `per_conversation_per_minute` (20), and `max_unreplied` (50): inbound messages
 since the POC last wrote to that conversation, so an absent POC is not flooded.
 Only messages Core accepted are counted, so retries after an outage cannot
 exhaust a limit; the sender gets a short notice and nothing reaches Core.
-Every POC change (chat, control, handoff, failures of control ops) is appended to
-`poc_audit` with actor (`telegram:ID(label)` or `agent:ID`/`human:ID`), channel,
-old/new target and outcome; the newest 2000 rows are kept (`im-poc audit`).
+
+**Audit.** Every *change* (`/poc`, `poc.set|handoff|enable|disable`, `users.set`,
+and startup reconciliation) is appended to `poc_audit` with actor
+(`telegram:ID(label)`, `agent:ID`, `human:ID` or `config`), via, old/new target and
+outcome; the newest 5000 are kept (`im-poc audit`), and each change is also logged
+as one line on stderr (`Treer IM poc change: …`), which is append-only in the App/Agent
+log. Rejected or invalid control requests are **not** written there: they go to a
+separate ring of 200 (`poc_rejects`), so cheap bad requests cannot push change
+records out. Read-only ops are not audited.
+
+**Change notices.** A POC change is not gated, but it is visible: the Agent that
+lost the conversation and the one that gained it (never the actor) each get a
+fixed short Message, `IM point of contact changed for conversation C: OLD -> NEW,
+by ACTOR.`, so a hijack does not go unnoticed. Creating a new binding or re-sending
+the same target sends nothing.
+
+**Revoking access.** Rows created from the configuration follow the file at every
+start: delete a user from `allowed_user_ids`/`users`, or a binding from `bindings`,
+and restart the bridge — the row is **disabled** and audited (`config.revoke_user`,
+`config.revoke_binding`); putting it back re-enables it. Rows an operator or Agent
+changed at runtime are runtime-owned and survive restarts, so revoke those with
+`im-poc disable --conversation=…`, `im-poc user-set ID LABEL --disabled`, or
+`/poc off` in the chat. Stopping the bridge Agent stops everything.
+
+**Authorization boundary.** The bridge Agent's Message Policy *is* the
+authorization for IM conversations: whoever may send it a Message can redirect any
+conversation's inbound IM text to themselves and, as POC, write into that chat as
+the bot. Keep that set minimal. `poc.list`, `audit` and `users.list` disclose
+Telegram chat IDs and user labels and are as sensitive as changing a POC. Error
+codes such as `target_unavailable` also reveal what the bridge can see.
 
 The Message body is exactly what the user typed. Their label and numeric ID are in
 `external_source.metadata` (`user_label`, `user_id`); text claiming another

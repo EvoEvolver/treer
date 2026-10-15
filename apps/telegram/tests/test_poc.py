@@ -346,12 +346,12 @@ class RegistryTest(unittest.TestCase):
             state = telegram.StateStore(Path(directory) / "s.sqlite3")
             with self.assertRaises(KeyError):
                 state.set_binding("telegram", "b", "1:0", target=None, enabled=True, wake=None, actor="x", via="t", op="poc.on")
-            for i in range(2100):
+            for i in range(5100):
                 state.audit(f"a{i}", "control", "poc.set", "telegram", "b", "1:0")
             events = state.audit_list("telegram", "b", 200)
-            self.assertEqual(events[0]["actor"], "a2099")
+            self.assertEqual(events[0]["actor"], "a5099")
             with sqlite3.connect(Path(directory) / "s.sqlite3") as db:
-                self.assertLessEqual(db.execute("SELECT COUNT(*) FROM poc_audit").fetchone()[0], 2001)
+                self.assertLessEqual(db.execute("SELECT COUNT(*) FROM poc_audit").fetchone()[0], 5001)
             self.assertTrue(state.audit("x", "control", "poc.set", "telegram", "b", None, delivery_id="d"))
             self.assertFalse(state.audit("x", "control", "poc.set", "telegram", "b", None, delivery_id="d"), "one audit row per delivery")
 
@@ -391,3 +391,91 @@ class CtlTest(unittest.TestCase):
             self.assertEqual(message["recipients"][0]["id"], "/infra/im")
             missing = subprocess.run([sys.executable, str(APP_ROOT / "im-poc"), "list"], env=env, capture_output=True, text=True)
             self.assertEqual(missing.returncode, 2)
+
+
+class ReviewFixesTest(PocBase):
+    admins = frozenset({"ag_admin"})
+
+    def notices_to(self) -> dict[str, str]:
+        return {m["recipients"][0]["id"]: m["body"] for m in self.cli().get("messages", []) if m["body"].startswith("IM point of contact changed")}
+
+    def test_removing_a_config_entry_and_restarting_revokes_it(self) -> None:
+        both = dict(allowed_user_ids=frozenset({1234, 5678}),
+                    bindings=(telegram.Binding("-10042", 9, "agent-a", False), telegram.Binding("-20", None, "agent-b", False)))
+        self.bridge = self.new_bridge(**both)
+        self.say("/poc ag_runtime", chat=-20, thread=None)                  # runtime-owned from now on
+        only_a = dict(allowed_user_ids=frozenset({1234}), bindings=(telegram.Binding("-10042", 9, "agent-a", False),))
+        self.bridge = self.new_bridge(**only_a)
+        self.assertEqual(self.bridge.state.get_user("telegram", "999", "5678"), ("user-5678", False), "dropped from config: disabled")
+        self.say("hi", user=5678)
+        self.assertIn("not allowed", self.notices()[-1])
+        self.assertTrue(self.bridge.state.get_binding("telegram", "999", "-20:0").enabled, "a runtime change is not overridden by the file")
+        self.assertEqual(self.bridge.state.get_binding("telegram", "999", "-20:0").target_agent_id, "ag_runtime")
+        self.bridge = self.new_bridge(allowed_user_ids=frozenset({1234}), bindings=())
+        binding = self.bridge.state.get_binding("telegram", "999", "-10042:9")
+        self.assertFalse(binding.enabled)
+        self.say("anyone?")
+        self.assertIn("switched off", self.notices()[-1])
+        ops = [e["op"] for e in self.audit()]
+        self.assertIn("config.revoke_user", ops)
+        self.assertIn("config.revoke_binding", ops)
+        revoke = [e for e in self.audit() if e["op"] == "config.revoke_binding"][0]
+        self.assertEqual((revoke["actor"], revoke["via"], revoke["old_target"]), ("config", "startup", "agent-a"))
+        # adding the entry back re-enables a config-owned row
+        self.bridge = self.new_bridge(**both)
+        self.assertTrue(self.bridge.state.get_binding("telegram", "999", "-10042:9").enabled)
+        self.assertEqual(self.bridge.state.get_user("telegram", "999", "5678"), ("user-5678", True))
+
+    def test_users_set_rows_are_runtime_owned(self) -> None:
+        self.result(self.control("ag_admin", {"im": "users.set", "user_id": 4242, "label": "Dana"}))
+        self.assertIn("users.set", [e["op"] for e in self.audit()])
+        self.assertEqual(self.audit()[0]["actor"], "agent:ag_admin")
+        self.bridge = self.new_bridge()                                       # restart: not in config, but runtime-owned
+        self.assertEqual(self.bridge.state.get_user("telegram", "999", "4242"), ("Dana", True))
+
+    def test_rejected_requests_cannot_flush_the_change_history(self) -> None:
+        self.result(self.control("agent-x", {"im": "poc.set", "conversation": "-10042:9", "to": "ag_hijack"}))
+        for i in range(250):
+            self.bridge.state.audit_reject("agent:spam", "poc.set", "target_unavailable")
+        self.assertEqual(self.audit()[0]["new_target"], "ag_hijack")
+        self.assertEqual(len(self.bridge.state.rejects_list(1000)), 200, "rejects live in their own small ring")
+        self.result(self.control("agent-x", {"im": "poc.get"}))                # an invalid request is recorded as a reject only
+        self.assertEqual(self.bridge.state.rejects_list(1)[0]["code"], "invalid_conversation")
+        self.assertEqual([e["op"] for e in self.audit()], ["poc.set"])
+
+    def test_targets_must_look_like_ids_or_absolute_paths(self) -> None:
+        for target in ("-n", "--help", "builder", "sibling"):
+            body, _ = self.result(self.control("agent-x", {"im": "poc.set", "conversation": "-1", "to": target}))
+            self.assertEqual(body["error"]["code"], "invalid_target", target)
+        self.say("/poc builder")
+        self.assertIn("stable Agent ID", self.notices()[-1])
+        self.assertEqual([c["argv"] for c in self.cli()["calls"] if c["argv"][:2] == ["agent", "show"]], [], "never reaches the CLI")
+
+    def test_a_poc_change_is_announced_to_the_agents_that_gained_or_lost_it(self) -> None:
+        self.result(self.control("agent-x", {"im": "poc.set", "conversation": "-10042:9", "to": "/team/builder"}))
+        notices = self.notices_to()
+        self.assertEqual(set(notices), {"agent-a", "ag_builder"}, "old and new POC hear about it, the actor does not")
+        self.assertIn("-10042:9: agent-a -> ag_builder, by agent:agent-x", notices["ag_builder"])
+        self.assertNotIn("Treer IM", json.dumps(notices))
+        before = len(self.cli()["messages"])
+        self.result(self.control("agent-x", {"im": "poc.set", "conversation": "-9999", "to": "ag_new"}))          # a brand-new binding: no old POC
+        self.assertEqual([m for m in self.cli()["messages"][before:] if m["body"].startswith("IM point")], [])
+        self.result(self.control("agent-x", {"im": "poc.set", "conversation": "-10042:9", "to": "ag_builder"}))    # unchanged target
+        self.assertEqual(len([m for m in self.cli()["messages"] if m["body"].startswith("IM point")]), 2)
+
+    def test_handoff_tells_the_new_poc_and_chat_changes_tell_both(self) -> None:
+        self.result(self.control("agent-a", {"im": "poc.handoff", "conversation": "-10042:9", "to": "ag_other"}))
+        self.assertEqual(set(self.notices_to()), {"ag_other"}, "the handing-over POC is the actor and is not told about its own act")
+        self.say("/poc ag_builder")
+        self.assertEqual(set(self.notices_to()), {"ag_other", "ag_builder"})
+        self.assertIn("by telegram:1234(researcher)", self.notices_to()["ag_builder"])
+
+
+class AccountTest(unittest.TestCase):
+    def test_reconcile_returns_log_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            state = telegram.StateStore(Path(directory) / "s.sqlite3")
+            self.assertEqual(state.reconcile_registry("telegram", "b", [("1:0", "ag_a", False)], [("5", "five")]), [])
+            changes = state.reconcile_registry("telegram", "b", [], [])
+            self.assertEqual(sorted(changes), ["binding 1:0 removed from config: disabled", "user 5 removed from config: disabled"])
+            self.assertEqual(state.reconcile_registry("telegram", "b", [], []), [], "idempotent")

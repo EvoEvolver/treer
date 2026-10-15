@@ -1481,6 +1481,12 @@ TELEGRAM_BOT_TOKEN='<BotFather token>' \
 python3 apps/telegram/telegram.py
 ```
 
+Telegram's point-of-contact (POC) routing is changed at runtime in the chat (`/poc`)
+or by Core control Messages to the bridge Agent, with no confirmation gate; the
+bridge Agent's Message Policy is therefore the authorization boundary for IM
+conversations, so allow only a minimal set of senders (see "Limits, audit and
+revoking access" in the Telegram guide).
+
 See the [App contract](../apps/README.md), [Mail guide](../apps/mail/README.md), and
 [Telegram guide](../apps/telegram/README.md). The App process can use every
 credential and operating-system capability available to it. Use a separate

@@ -10,6 +10,8 @@ They are never relayed to the chat; the result is sent back to the sender as a C
 from __future__ import annotations
 
 import json
+import sys
+import uuid
 from typing import Any
 
 from .clients import TreerCli
@@ -72,9 +74,10 @@ class PocService:
         self.user_admin_agent_ids = user_admin_agent_ids
 
     def resolve_agent(self, target: str) -> str:
-        """Stable ID of an Agent given as ID, tree path or sibling name; the bridge's own Policy decides visibility."""
-        if not isinstance(target, str) or not target.strip() or len(target) > MAX_TARGET or any(c.isspace() for c in target.strip()):
-            raise PocError("invalid_target", "target must be an Agent ID or tree path without spaces")
+        """Stable ID of an Agent given as ID or absolute tree path (never an option-looking string); the bridge's own Policy decides visibility."""
+        if (not isinstance(target, str) or not target.strip() or len(target) > MAX_TARGET or any(c.isspace() for c in target.strip())
+                or not target.strip().startswith(("ag_", "agent-", "/"))):
+            raise PocError("invalid_target", "target must be a stable Agent ID (ag_...) or an absolute tree path (/team/agent)")
         try:
             info = self.cli.run(["agent", "show", target.strip()])
         except CliError as error:
@@ -85,13 +88,31 @@ class PocService:
         return agent_id
 
     def set_poc(self, conversation: str, target: str | None, *, actor: str, via: str, op: str, enabled: bool | None = None,
-                wake: bool | None = None, delivery_id: str | None = None) -> tuple[PocBinding | None, PocBinding]:
+                wake: bool | None = None, delivery_id: str | None = None, notify_exclude: str = "") -> tuple[PocBinding | None, PocBinding]:
         agent_id = self.resolve_agent(target) if target is not None else None
         try:
-            return self.state.set_binding(CHANNEL, self.account_id, conversation, target=agent_id, enabled=enabled, wake=wake,
-                                          actor=actor, via=via, op=op, delivery_id=delivery_id)
+            old, new = self.state.set_binding(CHANNEL, self.account_id, conversation, target=agent_id, enabled=enabled, wake=wake,
+                                              actor=actor, via=via, op=op, delivery_id=delivery_id)
         except KeyError as error:
             raise PocError("no_binding", "this conversation has no POC yet; set one with a target") from error
+        self.announce(op, conversation, old, new, actor, delivery_id, notify_exclude)
+        return old, new
+
+    def announce(self, op: str, conversation: str, old: PocBinding | None, new: PocBinding, actor: str, delivery_id: str | None, exclude: str) -> None:
+        """Makes a change visible without gating it: a durable log line, and a fixed short Message to the Agents that
+        gained or lost the conversation (never the actor). Best effort; the audit row is the record."""
+        print(f"Treer IM poc change: actor={actor} op={op} conversation={conversation} "
+              f"old={old.target_agent_id if old else None} new={new.target_agent_id}{'' if new.enabled else ' (off)'}", file=sys.stderr, flush=True)
+        if old is None or (old.target_agent_id == new.target_agent_id and old.enabled == new.enabled):
+            return
+        text = (f"IM point of contact changed for conversation {conversation}: {old.target_agent_id} -> {new.target_agent_id}"
+                f"{'' if new.enabled else ' (forwarding off)'}, by {actor}.")
+        for recipient in sorted({old.target_agent_id, new.target_agent_id} - {exclude}):
+            try:
+                key = f"im-poc-change-{delivery_id or uuid.uuid4().hex}-{conversation}-{recipient}"
+                self.cli.run(["message", "send", "--to", recipient, "--idempotency-key", key[:200], "--body-file", "-"], stdin=text)
+            except BridgeError as error:
+                print(f"Treer IM poc change notice to {recipient} failed ({getattr(error, 'code', type(error).__name__)})", file=sys.stderr, flush=True)
 
     # --- Core control messages ---------------------------------------------------------------
 
@@ -110,8 +131,7 @@ class PocService:
             result = self._apply(op, control, actor, sender_id, delivery_id, replay)
             outcome = {"ok": True, "op": op, **result}
         except PocError as error:
-            if not replay:
-                self.state.audit(actor, "control", op[:64], CHANNEL, self.account_id, None, outcome=f"error:{error.code}", delivery_id=delivery_id)
+            self.state.audit_reject(actor, op, error.code)
             outcome = {"ok": False, "op": op, "error": {"code": error.code, "message": error.message}}
         if replay:
             outcome["replayed"] = True
@@ -143,8 +163,7 @@ class PocService:
             if not isinstance(label, str) or not label.strip() or len(label) > MAX_LABEL or not isinstance(enabled, bool):
                 raise PocError("invalid_user", f"label must be 1-{MAX_LABEL} characters and enabled a boolean")
             if not replay:
-                state.set_user(CHANNEL, account, str(int(user_id)), " ".join(label.split()), enabled)
-                state.audit(actor, "control", "users.set", CHANNEL, account, None, new_target=f"user:{int(user_id)}:{'on' if enabled else 'off'}", delivery_id=delivery_id)
+                state.set_user(CHANNEL, account, str(int(user_id)), " ".join(label.split()), enabled, actor=actor, delivery_id=delivery_id)
             return {"user": {"user_id": str(int(user_id)), "label": " ".join(label.split()), "enabled": enabled}}
         conversation = None
         if op != "poc.handoff" or control.get("conversation") is not None:
@@ -159,9 +178,11 @@ class PocService:
         if replay:
             return {"binding": describe(state.get_binding(CHANNEL, account, conversation))}
         if op == "poc.set":
-            _, new = self.set_poc(conversation, control.get("to"), actor=actor, via="control", op=op, enabled=True, wake=wake, delivery_id=delivery_id)
+            _, new = self.set_poc(conversation, control.get("to"), actor=actor, via="control", op=op, enabled=True, wake=wake,
+                                  delivery_id=delivery_id, notify_exclude=sender_id)
         else:
-            _, new = self.set_poc(conversation, None, actor=actor, via="control", op=op, enabled=op == "poc.enable", delivery_id=delivery_id)
+            _, new = self.set_poc(conversation, None, actor=actor, via="control", op=op, enabled=op == "poc.enable",
+                                  delivery_id=delivery_id, notify_exclude=sender_id)
         return {"binding": describe(new)}
 
     def _handoff(self, control: dict[str, Any], conversation: str | None, actor: str, sender_id: str, delivery_id: str, replay: bool) -> dict[str, Any]:
@@ -176,7 +197,8 @@ class PocService:
         target = self.resolve_agent(control.get("to"))
         done = []
         for index, binding in enumerate(mine):
-            self.state.set_binding(CHANNEL, self.account_id, binding.conversation, target=target, enabled=True, wake=None, actor=actor,
-                                   via="control", op="poc.handoff", delivery_id=delivery_id if index == 0 else None)
+            old, new = self.state.set_binding(CHANNEL, self.account_id, binding.conversation, target=target, enabled=True, wake=None, actor=actor,
+                                              via="control", op="poc.handoff", delivery_id=delivery_id if index == 0 else None)
+            self.announce("poc.handoff", binding.conversation, old, new, actor, f"{delivery_id}-{index}", sender_id)
             done.append(binding.conversation)
         return {"handed_over": done, "to": target}

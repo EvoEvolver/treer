@@ -53,12 +53,13 @@ class TelegramBridge:
         self.bot_id = bot_id
         self.state_dir = state_dir
         # The configuration only seeds the registry; afterwards bindings and users live in SQLite.
-        state.seed_registry(
+        for change in state.reconcile_registry(
             CHANNEL,
             bot_id,
             [(conversation_key(b.chat_id, b.thread_id), b.target_agent_id, b.wake_agent) for b in config.bindings],
             [(str(user), config.user_label(user)) for user in sorted(config.allowed_user_ids)],
-        )
+        ):
+            print(f"Treer Telegram registry: {change}", file=sys.stderr, flush=True)
         self.poc = PocService(state, cli, bot_id, config.user_admin_agent_ids)
 
     def run_inbound_once(self, timeout: int | None = None) -> int:
