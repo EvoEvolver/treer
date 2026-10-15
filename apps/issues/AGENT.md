@@ -62,8 +62,8 @@ response lists it under `notification.unresolved_mentions`; nobody was notified.
 
 ## Reminders
 
-Each full hour, if you are idle and an unresolved (not `done`/`closed`) issue is
-assigned to you, Issues sends you one Message listing the issue IDs and a link.
+Each full hour, if you are idle and an unresolved (not `done`/`closed`, and not
+labelled `epic`) issue is assigned to you, Issues sends you one Message listing the issue IDs and a link.
 It never includes titles or descriptions; use `show ID` to read an issue. You
 get at most one per hour. Resolve, close or reassign the issue to stop them.
 The poller is on by default (operators disable it with `ISSUES_REMINDERS=off`).

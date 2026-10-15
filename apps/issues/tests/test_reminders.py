@@ -12,7 +12,7 @@ clean = hermetic_env(); os.environ.clear(); os.environ.update(clean)
 sys.path.insert(0, str(ROOT))
 from store import Store
 import reminders
-from reminders import Reminders, CATCH_UP, HOUR, MAX_LISTED, enabled, next_boundary, slot_of
+from reminders import Reminders, CATCH_UP, HOUR, MAX_LISTED, enabled, next_boundary, skip_labels, slot_of
 
 PEOPLE = [{'id': 'ag_a', 'kind': 'agent'}, {'id': 'ag_b', 'kind': 'agent'}, {'id': 'ag_c', 'kind': 'agent'},
           {'id': 'usr_h', 'kind': 'human'}]
@@ -116,6 +116,42 @@ class ReminderTest(unittest.TestCase):
         self.store.mutate(issue, 'update', {'status': 'open', 'assignee': 'ag_b'}, ACTOR, PEOPLE)
         self.assertEqual(self.reminders(treer).tick()['sent'], 1)
         self.assertEqual(treer.sends()[0][treer.sends()[0].index('--to') + 1], 'ag_b')
+
+    def test_epic_labelled_issues_do_not_remind_by_default(self):
+        self.issue(assignee='ag_a', labels=['epic'])                 # only an epic: the Agent is not even probed
+        kept = self.issue(assignee='ag_b', labels=['ui'])
+        mixed_epic = self.issue(assignee='ag_c', labels=['Epic', 'ui'])   # case-insensitive
+        mixed_work = self.issue(assignee='ag_c')
+        treer = FakeTreer({'ag_a': 'idle', 'ag_b': 'idle', 'ag_c': 'idle'})
+        self.assertEqual(self.reminders(treer).tick()['sent'], 2)
+        self.assertEqual(sorted(c[2] for c in treer.calls if c[:2] == ['agent', 'show']), ['ag_b', 'ag_c'])
+        bodies = {c[c.index('--to') + 1]: c[c.index('--body') + 1] for c in treer.sends()}
+        self.assertIn(f'#{kept}', bodies['ag_b'])
+        self.assertIn(f'#{mixed_work}', bodies['ag_c'])
+        self.assertNotIn(f'#{mixed_epic}', bodies['ag_c'], 'the epic is left out of a mixed list')
+        self.assertIn('1 unresolved issue ', bodies['ag_c'])
+
+    def test_skip_labels_are_configurable(self):
+        self.assertEqual(skip_labels({}), ('epic',))
+        self.assertEqual(skip_labels({'ISSUES_REMINDER_SKIP_LABELS': ' epic, wip ,,epic'}), ('epic', 'wip'))
+        self.assertEqual(skip_labels({'ISSUES_REMINDER_SKIP_LABELS': ''}), (), 'an empty value reminds about everything')
+        self.issue(assignee='ag_a', labels=['epic'])
+        self.issue(assignee='ag_b', labels=['wip'])
+        treer = FakeTreer({'ag_a': 'idle', 'ag_b': 'idle'})
+        os.environ['ISSUES_REMINDER_SKIP_LABELS'] = 'wip'
+        try:
+            self.reminders(treer).tick()
+        finally:
+            os.environ.pop('ISSUES_REMINDER_SKIP_LABELS')
+        self.assertEqual([c[c.index('--to') + 1] for c in treer.sends()], ['ag_a'], 'configuration replaces the default list')
+        treer = FakeTreer({'ag_a': 'idle', 'ag_b': 'idle'})
+        self.now += HOUR
+        self.reminders(treer).tick()
+        self.assertEqual([c[c.index('--to') + 1] for c in treer.sends()], ['ag_b'])
+        treer = FakeTreer({'ag_a': 'idle', 'ag_b': 'idle'})
+        self.now += HOUR
+        Reminders(self.store, lambda: '', clock=lambda: self.now, runner=treer, log=self.logs.append, skip=()).tick()
+        self.assertEqual(sorted(c[c.index('--to') + 1] for c in treer.sends()), ['ag_a', 'ag_b'])
 
     def test_long_lists_are_capped(self):
         ids = [self.issue(assignee='ag_a') for _ in range(MAX_LISTED + 3)]

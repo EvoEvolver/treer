@@ -30,6 +30,15 @@ def enabled(environ=None):
     return value not in ('0', 'off', 'false', 'no', 'disabled')
 
 
+def skip_labels(environ=None):
+    """ISSUES_REMINDER_SKIP_LABELS: comma-separated labels whose issues never trigger reminders. Default `epic`; matching is
+    case-insensitive. Set it to an empty value to remind about everything."""
+    raw = (os.environ if environ is None else environ).get('ISSUES_REMINDER_SKIP_LABELS')
+    if raw is None:
+        return ('epic',)
+    return tuple(dict.fromkeys(label.strip() for label in raw.split(',') if label.strip()))
+
+
 def run_cli(treer_bin, args):
     """Run the Treer CLI; returns (exit status, stdout). stdout/stderr are never logged."""
     try:
@@ -60,8 +69,9 @@ def next_boundary(now):
 
 
 class Reminders:
-    def __init__(self, store, base_url, treer_bin='treer', clock=time.time, runner=None, log=None):
+    def __init__(self, store, base_url, treer_bin='treer', clock=time.time, runner=None, log=None, skip=None):
         self.store, self.base_url, self.treer_bin, self.clock = store, base_url, treer_bin, clock
+        self.skip = skip
         self.runner = runner or self.run_treer
         self.log = log or (lambda message: print(message, file=sys.stderr, flush=True))
         self.stop = threading.Event()
@@ -92,7 +102,7 @@ class Reminders:
         slot = slot_of(self.clock() if now is None else now)
         sent = skipped = 0
         link = None
-        for agent, issue_ids in self.store.unresolved_by_assignee().items():
+        for agent, issue_ids in self.store.unresolved_by_assignee(skip_labels=skip_labels() if self.skip is None else self.skip).items():
             if self.store.reminded(slot, agent):
                 continue
             if not self.idle(agent):

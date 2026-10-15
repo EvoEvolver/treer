@@ -381,14 +381,16 @@ class Store:
             db.execute('DELETE FROM notify_budget WHERE hour < ?', (int(now // 3600) - 2,))
             db.execute('DELETE FROM notify_proven WHERE hour < ?', (int(now // 3600) - 2,))
 
-    def unresolved_by_assignee(self, prefix='ag_'):
-        """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix."""
+    def unresolved_by_assignee(self, prefix='ag_', skip_labels=()):
+        """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix. Issues carrying
+        any of skip_labels (e.g. long-lived epics) are not counted."""
+        skip = {label.lower() for label in skip_labels}
         with self.connect() as db:
             items = self.all(db)
         result = {}
         for issue in sorted(items.values(), key=lambda i: i['id']):
             assignee = issue['assignee']
-            if assignee and assignee.startswith(prefix) and issue['status'] not in ('done', 'closed'):
+            if assignee and assignee.startswith(prefix) and issue['status'] not in ('done', 'closed') and not skip & {label.lower() for label in issue['labels']}:
                 result.setdefault(assignee, []).append(issue['id'])
         return result
 

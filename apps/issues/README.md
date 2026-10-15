@@ -117,6 +117,7 @@ request headers or bodies.
 | `ISSUES_URL` | `http://issues.treer/` | Client-side root override for the `issues` CLI |
 | `ISSUES_NOTIFY_HOURLY_LIMIT` | `20` | Immediate Messages per recipient per hour before updates fold into one digest |
 | `ISSUES_NOTIFY` | `on` | `0`/`off`/`false`/`no` disables issue-change notifications and digests |
+| `ISSUES_REMINDER_SKIP_LABELS` | `epic` | Comma-separated labels (case-insensitive) whose issues are never counted by reminders; empty = none |
 | `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the hourly reminder poller |
 
 Protect the database directory: sessions contain short-lived human access
@@ -222,7 +223,8 @@ live in the SQLite `notify_windows`/`notify_budget` tables and survive restarts.
 > identity, and remains subject to Treer's Message authorization and Policy.
 
 On every full hour (epoch hour) the App collects issues that are not `done` or
-`closed` and whose assignee is an Agent (stable ID `ag_…`; humans are never
+`closed` and carry none of the labels in `ISSUES_REMINDER_SKIP_LABELS` (default
+`epic`, so long-lived epics are never nagged about) and whose assignee is an Agent (stable ID `ag_…`; humans are never
 messaged). For each such Agent it runs `treer agent show ID` and, only when the
 Agent's `status` is `idle` and it is not busy, sends **one** Message listing up
 to ten issue IDs (`+N more` beyond that) plus the App link (only a plain `http(s)` URL is
