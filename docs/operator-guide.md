@@ -115,6 +115,15 @@ configured interpreter with an absolute release script and physical cwd. Put all
 runtime writes outside the release. The selected database environment variable
 always points to `ROOT/state/app.sqlite3`; Python bytecode writing is disabled,
 and the child starts with umask 077. Normal workload identity remains intact.
+Initialization validates executable targets but preserves the absolute interpreter
+and launcher paths supplied by the caller, including symlink/shim paths. A shim
+can therefore follow interpreter updates without pinning an obsolete patch-version
+directory; maintaining that executable path remains the operator's responsibility.
+The interpreter is outside the release manifest's hash protection: changing a
+shim's target changes the interpreter that runs with the App's credentials. Keep
+the shim and its targets in directories writable only by trusted operators, and
+keep the initialization interpreter (including any virtual environment) available
+for future App starts. File permissions do not isolate Agents sharing an OS user.
 The entry is a frozen copy of the deployment tool at initialization. Updating
 `scripts/app-deploy` does not update installed entries; reinitializing with a
 different entry digest fails closed. To upgrade the entry, stage a separately
