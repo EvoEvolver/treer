@@ -80,6 +80,9 @@ class StateStore(RegistryMixin):
                 """
             )
             connection.executescript(REGISTRY_SCHEMA)
+            if "source" not in {row[1] for row in connection.execute("PRAGMA table_info(im_users)")}:
+                # Databases created by the first POC release: its rows came from the config.
+                connection.execute("ALTER TABLE im_users ADD COLUMN source TEXT NOT NULL DEFAULT 'config'")
 
     def _connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.path, timeout=15)

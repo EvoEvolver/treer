@@ -101,13 +101,16 @@ class PocService:
     def announce(self, op: str, conversation: str, old: PocBinding | None, new: PocBinding, actor: str, delivery_id: str | None, exclude: str) -> None:
         """Makes a change visible without gating it: a durable log line, and a fixed short Message to the Agents that
         gained or lost the conversation (never the actor). Best effort; the audit row is the record."""
-        print(f"Treer IM poc change: actor={actor} op={op} conversation={conversation} "
+        print(f"Treer IM poc change: actor={json.dumps(actor)} op={op} conversation={conversation} "
               f"old={old.target_agent_id if old else None} new={new.target_agent_id}{'' if new.enabled else ' (off)'}", file=sys.stderr, flush=True)
         if old is None or (old.target_agent_id == new.target_agent_id and old.enabled == new.enabled):
             return
+        # The chat actor's label is admin-set free text: the notice names only the numeric ID (the audit keeps the label).
         text = (f"IM point of contact changed for conversation {conversation}: {old.target_agent_id} -> {new.target_agent_id}"
-                f"{'' if new.enabled else ' (forwarding off)'}, by {actor}.")
+                f"{'' if new.enabled else ' (forwarding off)'}, by {actor.split('(')[0]}.")
         for recipient in sorted({old.target_agent_id, new.target_agent_id} - {exclude}):
+            if not self.state.claim_notice(conversation, recipient):
+                continue          # at most one notice per conversation and recipient per five minutes
             try:
                 key = f"im-poc-change-{delivery_id or uuid.uuid4().hex}-{conversation}-{recipient}"
                 self.cli.run(["message", "send", "--to", recipient, "--idempotency-key", key[:200], "--body-file", "-"], stdin=text)

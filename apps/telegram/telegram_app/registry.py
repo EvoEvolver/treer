@@ -36,6 +36,12 @@ CREATE TABLE IF NOT EXISTS im_users (
     source TEXT NOT NULL DEFAULT 'config',
     PRIMARY KEY(channel, account_id, user_id)
 );
+CREATE TABLE IF NOT EXISTS poc_notices (
+    conversation TEXT NOT NULL,
+    recipient TEXT NOT NULL,
+    at REAL NOT NULL,
+    PRIMARY KEY(conversation, recipient)
+);
 CREATE TABLE IF NOT EXISTS poc_rejects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     at REAL NOT NULL,
@@ -217,6 +223,20 @@ class RegistryMixin:
                           DO UPDATE SET label=excluded.label, enabled=excluded.enabled, source='control'""", (channel, account, user_id, label, int(enabled)))
             self._audit(db, time.time(), delivery_id, actor, "control", "users.set", channel, account, None, None, f"user:{user_id}:{'on' if enabled else 'off'}", "ok")
             db.commit()
+
+    def claim_notice(self, conversation: str, recipient: str, window: float = 300.0, now: float | None = None) -> bool:
+        """True at most once per (conversation, recipient) per window: flipping a POC back and forth cannot spam either side."""
+        now = time.time() if now is None else now
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT at FROM poc_notices WHERE conversation=? AND recipient=?", (conversation, recipient)).fetchone()
+            if row and now - row["at"] < window:
+                db.commit()
+                return False
+            db.execute("INSERT OR REPLACE INTO poc_notices VALUES (?,?,?)", (conversation, recipient, now))
+            db.execute("DELETE FROM poc_notices WHERE at < ?", (now - 24 * 3600,))
+            db.commit()
+        return True
 
     def audit_reject(self, actor: str, op: str, code: str) -> None:
         """Rejected or invalid requests: a small ring of their own, so cheap bad requests cannot push change records out."""

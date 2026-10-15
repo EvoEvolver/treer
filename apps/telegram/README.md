@@ -110,8 +110,10 @@ records out. Read-only ops are not audited.
 **Change notices.** A POC change is not gated, but it is visible: the Agent that
 lost the conversation and the one that gained it (never the actor) each get a
 fixed short Message, `IM point of contact changed for conversation C: OLD -> NEW,
-by ACTOR.`, so a hijack does not go unnoticed. Creating a new binding or re-sending
-the same target sends nothing.
+by ACTOR.`, so a hijack does not go unnoticed (a chat actor is named by its numeric
+ID only, never its label). Creating a new binding or re-sending the same target
+sends nothing, and each conversation/recipient pair is told at most once per five
+minutes, so flipping a POC back and forth cannot spam either side.
 
 **Revoking access.** Rows created from the configuration follow the file at every
 start: delete a user from `allowed_user_ids`/`users`, or a binding from `bindings`,
