@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Workspace issue tracker: no third-party runtime dependencies."""
+import argparse
 import http.cookies
 import json
 import mimetypes
@@ -115,6 +116,18 @@ class Application:
             return any(isinstance(e, dict) and e.get('kind') == 'agent' and e.get('id') == agent_id for e in answer.get('recipients') or [])
         return verify
 
+    def deployment_health(self):
+        """Readiness for scripts/app-deploy: running version (APP_DEPLOY_VERSION), the App's stable ID and a working
+        database. Unauthenticated and cacheless like /health; reveals only a commit SHA and the App ID."""
+        try:
+            with self.store.connect() as db:
+                db.execute('SELECT 1 FROM issues LIMIT 1').fetchall()
+            database = True
+        except Exception:
+            database = False
+        return {'version': os.environ.get('APP_DEPLOY_VERSION'), 'app_id': os.environ.get('TREER_AGENT_ID'),
+                'ready': database, 'database_ready': database}
+
     def mutation(self, issue_id, action, body, actor, directory, token):
         paths = self.resolve_paths(action, body, token)
         issue_id, event_id, event, recipients, notice, missed = self.store.mutate(issue_id, action, body, actor, directory, paths)
@@ -227,6 +240,10 @@ class Handler(BaseHTTPRequestHandler):
                 file = ROOT / ('issues' if path == '/issues' else 'dist/'+path[1:])
                 self.reply(200, file.read_bytes(), 'text/plain; charset=utf-8' if path == '/issues' else mimetypes.guess_type(str(file))[0])
                 return
+            if path == '/deployment-health' and method in ('GET', 'HEAD'):
+                health = app.deployment_health()
+                self.json(200 if health['ready'] else 503, health)
+                return
             if path == '/health' and method in ('GET', 'HEAD'):
                 self.json(200, {'status': 'ok', 'service': 'issues'})
                 return
@@ -301,8 +318,19 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(content)
 
 
-def main():
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description='Workspace issue tracker (configuration is environment-based)')
+    # Managed Apps deployed with scripts/app-deploy cannot carry environment variables in their saved command; the
+    # deployment's fixed arguments can carry this one. It overrides ISSUES_PROXY_URL.
+    parser.add_argument('--proxy-url', help='trusted Treer Proxy public URL (default: $ISSUES_PROXY_URL)')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
     os.umask(0o077)
+    arguments = parse_args(argv)
+    if arguments.proxy_url:
+        os.environ['ISSUES_PROXY_URL'] = arguments.proxy_url
     if not os.environ.get('ISSUES_PROXY_URL'):
         raise ValueError('ISSUES_PROXY_URL is required (the trusted Treer Proxy public URL)')
     proxy = urllib.parse.urlsplit(os.environ['ISSUES_PROXY_URL'])
