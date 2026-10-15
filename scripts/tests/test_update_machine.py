@@ -121,6 +121,7 @@ else:
         state['agents'][0]['pid']+=1
         state['agents'][0]['run_generation']+=1
     state_path.write_text(json.dumps(state))
+    if {failure!r} == 'activation' and COMMIT == {self.new!r}: sys.exit(4)
 '''
         path.write_text(source)
         path.chmod(0o755)
@@ -271,6 +272,58 @@ else:
         self.assertNotIn("test-only-secret", warning.getvalue())
         self.assertEqual(other.read_bytes(), original)
         self.assertEqual(json.loads(self.state.read_text())["events"], ["bbbbbbb:restart-controller"])
+
+    def test_confirmed_multi_install_activation_failure_rolls_back_selected_controller_only(self):
+        # Give the second workspace its own endpoint and state so accidentally
+        # polling it cannot be hidden by two configurations sharing a listener.
+        other_requests = []
+        other_state = {"controller_epoch": "other-epoch", "agents": [
+            {"agent_id": "ag_other", "pid": 555, "run_generation": 7}]}
+
+        class OtherController(BaseHTTPRequestHandler):
+            def do_GET(self):
+                other_requests.append(self.path)
+                data = json.dumps(other_state).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def log_message(self, *_):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), OtherController)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        other = self.other_install()
+        value = json.loads(other.read_text())
+        value["listen"] = f"127.0.0.1:{server.server_port}"
+        other.write_text(json.dumps(value))
+        original_config = other.read_bytes()
+        original_state = json.dumps(other_state, sort_keys=True)
+        originals = {name: (self.bindir / name).read_bytes() for name in update.BINARIES}
+        self.config["accept_shared_binaries"] = True
+        # The real fake executable records an attempted activation, then exits
+        # unsuccessfully; rollback must execute the restored old Controller.
+        self.binary(self.artifacts / "treer-agent-server", self.new, "activation")
+        self.refresh_sums()
+        with contextlib.redirect_stderr(io.StringIO()), patch.object(update, "run", wraps=update.run) as run:
+            code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "rolled_back", result)
+        self.assertIsNone(result["rollback_error"])
+        self.assertEqual(originals, {name: (self.bindir / name).read_bytes() for name in update.BINARIES})
+        activations = [call.args[0] for call in run.call_args_list if "service" in call.args[0]]
+        self.assertEqual(activations, [[str(self.bindir / "treer-agent-server"), "service",
+            "--workspace", "ws_fixture", "restart-controller"]] * 2)
+        selected = json.loads(self.state.read_text())
+        self.assertEqual(selected["events"], ["bbbbbbb:restart-controller", "aaaaaaa:restart-controller"])
+        self.assertTrue(selected["epoch"].startswith(self.old))
+        self.assertEqual(selected["agents"], self.initial["agents"])
+        self.assertEqual(other.read_bytes(), original_config)
+        self.assertEqual(json.dumps(other_state, sort_keys=True), original_state)
+        self.assertEqual(other_requests, [])
 
     def test_candidates_only_select_workspace_and_never_execute_updates(self):
         self.other_install()
