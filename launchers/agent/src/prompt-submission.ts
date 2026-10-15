@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 export type Outcome = "done" | "failed" | "interrupted";
+// All IDs must fit in one Core Message (32 KiB), with room for a result preview.
+export const MAX_COMPLETION_SUBMISSIONS = 512;
 export interface PromptSender { agent_id: string; path: string; name: string }
 export interface PromptNotify { on: Outcome[]; to?: string }
 export interface Submission {
@@ -15,6 +17,15 @@ export interface Submission {
   error: string | null;
 }
 export interface Receipt { id: string; disposition: "queued" | "sent" | "steered"; position: number | null }
+export interface CompletionBatch {
+  key: string;
+  recipient: string;
+  submission_ids: string[];
+  turn_id: string | null;
+  status: Outcome;
+  assistant_preview: string | null;
+  error: string | null;
+}
 export interface SubmissionRecord {
   submission: Submission;
   operationId: string;
@@ -23,13 +34,20 @@ export interface SubmissionRecord {
   delivery: "steer" | "queue";
   notify: PromptNotify | null;
   receipt: Receipt;
-  notification: { attempts: number; nextAttempt: number; error: string | null; delivered: boolean } | null;
+  notification: { attempts: number; nextAttempt: number; error: string | null; delivered: boolean; batch?: CompletionBatch } | null;
   priorTurnId?: string | null;
+  /** ACP turn counters may restart at 1; a queue generation distinguishes them. */
+  turnScope?: string;
   sourceMessage?: { messageId: string; deliveryId: string; ackPending: boolean };
   /** Additional batch checkpoints; keep the first field readable by old journals. */
   sourceMessages?: { messageId: string; deliveryId: string; ackPending: boolean }[];
 }
 export const messageCheckpoints = (record: SubmissionRecord) => [...(record.sourceMessage ? [record.sourceMessage] : []), ...(record.sourceMessages ?? [])];
+/** Turn IDs are scoped to this Agent's durable queue. No-turn commands stay independent. */
+export function completionKey(record: SubmissionRecord) {
+  return record.submission.turn_id === null ? `prompt-submission/${record.submission.id}/terminal`
+    : `prompt-turn/${createHash("sha256").update(JSON.stringify([record.turnScope ?? null, record.submission.turn_id, record.notify?.to])).digest("hex")}/terminal`;
+}
 export class QueueError extends Error {
   constructor(message: string, readonly status = 400) { super(message); }
 }
@@ -46,7 +64,7 @@ export function submissionOptions(sender: unknown, notify: unknown): { sender: P
     if (!value || typeof value !== "object" || [value.agent_id, value.path, value.name].some((part) => typeof part !== "string" || !part || part.length > 1024 || /[\r\n\u0000]/.test(part)) || !value.path.startsWith("/")) throw new QueueError("Invalid attested sender");
     source = { agent_id: value.agent_id, path: value.path, name: value.name };
   }
-  let notification: PromptNotify | null = source ? { on: ["done", "failed", "interrupted"], to: source.agent_id } : null;
+  let notification: PromptNotify | null = null;
   if (notify != null) {
     const value = notify as PromptNotify;
     if (!value || typeof value !== "object" || Object.keys(value).some((key) => key !== "on" && key !== "to") || !Array.isArray(value.on) || value.on.some((outcome) => !["done", "failed", "interrupted"].includes(outcome)) || (value.to !== undefined && (typeof value.to !== "string" || !value.to || value.to.length > 1024 || /[\r\n\u0000]/.test(value.to)))) throw new QueueError("Invalid completion notification");

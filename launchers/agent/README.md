@@ -730,13 +730,31 @@ Submission previews are bounded to 1,024 UTF-8 bytes (input) and 4,096 bytes
 (last assistant message). Source paths/times are prepended to model prompts and
 shown on user messages, so the native transcript also retains attribution.
 
-By default an attested sender receives `done`, `failed`, and `interrupted`
-notifications. Set `notify.on` to select outcomes (empty disables), and `to` to
+An attested sender does not receive completion notifications unless `notify`
+is explicitly requested (CLI `--notify`). Set `notify.on` to select outcomes
+(empty disables), and `to` to
 override the recipient; operators must explicitly supply a recipient. Terminal
 notifications use the Agent's own inherited identity via `treer message send`,
-including submission/turn IDs, outcome, error and assistant preview. A durable
-outbox retries with logged errors and exponential backoff capped at 60 seconds,
-using `prompt-submission/<id>/terminal` as its idempotency key. A notification
+including submission/turn IDs, outcome, error and assistant preview. At a turn's
+terminal state, submissions (including steers) for the same turn and recipient
+produce one `treer.prompt.completed` message with `submission_ids` in acceptance
+order. `submission_id` remains the first ID for older consumers. Each submission
+keeps its own queryable result and `notify.on` selection; different recipients
+get separate messages. Local commands/cancellations without a turn ID remain
+independent. No notification is sent for an in-progress turn.
+To fit all IDs in Core's 32 KiB message limit, at most 512 notify-enabled
+submissions may join one turn for one recipient (further steers return 429;
+use queue for the next turn). JSON-escaped diagnostics are shortened if needed,
+never the ID list. Oversized legacy batches remain in the retrying outbox with
+an explicit error instead of being silently split or dropped.
+A durable outbox freezes the member IDs, terminal payload and idempotency key
+before sending, then retries that same message with logged errors and exponential
+backoff capped at 60 seconds. Turn keys are `prompt-turn/<sha256>/terminal`
+(hash of queue generation, turn ID and recipient; the generation prevents ACP's
+restarted turn counters from colliding with earlier turns); no-turn keys retain
+`prompt-submission/<id>/terminal`. On journal upgrade, pending siblings are
+coalesced; if an older launcher already delivered a sibling, that turn is not
+sent again. Already delivered historical messages cannot be recalled. A notification
 failure never reruns the task. Pending notifications survive restart. Queue
 state is local to the Agent cwd and is not included in portable session exports.
 
