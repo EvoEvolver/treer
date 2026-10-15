@@ -10,6 +10,7 @@ use treer_protocol::{
 };
 use url::Url;
 mod machine_file;
+mod presentation;
 
 #[derive(Debug, serde::Deserialize)]
 struct Config {
@@ -342,7 +343,7 @@ async fn main() {
         return;
     }
     if raw == ["--client-help"] {
-        println!("treer [--url URL] [--workspace ID] <server command>\nBusiness help: treer --help\nCredentials: TREER_AGENT_ID + TREER_WORKLOAD_CREDENTIAL (Agent), or TREER_OPERATOR_CREDENTIAL (operator).");
+        println!("treer [--url URL] [--workspace ID] [--format json|table] <server command>\nOutput: status, agent ls and machine list default to table on stdout TTY; otherwise JSON.\nBusiness help: treer --help\nCredentials: TREER_AGENT_ID + TREER_WORKLOAD_CREDENTIAL (Agent), or TREER_OPERATOR_CREDENTIAL (operator).");
         return;
     }
     match run(raw).await {
@@ -384,6 +385,8 @@ fn ensure_file_transfer_capability(
 }
 
 async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
+    let (raw, mut presentation) =
+        presentation::Output::parse(raw, std::io::stdout().is_terminal())?;
     let connection = connection(raw)?;
     // Never let an older interpreter silently reinterpret sibling targets globally.
     let health: serde_json::Value = reqwest::Client::builder()
@@ -451,12 +454,19 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
             }
             _ = &mut interrupt, if !cancelling => { cancelling = true; stdin_open = false; send(&mut outgoing, &CliInput::Cancel).await?; },
             message = incoming.next() => {
-                let message = message.context("Controller disconnected; command was not retried")??;
+                let message = match message {
+                    Some(Ok(message)) => message,
+                    other => {
+                        stdout.write_all(&presentation.finish(1)).await?;
+                        stdout.flush().await?;
+                        other.context("Controller disconnected; command was not retried")??
+                    }
+                };
                 match message {
                     Message::Text(text) => match serde_json::from_str::<CliOutput>(&text)? {
-                        CliOutput::Stdout { data } => { stdout.write_all(&data).await?; stdout.flush().await?; }
+                        CliOutput::Stdout { data } => { if let Some(data) = presentation.push(data) { stdout.write_all(&data).await?; stdout.flush().await?; } }
                         CliOutput::Stderr { data } => { stderr.write_all(&data).await?; stderr.flush().await?; }
-                        CliOutput::Exit { code } => return Ok(code),
+                        CliOutput::Exit { code } => { stdout.write_all(&presentation.finish(code)).await?; stdout.flush().await?; return Ok(code); },
                         CliOutput::StdinReady { bytes } => { stdin_credit = stdin_credit.checked_add(bytes).context("stdin credit overflow")?; anyhow::ensure!(stdin_credit <= 8192, "invalid stdin capacity"); },
                         CliOutput::Session { path, terminal } => return relay_session(&connection.url, &connection.headers, &path, terminal, &mut stdin).await,
                         CliOutput::Forward { path, listen } => return forward(&connection.url, &connection.headers, &path, &listen).await,
@@ -465,7 +475,7 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
                         },
                     },
                     Message::Ping(data) => outgoing.send(Message::Pong(data)).await?,
-                    Message::Close(_) => bail!("Controller disconnected; command was not retried"),
+                    Message::Close(_) => { stdout.write_all(&presentation.finish(1)).await?; stdout.flush().await?; bail!("Controller disconnected; command was not retried"); },
                     _ => {},
                 }
             }

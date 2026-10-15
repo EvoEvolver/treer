@@ -1239,6 +1239,15 @@ workspace, agent, and machine records. `treer status` includes those current
 agent and machine records under `self` so callers can distinguish themselves
 from peers without matching names.
 
+For `treer status`, `treer agent ls` and `treer machine list`, a stdout terminal
+defaults to a compact table. Pipes and redirected output retain the original
+JSON bytes. Use `treer --format json status` for full machine-readable details
+in a terminal, or `treer machine list --format table` to request a table in a
+pipe. The client consumes this display option; Controller command semantics
+are unchanged. Table cells are single-line and truncated to 64 characters;
+use JSON for complete paths and fields. Help, failed commands, unknown response
+schemas and replies exceeding the 8 MiB presentation buffer retain raw output.
+
 ```bash
 treer whoami
 treer status

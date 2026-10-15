@@ -32,6 +32,74 @@ async fn negotiate_path_targets(listener: &tokio::net::TcpListener) {
 }
 
 #[tokio::test]
+async fn presentation_preserves_json_streams_and_formats_only_selected_commands() {
+    for (args, code, expected) in [
+        (vec!["machine", "list"], 0, "[ {\"name\":\"builder\",\"server_id\":\"srv_one\",\"status\":\"online\",\"hostname\":\"host\"} ]\n"),
+        (vec!["machine", "list", "--format", "table"], 0, "MACHINE  ID       STATUS  HOST\nbuilder  srv_one  online  host\n"),
+        (vec!["--format=json", "machine", "list"], 0, "[ {\"name\":\"builder\",\"server_id\":\"srv_one\",\"status\":\"online\",\"hostname\":\"host\"} ]\n"),
+        (vec!["machine", "list", "--format=table"], 7, "[ {\"name\":\"builder\",\"server_id\":\"srv_one\",\"status\":\"online\",\"hostname\":\"host\"} ]\n"),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            negotiate_path_targets(&listener).await;
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+            let request = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            let request: CliRequest = serde_json::from_str(&request).unwrap();
+            assert_eq!(request.argv, ["machine", "list"]);
+            let bytes = b"[ {\"name\":\"builder\",\"server_id\":\"srv_one\",\"status\":\"online\",\"hostname\":\"host\"} ]\n";
+            for chunk in bytes.chunks(7) {
+                socket.send(Message::Text(serde_json::to_string(&CliOutput::Stdout { data: chunk.to_vec() }).unwrap().into())).await.unwrap();
+            }
+            socket.send(Message::Text(serde_json::to_string(&CliOutput::Stderr { data: b"diagnostic\n".to_vec() }).unwrap().into())).await.unwrap();
+            socket.send(Message::Text(serde_json::to_string(&CliOutput::Exit { code }).unwrap().into())).await.unwrap();
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(10), client(address).args(args).output()).await.unwrap().unwrap();
+        server.await.unwrap();
+        assert_eq!(result.status.code(), Some(code));
+        assert_eq!(result.stdout, expected.as_bytes());
+        assert_eq!(result.stderr, b"diagnostic\n");
+    }
+}
+
+#[tokio::test]
+async fn table_mode_preserves_partial_stdout_when_controller_disconnects() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        negotiate_path_targets(&listener).await;
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = tokio_tungstenite::accept_async(stream).await.unwrap();
+        socket.next().await.unwrap().unwrap();
+        socket
+            .send(Message::Text(
+                serde_json::to_string(&CliOutput::Stdout {
+                    data: b"{\"partial\":".to_vec(),
+                })
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        socket.send(Message::Close(None)).await.unwrap();
+    });
+    let result = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        client(address).args(["--format=table", "status"]).output(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    server.await.unwrap();
+    assert!(!result.status.success());
+    assert_eq!(result.stdout, b"{\"partial\":");
+    assert!(String::from_utf8(result.stderr)
+        .unwrap()
+        .contains("Controller disconnected; command was not retried"));
+}
+
+#[tokio::test]
 async fn raw_argv_stdin_eof_output_streams_and_exit_are_preserved() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

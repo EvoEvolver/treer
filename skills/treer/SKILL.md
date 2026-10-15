@@ -20,7 +20,7 @@ treer whoami
 
 `treer whoami` returns the current workspace plus the complete `agent` and
 `machine` records. Treat those records as the caller identity; do not infer the
-caller from names. `treer status` also includes the same two records under its
+caller from names. `treer --format json status` also includes the same two records under its
 top-level `self` field alongside all workspace machines and agents.
 
 If the environment check fails, do not guess a proxy or local server address.
@@ -36,6 +36,11 @@ the business command. With neither `TREER_WORKSPACE_ID` nor
 connection: credentials are sent to the explicit URL, which the caller must
 trust. If either binding exists, explicit connection flags must match their
 corresponding binding; overriding a missing counterpart also fails closed.
+The client displays `status`, `agent ls`, and `machine list` as tables only when
+stdout is a terminal; pipes retain original JSON. Use `--format json` before
+these commands when parsing their full response in an interactive terminal,
+or `--format table` for a compact display. This display flag is not forwarded.
+
 The Controller must be online for business help:
 
 ```bash
@@ -107,8 +112,8 @@ Discover current topology before choosing a peer or server:
 
 ```bash
 treer whoami
-treer status
-treer agent ls -R /
+treer --format json status
+treer --format json agent ls -R /
 treer agent show self
 treer agent show /reviewer
 ```
@@ -196,8 +201,8 @@ Organize Agents and Apps in the shared workspace tree:
 
 ```bash
 treer agent mkdir -p /research/experiments
-treer agent ls /research
-treer agent ls -R /
+treer --format json agent ls /research
+treer --format json agent ls -R /
 treer agent mv /reviewer /research/experiments/
 treer agent mv /research/experiments /research/runs
 treer agent mv /research/experiments/reviewer /
@@ -504,7 +509,7 @@ Policy actions are `machine.file.write` and `machine.file.read`; filesystem
 paths are not workspace Tree path selectors. These operations are not a sandbox.
 
 If a machine shows Offline while Agents still exist, do not re-enroll it.
-Recover on that host with the real workspace ID (`ws_…` from `treer status` or
+Recover on that host with the real workspace ID (`ws_…` from `treer --format json status` or
 the copied web command). `service status` with no `--workspace` lists local
 installs. `service start` is ready only when the Controller reports
 `proxy_connected`; a live loopback API is not a Proxy lease. Duplicate fencing
@@ -606,7 +611,7 @@ reserves the name and placement atomically before starting the process;
 non-root placement requires `agent.tree.manage`. Sibling name conflicts are
 rejected before dispatch, including when two callers create concurrently.
 
-Select an online machine from `treer status`, then create an explicit command
+Select an online machine from `treer --format json status`, then create an explicit command
 Agent. Preserve the current working directory unless the task requires a
 different relative directory.
 
