@@ -1,6 +1,28 @@
 import { test, expect } from '@playwright/test'
-import { browseTreeOnMobile } from './fixtures/navigation'
+import { browseTreeOnMobile, openOverviewMap } from './fixtures/navigation'
 import { mockTreeMapApi, mockDeepTreeMapApi, mapSnapshot } from './fixtures/treemap'
+
+for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
+  test(`Overview owns the map entry ${theme} ${mobile ? '390' : 'desktop'}`, async ({ page }, info) => {
+    await page.setViewportSize({ width: mobile ? 390 : 1360, height: 900 })
+    await mockTreeMapApi(page)
+    await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
+    await page.goto('/')
+    const overview = page.locator('#workspace-panel-overview')
+    const trigger = overview.getByRole('button', { name: 'Expand tree map', exact: true })
+    await expect(trigger).toBeEnabled()
+    await expect(trigger).toContainText('Workspace map')
+    await expect(page.locator('#tree-sidebar button[aria-label="Expand tree map"]')).toHaveCount(0)
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: info.outputPath(`overview-map-${theme}-${mobile ? '390' : 'desktop'}.png`) })
+    await trigger.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('dialog', { name: 'Workspace map' })).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(page.getByRole('dialog', { name: 'Workspace map' })).toHaveCount(0)
+    await expect(trigger).toBeFocused()
+  })
+}
 
 for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
   test(`treemap ${mobile ? '390px' : 'desktop'} ${theme}: drill down, breadcrumbs and stable-ID keyboard selection`, async ({ page }, testInfo) => {
@@ -11,9 +33,9 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await page.goto('/')
     await browseTreeOnMobile(page)
     await page.evaluate((value) => document.documentElement.classList.toggle('dark', value === 'dark'), theme)
-    await expect(page.getByRole('button', { name: 'Expand tree map' })).toBeEnabled()
+    await expect(page.locator('#tree-sidebar').getByRole('button', { name: 'Expand tree map' })).toHaveCount(0)
     await expect(page.getByRole('button', { name: /^coordinator agent · workstation · idle$/ })).toBeVisible()
-    await page.getByRole('button', { name: 'Expand tree map' }).click()
+    await openOverviewMap(page)
     const dialog = page.getByRole('dialog', { name: 'Workspace map' })
     await expect(dialog.getByRole('group', { name: 'Workspace treemap' })).toBeVisible()
     await expect(dialog.getByRole('button', { name: 'Explore folder /Research', exact: true })).toBeVisible()
@@ -49,7 +71,7 @@ test('map renders hostile names as text and stays usable after folder removal', 
   await page.route('**/workload-tree', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(current) }))
   await page.goto('/')
   await browseTreeOnMobile(page)
-  await page.getByRole('button', { name: 'Expand tree map' }).click()
+  await openOverviewMap(page)
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
   await dialog.getByRole('button', { name: 'Explore folder /<img src=x onerror=alert(1)>', exact: true }).click()
   expect(await dialog.locator('img').count()).toBe(0)
@@ -98,6 +120,7 @@ test('loading folders disables only Add folder; an empty workspace disables both
   await page.reload()
   await browseTreeOnMobile(page)
   await expect(page.getByRole('button', { name: 'Add to tree', exact: true })).toBeDisabled()
+  await page.getByRole('button', { name: 'Workspace overview', exact: true }).click()
   await expect(page.getByRole('button', { name: 'Expand tree map', exact: true })).toBeDisabled()
 })
 
@@ -111,7 +134,7 @@ for (const sample of ["small", "medium", "large"] as const) for (const mobile of
     await browseTreeOnMobile(page)
     const appRow = page.getByRole('treeitem', { name: 'dashboard', exact: true })
     await expect(appRow.locator('[data-workload-icon="app"]')).toBeVisible()
-    await page.getByRole('button', { name: 'Expand tree map' }).click()
+    await openOverviewMap(page)
     const dialog = page.getByRole('dialog', { name: 'Workspace map' })
     const deepAgent = dialog.getByRole('button', { name: /^Open \/Team\/Research\/Experiments\/Lab\/agent-01 · agent/ })
     await expect(dialog.locator('[data-workload-icon="app"]')).toBeVisible()
@@ -155,7 +178,7 @@ test('a very deep small tree respects the node budget instead of recursively mou
   await mockDeepTreeMapApi(page, false, 110)
   await page.goto('/')
   await browseTreeOnMobile(page)
-  await page.getByRole('button', { name: 'Expand tree map' }).click()
+  await openOverviewMap(page)
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
   await expect(dialog.getByRole('button', { name: 'View contents of /Team', exact: true })).toContainText('3 agents')
   await expect(dialog.getByRole('region', { name: /^Folder / })).toHaveCount(1)

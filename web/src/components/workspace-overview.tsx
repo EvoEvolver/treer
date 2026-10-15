@@ -1,5 +1,5 @@
-import { useMemo, useState } from "react"
-import { ChevronDown, ChevronRight, CircleDot, Folder, LayoutDashboard, Plus } from "lucide-react"
+import { useMemo, useRef, useState } from "react"
+import { ChevronDown, ChevronRight, CircleDot, Folder, LayoutDashboard, Maximize2, Plus } from "lucide-react"
 import { machineName, type Agent, type AppDeployment, type Machine, type Workspace, type WorkloadTreeState } from "@/lib/api"
 import { attentionGroups } from "@/lib/attention"
 import { overviewForest, visibleOverviewRows, type AttentionFilter } from "@/lib/overview-tree"
@@ -7,6 +7,8 @@ import { workspaceWorkloads } from "@/lib/workspace-workloads"
 import { workloadKind } from "@/lib/workload-path"
 import { WorkloadIcon } from "@/components/workload-icon"
 import { Button } from "@/components/ui/button"
+import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from "@/components/ui/dialog"
+import TreeMap from "@/components/workload-treemap"
 import { cn } from "@/lib/utils"
 
 const filters = [
@@ -19,6 +21,9 @@ export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loa
   workspace?: Workspace; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; tree: WorkloadTreeState; loading: boolean
   onOpen: (id: string) => void; onNewAgent: () => void; onWorkspaceSettings: () => void
 }) {
+  const [mapOpen, setMapOpen] = useState(false)
+  const isOpeningAgent = useRef(false)
+  const mapTrigger = useRef<HTMLButtonElement>(null)
   const [filter, setFilter] = useState<AttentionFilter | null>(null)
   const [expanded, setExpanded] = useState<Record<string, boolean>>({})
   const [filteredExpanded, setFilteredExpanded] = useState<Record<string, boolean>>({})
@@ -34,7 +39,7 @@ export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loa
     setFilteredExpanded({})
   }
   return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
-    <div className="mb-5 flex flex-wrap items-start justify-between gap-4"><div><LayoutDashboard aria-hidden="true" className="mb-4 size-5 text-muted-foreground" /><h1 className="text-2xl font-semibold">Workspace overview</h1><p className="mt-2 text-xs text-muted-foreground">{workspace?.name ?? "Choose a workspace"}</p></div>{workspace && <Button variant="outline" onClick={onNewAgent}><Plus />Add agent</Button>}</div>
+    <div className="mb-5 flex flex-wrap items-start justify-between gap-4"><div><LayoutDashboard aria-hidden="true" className="mb-4 size-5 text-muted-foreground" /><h1 className="text-2xl font-semibold">Workspace overview</h1><p className="mt-2 text-xs text-muted-foreground">{workspace?.name ?? "Choose a workspace"}</p></div><div className="flex flex-wrap gap-2"><Button ref={mapTrigger} variant="outline" aria-label="Expand tree map" disabled={!workspace || loading} onClick={() => setMapOpen(true)}><Maximize2 />Workspace map</Button>{workspace && <Button variant="outline" onClick={onNewAgent}><Plus />Add agent</Button>}</div></div>
     {!workspace ? <p className="rounded-md border p-5 text-sm text-muted-foreground">Choose or create a workspace from the Tree to get started.</p> : loading ? <p role="status" className="py-8 text-sm text-muted-foreground">Loading workspace…</p> : <>
       <div role="group" aria-label="Attention filters" className="mb-4 flex flex-wrap gap-2">{filters.map(({ key, label, color }) => <button key={key} type="button" aria-pressed={filter === key} aria-label={`Filter ${label}`} onClick={() => toggleFilter(key)} className={cn("flex min-h-10 items-center gap-2 rounded-full border px-3 text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", filter === key && "border-primary bg-primary/10 ring-1 ring-primary")}><CircleDot aria-hidden="true" className={cn("size-3", color)} /><span className="tabular-nums">{groups[key].length}</span>{label}</button>)}<span className="flex min-h-10 cursor-default items-center px-1 text-xs text-muted-foreground">{machines.filter((machine) => machine.status === "online").length}/{machines.length} machines online</span></div>
       <p role="status" className="mb-5 text-xs leading-5 text-muted-foreground">{filter ? "Showing matching agents and their folders. Select the filter again to clear." : "Active folders expand by default; idle folders stay collapsed. Your toggles take priority."}</p>
@@ -57,5 +62,10 @@ export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loa
         })}</ul> : <p className="rounded-md border p-5 text-xs text-muted-foreground">{filter ? "No agents match this filter." : "No workloads in this workspace."}</p>}
       </section>
     </>}
-  </div></div>
+  </div>
+    <Dialog open={mapOpen} onOpenChange={setMapOpen}><DialogContent className="flex h-[min(820px,calc(100dvh-2rem))] w-[calc(100%-1rem)] max-w-6xl flex-col gap-0 overflow-hidden p-0 sm:w-[calc(100%-3rem)]" onCloseAutoFocus={(event) => { event.preventDefault(); if (!isOpeningAgent.current) mapTrigger.current?.focus(); isOpeningAgent.current = false }}>
+      <DialogHeader className="shrink-0 border-b px-5 py-4 pr-12"><DialogTitle>Workspace map</DialogTitle><DialogDescription className="text-xs">Explore folders and open agents.</DialogDescription></DialogHeader>
+      {mapOpen && <TreeMap tree={tree} agents={workloads} machines={machines} selectedId={null} onOpen={(id) => { isOpeningAgent.current = true; onOpen(id); setMapOpen(false) }} />}
+    </DialogContent></Dialog>
+  </div>
 }

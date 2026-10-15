@@ -4,7 +4,7 @@ Base: `origin/main` at `6f38c3f5f5860adc72192d2cd78c6be405188111`.
 
 The header combines creation into one + dropdown, preserving the existing
 per-action disabled conditions, root/folder destinations, machine setup guidance
-and tour target. The neighboring expand button opens a read-only treemap. It uses
+and tour target. The Workspace map button in Overview opens a read-only treemap. It uses
 existing authorized inventories, stable Agent IDs and Tree folder placements;
 there are no new API routes, writes, storage keys or credentials. No chart library
 or other dependency was added. The existing single-file build plugin is retained.
