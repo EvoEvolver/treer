@@ -92,7 +92,7 @@ export function controllerInstall(request) {
     if (aligned.status !== "compatible") throw new Error(aligned.reason);
     const profilesManifest = json(join(versionRoot, "profiles.json"));
     if (profilesManifest.schema !== "treer.launcher-profiles/v1" || !Array.isArray(profilesManifest.profiles)) throw new Error("Invalid profile manifest");
-    const selected = request.agents?.length ? [...new Set(request.agents)] : profilesManifest.profiles.map((profile) => profile.id);
+    const selected = request.skip_profiles === true ? [] : request.agents?.length ? [...new Set(request.agents)] : profilesManifest.profiles.map((profile) => profile.id);
     let profiles = selected.map((id) => profilesManifest.profiles.find((profile) => profile.id === id));
     if (profiles.some((profile) => !profile || typeof profile.name !== "string" || !Array.isArray(profile.args))) throw new Error("Unknown launcher provider");
     const transaction = profileTransaction(request.treer, (message) => console.error(message));

@@ -71,6 +71,85 @@ do not limit concurrent requests, accumulated transcripts or model tool output.
 
 ## Installation and updates
 
+### Local prepared bundles (launcher-only delivery)
+
+An operator can deliver a launcher change without rebuilding/restarting the
+Controller. From a trusted checkout, build an offline payload with
+`node launchers/agent/scripts/prepare-bundle.mjs --output /absolute/prepared --source-commit FULL_COMMIT`.
+Review its source and independently record SHA-256 of `bundle-manifest.json`.
+Then use an explicit trusted Node.js 22+ executable and Treer CLI:
+
+```sh
+/absolute/node launchers/agent/scripts/bundle-launcher.mjs install \
+  --bundle /absolute/prepared --sha256 MANIFEST_SHA256 --treer /absolute/treer
+/absolute/node launchers/agent/scripts/bundle-launcher.mjs status --treer /absolute/treer
+/absolute/node launchers/agent/scripts/bundle-launcher.mjs rollback --treer /absolute/treer
+```
+
+`update` has the same bundle arguments as `install`; `rollback --version
+sha256-HASH` can choose a retained version. Installation reuses the official
+installer's contract checks, immutable content versions, profile ownership
+receipts, save/readback transaction and atomic `current.json` pointer. It neither
+creates nor restarts Agents. It saves the normal six profiles unless narrowed
+with repeated `--agent` or explicitly disabled with `--skip-profiles` (useful for
+isolated previews). `--root ABS` chooses a separate physical installation root
+inside the enrolled machine root; paths outside that boundary are rejected;
+otherwise the authenticated Controller's enrolled root is used. There are no
+Git/npm/network dependencies at installation time, and no shell requirement on
+Windows. Prepared bundles must be runtime-ready, regular files only, and match
+the supplied manifest hash and every manifest entry. Hashes provide integrity,
+not authorship: this is **local operator-approved delivery**, not an officially
+signed Controller release. Never run this installer from an unreviewed bundle.
+The running Controller's protocol, capabilities/features and security floor
+must still be compatible; this channel cannot deliver Core changes.
+
+For a staged switch, put explicit Agent IDs/tree paths in a JSON array and name
+one disposable preview target from that list. First run the plan without apply:
+
+```sh
+/absolute/node launchers/agent/scripts/bundle-launcher.mjs rollout \
+  --bundle /absolute/prepared --sha256 MANIFEST_SHA256 --treer /absolute/treer \
+  --targets /absolute/targets.json --preview ag_PREVIEW --rollout-id preview-001
+# Repeat exactly the same command with --apply to execute the recorded plan.
+```
+
+A healthy baseline launcher must already be installed. Only enabled command
+Agents on this machine with an existing healthy launcher/session are eligible;
+custom startup commands, provider mismatches, duplicate aliases, the leader and
+the caller Agent are rejected. The preview is always the sole first batch;
+later batches contain at most three Agents (`--batch-size 1..3`). Existing harness
+and ACP provider arguments are retained; the native session and cwd are pinned,
+never replaced by a new session. Before advancing, each target must register a
+fresh interface instance, serve matching `/v1/manifest` and UI HTTP 200, become
+ready and keep the same native session ID within 90 seconds (`--timeout
+1000..300000` milliseconds). It then receives one queued continuation through
+its local AIS, with a stable operation ID. This explicit local operator action
+asserts no sender and requests no completion notification; it also works from
+Controller exec without an Agent identity or message watcher. This local queue
+injection does not pass through Core Message Policy. There are no
+automatic workspace-wide targets.
+
+The private `rollouts/ID.json` journal stores original/replacement startups and
+phase checkpoints under the installation directory (0700/current-user+SYSTEM
+ACL, files 0600); it can contain sensitive saved argv and must not be published.
+Keep sensitive ACP parameters in provider configuration/environment, not argv.
+After a completed rollout or successful rollback has been checked, the operator
+may delete its journal; doing so also removes its replay/recovery history.
+Reusing the same ID/arguments reconciles completed restarts from real run
+generation/instance state, reuses the continuation operation ID, and skips
+completed steps. Different plans cannot reuse an ID. On a failure, later batches
+stop; the previous launcher pointer and changed startups are restored, only this
+rollout's restarted targets are restarted again, and their old sessions/UI are
+health-checked. Concurrent startup/pointer edits are preserved and reported as
+rollback failures; stopped intent is respected. The journal records the failed
+stage and rollback result. A rollback does not undo model/tool actions or recall
+already submitted continuation prompts.
+Install and rollout locks reject concurrent operations. After a process crash,
+confirm that the recorded operator process is gone before manually removing its
+stale `rollouts/.lock` directory and repeating the same command. An interrupted
+or incomplete rollback requires inspecting the journal and recovering explicitly,
+not blindly starting a new rollout. No command uses broad process killing.
+
 The default launcher is installed through the local Controller (next release):
 
 ```bash
