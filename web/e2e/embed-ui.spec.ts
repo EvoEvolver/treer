@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from "@playwright/test"
+import { browseTreeOnMobile } from './fixtures/navigation'
 import { embedThemeMessage, withEmbedTheme } from "../src/lib/embed-ui"
 
 const NOW = new Date().toISOString()
@@ -196,6 +197,7 @@ for (const mobile of [false, true]) {
       })
       await page.route('**/api/workspaces/ws-1/apps/late-app/ui/**', (route) => route.fulfill({ contentType: 'text/html', body: '<h1>Late human interface</h1>' }))
       await page.goto('/')
+      await browseTreeOnMobile(page)
       await expect.poll(() => requests).toBeGreaterThan(0)
       await expect.poll(() => page.evaluate(() => (window as Window & { liveEvents?: WebSocket }).liveEvents?.readyState)).toBe(1)
       return {
@@ -317,6 +319,7 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
   test(`selecting a Managed App embeds its human root and retains logs (${runtimeId})`, async ({ page }) => {
     await mockApp(page, "running", runtimeId)
     await page.goto("/")
+    await browseTreeOnMobile(page)
     await page.getByRole("button", { name: /^Soul Archive / }).click()
     const frame = page.locator("iframe[title='/Soul Archive interface']")
     await expect(frame).toBeVisible()
@@ -346,6 +349,7 @@ test("mobile: selecting an App opens its human interface and closes back to work
   await mockApp(page)
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^Soul Archive / }).click()
   await expect(page.frameLocator("iframe[title='/Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
   await page.getByRole("button", { name: "Close full-screen interface" }).click()
@@ -358,6 +362,7 @@ test("a stopped App shows its state without fetching the human interface", async
   let appRequests = 0
   page.on("request", (request) => { if (request.url().includes("/apps/app-1/ui/")) appRequests++ })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^Soul Archive / }).click()
   await expect(page.getByText("App is not running")).toBeVisible()
   await expect(page.locator("iframe")).toHaveCount(0)
@@ -369,6 +374,7 @@ test("a running App whose runtime exited shows its state without fetching the hu
   let appRequests = 0
   page.on("request", (request) => { if (request.url().includes("/apps/app-1/ui/")) appRequests++ })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^Soul Archive / }).click()
   await expect(page.getByText("App is not running")).toBeVisible()
   await expect(page.locator("iframe")).toHaveCount(0)
@@ -380,6 +386,7 @@ test("an App on an offline machine shows recovery and lets mobile users return",
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [{ ...machine, status: "offline" }] }))
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^Soul Archive / }).click()
   await expect(page.getByText("Machine is offline")).toBeVisible()
   await expect(page.locator("iframe")).toHaveCount(0)
@@ -389,6 +396,7 @@ test("an App on an offline machine shows recovery and lets mobile users return",
 
 test("selecting an agent with an embedded UI shows the iframe instead of the terminal pane", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Click the agent that has a UI
@@ -417,6 +425,7 @@ test('tree resizing protects embedded iframe events and matches dark theme', asy
   await page.setViewportSize({ width: 1280, height: 900 })
   await page.addInitScript(() => localStorage.setItem('treer-theme', 'dark'))
   await page.goto('/')
+  await browseTreeOnMobile(page)
   await page.getByRole('button', { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
@@ -448,6 +457,7 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
     servers: [{ ...machine, status: "offline" }],
   }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   await expect(page.getByText("Machine is offline")).toBeVisible()
@@ -461,6 +471,7 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
 
 test("selecting a plain terminal agent shows the terminal pane, not an iframe", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Click the plain agent without an Interface UI.
@@ -484,6 +495,7 @@ test('embedded UI logs use the shared replay-safe terminal', async ({ page }) =>
     ws.send(history)
   })
   await page.goto('/')
+  await browseTreeOnMobile(page)
   await page.getByRole('button', { name: /^Soul Archive / }).click()
   await expect(page.locator("iframe[title='/Soul Archive interface']")).toBeVisible()
   await page.getByRole('button', { name: 'Show logs', exact: true }).click()
@@ -496,6 +508,7 @@ test('embedded UI logs use the shared replay-safe terminal', async ({ page }) =>
 
 test("reload button label changes when an agent has an embedded UI", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Plain agent: Reconnect terminal
@@ -510,6 +523,7 @@ test("reload button label changes when an agent has an embedded UI", async ({ pa
 test("mobile: selecting an embedded UI agent opens a full-screen iframe", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   await expect(page.locator("aside")).toBeVisible()
@@ -528,6 +542,7 @@ test("mobile: selecting an embedded UI agent opens a full-screen iframe", async 
 
 test("reload button triggers an iframe reload (key changes)", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
 
@@ -551,6 +566,7 @@ test("reload button triggers an iframe reload (key changes)", async ({ page }) =
 
 test("embedded UI iframe follows the control-plane light and dark theme", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
 
@@ -574,6 +590,7 @@ test("embedded UI iframe follows the control-plane light and dark theme", async 
 
 test("a new interface registered_at remounts the iframe", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='/dashboard interface']")
@@ -624,6 +641,7 @@ test("embed URL and message carry only whitelisted look and lang", () => {
 test("embedded UI receives the console look and browser language", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("treer-look", "c"))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='/dashboard interface']")
@@ -643,6 +661,7 @@ test("embedded UI receives the console look and browser language", async ({ page
 test("an unknown stored look is not forwarded", async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem("treer-look", "<script>"))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
   await page.getByRole("button", { name: /^dashboard / }).click()
   const src = await page.locator("iframe[title='/dashboard interface']").getAttribute("src")
@@ -654,6 +673,7 @@ test("a failed request announces its error toast as an alert", async ({ page }) 
     ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: { message: "Backend unavailable" } }) })
     : route.fallback())
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Organization settings" }).click()
   await page.getByRole("button", { name: "New organization" }).click()
   const dialog = page.getByRole("dialog")
@@ -668,6 +688,7 @@ test("a failed request announces its error toast as an alert", async ({ page }) 
 test("prefers-reduced-motion removes animation and transition time", async ({ page }) => {
   await page.emulateMedia({ reducedMotion: "reduce" })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   const durations = await page.evaluate(() => {
     const probe = document.createElement("div")
     probe.style.cssText = "transition: opacity 2s; animation: spin 2s infinite"
@@ -690,6 +711,7 @@ test.describe("workload tree keyboard navigation", () => {
 
   test("one tab stop with arrow, Home, End, Right and Left", async ({ page }) => {
     await page.goto("/")
+    await browseTreeOnMobile(page)
     await page.locator("aside").getByText("Tree", { exact: true }).click()
     const tree = page.getByRole("tree", { name: "Workspace workloads" })
     const primaries = tree.locator("[data-tree-primary]")

@@ -1,3 +1,5 @@
+import { WorkspaceOverview } from "@/components/workspace-overview"
+import { LayoutDashboard, PanelLeft } from "lucide-react"
 import { AgentBreadcrumbs } from "@/components/agent-breadcrumbs"
 import { AppSettingsView,AppsView } from "@/components/apps-view"
 import { AuditView } from "@/components/audit-view"
@@ -78,8 +80,9 @@ function WorkspaceAppContent() {
   const [terminalStatus, setTerminalStatus] = useState<TerminalState>("not attached")
   const [interfaceUiRevision, setInterfaceUiRevision] = useState(0)
   const [theme, setTheme] = useState<Theme>(() => readTheme())
-  const [mainView, setMainView] = useState<MainView>("terminal")
+  const [mainView, setMainView] = useState<MainView>("overview")
   const [mobileTerminalOpen, setMobileTerminalOpen] = useState(false)
+  const [mobileTreeOpen, setMobileTreeOpen] = useState(preview)
   const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches)
   const [ctrlArmed, setCtrlArmed] = useState(false)
   const terminalPaneRef = useRef<TerminalPaneHandle>(null)
@@ -191,9 +194,21 @@ function WorkspaceAppContent() {
   })
 
   useEffect(() => {
-    const agents = snapshot?.agents ?? []
-    setSelectedAgentId((current) => current && (agents.some((agent) => agent.agent_id === current) || apps.some((app) => (app.runtime_agent_id ?? app.app_id) === current)) ? current : agents[0]?.agent_id ?? (apps[0] ? apps[0].runtime_agent_id ?? apps[0].app_id : null))
-  }, [snapshot, apps])
+    if (!selectedAgentId) return
+    const exists = snapshot?.agents.some((agent) => agent.agent_id === selectedAgentId)
+      || apps.some((app) => (app.runtime_agent_id ?? app.app_id) === selectedAgentId)
+    if (exists) return
+    setSelectedAgentId(null)
+    setMainView((current) => current === "terminal" ? "overview" : current)
+  }, [snapshot, apps, selectedAgentId])
+
+  useEffect(() => {
+    setSelectedAgentId(null)
+    setLogsTarget(null)
+    setMobileTerminalOpen(false)
+    setMobileTreeOpen((current) => preview || current)
+    setMainView((current) => current === "terminal" || current === "app" || current === "machine" || current === "audit" ? "overview" : current)
+  }, [workspaceId, preview])
 
   const selectedAgentApp = apps.find((app) => (app.runtime_agent_id ?? app.app_id) === selectedAgentId)
   const showWorkloadLogs = Boolean(logsTarget && logsTarget.workspaceId === workspaceId && logsTarget.agentId === selectedAgentId && logsTarget.appId === (selectedAgentApp?.app_id ?? null))
@@ -252,8 +267,8 @@ function WorkspaceAppContent() {
     if (mainView === "organization") setOrganizationName(organization?.name ?? "")
     if (mainView === "workspace") setWorkspaceName(workspace?.name ?? "")
   }, [mainView, organization?.organization_id, organization?.name, workspace?.workspace_id, workspace?.name])
-  const mobileTerminalIdle = isMobile && mainView === "terminal" && !mobileTerminalOpen
-  const mobileSidebarHidden = isMobile && mainView !== "terminal"
+  const mobileTerminalIdle = isMobile && ((mainView === "terminal" && !mobileTerminalOpen) || (mainView === "overview" && mobileTreeOpen))
+  const mobileSidebarHidden = isMobile && mainView !== "terminal" && !(mainView === "overview" && mobileTreeOpen)
   const selectedMachine = snapshot?.servers.find((machine) => machine.server_id === selectedMachineId)
 
   const transformTerminalInput = useCallback((data: string) => {
@@ -273,6 +288,14 @@ function WorkspaceAppContent() {
 
   function openMobileTerminal() {
     setMobileTerminalOpen(true)
+  }
+
+  function showOverview() {
+    setMainView("overview")
+    setSelectedAgentId(null)
+    setMobileTerminalOpen(false)
+    setMobileTreeOpen(false)
+    setCtrlModifier(false)
   }
 
   function closeMobileSurface() {
@@ -323,6 +346,7 @@ function WorkspaceAppContent() {
   }, [isMobile, mobileTerminalOpen])
 
   function showAgentTerminal(agentId: string, logs = false) {
+    setMobileTreeOpen(false)
     setSelectedAgentId(agentId)
     setShowWorkloadLogs(logs, agentId)
     setMainView("terminal")
@@ -447,8 +471,8 @@ function WorkspaceAppContent() {
       if (folder && workspaceIdRef.current === creationWorkspaceId) setPlacementRevision((revision) => revision + 1)
       if (workspaceIdRef.current !== creationWorkspaceId) return
       setCreateAgentOpen(false)
-      showAgentTerminal(agentId)
       await refreshSnapshot()
+      if (workspaceIdRef.current === creationWorkspaceId) showAgentTerminal(agentId)
     } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) setCreateAgentError(reason instanceof Error ? reason.message : "Create failed") }
     finally { setCreatingAgent(false) }
   }
@@ -538,12 +562,11 @@ function WorkspaceAppContent() {
   }, [loadApps, showError, setApps])
 
   useEffect(() => {
-    if (mainView === "app" && selectedAppId && !appsLoading && !selectedApp) setMainView("terminal")
+    if (mainView === "app" && selectedAppId && !appsLoading && !selectedApp) setMainView("overview")
   }, [mainView, selectedAppId, selectedApp, appsLoading])
 
   function openApps() {
-    setMainView("terminal")
-    setMobileTerminalOpen(false)
+    showOverview()
   }
 
   function openAppSettings(app: AppDeployment) {
@@ -577,7 +600,7 @@ function WorkspaceAppContent() {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(deletingApp.app_id)}`, { method: "DELETE" })
       setDeletingApp(null)
       setSelectedAppId(null)
-      setMainView("terminal")
+      showOverview()
       await loadApps()
     } catch (reason) { showError(reason) }
   }
@@ -612,7 +635,7 @@ function WorkspaceAppContent() {
   }
 
   function closeMainView() {
-    setMainView("terminal")
+    showOverview()
   }
 
   function closeMachineOverview() {
@@ -749,6 +772,7 @@ function WorkspaceAppContent() {
 
   function replayFirstRunTour() {
     if (!user) return
+    setMobileTreeOpen(true)
     clearFirstRunTour(user.user_id)
     if (tourHostRef.current) startFirstRunTour(tourHostRef.current, { userId: user.user_id, persist: !preview })
   }
@@ -756,6 +780,7 @@ function WorkspaceAppContent() {
   useEffect(() => {
     if (!user) return
     if (!shouldAutoStartFirstRunTour(user.user_id)) return
+    setMobileTreeOpen(true)
     const timer = window.setTimeout(() => {
       if (!tourHostRef.current) return
       startFirstRunTour(tourHostRef.current, { userId: user.user_id, persist: !preview })
@@ -908,6 +933,7 @@ function WorkspaceAppContent() {
           </div>
           <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
+        <button type="button" aria-label="Workspace overview" onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />Overview</button>
         <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <div className="shrink-0 border-t p-2">
@@ -922,9 +948,9 @@ function WorkspaceAppContent() {
       <section className={cn("min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:grid" : "grid")}>
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
-            {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
-            <span className="hidden truncate sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
-          {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
+            {isMobile && mainView !== "terminal" && mainView !== "overview" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
+            <button type="button" onClick={showOverview} aria-label="Back to workspace overview" className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "overview" ? "Overview" : mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
+          {mainView === "overview" ? <Button variant="ghost" size="sm" aria-label="Browse tree" className="md:hidden" onClick={() => setMobileTreeOpen(true)}><PanelLeft />Browse tree</Button> : mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label={selectedAgentInterface || showAppUi ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs(!showWorkloadLogs)}>{showWorkloadLogs ? "Show App" : "Show logs"}</Button>}
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
@@ -934,7 +960,7 @@ function WorkspaceAppContent() {
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
           </div> : mainView === "apps" ? <IconButton label="Refresh Apps" onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
         </header>
-        {mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
+        {mainView === "overview" ? <WorkspaceOverview key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} onOpen={showAgentTerminal} onNewAgent={openCreateAgentOrMachineSetup} onWorkspaceSettings={openWorkspaceSettings} /> : mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
           <div className="max-w-sm">
             {mobileTerminalOpen && <Button variant="ghost" onClick={closeMobileSurface}>Back to workloads</Button>}
             <p className="text-sm font-medium text-zinc-800">Machine is offline</p>

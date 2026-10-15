@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { browseTreeOnMobile } from './fixtures/navigation'
 import { mockTreeMapApi, mockDeepTreeMapApi, mapSnapshot } from './fixtures/treemap'
 
 for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
@@ -8,6 +9,7 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
     // Apply the theme explicitly so screenshots do not depend on storage-key implementation.
     await page.goto('/')
+    await browseTreeOnMobile(page)
     await page.evaluate((value) => document.documentElement.classList.toggle('dark', value === 'dark'), theme)
     await expect(page.getByRole('button', { name: 'Expand tree map' })).toBeEnabled()
     await expect(page.getByRole('button', { name: /^coordinator agent · workstation · idle$/ })).toBeVisible()
@@ -46,6 +48,7 @@ test('map renders hostile names as text and stays usable after folder removal', 
   let current = { folders: [{ folder_id: 'hostile', name: '<img src=x onerror=alert(1)>', parent_id: null }], placements: [] }
   await page.route('**/workload-tree', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify(current) }))
   await page.goto('/')
+  await browseTreeOnMobile(page)
   await page.getByRole('button', { name: 'Expand tree map' }).click()
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
   await dialog.getByRole('button', { name: 'Explore folder /<img src=x onerror=alert(1)>', exact: true }).click()
@@ -63,6 +66,7 @@ test('single creation menu preserves independent disabled states and the tour an
   await mockTreeMapApi(page)
   await page.route('**/snapshot', (route) => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...mapSnapshot, servers: mapSnapshot.servers.map((machine) => ({ ...machine, status: 'offline' })) }) }))
   await page.goto('/')
+  await browseTreeOnMobile(page)
   const add = page.getByRole('button', { name: 'Add to tree', exact: true })
   await expect(add).toBeEnabled()
   await expect(page.getByRole('treeitem', { name: 'coordinator', exact: true })).toBeVisible()
@@ -83,6 +87,7 @@ test('loading folders disables only Add folder; an empty workspace disables both
   const pending = new Promise<void>((resolve) => { release = resolve })
   await page.route('**/workload-tree', async (route) => { await pending; return route.fulfill({ contentType: 'application/json', body: '{"folders":[],"placements":[]}' }) })
   await page.goto('/')
+  await browseTreeOnMobile(page)
   await expect(page.getByText('Loading folders…', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
   await expect(page.getByRole('menuitem', { name: 'Add folder', exact: true })).toHaveAttribute('data-disabled')
@@ -91,6 +96,7 @@ test('loading folders disables only Add folder; an empty workspace disables both
   await page.keyboard.press('Escape')
   await page.route('**/workspaces?*', (route) => route.fulfill({ contentType: 'application/json', body: '{"workspaces":[]}' }))
   await page.reload()
+  await browseTreeOnMobile(page)
   await expect(page.getByRole('button', { name: 'Add to tree', exact: true })).toBeDisabled()
   await expect(page.getByRole('button', { name: 'Expand tree map', exact: true })).toBeDisabled()
 })
@@ -102,6 +108,7 @@ for (const sample of ["small", "medium", "large"] as const) for (const mobile of
     await mockDeepTreeMapApi(page, large ? true : sample === "medium" ? "medium" : false)
     await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
     await page.goto('/')
+    await browseTreeOnMobile(page)
     const appRow = page.getByRole('treeitem', { name: 'dashboard', exact: true })
     await expect(appRow.locator('[data-workload-icon="app"]')).toBeVisible()
     await page.getByRole('button', { name: 'Expand tree map' }).click()
@@ -147,6 +154,7 @@ for (const sample of ["small", "medium", "large"] as const) for (const mobile of
 test('a very deep small tree respects the node budget instead of recursively mounting every folder', async ({ page }) => {
   await mockDeepTreeMapApi(page, false, 110)
   await page.goto('/')
+  await browseTreeOnMobile(page)
   await page.getByRole('button', { name: 'Expand tree map' }).click()
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
   await expect(dialog.getByRole('button', { name: 'View contents of /Team', exact: true })).toContainText('3 agents')

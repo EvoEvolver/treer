@@ -87,6 +87,7 @@ export interface MachineFileUpload {
 }
 
 export interface Agent {
+  updated_at?: string
   path?: string
   run_generation?: number
   agent_id: string

@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from '@playwright/test'
+import { browseTreeOnMobile } from './fixtures/navigation'
 import { mockTreeMapApi } from './fixtures/treemap'
 import { trafficBuckets } from '../src/lib/traffic'
 import type { MachineTrafficRecord } from '../src/lib/api'
@@ -24,6 +25,7 @@ async function setup(page: Page) {
 }
 async function openAudit(page: Page) {
   await page.goto('/')
+  await browseTreeOnMobile(page)
   await page.getByRole('button', { name: 'Organization settings', exact: true }).click()
   await page.getByRole('button', { name: 'Open audit', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Audit', exact: true })).toBeVisible()

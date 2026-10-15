@@ -1,3 +1,4 @@
+import { workspaceWorkloads } from "@/lib/workspace-workloads"
 import { useEffect, useRef, useState } from "react"
 import { api, machineName, type Agent, type AppDeployment, type Machine, type WorkloadFolder as FolderEntry, type WorkloadTreeState as Tree } from "@/lib/api"
 import { Button } from "@/components/ui/button"
@@ -93,27 +94,20 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   const selectionChain = JSON.stringify(selectedAncestors)
   useEffect(() => {
     if (!treeLoaded) return
-    const changedSelection = previousSelection.current !== null && previousSelection.current !== selectedId
+    const changedSelection = previousSelection.current !== selectedId
     if (changedSelection) pendingReveal.current = selectedId
     const next = { ...expansion.current }
     let changed = false
     const chain = JSON.parse(selectionChain) as string[]
     for (const id of chain) {
-      // Initial/default selection preserves collapsed preferences; changing Agent reveals only its chain.
+      // Overview starts with no selection; explicitly choosing an Agent reveals only its chain.
       if (next[id] !== true && pendingReveal.current === selectedId && selectedId !== null) { next[id] = true; changed = true }
     }
     if (chain.length) pendingReveal.current = null
     previousSelection.current = selectedId
     if (changed) saveExpansion(next)
   }, [selectedId, selectionChain, treeLoaded])
-  const workloads = [...agents]
-  for (const app of apps) {
-    const id = app.runtime_agent_id ?? app.app_id
-    const existing = workloads.findIndex((agent) => agent.agent_id === id || agent.agent_id === app.app_id)
-    if (existing >= 0) {
-      workloads[existing] = { ...workloads[existing], kind: "app", name: workloads[existing].name === `app:${app.name}` ? app.name : workloads[existing].name }
-    } else workloads.push({ agent_id: id, name: app.name, server_id: app.server_id, kind: "app", status: app.status })
-  }
+  const workloads = workspaceWorkloads(agents, apps)
   const placements = new Map(tree.placements.map((entry) => [entry.agent_id, entry]))
   function orderedRows(parent: string | null): Agent[] {
     return workloads.filter((agent) => (placements.get(agent.agent_id)?.folder_id ?? null) === parent)

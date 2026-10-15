@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test'
+import { browseTreeOnMobile } from './fixtures/navigation'
 import { mockTreeMapApi } from './fixtures/treemap'
 
 for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
@@ -9,10 +10,11 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     const failures: string[] = []
     page.on('pageerror', (error) => failures.push(error.message))
     await page.goto('/')
+    await browseTreeOnMobile(page)
     await expect(page.getByRole('tree', { name: 'Workspace workloads' })).toBeVisible()
     await expect(page.getByRole('combobox', { name: 'Workspace', exact: true })).toHaveText('Studio')
     await expect(page.getByRole('button', { name: 'Ideas', exact: true })).toBeVisible()
-    if (!mobile) await expect(page.getByRole('navigation', { name: 'Agent path' })).toHaveAttribute('title', '/Research/reviewer')
+    if (!mobile) await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: testInfo.outputPath(`console-${theme}-${mobile ? '390' : 'desktop'}.png`) })
     await page.getByRole('button', { name: 'Add to tree', exact: true }).click()

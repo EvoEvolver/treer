@@ -21,10 +21,9 @@ choices. Renaming/moving a folder retains its preference. Successful tree reads
 prune deleted IDs; failed reads never erase the cache. If browser storage is
 unavailable, the tree still toggles in memory and starts collapsed on reload.
 
-Selecting a different Agent reveals and saves only its ancestor folders, leaving
-other preferences intact. The initial/default Agent selection does not override
-collapsed preferences, so a user can collapse the selected Agent's folder and
-reload without reopening it. The current console has no Agent deep-link route;
+Explicitly selecting an Agent reveals and saves only its ancestor folders,
+leaving other preferences intact. Reload starts at Overview with no selected
+Agent, preserving collapsed preferences. The current console has no Agent deep-link route;
 a future explicit deep-link selection should use the same reveal behavior.
 
 The desktop Tree sidebar has a focusable vertical separator with a 24px mouse/touch
@@ -56,6 +55,31 @@ a denied operation. Managed Apps have separate settings; their startup editing
 requires the forthcoming App update API.
 
 ## Console composition
+
+Workspaces open at **Overview** without attaching a PTY. The main view preserves
+folder hierarchy and persisted sibling order; it never regroups Agents into flat
+attention lists. Status badges and subtree counts overlay the Tree. Attention
+rules follow iOS: blocked/failed Agents and nonterminal Agents on offline/missing
+machines need attention; online starting/working Agents are working; online
+idle/unknown Agents are idle. Apps remain visible but do not count as Agents in
+these filters. Legacy unknown statuses are neutral; `stopped` is terminal.
+
+Folders with attention/working descendants expand by default, while idle/empty
+folders collapse. Manual toggles take priority while the overview is mounted;
+they are separate from the sidebar's persisted expansion preferences. Filter
+chips retain matching Agents and their ancestor folders, automatically expanding
+those ancestors. Clear a filter to restore the unfiltered manual toggles. Filtered
+subtree counts include only matches. Machines online is informational. Folder
+and Agent controls are native keyboard buttons; complete paths are in accessible
+labels and hover titles. Repeated labels remain addressable by stable IDs.
+
+Selecting an Agent opens its existing Interface UI when available, otherwise its
+terminal; the Tree menu's Logs action remains the PTY fallback. Live snapshots
+update status/counts without selecting an Agent; workspace switching clears the
+selection. Use desktop Overview or the workspace breadcrumb to return. Phones
+start at Overview and expose **Browse tree**; closing a full-screen Agent retains
+return-to-Tree behavior. Trusted Policy settings links and tour previews retain
+their direct destinations. Treemap layout and launch operations are unchanged.
 
 `workspace-app.tsx` coordinates selection, views and user actions. Its dialog
 state and rendering live in `workspace-dialog-state.ts` / `workspace-dialogs.tsx`;
