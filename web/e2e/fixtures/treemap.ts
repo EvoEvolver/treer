@@ -60,7 +60,7 @@ export async function mockDeepTreeMapApi(page: Page, large: boolean | "medium", 
   const nestedFolders = Array.from({ length: depth }, (_, index) => ({
     folder_id: `level-${index}`, name: ['Team', 'Research', 'Experiments', 'Lab'][index] ?? `Level-${index}`, parent_id: index ? `level-${index - 1}` : null,
   }))
-  const nestedAgents = Array.from({ length: large === "medium" ? 20 : large ? 80 : 3 }, (_, index) => ({
+  const nestedAgents = Array.from({ length: large === "medium" ? 39 : large ? 299 : 4 }, (_, index) => ({
     agent_id: `deep-${index}`, name: `agent-${String(index + 1).padStart(2, '0')}`, kind: index % 2 ? 'codex' : 'command',
     status: index % 3 ? 'idle' : 'working', server_id: index % 11 === 10 ? 'remote' : 'local',
   }))
