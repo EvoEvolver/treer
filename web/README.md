@@ -33,13 +33,19 @@ select the limits, and double-click restores 272px. The minimum is 240px; the
 maximum is the smallest of 480px, 45% of the viewport and the space left after
 reserving 400px for main content plus the 8px separator. Window resizing clamps
 the displayed width while retaining the preferred width for larger windows.
-Preferences use `treer:tree-width:v1:<user_id>` in localStorage across workspaces.
+The arrow button at the top of the separator collapses/expands the sidebar,
+including via Enter/Space, and exposes `aria-expanded` and `aria-controls`.
+A narrow rail keeps the expand button available while collapsed. The original
+width is restored on expansion, and the terminal is fitted after either toggle.
+Preferences use `treer:tree-width:v1:<user_id>` and
+`treer:tree-collapsed:v1:<user_id>` in localStorage across workspaces.
 Unavailable storage falls back to the default on load and allows in-memory
-resizing. Pointer capture and a temporary overlay protect drags across terminals
+resizing and toggling. Collapse defaults to off when not cached. Pointer capture and a temporary overlay protect drags across terminals
 and embedded iframes; release/cancel/focus loss removes protection and fits the
 terminal after layout commits. Separator colors use theme tokens.
 
-Below 768px the separator is hidden and the existing mobile layout stays intact.
+Below 768px the separator and arrow are hidden, desktop collapse is ignored,
+and the existing mobile layout stays intact.
 Managed App/Agent Interface embeds retain the same surrounding console sidebar.
 Native iOS/Android screens and their separate Agent WebViews do not render this
 sidebar; no native source or embedded Agent-owned interface is changed.
@@ -76,6 +82,31 @@ App interface automatically. An explicit **Show logs** choice made after App
 recognition stays with that workspace/runtime/App identity across metadata and
 status refreshes. Mobile uses the same component and its existing full-screen
 interface and workload **Logs** menu.
+
+## Tree creation menu and map
+
+The Tree header has one **+** menu for **Add folder** and **Add agent**. Each item
+keeps its original disabled conditions; without machines, Add agent explains the
+required setup and opens machine settings, with a visible explanation and a
+**Set up a machine** button that opens enrollment instructions. The tour still targets `create-agent`.
+Folder context menus retain their existing creation actions and destinations.
+
+**Expand tree map** opens a read-only treemap in a large dialog.
+Folders contain equally weighted Agent blocks; empty folders keep a placeholder.
+Both Tree rows and map blocks display only **agent** or **app**, including their
+accessible labels; runtime shell/command/harness kinds remain internal. Green dots indicate running/idle/working/starting Agents on online machines;
+other states use muted dots and always have a text label. Names, workload category,
+machine and state are text, with full paths on hover/focus. Opening an Agent uses
+its stable ID and closes the dialog. Folder headers drill down; breadcrumbs and
+the back button return to ancestors. Drill-down does not change sidebar expansion
+preferences or send mutations. Narrow screens stack proportional blocks and
+scroll vertically; deeper/tight containers offer drill-down instead of tiny labels.
+The dialog traps focus, supports native button keyboard actions and Escape, and
+returns focus to its trigger on dismissal. It has no new library dependency.
+
+The map adds no dependencies and keeps the existing single-file build and release
+contract. The local Worker security test verifies the map under the unchanged
+nonce CSP. See [the size/review notes](tree-map-report.md).
 
 ## Trusted Policy publication settings
 

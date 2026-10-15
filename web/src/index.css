@@ -20,6 +20,7 @@
     --muted-foreground: 40 2% 46%;
     --accent: 45 6% 92%;
     --accent-foreground: 45 5% 20%;
+    --status-online: 150 47% 38%;
     --destructive: 2 79% 63%;
     --destructive-foreground: 0 0% 100%;
     --border: 45 6% 86%;
@@ -46,6 +47,7 @@
     --muted-foreground: 40 6% 62%;
     --accent: 40 6% 18%;
     --accent-foreground: 45 10% 90%;
+    --status-online: 150 46% 56%;
     --destructive: 2 62% 48%;
     --destructive-foreground: 0 0% 100%;
     --border: 40 6% 22%;

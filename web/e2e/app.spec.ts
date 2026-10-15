@@ -345,6 +345,11 @@ test.describe('resizable tree sidebar', () => {
     await page.mouse.up()
     await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'auto')
     await expect.poll(() => resizeColumns.at(-1)!).toBeLessThan(initialColumns)
+    const expandedColumns = resizeColumns.at(-1)!
+    await page.getByRole('button', { name: 'Collapse tree sidebar', exact: true }).click()
+    await expect.poll(() => resizeColumns.at(-1)!).toBeGreaterThan(expandedColumns)
+    await page.getByRole('button', { name: 'Expand tree sidebar', exact: true }).click()
+    await expect.poll(() => resizeColumns.at(-1)!).toBe(expandedColumns)
     expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe('368')
     await page.screenshot({ path: testInfo.outputPath('tree-resizer-desktop.png') })
     await page.reload()
@@ -355,6 +360,38 @@ test.describe('resizable tree sidebar', () => {
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
     await page.reload()
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
+  })
+  test('collapse is keyboard accessible and persists without losing width or mobile navigation', async ({ page }, testInfo) => {
+    await page.goto('/')
+    await separator(page).press('ArrowRight')
+    const collapse = page.getByRole('button', { name: 'Collapse tree sidebar', exact: true })
+    await collapse.focus()
+    await page.keyboard.press('Enter')
+    const expand = page.getByRole('button', { name: 'Expand tree sidebar', exact: true })
+    await expect(expand).toBeFocused()
+    await expect(expand).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('#tree-sidebar')).toBeHidden()
+    expect(await page.evaluate(() => localStorage.getItem('treer:tree-collapsed:v1:u1'))).toBe('true')
+    expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe('288')
+    await page.screenshot({ path: testInfo.outputPath('tree-collapsed-desktop.png') })
+    await page.reload()
+    await expect(expand).toBeVisible()
+    await expect(page.locator('#tree-sidebar')).toBeHidden()
+    await page.goto('/orgs/org-2/workspaces/ws-2')
+    await expect(expand).toBeVisible()
+    await page.setViewportSize({ width: 390, height: 844 })
+    await expect(expand).toBeHidden()
+    await expect(page.locator('#tree-sidebar')).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: testInfo.outputPath('tree-collapsed-preference-mobile.png') })
+    await page.setViewportSize({ width: 1280, height: 900 })
+    await expand.focus()
+    await page.keyboard.press('Space')
+    await expect(collapse).toHaveAttribute('aria-expanded', 'true')
+    await expect(separator(page)).toHaveAttribute('aria-valuenow', '288')
+    await page.reload()
+    await expect(collapse).toBeVisible()
+    await expect(page.locator('#tree-sidebar')).toBeVisible()
   })
   test('keyboard exposes separator values, clamps on resize and stays hidden at 390px', async ({ page }, testInfo) => {
     await page.goto('/')
@@ -389,14 +426,21 @@ test.describe('resizable tree sidebar', () => {
       await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
       await separator(page).press('ArrowRight')
       await expect(separator(page)).toHaveAttribute('aria-valuenow', '288')
+      await page.getByRole('button', { name: 'Collapse tree sidebar', exact: true }).click()
+      await expect(page.locator('#tree-sidebar')).toBeHidden()
+      await page.getByRole('button', { name: 'Expand tree sidebar', exact: true }).click()
+      await expect(page.locator('#tree-sidebar')).toBeVisible()
     })
   }
   test('width belongs to the signed in user and invalid cache uses default', async ({ page }) => {
-    await page.addInitScript(() => { localStorage.setItem('treer:tree-width:v1:other-user', '480'); localStorage.setItem('treer:tree-width:v1:u1', 'invalid') })
+    await page.addInitScript(() => { localStorage.setItem('treer:tree-width:v1:other-user', '480'); localStorage.setItem('treer:tree-width:v1:u1', 'invalid'); localStorage.setItem('treer:tree-collapsed:v1:other-user', 'true'); localStorage.setItem('treer:tree-collapsed:v1:u1', 'invalid') })
     await page.goto('/')
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
     await separator(page).press('ArrowRight')
     expect(await page.evaluate(() => localStorage.getItem('treer:tree-width:v1:other-user'))).toBe('480')
+    await page.getByRole('button', { name: 'Collapse tree sidebar', exact: true }).click()
+    await page.getByRole('button', { name: 'Expand tree sidebar', exact: true }).click()
+    expect(await page.evaluate(() => localStorage.getItem('treer:tree-collapsed:v1:other-user'))).toBe('true')
   })
   test('touch pointer drag resizes on a large touch screen', async ({ page, context }) => {
     await page.goto('/')
@@ -510,7 +554,8 @@ async function expandFolder(page: Page, name: string) {
 
 async function createResearchTree(page: Page) {
   await page.goto("/")
-  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("research")
   await page.getByRole("button", { name: "Save", exact: true }).click()
   await page.getByRole("button", { name: "Actions for research", exact: true }).click()
@@ -637,7 +682,8 @@ for (const mobile of [false, true]) {
       await expect(page.getByRole("treeitem", { name: "reviewer", exact: true })).toHaveCount(0)
       await expect(page.getByRole("dialog")).toHaveCount(0)
       expect(creations).toBe(1)
-      await page.getByRole("button", { name: "New", exact: true }).click()
+      await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+      await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
       await expect(page.getByRole("dialog")).not.toContainText("Tree folder:")
     })
   })
@@ -672,6 +718,19 @@ test("mixed workloads use common lifecycle endpoints and logs", async ({ page })
   }
 })
 
+test("Tree and map distinguish App identity from a command runtime kind", async ({ page }) => {
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB, { ...appRuntimeAgent, kind: "command" }] }))
+  await page.goto("/")
+  await expect(page.getByRole("button", { name: /^api-server agent ·/ })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^worker agent ·/ })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^Soul Archive app ·/ })).toBeVisible()
+  await page.getByRole("button", { name: "Expand tree map" }).click()
+  const app = page.getByRole("dialog").getByRole("button", { name: /^Open \/Soul Archive · app ·/ })
+  await expect(app).toBeVisible()
+  await expect(app).toHaveAttribute("title", / · app ·/)
+  await expect(page.getByRole("dialog").getByRole("button", { name: /^Open \/api-server · agent ·/ })).toBeVisible()
+})
+
 test("folder loading failure keeps workloads usable and supports retry", async ({ page }) => {
   let fail = true
   await page.route("**/api/workspaces/ws-1/workload-tree", async (route) => {
@@ -693,7 +752,8 @@ test("external folder changes refresh without resetting an open editor", async (
   await page.route("**/api/workspaces/ws-1/workload-tree", (route) => ok(route, { folders, placements: folders.length ? [{ agent_id: "ag-1", folder_id: "cli-folder", position: 0 }] : [] }))
   await page.goto("/")
   await expect(page.getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
-  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Unsaved folder")
   folders = [{ folder_id: "cli-folder", name: "From CLI", parent_id: null }]
   await page.clock.fastForward(5100)
@@ -717,11 +777,12 @@ test("a stale background tree read cannot undo a local folder mutation", async (
     return ok(route, { folders: [], placements: [] })
   })
   await page.goto("/")
-  await expect(page.getByRole("button", { name: "New folder", exact: true })).toBeEnabled()
+  await expect(page.getByRole("button", { name: "Add to tree", exact: true })).toBeEnabled()
   blockRead = true
   await page.evaluate(() => window.dispatchEvent(new Event("focus")))
   await pending
-  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Keep this folder")
   await page.getByRole("button", { name: "Save", exact: true }).click()
   await expect(page.getByRole("treeitem", { name: "Keep this folder", exact: true })).toBeVisible()
@@ -858,7 +919,8 @@ test("mobile workload menus move entries up and down and disable list boundaries
 
 test("dragging into a folder inserts at the chosen sibling and preserves that order", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Research")
   await page.getByRole("button", { name: "Save", exact: true }).click()
   const folder = page.getByRole("treeitem", { name: "Research", exact: true })
@@ -879,7 +941,8 @@ test("dragging into a folder inserts at the chosen sibling and preserves that or
 
 test("folders support persistent drag and keyboard moves, nesting, rename and deletion", async ({ page }) => {
   await page.goto("/")
-  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Research")
   await page.getByRole("button", { name: "Save", exact: true }).click()
   const folder = page.getByRole("treeitem", { name: "Research", exact: true })
@@ -927,7 +990,8 @@ test("folders support persistent drag and keyboard moves, nesting, rename and de
 test("workload folders remain workspace scoped and mobile navigation returns to the tree", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
-  await page.getByRole("button", { name: "New folder", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Private organization")
   await page.getByRole("button", { name: "Save", exact: true }).click()
   await page.getByRole("combobox", { name: "Organization" }).click()
@@ -1004,21 +1068,22 @@ test("agent list row menu can rename and delete", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Delete agent" })).toBeVisible()
 })
 
-test("new agent sends an empty workspace to machine setup", async ({ page }) => {
-  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
-    ...snapshot,
-    servers: [],
-    agents: [],
-  }))
+for (const mobile of [false, true]) test(`new agent visibly guides an empty workspace to machine setup (${mobile ? '390px' : 'desktop'})`, async ({ page }) => {
+  if (mobile) await page.setViewportSize({ width: 390, height: 844 })
+  await page.route("**/api/workspaces/ws-1/bootstrap", (route) => ok(route, { install_command: "echo synthetic install instructions", connect_command: "echo synthetic connect instructions" }))
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [], agents: [] }))
   await page.goto("/")
-
-  const addMachinePrompt = page.getByRole("button", { name: "Set up a machine before creating an agent" })
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await expect(page.getByText("Set up a machine first", { exact: true })).toBeVisible()
+  const addMachinePrompt = page.getByRole("menuitem", { name: "Set up a machine before creating an agent" })
   await expect(addMachinePrompt).toBeEnabled()
   await addMachinePrompt.click()
-
-  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
-  await expect(page.locator("section[data-tour='workspace-machines']").getByRole("button", { name: "Add", exact: true })).toBeVisible()
+  await expect(page.getByText("Add a machine to create agents", { exact: true })).toBeVisible()
+  await expect(page.getByText("Agents run on machines.", { exact: false })).toBeVisible()
   await expect(page.getByRole("heading", { name: "Create agent" })).toHaveCount(0)
+  await page.getByRole("button", { name: "Set up a machine", exact: true }).click()
+  await expect(page.getByRole("dialog").getByRole("heading", { name: "Add machine", exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
 test("organization actions open a settings page with inline management", async ({ page }) => {
@@ -1461,7 +1526,8 @@ test("terminal uses a browser-safe close code when output backlog exceeds its li
 test("create agent dialog offers profiles and explicit commands without provider installation", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
-  await page.getByRole("button", { name: "New", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await expect(page.getByRole("option", { name: "Terminal", exact: true })).toBeVisible()
   await expect(page.getByRole("option", { name: "Custom command", exact: true })).toBeVisible()
@@ -1473,7 +1539,8 @@ test("create agent dialog offers profiles and explicit commands without provider
 test("create agent custom command preserves argv without a provider installer", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
-  await page.getByRole("button", { name: "New", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Custom command", exact: true }).click()
   await page.getByRole("textbox", { name: "Command", exact: true }).fill('/opt/my-agent --label "two words"')
@@ -1491,7 +1558,8 @@ test("create agent custom command preserves argv without a provider installer", 
 test("create agent dialog lists an installed recipe launch profile", async ({ page }) => {
   await page.goto("/")
   await agentsTab(page).click()
-  await page.getByRole("button", { name: "New", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
   await expect(page.getByRole("dialog")).toBeVisible()
   await page.getByRole("dialog").getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Codex Agent UI" }).click()
@@ -1504,7 +1572,8 @@ test("create agent dialog contains a long profile command on narrow screens", as
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
   await agentsTab(page).click()
-  await page.getByRole("button", { name: "New", exact: true }).click()
+  await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
   const dialog = page.getByRole("dialog")
   await dialog.getByRole("combobox", { name: "Launch" }).click()
   await page.getByRole("option", { name: "Codex + UI" }).click()

@@ -431,6 +431,12 @@ test('tree resizing protects embedded iframe events and matches dark theme', asy
   await expect(frame).toBeVisible()
   await expect(page.locator('html')).toHaveClass(/dark/)
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.getByRole('button', { name: 'Collapse tree sidebar', exact: true }).click()
+  await expect(page.locator('#tree-sidebar')).toBeHidden()
+  await expect(frame).toBeVisible()
+  await page.getByRole('button', { name: 'Expand tree sidebar', exact: true }).click()
+  await expect(bar).toHaveAttribute('aria-valuenow', '422')
+  await expect(frame).toBeVisible()
   await page.screenshot({ path: testInfo.outputPath('tree-resizer-dark-embed.png') })
 })
 

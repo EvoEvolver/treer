@@ -174,6 +174,11 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
       <Button variant="outline" className="shrink-0" onClick={onClose}>Close</Button>
     </div>
 
+    {!preview && machines.length === 0 && machineCount === 0 && <div role="status" className="mb-6 flex flex-col items-start gap-3 rounded-md border bg-muted/50 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
+      <div><p className="font-medium">Add a machine to create agents</p><p className="mt-1 text-xs text-muted-foreground">Agents run on machines. Connect your first machine to this workspace, then add an agent from the Tree menu.</p></div>
+      <Button variant="outline" className="shrink-0" onClick={onAddMachine}>Set up a machine</Button>
+    </div>}
+
     <section className="border-y py-6">
       <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
         <div><h2 className="text-sm font-semibold">General</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">The display name shown to organization members.</p></div>
