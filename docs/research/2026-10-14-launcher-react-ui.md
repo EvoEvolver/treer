@@ -182,55 +182,87 @@ from `?lang=`, else `navigator.language` (`zh*` → zh). Server-provided text (h
 names, item text, errors) is never translated. Dates use `<time datetime>` with
 `Intl.DateTimeFormat`.
 
+### 2.7 Visual language (round 2, after user feedback)
+
+* Header: one 46px flat row on `panel`: title, muted cwd (hidden <= 640px),
+  status dot + word, ghost buttons (tasks count, files, theme). No brand mark.
+* Thread canvas is `--theme-surface`; turns are edge-to-edge text, no
+  bubbles. A user message is a quiet left-aligned block on `surface-strong`.
+  Assistant prose has no container.
+* Activity is a muted summary row with a trailing 1px rule
+  (`Worked for 18s · 3 commands · 1 file change ———`); expanded rows are
+  monospace 13px `fg-soft` with a tiny muted status. Diffs are a bordered block
+  with a `surface-strong` header and low-saturation add/delete rows plus a `+`/`-`
+  gutter (never color alone).
+* The composer is one `panel` frame with the `border-contrast` edge, the status
+  strip on `surface-strong` above the editor, and a single amber button.
+* Popovers and the jump pill are `panel` with `border-strong`; no shadows anywhere.
+
 ## 3. Design tokens
 
-Two layers; components read **only** the `--t-*` semantic aliases. Base values
-are authored here (OKLCH with sRGB fallback not needed: evergreen browsers; the
-supported matrix is the same as for `dialog`/`:has`, which the current CSS
-already requires).
+**Decision record (2026-10-15, user feedback).** The user judged the first
+prototype, which kept the existing launcher's look, "quite ugly" and explicitly
+released the visual design: **the current launcher art style is not preserved.**
+The palette now follows the reference implementation's token *values* (facts; the
+CSS blocks and markup are our own). Visual principles: flat (no shadows; layers
+by 1px borders and adjacent surface lightness), radius `0.625rem` with
+`0.4rem` for small controls, conversation first, machine activity quiet,
+amber only for the primary action and small emphasis (Steer/Send, current plan
+item, focus ring, progress), everything else neutral cool-grey (light) or warm
+grey (dark).
 
-Base (light / dark), neutral-cool hue 220, one amber accent, radius 0.625rem,
-no shadows (separation by border and surface step):
+Three layers; components read **only** `--theme-*`:
 
-| Base token | Light | Dark |
+1. Neutral base (shadcn-style): `--radius: .625rem`, `--destructive`
+   (light `oklch(.577 .245 27.325)`, dark `oklch(.704 .191 22.216)`).
+2. Product palette `--gc-*` (values below).
+3. Semantic aliases `--theme-*`: `bg`, `panel`, `surface` (= workspace, the
+   thread canvas), `surface-strong` (user blocks, strips, code headers), `muted`,
+   `hover`, `border`, `border-strong`, `border-contrast`, `fg`, `fg-soft`,
+   `fg-muted`, `accent-solid`, `accent-solid-hover`, `accent-solid-fg`,
+   `accent-soft`, `accent-strong`, `accent-border`, `shadow` (`none`), plus
+   `danger`, `ok`, `add`, `del`.
+
+| `--gc-*` | Light (hue 220/235, amber 76) | Dark (warm grey, hue 95/90) |
 | --- | --- | --- |
-| `--g-0` page | `oklch(.975 .005 220)` | `oklch(.165 .008 235)` |
-| `--g-1` panel | `oklch(.99 .003 220)` | `oklch(.205 .009 235)` |
-| `--g-2` sunken | `oklch(.95 .008 220)` | `oklch(.185 .008 235)` |
-| `--g-3` hover/muted | `oklch(.92 .012 220)` | `oklch(.26 .011 235)` |
-| `--g-line` | `oklch(.86 .012 220)` | `oklch(.3 .012 235)` |
-| `--g-line-strong` | `oklch(.74 .02 220)` | `oklch(.42 .016 235)` |
-| `--g-line-ui` (control borders, 3:1) | `oklch(.62 .026 220)` | `oklch(.55 .02 235)` |
-| `--g-fg` | `oklch(.24 .012 235)` | `oklch(.93 .006 235)` |
-| `--g-fg-soft` | `oklch(.40 .016 235)` | `oklch(.80 .01 235)` |
-| `--g-fg-muted` | `oklch(.50 .018 235)` | `oklch(.68 .012 235)` |
-| `--g-amber` | `oklch(.72 .14 76)` | `oklch(.79 .13 76)` |
-| `--g-amber-fg` (text on amber) | `oklch(.20 .03 76)` | `oklch(.20 .03 76)` |
-| `--g-amber-text` (amber as text/link) | `oklch(.46 .12 70)` | `oklch(.83 .11 76)` |
-| `--g-ok` / `--g-warn` / `--g-bad` | AA on `--g-1` | AA on `--g-1` |
+| bg | `.965 .006 220` | `.155 .008 95` |
+| panel | `.988 .004 220` | `.19 .009 95` |
+| workspace (`surface`) | `.95 .008 220` | `.175 .008 95` |
+| surface (`surface-strong`) | `.925 .011 220` | `.22 .01 95` |
+| muted | `.9 .012 220` | `.245 .01 95` |
+| hover | `.92 .016 220` | `.255 .013 90` |
+| border | `.85 .014 220` | `.285 .012 95` |
+| border-strong | `.77 .02 220` | `.34 .015 95` |
+| border-contrast | `.62 .026 220` | `.52 .018 95` (**reference .45**) |
+| fg / fg-soft / fg-muted | `.22 .012 235` / `.38 .018 235` / `.5 .02 235` | `.94 .008 90` / `.79 .012 90` / `.64 .014 90` |
+| primary (`accent-solid`) / hover / fg | `.7 .145 76` / `.65 .15 72` / `.19 .025 76` | `.78 .14 76` / `.83 .13 76` / `.19 .025 76` |
+| accent-soft / strong / border | `.93 .04 76` / `.48 .12 70` / `.67 .11 76` | `.265 .04 76` / `.84 .115 76` / `.48 .085 76` |
+| ok *(ours)* | `.45 .1 160` | `.78 .12 160` |
+| add / del *(ours)* | `.93 .05 155` / `.93 .04 25` | `.28 .05 155` / `.28 .05 25` |
+| danger-text *(ours)* | `.48 .2 27` (**destructive .577 fails**) | `.704 .191 22.216` |
 
-Semantic aliases (what components use; switching theme = remapping these):
-`--t-bg`, `--t-panel`, `--t-sunken`, `--t-hover`, `--t-line`, `--t-line-strong`,
-`--t-fg`, `--t-fg-soft`, `--t-fg-muted`, `--t-accent`, `--t-accent-fg`,
-`--t-accent-text`, `--t-ok`, `--t-warn`, `--t-danger`, `--t-focus`, `--t-radius`.
-Type: system stack (no remote fonts) with CJK fallbacks; 14px body, 12px meta,
-11px/10px for usage and effort; code 12.5px mono. Spacing 4px grid.
+Type: the reference system stack plus CJK fallbacks (`-apple-system,
+BlinkMacSystemFont, "Segoe UI", system-ui, ui-sans-serif, "Noto Sans CJK SC",
+"Noto Sans SC", "Microsoft YaHei", "PingFang SC", "Hiragino Sans GB",
+sans-serif`; no remote fonts), system monospace for code. Body `0.875rem`, meta
+`0.75rem`, usage/effort `0.6875rem`/10px, line height 1.5-1.6.
 
 Contrast is verified by `2026-10-14-launcher-react-ui/contrast.mjs` (reads the
-token values from `prototype.html`; WCAG 2.1 relative luminance on OKLCH to sRGB).
-Rules: text >= 4.5:1; UI component borders, focus ring and icons >= 3:1; both
-themes. **Result: 67 checks, all pass.** Covered: `fg`, `fg-soft`, `fg-muted`,
-`accent-text`, `ok`, `danger` on page/panel/sunken/hover; accent-fg on the amber
-fill; `fg` on diff add/delete backgrounds; `line-ui` on page/panel/sunken;
-`accent-text` (focus ring, icons) on panel/sunken/hover.
-The first run found 5 failures, now fixed in the tokens: `line-strong` was only
-2.1-2.3:1 as a control border (added `--g-line-ui` for control edges;
-`line-strong` is decorative only), and the amber *fill* is 2.5:1 on the panel
-(amber is therefore never used alone as an icon/text color; `accent-text`
-is, and the amber fill always carries dark text). Not covered by the script:
-text over images, `prefers-contrast`, and forced-colors; these are manual checks
-before the switch. At implementation time the script moves to the test suite and
-reads `tokens.css` instead of the prototype.
+palette and aliases from `prototype.html`; WCAG 2.1, OKLCH to sRGB). Rules: text
+>= 4.5:1 on every surface it can sit on (panel, surface, surface-strong, hover,
+muted); UI control borders and the focus ring >= 3:1. **Result: 75 checks, all
+pass.** Deviations from the reference palette, all required by the check:
+* `danger` as text: the shadcn destructive fails AA on the tinted surfaces in
+  light (3.5-4.1:1), so a darker `danger-text` is used for text; the original
+  stays for fills.
+* Dark `border-contrast` raised `.45 -> .52` (2.5:1 on panel with the reference
+  value); it is used only for the composer frame and the filter input, which must
+  be identifiable as controls. Ordinary borders stay at `border`/`border-strong`.
+* `fg-muted` on `muted` is 4.44:1, so it is never placed there (rule enforced in
+  the script's pair list).
+Not covered by the script: text over images, `prefers-contrast`, forced-colors
+(manual checks before the switch). At implementation time the script moves into the
+test suite and reads `tokens.css` instead of the prototype.
 
 Theme selection is unchanged: `data-theme` on `<html>` set by a tiny module
 (same logic as `theme.js`: `?theme=`, `treer:embed-theme` message with
@@ -486,7 +518,7 @@ viewer, split workbench, account/device sharing.
 
 ## 15. Static prototype
 
-`2026-10-14-launcher-react-ui/prototype.html` is hand-written HTML/CSS plus a
+`2026-10-14-launcher-react-ui/prototype.html` is hand-written HTML/CSS (round 2: new palette and flat visual language, section 3) plus a
 small mock-only script (no React) that toggles states via query strings.
 `screenshots.mjs` regenerates every PNG (`<viewport>-<state>-<theme>.png`,
 viewports `desktop` 1280px and `390`, 2x). States: `default`, `plan`, `queue`,
