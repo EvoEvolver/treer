@@ -48,6 +48,34 @@ pub(super) async fn run_app_command(
         AppCommand::Start { target } => app_action(client, &target, "start").await,
         AppCommand::Stop { target } => app_action(client, &target, "stop").await,
         AppCommand::Restart { target } => app_action(client, &target, "restart").await,
+        AppCommand::Update {
+            target,
+            cwd,
+            command,
+            clear_args,
+            args,
+        } => {
+            let target = workload_tree::resolve_target(client, &target).await?;
+            let args = if clear_args || !args.is_empty() {
+                Some(args)
+            } else {
+                None
+            };
+            if cwd.is_none() && command.is_none() && args.is_none() {
+                anyhow::bail!(
+                    "app update requires --cwd, --command, arguments after --, or --clear-args"
+                );
+            }
+            client
+                .value(
+                    Method::POST,
+                    &format!("api/apps/{}/update", path_segment(&target)),
+                    Some(serde_json::to_value(
+                        treer_protocol::UpdateAppDeploymentRequest { cwd, command, args },
+                    )?),
+                )
+                .await
+        }
         AppCommand::Delete { target } => {
             let target = workload_tree::resolve_target(client, &target).await?;
             client

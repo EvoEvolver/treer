@@ -708,8 +708,25 @@ impl ProxyClient {
             .apply_stopped_startups(&response.stopped_agent_ids)
             .await
             .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
-        Ok(response
-            .active_agent_ids
+        let mut active_agent_ids = response.active_agent_ids;
+        for startup in response.app_startups {
+            if let Err(error) = self
+                .runtime
+                .update_app_startup(
+                    &format!("app-reconcile:{}:{}", startup.agent_id, startup.revision),
+                    &startup.agent_id,
+                    startup.request,
+                    startup.revision,
+                )
+                .await
+            {
+                // One broken App must not defer every other workload forever.
+                // Do not fall back to its old command; retry on the next pass.
+                active_agent_ids.retain(|id| id != &startup.agent_id);
+                warn!(agent_id = %startup.agent_id, code = %error.code, "App startup reconciliation failed; will retry");
+            }
+        }
+        Ok(active_agent_ids
             .into_iter()
             .filter(|id| !response.stopped_agent_ids.contains(id))
             .collect())
@@ -732,6 +749,27 @@ impl ProxyClient {
         }
         let command_id = envelope.command_id;
         let result = match envelope.command {
+            AgentCommand::AppEnsureLifecycle {
+                agent_id,
+                workload_credential,
+                request,
+                enabled,
+                start_missing,
+                revision,
+            } => self
+                .runtime
+                .ensure_app_lifecycle(
+                    &command_id,
+                    agent_id,
+                    workload_credential,
+                    request,
+                    enabled,
+                    start_missing,
+                    Some(revision),
+                )
+                .await
+                .map(|agent| CommandResult::success(command_id.clone(), agent))
+                .unwrap_or_else(|err| CommandResult::failure(command_id.clone(), err)),
             AgentCommand::EnsureLifecycle {
                 agent_id,
                 workload_credential,
@@ -873,6 +911,24 @@ impl ProxyClient {
             AgentCommand::StartupAdminGet { agent_id } => self
                 .runtime
                 .get_admin_startup(&agent_id)
+                .map(|spec| CommandResult::success(command_id.clone(), spec))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::AppStartupCheck { agent_id, request } => self
+                .runtime
+                .check_app_startup(&agent_id, request)
+                .await
+                .map(|()| {
+                    CommandResult::success(command_id.clone(), serde_json::json!({"valid": true}))
+                })
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::AppStartupUpdate {
+                agent_id,
+                request,
+                revision,
+            } => self
+                .runtime
+                .update_app_startup(&command_id, &agent_id, request, revision)
+                .await
                 .map(|spec| CommandResult::success(command_id.clone(), spec))
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::StartupAdminSet { agent_id, request } => self
@@ -1093,6 +1149,7 @@ async fn validate_startup_batches(
     agent_ids: &[String],
 ) -> anyhow::Result<ValidateAgentStartupResponse> {
     let mut validated = ValidateAgentStartupResponse {
+        app_startups: vec![],
         active_agent_ids: vec![],
         stopped_agent_ids: vec![],
     };
@@ -1117,6 +1174,7 @@ async fn validate_startup_batches(
             .await
             .context("invalid startup validation response")?;
         validated.active_agent_ids.extend(response.active_agent_ids);
+        validated.app_startups.extend(response.app_startups);
         validated
             .stopped_agent_ids
             .extend(response.stopped_agent_ids);
@@ -1511,6 +1569,7 @@ mod tests {
                             .into_iter()
                             .partition(|id| id == "agent-256");
                         Json(ValidateAgentStartupResponse {
+                            app_startups: vec![],
                             active_agent_ids,
                             stopped_agent_ids,
                         })

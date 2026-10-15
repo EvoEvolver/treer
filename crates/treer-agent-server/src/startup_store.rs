@@ -12,6 +12,8 @@ const STORE_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredAgentStartup {
+    #[serde(default)]
+    pub app_revision: u64,
     #[serde(flatten)]
     pub spec: AgentStartupSpec,
     pub workspace_id: String,
@@ -217,6 +219,7 @@ mod tests {
 
     fn entry(agent_id: &str) -> StoredAgentStartup {
         StoredAgentStartup {
+            app_revision: 0,
             spec: AgentStartupSpec {
                 agent_id: agent_id.to_string(),
                 server_id: "server-one".to_string(),

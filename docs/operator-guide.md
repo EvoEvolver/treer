@@ -84,6 +84,29 @@ treer agent restart /docs
 treer agent read /docs --lines 80
 ```
 
+Change an existing App's launch fields without recreating its identity or routes:
+
+```bash
+treer app update /docs --cwd apps-deployed/docs/releases/COMMIT --command python3 -- server.py
+treer app update /docs --cwd apps-deployed/docs/current
+treer app update /docs --clear-args
+```
+
+Omitted fields are preserved, including arguments when only `--command` changes.
+Arguments after `--` replace the whole argument array; `--clear-args` empties it.
+The directory is relative to the enrolled machine root and must exist inside it.
+Running Apps restart once; stopped Apps keep their stopped intent. App/runtime
+IDs, credentials, service/virtual host and public origin stay fixed. Startup
+management and ordinary restart Policy permissions are required. Older
+Controllers/Proxies return `app_update_unsupported` during CLI/local preflight
+(or `unsupported_command` naming `app.update.v1` for a remote target Controller).
+Direct API calls to older Proxies return a missing-route error. Upgrade rather
+than falling back to delete/create.
+If launch fails after saving, the new fields remain saved: repair and start or
+restart, or explicitly update back to the old specification. Treer does not
+roll back application data. Put environment/secrets in private entry configuration,
+never command arguments; this update API does not accept environment fields.
+
 When wildcard ingress is configured, every Managed App receives a stable
 `public_url` on its own origin. It requires Workspace authentication by default;
 an Agent can explicitly pass `--public` at creation time to allow anonymous

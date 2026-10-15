@@ -776,6 +776,34 @@ fn agent_startup_command_preserves_argv() {
 
 #[test]
 fn managed_app_commands_parse() {
+    let update = Args::try_parse_from([
+        "treer",
+        "app",
+        "update",
+        "/infra/issues",
+        "--cwd",
+        "apps/issues",
+        "--command",
+        "python3",
+        "--",
+        "issues.py",
+    ])
+    .unwrap();
+    assert!(
+        matches!(update.command, Some(Command::App { command: AppCommand::Update { target, cwd: Some(cwd), command: Some(command), clear_args: false, args } })
+        if target == "/infra/issues" && cwd == "apps/issues" && command == "python3" && args == ["issues.py"])
+    );
+    let clear =
+        Args::try_parse_from(["treer", "app", "update", "app_stable", "--clear-args"]).unwrap();
+    assert!(matches!(
+        clear.command,
+        Some(Command::App {
+            command: AppCommand::Update {
+                clear_args: true,
+                ..
+            }
+        })
+    ));
     let create = Args::try_parse_from([
         "treer",
         "app",

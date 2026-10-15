@@ -373,13 +373,40 @@ pub(crate) async fn validate_agent_startup(
     let stopped_agent_ids = auth
         .stopped_agent_recovery_ids(&workspace_id, &server_id, &request.agent_ids)
         .await?;
-    let active_agent_ids = auth
+    let active_agent_ids: Vec<String> = auth
         .active_agent_ids(&workspace_id, &server_id, &request.agent_ids)
         .await?
         .into_iter()
         .filter(|id| !stopped_agent_ids.contains(id))
         .collect();
+    let app_startups = auth
+        .list_app_deployments_for_server(&workspace_id, &server_id)
+        .await?
+        .into_iter()
+        .filter_map(|app| {
+            let id = app
+                .runtime_agent_id
+                .clone()
+                .unwrap_or_else(|| app.app_id.clone());
+            if app.startup_revision == 0
+                || !request.agent_ids.contains(&id)
+                || !(active_agent_ids.contains(&id) || stopped_agent_ids.contains(&id))
+            {
+                return None;
+            }
+            Some(treer_protocol::AppStartupRevision {
+                agent_id: id,
+                revision: app.startup_revision,
+                request: ReplaceAgentStartupRequest {
+                    cwd: Some(app.cwd),
+                    command: app.command,
+                    args: app.args,
+                },
+            })
+        })
+        .collect();
     Ok(Json(ValidateAgentStartupResponse {
+        app_startups,
         stopped_agent_ids,
         active_agent_ids,
     }))

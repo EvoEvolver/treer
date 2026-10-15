@@ -723,7 +723,7 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT a.app_id, a.workspace_id, a.name, a.server_id, a.command, a.args, a.cwd, \
              a.port, a.hostname, a.service_id, a.desired_state, a.runtime_agent_id, \
-             a.restart_count, a.last_error, a.created_at, a.created_by, a.updated_at, a.updated_by \
+             a.restart_count, a.last_error, a.created_at, a.created_by, a.updated_at, a.updated_by, a.startup_revision \
              FROM app_deployments a JOIN workspaces w ON w.workspace_id = a.workspace_id \
              WHERE w.deleted_at IS NULL ORDER BY a.app_id",
         )

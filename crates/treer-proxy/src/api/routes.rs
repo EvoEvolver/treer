@@ -93,6 +93,10 @@ pub fn router(
             post(restart_app_deployment),
         )
         .route(
+            "/agent/workspaces/{workspace_id}/apps/{app_id}/update",
+            post(update_app_deployment),
+        )
+        .route(
             "/agent/workspaces/{workspace_id}/policy-provider/invalidate",
             post(invalidate_policy_provider),
         )
@@ -433,6 +437,10 @@ pub fn router(
         .route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/restart",
             post(restart_app_deployment),
+        )
+        .route(
+            "/api/workspaces/{workspace_id}/apps/{app_id}/update",
+            post(update_app_deployment),
         )
         .route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/ui/",

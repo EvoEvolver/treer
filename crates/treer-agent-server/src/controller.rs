@@ -501,6 +501,7 @@ impl ControllerRuntime {
             self.inner
                 .startup_store
                 .upsert(StoredAgentStartup {
+                    app_revision: 0,
                     spec: AgentStartupSpec {
                         agent_id: agent_id.clone(),
                         server_id: self.inner.server_id.clone(),
@@ -664,7 +665,53 @@ impl ControllerRuntime {
         enabled: bool,
         start_missing: bool,
     ) -> Result<AgentInfo, ProtocolError> {
+        self.ensure_app_lifecycle(
+            operation_id,
+            agent_id,
+            workload_credential,
+            request,
+            enabled,
+            start_missing,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn ensure_app_lifecycle(
+        &self,
+        operation_id: &str,
+        agent_id: String,
+        workload_credential: Option<String>,
+        request: CreateAgentRequest,
+        enabled: bool,
+        start_missing: bool,
+        revision: Option<u64>,
+    ) -> Result<AgentInfo, ProtocolError> {
         let _guard = self.inner.recovery_lock.lock().await;
+        if let Some(revision) = revision {
+            if revision == 0 || request.kind != "app" {
+                return Err(ProtocolError::new(
+                    "invalid_app_startup",
+                    "versioned lifecycle declaration must target an App",
+                ));
+            }
+            let replacement = ReplaceAgentStartupRequest {
+                cwd: Some(request.cwd.clone()),
+                command: request.args.first().cloned().unwrap_or_default(),
+                args: request.args.iter().skip(1).cloned().collect(),
+            };
+            if self.inner.startup_store.get(&agent_id).is_some() {
+                let (_, changed) =
+                    self.save_app_startup_locked(&agent_id, replacement, revision)?;
+                if changed && enabled && start_missing {
+                    return self.start_locked(operation_id, &agent_id, true).await;
+                }
+            } else {
+                replacement.validate()?;
+                self.resolve_machine_directory(&request.cwd)?;
+            }
+        }
         let inventory = self
             .inner
             .host
@@ -711,6 +758,7 @@ impl ControllerRuntime {
             self.inner
                 .startup_store
                 .upsert(StoredAgentStartup {
+                    app_revision: revision.unwrap_or(0),
                     spec: AgentStartupSpec {
                         agent_id: agent_id.clone(),
                         server_id: self.inner.server_id.clone(),
@@ -879,6 +927,109 @@ impl ControllerRuntime {
         self.replace_startup_locked(agent_id, request)
     }
 
+    fn checked_app_startup(
+        &self,
+        agent_id: &str,
+        request: &ReplaceAgentStartupRequest,
+    ) -> Result<StoredAgentStartup, ProtocolError> {
+        request.validate()?;
+        let entry = self.inner.startup_store.get(agent_id).ok_or_else(|| {
+            ProtocolError::new(
+                "startup_not_found",
+                "App has no saved startup; retry after lifecycle synchronization",
+            )
+        })?;
+        if entry.spec.kind != "app"
+            || entry.workspace_id != self.inner.workspace_id
+            || entry.spec.server_id != self.inner.server_id
+        {
+            return Err(ProtocolError::new(
+                "app_startup_mismatch",
+                "startup does not belong to this App Controller",
+            ));
+        }
+        if !entry.workload_credential.is_empty()
+            && std::iter::once(&request.command)
+                .chain(request.args.iter())
+                .chain(request.cwd.iter())
+                .any(|value| value.contains(&entry.workload_credential))
+        {
+            return Err(ProtocolError::new(
+                "invalid_agent_startup",
+                "startup must not contain the workload credential",
+            ));
+        }
+        self.resolve_machine_directory(request.cwd.as_deref().unwrap_or(&entry.spec.cwd))?;
+        Ok(entry)
+    }
+
+    pub async fn check_app_startup(
+        &self,
+        agent_id: &str,
+        request: ReplaceAgentStartupRequest,
+    ) -> Result<(), ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
+        self.checked_app_startup(agent_id, &request).map(|_| ())
+    }
+
+    pub async fn update_app_startup(
+        &self,
+        operation_id: &str,
+        agent_id: &str,
+        request: ReplaceAgentStartupRequest,
+        revision: u64,
+    ) -> Result<AgentStartupSpec, ProtocolError> {
+        let _guard = self.inner.recovery_lock.lock().await;
+        let (entry, changed) = self.save_app_startup_locked(agent_id, request, revision)?;
+        if changed && entry.spec.enabled {
+            self.start_locked(operation_id, agent_id, true).await?;
+        }
+        self.get_startup(agent_id)
+    }
+
+    fn save_app_startup_locked(
+        &self,
+        agent_id: &str,
+        request: ReplaceAgentStartupRequest,
+        revision: u64,
+    ) -> Result<(StoredAgentStartup, bool), ProtocolError> {
+        let mut entry = self.checked_app_startup(agent_id, &request)?;
+        if revision < entry.app_revision || revision == 0 {
+            return Err(ProtocolError::new(
+                "stale_app_startup",
+                "a newer App startup specification is already saved",
+            ));
+        }
+        if revision == entry.app_revision {
+            // Duplicate delivery must not allocate another generation or restart.
+            if entry.spec.command != request.command
+                || entry.spec.args != request.args
+                || request
+                    .cwd
+                    .as_ref()
+                    .is_some_and(|cwd| cwd != &entry.spec.cwd)
+            {
+                return Err(ProtocolError::new(
+                    "app_revision_conflict",
+                    "App revision has conflicting launch fields",
+                ));
+            }
+            return Ok((entry, false));
+        }
+        entry.spec.command = request.command;
+        entry.spec.args = request.args;
+        if let Some(cwd) = request.cwd {
+            entry.spec.cwd = cwd;
+        }
+        entry.app_revision = revision;
+        entry.initial_writes.clear();
+        self.inner
+            .startup_store
+            .upsert(entry.clone())
+            .map_err(startup_store_error)?;
+        Ok((entry, true))
+    }
+
     pub async fn restart_with_startup(
         &self,
         operation_id: &str,
@@ -917,6 +1068,7 @@ impl ControllerRuntime {
                     .lock()
                     .map_err(|_| ProtocolError::new("state_error", "agent state lock poisoned"))?;
                 StoredAgentStartup {
+                    app_revision: 0,
                     spec: AgentStartupSpec {
                         agent_id: agent_id.into(),
                         server_id: self.inner.server_id.clone(),
@@ -1032,6 +1184,7 @@ impl ControllerRuntime {
         self.inner
             .startup_store
             .upsert(StoredAgentStartup {
+                app_revision: 0,
                 spec: spec.clone(),
                 workspace_id: self.inner.workspace_id.clone(),
                 workload_credential,

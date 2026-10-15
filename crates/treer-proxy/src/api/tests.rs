@@ -1202,6 +1202,17 @@ async fn app_lifecycle_fixture() -> (
     AppDeployment,
     tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
 ) {
+    app_lifecycle_fixture_with_update(false).await
+}
+
+async fn app_lifecycle_fixture_with_update(
+    update: bool,
+) -> (
+    AuthStore,
+    AppState,
+    AppDeployment,
+    tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+) {
     let auth = AuthStore::for_test("admin-password").await;
     auth.seed_test_workspace("default").await;
     let app = auth
@@ -1236,12 +1247,390 @@ async fn app_lifecycle_fixture() -> (
             server,
             Uuid::new_v4(),
             "test-controller".into(),
-            vec![treer_protocol::CAPABILITY_AGENT_LIFECYCLE.into()],
+            if update {
+                vec![
+                    treer_protocol::CAPABILITY_AGENT_LIFECYCLE.into(),
+                    treer_protocol::CAPABILITY_APP_UPDATE.into(),
+                ]
+            } else {
+                vec![treer_protocol::CAPABILITY_AGENT_LIFECYCLE.into()]
+            },
             tx,
         )
         .await
         .unwrap();
     (auth, state, app, rx)
+}
+
+#[tokio::test]
+async fn app_update_serializes_revisions_and_restart_on_the_same_lifecycle_lock() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture_with_update(true).await;
+    let update = || {
+        tokio::spawn({
+            let auth = auth.clone();
+            let state = state.clone();
+            let app = app.clone();
+            async move { invoke_app_update(auth, state, &app, PolicyEngine::allow_all()).await }
+        })
+    };
+    let first = update();
+    let preflight = next_lifecycle_command(&mut rx).await;
+    let second = update();
+    let restart = tokio::spawn({
+        let auth = auth.clone();
+        let state = state.clone();
+        let agent = app_workload_agent(&app);
+        async move {
+            apply_workload_action(
+                &state,
+                &auth,
+                "default",
+                &agent,
+                WorkloadAction::Restart,
+                "owner",
+            )
+            .await
+        }
+    });
+    assert!(matches!(
+        preflight.command,
+        AgentCommand::AppStartupCheck { .. }
+    ));
+    state
+        .complete_command(CommandResult::success(preflight.command_id, json!({})))
+        .await;
+    let apply = next_lifecycle_command(&mut rx).await;
+    assert!(matches!(
+        apply.command,
+        AgentCommand::AppStartupUpdate { revision: 1, .. }
+    ));
+    assert!(
+        rx.try_recv().is_err(),
+        "other lifecycle actions wait until this update is acknowledged"
+    );
+    state
+        .complete_command(CommandResult::success(apply.command_id, json!({})))
+        .await;
+    let _ = first.await.unwrap().unwrap();
+    let mut seen_revision = 1;
+    for _ in 0..2 {
+        let next = next_lifecycle_command(&mut rx).await;
+        match next.command {
+            AgentCommand::AppStartupCheck { .. } => {
+                state
+                    .complete_command(CommandResult::success(next.command_id, json!({})))
+                    .await;
+                let apply = next_lifecycle_command(&mut rx).await;
+                assert!(matches!(
+                    apply.command,
+                    AgentCommand::AppStartupUpdate { revision: 2, .. }
+                ));
+                seen_revision = 2;
+                state
+                    .complete_command(CommandResult::success(apply.command_id, json!({})))
+                    .await;
+            }
+            AgentCommand::AppEnsureLifecycle {
+                start_missing: false,
+                revision,
+                ..
+            } => {
+                assert_eq!(revision, seen_revision);
+                state
+                    .complete_command(CommandResult::success(next.command_id, json!({})))
+                    .await;
+                let restart = next_lifecycle_command(&mut rx).await;
+                assert!(matches!(restart.command, AgentCommand::Restart { .. }));
+                state
+                    .complete_command(CommandResult::success(restart.command_id, json!({})))
+                    .await;
+            }
+            other => panic!("unexpected command {other:?}"),
+        }
+    }
+    let _ = second.await.unwrap().unwrap();
+    restart.await.unwrap().unwrap();
+    assert_eq!(
+        auth.resolve_app_deployment("default", &app.app_id)
+            .await
+            .unwrap()
+            .startup_revision,
+        2
+    );
+    assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn app_update_restore_validation_returns_current_spec_only_for_valid_machine_identity() {
+    let (auth, _state, app, _rx) = app_lifecycle_fixture_with_update(true).await;
+    auth.rotate_agent_credential("default", "machine-a", &app.app_id)
+        .await
+        .unwrap();
+    let request = app_update_patch().apply(&app).unwrap();
+    let guard = auth
+        .workload_lifecycle_guard("default", &app.app_id)
+        .await
+        .unwrap();
+    auth.update_app_startup("default", &app.app_id, &request, "owner")
+        .await
+        .unwrap();
+    guard.commit().await.unwrap();
+    let validate = |machine: &str| {
+        agents::validate_agent_startup(
+            Extension(auth.clone()),
+            Extension(MachineSession {
+                server_id: Some(machine.into()),
+                workspace_id: Some("default".into()),
+            }),
+            Path(("default".into(), "machine-a".into())),
+            Json(treer_protocol::ValidateAgentStartupRequest {
+                agent_ids: vec![app.app_id.clone()],
+            }),
+        )
+    };
+    let response = validate("machine-a").await.unwrap().0;
+    assert_eq!(response.app_startups.len(), 1);
+    assert_eq!(response.app_startups[0].revision, 1);
+    assert_eq!(response.app_startups[0].request, request);
+    assert!(validate("another-machine").await.is_err());
+    sqlx::query("UPDATE agent_credentials SET revoked_at=$1 WHERE agent_id=$2")
+        .bind(Utc::now().to_rfc3339())
+        .bind(&app.app_id)
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    let revoked = validate("machine-a").await.unwrap().0;
+    assert!(
+        revoked.app_startups.is_empty(),
+        "revoked identities must not be restarted by spec reconciliation"
+    );
+    assert!(revoked.active_agent_ids.is_empty());
+}
+
+fn app_update_patch() -> treer_protocol::UpdateAppDeploymentRequest {
+    treer_protocol::UpdateAppDeploymentRequest {
+        cwd: Some("releases/v2".into()),
+        command: Some("node".into()),
+        args: Some(vec!["entry.mjs".into()]),
+    }
+}
+
+async fn invoke_app_update(
+    auth: AuthStore,
+    state: AppState,
+    app: &AppDeployment,
+    policy: PolicyEngine,
+) -> Result<Json<Value>, ApiFailure> {
+    apps::update_app_deployment(
+        State(state),
+        Extension(auth),
+        Extension(test_ingress_config()),
+        Extension(policy),
+        None,
+        Some(Extension(MachineSession {
+            server_id: Some(app.server_id.clone()),
+            workspace_id: Some(app.workspace_id.clone()),
+        })),
+        HeaderMap::new(),
+        Path((app.workspace_id.clone(), app.app_id.clone())),
+        Json(app_update_patch()),
+    )
+    .await
+}
+
+#[tokio::test]
+async fn app_update_old_controller_rejects_before_persisting() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
+    let error = invoke_app_update(auth.clone(), state.clone(), &app, PolicyEngine::allow_all())
+        .await
+        .unwrap_err();
+    let response = error.into_response();
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let body = axum::body::to_bytes(response.into_body(), 4096)
+        .await
+        .unwrap();
+    let body: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["error"]["code"], "unsupported_command");
+    assert!(body["error"]["message"]
+        .as_str()
+        .unwrap()
+        .contains("app.update.v1"));
+    assert!(rx.try_recv().is_err());
+    assert_eq!(
+        auth.resolve_app_deployment("default", &app.app_id)
+            .await
+            .unwrap(),
+        app
+    );
+    assert_eq!(state.snapshot("default").await.unwrap().servers.len(), 1);
+}
+
+#[tokio::test]
+async fn app_update_persists_before_apply_preserving_identity_routing_and_credentials() {
+    for fail_apply in [false, true] {
+        let (auth, state, app, mut rx) = app_lifecycle_fixture_with_update(true).await;
+        let ingress = auth
+            .ensure_app_ingress(
+                &app,
+                "owner",
+                "apps.treer.ai",
+                Some(ServiceIngressAccess::Public),
+            )
+            .await
+            .unwrap();
+        let hosts_before = auth.list_virtual_network_hosts("default").await.unwrap();
+        let mut origin_before = app.clone();
+        hydrate_app_public_url(&auth, &test_ingress_config(), &mut origin_before)
+            .await
+            .unwrap();
+        assert!(origin_before.public_url.is_some());
+        let credential = auth
+            .rotate_agent_credential("default", "machine-a", &app.app_id)
+            .await
+            .unwrap();
+        let credential_before: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(c) FROM agent_credentials c WHERE agent_id=$1")
+                .bind(&app.app_id)
+                .fetch_one(&auth.pool())
+                .await
+                .unwrap();
+        let task = tokio::spawn({
+            let auth = auth.clone();
+            let state = state.clone();
+            let app = app.clone();
+            async move { invoke_app_update(auth, state, &app, PolicyEngine::allow_all()).await }
+        });
+        let preflight = next_lifecycle_command(&mut rx).await;
+        assert!(matches!(
+            preflight.command,
+            AgentCommand::AppStartupCheck { .. }
+        ));
+        assert_eq!(
+            auth.resolve_app_deployment("default", &app.app_id)
+                .await
+                .unwrap()
+                .startup_revision,
+            0
+        );
+        state
+            .complete_command(CommandResult::success(
+                preflight.command_id,
+                json!({"valid":true}),
+            ))
+            .await;
+        let apply = next_lifecycle_command(&mut rx).await;
+        assert!(
+            matches!(&apply.command, AgentCommand::AppStartupUpdate { agent_id, revision: 1, request }
+            if agent_id == &app.app_id && request.command == "node" && request.cwd.as_deref() == Some("releases/v2"))
+        );
+        let saved = auth
+            .resolve_app_deployment("default", &app.app_id)
+            .await
+            .unwrap();
+        assert_eq!(saved.command, "node");
+        assert_eq!(saved.args, ["entry.mjs"]);
+        assert_eq!(saved.cwd, "releases/v2");
+        assert_eq!(saved.service_id, app.service_id);
+        assert_eq!(saved.hostname, app.hostname);
+        assert_eq!(saved.runtime_agent_id, app.runtime_agent_id);
+        assert_eq!(saved.desired_state, app.desired_state);
+        if fail_apply {
+            state
+                .complete_command(CommandResult::failure(
+                    apply.command_id,
+                    ProtocolError::new("spawn_failed", "synthetic failure"),
+                ))
+                .await;
+        } else {
+            state
+                .complete_command(CommandResult::success(apply.command_id, json!({})))
+                .await;
+        }
+        assert_eq!(task.await.unwrap().is_err(), fail_apply);
+        let after = auth
+            .resolve_app_deployment("default", &app.app_id)
+            .await
+            .unwrap();
+        assert_eq!(after.startup_revision, 1);
+        assert_eq!(
+            after.command, "node",
+            "failed spawn keeps new specification for repair"
+        );
+        assert_eq!(after.last_error.is_some(), fail_apply);
+        assert_eq!(
+            auth.list_virtual_network_hosts("default").await.unwrap(),
+            hosts_before
+        );
+        assert_eq!(
+            auth.list_service_ingresses("default").await.unwrap(),
+            vec![ingress]
+        );
+        let mut origin_after = after.clone();
+        hydrate_app_public_url(&auth, &test_ingress_config(), &mut origin_after)
+            .await
+            .unwrap();
+        assert_eq!(origin_after.public_url, origin_before.public_url);
+        assert_eq!(origin_after.access, Some(ServiceIngressAccess::Public));
+        let credential_after: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(c) FROM agent_credentials c WHERE agent_id=$1")
+                .bind(&app.app_id)
+                .fetch_one(&auth.pool())
+                .await
+                .unwrap();
+        assert_eq!(credential_before, credential_after);
+        assert!(!serde_json::to_string(&after).unwrap().contains(&credential));
+        assert!(rx.try_recv().is_err());
+    }
+}
+
+#[tokio::test]
+async fn app_update_policy_denies_before_preflight_or_persistence() {
+    let (auth, state, app, mut rx) = app_lifecycle_fixture_with_update(true).await;
+    let store = WorkspacePolicyStore::new(auth.pool());
+    for (index, denied) in [
+        ACTION_AGENT_STARTUP_MANAGE,
+        ACTION_AGENT_STOP,
+        ACTION_AGENT_CREATE,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .replace(
+                "default",
+                index as u64,
+                PolicyMode::Enforce,
+                WorkspacePolicyDocument {
+                    schema_version: POLICY_SCHEMA_VERSION,
+                    defaults: BTreeMap::from([(denied.to_string(), PolicyEffect::Deny)]),
+                    groups: BTreeMap::new(),
+                    rules: vec![],
+                },
+                PolicyPrincipalRef {
+                    kind: PolicyPrincipalKind::Human,
+                    id: "owner".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let error = invoke_app_update(
+            auth.clone(),
+            state.clone(),
+            &app,
+            PolicyEngine::durable(store.clone()),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.into_response().status(), StatusCode::FORBIDDEN);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(
+            auth.resolve_app_deployment("default", &app.app_id)
+                .await
+                .unwrap()
+                .startup_revision,
+            0
+        );
+    }
 }
 
 async fn next_lifecycle_command(
@@ -1709,6 +2098,7 @@ fn app_public_url_reports_the_managed_ingress_access() {
     let config = test_ingress_config();
     let now = Utc::now();
     let mut app = AppDeployment {
+        startup_revision: 0,
         app_id: "app_1234".to_string(),
         workspace_id: "default".to_string(),
         name: "Public Docs".to_string(),

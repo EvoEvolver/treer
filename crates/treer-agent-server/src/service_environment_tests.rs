@@ -197,6 +197,7 @@ async fn real_service_environment_boundary() {
         for (id, kind) in [("fixture-agent", "command"), ("fixture-app", "app")] {
             store
                 .upsert(StoredAgentStartup {
+                    app_revision: 0,
                     spec: AgentStartupSpec {
                         agent_id: id.into(),
                         server_id: "srv_env".into(),

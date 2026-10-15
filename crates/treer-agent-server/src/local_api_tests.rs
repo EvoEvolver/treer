@@ -1,6 +1,20 @@
 use super::*;
 
 #[test]
+fn old_proxy_rejects_app_update_before_forwarding() {
+    for health in [json!({"status":"ok"}), json!({"capabilities":["unknown"]})] {
+        assert_eq!(
+            require_proxy_app_update(&health).unwrap_err().error.code,
+            "app_update_unsupported"
+        );
+    }
+    assert!(require_proxy_app_update(
+        &json!({"capabilities":[treer_protocol::CAPABILITY_APP_UPDATE]})
+    )
+    .is_ok());
+}
+
+#[test]
 fn old_proxy_cannot_silently_ignore_creation_placement() {
     for health in [json!({"status":"ok"}), json!({"capabilities":["unknown"]})] {
         assert_eq!(

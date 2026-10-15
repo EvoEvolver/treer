@@ -12,6 +12,17 @@ async fn old_controller_gets_an_explicit_error_without_opening_a_cli_session() {
 }
 
 #[tokio::test]
+async fn old_controller_cannot_dispatch_app_update() {
+    rejects_without_dispatch(
+        r#"{"status":"ok","cli_capabilities":["agent.path-targets.v1"]}"#,
+        &["app", "update", "/infra/issues", "--cwd", "new-release"],
+        "app_update_unsupported",
+        "app.update.v1",
+    )
+    .await;
+}
+
+#[tokio::test]
 async fn path_aware_old_controller_cannot_interpret_queued_prompts_as_steering() {
     for command in [
         vec!["agent", "prompt", "ag_target", "task"],

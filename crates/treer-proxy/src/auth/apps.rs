@@ -235,7 +235,7 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by FROM app_deployments \
+             created_at, created_by, updated_at, updated_by, startup_revision FROM app_deployments \
              WHERE workspace_id = $1 ORDER BY lower(name), app_id",
         )
         .bind(workspace_id)
@@ -253,7 +253,7 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by FROM app_deployments \
+             created_at, created_by, updated_at, updated_by, startup_revision FROM app_deployments \
              WHERE workspace_id = $1 AND server_id = $2 ORDER BY app_id",
         )
         .bind(workspace_id)
@@ -272,7 +272,7 @@ impl AuthStore {
         let row = sqlx::query(
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by FROM app_deployments \
+             created_at, created_by, updated_at, updated_by, startup_revision FROM app_deployments \
              WHERE workspace_id = $1 AND (app_id = $2 OR runtime_agent_id = $2 OR name = $2) ORDER BY (app_id = $2) DESC, (runtime_agent_id = $2) DESC, app_id",
         )
         .bind(workspace_id)
@@ -292,7 +292,7 @@ impl AuthStore {
         let row = sqlx::query(
             "SELECT app_id, workspace_id, name, server_id, command, args, cwd, port, hostname, \
              service_id, desired_state, runtime_agent_id, restart_count, last_error, \
-             created_at, created_by, updated_at, updated_by FROM app_deployments \
+             created_at, created_by, updated_at, updated_by, startup_revision FROM app_deployments \
              WHERE workspace_id = $1 AND runtime_agent_id = $2",
         )
         .bind(workspace_id)
@@ -383,6 +383,7 @@ impl AuthStore {
         let hostname = platform_service_hostname(&service.service_id, "internal")?;
         let app_id = format!("app_{}", Uuid::new_v4().simple());
         let deployment = AppDeployment {
+            startup_revision: 0,
             app_id: app_id.clone(),
             workspace_id: workspace_id.to_string(),
             name,
@@ -539,7 +540,7 @@ impl AuthStore {
             "UPDATE app_deployments SET desired_state = $1, updated_at = $2, updated_by = $3 \
              WHERE workspace_id = $4 AND app_id = $5 RETURNING app_id, workspace_id, name, server_id, \
              command, args, cwd, port, hostname, service_id, desired_state, runtime_agent_id, \
-             restart_count, last_error, created_at, created_by, updated_at, updated_by",
+             restart_count, last_error, created_at, created_by, updated_at, updated_by, startup_revision",
         )
         .bind(app_desired_state_str(desired_state))
         .bind(Utc::now().to_rfc3339())
@@ -550,6 +551,33 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         app_deployment_from_row(row)
+    }
+
+    /// Caller holds the workspace/workload lifecycle advisory lock. Persist only
+    /// the launch patch: all identity, routing and desired-state columns survive.
+    pub async fn update_app_startup(
+        &self,
+        workspace_id: &str,
+        app_id: &str,
+        request: &treer_protocol::ReplaceAgentStartupRequest,
+        actor: &str,
+    ) -> Result<AppDeployment, AuthFailure> {
+        sqlx::query(
+            "UPDATE app_deployments SET command = $1, args = $2, cwd = $3, \
+             startup_revision = startup_revision + 1, updated_at = $4, updated_by = $5 \
+             WHERE workspace_id = $6 AND app_id = $7",
+        )
+        .bind(&request.command)
+        .bind(serde_json::json!(request.args))
+        .bind(request.cwd.as_deref().unwrap_or("."))
+        .bind(Utc::now().to_rfc3339())
+        .bind(actor)
+        .bind(workspace_id)
+        .bind(app_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        self.resolve_app_deployment(workspace_id, app_id).await
     }
 
     pub async fn set_app_last_error(

@@ -70,9 +70,18 @@ pub struct ValidateAgentStartupRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidateAgentStartupResponse {
     #[serde(default)]
+    pub app_startups: Vec<AppStartupRevision>,
+    #[serde(default)]
     pub stopped_agent_ids: Vec<String>,
     #[serde(default)]
     pub active_agent_ids: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AppStartupRevision {
+    pub agent_id: String,
+    pub revision: u64,
+    pub request: ReplaceAgentStartupRequest,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -96,6 +105,8 @@ pub enum AppDeploymentStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AppDeployment {
+    #[serde(default)]
+    pub startup_revision: u64,
     pub app_id: String,
     pub workspace_id: String,
     pub name: String,
@@ -149,6 +160,36 @@ pub struct CreateAppDeploymentRequest {
     pub hostname: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub public: bool,
+}
+
+/// Patch only launch fields; identity, service, ingress and desired state stay fixed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateAppDeploymentRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Vec<String>>,
+}
+
+impl UpdateAppDeploymentRequest {
+    pub fn apply(&self, app: &AppDeployment) -> Result<ReplaceAgentStartupRequest, ProtocolError> {
+        if self.cwd.is_none() && self.command.is_none() && self.args.is_none() {
+            return Err(ProtocolError::new(
+                "invalid_app_update",
+                "at least one launch field is required",
+            ));
+        }
+        let request = ReplaceAgentStartupRequest {
+            cwd: Some(self.cwd.clone().unwrap_or_else(|| app.cwd.clone())),
+            command: self.command.clone().unwrap_or_else(|| app.command.clone()),
+            args: self.args.clone().unwrap_or_else(|| app.args.clone()),
+        };
+        request.validate()?;
+        Ok(request)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -324,6 +365,23 @@ pub struct AgentServerSnapshot {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum AgentCommand {
+    AppEnsureLifecycle {
+        agent_id: String,
+        workload_credential: Option<String>,
+        request: CreateAgentRequest,
+        enabled: bool,
+        start_missing: bool,
+        revision: u64,
+    },
+    AppStartupCheck {
+        agent_id: String,
+        request: ReplaceAgentStartupRequest,
+    },
+    AppStartupUpdate {
+        agent_id: String,
+        request: ReplaceAgentStartupRequest,
+        revision: u64,
+    },
     StartupAdminGet {
         agent_id: String,
     },
@@ -460,6 +518,9 @@ pub enum AgentCommand {
 impl AgentCommand {
     pub fn required_capability(&self) -> Option<&'static str> {
         match self {
+            Self::AppStartupCheck { .. }
+            | Self::AppStartupUpdate { .. }
+            | Self::AppEnsureLifecycle { .. } => Some(CAPABILITY_APP_UPDATE),
             Self::Create { .. } | Self::CreationPlacementCheck {} => {
                 Some(CAPABILITY_WORKLOAD_CREATE_PLACEMENT)
             }
