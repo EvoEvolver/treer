@@ -19,6 +19,7 @@ import {
   Trash2
 } from "lucide-react"
 import { FormEvent, useEffect, useState } from "react"
+import { roleLabel, t } from "@/i18n"
 
 export type WorkspaceSettingsViewProps = {
   workspace?: Workspace
@@ -72,7 +73,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
       setAccess(accessData.access)
       setOrganizationMembers(memberData.members)
       setOrganizationGroups(groupData.groups)
-    }).catch((reason) => setAccessError(reason instanceof Error ? reason.message : "Unable to load workspace access"))
+    }).catch((reason) => setAccessError(reason instanceof Error ? reason.message : t("wsettings.unable_to_load_workspace_access")))
   }, [preview, workspace?.workspace_id, organization?.organization_id])
   useEffect(() => {
     if (preview || !workspace) return
@@ -84,7 +85,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
         setPolicyStaleSeconds(String(status.provider?.max_stale_seconds ?? 300))
         setPolicyError(null)
       })
-      .catch((reason) => setPolicyError(reason instanceof Error ? reason.message : "Unable to load Policy Provider"))
+      .catch((reason) => setPolicyError(reason instanceof Error ? reason.message : t("wsettings.unable_to_load_policy_provider")))
   }, [preview, workspace?.workspace_id])
   useEffect(() => {
     if (machines.some((machine) => machine.server_id === policyInstallMachineId && machine.status === "online")) return
@@ -97,14 +98,14 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
     if (!workspace || !policyAppId) return
     const maxStaleSeconds = Number(policyStaleSeconds)
     if (!Number.isInteger(maxStaleSeconds) || maxStaleSeconds < 0 || maxStaleSeconds > 86400) {
-      setPolicyError("Stale cache window must be between 0 and 86400 seconds")
+      setPolicyError(t("wsettings.stale_cache_window_must_be"))
       return
     }
     setPolicyBusy(true); setPolicyError(null)
     try {
       const status = await api<PolicyProviderStatus>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider`, { method: "PUT", body: JSON.stringify({ app_id: policyAppId, failure_mode: policyFailureMode, max_stale_seconds: maxStaleSeconds }) })
       setPolicyProvider(status)
-    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : "Unable to configure Policy Provider") }
+    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : t("wsettings.unable_to_configure_policy_provider")) }
     finally { setPolicyBusy(false) }
   }
   async function removePolicyProvider() {
@@ -114,7 +115,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
       await api(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider`, { method: "DELETE" })
       const status = await api<PolicyProviderStatus>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/policy-provider`)
       setPolicyProvider(status); setPolicyAppId("")
-    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : "Unable to remove Policy Provider") }
+    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : t("wsettings.unable_to_remove_policy_provider")) }
     finally { setPolicyBusy(false) }
   }
   async function installDefaultPolicyApp() {
@@ -125,7 +126,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
       setPolicyProvider(status)
       setPolicyAppId(status.provider?.app_id ?? "")
       if (status.app) onPolicyAppInstalled(status.app)
-    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : "Unable to install the default Policy App") }
+    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : t("wsettings.unable_to_install_the_default")) }
     finally { setPolicyBusy(false) }
   }
   async function policyLifecycle(action: "start" | "stop" | "restart") {
@@ -134,7 +135,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
     try {
       const data = await api<{ app: AppDeployment }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/apps/${encodeURIComponent(policyProvider.app.app_id)}/${action}`, { method: "POST", body: "{}" })
       setPolicyProvider((current) => current ? { ...current, app: data.app } : current)
-    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : `Unable to ${action} Policy App`) }
+    } catch (reason) { setPolicyError(reason instanceof Error ? reason.message : t("wsettings.policy_action_failed", { action: t(`wsettings.action_${action}`) })) }
     finally { setPolicyBusy(false) }
   }
   async function onAccessMode(mode: WorkspaceAccess["access_mode"]) {
@@ -142,23 +143,23 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
     try {
       const data = await api<{ access: WorkspaceAccess }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/access`, { method: "PATCH", body: JSON.stringify({ access_mode: mode }) })
       setAccess(data.access)
-    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : "Unable to update access") }
+    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : t("wsettings.unable_to_update_access")) }
   }
   async function onUserGrant(userId: string, role: WorkspaceAccess["current_role"] | null) {
     if (!workspace) return
     try {
       const data = await api<{ access: WorkspaceAccess }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/access/users/${encodeURIComponent(userId)}`, role ? { method: "PUT", body: JSON.stringify({ role }) } : { method: "DELETE" })
       setAccess(data.access); setSelectedUserId("")
-    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : "Unable to update member") }
+    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : t("wsettings.unable_to_update_member")) }
   }
   async function onGroupGrant(groupId: string, role: WorkspaceAccess["current_role"] | null) {
     if (!workspace) return
     try {
       const data = await api<{ access: WorkspaceAccess }>(`/api/workspaces/${encodeURIComponent(workspace.workspace_id)}/access/groups/${encodeURIComponent(groupId)}`, role ? { method: "PUT", body: JSON.stringify({ role }) } : { method: "DELETE" })
       setAccess(data.access); setSelectedGroupId("")
-    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : "Unable to update group") }
+    } catch (reason) { setAccessError(reason instanceof Error ? reason.message : t("wsettings.unable_to_update_group")) }
   }
-  if (!workspace) return <div className="grid min-h-0 flex-1 place-items-center p-8 text-sm text-muted-foreground">Workspace not found. <Button variant="outline" className="mt-3" onClick={onClose}>Back</Button></div>
+  if (!workspace) return <div className="grid min-h-0 flex-1 place-items-center p-8 text-sm text-muted-foreground">{t("wsettings.not_found")} <Button variant="outline" className="mt-3" onClick={onClose}>{t("org.back")}</Button></div>
   const deleteBlocked = machineCount === undefined || machineCount > 0
   const isOwner = access?.current_role === "owner"
   const availableMembers = organizationMembers.filter((member) => !access?.members.some((grant) => grant.user_id === member.user_id))
@@ -171,48 +172,48 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
         <p className="font-mono text-xs text-muted-foreground">{workspace.workspace_id}</p>
         {organization && <p className="mt-1 text-xs text-muted-foreground">{organization.name}</p>}
       </div>
-      <Button variant="outline" className="shrink-0" onClick={onClose}>Close</Button>
+      <Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button>
     </div>
 
     {!preview && machines.length === 0 && machineCount === 0 && <div role="status" className="mb-6 flex flex-col items-start gap-3 rounded-md border bg-muted/50 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
-      <div><p className="font-medium">Add a machine to create agents</p><p className="mt-1 text-xs text-muted-foreground">Agents run on machines. Connect your first machine to this workspace, then add an agent from the Tree menu.</p></div>
-      <Button variant="outline" className="shrink-0" onClick={onAddMachine}>Set up a machine</Button>
+      <div><p className="font-medium">{t("wsettings.add_a_machine_to_create")}</p><p className="mt-1 text-xs text-muted-foreground">{t("wsettings.agents_run_on_machines_connect")}</p></div>
+      <Button variant="outline" className="shrink-0" onClick={onAddMachine}>{t("wsettings.set_up_a_machine")}</Button>
     </div>}
 
     <section className="border-y py-6">
       <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
-        <div><h2 className="text-sm font-semibold">General</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">The display name shown to organization members.</p></div>
-        <form onSubmit={onRename} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><div className="min-w-0"><Field label="Workspace name"><Input aria-label="Workspace name" value={name} onChange={(event) => onNameChange(event.target.value)} required maxLength={80} /></Field></div><Button type="submit" className="w-full sm:w-auto" disabled={!name.trim() || name.trim() === workspace.name}>Save</Button></form>
+        <div><h2 className="text-sm font-semibold">{t("settings.nav.general")}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("wsettings.the_display_name_shown_to")}</p></div>
+        <form onSubmit={onRename} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><div className="min-w-0"><Field label={t("wsettings.workspace_name")}><Input aria-label={t("wsettings.workspace_name")} value={name} onChange={(event) => onNameChange(event.target.value)} required maxLength={80} /></Field></div><Button type="submit" className="w-full sm:w-auto" disabled={!name.trim() || name.trim() === workspace.name}>{t("common.save")}</Button></form>
       </div>
     </section>
 
     <section className="border-b py-6" data-tour="workspace-machines">
       <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
-        <div><div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">Machines</h2><span data-tour="add-machine"><Button variant="outline" size="sm" className="h-8" onClick={onAddMachine}><Plus />Add</Button></span></div><p className="mt-1 text-xs leading-5 text-muted-foreground">Hosts enrolled in this workspace. Open a machine to inspect its agents, services, and network activity.</p></div>
+        <div><div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">{t("wsettings.machines")}</h2><span data-tour="add-machine"><Button variant="outline" size="sm" className="h-8" onClick={onAddMachine}><Plus />{t("wsettings.add")}</Button></span></div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("wsettings.hosts_enrolled_in_this_workspace")}</p></div>
         <div className="border-y py-1">
           {machines.map((machine) => <MachineItem key={machine.server_id} machine={machine} machines={machines} workspaceId={workspace.workspace_id} onClick={() => onOpenMachine(machine)} onRename={() => onRenameMachine(machine)} onDelete={() => onDeleteMachine(machine)} onCopy={onCopy} />)}
-          {!machines.length && <EmptyState icon={machineCount === undefined ? <RotateCw className="animate-spin" /> : <Server />} label={machineCount === undefined ? "Loading machines" : "No machines connected"} />}
+          {!machines.length && <EmptyState icon={machineCount === undefined ? <RotateCw className="animate-spin" /> : <Server />} label={machineCount === undefined ? t("wsettings.loading_machines") : t("wsettings.no_machines_connected")} />}
         </div>
       </div>
     </section>
 
     <section className="border-b py-6">
       <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
-        <div><div className="flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">Launch profiles</h2><div className="flex items-center gap-1"><IconButton label="Refresh profiles" onClick={onRefreshProfiles} disabled={profilesLoading}><RotateCw /></IconButton><IconButton label="New profile" onClick={onNewProfile}><Plus /></IconButton></div></div><p className="mt-1 text-xs leading-5 text-muted-foreground">Reusable Agent commands and their default working directories.</p></div>
+        <div><div className="flex items-center justify-between gap-2"><h2 className="text-sm font-semibold">{t("wsettings.launch_profiles")}</h2><div className="flex items-center gap-1"><IconButton label={t("wsettings.refresh_profiles")} onClick={onRefreshProfiles} disabled={profilesLoading}><RotateCw /></IconButton><IconButton label={t("wsettings.new_profile")} onClick={onNewProfile}><Plus /></IconButton></div></div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("wsettings.reusable_agent_commands_and_their")}</p></div>
         <LaunchProfilesList profiles={profiles} loading={profilesLoading} onEdit={onEditProfile} onLaunch={onLaunchProfile} onDelete={onDeleteProfile} />
       </div>
     </section>
 
     <section className="border-b py-6">
       <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
-        <div><h2 className="text-sm font-semibold">Access</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Choose whether everyone in the organization or only selected people and groups can open this workspace.</p></div>
+        <div><h2 className="text-sm font-semibold">{t("apps.access")}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("wsettings.choose_whether_everyone_in_the")}</p></div>
         <div className="space-y-5">
-          <Field label="Who can access"><Select value={access?.access_mode ?? "organization"} onValueChange={(mode: WorkspaceAccess["access_mode"]) => void onAccessMode(mode)} disabled={!isOwner || preview}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="organization">Everyone in organization</SelectItem><SelectItem value="restricted">Selected people and groups</SelectItem></SelectContent></Select></Field>
+          <Field label={t("apps.who_can_access")}><Select value={access?.access_mode ?? "organization"} onValueChange={(mode: WorkspaceAccess["access_mode"]) => void onAccessMode(mode)} disabled={!isOwner || preview}><SelectTrigger><SelectValue /></SelectTrigger><SelectContent><SelectItem value="organization">{t("wsettings.everyone_in_organization")}</SelectItem><SelectItem value="restricted">{t("wsettings.selected_people_and_groups")}</SelectItem></SelectContent></Select></Field>
           {accessError && <p className="text-xs text-destructive">{accessError}</p>}
           {access && <>
-            {access.access_mode === "organization" && <p className="text-xs leading-5 text-muted-foreground">Everyone already has member access. Add owners here to share access management and workspace deletion.</p>}
-            <div><h3 className="mb-2 text-xs font-semibold">People</h3><div className="border-y">{access.members.map((grant) => <div key={grant.user_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-2 border-b last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{grant.preferred_name}</span><span className="block truncate text-[10px] text-muted-foreground">{grant.email}</span></span>{isOwner ? <Select value={grant.role} onValueChange={(role: WorkspaceAccess["current_role"]) => void onUserGrant(grant.user_id, role)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="owner">Owner</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{grant.role}</span>}{isOwner ? <IconButton label={`Remove ${grant.preferred_name}`} onClick={() => void onUserGrant(grant.user_id, null)}><Trash2 /></IconButton> : <span />}</div>)}{!access.members.length && <div className="py-3 text-xs text-muted-foreground">No direct members.</div>}</div>{isOwner && availableMembers.length > 0 && <div className="mt-2 flex gap-2"><Select value={selectedUserId} onValueChange={setSelectedUserId}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder="Select organization member" /></SelectTrigger><SelectContent>{availableMembers.map((member) => <SelectItem key={member.user_id} value={member.user_id}>{member.preferred_name}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={!selectedUserId} onClick={() => void onUserGrant(selectedUserId, "member")}><Plus />Add</Button></div>}</div>
-            <div><h3 className="mb-2 text-xs font-semibold">Groups</h3><div className="border-y">{access.groups.map((grant) => <div key={grant.group_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-2 border-b last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{grant.name}</span><span className="block text-[10px] text-muted-foreground">{grant.member_count} members</span></span>{isOwner ? <Select value={grant.role} onValueChange={(role: WorkspaceAccess["current_role"]) => void onGroupGrant(grant.group_id, role)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">Member</SelectItem><SelectItem value="owner">Owner</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{grant.role}</span>}{isOwner ? <IconButton label={`Remove ${grant.name}`} onClick={() => void onGroupGrant(grant.group_id, null)}><Trash2 /></IconButton> : <span />}</div>)}{!access.groups.length && <div className="py-3 text-xs text-muted-foreground">No groups.</div>}</div>{isOwner && availableGroups.length > 0 && <div className="mt-2 flex gap-2"><Select value={selectedGroupId} onValueChange={setSelectedGroupId}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder="Select organization group" /></SelectTrigger><SelectContent>{availableGroups.map((group) => <SelectItem key={group.group_id} value={group.group_id}>{group.name}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={!selectedGroupId} onClick={() => void onGroupGrant(selectedGroupId, "member")}><Plus />Add</Button></div>}</div>
+            {access.access_mode === "organization" && <p className="text-xs leading-5 text-muted-foreground">{t("wsettings.everyone_already_has_member_access")}</p>}
+            <div><h3 className="mb-2 text-xs font-semibold">{t("wsettings.people")}</h3><div className="border-y">{access.members.map((grant) => <div key={grant.user_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-2 border-b last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{grant.preferred_name}</span><span className="block truncate text-[10px] text-muted-foreground">{grant.email}</span></span>{isOwner ? <Select value={grant.role} onValueChange={(role: WorkspaceAccess["current_role"]) => void onUserGrant(grant.user_id, role)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">{t("org.member")}</SelectItem><SelectItem value="owner">{t("wsettings.owner")}</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{roleLabel(grant.role)}</span>}{isOwner ? <IconButton label={t("wsettings.remove_grant", { name: grant.preferred_name })} onClick={() => void onUserGrant(grant.user_id, null)}><Trash2 /></IconButton> : <span />}</div>)}{!access.members.length && <div className="py-3 text-xs text-muted-foreground">{t("wsettings.no_direct_members")}</div>}</div>{isOwner && availableMembers.length > 0 && <div className="mt-2 flex gap-2"><Select value={selectedUserId} onValueChange={setSelectedUserId}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={t("wsettings.select_organization_member")} /></SelectTrigger><SelectContent>{availableMembers.map((member) => <SelectItem key={member.user_id} value={member.user_id}>{member.preferred_name}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={!selectedUserId} onClick={() => void onUserGrant(selectedUserId, "member")}><Plus />{t("wsettings.add")}</Button></div>}</div>
+            <div><h3 className="mb-2 text-xs font-semibold">{t("org.groups")}</h3><div className="border-y">{access.groups.map((grant) => <div key={grant.group_id} className="grid min-h-12 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-2 border-b last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{grant.name}</span><span className="block text-[10px] text-muted-foreground">{t("org.member_count", { count: grant.member_count })}</span></span>{isOwner ? <Select value={grant.role} onValueChange={(role: WorkspaceAccess["current_role"]) => void onGroupGrant(grant.group_id, role)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">{t("org.member")}</SelectItem><SelectItem value="owner">{t("wsettings.owner")}</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{roleLabel(grant.role)}</span>}{isOwner ? <IconButton label={t("wsettings.remove_grant", { name: grant.name })} onClick={() => void onGroupGrant(grant.group_id, null)}><Trash2 /></IconButton> : <span />}</div>)}{!access.groups.length && <div className="py-3 text-xs text-muted-foreground">{t("wsettings.no_groups")}</div>}</div>{isOwner && availableGroups.length > 0 && <div className="mt-2 flex gap-2"><Select value={selectedGroupId} onValueChange={setSelectedGroupId}><SelectTrigger className="min-w-0 flex-1"><SelectValue placeholder={t("wsettings.select_organization_group")} /></SelectTrigger><SelectContent>{availableGroups.map((group) => <SelectItem key={group.group_id} value={group.group_id}>{group.name}</SelectItem>)}</SelectContent></Select><Button variant="outline" disabled={!selectedGroupId} onClick={() => void onGroupGrant(selectedGroupId, "member")}><Plus />{t("wsettings.add")}</Button></div>}</div>
           </>}
         </div>
       </div>
@@ -220,28 +221,28 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
 
     <section id="policy-provider" className="scroll-mt-4 border-b py-6">
       <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
-        <div><div className="flex items-center gap-2"><h2 className="text-sm font-semibold">Policy Provider</h2>{policyProvider?.provider && <Status value={policyProvider.app?.status ?? "unavailable"} />}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">Workspace authorization supplied by a Managed App.</p></div>
+        <div><div className="flex items-center gap-2"><h2 className="text-sm font-semibold">{t("wsettings.policy_provider")}</h2>{policyProvider?.provider && <Status value={policyProvider.app?.status ?? "unavailable"} />}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("wsettings.workspace_authorization_supplied_by_a")}</p></div>
         <div className="space-y-4">
-          {!policyProvider?.provider && policyProvider?.fallback && <div className="flex flex-wrap items-center justify-between gap-3 border-y py-3"><div className="flex min-w-0 items-center gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-md bg-[#e3eee8] text-[#176b52]"><ShieldCheck className="size-4" /></span><div className="min-w-0"><p className="truncate text-xs font-semibold text-foreground">{policyProvider.fallback.name}</p><p className="mt-0.5 text-[11px] text-muted-foreground">Active · {policyProvider.fallback.mode}{policyProvider.fallback.effect ? ` · ${policyProvider.fallback.effect}` : ` · revision ${policyProvider.fallback.revision}`}</p></div></div><Status value="running" /></div>}
+          {!policyProvider?.provider && policyProvider?.fallback && <div className="flex flex-wrap items-center justify-between gap-3 border-y py-3"><div className="flex min-w-0 items-center gap-3"><span className="grid size-8 shrink-0 place-items-center rounded-md bg-[#e3eee8] text-[#176b52]"><ShieldCheck className="size-4" /></span><div className="min-w-0"><p className="truncate text-xs font-semibold text-foreground">{policyProvider.fallback.name}</p><p className="mt-0.5 text-[11px] text-muted-foreground">{t("wsettings.active_mode", { mode: policyProvider.fallback.mode })}{policyProvider.fallback.effect ? ` · ${policyProvider.fallback.effect}` : ` · ${t("wsettings.revision", { revision: policyProvider.fallback.revision })}`}</p></div></div><Status value="running" /></div>}
           <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_180px_140px]">
-            <Field label="Policy App"><Select value={policyAppId || undefined} onValueChange={setPolicyAppId} disabled={!isOwner || policyBusy}><SelectTrigger aria-label="Policy App"><SelectValue placeholder="Not configured" /></SelectTrigger><SelectContent>{apps.filter((app) => app.status === "running" || app.app_id === policyProvider?.provider?.app_id).map((app) => <SelectItem key={app.app_id} value={app.app_id}>{app.name}</SelectItem>)}</SelectContent></Select></Field>
-            <Field label="Provider failure"><Select value={policyFailureMode} onValueChange={(value: "fail_closed" | "fail_open") => setPolicyFailureMode(value)} disabled={!isOwner || policyBusy}><SelectTrigger aria-label="Policy Provider failure mode"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="fail_closed">Deny after stale window</SelectItem><SelectItem value="fail_open">Allow after stale window</SelectItem></SelectContent></Select></Field>
-            <Field label="Stale seconds"><Input aria-label="Policy Provider stale seconds" type="number" min={0} max={86400} value={policyStaleSeconds} onChange={(event) => setPolicyStaleSeconds(event.target.value)} disabled={!isOwner || policyBusy} /></Field>
+            <Field label={t("wsettings.policy_app")}><Select value={policyAppId || undefined} onValueChange={setPolicyAppId} disabled={!isOwner || policyBusy}><SelectTrigger aria-label={t("wsettings.policy_app")}><SelectValue placeholder={t("wsettings.not_configured")} /></SelectTrigger><SelectContent>{apps.filter((app) => app.status === "running" || app.app_id === policyProvider?.provider?.app_id).map((app) => <SelectItem key={app.app_id} value={app.app_id}>{app.name}</SelectItem>)}</SelectContent></Select></Field>
+            <Field label={t("wsettings.provider_failure")}><Select value={policyFailureMode} onValueChange={(value: "fail_closed" | "fail_open") => setPolicyFailureMode(value)} disabled={!isOwner || policyBusy}><SelectTrigger aria-label={t("wsettings.policy_provider_failure_mode")}><SelectValue /></SelectTrigger><SelectContent><SelectItem value="fail_closed">{t("wsettings.deny_after_stale_window")}</SelectItem><SelectItem value="fail_open">{t("wsettings.allow_after_stale_window")}</SelectItem></SelectContent></Select></Field>
+            <Field label={t("wsettings.stale_seconds")}><Input aria-label={t("wsettings.policy_provider_stale_seconds")} type="number" min={0} max={86400} value={policyStaleSeconds} onChange={(event) => setPolicyStaleSeconds(event.target.value)} disabled={!isOwner || policyBusy} /></Field>
           </div>
-          {!policyProvider?.provider && isOwner && <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><Field label="Install default App on"><Select value={policyInstallMachineId || undefined} onValueChange={setPolicyInstallMachineId} disabled={policyBusy}><SelectTrigger aria-label="Default Policy App machine"><SelectValue placeholder="No online machine" /></SelectTrigger><SelectContent>{machines.filter((machine) => machine.status === "online").map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Button variant="outline" onClick={() => void installDefaultPolicyApp()} disabled={!policyInstallMachineId || policyBusy}>{policyBusy ? <RotateCw className="animate-spin" /> : <Download />}Install Default Policy App</Button></div>}
-          <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => void savePolicyProvider()} disabled={!isOwner || !policyAppId || policyBusy}>{policyBusy && <RotateCw className="animate-spin" />}Apply</Button>{policyProvider?.app && policyProvider.app.status !== "running" && <Button size="sm" variant="outline" onClick={() => void policyLifecycle("start")} disabled={!isOwner || policyBusy}><Play />Start</Button>}{policyProvider?.app?.status === "running" && <><Button size="sm" variant="outline" onClick={() => void policyLifecycle("restart")} disabled={!isOwner || policyBusy}><RotateCw />Restart</Button><Button size="sm" variant="outline" onClick={() => void policyLifecycle("stop")} disabled={!isOwner || policyBusy}><Square />Stop</Button></>}{policyProvider?.provider && <Button size="sm" variant="outline" onClick={() => void removePolicyProvider()} disabled={!isOwner || policyBusy}>Remove</Button>}{policyProvider?.app?.public_url && <Button size="sm" variant="outline" asChild><a href={policyProvider.app.public_url} target="_blank" rel="noreferrer"><ExternalLink />Open Policy App</a></Button>}</div>
+          {!policyProvider?.provider && isOwner && <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-end"><Field label={t("wsettings.install_default_app_on")}><Select value={policyInstallMachineId || undefined} onValueChange={setPolicyInstallMachineId} disabled={policyBusy}><SelectTrigger aria-label={t("wsettings.default_policy_app_machine")}><SelectValue placeholder={t("wsettings.no_online_machine")} /></SelectTrigger><SelectContent>{machines.filter((machine) => machine.status === "online").map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Button variant="outline" onClick={() => void installDefaultPolicyApp()} disabled={!policyInstallMachineId || policyBusy}>{policyBusy ? <RotateCw className="animate-spin" /> : <Download />}{t("wsettings.install_default_policy_app")}</Button></div>}
+          <div className="flex flex-wrap items-center gap-2"><Button size="sm" onClick={() => void savePolicyProvider()} disabled={!isOwner || !policyAppId || policyBusy}>{policyBusy && <RotateCw className="animate-spin" />}Apply</Button>{policyProvider?.app && policyProvider.app.status !== "running" && <Button size="sm" variant="outline" onClick={() => void policyLifecycle("start")} disabled={!isOwner || policyBusy}><Play />{t("apps.start")}</Button>}{policyProvider?.app?.status === "running" && <><Button size="sm" variant="outline" onClick={() => void policyLifecycle("restart")} disabled={!isOwner || policyBusy}><RotateCw />{t("apps.restart")}</Button><Button size="sm" variant="outline" onClick={() => void policyLifecycle("stop")} disabled={!isOwner || policyBusy}><Square />{t("apps.stop")}</Button></>}{policyProvider?.provider && <Button size="sm" variant="outline" onClick={() => void removePolicyProvider()} disabled={!isOwner || policyBusy}>{t("wsettings.remove")}</Button>}{policyProvider?.app?.public_url && <Button size="sm" variant="outline" asChild><a href={policyProvider.app.public_url} target="_blank" rel="noreferrer"><ExternalLink />{t("wsettings.open_policy_app")}</a></Button>}</div>
           {policyProvider?.provider && <div className="grid gap-2 border-y py-3 text-[11px] text-muted-foreground sm:grid-cols-3"><span>Announced <strong className="text-foreground">rev {policyProvider.provider.revision_hint}</strong></span><span>Cached <strong className="text-foreground">{policyProvider.cache.revision === undefined ? "none" : `rev ${policyProvider.cache.revision}`}</strong></span><span>Age <strong className="text-foreground">{policyProvider.cache.age_seconds === undefined ? "-" : `${policyProvider.cache.age_seconds}s`}</strong></span></div>}
           <PolicyPublishAuthoritySettings key={`${workspace.workspace_id}/${policyProvider?.provider?.app_id ?? "none"}`} workspaceId={workspace.workspace_id} status={policyProvider} isOwner={isOwner} disabled={preview || policyBusy} onSaved={(provider) => setPolicyProvider((current) => current ? { ...current, provider } : current)} />
           {(policyError || policyProvider?.cache.last_error) && <p className="text-xs text-destructive">{policyError ?? policyProvider?.cache.last_error}</p>}
-          {!apps.length && !machines.some((machine) => machine.status === "online") && <p className="text-xs text-muted-foreground">Connect a machine to install the default Policy App.</p>}
+          {!apps.length && !machines.some((machine) => machine.status === "online") && <p className="text-xs text-muted-foreground">{t("wsettings.connect_a_machine_to_install")}</p>}
         </div>
       </div>
     </section>
 
     {isOwner && <section className="border-b py-6">
       <div className="grid gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
-        <div><h2 className="text-sm font-semibold text-destructive">Danger zone</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">Deleted workspaces disappear from active views while historical traffic and messages remain.</p></div>
-        <div className="grid gap-3 border border-destructive/30 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><p className="text-xs leading-5 text-muted-foreground">{machineCount === undefined ? "Checking machine inventory..." : machineCount > 0 ? `Delete all ${machineCount} ${machineCount === 1 ? "machine" : "machines"} before deleting this workspace.` : "This action cannot be undone."}</p><Button variant="destructive" className="w-full sm:w-auto" disabled={preview || deleteBlocked} onClick={onDelete}><Trash2 />Delete workspace</Button></div>
+        <div><h2 className="text-sm font-semibold text-destructive">{t("apps.danger_zone")}</h2><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("wsettings.deleted_workspaces_disappear_from_active")}</p></div>
+        <div className="grid gap-3 border border-destructive/30 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><p className="text-xs leading-5 text-muted-foreground">{machineCount === undefined ? t("wsettings.checking_machine_inventory") : machineCount > 0 ? t(machineCount === 1 ? "wsettings.delete_machines_first_one" : "wsettings.delete_machines_first_many", { count: machineCount }) : t("wsettings.this_action_cannot_be_undone")}</p><Button variant="destructive" className="w-full sm:w-auto" disabled={preview || deleteBlocked} onClick={onDelete}><Trash2 />{t("wsettings.delete_workspace")}</Button></div>
       </div>
     </section>}
   </div></div>

@@ -1,5 +1,6 @@
 import { driver, type DriveStep } from "driver.js"
 import "driver.js/dist/driver.css"
+import { t } from "@/i18n"
 
 export const FIRST_RUN_TOUR_VERSION = "v1"
 
@@ -139,10 +140,10 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
 
   const tour = driver({
     showProgress: true,
-    progressText: "{{current}} of {{total}}",
-    nextBtnText: "Next",
-    prevBtnText: "Back",
-    doneBtnText: "Done",
+    progressText: t("tour.current_of_total"),
+    nextBtnText: t("tour.next"),
+    prevBtnText: t("org.back"),
+    doneBtnText: t("tabs.done"),
     allowClose: true,
     overlayOpacity: 0.55,
     stagePadding: 8,
@@ -165,17 +166,17 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
   const steps: DriveStep[] = [
     {
       popover: {
-        title: "Welcome to Treer",
+        title: t("tour.welcome_to_treer"),
         description:
-          "<p>Treer is a control plane for coding agents on machines you already own. This tour covers the first three things you need: a <strong>workspace</strong>, a <strong>machine</strong>, and an <strong>agent</strong>.</p>",
+          t("tour.treer_is_a_control_plane"),
       },
     },
     {
       element: "[data-tour='workspace-select']",
       popover: {
-        title: "What is a workspace?",
+        title: t("tour.what_is_a_workspace"),
         description:
-          "<p>A workspace is a shared room for one project or lab. Machines you enroll, agents you start, and launch profiles all live here. Organization members who can see the workspace can use those machines and agents. It is not the git checkout on disk — each machine still has its own working directory.</p>",
+          t("tour.a_workspace_is_a_shared"),
         side: "right",
         align: "start",
       },
@@ -183,9 +184,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='create-workspace']",
       popover: {
-        title: "Create a workspace",
+        title: t("tour.create_a_workspace"),
         description:
-          "<p>Treer does not create a workspace for you. Use <strong>+</strong> to add one — for example <code>personal</code> or <code>lab</code>. You can rename it later; the workspace ID stays the same, so enrolled machines stay connected.</p>",
+          t("tour.treer_does_not_create_a"),
         side: "bottom",
         align: "end",
         onNextClick: () => {
@@ -198,9 +199,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='create-workspace-dialog']",
       popover: {
-        title: "Name the workspace",
+        title: t("tour.name_the_workspace"),
         description:
-          "<p>The name is only a label shown to members. After you create it, this control plane can enroll machines into that workspace and start agents on them. Close this dialog when you are ready — you do not have to create one during the tour.</p>",
+          t("tour.the_name_is_only_a"),
         side: "left",
         align: "start",
         onPrevClick: () => {
@@ -219,9 +220,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='workspace-machines']",
       popover: {
-        title: "Machines hold the processes",
+        title: t("tour.machines_hold_the_processes"),
         description:
-          "<p>Agents do not run in the browser. They run on enrolled machines: a laptop, a workstation, or a server. The machine connects <strong>out</strong> to this Proxy, so you do not publish SSH or local agent ports.</p>",
+          t("tour.agents_do_not_run_in"),
         side: "right",
         align: "start",
         onPrevClick: () => {
@@ -234,9 +235,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='add-machine']",
       popover: {
-        title: "Add your first machine",
+        title: t("tour.add_your_first_machine"),
         description:
-          "<p>Open <strong>Machines</strong> and click <strong>Add</strong>. That dialog is how you enroll the first device into this workspace. You need an online machine before you can start an agent.</p>",
+          t("tour.open_machines_and_click_add"),
         side: "bottom",
         align: "end",
         onNextClick: () => {
@@ -247,9 +248,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='add-machine-dialog']",
       popover: {
-        title: "Install, then enroll",
+        title: t("tour.install_then_enroll"),
         description:
-          "<p><strong>Step 1</strong> installs Treer on that computer. It has no secret and can be reused.</p><p><strong>Step 2</strong> is a 10-minute, single-use enrollment key. Run it on the same machine to bind that Host to this workspace. Copy both commands to the device, then come back here — the machine appears when it is online.</p>",
+          t("tour.step_1_installs_treer_on"),
         side: "left",
         align: "start",
         onPrevClick: () => {
@@ -266,9 +267,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='create-agent']",
       popover: {
-        title: "Start an agent",
+        title: t("tour.start_an_agent"),
         description:
-          "<p>Once a machine is online, open <strong>Agents</strong> and click <strong>New</strong>. An agent is a process Treer keeps alive on that machine: a shell, a coding agent, or a short-lived installer. If this workspace has no machines yet, <strong>New</strong> takes you to Machines so you can add one.</p>",
+          t("tour.once_a_machine_is_online"),
         side: "bottom",
         align: "end",
         onPrevClick: () => {
@@ -284,9 +285,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='agent-launch']",
       popover: {
-        title: "Command-line agents",
+        title: t("tour.command_line_agents"),
         description:
-          "<p><strong>Terminal</strong> starts your interactive shell. <strong>Custom command</strong> runs an executable you type, such as <code>codex</code>.</p><p>These are PTY sessions: you type in the terminal, and Treer streams that output. No extra UI is required.</p>",
+          t("tour.terminal_starts_your_interactive_shell"),
         side: "left",
         align: "start",
         onPrevClick: () => {
@@ -302,9 +303,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     {
       element: "[data-tour='agent-launch']",
       popover: {
-        title: "UI agents (AIS / ACP-style)",
+        title: t("tour.ui_agents_ais_acp_style"),
         description:
-          "<p>Saved profiles run your chosen launcher on the machine. Install its runtime and dependencies first. The launcher may register an <strong>Agent Interface Server</strong> (AIS).</p><p>If the running agent publishes a <code>ui_path</code>, Treer embeds its page. Prompts and transcripts use the advertised interface.</p>",
+          t("tour.saved_profiles_run_your_chosen"),
         side: "left",
         align: "start",
         onPrevClick: () => {
@@ -319,9 +320,9 @@ export function startFirstRunTour(host: FirstRunTourHost, options: { userId: str
     },
     {
       popover: {
-        title: "You’re ready",
+        title: t("tour.you_re_ready"),
         description:
-          "<p>Create a workspace, enroll a machine with the two commands, then start a terminal or a saved profile. Replay this tour anytime from the user menu.</p>",
+          t("tour.create_a_workspace_enroll_a"),
         onPrevClick: () => {
           void (async () => {
             host.openCreateAgent(false)
@@ -344,10 +345,10 @@ export function startAdminTour(host: AdminTourHost, options: { persist: boolean 
 
   const tour = driver({
     showProgress: true,
-    progressText: "{{current}} of {{total}}",
-    nextBtnText: "Next",
-    prevBtnText: "Back",
-    doneBtnText: "Done",
+    progressText: t("tour.current_of_total"),
+    nextBtnText: t("tour.next"),
+    prevBtnText: t("org.back"),
+    doneBtnText: t("tabs.done"),
     allowClose: true,
     overlayOpacity: 0.55,
     stagePadding: 8,
@@ -367,17 +368,17 @@ export function startAdminTour(host: AdminTourHost, options: { persist: boolean 
   const steps: DriveStep[] = [
     {
       popover: {
-        title: "Platform administration",
+        title: t("tour.platform_administration"),
         description:
-          "<p>This panel is for the <strong>platform administrator</strong>, not a Treer user. It is not a workspace. You invite people here; they register, get a personal organization, and then enroll machines.</p>",
+          t("tour.this_panel_is_for_the"),
       },
     },
     {
       element: "[data-tour='admin-overview']",
       popover: {
-        title: "What you are looking at",
+        title: t("tour.what_you_are_looking_at"),
         description:
-          "<p>These totals are live across every organization on this Proxy: enrolled machines and running agents. They are a health snapshot, not a place to start work.</p>",
+          t("tour.these_totals_are_live_across"),
         side: "bottom",
         align: "start",
       },
@@ -385,9 +386,9 @@ export function startAdminTour(host: AdminTourHost, options: { persist: boolean 
     {
       element: "[data-tour='admin-invite']",
       popover: {
-        title: "Invite the first user",
+        title: t("tour.invite_the_first_user"),
         description:
-          "<p>New accounts need an invitation unless open registration is enabled. <strong>Create invitation</strong> mints a one-time registration link. That user gets an organization named <code>&lt;preferred name&gt; Personal</code> and owns it.</p>",
+          t("tour.new_accounts_need_an_invitation"),
         side: "top",
         align: "end",
         onNextClick: () => {
@@ -398,9 +399,9 @@ export function startAdminTour(host: AdminTourHost, options: { persist: boolean 
     {
       element: "[data-tour='admin-invite-dialog']",
       popover: {
-        title: "Send the link, then stop",
+        title: t("tour.send_the_link_then_stop"),
         description:
-          "<p>Copy this URL to the person who should join. It can be used once. After they register, they create a workspace and enroll machines themselves. You do not enroll devices from this admin panel.</p>",
+          t("tour.copy_this_url_to_the"),
         side: "left",
         align: "start",
         onPrevClick: () => {
@@ -416,9 +417,9 @@ export function startAdminTour(host: AdminTourHost, options: { persist: boolean 
     {
       element: "[data-tour='admin-workspace-link']",
       popover: {
-        title: "Work happens in the app",
+        title: t("tour.work_happens_in_the_app"),
         description:
-          "<p>Use <strong>User workspace</strong> to open the normal Treer app. Log in as an invited user there to create a workspace, add a machine, and start an agent. Replay this tour with the button next to Refresh.</p>",
+          t("tour.use_user_workspace_to_open"),
         side: "bottom",
         align: "end",
       },

@@ -10,7 +10,7 @@ import {
 } from "lucide-react"
 import type * as React from "react"
 import { FormEvent } from "react"
-import { t } from "@/i18n"
+import { statusLabel, t } from "@/i18n"
 
 export function MachineRecovery({ workspaceId, onCopy, reason }: { workspaceId: string; onCopy: (value: string) => void; reason?: string }) {
   const commands = machineRecoveryCommands(workspaceId)
@@ -31,7 +31,7 @@ export function MachineRecovery({ workspaceId, onCopy, reason }: { workspaceId: 
 }
 
 export function Status({ value }: { value: string }) {
-  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 text-[10px] font-medium capitalize text-zinc-500", value === "idle" && "text-emerald-700", ["working", "starting"].includes(value) && "text-sky-700", value === "blocked" && "text-amber-700", ["failed", "exited", "offline"].includes(value) && "text-red-600")}><span className="size-1.5 rounded-full bg-current opacity-75" />{value}</span>
+  return <span className={cn("inline-flex shrink-0 items-center gap-1.5 text-[10px] font-medium capitalize text-zinc-500", value === "idle" && "text-emerald-700", ["working", "starting"].includes(value) && "text-sky-700", value === "blocked" && "text-amber-700", ["failed", "exited", "offline"].includes(value) && "text-red-600")}><span className="size-1.5 rounded-full bg-current opacity-75" />{statusLabel(value)}</span>
 }
 
 export function IconButton({ label, children, ...props }: React.ComponentProps<typeof Button> & { label: string }) {

@@ -1,4 +1,5 @@
 import { parse, quote } from "shell-quote"
+import { t } from "@/i18n"
 
 export interface ParsedCommandLine {
   command: string
@@ -14,12 +15,12 @@ export function parseCommandLine(value: string): ParsedCommandLine {
   try {
     entries = parse(value, (name) => `$${name}`)
   } catch {
-    throw new Error("Command has invalid quoting")
+    throw new Error(t("cmd.command_has_invalid_quoting"))
   }
 
   const words = entries.filter((entry): entry is string => typeof entry === "string")
   if (!words.length || words.length !== entries.length) {
-    throw new Error("Command must be one executable and its arguments; use sh -lc for shell operators")
+    throw new Error(t("cmd.command_must_be_one_executable"))
   }
 
   const [command, ...args] = words

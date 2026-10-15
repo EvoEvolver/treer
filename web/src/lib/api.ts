@@ -1,3 +1,4 @@
+import { t } from "@/i18n"
 export interface User {
   user_id: string
   email: string
@@ -376,13 +377,13 @@ export async function loadRuntimeConfig() {
   if (import.meta.env.DEV) return
   const response = await fetch("/config.json", { cache: "no-store" })
   if (!response.ok) {
-    throw new Error(`Unable to load Treer runtime configuration (HTTP ${response.status})`)
+    throw new Error(t("api.config_http", { status: response.status }))
   }
   const config = (await response.json()) as RuntimeConfig
-  if (!config.proxy_url) throw new Error("Treer runtime configuration has no proxy URL")
+  if (!config.proxy_url) throw new Error(t("api.treer_runtime_configuration_has_no"))
   const url = new URL(config.proxy_url)
   if (!(["http:", "https:"] as string[]).includes(url.protocol) || url.username || url.password) {
-    throw new Error("Treer runtime configuration has an invalid proxy URL")
+    throw new Error(t("api.treer_runtime_configuration_has_an"))
   }
   proxyOrigin = url.origin
 }
@@ -404,7 +405,7 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   } catch {
     const fallback =
       response.status === 502 || response.status === 503
-        ? "control-plane updater sidecar is unreachable"
+        ? t("api.control_plane_updater_sidecar_is")
         : `HTTP ${response.status}`
     throw new ApiError(fallback, response.status)
   }
@@ -412,7 +413,7 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
   return body
 }
 
-export function machineName(machine: Machine | undefined, fallback = "Unknown machine") {
+export function machineName(machine: Machine | undefined, fallback = t("api.unknown_machine")) {
   return machine?.name || machine?.hostname || machine?.server_id || fallback
 }
 

@@ -13,6 +13,11 @@ test('zh defines exactly the English keys with the same placeholders and no empt
   }
 })
 
+test('HTML tour messages keep the same tags in both languages', () => {
+  const tags = (text: string) => [...text.matchAll(/<\/?\w+[^>]*>/g)].map((match) => match[0])
+  for (const key of Object.keys(en) as (keyof typeof en)[]) if (en[key].includes('<')) expect(tags(zh[key]), key).toEqual(tags(en[key]))
+})
+
 async function signedOut(page: import('@playwright/test').Page) {
   await page.route('**/api/auth/me', (route) => route.fulfill({ status: 401, json: { error: { message: 'Unauthorized' } } }))
   await page.route('**/api/auth/config', (route) => route.fulfill({ json: { github: false, google: false, invitation_required: false } }))
@@ -68,4 +73,19 @@ test('Settings language switch re-renders the open dialog, the menu and the embe
   await page.keyboard.press('Escape')
   await page.reload()
   await expect(page.getByRole('button', { name: '用户菜单' })).toBeVisible()
+})
+
+test('Settings dialog sections render in zh', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
+  await mockTreeMapApi(page)
+  await page.goto('/')
+  await page.getByRole('button', { name: '用户菜单' }).click()
+  await page.getByRole('menuitem', { name: '设置' }).click()
+  const dialog = page.getByRole('dialog', { name: '设置' })
+  await expect(dialog.getByRole('heading', { name: '账号' })).toBeVisible()
+  await dialog.getByRole('navigation', { name: '设置' }).getByRole('button', { name: '用量与计费' }).click()
+  await expect(dialog.getByText('用量与计费暂不可用')).toBeVisible()
+  await dialog.getByRole('navigation', { name: '设置' }).getByRole('button', { name: '通用' }).click()
+  await expect(dialog.getByRole('button', { name: '浅色' })).toBeVisible()
+  await expect(dialog.getByLabel('语言')).toHaveText('简体中文')
 })

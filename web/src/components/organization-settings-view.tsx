@@ -14,7 +14,7 @@ import {
   Users
 } from "lucide-react"
 import { FormEvent } from "react"
-import { t } from "@/i18n"
+import { roleLabel, t } from "@/i18n"
 
 export type OrganizationSettingsViewProps = {
   organization?: Organization
@@ -50,7 +50,7 @@ export function OrganizationSettingsView({ organization, name, workspaces, selec
       <div className="min-w-0">
         <div className="mb-3 flex items-center gap-3"><span className="grid size-9 shrink-0 place-items-center rounded-md bg-[#e8deee] text-[#694a73]"><Building2 className="size-4" /></span><h1 className="truncate text-2xl font-semibold">{organization.name}</h1></div>
         <p className="font-mono text-xs text-muted-foreground">{organization.organization_id}</p>
-        <p className="mt-1 text-xs capitalize text-muted-foreground">{currentRole}</p>
+        <p className="mt-1 text-xs capitalize text-muted-foreground">{roleLabel(currentRole)}</p>
       </div>
       <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto"><Button variant="outline" className="min-w-0 flex-1 sm:flex-none" onClick={onCreateOrganization}><Plus />{t("org.new_organization")}</Button><Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button></div>
     </div>
@@ -76,7 +76,7 @@ export function OrganizationSettingsView({ organization, name, workspaces, selec
       <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
         <div><div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">{t("org.members")}</h2>{canManage && <IconButton label={t("org.invite_member")} onClick={onInvite}><UserRound /></IconButton>}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("org.people_with_organization_access")}</p></div>
         <div className="border-y">
-          {members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-3 border-b py-2 last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => onMemberRoleChange(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">{t("org.member")}</SelectItem><SelectItem value="admin">{t("org.admin")}</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{member.role}</span>}{canManage && member.role !== "owner" ? <IconButton label={t("org.remove_member", { name: member.preferred_name })} className="text-destructive hover:text-destructive" onClick={() => onRemoveMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}
+          {members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-3 border-b py-2 last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => onMemberRoleChange(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">{t("org.member")}</SelectItem><SelectItem value="admin">{t("org.admin")}</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{roleLabel(member.role)}</span>}{canManage && member.role !== "owner" ? <IconButton label={t("org.remove_member", { name: member.preferred_name })} className="text-destructive hover:text-destructive" onClick={() => onRemoveMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}
           {!members.length && <EmptyState icon={<Users />} label={t("org.no_members")} />}
         </div>
       </div>

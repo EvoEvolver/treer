@@ -49,6 +49,7 @@ X
 } from "lucide-react"
 import { FormEvent,useCallback,useEffect,useMemo,useRef,useState } from "react"
 import { useLocation,useParams } from "react-router"
+import { t } from "@/i18n"
 
 export function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
@@ -112,7 +113,7 @@ function WorkspaceAppContent() {
   const createAgentOpenRef = useRef(false)
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
 
-  const showError = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : "Something went wrong"), [])
+  const showError = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : t("app.something_went_wrong")), [])
 
   useEffect(() => {
     if (preview) return
@@ -133,7 +134,7 @@ function WorkspaceAppContent() {
     setOrganizations(data.organizations)
     const routeSelection = routeSelectionRef.current
     if (routingRef.current.hash === "#policy-provider" && routeSelection.organizationId && !data.organizations.some((item) => item.organization_id === routeSelection.organizationId)) {
-      throw new Error("Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.")
+      throw new Error(t("app.policy_settings_target_is_unavailable"))
     }
     const selected = preferred && data.organizations.some((item) => item.organization_id === preferred)
       ? preferred
@@ -160,7 +161,7 @@ function WorkspaceAppContent() {
     setWorkspaces(data.workspaces)
     const routeSelection = routeSelectionRef.current
     if (routingRef.current.hash === "#policy-provider" && routeSelection.workspaceId && !data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)) {
-      throw new Error("Policy settings target is unavailable. Open a workspace you can access; no other workspace was selected.")
+      throw new Error(t("app.policy_settings_target_is_unavailable"))
     }
     const selected = routeSelection.organizationId === organizationId
       && routeSelection.workspaceId
@@ -326,7 +327,7 @@ function WorkspaceAppContent() {
 
   function showAgentTerminal(agentId: string, logs?: boolean) {
     const previous = tabs.tabs.find((tab) => tab.id === agentId)
-    if (previous && !previous.live) setTabNotice(`Reloaded ${tabLabels.get(agentId)?.path ?? agentId}. Its previous browser instance was unloaded to save resources.`)
+    if (previous && !previous.live) setTabNotice(t("app.reloaded", { path: tabLabels.get(agentId)?.path ?? agentId }))
     else setTabNotice("")
     tabs.open(agentId, logs, apps.find((app) => (app.runtime_agent_id ?? app.app_id) === agentId)?.app_id ?? null)
     setCtrlModifier(false)
@@ -461,7 +462,7 @@ function WorkspaceAppContent() {
         agent = await api<Agent>(`/api/workspaces/${encodeURIComponent(workspaceId)}/launch-profiles/${encodeURIComponent(agentProfileId)}/launch`, { method: "POST", body: JSON.stringify({ ...placement, server_id: agentServerId, agent_name: agentName, cols: 120, rows: 36 }) })
       }
       const agentId = agent.agent_id
-      if (!agentId) throw new Error("Create agent did not return an id")
+      if (!agentId) throw new Error(t("app.create_agent_did_not_return"))
       // Name and final placement are reserved atomically by the Proxy.
       if (workspaceIdRef.current === creationWorkspaceId) {
         setCreateAgentOpen(false)
@@ -472,7 +473,7 @@ function WorkspaceAppContent() {
       setCreateAgentOpen(false)
       await refreshSnapshot()
       if (workspaceIdRef.current === creationWorkspaceId) showAgentTerminal(agentId)
-    } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) setCreateAgentError(reason instanceof Error ? reason.message : "Create failed") }
+    } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) setCreateAgentError(reason instanceof Error ? reason.message : t("app.create_failed")) }
     finally { setCreatingAgent(false) }
   }
 
@@ -729,7 +730,7 @@ function WorkspaceAppContent() {
     }
     try {
       const data = await api<{ install_command: string; connect_command: string; windows_install_command?: string; windows_connect_command?: string }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/bootstrap`, { method: "POST", body: "{}" })
-      setWindowsInstallCommand(data.windows_install_command ?? "Update the Proxy to obtain the Windows installer.")
+      setWindowsInstallCommand(data.windows_install_command ?? t("app.update_the_proxy_to_obtain"))
       setWindowsConnectCommand(data.windows_connect_command ?? data.connect_command)
       setInstallCommand(data.install_command); setConnectCommand(data.connect_command); setInstallOpen(true)
     } catch (reason) { showError(reason) }
@@ -807,7 +808,7 @@ function WorkspaceAppContent() {
     event.preventDefault()
     if (!workspaceId || !selectedAgent || !uploadFile) return
     if (uploadFile.size > 16 * 1024 * 1024) {
-      setUploadError("Files must be 16 MiB or smaller.")
+      setUploadError(t("app.files_must_be_16_mib"))
       return
     }
     setUploading(true)
@@ -823,11 +824,11 @@ function WorkspaceAppContent() {
           overwrite: overwriteUpload,
         }),
       })
-      setUploadMessage(`Uploaded ${result.path} (${formatBytes(result.bytes_written)}).`)
+      setUploadMessage(t("app.uploaded", { path: result.path, size: formatBytes(result.bytes_written) }))
       setUploadFile(null)
       setUploadInputKey((value) => value + 1)
     } catch (reason) {
-      setUploadError(reason instanceof Error ? reason.message : "Upload failed")
+      setUploadError(reason instanceof Error ? reason.message : t("app.upload_failed"))
     } finally {
       setUploading(false)
     }
@@ -843,7 +844,7 @@ function WorkspaceAppContent() {
       if (workspaceIdRef.current !== workspaceId) return
       if (renameTarget.kind === "agent") setApps((current) => current.map((app) => app.runtime_agent_id === renameTarget.id || app.app_id === renameTarget.id ? { ...app, name: renameName } : app))
       setRenameTarget(null); await refreshSnapshot()
-    } catch (reason) { setRenameError(reason instanceof Error ? reason.message : "Rename failed") }
+    } catch (reason) { setRenameError(reason instanceof Error ? reason.message : t("app.rename_failed")) }
   }
 
   async function confirmDelete() {
@@ -899,7 +900,7 @@ function WorkspaceAppContent() {
 
   async function copy(value: string) {
     try { await navigator.clipboard.writeText(value) }
-    catch { showError("Unable to copy to the clipboard") }
+    catch { showError(t("app.unable_to_copy_to_the")) }
   }
 
   async function logout() {
@@ -908,26 +909,26 @@ function WorkspaceAppContent() {
     finally { window.location.href = "/" }
   }
 
-  if (user === undefined) return <div className="grid min-h-dvh place-items-center bg-sidebar text-sm text-muted-foreground">Loading Treer...</div>
+  if (user === undefined) return <div className="grid min-h-dvh place-items-center bg-sidebar text-sm text-muted-foreground">{t("app.loading_treer")}</div>
   if (!user) return <AuthScreen onAuthenticated={setUser} />
 
   return <TooltipProvider delayDuration={350}>
       <main style={treeWidth.style} className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[var(--tree-width)_var(--tree-divider)_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto")}>
         <aside id="tree-sidebar" className={cn("flex min-h-0 min-w-0 flex-col border-b bg-sidebar md:border-b-0", mobileSidebarHidden && "hidden md:flex", treeWidth.collapsed && "md:invisible md:overflow-hidden")}>
-        {preview && <div className="treer-tour-banner"><span>Tour preview · empty first-run account, no server writes</span></div>}
+        {preview && <div className="treer-tour-banner"><span>{t("app.tour_preview_empty_first_run")}</span></div>}
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
-          <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">Organization</div><Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label="Organization" className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder="No organization" /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
-          <IconButton label={organization ? "Organization settings" : "Create organization"} className={cn("size-8", mainView === "organization" && "bg-accent")} onClick={openOrganizationSettings}>{organization ? <MoreHorizontal /> : <Plus />}</IconButton>
+          <div className="min-w-0"><div className="mb-0.5 px-1 text-[9px] font-semibold uppercase text-muted-foreground">{t("app.organization")}</div><Select value={organizationId ?? undefined} onValueChange={selectOrganization}><SelectTrigger aria-label={t("app.organization")} className="h-7 border-0 bg-transparent px-1 shadow-none hover:bg-accent"><SelectValue placeholder={t("app.no_organization")} /></SelectTrigger><SelectContent>{organizations.map((item) => <SelectItem key={item.organization_id} value={item.organization_id}>{item.name}</SelectItem>)}</SelectContent></Select></div>
+          <IconButton label={organization ? t("app.organization_settings") : t("dialogs.create_organization")} className={cn("size-8", mainView === "organization" && "bg-accent")} onClick={openOrganizationSettings}>{organization ? <MoreHorizontal /> : <Plus />}</IconButton>
         </div>
         <div className="grid grid-cols-[20px_minmax(0,1fr)_32px] items-center gap-2 px-3 pb-3 pl-5">
           <FolderKanban className="size-3.5 text-muted-foreground" />
           <div data-tour="workspace-select">
-            <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label="Workspace" className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder="No workspace" /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
+            <Select value={workspaceId ?? undefined} onValueChange={selectWorkspace} disabled={!organizationId}><SelectTrigger aria-label={t("app.workspace")} className="h-7 border-0 bg-transparent px-1 text-xs shadow-none hover:bg-accent"><SelectValue placeholder={t("app.no_workspace")} /></SelectTrigger><SelectContent>{workspaces.map((item) => <SelectItem key={item.workspace_id} value={item.workspace_id}>{item.name}</SelectItem>)}</SelectContent></Select>
           </div>
-          <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
+          <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
-        <button type="button" aria-label="Workspace overview" onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />Overview</button>
+        <button type="button" aria-label={t("app.workspace_overview")} onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />{t("app.overview")}</button>
         <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <UserMenu user={user} badge={initials(user.preferred_name)} role={currentRole} preview={preview} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
@@ -940,17 +941,17 @@ function WorkspaceAppContent() {
         <header className={cn("flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5", isMobile && mainView === "terminal" && "hidden")}>
 
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
-            {isMobile && mainView !== "terminal" && mainView !== "overview" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
-            <button type="button" onClick={showOverview} aria-label="Back to workspace overview" className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "overview" ? "Overview" : mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
-          {mainView === "overview" ? <Button variant="ghost" size="sm" aria-label="Browse tree" className="md:hidden" onClick={() => setMobileTreeOpen(true)}><PanelLeft />Browse tree</Button> : mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
-            <IconButton label={selectedAgentInterface || showAppUi ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
-            {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs(!showWorkloadLogs)}>{showWorkloadLogs ? "Show App" : "Show logs"}</Button>}
-            <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
-            <IconButton label="Upload file" disabled={!selectedAgent || !selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton>
-            <IconButton label={selectedAgentInterface || showAppUi ? "Reload interface" : "Reconnect terminal"} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>
-            <IconButton label="Stop agent" disabled={!selectedAgent || !terminalActive} onClick={() => void stopAgent()}><Square /></IconButton>
-            <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
-          </div> : mainView === "apps" ? <IconButton label="Refresh Apps" onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
+            {isMobile && mainView !== "terminal" && mainView !== "overview" && <IconButton label={t("org.back")} className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
+            <button type="button" onClick={showOverview} aria-label={t("app.back_to_workspace_overview")} className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "overview" ? "Overview" : mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
+          {mainView === "overview" ? <Button variant="ghost" size="sm" aria-label={t("app.browse_tree")} className="md:hidden" onClick={() => setMobileTreeOpen(true)}><PanelLeft />{t("app.browse_tree")}</Button> : mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
+            <IconButton label={selectedAgentInterface || showAppUi ? t("app.open_full_screen_interface") : t("app.open_full_screen_terminal")} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
+            {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs(!showWorkloadLogs)}>{showWorkloadLogs ? t("surface.show_app") : t("surface.show_logs")}</Button>}
+            <IconButton label={t("app.rename_agent")} disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
+            <IconButton label={t("surface.upload_file")} disabled={!selectedAgent || !selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton>
+            <IconButton label={selectedAgentInterface || showAppUi ? t("app.reload_interface") : t("app.reconnect_terminal")} disabled={!selectedAgent} onClick={refreshAgentView}><RotateCw /></IconButton>
+            <IconButton label={t("app.stop_agent")} disabled={!selectedAgent || !terminalActive} onClick={() => void stopAgent()}><Square /></IconButton>
+            <IconButton label={t("app.delete_agent")} disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
+          </div> : mainView === "apps" ? <IconButton label={t("app.refresh_apps")} onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label={t("app.refresh_audit")} onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
         </header>
         <div className={cn("relative min-h-0 flex-1", mainView !== "overview" && mainView !== "terminal" && "hidden")}>
           <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? "Overview" : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">
@@ -963,7 +964,7 @@ function WorkspaceAppContent() {
             const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === tab.id)
             const machine = snapshot?.servers.find((entry) => entry.server_id === label.agent.server_id)
             return <div key={`${workspaceId}:${tab.id}`} id={`workspace-panel-${tab.id}`} role="tabpanel" aria-labelledby={isMobile ? undefined : `workspace-tab-${tab.id}`} aria-label={isMobile ? label.path : undefined} hidden={!visible} className="absolute inset-0 min-h-0 overflow-hidden">
-              {tab.live ? <WorkloadSurface ref={visible ? terminalPaneRef : undefined} workspaceId={workspaceId} agent={label.agent} app={app} machine={machine} path={label.path} tab={tab} visible={visible} mobile={isMobile && mobileTerminalOpen} theme={theme} ctrlArmed={ctrlArmed} transformInput={transformTerminalInput} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} onClose={closeMobileSurface} onUpload={openUpload} onCopy={copy} onLogs={(logs) => setShowWorkloadLogs(logs)} /> : <div className="grid size-full place-content-center gap-3 p-6 text-center"><p className="text-sm font-medium">Page unloaded</p><p className="max-w-sm text-xs text-muted-foreground">This browser page was unloaded to bound memory and connections. Its machine workload keeps running.</p><Button onClick={() => showAgentTerminal(tab.id)}>Reload tab</Button></div>}
+              {tab.live ? <WorkloadSurface ref={visible ? terminalPaneRef : undefined} workspaceId={workspaceId} agent={label.agent} app={app} machine={machine} path={label.path} tab={tab} visible={visible} mobile={isMobile && mobileTerminalOpen} theme={theme} ctrlArmed={ctrlArmed} transformInput={transformTerminalInput} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} onClose={closeMobileSurface} onUpload={openUpload} onCopy={copy} onLogs={(logs) => setShowWorkloadLogs(logs)} /> : <div className="grid size-full place-content-center gap-3 p-6 text-center"><p className="text-sm font-medium">{t("app.page_unloaded")}</p><p className="max-w-sm text-xs text-muted-foreground">{t("app.this_browser_page_was_unloaded")}</p><Button onClick={() => showAgentTerminal(tab.id)}>{t("app.reload_tab")}</Button></div>}
             </div>
           })}
         </div>

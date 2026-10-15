@@ -4,6 +4,7 @@ import { FitAddon } from "@xterm/addon-fit"
 import "@xterm/xterm/css/xterm.css"
 import { websocketUrl } from "@/lib/api"
 import { suppressReplayQueries } from "@/lib/terminal-replay"
+import { t } from "@/i18n"
 
 type TerminalStatus = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
 
@@ -406,7 +407,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     }
   }, [workspaceId, agentId, active, onStatusChange])
 
-  if (!workspaceId) return <div className="grid h-full place-items-center text-xs text-zinc-500">No workspace selected</div>
-  if (!agentId) return <div className="grid h-full place-items-center text-xs text-zinc-500">Select an agent to attach</div>
+  if (!workspaceId) return <div className="grid h-full place-items-center text-xs text-zinc-500">{t("term.no_workspace_selected")}</div>
+  if (!agentId) return <div className="grid h-full place-items-center text-xs text-zinc-500">{t("term.select_an_agent_to_attach")}</div>
   return <div className="h-full min-h-0 min-w-0 w-full max-w-full p-3"><div ref={hostRef} className="h-full min-h-0 min-w-0 w-full max-w-full overflow-hidden" /></div>
 })

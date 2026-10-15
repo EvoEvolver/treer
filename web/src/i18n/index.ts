@@ -45,9 +45,9 @@ export function setLocale(next: Locale, persist = true) {
 }
 
 // Plain-text interpolation only: values are never parsed as markup.
-export function t(key: MessageKey, vars?: Record<string, string | number>): string {
+export function t(key: MessageKey, vars?: Record<string, string | number | undefined>): string {
   const template = dictionaries[current][key] ?? en[key]
-  return vars ? template.replace(/\{(\w+)\}/g, (match, name: string) => (name in vars ? String(vars[name]) : match)) : template
+  return vars ? template.replace(/\{(\w+)\}/g, (match, name: string) => (name in vars ? String(vars[name] ?? "") : match)) : template
 }
 
 // Subscribes the component to language changes and returns t.
@@ -66,4 +66,14 @@ export function tnodes(key: MessageKey, nodes: Record<string, ReactNode>): React
     const name = /^\{(\w+)\}$/.exec(part)?.[1]
     return createElement(Fragment, { key: index }, name && name in nodes ? nodes[name] : part)
   })
+}
+
+// Server-provided enums (agent status, member role) are shown through the dictionary when known, raw otherwise.
+export function statusLabel(value: string): string {
+  const key = `status.${value}`
+  return key in en ? t(key as MessageKey) : value
+}
+export function roleLabel(value: string): string {
+  const key = `role.${value}`
+  return key in en ? t(key as MessageKey) : value
 }

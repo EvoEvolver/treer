@@ -752,3 +752,15 @@ test.describe("workload tree keyboard navigation", () => {
     await expect(page.locator(":focus")).toHaveAttribute("tabindex", "0")
   })
 })
+
+test("organization settings render in Chinese without leaking English copy", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("treer-lang", "zh"))
+  await page.goto("/")
+  await page.getByRole("button", { name: "组织设置" }).click()
+  await expect(page.getByRole("heading", { name: "成员" })).toBeVisible()
+  await expect(page.getByRole("heading", { name: "群组" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "新建组织" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "打开审计" })).toBeVisible()
+  const body = await page.locator("main").innerText()
+  for (const english of ["Members", "Groups", "Open audit", "New organization", "Activity"]) expect(body).not.toContain(english)
+})

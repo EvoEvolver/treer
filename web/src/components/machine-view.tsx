@@ -17,7 +17,7 @@ import {
   TriangleAlert
 } from "lucide-react"
 import { useState } from "react"
-import { t } from "@/i18n"
+import { statusLabel, t } from "@/i18n"
 
 export function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
   const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
@@ -49,7 +49,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
         <div className="mb-3 flex items-center gap-3">
           <span className={cn("inline-flex size-2.5 rounded-full", machine.status === "online" ? "bg-emerald-500" : "bg-zinc-400")} />
           <h1 className="truncate text-2xl font-semibold">{machineDisplayName(machine, machines)}</h1>
-          <span className="text-xs uppercase text-muted-foreground">{machine.status}</span>
+          <span className="text-xs uppercase text-muted-foreground">{statusLabel(machine.status)}</span>
         </div>
         <p className="font-mono text-xs text-muted-foreground">{machine.server_id}</p>
         {machine.hostname && <p className="mt-1 font-mono text-xs text-muted-foreground">{machine.hostname}{machineListen(machine) ? ` · ${machineListen(machine)}` : ""}</p>}
