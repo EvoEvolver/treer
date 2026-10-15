@@ -1573,12 +1573,14 @@ items; `treer agent queue cancel TARGET ID` cancels a pending submission.
 `agent show` includes live `busy` and `queue_length` when the Interface supports
 status observation (or `activity_error` if status is unavailable).
 
-Agent-to-Agent submissions automatically request a completion Core Message;
-`--notify` makes the request explicit. Human/operator API callers must supply
-`notify.to` when requesting notification. Completion delivery uses the target
+Agent-to-Agent submissions request a completion Core Message only with
+`--notify`, for both queued and steering delivery. `--wait` alone polls the
+submission receipt without requesting a message. Omitted/null API `notify`
+remains disabled, including interrupted results. Human/operator API callers
+must supply `notify.to` when requesting notification. Completion delivery uses the target
 launcher's identity and normal message authorization, with a durable outbox
 and idempotency key. Notification failure does not rerun the task. API clients
-can opt out with `notify:{on:[]}`.
+may also explicitly select no outcomes with `notify:{on:[]}`.
 
 To create a peer:
 

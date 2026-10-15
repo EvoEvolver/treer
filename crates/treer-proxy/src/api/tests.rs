@@ -239,7 +239,7 @@ async fn prompt_queue_attests_sender_and_checks_cancel_ownership() {
                 Json(treer_protocol::SubmitAgentPromptRequest {
                     text: "task".into(),
                     delivery: treer_protocol::PromptDelivery::Queue,
-                    notify: None,
+                    notify: Some(treer_protocol::PromptNotify::default()),
                     require_receipt: true,
                 }),
             )
@@ -317,6 +317,128 @@ async fn prompt_queue_attests_sender_and_checks_cancel_ownership() {
                 pending.await.unwrap().unwrap().0["submission"]["state"],
                 "interrupted"
             );
+        }
+    }
+}
+
+#[tokio::test]
+async fn prompt_queue_notifications_require_explicit_opt_in_even_for_interrupted_receipts() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let server = state.resolve_server("default", "machine-a").await.unwrap();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            server,
+            Uuid::new_v4(),
+            "notify-test".into(),
+            vec![treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let store = WorkspacePolicyStore::new(auth.pool());
+    store
+        .replace(
+            "default",
+            0,
+            PolicyMode::Enforce,
+            WorkspacePolicyDocument {
+                schema_version: POLICY_SCHEMA_VERSION,
+                defaults: BTreeMap::from([(
+                    crate::policy::ACTION_AGENT_QUEUE_READ.into(),
+                    PolicyEffect::Deny,
+                )]),
+                groups: BTreeMap::new(),
+                rules: vec![],
+            },
+            PolicyPrincipalRef {
+                kind: PolicyPrincipalKind::Human,
+                id: "owner".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let policy = PolicyEngine::durable(store);
+    let headers = HeaderMap::from_iter([(
+        AGENT_ID_HEADER.parse().unwrap(),
+        HeaderValue::from_static("agent-a"),
+    )]);
+    let machine = Some(Extension(MachineSession {
+        server_id: Some("machine-a".into()),
+        workspace_id: Some("default".into()),
+    }));
+    for delivery in ["queue", "steer"] {
+        for notify in [
+            None,
+            Some(Value::Null),
+            Some(json!({"on":["interrupted"]})),
+            Some(json!({"on":["done"],"to":"agent-b"})),
+        ] {
+            for require_receipt in [false, true] {
+                let mut body =
+                    json!({"text":"task", "delivery":delivery, "require_receipt":require_receipt});
+                if let Some(notify) = &notify {
+                    body["notify"] = notify.clone();
+                }
+                let request = serde_json::from_value(body).unwrap();
+                let pending = tokio::spawn(prompt_agent(
+                    State(state.clone()),
+                    Extension(auth.clone()),
+                    Extension(policy.clone()),
+                    machine.clone(),
+                    headers.clone(),
+                    Path(("default".into(), "reviewer".into())),
+                    Json(request),
+                ));
+                let envelope = next_lifecycle_command(&mut rx).await;
+                let AgentCommand::SubmitPrompt {
+                    agent_id,
+                    request,
+                    sender: Some(sender),
+                } = envelope.command
+                else {
+                    panic!("expected attested prompt")
+                };
+                assert_eq!(agent_id, "agent-b");
+                assert_eq!(sender.agent_id, "agent-a");
+                assert_eq!(sender.path, "/agent-a");
+                assert_eq!(request.require_receipt, require_receipt);
+                assert_eq!(serde_json::to_value(request.delivery).unwrap(), delivery);
+                if let Some(explicit) = notify.as_ref().filter(|v| !v.is_null()) {
+                    let actual = request.notify.unwrap();
+                    assert_eq!(serde_json::to_value(actual.on).unwrap(), explicit["on"]);
+                    assert_eq!(
+                        actual.to.as_deref(),
+                        Some(explicit["to"].as_str().unwrap_or("agent-a"))
+                    );
+                } else {
+                    assert!(request.notify.is_none(), "omitted/null notify must stay absent for {delivery}, receipt={require_receipt}");
+                }
+                state.complete_command(CommandResult::success(envelope.command_id,
+                    json!({"submission":{"id":"sub-opt-in","disposition":"queued","position":1}}))).await;
+                assert!(pending.await.unwrap().is_ok());
+                // A sender can poll its own interrupted receipt without queue.read
+                // permission or any completion-notification subscription.
+                let pending = tokio::spawn(read_prompt_submission(
+                    State(state.clone()),
+                    Extension(auth.clone()),
+                    Extension(policy.clone()),
+                    machine.clone(),
+                    headers.clone(),
+                    Path(("default".into(), "reviewer".into(), "sub-opt-in".into())),
+                ));
+                let read = next_lifecycle_command(&mut rx).await;
+                assert!(matches!(read.command, AgentCommand::SubmissionRead { .. }));
+                state.complete_command(CommandResult::success(read.command_id,
+                    json!({"submission":{"id":"sub-opt-in","sender":{"agent_id":"agent-a"},"state":"interrupted","turn_id":"turn-opt-in"}}))).await;
+                assert_eq!(
+                    pending.await.unwrap().unwrap().0["submission"]["state"],
+                    "interrupted"
+                );
+                assert!(rx.try_recv().is_err());
+            }
         }
     }
 }

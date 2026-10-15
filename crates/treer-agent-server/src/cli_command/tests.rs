@@ -45,6 +45,7 @@ async fn prompt_wait_follows_its_receipt_instead_of_unrelated_idle_state() {
         .route("/api/agents/{agent_id}/prompt", axum::routing::post(|axum::Json(body): axum::Json<Value>| async move {
             assert_eq!(body["delivery"], "queue");
             assert_eq!(body["require_receipt"], true);
+            assert!(body.get("notify").is_none_or(Value::is_null), "--wait alone must not subscribe to Core Message notifications");
             axum::Json(json!({"submission":{"id":"sub-ours","disposition":"queued","position":2}}))
         }))
         .route("/api/agents/{agent_id}/submissions/{id}", axum::routing::get(move |axum::extract::Path((agent_id,id)): axum::extract::Path<(String,String)>| {
