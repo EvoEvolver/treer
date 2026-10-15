@@ -393,6 +393,33 @@ switch during a foreground tool, retain a queued prompt, verify its assistant
 model in native JSONL, and confirm effort via `/model`. Both save screenshots to
 the printed temporary directory and leave managed Agent processes untouched.
 
+## React browser UI (in progress)
+
+`public/ui.html` is the React rebuild of the browser interface. It lives next to the
+legacy page (`/`), which stays the default until every item of the parity list passes.
+It consumes exactly the routes listed below and adds none.
+
+* **Looks and themes.** Three selectable looks (A Quiet Editor, B Warm Paper, C
+  Terminal Contrast, default B) times light/dark. Look: `?look=a|b|c`, else
+  `localStorage["treer-launcher-look"]`, else B. Theme: parent `treer:embed-theme`
+  message or `?theme=`, else the stored mode (`treer-launcher-theme`), else the system
+  preference. Every value is validated against a fixed list; storage access is guarded.
+* **Files.** The page is four flat files in `public/`: `ui.html`, `boot.js` (runs in
+  `<head>`, no flash), `ui.js` (React, bundled) and `ui.css` (all looks). They are
+  committed (the bootstrap installer checks out git without esbuild) and listed in the
+  payload hash manifest like every other file; nothing needs `node_modules` at runtime.
+  Budget: at most 5 files and 600 KB in total.
+* **Policy.** `ui.html` is served with `style-src 'self'` (no inline styles or scripts, no
+  eval), `object-src 'none'`, `base-uri 'self'`, `form-action 'none'`. HTML reaches the DOM
+  through one component only (markdown, sanitized with DOMPurify).
+* **Develop.** Sources are under `ui/`. `npm run build:ui` rebuilds the four files;
+  `npm run check:ui` rebuilds in memory and fails on any byte difference with the
+  committed files, on budget overruns, leaked paths, and on forbidden code patterns in
+  `ui/src` (HTML sinks outside the markdown component, eval, unsafe URLs, absolute
+  network paths). `prepare-bundle.mjs` runs the same byte comparison before it builds a
+  payload. `npm run test:browser:ui` drives the page against the real server and a fake
+  Codex (looks x themes, CSP violations, mobile overflow).
+
 ## Browser interface
 
 When supported by the harness, the header's **N running** button opens background
