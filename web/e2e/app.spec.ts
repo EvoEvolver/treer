@@ -322,6 +322,47 @@ test.describe('resizable tree sidebar', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
   const key = 'treer:tree-width:v1:u1'
   const separator = (page: Page) => page.getByRole('separator', { name: 'Resize tree sidebar' })
+  for (const theme of ['light', 'dark']) test(`compact sidebar toggle is centered with a full touch target ${theme}`, async ({ page }, info) => {
+    await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    const toggle = () => page.getByRole('button', { name: /^(Collapse|Expand) tree sidebar$/ })
+    async function centered() {
+      const bounds = await toggle().evaluate((button) => {
+        const target = button.getBoundingClientRect(), rail = button.parentElement!.getBoundingClientRect()
+        const visual = button.querySelector('span')!.getBoundingClientRect()
+        return { x: target.x, right: target.right, viewport: innerWidth, width: target.width, height: target.height, delta: Math.abs(target.y + target.height / 2 - rail.y - rail.height / 2), visualWidth: visual.width, visualHeight: visual.height }
+      })
+      expect(bounds.x).toBeGreaterThanOrEqual(0)
+      expect(bounds.right).toBeLessThanOrEqual(bounds.viewport)
+      expect(bounds.width).toBeGreaterThanOrEqual(44)
+      expect(bounds.height).toBeGreaterThanOrEqual(44)
+      expect(bounds.delta).toBeLessThan(1)
+      expect(bounds.visualWidth).toBeLessThan(bounds.width)
+      expect(bounds.visualHeight).toBeLessThan(bounds.height)
+    }
+    await expect(toggle()).toHaveAttribute('aria-controls', 'tree-sidebar')
+    await centered()
+    await page.screenshot({ path: info.outputPath(`tree-toggle-${theme}-expanded.png`) })
+    // The transparent corner is outside the small visual pill, but is clickable.
+    await toggle().click({ position: { x: 2, y: 2 } })
+    await expect(toggle()).toHaveAttribute('aria-expanded', 'false')
+    await expect(page.locator('#tree-sidebar')).toBeHidden()
+    await centered()
+    await page.screenshot({ path: info.outputPath(`tree-toggle-${theme}-collapsed.png`) })
+    await page.setViewportSize({ width: 1280, height: 640 })
+    await centered()
+    await toggle().focus()
+    await page.keyboard.press('Space')
+    await expect(toggle()).toHaveAttribute('aria-expanded', 'true')
+    await expect(toggle()).toBeFocused()
+    await centered()
+    await page.setViewportSize({ width: 390, height: 844 })
+    await browseTreeOnMobile(page)
+    await expect(toggle()).toBeHidden()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: info.outputPath(`tree-toggle-${theme}-390.png`) })
+  })
   async function drag(page: Page, delta: number) {
     const box = (await separator(page).boundingBox())!
     await page.mouse.move(box.x + box.width / 2, box.y + 200)
@@ -373,7 +414,7 @@ test.describe('resizable tree sidebar', () => {
     await page.goto('/orgs/org-2/workspaces/ws-2')
     await browseTreeOnMobile(page)
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '368')
-    await separator(page).dblclick()
+    await separator(page).dblclick({ position: { x: 12, y: 120 } })
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
     await page.reload()
     await browseTreeOnMobile(page)

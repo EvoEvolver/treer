@@ -32,7 +32,8 @@ select the limits, and double-click restores 272px. The minimum is 240px; the
 maximum is the smallest of 480px, 45% of the viewport and the space left after
 reserving 400px for main content plus the 8px separator. Window resizing clamps
 the displayed width while retaining the preferred width for larger windows.
-The arrow button at the top of the separator collapses/expands the sidebar,
+The compact arrow sits at the vertical center of the separator, with a 44px
+click/touch target around its 16×28px visual surface. It collapses/expands the sidebar,
 including via Enter/Space, and exposes `aria-expanded` and `aria-controls`.
 A narrow rail keeps the expand button available while collapsed. The original
 width is restored on expansion, and the terminal is fitted after either toggle.
