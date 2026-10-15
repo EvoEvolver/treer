@@ -1,27 +1,64 @@
-"""Hourly reminders for unresolved issues assigned to idle Agents.
+"""Reminders for unresolved issues assigned to Agents, with exponential backoff per (assignee, issue).
 
-Every full hour (epoch hour, i.e. the top of the hour in whole-hour time zones) the App looks for issues that
-are not done/closed and assigned to an Agent, probes each such Agent with `treer agent show`, and sends one
-Message per idle Agent through `treer message send` using the App's own runtime identity. No credential is
-read, logged or passed on the command line: the CLI resolves identity from the inherited environment.
+An issue that needs a reminder (not done/closed, assigned to an Agent, not carrying a skip label such as `epic`) is first
+reminded FIRST after it entered that state (10 minutes by default); every later interval is the previous one times FACTOR
+(2 by default), capped at MAX (24 hours): 10m, 20m, 40m, 1h20m, 2h40m, 5h20m, 10h40m, 21h20m, then 24h. Any real activity on
+the issue (a comment, status or assignee change, an edit, a lease) starts the sequence over, a new assignee starts from
+scratch and the old state is dropped. The reminder is only sent while the assignee is idle: when it is busy at the due time
+nothing is sent and the interval does not grow, the next poll (a minute later) looks again. Everything due for the same
+Agent at the same moment goes into ONE Message; each issue keeps its own backoff. State lives in SQLite, so restarts keep the
+schedule, and issues unresolved at deployment time simply start their first interval then.
 
-Anti-spam: one aggregated Message per Agent per hour; a (hour, Agent) record in SQLite survives restarts; the
-Message idempotency key is stable per (hour, Agent), so a crash between send and record cannot duplicate it.
-A busy, unknown or unreachable Agent is skipped until the next hour. Message bodies carry only issue IDs and
-a link, never titles or descriptions.
+Sending: `treer agent show` to check idleness, `treer message send` under the App's own runtime identity. No credential is
+read, logged or put on a command line. A failed send is not recorded (the same idempotency key is used on the retry). The
+key covers the Agent, the issue set and each issue's backoff step, so a crash between send and record cannot duplicate a
+reminder and different steps never collide. Message bodies carry only issue IDs and a link, never titles or descriptions.
 """
+import collections
+import hashlib
 import json
+import math
 import os
+import re
 import subprocess
 import sys
 import threading
 import time
 import urllib.parse
 
-HOUR = 3600
-CATCH_UP = 300          # a restart within 5 minutes after the hour still runs that hour's pass
+POLL = 60.0             # the scheduler wakes at least this often (or at the nearest due time)
 MAX_LISTED = 10         # issue IDs named in one Message; the rest are summarised as "+N more"
 TIMEOUT = 15
+DURATION = re.compile(r'^\s*(\d+(?:\.\d+)?)\s*(s|m|h|d)\s*$')
+UNITS = {'s': 1, 'm': 60, 'h': 3600, 'd': 86400}
+
+Backoff = collections.namedtuple('Backoff', 'first factor maximum')
+
+
+def parse_duration(text, name):
+    match = DURATION.match(text or '')
+    if not match:
+        raise ValueError(f'{name} must be a duration such as 10m, 90s, 1.5h or 24h, not {text!r}')
+    return float(match.group(1)) * UNITS[match.group(2)]
+
+
+def backoff(environ=None):
+    """ISSUES_REMINDER_FIRST (default 10m, 1m-24h), ISSUES_REMINDER_FACTOR (default 2, 1-10) and ISSUES_REMINDER_MAX (default 24h,
+    at least FIRST, at most 30d). Invalid values are an error at start-up, never silently replaced by a default."""
+    env = os.environ if environ is None else environ
+    first = parse_duration(env.get('ISSUES_REMINDER_FIRST', '10m'), 'ISSUES_REMINDER_FIRST')
+    maximum = parse_duration(env.get('ISSUES_REMINDER_MAX', '24h'), 'ISSUES_REMINDER_MAX')
+    try:
+        factor = float(env.get('ISSUES_REMINDER_FACTOR', '2'))
+    except ValueError:
+        raise ValueError('ISSUES_REMINDER_FACTOR must be a number between 1 and 10') from None
+    if not 60 <= first <= 86400:
+        raise ValueError('ISSUES_REMINDER_FIRST must be between 1m and 24h')
+    if not (math.isfinite(factor) and 1 <= factor <= 10):
+        raise ValueError('ISSUES_REMINDER_FACTOR must be between 1 and 10')
+    if not first <= maximum <= 30 * 86400:
+        raise ValueError('ISSUES_REMINDER_MAX must be at least ISSUES_REMINDER_FIRST and at most 30d')
+    return Backoff(first, factor, maximum)
 
 
 def enabled(environ=None):
@@ -60,18 +97,11 @@ def safe_link(base_url):
     return value
 
 
-def slot_of(now):
-    return int(now // HOUR)
-
-
-def next_boundary(now):
-    return (slot_of(now) + 1) * HOUR
-
-
 class Reminders:
-    def __init__(self, store, base_url, treer_bin='treer', clock=time.time, runner=None, log=None, skip=None):
+    def __init__(self, store, base_url, treer_bin='treer', clock=time.time, runner=None, log=None, skip=None, schedule=None):
         self.store, self.base_url, self.treer_bin, self.clock = store, base_url, treer_bin, clock
         self.skip = skip
+        self.schedule = schedule or backoff()
         self.runner = runner or self.run_treer
         self.log = log or (lambda message: print(message, file=sys.stderr, flush=True))
         self.stop = threading.Event()
@@ -97,45 +127,53 @@ class Reminders:
         return (f'Issues reminder: you are idle and have {len(issue_ids)} unresolved {noun} assigned to you: {shown}{more}.\n'
                 f'{link}'.rstrip('\n'))
 
+    @staticmethod
+    def key(agent, rows):
+        steps = json.dumps([[row['issue_id'], row['count']] for row in rows], separators=(',', ':'))
+        return f'issues-reminder-{agent}-' + hashlib.sha256(steps.encode()).hexdigest()[:20]
+
     def tick(self, now=None):
-        """One pass for the current hour. Safe to repeat: already reminded Agents are skipped."""
-        slot = slot_of(self.clock() if now is None else now)
+        """One poll: align the schedule with the issues, then remind every idle Agent that has issues due."""
+        now = self.clock() if now is None else now
+        self.store.reminder_sync(self.store.reminder_candidates(skip_labels=skip_labels() if self.skip is None else self.skip), now, self.schedule.first)
+        due = self.store.reminder_due(now)
+        by_agent = {}
+        for row in due:
+            by_agent.setdefault(row['assignee'], []).append(row)
         sent = skipped = 0
         link = None
-        for agent, issue_ids in self.store.unresolved_by_assignee(skip_labels=skip_labels() if self.skip is None else self.skip).items():
-            if self.store.reminded(slot, agent):
-                continue
+        for agent, rows in by_agent.items():
             if not self.idle(agent):
-                skipped += 1
+                skipped += 1            # busy, unknown or unreachable: no message and no growth; look again next poll
                 continue
-            link = link or safe_link(self.base_url)  # resolved once per pass, and only when something is to be sent
-            status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body(issue_ids, link),
-                                     '--idempotency-key', f'issues-reminder-{agent}-{slot}'])
+            link = link if link is not None else safe_link(self.base_url)   # resolved once per poll, only when sending
+            status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body([r['issue_id'] for r in rows], link),
+                                     '--idempotency-key', self.key(agent, rows)])
             if status != 0:
                 skipped += 1
                 self.log(f'Issues reminder not delivered to {agent} (treer exit {status})')
                 continue
-            self.store.record_reminder(slot, agent, issue_ids)
+            self.store.reminder_advance([r['issue_id'] for r in rows], now, self.schedule.factor, self.schedule.maximum)
             sent += 1
-        return {'slot': slot, 'sent': sent, 'skipped': skipped}
+        return {'sent': sent, 'skipped': skipped, 'due': len(due)}
 
     def loop(self, wait=None):
         wait = wait or self.stop.wait
-        now = self.clock()
-        if now - slot_of(now) * HOUR < CATCH_UP:
-            self.guarded()
         while not self.stop.is_set():
-            target = next_boundary(self.clock())
-            while self.clock() < target:   # a timer may wake early; never run a pass before the hour
-                if wait(max(1.0, target - self.clock())):
-                    return
             self.guarded()
+            try:
+                nearest = self.store.reminder_next_due()
+            except Exception:
+                nearest = None
+            delay = POLL if nearest is None else min(POLL, max(1.0, nearest - self.clock()))
+            if wait(delay):
+                return
 
     def guarded(self):
         try:
             self.tick()
-        except Exception as exc:  # a failed pass must never kill the scheduler
-            self.log(f'Issues reminder pass failed: {type(exc).__name__}')
+        except Exception as exc:  # a failed poll must never kill the scheduler
+            self.log(f'Issues reminder poll failed: {type(exc).__name__}')
 
     def start(self):
         self.thread = threading.Thread(target=self.loop, name='issues-reminders', daemon=True)

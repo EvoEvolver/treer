@@ -61,6 +61,9 @@ class Store:
                     PRIMARY KEY(recipient, actor, hour));
                 CREATE TABLE IF NOT EXISTS notify_budget(recipient TEXT NOT NULL, hour INTEGER NOT NULL, immediate INTEGER NOT NULL,
                     PRIMARY KEY(recipient, hour));
+                CREATE TABLE IF NOT EXISTS reminder_backoff(issue_id INTEGER PRIMARY KEY, assignee TEXT NOT NULL, version INTEGER NOT NULL,
+                    interval REAL NOT NULL, next_due REAL NOT NULL, count INTEGER NOT NULL DEFAULT 0);
+                CREATE INDEX IF NOT EXISTS reminder_backoff_due ON reminder_backoff(next_due);
                 CREATE TABLE IF NOT EXISTS sessions(secret TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
             ''')
         with self.connect() as db:
@@ -393,6 +396,62 @@ class Store:
             if assignee and assignee.startswith(prefix) and issue['status'] not in ('done', 'closed') and not skip & {label.lower() for label in issue['labels']}:
                 result.setdefault(assignee, []).append(issue['id'])
         return result
+
+    def reminder_candidates(self, prefix='ag_', skip_labels=()):
+        """(issue ID, assignee, version, updated-at epoch) of every issue that needs reminding: unresolved, assigned to an Agent, not skipped.
+        The version changes on every real write (edit, comment, status/assignee change, lease), which resets the backoff."""
+        skip = {label.lower() for label in skip_labels}
+        with self.connect() as db:
+            items = self.all(db)
+        return [(i['id'], i['assignee'], i['version'], datetime.fromisoformat(i['updated_at'].replace('Z', '+00:00')).timestamp())
+                for i in sorted(items.values(), key=lambda i: i['id'])
+                if i['assignee'] and i['assignee'].startswith(prefix) and i['status'] not in ('done', 'closed')
+                and not skip & {label.lower() for label in i['labels']}]
+
+    def reminder_sync(self, candidates, now, first):
+        """Aligns the persisted backoff with the issues: issues that stopped needing a reminder lose their state; a new one
+        starts at `first` from now (so a fresh deployment does not remind anyone at once); a changed assignee or any new
+        activity (version) starts over. Idempotent."""
+        wanted = {issue_id: (assignee, version, updated) for issue_id, assignee, version, updated in candidates}
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            current = {row['issue_id']: row for row in db.execute('SELECT * FROM reminder_backoff')}
+            for issue_id in set(current) - set(wanted):
+                db.execute('DELETE FROM reminder_backoff WHERE issue_id=?', (issue_id,))
+            for issue_id, (assignee, version, updated) in wanted.items():
+                row = current.get(issue_id)
+                if row is None:
+                    start = now                       # newly tracked (also: just deployed): the first interval starts now
+                elif row['assignee'] != assignee or row['version'] != version:
+                    start = min(now, max(updated, now - first))   # activity: counted from when it happened (never in the future)
+                else:
+                    continue
+                db.execute('INSERT OR REPLACE INTO reminder_backoff(issue_id,assignee,version,interval,next_due,count) VALUES(?,?,?,?,?,0)',
+                           (issue_id, assignee, version, first, max(now, start + first)))
+
+    def reminder_due(self, now):
+        with self.connect() as db:
+            rows = db.execute('SELECT issue_id,assignee,interval,count FROM reminder_backoff WHERE next_due<=? ORDER BY assignee,issue_id', (now,)).fetchall()
+        return [dict(row) for row in rows]
+
+    def reminder_advance(self, issue_ids, now, factor, maximum):
+        """After a delivered reminder: the next interval is the last one times `factor`, capped at `maximum`."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            for issue_id in issue_ids:
+                row = db.execute('SELECT interval FROM reminder_backoff WHERE issue_id=?', (issue_id,)).fetchone()
+                if row is None:
+                    continue
+                interval = min(row['interval'] * factor, maximum)
+                db.execute('UPDATE reminder_backoff SET interval=?, next_due=?, count=count+1 WHERE issue_id=?', (interval, now + interval, issue_id))
+
+    def reminder_next_due(self):
+        with self.connect() as db:
+            return db.execute('SELECT MIN(next_due) FROM reminder_backoff').fetchone()[0]
+
+    def reminder_states(self):
+        with self.connect() as db:
+            return {row['issue_id']: dict(row) for row in db.execute('SELECT * FROM reminder_backoff')}
 
     def reminded(self, slot, assignee):
         with self.connect() as db:
