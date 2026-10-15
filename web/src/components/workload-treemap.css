@@ -1,0 +1,6 @@
+.treemap-agent[aria-current="true"] {
+  border-color: hsl(var(--primary));
+  background: hsl(var(--primary) / .045);
+  box-shadow: inset 0 2px hsl(var(--primary));
+}
+.treemap-folder { box-shadow: inset 0 1px hsl(var(--background) / .6); }

@@ -77,6 +77,29 @@ recognition stays with that workspace/runtime/App identity across metadata and
 status refreshes. Mobile uses the same component and its existing full-screen
 interface and workload **Logs** menu.
 
+## Tree creation menu and map
+
+The Tree header has one **+** menu for **Add folder** and **Add agent**. Each item
+keeps its original disabled conditions; without machines, Add agent explains the
+required setup and opens machine settings. The tour still targets `create-agent`.
+Folder context menus retain their existing creation actions and destinations.
+
+**Expand tree map** opens a read-only treemap in a large dialog.
+Folders contain equally weighted Agent blocks; empty folders keep a placeholder.
+Green dots indicate running/idle/working/starting Agents on online machines;
+other states use muted dots and always have a text label. Names, harness kind,
+machine and state are text, with full paths on hover/focus. Opening an Agent uses
+its stable ID and closes the dialog. Folder headers drill down; breadcrumbs and
+the back button return to ancestors. Drill-down does not change sidebar expansion
+preferences or send mutations. Narrow screens stack proportional blocks and
+scroll vertically; deeper/tight containers offer drill-down instead of tiny labels.
+The dialog traps focus, supports native button keyboard actions and Escape, and
+returns focus to its trigger on dismissal. It has no new library dependency.
+
+The map adds no dependencies and keeps the existing single-file build and release
+contract. The local Worker security test verifies the map under the unchanged
+nonce CSP. See [the size/review notes](tree-map-report.md).
+
 ## Trusted Policy publication settings
 
 Workspace settings → Policy Provider shows the Core-confirmed `publish_authority`.

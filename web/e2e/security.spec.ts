@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { securityHeaders } from '../worker/security-headers'
 import { postEmbedTheme } from '../src/lib/embed-ui'
+import { mockTreeMapApi } from './fixtures/treemap'
 import { formatCommandLine, parseCommandLine } from '../src/lib/command-line'
 
 const origin = 'http://127.0.0.1:4199'
@@ -121,4 +122,19 @@ test('command formatter preserves newline arguments and rejects shell comment/op
   expect(parseCommandLine(formatCommandLine('synthetic-command', args))).toEqual({ command: 'synthetic-command', args })
   expect(() => parseCommandLine('synthetic-command # comment\nother-command')).toThrow()
   expect(() => parseCommandLine('synthetic-command && other-command')).toThrow()
+})
+
+
+test('built treemap works inside the unchanged single-file Worker CSP', async ({ page }) => {
+  await mockTreeMapApi(page)
+  await page.addInitScript(() => {
+    (window as Window & { cspViolations?: string[] }).cspViolations = []
+    document.addEventListener('securitypolicyviolation', (event) => (window as Window & { cspViolations: string[] }).cspViolations.push(event.violatedDirective))
+  })
+  await page.goto(origin)
+  await page.getByRole('button', { name: 'Expand tree map' }).click()
+  await expect(page.getByRole('button', { name: 'Explore folder /Research', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Explore folder /Product', exact: true }).click()
+  await expect(page.getByRole('button', { name: /^Open \/Product\/reviewer · claude · build-node · offline$/ })).toBeVisible()
+  expect(await page.evaluate(() => (window as Window & { cspViolations: string[] }).cspViolations)).toEqual([])
 })
