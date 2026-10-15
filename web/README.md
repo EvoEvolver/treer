@@ -168,7 +168,8 @@ Tree rows and map blocks share a Bot icon for Agents and a window icon for Apps.
 Both display only **agent** or **app**, including accessible labels; runtime
 shell/command/harness kinds remain internal. Status dots use the existing theme
 tokens (working, online or muted), with the full state always in the hover/focus
-hint and accessible name. Labels progressively reduce from full path to name,
+hint and accessible name. A visible hover/focus tooltip and status legend explain
+dense maps. Labels stay at the top-left and progressively reduce from full path to name,
 initials and status dot as space decreases. No button is smaller than 44×44px.
 Small blocks remain visual markers: drill into their parent folder to enlarge
 its children, or use the native **Go to** picker to open any immediate child

@@ -142,6 +142,10 @@ async function noMapOverflow(page: import('@playwright/test').Page) {
     expect(rect.width).toBeGreaterThanOrEqual(44)
     expect(rect.height).toBeGreaterThanOrEqual(44)
   }
+  expect(await canvas.locator('.treemap-dot').evaluateAll((dots) => dots.every((dot) => {
+    const marker = dot.getBoundingClientRect(), block = dot.closest('[data-map-id]')!.getBoundingClientRect()
+    return !marker.width || !marker.height || (marker.left >= block.left - 0.5 && marker.right <= block.right + 0.5 && marker.top >= block.top - 0.5 && marker.bottom <= block.bottom + 0.5)
+  }))).toBe(true)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 }
 
@@ -157,6 +161,12 @@ for (const sample of ["small", "medium", "large"] as const) for (const mobile of
     const dialog = page.getByRole('dialog', { name: 'Workspace map' })
     await expect(dialog.locator('[data-map-id="level-0"]')).toBeVisible()
     await noMapOverflow(page)
+    await expect(dialog.getByRole('group', { name: 'Status legend', exact: true })).toBeVisible()
+    if (sample === 'small') {
+      const agent = dialog.locator('[data-map-id="deep-0"]')
+      const block = (await agent.boundingBox())!, label = (await agent.locator('span').first().boundingBox())!
+      expect(label.y - block.y).toBeLessThan(20)
+    }
     await page.screenshot({ path: testInfo.outputPath(`fixed-${sample}-${theme}-${mobile ? '390' : 'desktop'}.png`) })
     for (const id of ['level-0', 'level-1', 'level-2', 'level-3']) {
       await dialog.getByRole('combobox', { name: 'Go to', exact: true }).selectOption(id)
@@ -169,6 +179,14 @@ for (const sample of ["small", "medium", "large"] as const) for (const mobile of
       const dot = dialog.locator('[data-map-id="deep-0"]')
       await expect(dot).toHaveAttribute('role', 'img')
       await expect(dot).toHaveAttribute('title', /\/Team\/Research\/Experiments\/Lab\/agent-01.*working/)
+    }
+    const marker = dialog.locator('[data-map-id="deep-0"]')
+    await marker.hover()
+    await expect(dialog.getByRole('tooltip')).toContainText('/Team/Research/Experiments/Lab/agent-01')
+    if (sample === 'large') await page.screenshot({ path: testInfo.outputPath(`fixed-large-${theme}-${mobile ? '390' : 'desktop'}-tooltip.png`) })
+    if (await marker.evaluate((el) => el.tagName === 'BUTTON')) {
+      await marker.focus()
+      await expect(dialog.getByRole('tooltip')).toContainText('working')
     }
     await picker.focus()
     await picker.selectOption('deep-0')
@@ -196,6 +214,8 @@ test('resize recomputes rectangles; status and input order do not move blocks', 
   events!.send(JSON.stringify({ event: 'workspace.snapshot', data: { ...mapSnapshot, revision: 2, agents } }))
   await expect(dialog.getByRole('button', { name: /Open .*coordinator.*stopped/ })).toBeVisible()
   expect(await geometry()).toEqual(before)
+  await dialog.locator('.treemap-agent').last().hover()
+  await expect(dialog.getByRole('tooltip')).toBeVisible()
   await page.setViewportSize({ width: 390, height: 640 })
   await expect.poll(geometry).not.toEqual(before)
   await noMapOverflow(page)

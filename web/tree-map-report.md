@@ -175,8 +175,8 @@ child reachable even in a dense flat folder. Breadcrumbs collapse older
 ancestors into a native picker rather than a scrolling strip.
 
 Measured against `origin/main` at `169259f`, same locked pnpm 10.12.4 toolchain:
-index.html grows from 1,106,272 to 1,108,213 bytes (+1,941 bytes); Vite's gzip
-measurement changes from 315.75 to 316.47 kB (+0.72 kB). No new dependencies,
+index.html grows from 1,106,272 to 1,110,438 bytes (+4,166 bytes); Vite's gzip
+measurement changes from 315.75 to 317.05 kB (+1.30 kB). No new dependencies,
 assets, data requests, storage, build, CSP, Worker or release changes.
 
 Local browser coverage includes 5/40/300 workloads in both themes at desktop
@@ -185,7 +185,8 @@ resize and geometry stability, stable-ID activation, empty and deleted folders,
 text-only hostile names, Chinese navigation, Escape and focus return. Pure layout
 checks cover proportional area, bounds, non-overlap and zero-weight inputs.
 Screenshots are local review artifacts under
-`/Users/dooms/treer/.treer/reviews/fixed-treemap/` (12 images). No real workspace
+`/Users/dooms/treer/.treer/reviews/fixed-treemap-final/` (12 base images
+and four dense-map tooltip views). No real workspace
 mutations or live-system validation were performed; no Rust/PostgreSQL tests
 are needed for this presentation-only change.
 
@@ -193,4 +194,9 @@ Before release, single-child folder chains were compressed into one title bar.
 Each visible segment drills down independently; a native picker retains omitted
 segments on narrow screens or very deep chains. A four-level chain now reserves
 44px of title height instead of four bars. The final screenshots are under
-`/Users/dooms/treer/.treer/reviews/fixed-treemap-chain/`.
+`/Users/dooms/treer/.treer/reviews/fixed-treemap-final/`.
+
+The final visual increment adds a localized status legend, a visible hover/focus
+tooltip, top-left labels, and adaptive gutters/dot diameters for very thin cells.
+Browser assertions check that every status dot stays within its block, including
+the right edge at 390px; no scrollbar is introduced.
