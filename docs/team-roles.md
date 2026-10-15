@@ -37,6 +37,8 @@ of the people or Agent sessions currently filling them. Address team Agents by
    Communicate uncertainty and pending review or operational checks explicitly.
 6. List cleanup candidates before removal. Remove worktrees or branches only
    after explicit cleanup approval; preserve uncommitted or unmerged work.
+7. Coordination state lives in tickets; follow the
+   [team collaboration protocol](team-protocol.md).
 
 Role names and paths are the maintained addressing convention. Saved commands,
 scripts and prompts must use these paths, sibling references, or stable IDs,
