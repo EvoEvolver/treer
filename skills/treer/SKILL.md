@@ -130,7 +130,7 @@ Register an explicit command when this Agent should return after a full Treer
 Host restart:
 
 ```bash
-treer agent startup set --cwd . -- ./scripts/start-agent.sh
+treer agent startup set --cwd . -- sh scripts/start-agent.sh
 treer agent startup show
 treer agent startup clear
 ```
@@ -152,7 +152,7 @@ Policy-controlled startup management commands:
 
 ```bash
 treer agent admin startup show /reviewer
-treer agent admin startup set /reviewer --cwd repo -- ./scripts/start-agent.sh
+treer agent admin startup set /reviewer --cwd repo -- sh scripts/start-agent.sh
 treer agent restart /reviewer
 # Atomically save new argv and restart once:
 treer agent restart /reviewer --cwd repo -- codex --no-daemon resume THREAD_ID
@@ -182,11 +182,18 @@ Edit managed App launch fields through the deployment, preserving its stable
 ID, credential, service and public origin:
 
 ```bash
-treer app update /infra/issues --cwd apps-deployed/issues --command ./start.sh --clear-args
+treer app update /infra/issues --cwd apps-deployed/issues --command sh -- start.sh
 treer app update /infra/issues --command python3 -- issues.py
 ```
 
 Omitted fields remain unchanged (even args when only command changes).
+For Agent/App starts and recovery, use an absolute executable or a bare name in
+an absolute PATH directory. Empty/relative PATH entries are ignored; relative
+executable paths (`./start.sh`) are rejected. Use an explicit interpreter with
+script argv instead. Windows bare-name lookup supports only `.exe`/`.com` and
+drive-qualified PATH directories. Missing commands fail with `command_not_found`;
+no shell, cwd search or `$HOME` expansion is implied. Upgrade target Controllers
+before relying on this behavior; older Controllers retain their previous lookup.
 Arguments after `--` replace the full array; `--clear-args` empties it.
 `cwd` must exist beneath the machine root. A running App restarts once; a stopped
 App remains stopped. This requires `agent.startup.manage` plus ordinary restart

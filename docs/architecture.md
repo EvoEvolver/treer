@@ -231,6 +231,16 @@ Start, stop, restart, delete, list, and show are available through the browser,
 public API, Controller-local API, and `treer app` CLI. User-triggered lifecycle
 changes append workspace audit events.
 
+Controller Agent/App spawn paths resolve bare commands using only absolute
+directories from the final workload PATH before sending an absolute executable
+to the generic Host. Empty/relative PATH entries and relative command paths do
+not trigger cwd search; lookup failures are explicit. Windows lookup uses fixed
+`.exe`/`.com` extensions and drive-qualified search directories. Explicit absolute
+commands are unchanged. Startup intent retains logical command/argv; first
+start, restart and recovery share this resolution boundary. This is a Controller
+behavior change, not a Host wire protocol change; older Controllers require an
+upgrade before shared portable profiles are installed.
+
 `POST /api/workspaces/{workspace_id}/apps/{app_id}/update` (and the authenticated
 `/agent/workspaces/...` equivalent) patches `cwd`, `command`, and/or `args`.
 Omitted fields remain unchanged; an empty args array clears arguments. The Proxy

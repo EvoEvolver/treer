@@ -195,6 +195,19 @@ they never receive machine/enrollment/operator credential placeholders from the
 Controller. Previously those names were inserted with empty values: names alone
 were not evidence that the actual service secrets leaked.
 
+For Agent/App process starts, restarts and recovery, the Controller resolves bare
+executable names only against absolute directories in the final workload PATH.
+Empty and relative entries are ignored; missing commands fail closed without
+cwd or OS-default search. Relative executable paths such as `./run` are rejected;
+explicit absolute commands retain their existing behavior. On Windows, bare-name
+lookup accepts only `.exe`/`.com` and searches drive-qualified directories
+(including drive verbatim paths), not UNC/device directories or caller-supplied PATHEXT
+extensions. File symlinks must resolve to a regular executable target; Unix
+targets require execute bits. The Host receives the resolved absolute command.
+This prevents implicit cwd lookup, not replacement of executables by their OS
+owner or a filesystem race: PATH directories and binaries must still be trusted.
+It does not change machine exec's separate command/environment contract.
+
 For Windows PowerShell 5.1, machine exec does not inherit `PSModulePath`.
 Treer supplies only `System32/WindowsPowerShell/v1.0/Modules` under the Windows
 installation directory returned by Win32, and also corrects SystemRoot/windir

@@ -141,6 +141,15 @@ precision request timestamp previously mislabeled fast spawns as `Attached`.
 The mock-Host regression uses a fixed earlier timestamp across generations and
 checks concurrent restore (one spawn, one attachment), lost-ACK attachment,
 missed-exit respawn, and preservation of stopped/revoked startup intent.
+Controller command-resolution regressions cover absolute-only PATH lookup for
+Agent/App starts and recovery. Unix and Windows run an isolated child with a
+cwd executable decoy, empty/relative PATH entries and no PATH; all fail closed.
+Other cases cover fixed Windows `.exe`/`.com` selection, rejected UNC/device
+search directories, regular/executable files, relative-command rejection and
+unchanged explicit absolute commands. The mock Host startup/restart/App-update
+fixture asserts absolute commands cross the Host boundary while logical command
+names remain in durable startup intent. Native Windows execution remains a
+release gate; a cross-target compilation is not native execution evidence.
 
 Controller inventory reconciliation must preserve the cached output and its
 revision for the same process generation and stream epoch, including exited

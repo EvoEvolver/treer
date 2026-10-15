@@ -654,7 +654,7 @@ of creating a second Host registration.
 An Agent can opt itself into recovery after a full Treer Host restart:
 
 ```bash
-treer agent startup set --cwd . -- ./scripts/start-agent.sh
+treer agent startup set --cwd . -- sh scripts/start-agent.sh
 treer agent startup show
 treer agent startup clear
 ```
@@ -997,6 +997,23 @@ or perform shell expansion, explicitly use a shell in the profile, for example
 proxy variables, containers, and credentials yourself. Profiles are plaintext
 workspace configuration and must not contain secrets.
 
+Agent/App executables may be absolute paths or bare names found in absolute
+directories of the final workload PATH. Empty/relative PATH entries are ignored;
+lookup failure returns `command_not_found` without falling back to the working
+directory. Relative commands such as `./start.sh` are rejected: use an absolute
+script path or an explicit interpreter such as `sh start.sh` instead. Windows
+bare-name lookup accepts only `.exe`/`.com`, ignores PATHEXT overrides and skips
+UNC/device search directories; explicit absolute commands are unchanged. No
+`$HOME` or `%LOCALAPPDATA%` expansion is performed. Startup specifications retain
+the original command; each start/restart/restore resolves it again. Upgrade all
+target Controllers before installing shared profiles relying on this behavior;
+older Controllers retain their previous PATH/cwd search behavior. Install the
+launcher shim on every target and check its bin directory is on the Controller's
+PATH before migrating shared launcher profiles.
+Before upgrading, replace any existing relative executable in saved startup
+specifications with an absolute path or an explicit interpreter. Running
+processes are unaffected until their next start/restart/recovery.
+
 `profile launch --cwd` overrides the saved working directory for that launch
 without changing the profile. The directory is relative to the selected
 machine's Host root and must resolve inside that root. Omitting it uses the
@@ -1332,7 +1349,7 @@ For a provider that runs outside the Host, launch a command-owned bridge:
 
 ```bash
 treer agent admin create --machine build-machine --kind bridge \
-  --name provider-bridge --cwd . -- ./bridge --serve
+  --name provider-bridge --cwd . -- /absolute/path/to/bridge --serve
 ```
 
 The bridge receives other Agents' prompts from its authenticated local
