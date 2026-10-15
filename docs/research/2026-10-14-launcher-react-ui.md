@@ -279,10 +279,10 @@ today.
   (bundle, minify, `format=iife`, `target=es2022`, `jsx=automatic`,
   `define NODE_ENV=production`, `legalComments=inline`, deterministic, no
   sourcemap in the payload).
-* Output: `public/ui.html`, `public/u.js`, `public/u.css` — **3 files, short
+* Output: `public/ui.html`, `public/ui.js`, `public/ui.css` — **3 files, short
   names, flat** (no nested dirs → Windows long-path safe). `markdown.js` is
   folded into `ui.js` (the legacy `markdown.js` stays until deletion). Relative
-  `<base href="./">`; the script tag is `<script src="u.js" defer>` (classic IIFE
+  `<base href="./">`; the script tag is `<script src="ui.js" defer>` (classic IIFE
   avoids module-MIME and base-URL edge cases in the iframe tunnel).
 * **Artifacts are committed**, same as `markdown.js` today. Reason:
   `bootstrap.sh` installs by sparse git checkout + `npm ci --omit=dev`, i.e.
