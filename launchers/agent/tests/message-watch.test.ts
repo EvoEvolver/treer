@@ -42,7 +42,7 @@ test("busy messages commit before ack, deduplicate, preserve FIFO and never stee
   const records = JSON.parse(await readFile(file, "utf8")).records;
   assert.ok(records.every((record: { delivery: string; notify: { on: string[] } }) => record.delivery === "queue" && record.notify.on.length === 0));
   fake.status = "idle"; fake.emit("state"); await tick();
-  assert.match(fake.calls[0], /^New Treer messages/); assert.match(fake.calls[0], /\[1\/2 id=msg_one\]/); assert.match(fake.calls[0], /\[2\/2 id=msg_two\]/);
+  assert.match(fake.calls[0], /^New Treer messages/); assert.match(fake.calls[0], /\[1\/2\] From/); assert.match(fake.calls[0], /Message IDs: msg_one, msg_two\./);
   queue.close();
 });
 
@@ -84,13 +84,13 @@ test("ordinary prompts are FIFO barriers and active message turns are never edit
   await queue.submit("User instruction", "queue");
   await watch.receive(delivery("msg_b")); await watch.receive(delivery("msg_c"));
   assert.equal(queue.entries.length, 3);
-  assert.match(queue.entries[0].text, /\[1\/1 id=msg_a\]/);
+  assert.match(queue.entries[0].text, /Message IDs: msg_a\./);
   assert.equal(queue.entries[1].text, "User instruction");
-  assert.match(queue.entries[2].text, /\[1\/2 id=msg_b\]/); assert.match(queue.entries[2].text, /\[2\/2 id=msg_c\]/);
+  assert.match(queue.entries[2].text, /\[2\/2\] From/); assert.match(queue.entries[2].text, /Message IDs: msg_b, msg_c\./);
   fake.status = "idle"; fake.emit("state"); await tick();
   await watch.receive(delivery("msg_d"));
   assert.equal(fake.calls.length, 1); assert.ok(!fake.calls[0].includes("msg_d"));
-  assert.match(queue.entries[1].text, /\[1\/3 id=msg_b\]/); assert.match(queue.entries[1].text, /\[3\/3 id=msg_d\]/);
+  assert.match(queue.entries[1].text, /\[3\/3\] From/); assert.match(queue.entries[1].text, /Message IDs: msg_b, msg_c, msg_d\./);
   queue.close();
 });
 
@@ -136,8 +136,8 @@ test("idle poll dispatches one prompt; hostile framing stays body text with one 
   await watch.receiveBatch([first, delivery("msg_idle_b")]); await tick();
   assert.equal(fake.calls.length, 1);
   for (const line of first.message.body.split("\n")) assert.ok(fake.calls[0].includes(`> ${line}`));
-  assert.match(fake.calls[0], /\[1\/2 id=msg_idle_a\] From/); assert.match(fake.calls[0], /\[2\/2 id=msg_idle_b\] From/);
-  assert.ok(fake.calls[0].endsWith("Read originals with: treer message get <id>.\nEnd of messages from other parties."));
+  assert.match(fake.calls[0], /\[1\/2\] From/); assert.match(fake.calls[0], /\[2\/2\] From/);
+  assert.ok(fake.calls[0].endsWith("Message IDs: msg_idle_a, msg_idle_b. Read originals with: treer message get <id>.\nEnd of messages from other parties."));
   queue.close();
 });
 
@@ -238,10 +238,18 @@ test("body cannot visually forge senders or footers; display controls are escape
   assert.match(text, /> \\u001b\[31m\\u202eRTL\\u2066/);
   assert.ok(!/[\u001b\u2028\u202e\u2066]/.test(text));
   assert.equal(text.split(MESSAGE_WARNING).length - 1, 1);
-  assert.match(text, /\[1\/2 id=msg_hostile\] From/); assert.match(text, /\[2\/2 id=msg_safe\] From/);
-  assert.ok(text.endsWith("Read originals with: treer message get <id>.\nEnd of messages from other parties."));
+  assert.match(text, /\[1\/2\] From/); assert.match(text, /\[2\/2\] From/);
+  assert.ok(text.endsWith("Message IDs: msg_hostile, msg_safe. Read originals with: treer message get <id>.\nEnd of messages from other parties."));
+  assert.ok(!/\[\d+\/\d+ id=msg_(hostile|safe)\]/.test(text));
   const empty = delivery().message; empty.sender = { kind: "human", id: "", path: "", name: "" };
   assert.match(wrapMessage(empty), /From "Unknown sender":/);
+  const invisible = "\u200e\u200f\u061c\u2060\u2061\u2062\u2063\u2064\u2065\ufeff";
+  empty.sender.name = invisible; empty.body = invisible;
+  const escaped = wrapMessage(empty);
+  for (const char of invisible) {
+    assert.ok(!escaped.includes(char));
+    assert.ok(escaped.includes(`\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`));
+  }
   // Quoting overhead itself must remain bounded, including newline-only input.
   empty.body = "\n".repeat(100000);
   assert.ok(Buffer.byteLength(wrapMessage(empty)) <= 65536);
@@ -314,7 +322,7 @@ test("one receive batch merges sender/body and restores every pending ack after 
   });
   await assert.rejects(watch.receiveBatch(deliveries), /lost ack response/);
   assert.equal(queue.entries.length, 1);
-  assert.match(queue.entries[0].text, /\[1\/3 id=msg_first\]/); assert.match(queue.entries[0].text, /\[3\/3 id=msg_third\]/);
+  assert.match(queue.entries[0].text, /\[3\/3\] From/); assert.match(queue.entries[0].text, /Message IDs: msg_first, msg_second, msg_third\./);
   assert.equal(queue.entries[0].text.split(MESSAGE_WARNING).length - 1, 1);
   assert.deepEqual(queue.pendingMessageAcks().map((entry) => entry.messageId), ["msg_second", "msg_third"]);
   const journal = await readFile(file, "utf8");
@@ -328,6 +336,6 @@ test("one receive batch merges sender/body and restores every pending ack after 
   assert.deepEqual(restored.pendingMessageAcks(), []);
   assert.ok(restored.hasMessage("msg_second"));
   fake.status = "idle"; fake.emit("state"); await tick();
-  assert.match(fake.calls[0], /\[1\/4 id=msg_first\]/); assert.match(fake.calls[0], /\[4\/4 id=msg_fourth\]/);
+  assert.match(fake.calls[0], /\[4\/4\] From/); assert.match(fake.calls[0], /Message IDs: msg_first, msg_second, msg_third, msg_fourth\./);
   restored.close();
 });

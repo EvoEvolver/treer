@@ -494,8 +494,8 @@ messages received in later polls while the Agent is busy. Ordinary queued prompt
 remain FIFO barriers; running turns are never modified or interrupted. One English
 warning marks the content as third-party input, not system instructions. Body
 lines are quoted and display control characters are escaped. Each section has
-an ordinal and Core message ID followed by sender and body; each ID appears once.
-The footer gives `treer message get <id>` instructions and an explicit ending.
+an ordinal followed by sender and body. IDs appear only once in a footer list
+with `treer message get <id>` instructions and an explicit ending.
 Subject, preview and send time are omitted.
 The Agent decides whether to act, reply or ignore; the watcher does not filter by
 message type. Sender/body now enter the private queue journal and transcript and
