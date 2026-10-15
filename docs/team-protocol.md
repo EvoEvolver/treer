@@ -15,7 +15,9 @@ newer ticket comment disagree, the ticket wins and this file should be updated.
 2. **Reviews are written on the ticket**, not forwarded through the leader:
    `[review] <SHA> pass|changes needed — key points`. Authors and the releaser
    read the ticket. Request a review by `@`-mentioning the reviewer, otherwise
-   the notification has no recipient.
+   the notification has no recipient. A bare `@name` fails to resolve when the
+   directory holds more than one agent with that name (for example two
+   `leader`s); use the path `@/treer-dev-team/<name>` or the stable agent ID.
 3. **Releasers comment every step:** `[release] <step> <SHA> <result>`. Order is
    expressed with `blocked_by`.
 4. **Commands are idempotent.** Check real state first (git, gh, manifest,
