@@ -238,6 +238,8 @@ for (const mobile of [false, true]) {
       if (mobile) {
         await page.getByRole('button', { name: 'Close full-screen terminal', exact: true }).click()
         await page.getByRole('button', { name: /^Late App app / }).click()
+        await expect(page.locator('.xterm')).toBeVisible()
+        await page.getByRole('button', { name: 'Show App', exact: true }).click()
       } else await page.getByRole('button', { name: 'Show App', exact: true }).click()
       await expect(frame).toBeVisible()
       backend.setApps([{ ...backend.app, status: 'exited' }])
@@ -341,6 +343,8 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await expect(frame).toBeHidden()
     await expect(page.locator(".xterm")).toBeVisible()
     await page.getByRole("button", { name: /^Soul Archive / }).click()
+    await expect(page.locator(".xterm")).toBeVisible() // Selecting the same tab preserves its Logs choice.
+    await page.getByRole("button", { name: "Show App", exact: true }).click()
     await expect(frame).toBeVisible()
   })
 }

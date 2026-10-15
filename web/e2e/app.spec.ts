@@ -1863,7 +1863,7 @@ for (const mobile of [false, true]) {
         await row.getByRole("button").first().click()
         await expect(row).toHaveAttribute("aria-selected", "true")
         if (mobile) {
-          await expect(page.locator(`span[title="${path}"]`)).toBeVisible()
+          await expect(page.getByRole("tabpanel").locator(`span[title="${path}"]`)).toBeVisible()
           await page.getByRole("button", { name: "Close full-screen terminal", exact: true }).click()
         } else await expect(page.getByRole("navigation", { name: "Agent path" })).toHaveAttribute("title", path)
         await row.getByRole("button", { name: "Actions for reviewer", exact: true }).click()
