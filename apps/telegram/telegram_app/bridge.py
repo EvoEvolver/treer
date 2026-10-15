@@ -160,17 +160,17 @@ class TelegramBridge:
         arguments = ["message", "send", "--to", binding.target_agent_id]
         for context_id in context_ids:
             arguments.extend(["--context", context_id])
-        arguments.extend(
-            [
-                "--idempotency-key",
-                f"telegram-{self.bot_id}-{update_id}",
-                "--external-source-file",
-                "-",
-                f"--body={text}",
-            ]
-        )
-        # The Controller cannot read client-local files: the source goes over stdin and the text as --body=TEXT (the joined form keeps text starting with '-' from being parsed as an option).
-        response = self.cli.run(arguments, stdin=json.dumps(source, separators=(",", ":")))
+        arguments.extend(["--idempotency-key", f"telegram-{self.bot_id}-{update_id}"])
+        if self.cli.has_stdin_envelope():
+            # Nothing the user wrote, and no conversation metadata, appears in argv (visible to local `ps`).
+            arguments.append("--stdin-envelope")
+            payload = json.dumps({"body": text, "external_source": source}, separators=(",", ":"))
+        else:
+            # Older Controller: it cannot read client-local files, so the source goes over stdin and the text as
+            # --body=TEXT (the joined form keeps text starting with '-' from being parsed as an option).
+            arguments.extend(["--external-source-file", "-", f"--body={text}"])
+            payload = json.dumps(source, separators=(",", ":"))
+        response = self.cli.run(arguments, stdin=payload)
         core_message = _object(response.get("message"), "Core Message")
         core_message_id = _string(core_message.get("message_id"), "Core Message ID", 256)
         self.state.record_inbound(CHANNEL, self.bot_id, str(user_id), conversation)
