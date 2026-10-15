@@ -27,7 +27,7 @@ function directories(path) {
     current = join(current, part);
     if (!present(current)) mkdirSync(current, { mode: 0o700 });
     const info = lstatSync(current);
-    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Shim directory ancestors must be physical directories, not links");
+    if (!info.isDirectory() || info.isSymbolicLink()) throw new Error("Shim directory ancestors must be physical directories, not links; use a physical home/bin directory (symlinked ~/.local is unsupported)");
   }
   const info = lstatSync(path);
   if (process.getuid && (info.uid !== process.getuid() || (info.mode & 0o022))) throw new Error("Shim bin directory must be owned by this user and not writable by other users");

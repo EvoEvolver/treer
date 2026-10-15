@@ -1,10 +1,13 @@
 #!/usr/bin/env node
 // Default is read-only. Run apply only after installing shims on every machine.
-import { readFileSync } from "node:fs";
+import { closeSync, fsyncSync, mkdtempSync, openSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { profileMigration } from "./profile-migration.mjs";
 import { profileTransaction, profileFailureSummary } from "./profile-transaction.mjs";
 import { runProviderSync } from "./process.mjs";
+import { protectDirectory, syncDirectory } from "./private-state.mjs";
 const args = process.argv.slice(2), apply = args.includes("--apply");
 if (args.some(arg => !["--apply", "--dry-run"].includes(arg)) || apply && args.includes("--dry-run")) throw new Error("Usage: migrate-profiles.mjs [--dry-run | --apply]");
 const treer = process.env.AGENT_UI_TREER_BIN || "treer";
@@ -19,6 +22,16 @@ const definitions = JSON.parse(readFileSync(new URL("../profiles.json", import.m
 const plan = profileMigration(profiles, definitions, agents);
 console.log(JSON.stringify({ dry_run: !apply, ...plan }, null, 2));
 if (apply) {
+  // The OS creates a unique private directory; no pre-existing path is reused.
+  // Preserve original JSON before even the first workspace mutation. Do not
+  // print the contents: commands/descriptions may contain sensitive data.
+  const directory = mkdtempSync(join(tmpdir(), "treer-profile-backup-"));
+  protectDirectory(directory);
+  const backup = join(directory, "profiles.json"), fd = openSync(backup, "wx", 0o600);
+  try { writeFileSync(fd, JSON.stringify({ schema: "treer.profile-backup/v1", createdAt: new Date().toISOString(), profiles, plan }, null, 2) + "\n"); fsyncSync(fd); }
+  finally { closeSync(fd); }
+  syncDirectory(directory);
+  console.error(`Profile backup: ${backup}`);
   const transaction = profileTransaction(treer), changed = [];
   try {
     for (const change of plan.changes) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync, rmSync, statSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { hermeticEnv } from "./hermetic.mjs";
@@ -56,8 +56,26 @@ fs.writeFileSync(file,JSON.stringify(profiles));console.log('{}');`);
   writeFileSync(state, JSON.stringify(initial));
   const dry = run(["--dry-run"]); assert.equal(dry.status, 0, dry.stderr); assert.deepEqual(JSON.parse(readFileSync(state, "utf8")), initial);
   const failed = run(["--apply"], { FAIL_DELETE: initial[1].name }); assert.notEqual(failed.status, 0);
+  function verifyBackup(result: { stderr: string }) {
+    const path = result.stderr.match(/^Profile backup: (.+)$/m)?.[1]?.trim();
+    assert.ok(path, "apply must report the backup before mutation");
+    t.after(() => rmSync(dirname(path), { recursive: true, force: true }));
+    const backup = JSON.parse(readFileSync(path, "utf8"));
+    assert.deepEqual(backup.profiles, initial); assert.equal(backup.schema, "treer.profile-backup/v1");
+    if (process.platform !== "win32") {
+      assert.equal(statSync(path).mode & 0o777, 0o600);
+      assert.equal(statSync(dirname(path)).mode & 0o777, 0o700);
+    }
+    assert.ok(!result.stderr.includes('"command"'), "backup contents must not be logged");
+  }
+  verifyBackup(failed);
   assert.deepEqual(sorted(JSON.parse(readFileSync(state, "utf8"))), sorted(structuredClone(initial)));
   const applied = run(["--apply"]); assert.equal(applied.status, 0, applied.stderr);
+  // The failed transaction restored the same values, with irrelevant ordering
+  // differences; the successful run captures that inventory before updating.
+  const path = applied.stderr.match(/^Profile backup: (.+)$/m)?.[1]?.trim(); assert.ok(path);
+  t.after(() => rmSync(dirname(path), { recursive: true, force: true }));
+  assert.deepEqual(sorted(JSON.parse(readFileSync(path, "utf8")).profiles), sorted(structuredClone(initial)));
   const saved = JSON.parse(readFileSync(state, "utf8")); assert.equal(saved.length, definitions.length);
   assert.ok(saved.every((p: any) => p.command === "treer-agent" && p.cwd === "."));
 });

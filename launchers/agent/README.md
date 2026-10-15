@@ -100,13 +100,23 @@ this locally compiled entry is not a separately signed release artifact.
 
 Only the named managed shim and its integrity receipt are atomically replaced;
 other files in the bin directory are untouched. Links, unknown existing commands,
-and bin directories writable by another POSIX user are refused. A failed profile
+and bin directories writable by another POSIX user are refused. Symlinked
+`~/.local`, linked home ancestors (including some Home Manager setups), and linked
+bin directories are unsupported: use a physical home/bin directory instead.
+A failed profile
 transaction restores the previous pointer, shim and profiles. Already running
 Agents retain their immutable launcher assets and copied startup specifications.
 
 To collapse an existing workspace, first install the new shim on **all** machines.
 Run `node launchers/agent/scripts/migrate-profiles.mjs --dry-run` and review the
-diff, then run it with `--apply`. It adopts only recognized launcher commands
+diff, then run it with `--apply`.
+Before applying any mutation it saves the original profile inventory and plan
+in a private temporary directory (0700, current-user/SYSTEM-only ACL on Windows),
+with a 0600 `profiles.json` backup,
+and prints only the backup path to stderr. Keep that file somewhere private
+before temporary-directory cleanup if you need a durable manual rollback;
+profile commands/descriptions in it may contain sensitive information.
+It adopts only recognized launcher commands
 with exact provider arguments, saves/reads back six canonical profiles, and
 removes recognized machine-qualified/old preview entries. Custom/Pockymoe
 profiles and any explicitly referenced profile stay intact. Concurrent profile
