@@ -661,6 +661,9 @@ export const en = {
   "tabs.unloaded_select": "↻ Unloaded · select to reload",
   "tabs.stop_confirm": "Stop {path}?",
   "tabs.stop_detail": "This stops the running process. Unsaved work may be lost.",
+  "tabs.more_actions": "More actions for {path}",
+  "tabs.rename_app": "Rename App",
+  "tabs.stop_app": "Stop App",
 } as const
 
 export type MessageKey = keyof typeof en

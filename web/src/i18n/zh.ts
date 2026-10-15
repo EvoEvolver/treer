@@ -662,4 +662,7 @@ export const zh: Messages = {
   "tabs.unloaded_select": "↻ 已卸载 · 点按重新加载",
   "tabs.stop_confirm": "停止 {path}？",
   "tabs.stop_detail": "这会停止正在运行的进程，未保存的工作可能丢失。",
+  "tabs.more_actions": "{path} 的更多操作",
+  "tabs.rename_app": "重命名 App",
+  "tabs.stop_app": "停止 App",
 }

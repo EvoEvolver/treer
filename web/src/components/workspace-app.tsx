@@ -984,7 +984,7 @@ function WorkspaceAppContent() {
 
     <ErrorToast message={error} onDismiss={() => setError(null)} />
 
-    <Dialog open={Boolean(stoppingAgent)} onOpenChange={(open) => !open && setStoppingAgent(null)}><DialogContent><DialogHeader><DialogTitle>{t("tabs.stop_confirm", { path: stoppingAgent ? agentPath(stoppingAgent.agent, workloadTree) : "" })}</DialogTitle><DialogDescription>{t("tabs.stop_detail")}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setStoppingAgent(null)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={() => { if (stoppingAgent?.workspaceId === workspaceId) void stopAgent(stoppingAgent.agent.agent_id); setStoppingAgent(null) }}>{t("app.stop_agent")}</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(stoppingAgent)} onOpenChange={(open) => !open && setStoppingAgent(null)}><DialogContent><DialogHeader><DialogTitle>{t("tabs.stop_confirm", { path: stoppingAgent ? agentPath(stoppingAgent.agent, workloadTree) : "" })}</DialogTitle><DialogDescription>{t("tabs.stop_detail")}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setStoppingAgent(null)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={() => { if (stoppingAgent?.workspaceId === workspaceId) void stopAgent(stoppingAgent.agent.agent_id); setStoppingAgent(null) }}>{stoppingAgent && apps.some((app) => (app.runtime_agent_id ?? app.app_id) === stoppingAgent.agent.agent_id) ? t("tabs.stop_app") : t("app.stop_agent")}</Button></DialogFooter></DialogContent></Dialog>
     <WorkspaceDialogs state={dialogState}
       user={user}
       setUser={setUser}

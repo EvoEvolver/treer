@@ -318,7 +318,8 @@ dependency. Everything lives in `src/i18n/`:
 
 ### Tab page actions
 
-Agent/App pages use a single tab bar. Right-click a tab (including an inactive
+Agent/App pages use a single tab bar. The active desktop tab and mobile title
+have a small ⋯ button for page actions. Right-click a tab (including an inactive
 one), or press Shift+F10 / the ContextMenu key on it, for its page actions.
 On phones, long-press the active title or a card in the tab switcher; moving a
 finger cancels the long-press so scrolling still works. Menus support arrow
