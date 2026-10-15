@@ -48,8 +48,10 @@ test("AIS queue persists across launcher restart, exposes correlated results and
   assert.equal((await fetch(first.base + "/v1/queue")).status, 403);
   assert.equal((await fetch(first.base + "/v1/queue", { headers: { ...first.headers, "x-treer-interface-instance": "stale" } })).status, 403);
   assert.equal((await fetch(first.base + "/v1/queue", { headers: { ...first.headers, origin: "https://attacker.example" } })).status, 403);
-  const hold = await first.post({ operation_id: "hold", text: "hold", mode: "prompt" }).then((response) => response.json());
   const sender = { agent_id: "ag_sender", path: "/team/sender", name: "sender" };
+  // Attested attribution is not consent to notify, even when restart interrupts
+  // the turn. Only the second submission explicitly requests completion messages.
+  const hold = await first.post({ operation_id: "hold", text: "hold", mode: "prompt", sender }).then((response) => response.json());
   const body = { operation_id: "queued", text: "continue", sender, delivery: "queue", notify: { on: ["done", "failed", "interrupted"] } };
   const queued = await first.post(body).then((response) => response.json());
   assert.equal(queued.submission.disposition, "queued"); assert.equal(queued.submission.position, 1);
@@ -68,6 +70,9 @@ test("AIS queue persists across launcher restart, exposes correlated results and
   const notified = await until(async () => (await readFile(calls, "utf8")).trim().split("\n").map((line) => JSON.parse(line)), (value) => value.length === 1);
   assert.equal(notified[0].agent, "ag_fixture");
   const journal = JSON.parse(await readFile(join(cwd, ".treer/agents/ag_fixture/queue.json"), "utf8"));
+  const interrupted = journal.records.find((record: { submission: { id: string } }) => record.submission.id === hold.submission.id);
+  assert.equal(interrupted.notify, null);
+  assert.equal(interrupted.notification, null);
   const record = journal.records.find((record: { submission: { id: string } }) => record.submission.id === queued.submission.id);
   assert.deepEqual(notified[0].args, ["message", "send", "--to", "ag_sender", "--idempotency-key", completionKey(record)]);
   assert.equal(JSON.parse(notified[0].body).status, "done");

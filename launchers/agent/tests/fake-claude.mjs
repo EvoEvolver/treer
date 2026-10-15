@@ -101,7 +101,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     continue;
   }
   if (hold) { message("assistant", [{ type: "text", text: `Steered: ${value}` }]); result(); continue; }
-  if (value === "hold") { hold = true; continue; }
+  if (value.replace(/^\[来自 [^\n]+\]\n/, "") === "hold") { hold = true; continue; }
   if (/^usage \d+$/.test(value)) {
     const tokens = Number(value.slice(6));
     const id = `usage-${randomUUID()}`;

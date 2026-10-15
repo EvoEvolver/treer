@@ -36,17 +36,32 @@ class Fake extends EventEmitter {
 const source = { agent_id: "ag_sender", path: "/team/sender", name: "sender" };
 const tick = () => new Promise((done) => setImmediate(done));
 const asRuntime = (runtime: Fake) => runtime as unknown as HarnessRuntime;
-test("sender attribution alone does not opt in to completion messages", async () => {
-  assert.equal(submissionOptions(source, undefined).notify, null);
-  assert.deepEqual(submissionOptions(source, { on: ["done"] }).notify, { on: ["done"], to: source.agent_id });
+for (const notify of [undefined, null]) for (const terminal of ["completed", "failed", "interrupted", "exit", "restart"] as const) test(`sender with ${notify === null ? "null" : "omitted"} notify stays silent on ${terminal}`, async (t) => {
+  assert.equal(submissionOptions(source, notify).notify, null);
+  const { file } = await fixture(t);
   const runtime = new Fake();
-  const queue = new PromptQueue(asRuntime(runtime), () => {}, { notify: async () => { assert.fail("notification was not requested"); } });
-  try {
-    const first = await queue.submit("plain", "queue", { sender: source });
-    await queue.submit("steer without notify", "steer", { sender: source });
-    runtime.finish(); await tick();
-    assert.equal(queue.submission(first.id)!.state, "done");
-  } finally { queue.close(); }
+  const sent: SubmissionRecord[] = [];
+  const options = { file, notify: async (record: SubmissionRecord) => { sent.push(structuredClone(record)); } };
+  let queue = new PromptQueue(asRuntime(runtime), () => {}, options);
+  t.after(async () => queue.close());
+  const first = await queue.submit("plain", "queue", { sender: source, notify });
+  const steer = await queue.submit("steer without notify", "steer", { sender: source, notify });
+  assert.equal(steer.disposition, "steered");
+  if (terminal === "restart") {
+    queue.close();
+    queue = new PromptQueue(asRuntime(new Fake()), () => {}, options);
+  } else if (terminal === "exit") runtime.emit("exit");
+  else runtime.finish(terminal);
+  await tick(); await queue.flushNotifications();
+  const expected = terminal === "completed" ? "done" : terminal === "exit" || terminal === "restart" ? "interrupted" : terminal;
+  for (const id of [first.id, steer.id]) assert.equal(queue.submission(id)!.state, expected);
+  assert.deepEqual(sent, []);
+  const journal = JSON.parse(await readFile(file, "utf8"));
+  assert.equal(journal.records.length, 2);
+  for (const record of journal.records) {
+    assert.equal(record.notify, null);
+    assert.equal(record.notification, null);
+  }
 });
 async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
   const root = await realpath(await mkdtemp(join(tmpdir(), "durable-queue-")));
