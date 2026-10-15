@@ -1737,7 +1737,7 @@ test("Account settings save preferred name via PATCH /api/auth/profile", async (
   await expect(page.locator("aside").getByText("Dana Owner")).toBeVisible()
 })
 
-test("General settings show theme and English language, and toggle dark class", async ({ page }) => {
+test("General settings show theme and the language choice, and toggle dark class", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
   await openUserMenu(page)
@@ -1749,7 +1749,7 @@ test("General settings show theme and English language, and toggle dark class", 
   await expect(settings.getByRole("button", { name: "Light" })).toBeVisible()
   await expect(settings.getByRole("button", { name: "Dark" })).toBeVisible()
   await expect(settings.getByLabel("Language")).toHaveText("English")
-  await expect(settings.getByText("Only English is available.")).toBeVisible()
+  await expect(settings.getByText("Applies to the console. Embedded interfaces follow it when they load.")).toBeVisible()
 
   await expect(page.locator("html")).not.toHaveClass(/dark/)
   await page.getByRole("button", { name: "Dark" }).click()

@@ -1,3 +1,4 @@
+import { getLocale } from "@/i18n"
 import { type Theme } from "@/lib/theme"
 
 export const EMBED_THEME_MESSAGE_TYPE = "treer:embed-theme"
@@ -14,12 +15,11 @@ const asLook = (value: unknown): EmbedLook | undefined =>
   EMBED_LOOKS.find((look) => look === value)
 
 // Console look: optional localStorage "treer-look" (a|b|c). Unset means the
-// embedded UI keeps its own default or stored look. Language follows the browser.
+// embedded UI keeps its own default or stored look. Language is the console language (stored choice, else the browser).
 export function readEmbedAppearance(): EmbedAppearance {
   let look: EmbedLook | undefined
   try { look = asLook(window.localStorage.getItem(EMBED_LOOK_STORAGE_KEY)) } catch { look = undefined }
-  const language = (typeof navigator === "undefined" ? "" : navigator.language).toLowerCase()
-  return { look, lang: language.startsWith("zh") ? "zh" : "en" }
+  return { look, lang: getLocale() }
 }
 
 export function interfaceFrameKey(
