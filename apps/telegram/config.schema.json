@@ -151,10 +151,13 @@
             "minLength": 1,
             "maxLength": 256
           },
-          "default": [],
-          "description": "Agents allowed to admit/disable IM users through control messages. POC changes need no such list."
+          "description": "Restricts who may admit/disable IM users through control messages. Absent: any sender the bridge accepts (default). A list: only these Agent IDs. An empty list: nobody. POC changes are never restricted by this."
         }
       }
+    },
+    "bot_token_file": {
+      "type": "string",
+      "description": "Absolute path of a private (0600, owned by the bridge's user, not a symlink) file holding the bot token. Used when TELEGRAM_BOT_TOKEN is not set; keeps the token out of argv, the environment and this configuration."
     }
   },
   "anyOf": [

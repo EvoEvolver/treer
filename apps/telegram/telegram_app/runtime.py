@@ -4,6 +4,7 @@ import argparse
 import json
 import os
 import signal
+import stat
 import sys
 import threading
 from pathlib import Path
@@ -25,22 +26,51 @@ from .common import (
 )
 from .state import StateStore
 
+def read_token_file(path: str) -> str:
+    """The bot token from a private file, so it never appears in argv, the environment or the configuration.
+
+    The path must be absolute and name a regular file (not a symlink) owned by this user that no group or other
+    user can access; messages never include the file's content."""
+    if not os.path.isabs(path):
+        raise BridgeError("bot_token_file must be an absolute path")
+    try:
+        info = os.lstat(path)
+    except OSError as error:
+        raise BridgeError("bot_token_file cannot be read") from error
+    if not stat.S_ISREG(info.st_mode):
+        raise BridgeError("bot_token_file must be a regular file, not a symlink or directory")
+    if info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise BridgeError("bot_token_file must be owned by this user with mode 0600 (no group/other access)")
+    if info.st_size == 0 or info.st_size > 512:
+        raise BridgeError("bot_token_file must hold one token of at most 512 bytes")
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read(513)
+        return raw.decode("ascii").strip()
+    except (OSError, UnicodeDecodeError) as error:
+        raise BridgeError("bot_token_file cannot be read as an ASCII token") from error
+
+
 def load_config() -> tuple[Config, Path, str, str]:
     config_path = os.environ.get("TREER_APP_CONFIG")
     state_value = os.environ.get("TREER_APP_STATE_DIR")
     cli = os.environ.get("TREER_CLI", "treer")
-    token = os.environ.get("TELEGRAM_BOT_TOKEN")
-    if not config_path or not state_value or not cli or not token:
-        raise BridgeError(
-            "TREER_APP_CONFIG, TREER_APP_STATE_DIR, and TELEGRAM_BOT_TOKEN are required"
-        )
-    if len(token) > 256 or any(character.isspace() for character in token):
-        raise BridgeError("TELEGRAM_BOT_TOKEN is invalid")
+    if not config_path or not state_value or not cli:
+        raise BridgeError("TREER_APP_CONFIG and TREER_APP_STATE_DIR are required")
     with open(config_path, "rb") as handle:
         value = json.load(handle)
     if not isinstance(value, dict):
         raise BridgeError("Telegram config must contain a JSON object")
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    if token is None:
+        token_file = value.get("bot_token_file")
+        if not isinstance(token_file, str) or not token_file:
+            raise BridgeError("the bot token is required: TELEGRAM_BOT_TOKEN or bot_token_file in the config")
+        token = read_token_file(token_file)
+    if not token or len(token) > 256 or any(character.isspace() for character in token):
+        raise BridgeError("the bot token is invalid")
     allowed_keys = {
+        "bot_token_file",
         "api_base_url",
         "allowed_user_ids",
         "bindings",
@@ -122,7 +152,8 @@ def load_config() -> tuple[Config, Path, str, str]:
     control = _object(value.get("control", {}), "control")
     if set(control) - {"user_admin_agent_ids"}:
         raise BridgeError("control has unknown fields")
-    admins = _list(control.get("user_admin_agent_ids", []), "user_admin_agent_ids")
+    # Absent: any sender the bridge accepts may admit IM users (like POC changes). A list restricts it; [] means nobody.
+    admins = _list(control["user_admin_agent_ids"], "user_admin_agent_ids") if "user_admin_agent_ids" in control else None
     state_dir = Path(state_value)
     state_dir.mkdir(parents=True, exist_ok=True)
     return (
@@ -141,7 +172,7 @@ def load_config() -> tuple[Config, Path, str, str]:
             per_user_per_hour=_bounded_int(limits.get("per_user_per_hour", 60), "per_user_per_hour", 1, 10_000),
             per_conversation_per_minute=_bounded_int(limits.get("per_conversation_per_minute", 20), "per_conversation_per_minute", 1, 1_000),
             max_unreplied=_bounded_int(limits.get("max_unreplied", 50), "max_unreplied", 1, 10_000),
-            user_admin_agent_ids=frozenset(_string(item, "user admin Agent ID", 256) for item in admins),
+            user_admin_agent_ids=None if admins is None else frozenset(_string(item, "user admin Agent ID", 256) for item in admins),
         ),
         state_dir,
         cli,

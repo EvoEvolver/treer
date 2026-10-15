@@ -511,3 +511,90 @@ class AccountTest(unittest.TestCase):
             changes = state.reconcile_registry("telegram", "b", [], [])
             self.assertEqual(sorted(changes), ["binding 1:0 removed from config: disabled", "user 5 removed from config: disabled"])
             self.assertEqual(state.reconcile_registry("telegram", "b", [], []), [], "idempotent")
+
+
+class TokenFileTest(unittest.TestCase):
+    SECRET = "123456:SECRET-token-value"
+
+    def load(self, config: dict[str, Any], *, env_token: str | None = None) -> tuple[Any, ...]:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "config.json"
+            path.write_text(json.dumps({"allowed_user_ids": [5], **config}), encoding="utf-8")
+            old = {k: os.environ.get(k) for k in ("TREER_APP_CONFIG", "TREER_APP_STATE_DIR", "TELEGRAM_BOT_TOKEN")}
+            os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+            os.environ.update(TREER_APP_CONFIG=str(path), TREER_APP_STATE_DIR=str(Path(directory) / "state"))
+            if env_token is not None:
+                os.environ["TELEGRAM_BOT_TOKEN"] = env_token
+            try:
+                return telegram_runtime().load_config()
+            finally:
+                for key, value in old.items():
+                    os.environ.pop(key, None) if value is None else os.environ.__setitem__(key, value)
+
+    def token_file(self, directory: Path, content: bytes = b"123456:SECRET-token-value\n", mode: int = 0o600) -> Path:
+        path = directory / "bot-token"
+        path.write_bytes(content)
+        path.chmod(mode)
+        return path
+
+    def test_the_token_is_read_from_a_private_file(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.token_file(Path(directory))
+            self.assertEqual(self.load({"bot_token_file": str(path)})[3], self.SECRET, "the trailing newline is stripped")
+            self.assertEqual(self.load({"bot_token_file": str(path)}, env_token="9:env")[3], "9:env", "the environment variable still wins")
+
+    def test_unsafe_or_missing_token_files_are_refused_without_leaking_the_token(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            good = self.token_file(root)
+            link = root / "link"
+            link.symlink_to(good)
+            cases = {
+                "group readable": self.token_file(root, mode=0o640),
+                "world readable": self.token_file(root, mode=0o644),
+                "symlink": link,
+                "directory": root,
+                "empty": self.token_file(root, b""),
+                "oversized": self.token_file(root, b"1:" + b"a" * 600),
+                "non ascii": self.token_file(root, "1:密钥".encode()),
+                "relative": "bot-token",
+                "missing": root / "nope",
+            }
+            for name, path in cases.items():
+                with self.assertRaises(BridgeError, msg=name) as caught:
+                    self.load({"bot_token_file": str(path)})
+                self.assertNotIn("SECRET", str(caught.exception), name)
+            for content in (b"two words", b"1:a b"):
+                with self.assertRaises(BridgeError):
+                    self.load({"bot_token_file": str(self.token_file(root, content))})
+        with self.assertRaises(BridgeError):
+            self.load({})                                         # neither the variable nor a file
+        with self.assertRaises(BridgeError):
+            self.load({"bot_token_file": ""})
+
+    def test_user_admin_is_open_by_default_and_a_list_restricts_it(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(self.token_file(Path(directory)))
+            self.assertIsNone(self.load({"bot_token_file": path})[0].user_admin_agent_ids, "absent: any accepted sender")
+            self.assertEqual(self.load({"bot_token_file": path, "control": {"user_admin_agent_ids": []}})[0].user_admin_agent_ids, frozenset(), "empty list: nobody")
+            self.assertEqual(self.load({"bot_token_file": path, "control": {"user_admin_agent_ids": ["ag_a"]}})[0].user_admin_agent_ids, frozenset({"ag_a"}))
+
+
+class OpenUserAdminTest(PocBase):
+    admins = None
+
+    def test_any_accepted_sender_may_admit_a_user_and_it_is_audited(self) -> None:
+        result, _ = self.result(self.control("agent-x", {"im": "users.set", "user_id": 777, "label": "Dana"}))
+        self.assertEqual(result["user"], {"user_id": "777", "label": "Dana", "enabled": True})
+        self.assertEqual(self.audit()[0]["op"], "users.set")
+        self.assertEqual(self.audit()[0]["actor"], "agent:agent-x")
+        self.say("hi", user=777)
+        self.assertEqual(self.core_sends()[-1]["external_source"]["metadata"]["user_label"], "Dana")
+
+
+class EmptyUserAdminTest(PocBase):
+    admins = frozenset()
+
+    def test_an_explicit_empty_list_still_means_nobody(self) -> None:
+        result, _ = self.result(self.control("agent-x", {"im": "users.set", "user_id": 777, "label": "Dana"}))
+        self.assertEqual(result["error"]["code"], "forbidden")

@@ -21,7 +21,11 @@ reconciles** the POC registry (below): `bindings` (chat/topic → target Agent) 
 change made at runtime (in the chat, by a control message, `users.set`) is
 runtime-owned and is never overwritten by the file. See *Revoking access*. At least one of `allowed_user_ids`/`users` is required;
 `bindings` may be empty because a chat can be bound with `/poc`. Inbound Messages are authored by the bridge Agent, not by a trusted Treer human
-identity. Keep the bot token outside configuration and logs.
+identity. Keep the bot token outside configuration and logs: put it in a private file and
+name it with `"bot_token_file": "/absolute/path"` in the configuration (used when
+`TELEGRAM_BOT_TOKEN` is not set). The file must be a regular file (not a symlink) owned by
+the bridge's user with mode 0600, hold one ASCII token of at most 512 bytes, and its content
+is never echoed in an error; the token then appears in neither argv nor the environment.
 
 Back up `telegram-state.sqlite3` with its WAL files or SQLite's online backup
 API. One active instance should own a bot token and state database. Ambiguous
@@ -85,10 +89,12 @@ Redelivery is safe: the audit row is unique per Core delivery, so a change is
 applied once and the result is re-sent under the same idempotency key. A relayed
 reply whose whole body happens to be JSON with an `im` key is treated as control.
 
-**Admitting IM users** is a bigger trust decision than choosing a POC, so
-`users.set` (and `im-poc user-set`) works only for Agent IDs listed in
-`control.user_admin_agent_ids` (default none); otherwise edit the config's
-`users` and restart. Unknown or disabled users are refused.
+**Admitting IM users** (`users.set`, `im-poc user-set`) is open to any sender the
+bridge accepts by default, like POC changes, and is audited the same way. Admitting an
+external person to talk to the POC is a wider trust decision than choosing a POC, so
+`control.user_admin_agent_ids` can restrict it to a list of Agent IDs (an empty list:
+nobody; then edit the config's `users` and restart). Unknown or disabled users are
+refused either way.
 
 ## Limits, audit and revoking access
 
@@ -144,3 +150,36 @@ identity may `message receive` has not been verified. `/status` and `/poc AGENT`
 use `treer agent show`, so the bridge needs Policy to read the Agents it routes to.
 Slack and other adapters are not implemented; the registry and control protocol are
 channel-agnostic, the Telegram delivery state and Bot API client are not yet.
+
+## Running the bridge from a release directory
+
+The bridge is a long-running process, not an App: run it as a managed Agent (kind `command`)
+whose saved startup command points at an immutable export of `apps/telegram` at a full commit,
+so the Agent never executes a mutable checkout:
+
+```sh
+SHA=<full 40-character commit on origin/main>
+ROOT=/Users/dooms/apps-deployed/telegram-bridge
+git -C /path/to/repo archive --prefix="releases/$SHA/" "$SHA:apps/telegram" | tar -x -C "$ROOT"
+python3 -m unittest discover -s "$ROOT/releases/$SHA/tests" -p 'test_*.py'   # optional gate
+ln -sfn "releases/$SHA" "$ROOT/current"
+treer agent admin startup set /infra/telegram-bridge --cwd apps-deployed/telegram-bridge -- \
+  env TREER_APP_CONFIG=/Users/dooms/.config/treer/telegram/config.json \
+      TREER_APP_STATE_DIR=/Users/dooms/.local/share/treer/apps/telegram \
+      /absolute/stable/python3 current/telegram.py
+```
+
+Upgrade by exporting the next commit, repointing `current` and `treer agent restart`; keep the
+previous release for rollback (the SQLite state, including bindings and audit, lives in
+`TREER_APP_STATE_DIR` and is independent of the release). Config example (the placeholder
+user/binding `0` never matches a real Telegram ID; replace it with the real numeric user ID,
+which is also the chat ID of that user's private chat, and restart. Removing an entry disables
+the registry row it created):
+
+```json
+{
+  "bot_token_file": "/Users/dooms/.config/treer/telegram/bot-token",
+  "users": [{"id": 0, "label": "REPLACE-with-the-telegram-user-id"}],
+  "bindings": [{"chat_id": 0, "target_agent_id": "ag_POC_AGENT_ID", "wake_agent": false}]
+}
+```
