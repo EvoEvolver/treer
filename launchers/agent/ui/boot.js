@@ -1,5 +1,6 @@
 // Runs synchronously from <head>, before first paint. It decides the look and the theme and exposes them to the UI.
 //   look : ?look=a|b|c  >  localStorage "treer-launcher-look"  >  default (b)
+//   look  also from the parent message (session only). lang: ?lang=en|zh at load (the message carries it but a language change needs a reload)
 //   theme: parent postMessage {type:"treer:embed-theme"} or ?theme=  >  stored mode "treer-launcher-theme"  >  system preference
 // Look and theme are independent (3 looks x light/dark). Every input is validated against a fixed list.
 (() => {
@@ -28,6 +29,8 @@
   addEventListener("message", (event) => {
     if (event.source !== parent || event.data?.type !== "treer:embed-theme" || !okTheme(event.data.theme)) return;
     override = event.data.theme;
+    const sent = okLook(event.data.look);
+    if (sent) look = sent; // session-only: the console's look is not written to the launcher's own storage
     apply();
   });
   window.TreerAppearance = {

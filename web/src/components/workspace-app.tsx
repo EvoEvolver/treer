@@ -20,7 +20,8 @@ import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
 import { ApiError, api, machineName, proxyUrl, websocketUrl, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkloadTreeState } from "@/lib/api"
 import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
 import { DeleteTarget, MainView, PREVIEW_CONNECT, PREVIEW_INSTALL, PREVIEW_ORG, PREVIEW_PROFILES, PREVIEW_USER, PREVIEW_WORKSPACE, RenameTarget, TerminalState, activeStatuses, arrayBufferToBase64, authorizationReturnUrl, controlCharacter, defaultAgentName, defaultProfileAgentName, formatBytes, initials, machineOnline, replaceWorkspace, visibleWorkspaceSnapshot, workspacePath } from "@/lib/control-plane"
-import { interfaceFrameKey, postEmbedTheme, withEmbedTheme } from "@/lib/embed-ui"
+import { ErrorToast } from "@/components/error-toast"
+import { interfaceFrameKey, postEmbedTheme, readEmbedAppearance, withEmbedTheme } from "@/lib/embed-ui"
 import { clearFirstRunTour, firstRunTourMode, shouldAutoStartFirstRunTour, startFirstRunTour, stopFirstRunTour, type FirstRunTourHost } from "@/lib/first-run-tour"
 import { readTheme, subscribeTheme, type Theme } from "@/lib/theme"
 import { agentPath } from "@/lib/workload-path"
@@ -439,12 +440,14 @@ function WorkspaceAppContent() {
       return withEmbedTheme(
         proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(selectedAgentApp.app_id)}/ui/`),
         theme,
+        readEmbedAppearance(),
       )
     }
     if (!workspaceId || !selectedAgent || !selectedAgentInterface) return null
     return withEmbedTheme(
       proxyUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(selectedAgent.agent_id)}/interface/ui/`),
       theme,
+      readEmbedAppearance(),
     )
     // Theme is snapshotted when the Agent interface loads or reloads so toggling
     // Treer appearance does not remount the iframe. Live updates use postMessage
@@ -521,7 +524,7 @@ function WorkspaceAppContent() {
   useEffect(() => subscribeTheme(setTheme), [])
 
   useEffect(() => {
-    postEmbedTheme(interfaceFrameRef.current, theme)
+    postEmbedTheme(interfaceFrameRef.current, theme, readEmbedAppearance())
   }, [theme])
 
   useEffect(() => {
@@ -1306,7 +1309,7 @@ function WorkspaceAppContent() {
       </section>
     </main>
 
-    {error && <div className="fixed bottom-4 left-1/2 z-[90] flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-md border bg-background px-4 py-3 text-sm shadow-lg"><span className="truncate">{error}</span><Button size="sm" variant="ghost" onClick={() => setError(null)}>Dismiss</Button></div>}
+    <ErrorToast message={error} onDismiss={() => setError(null)} />
 
     <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} onUserChange={setUser} onError={showError} />
 

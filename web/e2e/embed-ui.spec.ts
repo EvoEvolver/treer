@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from "@playwright/test"
+import { embedThemeMessage, withEmbedTheme } from "../src/lib/embed-ui"
 
 const NOW = new Date().toISOString()
 
@@ -160,7 +161,7 @@ async function mockInterfaceUiContent(page: Page) {
     await route.fulfill({
       status: 200,
       contentType: "text/html",
-      body: `<!doctype html><html><body><h1 data-testid="agent-app">Agent dashboard for ag-ui</h1><script>window.addEventListener("message",(event)=>{if(event.data&&event.data.type==="treer:embed-theme"){document.documentElement.dataset.embedTheme=event.data.theme}})</script></body></html>`,
+      body: `<!doctype html><html><body><h1 data-testid="agent-app">Agent dashboard for ag-ui</h1><script>window.addEventListener("message",(event)=>{if(event.data&&event.data.type==="treer:embed-theme"){document.documentElement.dataset.embedTheme=event.data.theme;document.documentElement.dataset.embedLook=event.data.look||"";document.documentElement.dataset.embedLang=event.data.lang||""}})</script></body></html>`,
     })
   })
 }
@@ -319,7 +320,7 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await page.getByRole("button", { name: /^Soul Archive / }).click()
     const frame = page.locator("iframe[title='/Soul Archive interface']")
     await expect(frame).toBeVisible()
-    await expect(frame).toHaveAttribute("src", /\/apps\/app-1\/ui\/\?theme=light$/)
+    await expect(frame).toHaveAttribute("src", /\/apps\/app-1\/ui\/\?theme=light&lang=en$/)
     await expect(page.frameLocator("iframe[title='/Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
     await expect(page.locator(".xterm")).toBeHidden()
 
@@ -609,4 +610,119 @@ test("a new interface registered_at remounts the iframe", async ({ page }) => {
 
   await expect.poll(() => uiHits, { timeout: 5000 }).toBeGreaterThan(0)
   await expect(frame).toBeVisible()
+})
+
+test("embed URL and message carry only whitelisted look and lang", () => {
+  const url = new URL(withEmbedTheme("https://proxy.example.test/ui/", "dark", { look: "c", lang: "zh" }))
+  expect(url.search).toBe("?theme=dark&look=c&lang=zh")
+  const bad = withEmbedTheme("https://proxy.example.test/ui/", "light", { look: "x" as never, lang: "fr" as never })
+  expect(new URL(bad).search).toBe("?theme=light")
+  expect(embedThemeMessage("dark", { look: "a", lang: "en" })).toEqual({ type: "treer:embed-theme", theme: "dark", look: "a", lang: "en" })
+  expect(embedThemeMessage("light", { look: "x" as never })).toEqual({ type: "treer:embed-theme", theme: "light" })
+})
+
+test("embedded UI receives the console look and browser language", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("treer-look", "c"))
+  await page.goto("/")
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
+  const frame = page.locator("iframe[title='/dashboard interface']")
+  await expect(frame).toHaveAttribute("src", /[?&]look=c(?:&|$)/)
+  await expect(frame).toHaveAttribute("src", /[?&]lang=en(?:&|$)/)
+  // The live theme message repeats the look so a running UI can follow without a reload.
+  await page.getByRole("button", { name: "User menu" }).click()
+  await page.getByRole("menuitem", { name: "Settings" }).click()
+  const settings = page.getByRole("dialog", { name: "Settings" })
+  await settings.getByRole("navigation", { name: "Settings" }).getByRole("button", { name: "General" }).click()
+  await settings.getByRole("button", { name: "Dark" }).click()
+  const inner = page.frameLocator("iframe[title='/dashboard interface']").locator("html")
+  await expect(inner).toHaveAttribute("data-embed-look", "c")
+  await expect(inner).toHaveAttribute("data-embed-lang", "en")
+})
+
+test("an unknown stored look is not forwarded", async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem("treer-look", "<script>"))
+  await page.goto("/")
+  await page.locator("aside").getByText("Tree", { exact: true }).click()
+  await page.getByRole("button", { name: /^dashboard / }).click()
+  const src = await page.locator("iframe[title='/dashboard interface']").getAttribute("src")
+  expect(new URL(src!, "http://x").searchParams.has("look")).toBe(false)
+})
+
+test("a failed request announces its error toast as an alert", async ({ page }) => {
+  await page.route(/\/api\/organizations$/, (route) => route.request().method() === "POST"
+    ? route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: { message: "Backend unavailable" } }) })
+    : route.fallback())
+  await page.goto("/")
+  await page.getByRole("button", { name: "Organization settings" }).click()
+  await page.getByRole("button", { name: "New organization" }).click()
+  const dialog = page.getByRole("dialog")
+  await dialog.getByRole("textbox").fill("Second")
+  await dialog.getByRole("button", { name: /create/i }).last().click()
+  const toast = page.getByRole("alert").filter({ hasText: "Backend unavailable" })
+  await expect(toast).toBeVisible()
+  await toast.getByRole("button", { name: "Dismiss" }).click()
+  await expect(toast).toHaveCount(0)
+})
+
+test("prefers-reduced-motion removes animation and transition time", async ({ page }) => {
+  await page.emulateMedia({ reducedMotion: "reduce" })
+  await page.goto("/")
+  const durations = await page.evaluate(() => {
+    const probe = document.createElement("div")
+    probe.style.cssText = "transition: opacity 2s; animation: spin 2s infinite"
+    document.body.append(probe)
+    const style = getComputedStyle(probe)
+    const result = [style.transitionDuration, style.animationDuration, style.animationIterationCount]
+    probe.remove()
+    return result
+  })
+  expect(durations).toEqual(["1e-05s", "1e-05s", "1"])
+})
+
+test.describe("workload tree keyboard navigation", () => {
+  test.beforeEach(async ({ page }) => {
+    await page.route("**/api/workspaces/ws-1/workload-tree", (route) => ok(route, {
+      folders: [{ folder_id: "f-1", name: "Team", parent_id: null }],
+      placements: [{ agent_id: "ag-tty", folder_id: "f-1", position: 0 }],
+    }))
+  })
+
+  test("one tab stop with arrow, Home, End, Right and Left", async ({ page }) => {
+    await page.goto("/")
+    await page.locator("aside").getByText("Tree", { exact: true }).click()
+    const tree = page.getByRole("tree", { name: "Workspace workloads" })
+    const primaries = tree.locator("[data-tree-primary]")
+    await expect(primaries.first()).toBeVisible()
+    // Roving tabindex: exactly one primary button is in the tab order.
+    await expect(tree.locator("[data-tree-primary][tabindex='0']")).toHaveCount(1)
+    await expect(tree.locator("[data-tree-actions]").first()).toHaveAttribute("tabindex", "-1")
+
+    const folder = tree.getByRole("treeitem", { name: "Team" })
+    await folder.locator("[data-tree-primary]").first().focus()
+    await expect(folder).toHaveAttribute("aria-expanded", /true|false/)
+    if ((await folder.getAttribute("aria-expanded")) === "true") await page.keyboard.press("ArrowLeft")
+    await expect(folder).toHaveAttribute("aria-expanded", "false")
+    await page.keyboard.press("ArrowRight")
+    await expect(folder).toHaveAttribute("aria-expanded", "true")
+    await page.keyboard.press("ArrowRight")
+    await expect(page.locator(":focus")).toHaveAttribute("data-tree-key", "ag-tty")
+    await page.keyboard.press("ArrowRight")
+    await expect(page.locator(":focus")).toHaveAttribute("data-tree-actions", "")
+    await page.keyboard.press("ArrowLeft")
+    await expect(page.locator(":focus")).toHaveAttribute("data-tree-key", "ag-tty")
+    await page.keyboard.press("ArrowLeft")
+    await expect(page.locator(":focus")).toHaveAttribute("data-tree-key", "f-1")
+    await page.keyboard.press("End")
+    const count = await primaries.count()
+    await expect(page.locator(":focus")).toHaveAttribute("data-tree-key", (await primaries.nth(count - 1).getAttribute("data-tree-key"))!)
+    await page.keyboard.press("Home")
+    await expect(page.locator(":focus")).toHaveAttribute("data-tree-key", (await primaries.first().getAttribute("data-tree-key"))!)
+    await page.keyboard.press("ArrowDown")
+    await page.keyboard.press("ArrowUp")
+    await expect(page.locator(":focus")).toHaveAttribute("data-tree-key", (await primaries.first().getAttribute("data-tree-key"))!)
+    // The focused row is the single tab stop.
+    await expect(tree.locator("[data-tree-primary][tabindex='0']")).toHaveCount(1)
+    await expect(page.locator(":focus")).toHaveAttribute("tabindex", "0")
+  })
 })

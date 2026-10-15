@@ -164,6 +164,7 @@ just agent-launcher-test
 just updater-test
 just messaging-e2e
 just web-test
+(cd web && pnpm run check:contrast)
 just ais-e2e
 just service-canary
 just machine-artifacts-test
