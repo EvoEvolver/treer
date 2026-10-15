@@ -192,6 +192,16 @@ Tests should prove that:
   gateway reproducing per-request signing, header/cookie sanitization and Host
   rewriting, with separate tests of actual Proxy handlers and signing.
 
+An App that shells out to `treer` must test it through a fake CLI that validates
+every call with `apps/cli_contract.py` (see the Telegram and Mail fakes). The
+contract is `apps/cli-contract.json`, generated from the real clap definitions;
+the Rust test `cli_contract_snapshot_matches_the_real_parser` fails when it is
+stale (`TREER_UPDATE_CLI_CONTRACT=1 cargo test -p treer-agent-server cli_contract`
+regenerates it). A fake must reject unknown subcommands and options, never
+accept what the real parser or Controller refuses. Contract tests cannot see
+Controller-side semantics (for example, `--external-source-file` must be `-`);
+keep such rules in the fake as well.
+
 Keep the App's README focused on deployment, configuration, state, backup, and
 operator concerns. Put the concise runtime manual in the content served from
 `/`, and keep both documents synchronized with executable behavior and tests.

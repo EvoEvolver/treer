@@ -1,10 +1,8 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import sys
-import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -159,7 +157,6 @@ class TelegramBridge:
             "message_id": str(telegram_message_id),
             "metadata": {"user_id": str(user_id), "user_label": label, "update_id": str(update_id)},
         }
-        source_path = self._write_source(update_id, source)
         arguments = ["message", "send", "--to", binding.target_agent_id]
         for context_id in context_ids:
             arguments.extend(["--context", context_id])
@@ -168,18 +165,12 @@ class TelegramBridge:
                 "--idempotency-key",
                 f"telegram-{self.bot_id}-{update_id}",
                 "--external-source-file",
-                str(source_path),
-                "--body-file",
                 "-",
+                f"--body={text}",
             ]
         )
-        try:
-            response = self.cli.run(arguments, stdin=text)
-        finally:
-            try:
-                source_path.unlink()
-            except FileNotFoundError:
-                pass
+        # The Controller cannot read client-local files: the source goes over stdin and the text as --body=TEXT (the joined form keeps text starting with '-' from being parsed as an option).
+        response = self.cli.run(arguments, stdin=json.dumps(source, separators=(",", ":")))
         core_message = _object(response.get("message"), "Core Message")
         core_message_id = _string(core_message.get("message_id"), "Core Message ID", 256)
         self.state.record_inbound(CHANNEL, self.bot_id, str(user_id), conversation)
@@ -296,24 +287,6 @@ class TelegramBridge:
             self.bot.send_message(chat_id, thread_id, text, None)
         except TelegramError:
             pass
-
-    def _write_source(self, update_id: int, value: dict[str, Any]) -> Path:
-        descriptor, name = tempfile.mkstemp(
-            prefix=f"telegram-source-{update_id}-", suffix=".json", dir=self.state_dir
-        )
-        path = Path(name)
-        try:
-            os.fchmod(descriptor, 0o600)
-            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-                json.dump(value, handle, separators=(",", ":"))
-        except Exception:
-            try:
-                os.close(descriptor)
-            except OSError:
-                pass
-            path.unlink(missing_ok=True)
-            raise
-        return path
 
     def process_pending_wakes(self) -> None:
         for wake in self.state.pending_wakes():
