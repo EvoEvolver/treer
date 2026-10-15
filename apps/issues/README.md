@@ -167,9 +167,12 @@ author's Policy decides what a path means; the result must also be an Agent in
 the author's directory. At most 10 paths are resolved per event, and none when
 notifications are off. An ambiguous or unknown mention is ignored and reported:
 `notification.unresolved_mentions` lists it and, for a duplicated name,
-`notification.mention_candidates` offers the exact spellings (tree paths from
-`treer agent ls -R /` under the App identity, cached for a minute, otherwise
-stable IDs; only Agents the author can see are offered). The UI toast shows
+`notification.mention_candidates` offers the exact spellings: stable IDs, or a tree
+path when the author is allowed to see it. Paths come from `treer agent ls -R /`
+under the App identity (cached for a minute) but each one is shown only after
+Core resolves it to the same Agent with the **author's own token** (at most 10
+verification calls per event); a path the author's Policy hides is replaced by
+the stable ID, so the App identity never discloses tree paths. The UI toast shows
 them. Only Agents can be mentioned; the creator therefore hears plain comments
 only when mentioned (`@author`).
 

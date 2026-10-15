@@ -98,6 +98,23 @@ class Application:
                     resolved[path.lower()] = entry['id']
         return resolved
 
+    def path_verifier(self, token, budget=10):
+        """verify(path, agent_id): does Core, asked with the AUTHOR's token, resolve this tree path to that Agent?
+        At most `budget` Core calls per event; anything unverifiable counts as no."""
+        left = [budget]
+
+        def verify(path, agent_id):
+            if left[0] <= 0:
+                return False
+            left[0] -= 1
+            try:
+                auth = self.identity_provider()
+                answer = auth.request('POST', f'/api/apps/{auth.service_id}/recipients/resolve', token, body={'recipients': [path]})
+            except Error:
+                return False
+            return any(isinstance(e, dict) and e.get('kind') == 'agent' and e.get('id') == agent_id for e in answer.get('recipients') or [])
+        return verify
+
     def mutation(self, issue_id, action, body, actor, directory, token):
         paths = self.resolve_paths(action, body, token)
         issue_id, event_id, event, recipients, notice, missed = self.store.mutate(issue_id, action, body, actor, directory, paths)
@@ -132,7 +149,8 @@ class Application:
                     notification['throttled'] = len(throttled)
         if missed:
             notification = dict(notification, unresolved_mentions=missed)
-            options = {t: c for t in missed if (c := candidates(t, directory, self.tree_paths.get))}
+            verify = self.path_verifier(token)
+            options = {t: c for t in missed if (c := candidates(t, directory, self.tree_paths.get, verify))}
             if options:
                 notification['mention_candidates'] = options
         self.store.notification(event_id, notification)

@@ -394,8 +394,9 @@ class PathMentionTest(Base):
         self.mutate(id, 'comment', {'body': '@/dev/author'}, LEAD)
         self.assertEqual(self.last()['recipients'], ['ag_author', 'ag_work'])
 
-    def test_ambiguous_names_offer_path_candidates(self):
+    def test_ambiguous_names_offer_path_candidates_the_author_may_see(self):
         self.app.tree_paths = TreePaths(runner=lambda args: (0, json.dumps({'agents': [{'agent_id': k, 'path': v} for k, v in TREE.items()]})), clock=lambda: self.now)
+        self.auth.resolvable.update({'/treer-dev-team/leader': 'ag_lead1', '/mariana/forjador/leader': 'ag_lead2'})
         id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
         self.now += WINDOW + 1
         result = self.mutate_np(id, 'comment', {'body': 'cc @leader'}, LEAD)
@@ -403,6 +404,32 @@ class PathMentionTest(Base):
         self.assertEqual(result['notification']['mention_candidates'], {'leader': ['/treer-dev-team/leader', '/mariana/forjador/leader']},
                          'only Agents in the author\'s directory are offered; the hidden one is not')
         self.assertEqual(result['activity'][0]['notification']['mention_candidates'], result['notification']['mention_candidates'])
+        self.assertEqual({t for t, _ in self.auth.resolve_calls}, {'token-usr_lead'}, 'every path was verified with the author\'s own token')
+
+    def test_candidate_paths_the_author_cannot_resolve_are_never_disclosed(self):
+        """Policy agent.tree.read: the App identity can list every path, the author may not see them."""
+        self.app.tree_paths = TreePaths(runner=lambda args: (0, json.dumps({'agents': [{'agent_id': k, 'path': v} for k, v in TREE.items()]})), clock=lambda: self.now)
+        self.auth.resolvable.update({'/treer-dev-team/leader': 'ag_lead1'})          # lead2's path is denied/invisible to the author
+        id = self.mutate_np(None, 'create', {'title': 't', 'assignee': 'ag_work'})['issue']['id']
+        self.now += WINDOW + 1
+        result = self.mutate_np(id, 'comment', {'body': 'cc @leader'}, LEAD)
+        self.assertEqual(result['notification']['mention_candidates'], {'leader': ['/treer-dev-team/leader', 'ag_lead2']})
+        self.assertNotIn('mariana', json.dumps(result), 'a path the author cannot resolve appears nowhere in the response')
+        self.auth.resolvable.clear()                                                 # nothing resolvable: IDs only
+        self.now += WINDOW + 1
+        result = self.mutate_np(id, 'comment', {'body': 'cc @leader again'}, LEAD)
+        self.assertEqual(result['notification']['mention_candidates'], {'leader': ['ag_lead1', 'ag_lead2']})
+        self.assertNotIn('/', json.dumps(result['notification']['mention_candidates']))
+
+    def test_a_resolve_that_returns_a_different_agent_does_not_verify_the_path(self):
+        self.app.tree_paths = TreePaths(runner=lambda args: (0, json.dumps({'agents': [{'agent_id': 'ag_lead1', 'path': '/treer-dev-team/leader'}]})), clock=lambda: self.now)
+        self.auth.resolvable['/treer-dev-team/leader'] = 'ag_lead2'
+        verify = self.app.path_verifier('t')
+        self.assertFalse(verify('/treer-dev-team/leader', 'ag_lead1'))
+        self.assertTrue(verify('/treer-dev-team/leader', 'ag_lead2'))
+        small = self.app.path_verifier('t', budget=1)
+        self.assertTrue(small('/treer-dev-team/leader', 'ag_lead2'))
+        self.assertFalse(small('/treer-dev-team/leader', 'ag_lead2'), 'verification calls are capped per event')
 
     def test_candidates_fall_back_to_ids_when_paths_are_unavailable_and_never_call_needlessly(self):
         calls = []
