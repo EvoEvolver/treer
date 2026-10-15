@@ -134,6 +134,14 @@ the revision remains local to a Proxy process rather than a durable global clock
 
 ### Output retention and recovery
 
+Restore reports record `Started` or `Attached` from the action taken under the
+Controller recovery lock, not by comparing wall-clock timestamps. Host process
+timestamps have millisecond wire precision; comparing them with a higher
+precision request timestamp previously mislabeled fast spawns as `Attached`.
+The mock-Host regression uses a fixed earlier timestamp across generations and
+checks concurrent restore (one spawn, one attachment), lost-ACK attachment,
+missed-exit respawn, and preservation of stopped/revoked startup intent.
+
 Controller inventory reconciliation must preserve the cached output and its
 revision for the same process generation and stream epoch, including exited
 Agent and App instances. An inventory-only update is not an empty transcript.

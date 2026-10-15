@@ -1297,6 +1297,11 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
     let host_spawn_count = spawn_count.clone();
     let inventory_failed = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let host_inventory_failed = inventory_failed.clone();
+    // Host timestamps are wall-clock values encoded at millisecond precision.
+    // A fresh spawn can compare <= the restore request (same millisecond or
+    // clock adjustment). Keep all generations at a fixed earlier time so the
+    // report must describe the actual branch, rather than infer it from time.
+    let host_started_at = Utc::now() - chrono::Duration::days(1);
     let host_task = tokio::spawn(async move {
         let mut stream = listener.accept().await.unwrap();
         let mut processes: Vec<HostProcessInfo> = vec![];
@@ -1365,7 +1370,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
                     );
                     assert!(!request.env.contains_key("TREER_ENROLLMENT_KEY"));
                     host_spawn_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    let now = Utc::now();
+                    let now = host_started_at;
                     let process = HostProcessInfo {
                         process_id: request.process_id,
                         pid: Some(1234),
@@ -1449,10 +1454,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
         runtime.restore_runtime(&active)
     );
     assert_eq!(first.items[0].state, RuntimeRestoreState::Started);
-    assert!(matches!(
-        second.items[0].state,
-        RuntimeRestoreState::Started | RuntimeRestoreState::Attached
-    ));
+    assert_eq!(second.items[0].state, RuntimeRestoreState::Attached);
     assert_eq!(first.items[1].state, RuntimeRestoreState::IdentityRevoked);
     assert_eq!(first.items[2].state, RuntimeRestoreState::SkippedStopped);
     assert_eq!(spawn_count.load(std::sync::atomic::Ordering::SeqCst), 1);
