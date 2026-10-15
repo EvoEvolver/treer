@@ -97,6 +97,8 @@ function serveFile(response: ServerResponse, file: string) {
   const headers: Record<string, string> = {
     "cache-control": "no-store",
     "content-type": mime(file),
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
   };
   if (extname(file) === ".html") {
     // The page ships no inline styles or scripts, so it runs under a strict policy (no 'unsafe-inline', no plugins, no foreign forms).

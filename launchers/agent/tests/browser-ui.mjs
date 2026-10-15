@@ -53,6 +53,9 @@ try {
 
   // Headers: the React page gets the strict policy, the legacy page is unchanged.
   const csp = (await fetch(url())).headers.get("content-security-policy") ?? "";
+  const asset = await fetch(url().replace(/index\.html$/, "ui.js"));
+  assert.equal(asset.headers.get("x-content-type-options"), "nosniff");
+  assert.equal(asset.headers.get("referrer-policy"), "no-referrer");
   assert.match(csp, /script-src 'self'/);
   assert.match(csp, /style-src 'self'(?:;|$)/);
   assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
@@ -87,6 +90,7 @@ try {
   await expect(chat.locator(".markdown a", { hasText: "the docs" })).toHaveAttribute("rel", "noopener noreferrer");
   await expect(chat.locator(".markdown a", { hasText: "the docs" })).toHaveAttribute("target", "_blank");
   assert.deepEqual(await page.evaluate(() => ({ xss: window.xss ?? null, scripts: document.querySelectorAll(".chat script").length, handlers: document.querySelectorAll(".chat [onerror], .chat [onload]").length, js: document.querySelectorAll('.chat a[href^="javascript"]').length, remote: document.querySelectorAll('.chat img[src^="http"]').length })), { xss: null, scripts: 0, handlers: 0, js: 0, remote: 0 }, "hostile markdown must stay inert");
+  assert.deepEqual(await page.evaluate(() => ({ schemes: [...document.querySelectorAll(".chat a[href]")].map((a) => a.getAttribute("href")).filter((h) => (/^[a-z][a-z0-9+.-]*:/i.test(h) && !/^(https?:|mailto:)/i.test(h)) || h.startsWith("//") || h.includes("\\")), forms: document.querySelectorAll(".chat form, .chat input, .chat button.x, .chat [name]").length })), { schemes: [], forms: 0 }, "no foreign-scheme, protocol-relative or backslash links survive; no forms");
   const groups = chat.locator(".grp");
   await expect(groups).toHaveCount(2);
   await expect(groups.first().locator(".sum")).toHaveAttribute("aria-expanded", "false");

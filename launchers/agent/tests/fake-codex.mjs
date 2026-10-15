@@ -32,7 +32,7 @@ if (process.env.FAKE_CODEX_RICH) {
     { id: "think-1", type: "reasoning", summary: ["Compare the storage options"], text: "" },
     { id: "cmd-1", type: "commandExecution", command: "npm test", aggregatedOutput: "ok 1 - queue\nok 2 - store", status: "completed" },
     { id: "cmd-2", type: "commandExecution", command: "node --test tests/durable-queue.test.ts", aggregatedOutput: "not ok 1 - fixture path", status: "failed" },
-    { id: "rich-1", type: "agentMessage", text: "## Result\n\nSee [the docs](https://example.test/docs) and [bad](javascript:window.xss=3).\n\n<img src=x onerror=\"window.xss=1\">\n\n<svg onload=\"window.xss=2\"></svg><script>window.xss=4</script>\n\n![remote](https://example.test/x.png)\n\n- one\n- two\n\n```ts\nconst a = 1;\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n![pixel](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==)" },
+    { id: "rich-1", type: "agentMessage", text: "## Result\n\nSee [the docs](https://example.test/docs) and [bad](javascript:window.xss=3), [ftp](ftp://example.test/x), [tel](tel:123), [slash](/\\\\evil.test/x).<form><input name=\"x\"><button>go</button></form>\n\n<img src=x onerror=\"window.xss=1\">\n\n<svg onload=\"window.xss=2\"></svg><script>window.xss=4</script>\n\n![remote](https://example.test/x.png)\n\n- one\n- two\n\n```ts\nconst a = 1;\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n![pixel](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==)" },
   );
 }
 if (process.env.FAKE_CODEX_MANY) {

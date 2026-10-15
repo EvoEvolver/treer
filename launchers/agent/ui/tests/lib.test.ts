@@ -13,12 +13,12 @@ const item = (id: string, kind: HistoryItem["kind"], extra: Partial<HistoryItem>
 
 test("safeUrl keeps http(s), mailto and relative references only", () => {
   for (const ok of ["https://example.test/a?b=1", "http://example.test", "mailto:a@example.test", "docs/readme.md", "#section", "?x=1"]) assert.equal(safeUrl(ok), ok, ok);
-  for (const bad of ["javascript:alert(1)", " JaVaScRiPt:alert(1)", "data:text/html,<script>", "file:///etc/passwd", "//evil.test/x", "vbscript:x", "blob:https://x/y", "\u0001javascript:x", "", null, undefined]) assert.equal(safeUrl(bad as string | null | undefined), undefined, String(bad));
+  for (const bad of ["javascript:alert(1)", " JaVaScRiPt:alert(1)", "data:text/html,<script>", "file:///etc/passwd", "//evil.test/x", "vbscript:x", "blob:https://x/y", "\u0001javascript:x", "\\evil.test/x", "/\\evil.test/x", "", null, undefined]) assert.equal(safeUrl(bad as string | null | undefined), undefined, String(bad));
 });
 
 test("safeImageUrl allows same-origin, data raster and blob images, never svg data or remote hosts", () => {
   for (const ok of ["img/logo.png", "data:image/png;base64,iVBORw0KGgo=", "data:image/webp;base64,AAAA", "blob:https://app.test/3f2a"]) assert.equal(safeImageUrl(ok), ok, ok);
-  for (const bad of ["https://example.test/x.png", "http://example.test/x.png", "//example.test/x.png", "data:image/svg+xml;base64,PHN2Zz4=", "data:image/png,notbase64<", "javascript:alert(1)", "", null]) assert.equal(safeImageUrl(bad as string | null), undefined, String(bad));
+  for (const bad of ["https://example.test/x.png", "http://example.test/x.png", "//example.test/x.png", "data:image/svg+xml;base64,PHN2Zz4=", "data:image/png,notbase64<", "javascript:alert(1)", "\\evil.test/x.png", "", null]) assert.equal(safeImageUrl(bad as string | null), undefined, String(bad));
 });
 
 test("durations, compact counts, plurals and tool states", () => {

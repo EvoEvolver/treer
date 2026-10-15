@@ -1,7 +1,7 @@
 import DOMPurify from "dompurify";
 import { marked } from "marked";
 import { memo, useMemo, type KeyboardEvent, type MouseEvent } from "react";
-import { safeImageUrl } from "../lib/url";
+import { safeImageUrl, safeUrl } from "../lib/url";
 import { useDialogs } from "./Dialogs";
 
 // THE ONLY HTML sink in the UI. Source text is parsed by marked, then sanitized by DOMPurify before it reaches the DOM.
@@ -9,8 +9,13 @@ import { useDialogs } from "./Dialogs";
 marked.use({ breaks: true, gfm: true });
 DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.tagName === "A" && node.hasAttribute("href")) {
-    node.setAttribute("target", "_blank");
-    node.setAttribute("rel", "noopener noreferrer");
+    // DOMPurify's own URI list also allows ftp:, tel:, sms: and more; links here are http(s), mailto or relative only.
+    const href = safeUrl(node.getAttribute("href"));
+    if (href) {
+      node.setAttribute("href", href);
+      node.setAttribute("target", "_blank");
+      node.setAttribute("rel", "noopener noreferrer");
+    } else node.removeAttribute("href");
   }
   if (node.tagName === "IMG") {
     const safe = safeImageUrl(node.getAttribute("src"));
@@ -31,7 +36,7 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
 
 export function renderMarkdown(source: string): string {
   const html = marked.parse(source, { async: false });
-  return DOMPurify.sanitize(html, { FORBID_ATTR: ["style"], FORBID_TAGS: ["style"], USE_PROFILES: { html: true } });
+  return DOMPurify.sanitize(html, { FORBID_ATTR: ["style"], FORBID_TAGS: ["style", "form", "input", "button", "textarea", "select"], SANITIZE_NAMED_PROPS: true, USE_PROFILES: { html: true } });
 }
 
 export const Markdown = memo(function Markdown({ text, className }: { text: string; className?: string }) {
