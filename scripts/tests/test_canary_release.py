@@ -109,7 +109,9 @@ class ReleaseTest(unittest.TestCase):
                 path.write_text(json.dumps({"commit": self.commit, "status": "canary_passed",
                                             "canary": {"proxy_deployment_id": "deployment-test"}}))
 
+        # CI and native gates have their own tests (test_canary_gates.py).
         with patch.object(release.shutil, "which", return_value="/bin/true"), \
+             patch.object(release, "wait_ci"), patch.object(release, "native_ready"), \
              patch.object(release, "run", side_effect=fake_run):
             release.deploy(self.root, self.args())
             checkout = release.candidate(self.root, "HEAD")[1]

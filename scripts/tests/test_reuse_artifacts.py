@@ -267,6 +267,44 @@ class ReuseTest(unittest.TestCase):
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("25 file hashes", result.stderr)
 
+    def test_check_only_reports_reusability_without_creating_dist(self):
+        commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        result = self.reuse(None, "--check-only")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("reusable", result.stdout)
+        self.assertFalse((self.repo / "dist").exists())
+        commit_files(self.repo, {"crates/core/lib.rs": "native"}, "native")
+        self.assertNotEqual(self.reuse(None, "--check-only").returncode, 0)
+        self.assertFalse((self.repo / "dist").exists())
+
+    def verify_dist(self, directory="dist"):
+        return subprocess.run(["sh", "scripts/reuse-machine-artifacts.sh", git(self.repo, "rev-parse", "HEAD"), "--verify-dist", directory],
+                              cwd=self.repo, capture_output=True, text=True,
+                              env={**os.environ, "TREER_ARTIFACT_REUSE_ROOT": str(self.checkouts)})
+
+    def test_verify_dist_accepts_only_a_dist_matching_the_passed_releases_recorded_hashes(self):
+        commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        self.assertEqual(self.reuse().returncode, 0)
+        self.assertEqual(self.verify_dist().returncode, 0)
+        manifest_path = self.checkouts / self.source / ".treer/releases" / self.source / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["machine_artifacts"]["files"]["linux-x86_64/treer"] = "0" * 64
+        manifest_path.write_text(json.dumps(manifest))
+        self.assertNotEqual(self.verify_dist().returncode, 0)
+        manifest_path.unlink()
+        self.assertNotEqual(self.verify_dist().returncode, 0)
+
+    def test_verify_dist_rejects_a_dist_without_provenance_or_for_a_manifest_not_canary_passed(self):
+        commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        self.assertEqual(self.reuse().returncode, 0)
+        manifest_path = self.checkouts / self.source / ".treer/releases" / self.source / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["status"] = "failed"
+        manifest_path.write_text(json.dumps(manifest))
+        self.assertNotEqual(self.verify_dist().returncode, 0)
+        (self.repo / "dist" / "artifact-provenance.json").unlink()
+        self.assertNotEqual(self.verify_dist().returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
