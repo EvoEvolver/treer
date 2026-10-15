@@ -7,7 +7,7 @@ import { GoalError } from "./goals.js";
 
 interface Edit { id: string; input: GoalUpdate; previous: Goal | null; goal: Goal | null; applied: boolean; applying?: boolean; status: "pending" | "sent" | "failed"; error?: string; promptId?: string; mode?: "steer" | "queue"; attempt?: number }
 export function goalEditPrompt(previous: Goal | null, goal: Goal | null) {
-  return `The user changed the goal. New objective (user-authored): ${goal?.objective || "None"}\nPrevious objective: ${previous?.objective || "None"}\nStatus: ${goal?.status || "cleared"}. Token budget: ${goal?.tokenBudget ?? "default"}. Round budget: ${goal?.roundBudget ?? "default"}.\n${goal?.status === "paused" ? "Pause goal-directed work and await the user's instructions." : "Use the updated goal and budget; do not keep following the previous objective."}`;
+  return `The user changed the goal. New objective (user-authored): ${goal?.objective || "None"}\nPrevious objective: ${previous?.objective || "None"}\nStatus: ${goal?.status || "cleared"}. Token budget: ${goal?.tokenBudget ?? "unlimited"}. Round budget: ${goal?.roundBudget ?? "unlimited"}.\n${goal?.status === "paused" ? "Pause goal-directed work and await the user's instructions." : "Use the updated goal and budget; do not keep following the previous objective."}`;
 }
 
 /** Native mutations and model-context delivery have separate durable receipts. */

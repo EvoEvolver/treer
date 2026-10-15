@@ -77,6 +77,7 @@ export function GoalPop({ confirming, onClose, onEdit, onAskClear, onKeep, onCle
           <p className="meta">{t("goal.budget", { used: goal.tokensUsed == null ? "—" : Number(goal.tokensUsed).toLocaleString(), budget: budget.toLocaleString() })}</p>
         </>
       )}
+      {capability.budget && <p className="meta">{t("goal.budgetSummary", { tokens: budget == null ? t("goal.unlimited") : budget.toLocaleString(), rounds: goal.roundBudget == null ? t("goal.unlimited") : goal.roundBudget.toLocaleString() })}</p>}
       {confirming ? (
         <div className="goal-confirm" role="group" aria-label={t("goal.confirm")}>
           <span>{t("goal.confirmQuestion")}</span>

@@ -30,7 +30,7 @@ export interface Goal {
   timeUsedSeconds: number | null;
   reason?: string;
   requiredAction?: string;
-  roundBudget?: number;
+  roundBudget?: number | null;
   roundsUsed?: number;
   rejectionCount?: number;
   consecutiveRejections?: number;
@@ -44,7 +44,7 @@ export interface GoalUpdate {
   objective?: string;
   status?: Goal["status"];
   tokenBudget?: number | null;
-  roundBudget?: number;
+  roundBudget?: number | null;
   reason?: string;
   requiredAction?: string;
 }

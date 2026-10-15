@@ -197,6 +197,16 @@ try {
   const goalPop = page.getByRole("region", { name: "Goal" });
   await expect(goalPop).toContainText("Ship the React UI");
   await expect(goalPop.getByRole("progressbar", { name: "Goal token budget" })).toBeVisible();
+  await expect(goalPop).toContainText("Token limit: 5,000 · Round limit: Unlimited");
+  await goalPop.getByRole("button", { name: "Edit goal" }).click();
+  const editBudget = page.getByRole("dialog", { name: "Edit goal" });
+  await editBudget.getByLabel("Token budget (optional)").fill("");
+  await expect(editBudget.getByLabel("Token budget (optional)")).toHaveAttribute("placeholder", "Unlimited");
+  await expect(editBudget).toContainText("Leave blank for unlimited");
+  await editBudget.getByRole("button", { name: "Save goal" }).click(); await expect(editBudget).toBeHidden();
+  await goalSegment.click();
+  await expect(goalPop).toContainText("Token limit: Unlimited · Round limit: Unlimited");
+  await expect(goalPop.getByRole("progressbar", { name: "Goal token budget" })).toHaveCount(0);
   await goalPop.getByRole("button", { name: "Pause goal" }).click();
   await expect(goalPop).toContainText("Paused");
   await goalPop.getByRole("button", { name: "Resume goal" }).click();
@@ -406,6 +416,20 @@ try {
   await expect(page.getByRole("textbox", { name: "给 Codex 发消息" })).toBeVisible();
   await expect(page.locator(".status-t")).toHaveText("空闲");
   await expect(page.locator(".grp .t").first()).toHaveText("活动");
+  await page.getByRole("button", { name: /^目标/ }).click();
+  const chineseGoalPop = page.getByRole("region", { name: "目标", exact: true });
+  await expect(chineseGoalPop).toContainText("token 上限：无限制 · 轮次上限：无限制");
+  await page.screenshot({ path: join(screenshots, "goal-unlimited-zh-desktop.png") });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(chineseGoalPop).toContainText("无限制");
+  assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth));
+  await page.screenshot({ path: join(screenshots, "goal-unlimited-zh-390px.png") });
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await chineseGoalPop.getByRole("button", { name: "编辑目标", exact: true }).click();
+  const chineseGoal = page.getByRole("dialog", { name: "编辑目标" });
+  await expect(chineseGoal.getByLabel("token 预算(可选)")).toHaveAttribute("placeholder", "无限制");
+  await expect(chineseGoal).toContainText("留空表示无限制");
+  await chineseGoal.getByRole("button", { name: "取消", exact: true }).click();
   assert.equal(await page.evaluate(() => /\b(?:composer|status|activity|goal|plan|queue|tool|thread|appearance)\.[a-zA-Z.]+\b/.test(document.body.innerText)), false, "no raw message keys on screen");
 
   // Narrow screen: bottom bar, no horizontal overflow, in every look.

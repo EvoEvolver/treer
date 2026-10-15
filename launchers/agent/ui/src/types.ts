@@ -77,6 +77,8 @@ export interface Goal {
   objective: string;
   status: "active" | "paused" | "blocked" | "stale" | "done" | "cleared" | "usageLimited" | "budgetLimited" | "complete";
   tokenBudget: number | null;
+  roundBudget?: number | null;
+  roundsUsed?: number;
   tokensUsed: number | null;
   timeUsedSeconds: number | null;
   reason?: string;
@@ -88,7 +90,7 @@ export interface Goal {
 }
 
 export interface GoalDelivery { id: string; status: "pending" | "sent" | "failed"; error?: string | null }
-export interface GoalInput { objective?: string; status?: "active" | "paused"; tokenBudget?: number | null }
+export interface GoalInput { objective?: string; status?: "active" | "paused"; tokenBudget?: number | null; roundBudget?: number | null }
 
 export interface HarnessInfo {
   id: string;

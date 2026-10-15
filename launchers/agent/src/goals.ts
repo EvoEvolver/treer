@@ -25,8 +25,8 @@ export function goalUpdate(body: Record<string, unknown>): GoalUpdate {
     }
   }
   if (body.roundBudget !== undefined) {
-    if (!Number.isSafeInteger(body.roundBudget) || Number(body.roundBudget) < 1 || Number(body.roundBudget) > 10000) throw new GoalError("roundBudget must be an integer from 1 to 10000");
-    result.roundBudget = Number(body.roundBudget);
+    if (body.roundBudget !== null && (!Number.isSafeInteger(body.roundBudget) || Number(body.roundBudget) < 1 || Number(body.roundBudget) > 10000)) throw new GoalError("roundBudget must be an integer from 1 to 10000 or null");
+    result.roundBudget = body.roundBudget === null ? null : Number(body.roundBudget);
   }
   if (["blocked", "stale", "done"].includes(result.status || "") && !result.reason) throw new GoalError("A goal exit requires reason");
   if (!Object.keys(result).length) throw new GoalError("Provide objective, status, or tokenBudget");
@@ -50,8 +50,8 @@ export class GoalGuard {
   rounds = 0;
   tokens = 0;
   constructor(readonly rejectionLimit = positiveSetting("AGENT_UI_GOAL_NO_PROGRESS_LIMIT", 3),
-    readonly roundBudget = positiveSetting("AGENT_UI_GOAL_ROUND_BUDGET", 20),
-    readonly tokenBudget = positiveSetting("AGENT_UI_GOAL_TOKEN_BUDGET", 100000)) {}
+    readonly roundBudget: number | null = budgetSetting("AGENT_UI_GOAL_ROUND_BUDGET"),
+    readonly tokenBudget: number | null = budgetSetting("AGENT_UI_GOAL_TOKEN_BUDGET")) {}
   progress(value: string) {
     const key = createHash("sha256").update(value).digest("hex");
     if (!this.evidence.has(key)) { this.evidence.add(key); this.revision++; }
@@ -64,7 +64,11 @@ export class GoalGuard {
     return this.rejections >= this.rejectionLimit ? "Repeated Stop hook rejection without new tool or result evidence" : this.limit();
   }
   usage(tokens: number) { this.tokens += Math.max(0, tokens); return this.limit(); }
-  limit() { return this.rejections >= this.rejectionLimit ? "Repeated Stop hook rejection without new tool or result evidence" : this.rounds >= this.roundBudget ? "Goal round budget reached" : this.tokens >= this.tokenBudget ? "Goal token budget reached" : null; }
+  limit() { return this.rejections >= this.rejectionLimit ? "Repeated Stop hook rejection without new tool or result evidence" : this.roundBudget !== null && this.rounds >= this.roundBudget ? "Goal round budget reached" : this.tokenBudget !== null && this.tokens >= this.tokenBudget ? "Goal token budget reached" : null; }
+}
+function budgetSetting(name: string) {
+  const value = process.env[name];
+  return value === undefined || value === "" || value === "0" ? null : positiveSetting(name, 0);
 }
 function positiveSetting(name: string, fallback: number) {
   const value = process.env[name];

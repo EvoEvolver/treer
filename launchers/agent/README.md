@@ -565,10 +565,17 @@ not OS isolation from other locally authorized CLI/native inputs.
 Three consecutive rejected evaluations without new tool input/result evidence
 automatically request clear and record `blocked`. Distinct tool input, file edit
 or changed tool output resets the sequence; repeated identical tools/results and
-assistant prose do not. Defaults: `AGENT_UI_GOAL_NO_PROGRESS_LIMIT=3`,
-`AGENT_UI_GOAL_ROUND_BUDGET=20`, `AGENT_UI_GOAL_TOKEN_BUDGET=100000`.
-`PUT /api/goal` can set positive `roundBudget` and `tokenBudget`; null token budget
-uses the finite launcher default. Claude rounds count rejected Stop evaluations;
+assistant prose do not. No-progress protection defaults to
+`AGENT_UI_GOAL_NO_PROGRESS_LIMIT=3` independently of budgets. Token and round
+budgets default to **unlimited**: there is no implicit 100,000-token/20-round cap.
+Optional positive `AGENT_UI_GOAL_ROUND_BUDGET` / `AGENT_UI_GOAL_TOKEN_BUDGET`
+values explicitly configure installation defaults; unset, empty or `0` means
+unlimited. `PUT /api/goal` accepts positive `tokenBudget`, `roundBudget` (1–10000)
+or `null` to remove the respective limit, even if an environment default exists.
+Omitted fields on a budget-only/status patch preserve the existing limit; a new
+objective uses explicit input or the configured defaults. The UI displays
+Unlimited (无限制), and blank token/round fields explicitly remove those limits.
+Claude rounds count rejected Stop evaluations;
 Codex rounds count completed goal turns and use native token budgets. Limits
 clear the native condition, record `blocked`, and notify. Token counters include
 input/output/cache tokens; streaming assistant and result usage are reconciled
@@ -634,10 +641,15 @@ does not verify its runtime wire shapes or feature gating. The 2.1.296 command
 and evaluator behavior was verified earlier/by the leader. Capability discovery
 still hides goal controls if initialize does not advertise `goal`; missing fields
 are not treated as proof of completion. Mariana was not accessed or restarted.
-Upgrading resets legacy active goal usage counters once, granting a fresh budget
-allowance. For checkpoints without a cumulative-usage baseline,
+Upgrading resets legacy active goal usage counters once, granting a fresh allowance
+only where a finite budget is saved. For checkpoints without a cumulative-usage baseline,
 active token/time/round/rejection counters restart (budgets are retained), with a
 visible reason explaining that old per-goal usage could not be verified. We do
+not infer a budget for legacy missing/null fields: they restore as unlimited.
+Saved numeric limits, including 100000/20, are preserved and visible/editable in
+the UI. Old checkpoints do not distinguish automatic defaults from user choices;
+we do not guess based on their value or silently remove a possibly explicit limit.
+Clear those UI budget fields to remove any legacy finite cap. We do
 not relabel old session-wide totals as accurate goal usage. If its saved desired
 objective differs from the native goal, native history wins and the incompatible
 checkpoint is discarded. Subsequent restarts retain verified counters normally.
