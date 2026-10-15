@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Workspace issue tracker: no third-party runtime dependencies."""
+import argparse
 import http.cookies
 import json
 import mimetypes
@@ -7,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -43,6 +45,7 @@ class Application:
     def __init__(self, store, auth=None):
         self.store, self.auth = store, auth
         self.lock = threading.Lock()
+        self.health_at, self.health_value = -1e9, None
         self.tree_paths = TreePaths(os.environ.get('TREER_BIN', 'treer'))
 
     def identity_provider(self):
@@ -114,6 +117,28 @@ class Application:
                 return False
             return any(isinstance(e, dict) and e.get('kind') == 'agent' and e.get('id') == agent_id for e in answer.get('recipients') or [])
         return verify
+
+    HEALTH_TTL = 2.0
+
+    def deployment_health(self, clock=time.monotonic):
+        """Readiness for scripts/app-deploy: running version (APP_DEPLOY_VERSION), the App's stable ID and a working
+        database. Unauthenticated and cacheless for clients like /health; reveals only a commit SHA and the App ID.
+        The database probe is memoised for HEALTH_TTL seconds so repeated requests cannot be used as DB load."""
+        now = clock()
+        with self.lock:
+            if now - self.health_at < self.HEALTH_TTL and self.health_value is not None:
+                return dict(self.health_value)
+        try:
+            with self.store.connect() as db:
+                db.execute('SELECT 1 FROM issues LIMIT 1').fetchall()
+            database = True
+        except Exception:
+            database = False
+        value = {'version': os.environ.get('APP_DEPLOY_VERSION'), 'app_id': os.environ.get('TREER_AGENT_ID'),
+                 'ready': database, 'database_ready': database}
+        with self.lock:
+            self.health_at, self.health_value = now, value
+        return dict(value)
 
     def mutation(self, issue_id, action, body, actor, directory, token):
         paths = self.resolve_paths(action, body, token)
@@ -227,6 +252,10 @@ class Handler(BaseHTTPRequestHandler):
                 file = ROOT / ('issues' if path == '/issues' else 'dist/'+path[1:])
                 self.reply(200, file.read_bytes(), 'text/plain; charset=utf-8' if path == '/issues' else mimetypes.guess_type(str(file))[0])
                 return
+            if path == '/deployment-health' and method in ('GET', 'HEAD'):
+                health = app.deployment_health()
+                self.json(200 if health['ready'] else 503, health)
+                return
             if path == '/health' and method in ('GET', 'HEAD'):
                 self.json(200, {'status': 'ok', 'service': 'issues'})
                 return
@@ -301,8 +330,19 @@ class Handler(BaseHTTPRequestHandler):
             self.wfile.write(content)
 
 
-def main():
+def parse_args(argv=None):
+    parser = argparse.ArgumentParser(description='Workspace issue tracker (configuration is environment-based)')
+    # Managed Apps deployed with scripts/app-deploy cannot carry environment variables in their saved command; the
+    # deployment's fixed arguments can carry this one. It overrides ISSUES_PROXY_URL.
+    parser.add_argument('--proxy-url', help='trusted Treer Proxy public URL (default: $ISSUES_PROXY_URL)')
+    return parser.parse_args(argv)
+
+
+def main(argv=None):
     os.umask(0o077)
+    arguments = parse_args(argv)
+    if arguments.proxy_url:
+        os.environ['ISSUES_PROXY_URL'] = arguments.proxy_url
     if not os.environ.get('ISSUES_PROXY_URL'):
         raise ValueError('ISSUES_PROXY_URL is required (the trusted Treer Proxy public URL)')
     proxy = urllib.parse.urlsplit(os.environ['ISSUES_PROXY_URL'])
