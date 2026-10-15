@@ -1,6 +1,6 @@
 import { createReadStream, existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
-import { basename, extname, join, normalize, resolve, sep } from "node:path";
+import { extname, join, normalize, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { WebSocketServer, type WebSocket } from "ws";
@@ -99,10 +99,9 @@ function serveFile(response: ServerResponse, file: string) {
     "content-type": mime(file),
   };
   if (extname(file) === ".html") {
-    // The React UI (ui.html) ships no inline styles or scripts, so it gets the strict policy; the legacy page keeps its own.
-    headers["content-security-policy"] = basename(file) === "ui.html"
-      ? "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'"
-      : "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:";
+    // The page ships no inline styles or scripts, so it runs under a strict policy (no 'unsafe-inline', no plugins, no foreign forms).
+    headers["content-security-policy"] =
+      "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'";
   }
   response.writeHead(200, headers);
   createReadStream(file).pipe(response);

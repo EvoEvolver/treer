@@ -9,7 +9,7 @@ import { buildUi, root, scopeCss } from "../scripts/ui-build.mjs";
 test("the committed UI artifacts equal a fresh deterministic build", async () => {
   const first = await buildUi();
   const second = await buildUi();
-  assert.deepEqual([...first.keys()], ["ui.html", "boot.js", "ui.js", "ui.css"]);
+  assert.deepEqual([...first.keys()], ["index.html", "boot.js", "ui.js", "ui.css"]);
   for (const [name, bytes] of first) {
     assert.ok(bytes.equals(second.get(name)!), `${name} must be reproducible`);
     assert.ok(bytes.equals(readFileSync(join(root, "public", name))), `public/${name} is stale; run npm run build:ui`);
@@ -19,7 +19,7 @@ test("the committed UI artifacts equal a fresh deterministic build", async () =>
 });
 
 test("the built page is relative, script-only from self and free of inline code", async () => {
-  const html = (await buildUi()).get("ui.html")!.toString("utf8");
+  const html = (await buildUi()).get("index.html")!.toString("utf8");
   assert.match(html, /<base href="\.\/"/);
   assert.doesNotMatch(html, /<script(?![^>]*\ssrc=)/i, "no inline script");
   assert.doesNotMatch(html, /\sstyle=|<style|\son[a-z]+=/i, "no inline style or handlers");

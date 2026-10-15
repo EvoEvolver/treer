@@ -8,6 +8,7 @@ import { createServer, request as httpRequest } from "node:http";
 import { connect } from "node:net";
 import { mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { hermeticEnv } from "./hermetic.mjs";
 
@@ -19,7 +20,9 @@ const cwd = await mkdtemp(join(tmpdir(), "ui-fixture-"));
 await mkdir(join(cwd, "src"));
 await writeFile(join(cwd, "src/greeting.ts"), "export const greeting = 'Hello, Treer';\n");
 await writeFile(join(cwd, "README.md"), "# Workspace\nSmall tools, thoughtful interfaces.\n");
-const env = hermeticEnv({ TREER_AGENT_ID: "ag_ui_fixture", AGENT_UI_INSTANCE_ID: "ui-fixture", CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: upstream,
+// A unique marker in the child's environment identifies exactly the processes this script started; it never kills by name.
+const marker = randomUUID();
+const env = hermeticEnv({ UI_DEV_FIXTURE: marker, TREER_AGENT_ID: "ag_ui_fixture", AGENT_UI_INSTANCE_ID: "ui-fixture", CODEX_UI_CWD: cwd, CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: upstream,
   CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", ...Object.fromEntries(Object.entries(process.env).filter(([name]) => name.startsWith("FAKE_"))) });
 const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "inherit" });
 const identity = { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_ui_fixture", "x-treer-interface-instance": "ui-fixture" };
@@ -38,6 +41,7 @@ proxy.on("upgrade", (req, socket, head) => {
   back.on("error", () => socket.destroy());
   socket.on("error", () => back.destroy());
 });
+proxy.on("error", (error) => { console.error(`Cannot listen on port ${port}: ${error.message}. Pick a free port; nothing is killed to make room.`); server.kill("SIGTERM"); });
 proxy.listen(Number(port), "127.0.0.1");
 const stop = async () => { server.kill("SIGTERM"); await rm(cwd, { recursive: true, force: true }); process.exit(0); };
 process.on("SIGINT", stop);

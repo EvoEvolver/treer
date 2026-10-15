@@ -1,4 +1,4 @@
-// Deterministic build of the React UI into four short, flat files: ui.html, boot.js, ui.js, ui.css.
+// Deterministic build of the React UI into four short, flat files: index.html, boot.js, ui.js, ui.css.
 // Shared by build-ui.mjs (writes public/) and check-ui.mjs (rebuilds and compares with the committed files).
 import { build, transform } from "esbuild";
 import { readFileSync } from "node:fs";
@@ -66,7 +66,7 @@ export async function buildUi(base = root) {
   const boot = await transform(file("ui/boot.js"), { minify: true, target: "es2022", loader: "js" });
   const style = await transform(css, { loader: "css", minify: true });
   return new Map([
-    ["ui.html", Buffer.from(file("ui/index.html"))],
+    ["index.html", Buffer.from(file("ui/index.html"))],
     ["boot.js", Buffer.from(boot.code)],
     ["ui.js", Buffer.from(js.outputFiles[0].contents)],
     ["ui.css", Buffer.from(style.code)],

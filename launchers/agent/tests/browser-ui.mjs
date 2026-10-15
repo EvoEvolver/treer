@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -8,10 +9,10 @@ import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 import { testRuntimeControlsUi } from "./browser-controls-ui.mjs";
 
 // The React UI (public/ui.html) against the real launcher server and a fake Codex: no inference, no Treer mutations.
-// Usage: node tests/browser-ui.mjs [--page ui.html]   (the page name changes when the UI becomes the default)
+// Usage: node tests/browser-ui.mjs [--page index.html]
 const app = resolve(import.meta.dirname, "..");
 const pageArgIndex = process.argv.indexOf("--page");
-const page_ = pageArgIndex > 0 ? process.argv[pageArgIndex + 1] : "ui.html";
+const page_ = pageArgIndex > 0 ? process.argv[pageArgIndex + 1] : "index.html";
 const screenshots = process.env.UI_SCREENSHOTS || await mkdtemp(join(tmpdir(), "ui-shots-"));
 await mkdir(screenshots, { recursive: true });
 const servers = [];
@@ -23,7 +24,8 @@ async function startServer(name, extra, harness = "codex") {
   await writeFile(join(cwd, "src/deep/inner.txt"), "inner file\n");
   await writeFile(join(cwd, "README.md"), "# Workspace\nSmall tools, thoughtful interfaces.\n");
   await writeFile(join(cwd, "large.txt"), "x".repeat(65537));
-  const common = { TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0" };
+  // The unique marker identifies exactly the processes this test started; they are stopped through their own handles only.
+  const common = { UI_DEV_FIXTURE: randomUUID(), TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0" };
   const env = hermeticEnv(harness === "claude"
     ? { ...common, AGENT_UI_HARNESS: "claude", AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: join(cwd, "port"), AGENT_UI_PUBLIC_DIR: join(app, "public"), CLAUDE_BIN: join(app, "tests/fake-claude.mjs"), ...extra }
     : { ...common, CODEX_UI_CWD: cwd, CODEX_UI_PORT_FILE: join(cwd, "port"), CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", ...extra });
@@ -55,7 +57,7 @@ try {
   assert.match(csp, /style-src 'self'(?:;|$)/);
   assert.doesNotMatch(csp, /unsafe-inline|unsafe-eval/);
   for (const directive of ["object-src 'none'", "base-uri 'self'", "form-action 'none'"]) assert.ok(csp.includes(directive), `CSP lacks ${directive}`);
-  if (page_ === "ui.html") assert.match((await fetch(base + "/")).headers.get("content-security-policy") ?? "", /style-src 'self' 'unsafe-inline'/);
+  assert.match((await fetch(base + "/")).headers.get("content-security-policy") ?? "", /style-src 'self'(?:;|$)/, "the root serves the same page under the same policy");
 
   browser = await chromium.launch({ headless: true });
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "light", extraHTTPHeaders: { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_browser_ui", "x-treer-interface-instance": "browser-ui" } });

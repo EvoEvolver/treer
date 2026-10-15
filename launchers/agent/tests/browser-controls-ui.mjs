@@ -6,7 +6,7 @@ import { expect } from "@playwright/test";
 import { WebSocketServer } from "ws";
 
 // The same pure HTTP/WS contract fixture as browser-controls.mjs, driving the React UI. Never starts a harness or reads credentials.
-export async function testRuntimeControlsUi(browser, screenshots, pageName = "ui.html") {
+export async function testRuntimeControlsUi(browser, screenshots, pageName = "index.html") {
   let state = {
     type: "state", ready: true, runtime: { state: "idle" }, modelOptions: [],
     harness: { name: "Mock Agent", capabilities: { steer: true, backgroundTasks: true, goal: { pause: true, budget: true } } },

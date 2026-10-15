@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// Gate for the committed UI artifacts: (1) rebuilt bytes equal public/{ui.html,boot.js,ui.js,ui.css};
+// Gate for the committed UI artifacts: (1) rebuilt bytes equal public/{index.html,boot.js,ui.js,ui.css};
 // (2) file count and size budgets; (3) no absolute paths, hostnames or source maps leaked into the output;
 // (4) static security scan of ui/src. Exit status is non-zero on any failure.
 import { readFileSync } from "node:fs";
