@@ -29,9 +29,31 @@ function goalState(runtime: ClaudeRuntime, check: () => boolean, milestone: stri
     runtime.on("state", observed); observed();
   });
 }
-async function fixture(t: TestContext, args: string[] = [], deadline = 1000) {
+// Keep successful provider commands on the production ACK deadline. Failure
+// tests expire the actual pending deadline callback only after the fake has
+// consumed clear, instead of racing all setup/resume commands against 100ms.
+function nativeAckClock(t: TestContext) {
+  const timers = new Map<ReturnType<typeof setTimeout>, () => void>();
+  const schedule = globalThis.setTimeout, cancel = globalThis.clearTimeout;
+  t.mock.method(globalThis, "setTimeout", ((callback: (...args: any[]) => void, delay?: number, ...args: any[]) => {
+    if (delay !== 30_000) return schedule(callback, delay, ...args);
+    const fire = () => { timers.delete(timer); callback(...args); };
+    const timer = schedule(fire, delay);
+    timers.set(timer, fire);
+    return timer;
+  }) as typeof setTimeout);
+  t.mock.method(globalThis, "clearTimeout", (timer: ReturnType<typeof setTimeout> | undefined) => {
+    if (timer) timers.delete(timer);
+    cancel(timer);
+  });
+  return { expire() {
+    assert.equal(timers.size, 1, "exactly one native ACK deadline must be pending");
+    const [timer, fire] = [...timers][0]; cancel(timer); fire();
+  } };
+}
+async function fixture(t: TestContext, args: string[] = []) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-goal-control-"))), calls = join(cwd, "calls.jsonl"), configDir = join(cwd, "claude");
-  const runtime = new ClaudeRuntime(process.execPath, cwd, { stateFile: join(cwd, "state"), configDir, goalCommandTimeoutMs: deadline,
+  const runtime = new ClaudeRuntime(process.execPath, cwd, { stateFile: join(cwd, "state"), configDir,
     args: [fake, "--real-goal-wire", "--zero-goal-usage", "--fixture-config", configDir, "--calls-file", calls, ...args] });
   t.after(async () => { await runtime.stop(); rmSync(cwd, { recursive: true, force: true }); });
   await runtime.start();
@@ -54,12 +76,15 @@ test("user clear preempts the Agent's unacknowledged exit and clears its durable
 });
 
 test("unconfirmed exit times out, releases locks, stops retries and durably notifies manual recovery", async t => {
-  const f = await fixture(t, ["--no-clear-ack"], 100);
+  const f = await fixture(t, ["--no-clear-ack"]);
   await f.runtime.updateGoal({ objective: "hold external condition" }); await f.idle();
+  const clock = nativeAckClock(t);
   const sent: any[] = [], outbox = new GoalNotifications(join(f.cwd, "notices.json"), () => {}, async (_to, _key, body) => { sent.push(JSON.parse(body)); }, async () => ["user_fixture"]);
   f.runtime.on("goal-exit-error", goal => outbox.enqueue(goal)); t.after(() => outbox.close());
   const journal = join(f.cwd, "exits.json"), exits = new GoalExitRequests(journal, f.runtime, () => {}); t.after(() => exits.close());
   exits.enqueue({ status: "blocked", reason: "Owner action needed" });
+  await until(() => f.calls().some(call => call.message?.content?.[0]?.text === "/goal clear"));
+  clock.expire();
   await until(() => f.runtime.snapshot().goal?.syncStatus === "exit_unconfirmed" && sent.length === 1);
   await until(() => JSON.parse(readFileSync(journal, "utf8")).length === 0);
   assert.match(sent[0].required_action, /manually enter \/goal clear/);
@@ -88,7 +113,7 @@ for (const clearDelay of [0, 1200]) test(`native hook's snake_case condition rej
   // producer against a 1s native-command deadline on a busy CI runner. Keep
   // the runtime's production 30s acknowledgement bound, with observable test
   // milestones and a shorter overall test bound for useful failures.
-  const f = await fixture(t, ["--step-goal-hooks", "--clear-ack-delay-ms", String(clearDelay)], 30_000);
+  const f = await fixture(t, ["--step-goal-hooks", "--clear-ack-delay-ms", String(clearDelay)]);
   const notices: any[] = []; f.runtime.on("goal-exit", goal => notices.push(goal));
   await f.runtime.updateGoal({ objective: "reject-loop native shape" });
   for (let rejection = 1; rejection <= 2; rejection++) {
@@ -200,23 +225,30 @@ test("HTTP user DELETE preempts an accepted Agent exit instead of returning muta
   assert.equal(state.goal, null);
 });
 
-test("resume preserves active budgets and an unconfirmed exit without retrying it forever", async t => {
-  const f = await fixture(t, ["--no-clear-ack"], 100);
+for (const setDelay of [0, 1200]) test(`resume preserves active budgets and an unconfirmed exit without retrying it forever (goal ACK delay ${setDelay}ms)`, async t => {
+  const f = await fixture(t, ["--no-clear-ack", "--goal-set-ack-delay-ms", String(setDelay)]);
   await f.runtime.updateGoal({ objective: "hold retained goal", tokenBudget: 12345, roundBudget: 7 }); await f.idle();
-  await assert.rejects(f.runtime.updateGoal({ status: "blocked", reason: "Owner action needed" }), /timed out/);
+  const clock = nativeAckClock(t);
+  const failed = assert.rejects(f.runtime.updateGoal({ status: "blocked", reason: "Owner action needed" }), /timed out/);
+  await until(() => f.calls().some(call => call.message?.content?.[0]?.text === "/goal clear"));
+  clock.expire(); await failed;
   await f.runtime.stop();
-  const resumed = new ClaudeRuntime(process.execPath, f.cwd, { stateFile: join(f.cwd, "state"), configDir: f.configDir, goalCommandTimeoutMs: 100,
-    args: [fake, "--fixture-config", f.configDir, "--calls-file", join(f.cwd, "calls.jsonl"), "--no-clear-ack"] });
+  const resumed = new ClaudeRuntime(process.execPath, f.cwd, { stateFile: join(f.cwd, "state"), configDir: f.configDir,
+    args: [fake, "--fixture-config", f.configDir, "--calls-file", join(f.cwd, "calls.jsonl"), "--no-clear-ack", "--goal-set-ack-delay-ms", String(setDelay)] });
   t.after(() => resumed.stop()); await resumed.start();
   const goal = resumed.snapshot().goal!;
   assert.equal(goal.tokenBudget, 12345); assert.equal(goal.roundBudget, 7);
   assert.equal(goal.syncStatus, "exit_unconfirmed"); assert.match(goal.syncError!, /manually enter/);
   await resumed.updateGoal({ tokenBudget: 20000 }); // no sticky pending mutation after resume
   assert.equal(resumed.snapshot().goal!.tokenBudget, 20000);
+  await resumed.updateGoal({ objective: "hold resumed new objective", tokenBudget: 20000, roundBudget: 7 });
+  assert.equal(resumed.snapshot().goal!.syncStatus, "synced");
+  assert.equal(resumed.snapshot().goal!.nativeObjective, "hold resumed new objective");
+  assert.equal(f.calls().filter(call => call.message?.content?.[0]?.text === "/goal clear").length, 1, "resume must not retry the unconfirmed clear");
 });
 
 test("a second edit during deferred native delivery is applied without manual reconcile (Core regression)", async t => {
-  const f = await fixture(t, [], 100);
+  const f = await fixture(t);
   await f.runtime.prompt("hold");
   await f.runtime.updateGoal({ objective: "first edited objective" });
   let secondEdit: Promise<void> | undefined;
@@ -226,7 +258,7 @@ test("a second edit during deferred native delivery is applied without manual re
     }
   });
   await f.runtime.interrupt(); await until(() => Boolean(secondEdit)); await secondEdit;
-  await until(() => f.runtime.snapshot().goal?.syncStatus === "synced", 400);
+  await goalState(f.runtime, () => f.runtime.snapshot().goal?.syncStatus === "synced", "Waiting for the newest deferred edit acknowledgement");
   assert.equal(f.runtime.snapshot().goal!.objective, "second edited objective");
   assert.equal(f.runtime.snapshot().goal!.nativeObjective, "second edited objective");
   assert.equal(f.calls().filter(call => call.message?.content?.[0]?.text === "/goal second edited objective").length, 1);
@@ -249,15 +281,18 @@ test("resume adopts the native objective instead of reapplying a mismatched cach
 });
 
 test("cancelled exit cannot resurrect after user-clear timeout and late native clear (Core regression)", async t => {
-  const f = await fixture(t, ["--no-clear-ack"], 150);
+  const f = await fixture(t, ["--no-clear-ack"]);
   await f.runtime.updateGoal({ objective: "hold external condition" }); await f.idle();
+  const clock = nativeAckClock(t);
   const journal = join(f.cwd, "exits.json"), exits = new GoalExitRequests(journal, f.runtime, () => {}); t.after(() => exits.close());
   exits.enqueue({ status: "done", reason: "Cancelled Agent conclusion" });
   await until(() => f.calls().some(call => call.message?.content?.[0]?.text === "/goal clear"));
   // An idle native query must not be relied on to emit another result that
   // happens to checkpoint cancellation before a crash.
   (f.runtime as any).finish(false, "Waiting for native clear acknowledgement");
-  await assert.rejects(f.runtime.clearGoal(), /timed out/);
+  const failed = assert.rejects(f.runtime.clearGoal(), /timed out/);
+  await until(() => f.calls().filter(call => call.message?.content?.[0]?.text === "/goal clear").length === 2);
+  clock.expire(); await failed;
   assert.deepEqual(JSON.parse(readFileSync(journal, "utf8")), []);
   assert.equal(JSON.parse(readFileSync(join(f.cwd, "state.goal-usage.json"), "utf8")).pendingExit, null);
   exits.close(); await f.runtime.stop();
