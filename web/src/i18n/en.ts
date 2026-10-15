@@ -607,6 +607,7 @@ export const en = {
   "overview.loading_workspace": "Loading workspace…",
   "overview.your_workspace_is_ready": "Your workspace is ready",
   "overview.explore_folders_and_open_agents": "Explore folders and open agents.",
+  "treemap.chain_folders": "Folder chain {path}",
   "treemap.folder_label": "Folder {path}",
   "treemap.workload_count": "{count} workloads",
   "treemap.ancestors": "Earlier folders",

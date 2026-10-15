@@ -110,14 +110,28 @@ export default function WorkloadTreeMap({ tree, agents, machines, selectedId, on
         return hit ? <button key={item.id} data-map-id={item.id} style={style} className={className} title={info} aria-label={t("treemap.open_agent", { description: info })} aria-current={item.id === selectedId ? "true" : undefined} {...events} onClick={() => onOpen(item.id)}>{contents}</button>
           : <div key={item.id} data-map-id={item.id} style={style} className={className} role="img" aria-label={info} title={info} {...events}>{contents}</div>
       }
+      // A folder-only, single-child chain reserves one title bar, not one
+      // bar per level. Each segment remains reachable, including narrow/deep
+      // cases where older segments move into a native picker.
+      const segments = [item]
+      let tail = item
+      while (tail.children.length === 1 && !tail.children[0].agent) {
+        tail = tail.children[0]; segments.push(tail)
+      }
       const inner = { x: 2, y: 46, width: Math.max(0, box.width - 4), height: Math.max(0, box.height - 48) }
-      const preview = hit && inner.width >= 88 && inner.height >= 44 && depth < 12 && nodes + item.nodes < 700
-        && squarify(item.children, (child) => child.count, inner).every(({ item: child, rect: childRect }) => child.agent || (childRect.width >= 48 && childRect.height >= 48))
-      const header = <><Folder aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{named ? item.label : Array.from(item.label).slice(0, 2).join("")}</span>{named && <span className="shrink-0 text-[10px] text-muted-foreground">{item.count}</span>}<ChevronRight aria-hidden="true" className="size-3 shrink-0" /></>
+      const preview = hit && inner.width >= 88 && inner.height >= 44 && depth < 12 && nodes + tail.nodes < 700
+        && squarify(tail.children, (child) => child.count, inner).every(({ item: child, rect: childRect }) => child.agent || (childRect.width >= 48 && childRect.height >= 48))
+      const capacity = Math.min(6, Math.max(1, Math.floor((box.width - (named ? 60 : 0)) / 56)))
+      const visible = segments.length <= capacity ? segments : segments.slice(segments.length - (capacity - 1))
+      const hidden = segments.slice(0, segments.length - visible.length)
       return <section key={item.id} data-map-id={item.id} style={style} aria-label={t("treemap.folder_label", { path: item.path })} className={`treemap-folder absolute overflow-hidden rounded-lg border ${depth % 2 ? "bg-background" : "bg-muted/60"}`}>
-        {hit ? <button title={info} aria-label={t("treemap.explore", { path: item.path })} className={`flex w-full min-w-0 items-center gap-1 px-1.5 text-left text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring ${preview ? "h-11 border-b" : "h-full"}`} {...events} onClick={() => navigate(item.id)}>{header}</button>
-          : <div role="img" aria-label={info} title={info} className="flex h-full items-center justify-center" {...events}><Folder aria-hidden="true" className="size-3 text-muted-foreground" /></div>}
-        {preview && render(item.children, inner, depth + 1)}
+        {hit ? <div className={`flex w-full min-w-0 items-center text-xs font-medium ${preview ? "h-11 border-b" : "h-full"}`}>
+          {named && <Folder aria-hidden="true" className="mx-1 size-3.5 shrink-0 text-muted-foreground" />}
+          {hidden.length > 0 && <select aria-label={t("treemap.chain_folders", { path: item.path })} title={segments.map((segment) => segment.label).join(" / ")} className="h-full min-h-11 w-11 shrink-0 rounded bg-transparent text-xs focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" value="" onChange={(event) => navigate(event.target.value)}><option value="">…</option>{hidden.map((segment) => <option key={segment.id} value={segment.id}>{segment.path}</option>)}</select>}
+          {visible.map((segment, index) => <button key={segment.id} title={description(segment)} aria-label={t("treemap.explore", { path: segment.path })} className="h-full min-h-11 min-w-11 flex-1 truncate px-1 text-left hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onMouseEnter={() => setDetail(description(segment))} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(description(segment))} onBlur={() => setDetail("")} onClick={() => navigate(segment.id)}>{index > 0 && <span aria-hidden="true" className="mr-1 text-muted-foreground">/</span>}{named ? segment.label : Array.from(segment.label).slice(0, 2).join("")}</button>)}
+          {named && <span className="mx-1 shrink-0 text-[10px] text-muted-foreground">{item.count}</span>}
+        </div> : <div role="img" aria-label={info} title={info} className="flex h-full items-center justify-center" {...events}><Folder aria-hidden="true" className="size-3 text-muted-foreground" /></div>}
+        {preview && render(tail.children, inner, depth + 1)}
       </section>
     })
   }

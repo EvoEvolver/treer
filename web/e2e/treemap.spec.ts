@@ -165,7 +165,7 @@ for (const sample of ["small", "medium", "large"] as const) for (const mobile of
     const picker = dialog.getByRole('combobox', { name: 'Go to', exact: true })
     await expect(picker.locator('option[value="deep-0"]')).toHaveText(/\/Team\/Research\/Experiments\/Lab\/agent-01 · agent · workstation · working/)
     await noMapOverflow(page)
-    if (sample === 'large') {
+    if (sample === 'large' && mobile) {
       const dot = dialog.locator('[data-map-id="deep-0"]')
       await expect(dot).toHaveAttribute('role', 'img')
       await expect(dot).toHaveAttribute('title', /\/Team\/Research\/Experiments\/Lab\/agent-01.*working/)
@@ -210,7 +210,7 @@ test('very deep trees bound nested DOM, retain ancestors and allow keyboard dril
   await page.goto('/')
   await openOverviewMap(page)
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
-  await expect(dialog.getByRole('button', { name: 'Explore folder /Team', exact: true })).toBeVisible()
+  await expect(dialog.getByRole('combobox', { name: 'Folder chain /Team', exact: true }).locator('option[value="level-0"]')).toHaveText('/Team')
   expect(await dialog.getByRole('region', { name: /^Folder / }).count()).toBeLessThanOrEqual(13)
   const picker = dialog.getByRole('combobox', { name: 'Go to', exact: true })
   for (let i = 0; i < 12; i++) await picker.selectOption(`level-${i}`)
@@ -231,4 +231,24 @@ test('Chinese map localizes navigation, counts and folder descriptions', async (
   await expect(dialog.getByRole('combobox', { name: '前往', exact: true })).toBeVisible()
   await expect(dialog.getByRole('region', { name: '文件夹 /Research', exact: true })).toBeVisible()
   await expect(dialog.getByText('7 个工作负载', { exact: true })).toBeVisible()
+})
+
+
+test('single-child folder chains share one title row; every segment still drills down', async ({ page }) => {
+  await mockDeepTreeMapApi(page, true)
+  await page.setViewportSize({ width: 1360, height: 960 })
+  await page.goto('/')
+  await openOverviewMap(page)
+  const dialog = page.getByRole('dialog', { name: 'Workspace map' })
+  const segments = ['/Team', '/Team/Research', '/Team/Research/Experiments', '/Team/Research/Experiments/Lab']
+  const positions = []
+  for (const path of segments) positions.push((await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).boundingBox())!.y)
+  expect(new Set(positions).size).toBe(1)
+  for (const [index, path] of segments.entries()) {
+    await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).focus()
+    await page.keyboard.press('Enter')
+    await expect(dialog.getByRole('button', { name: path.split('/').at(-1), exact: true })).toHaveAttribute('aria-current', 'location')
+    await dialog.getByRole('button', { name: 'Workspace', exact: true }).click()
+    if (index === segments.length - 1) await noMapOverflow(page)
+  }
 })

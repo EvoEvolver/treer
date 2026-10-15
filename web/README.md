@@ -174,9 +174,11 @@ Small blocks remain visual markers: drill into their parent folder to enlarge
 its children, or use the native **Go to** picker to open any immediate child
 without targeting tiny blocks. This picker also keeps very dense, flat folders
 fully keyboard accessible. Opening an Agent uses its stable ID and closes the
-dialog. Folder headers drill down; breadcrumbs, an ancestor picker and the back
+dialog. Single-child folder chains share one header with individually accessible path
+segments (a native picker retains earlier segments when space is tight).
+Folder headers drill down; breadcrumbs, an ancestor picker and the back
 button return to ancestors. Navigation never changes sidebar expansion
-preferences or sends mutations. Nested previews are bounded to 12 folder levels
+preferences or sends mutations. Nested previews are bounded to 12 nested containers
 and approximately 700 nodes; branches fold earlier when their child folder
 headers cannot fit a touch target. Explicit drill-down resets that budget.
 The dialog traps focus, supports native button keyboard actions and Escape, and

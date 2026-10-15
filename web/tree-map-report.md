@@ -175,8 +175,8 @@ child reachable even in a dense flat folder. Breadcrumbs collapse older
 ancestors into a native picker rather than a scrolling strip.
 
 Measured against `origin/main` at `169259f`, same locked pnpm 10.12.4 toolchain:
-index.html grows from 1,106,272 to 1,107,269 bytes (+997 bytes); Vite's gzip
-measurement changes from 315.75 to 316.19 kB (+0.44 kB). No new dependencies,
+index.html grows from 1,106,272 to 1,108,213 bytes (+1,941 bytes); Vite's gzip
+measurement changes from 315.75 to 316.47 kB (+0.72 kB). No new dependencies,
 assets, data requests, storage, build, CSP, Worker or release changes.
 
 Local browser coverage includes 5/40/300 workloads in both themes at desktop
@@ -188,3 +188,9 @@ Screenshots are local review artifacts under
 `/Users/dooms/treer/.treer/reviews/fixed-treemap/` (12 images). No real workspace
 mutations or live-system validation were performed; no Rust/PostgreSQL tests
 are needed for this presentation-only change.
+
+Before release, single-child folder chains were compressed into one title bar.
+Each visible segment drills down independently; a native picker retains omitted
+segments on narrow screens or very deep chains. A four-level chain now reserves
+44px of title height instead of four bars. The final screenshots are under
+`/Users/dooms/treer/.treer/reviews/fixed-treemap-chain/`.

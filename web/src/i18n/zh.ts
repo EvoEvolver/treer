@@ -608,6 +608,7 @@ export const zh: Messages = {
   "overview.loading_workspace": "正在加载工作区…",
   "overview.your_workspace_is_ready": "你的工作区已就绪",
   "overview.explore_folders_and_open_agents": "浏览文件夹并打开 Agent。",
+  "treemap.chain_folders": "文件夹链 {path}",
   "treemap.folder_label": "文件夹 {path}",
   "treemap.workload_count": "{count} 个工作负载",
   "treemap.ancestors": "上级文件夹",
