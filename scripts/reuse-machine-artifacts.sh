@@ -8,16 +8,36 @@ cd "$root"
 commit=$(git rev-parse "${1:?candidate commit is required}^{commit}")
 requested=
 check_only=0
+verify_dist=
 shift
-for argument in "$@"; do
-    case "$argument" in
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --check-only) check_only=1 ;;
-        *) requested=$argument ;;
+        --verify-dist) shift; verify_dist=${1:?--verify-dist needs a directory} ;;
+        *) requested=$1 ;;
     esac
+    shift
 done
-[ ! -e dist ] || { echo "dist already exists; refusing to replace it" >&2; exit 1; }
 common=$(git rev-parse --path-format=absolute --git-common-dir)
 checkouts=${TREER_ARTIFACT_REUSE_ROOT:-$(dirname "$common")/.treer/canary-checkouts}
+if [ -n "$verify_dist" ]; then
+    # Prove an existing reused dist is the one a canary_passed release recorded: its
+    # provenance names the passed release, whose manifest must list identical hashes.
+    provenance="$verify_dist/artifact-provenance.json"
+    [ -f "$provenance" ] || { echo "dist has no reuse provenance" >&2; exit 1; }
+    passed=$(jq -er '.passed_release_commit' "$provenance") || exit 1
+    printf '%s' "$passed" | grep -Eq '^[0-9a-f]{40}$' || exit 1
+    manifest="$checkouts/$passed/.treer/releases/$passed/manifest.json"
+    [ -f "$manifest" ] || { echo "no manifest for the passed release $passed" >&2; exit 1; }
+    jq -e --arg passed "$passed" '.status == "canary_passed" and .commit == $passed' "$manifest" >/dev/null || exit 1
+    recorded=$(jq -cS '.machine_artifacts.files // empty' "$manifest") || exit 1
+    [ -n "$recorded" ] && [ "$recorded" = "$(jq -cS '.files' "$provenance")" ] || {
+        echo "reused dist hashes differ from the passed release's manifest" >&2; exit 1
+    }
+    sh scripts/verify-machine-artifacts.sh "$commit" "$verify_dist"
+    exit 0
+fi
+[ ! -e dist ] || { echo "dist already exists; refusing to replace it" >&2; exit 1; }
 # Only these paths cannot influence the CLI, Host or Controller binaries. Anything
 # else, including unknown paths, requires a native build at the exact commit.
 allowed='^(web|apps|docs)/'

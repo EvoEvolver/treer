@@ -318,8 +318,12 @@ Before it starts any release step the wrapper refuses to publish unless the exac
 commit has a completed successful `CI` run (push or manual dispatch; a pull-request
 run or a run for another commit does not count, the latest run decides, and it waits
 up to `TREER_RELEASE_CI_TIMEOUT` seconds, 2700 by default) and its native artifacts are
-green: a verified existing `dist/`, a successful `Machine artifacts <commit>` run, or
-a verified reuse anchor (`scripts/reuse-machine-artifacts.sh --check-only`). Dispatch
+green: a successful `Machine artifacts <commit>` run for that exact revision (the run
+title decides, so a dispatch on this ref that built another revision does not
+count; an existing `dist/` is still verified against it), or a verified reuse
+anchor (`scripts/reuse-machine-artifacts.sh --check-only`, or `--verify-dist` for a
+`dist/` that already carries reuse provenance). A local `dist/` alone is never
+evidence of a green native build. All `gh` calls are time-bounded. Dispatch
 the native workflow and let CI finish before running `just canary`;
 `python3 scripts/canary-release.py <commit> --check-ci` waits for CI alone.
 

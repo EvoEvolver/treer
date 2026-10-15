@@ -10,7 +10,12 @@ import sys
 import time
 
 
+GH_TIMEOUT = 120
+
+
 def run(*args, cwd, capture=False, **kwargs):
+    if args and args[0] == "gh":
+        kwargs.setdefault("timeout", GH_TIMEOUT)  # an external hang must not outlive the CI deadline
     result = subprocess.run(args, cwd=cwd, check=True, text=True,
                             stdout=subprocess.PIPE if capture else None, **kwargs)
     return result.stdout.strip() if capture else None
@@ -38,6 +43,7 @@ def wait_ci(root, commit, timeout=None, sleep=time.sleep, clock=time.monotonic):
     """Return only when the exact commit has a successful push/dispatch CI run."""
     timeout = int(os.environ.get("TREER_RELEASE_CI_TIMEOUT", "2700")) if timeout is None else timeout
     deadline = clock() + timeout
+    last_url = None
     while True:
         runs = json.loads(run("gh", "run", "list", "--workflow", "ci.yml", "--commit", commit,
                               "--limit", "20", "--json", "databaseId,status,conclusion,url,event,headSha",
@@ -47,6 +53,7 @@ def wait_ci(root, commit, timeout=None, sleep=time.sleep, clock=time.monotonic):
                 if item["event"] in ("push", "workflow_dispatch") and item["headSha"] == commit]
         if runs:
             latest = max(runs, key=lambda item: item["databaseId"])
+            last_url = latest["url"]
             if latest["status"] == "completed":
                 if latest["conclusion"] != "success":
                     raise RuntimeError(f"CI {latest['conclusion']} for {commit}: {latest['url']}; "
@@ -54,29 +61,45 @@ def wait_ci(root, commit, timeout=None, sleep=time.sleep, clock=time.monotonic):
                 print(f"Exact-commit CI passed: {latest['url']}")
                 return latest["url"]
         if clock() >= deadline:
-            raise RuntimeError(f"no successful CI run for {commit} within {timeout}s; no deployment started")
+            seen = f" (last seen: {last_url})" if last_url else ""
+            raise RuntimeError(f"no successful CI run for {commit} within {timeout}s{seen}; no deployment started")
         sleep(15)
 
 
 def native_ready(checkout, commit):
-    """Native artifacts must already be green for this commit or verifiably reusable."""
+    """Native artifacts must be green for this exact commit or provably reused from a canary_passed release.
+
+    A local dist/ is never evidence by itself: it passes only with a successful native run for the
+    commit, or with reuse provenance that matches the hashes a canary_passed manifest recorded."""
     dist = checkout / "dist"
-    if dist.is_dir():
-        run("sh", "scripts/verify-machine-artifacts.sh", commit, str(dist), cwd=checkout)
-        print("Native artifacts: existing dist verified")
+    if dist.is_dir() and (dist / "artifact-provenance.json").is_file():
+        run("sh", "scripts/reuse-machine-artifacts.sh", commit, "--verify-dist", str(dist), cwd=checkout)
+        print("Native artifacts: reused dist matches the canary_passed release that recorded it")
         return
     runs = json.loads(run("gh", "run", "list", "--workflow", "build-release-artifacts.yml", "--limit", "100",
                           "--json", "databaseId,status,conclusion,url,displayTitle,headSha",
                           cwd=checkout, capture=True))
-    runs = [item for item in runs
-            if item["displayTitle"] == f"Machine artifacts {commit}" or item["headSha"] == commit]
+    target = f"Machine artifacts {commit}"
+
+    def for_commit(item):
+        # A dispatch on ref C may build revision B: when the title names a revision it alone decides.
+        if item["displayTitle"].startswith("Machine artifacts "):
+            return item["displayTitle"] == target
+        return item["headSha"] == commit
+
+    runs = [item for item in runs if for_commit(item)]
     if runs:
         latest = max(runs, key=lambda item: item["databaseId"])
         if latest["status"] == "completed" and latest["conclusion"] == "success":
+            if dist.is_dir():
+                run("sh", "scripts/verify-machine-artifacts.sh", commit, str(dist), cwd=checkout)
             print(f"Native artifacts: build passed {latest['url']}")
             return
         raise RuntimeError(f"native artifact build for {commit} is {latest['status']}/{latest['conclusion']}: "
                            f"{latest['url']}; it must be green before publishing")
+    if dist.is_dir():
+        raise RuntimeError(f"dist/ exists but there is no native run for {commit} and no reuse provenance; "
+                           "a local dist is not evidence of a green native build")
     # No build exists: only a verified reuse of a canary_passed anchor may stand in for one.
     try:
         run("sh", "scripts/reuse-machine-artifacts.sh", commit, "--check-only", cwd=checkout)
@@ -165,11 +188,13 @@ def main():
         parser.error("--notify requires --agent to verify the sender identity")
     root = Path(__file__).resolve().parent.parent
     try:
+        if args.check_ci and args.dry_run:
+            parser.error("--dry-run and --check-ci are mutually exclusive: dry-run makes no network calls")
         if args.check_ci:
             wait_ci(root, git(root, "rev-parse", "--verify", f"{args.revision}^{{commit}}"))
         else:
             deploy(root, args)
-    except (RuntimeError, subprocess.CalledProcessError, OSError, KeyError, ValueError) as error:
+    except (RuntimeError, subprocess.SubprocessError, OSError, KeyError, ValueError) as error:
         print(f"Canary release failed: {error}", file=sys.stderr)
         print("Fix the failure, then rerun the same revision with --resume. No local runtime was restarted.",
               file=sys.stderr)
