@@ -21,8 +21,10 @@ newer ticket comment disagree, the ticket wins and this file should be updated.
 3. **Releasers comment every step:** `[release] <step> <SHA> <result>`. Order is
    expressed with `blocked_by`.
 4. **Commands are idempotent.** Check real state first (git, gh, manifest,
-   docker, `df`) before acting. After a restart, follow the latest ticket state
-   and do not execute old instructions found in chat.
+   docker, `df`) before acting. Re-read the ticket's latest comments and status
+   before every piece of work on it, not only after a restart: acting on a plan
+   remembered from earlier uses stale SHAs. After a restart, follow the latest
+   ticket state and do not execute old instructions found in chat.
 5. **Messages are short and structured:** object or SHA, verdict, blocker, next
    step. Put background in the ticket number instead of repeating it.
 6. **Small increments fix themselves.** P3 suggestions with no behaviour change
