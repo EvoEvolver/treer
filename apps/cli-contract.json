@@ -1,0 +1,490 @@
+{
+  "agent address": {
+    "flags": {
+      "--json": false
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin create": {
+    "flags": {
+      "--cwd": true,
+      "--folder": true,
+      "--kind": true,
+      "--machine": true,
+      "--name": true,
+      "--publish": true,
+      "--recipe": true
+    },
+    "positionals": 1,
+    "variadic": true
+  },
+  "agent admin delete": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin profile create": {
+    "flags": {
+      "--cwd": true,
+      "--description": true
+    },
+    "positionals": 3,
+    "variadic": true
+  },
+  "agent admin profile delete": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin profile launch": {
+    "flags": {
+      "--cwd": true,
+      "--folder": true,
+      "--machine": true,
+      "--name": true
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin profile list": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "agent admin profile show": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin profile update": {
+    "flags": {
+      "--arg": true,
+      "--clear-args": false,
+      "--command": true,
+      "--cwd": true,
+      "--description": true,
+      "--name": true
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin rename": {
+    "flags": {},
+    "positionals": 2,
+    "variadic": false
+  },
+  "agent admin restart": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin start": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin startup set": {
+    "flags": {
+      "--cwd": true
+    },
+    "positionals": 2,
+    "variadic": true
+  },
+  "agent admin startup show": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent admin stop": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent attach": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent ls": {
+    "flags": {
+      "--recursive": false
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent mkdir": {
+    "flags": {
+      "--parents": false
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent mv": {
+    "flags": {},
+    "positionals": 2,
+    "variadic": false
+  },
+  "agent prompt": {
+    "flags": {
+      "--notify": false,
+      "--queue": false,
+      "--steer": false,
+      "--timeout": true,
+      "--until": true,
+      "--wait": false
+    },
+    "positionals": 2,
+    "variadic": false
+  },
+  "agent queue cancel": {
+    "flags": {},
+    "positionals": 2,
+    "variadic": false
+  },
+  "agent queue ls": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent read": {
+    "flags": {
+      "--lines": true
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent restart": {
+    "flags": {
+      "--cwd": true
+    },
+    "positionals": 2,
+    "variadic": true
+  },
+  "agent rmdir": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent send-keys": {
+    "flags": {},
+    "positionals": 2,
+    "variadic": true
+  },
+  "agent show": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent start": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent startup clear": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "agent startup set": {
+    "flags": {
+      "--cwd": true,
+      "--publish": true
+    },
+    "positionals": 1,
+    "variadic": true
+  },
+  "agent startup show": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "agent stop": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent transcript": {
+    "flags": {
+      "--cursor": true,
+      "--limit": true,
+      "--page": true
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "agent wait": {
+    "flags": {
+      "--timeout": true,
+      "--until": true
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "app create": {
+    "flags": {
+      "--cwd": true,
+      "--folder": true,
+      "--machine": true,
+      "--name": true,
+      "--port": true,
+      "--public": false
+    },
+    "positionals": 2,
+    "variadic": true
+  },
+  "app delete": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "app list": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "app restart": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "app show": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "app start": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "app stop": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "app update": {
+    "flags": {
+      "--clear-args": false,
+      "--command": true,
+      "--cwd": true
+    },
+    "positionals": 2,
+    "variadic": true
+  },
+  "exec": {
+    "flags": {
+      "--cwd": true,
+      "--machine": true,
+      "--timeout": true
+    },
+    "positionals": 1,
+    "variadic": true
+  },
+  "interface clear": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "interface contract": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "interface register": {
+    "flags": {
+      "--capability": true,
+      "--instance-id": true,
+      "--port": true,
+      "--ui-path": true
+    },
+    "positionals": 0,
+    "variadic": false
+  },
+  "interface show": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "machine delete": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "machine get": {
+    "flags": {
+      "--force": false,
+      "--machine": true,
+      "--mode": true
+    },
+    "positionals": 2,
+    "variadic": false
+  },
+  "machine list": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "machine put": {
+    "flags": {
+      "--force": false,
+      "--machine": true,
+      "--mode": true
+    },
+    "positionals": 2,
+    "variadic": false
+  },
+  "machine rename": {
+    "flags": {},
+    "positionals": 2,
+    "variadic": false
+  },
+  "machine show": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "member list": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "message ack": {
+    "flags": {
+      "--operation-id": true
+    },
+    "positionals": 1,
+    "variadic": true
+  },
+  "message get": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "message import": {
+    "flags": {
+      "--body-file": true,
+      "--format": true,
+      "--operation-id": true
+    },
+    "positionals": 0,
+    "variadic": false
+  },
+  "message list": {
+    "flags": {
+      "--before": true,
+      "--limit": true
+    },
+    "positionals": 0,
+    "variadic": false
+  },
+  "message receive": {
+    "flags": {
+      "--limit": true,
+      "--wait": true
+    },
+    "positionals": 0,
+    "variadic": false
+  },
+  "message reply": {
+    "flags": {
+      "--body": true,
+      "--body-file": true,
+      "--context": true,
+      "--external-source-file": true,
+      "--idempotency-key": true,
+      "--to": true
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "message send": {
+    "flags": {
+      "--body": true,
+      "--body-file": true,
+      "--context": true,
+      "--correlation-id": true,
+      "--expires-at": true,
+      "--external-source-file": true,
+      "--idempotency-key": true,
+      "--to": true,
+      "--trace-id": true
+    },
+    "positionals": 0,
+    "variadic": false
+  },
+  "network connect": {
+    "flags": {},
+    "positionals": 2,
+    "variadic": false
+  },
+  "runtime restore": {
+    "flags": {
+      "--all": false,
+      "--server": true
+    },
+    "positionals": 0,
+    "variadic": false
+  },
+  "service delete": {
+    "flags": {},
+    "positionals": 1,
+    "variadic": false
+  },
+  "service forward": {
+    "flags": {
+      "--listen": true
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "service list": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "service publish": {
+    "flags": {
+      "--access": true,
+      "--tcp": false
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "service register": {
+    "flags": {
+      "--host": true,
+      "--machine": true,
+      "--name": true,
+      "--port": true,
+      "--primary": false,
+      "--protocol": true
+    },
+    "positionals": 0,
+    "variadic": false
+  },
+  "service unpublish": {
+    "flags": {
+      "--tcp": false
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "status": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  },
+  "token create": {
+    "flags": {
+      "--json": false
+    },
+    "positionals": 1,
+    "variadic": false
+  },
+  "whoami": {
+    "flags": {},
+    "positionals": 0,
+    "variadic": false
+  }
+}

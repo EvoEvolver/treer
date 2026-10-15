@@ -9,6 +9,9 @@ import os
 import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import cli_contract  # noqa: E402  (apps/cli_contract.py: the real CLI's argument contract)
+
 
 def fail(code: str, message: str) -> None:
     print(json.dumps({"error": {"code": code, "message": message}}), file=sys.stderr)
@@ -34,6 +37,10 @@ def main() -> int:
         state.setdefault("calls", [])
 
         arguments = sys.argv[1:]
+        problem = cli_contract.violation(arguments)
+        if problem:
+            print(json.dumps({"error": {"code": "cli_failed", "message": problem}}), file=sys.stderr)
+            return 2
         while arguments[:1] in (["--workspace"], ["--url"]):
             arguments = arguments[2:]
         if arguments[:1] == ["--workspace"]:

@@ -11,6 +11,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
+import cli_contract  # noqa: E402  (apps/cli_contract.py: the real CLI's argument contract)
+
 
 def fail(code: str, message: str) -> None:
     print(json.dumps({"error": {"code": code, "message": message}}), file=sys.stderr)
@@ -41,13 +44,10 @@ def main() -> int:
         state.setdefault("calls", [])
         state.setdefault("prompts", [])
         arguments = sys.argv[1:]
-        # clap treats a separate value that starts with '-' (other than '-') as an option, so such text needs --flag=VALUE.
-        for flag in ("--body", "--idempotency-key", "--to", "--context"):
-            for position, value in enumerate(arguments[:-1]):
-                nxt = arguments[position + 1]
-                if value == flag and nxt.startswith("-") and nxt != "-":
-                    print(json.dumps({"error": {"code": "cli_failed", "message": f"a value is required for '{flag}'"}}), file=sys.stderr)
-                    return 2
+        problem = cli_contract.violation(arguments)
+        if problem:
+            print(json.dumps({"error": {"code": "cli_failed", "message": problem}}), file=sys.stderr)
+            return 2
         files = options(arguments, "--external-source-file") + options(arguments, "--body-file")
         stdin = sys.stdin.read() if "-" in files else ""
         if any(value != "-" for value in files):

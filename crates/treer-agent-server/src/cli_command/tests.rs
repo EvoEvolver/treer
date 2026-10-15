@@ -910,3 +910,66 @@ fn agent_and_app_help_explain_paths_and_sibling_scope() {
         .is_ok());
     }
 }
+
+/// Every (sub)command with its long flags (and whether each takes a value) and positional count, hidden ones included, so Apps' fake CLIs can be
+/// checked against the real argument contract (`apps/cli-contract.json`).
+fn contract(
+    command: &clap::Command,
+    path: &str,
+    out: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    let mut flags = std::collections::BTreeMap::new();
+    let mut positionals = 0;
+    let mut variadic = false;
+    for argument in command.get_arguments() {
+        if argument.is_positional() {
+            positionals += 1;
+            variadic |= argument
+                .get_num_args()
+                .is_some_and(|range| range.max_values() > 1);
+        } else if let Some(long) = argument.get_long() {
+            let takes_value = argument.get_action().takes_values();
+            flags.insert(format!("--{long}"), takes_value);
+            for alias in argument.get_all_aliases().into_iter().flatten() {
+                flags.insert(format!("--{alias}"), takes_value);
+            }
+        }
+    }
+    let subcommands: Vec<_> = command.get_subcommands().collect();
+    if subcommands.is_empty() {
+        out.insert(
+            path.to_string(),
+            serde_json::json!({ "flags": flags, "positionals": positionals, "variadic": variadic }),
+        );
+    }
+    for sub in subcommands {
+        let name = sub.get_name();
+        contract(
+            sub,
+            &if path.is_empty() {
+                name.to_string()
+            } else {
+                format!("{path} {name}")
+            },
+            out,
+        );
+    }
+}
+
+#[test]
+fn cli_contract_snapshot_matches_the_real_parser() {
+    use clap::CommandFactory;
+    let mut out = serde_json::Map::new();
+    contract(&Args::command(), "", &mut out);
+    let rendered = serde_json::to_string_pretty(&serde_json::Value::Object(out)).unwrap() + "\n";
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../apps/cli-contract.json");
+    if std::env::var_os("TREER_UPDATE_CLI_CONTRACT").is_some() {
+        std::fs::write(&path, &rendered).unwrap();
+    }
+    let current = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        current == rendered,
+        "apps/cli-contract.json is stale: run `TREER_UPDATE_CLI_CONTRACT=1 cargo test -p treer-agent-server cli_contract` and commit it"
+    );
+}
