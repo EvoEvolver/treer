@@ -55,6 +55,19 @@ operation. The editor scrolls on short mobile screens and preserves input after
 a denied operation. Managed Apps have separate settings; their startup editing
 requires the forthcoming App update API.
 
+## Console composition
+
+`workspace-app.tsx` coordinates selection, views and user actions. Its dialog
+state and rendering live in `workspace-dialog-state.ts` / `workspace-dialogs.tsx`;
+App metadata and snapshot/event synchronization in `use-workspace-live-feed.ts`;
+organization members/groups in `use-organization-members.ts`; machine/audit
+queries in `use-workspace-metrics.ts`; route refs in `use-workspace-route.ts`;
+and the mobile terminal key rows in `mobile-terminal-keys.tsx`.
+These boundaries retain the existing request paths, refresh timings, mutation
+fencing, dialog defaults and focus/selection behavior. Authentication and trusted
+Policy settings remain in the existing control-plane flow. The single-file
+build and dependency list are unchanged.
+
 ## Audit traffic
 
 Audit shows workspace traffic for the last 6 hours, 24 hours (default), 7 days,
