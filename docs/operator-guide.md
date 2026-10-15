@@ -84,6 +84,92 @@ treer agent restart /docs
 treer agent read /docs --lines 80
 ```
 
+### Deploy new Apps from version directories (POSIX)
+
+`scripts/app-deploy` is an explicit, local App-layer tool for macOS/Linux with
+Python 3.11+ and Git. It does not update Core, enroll machines, create Apps, or
+control remote files. Run it on the App's machine using an authorized Treer CLI
+identity. Its absolute physical deployment root must be inside the enrolled
+machine root. Windows is explicitly unsupported by this symlink-based tool.
+Existing Apps need the Core App-update capability before migrating their saved
+command to this entry point; do not install a shim in a live source checkout.
+
+For a **new** App, initialize and stage before creating the Managed App:
+
+```bash
+# Use physical absolute paths and an independently reviewed full commit SHA.
+python3 scripts/app-deploy init --root /machine/apps-deployed/example \
+  --machine-root /machine --command /usr/bin/python3 --entry server.py --db-env EXAMPLE_DB
+python3 scripts/app-deploy stage --root /machine/apps-deployed/example \
+  --repo /source/treer --commit FULL_40_CHARACTER_SHA --component apps/example \
+  --check-json '["/usr/bin/python3","-m","unittest","discover"]'
+python3 scripts/app-deploy bootstrap --root /machine/apps-deployed/example \
+  --release FULL_40_CHARACTER_SHA
+# init prints the exact command/args/cwd for treer app create --machine ... .
+# Use its Python executable and entry.py, not a mutable checkout or current path.
+```
+
+The stable, private `entry.py run --root ROOT` loads `config.json`, resolves
+`current` once to `releases/<SHA>`, verifies its file hashes and executes the
+configured interpreter with an absolute release script and physical cwd. Put all
+runtime writes outside the release. The selected database environment variable
+always points to `ROOT/state/app.sqlite3`; Python bytecode writing is disabled,
+and the child starts with umask 077. Normal workload identity remains intact.
+Apps must expose a deployment-health JSON response on loopback **and** through
+their real Treer service route, containing `version` (from `APP_DEPLOY_VERSION`),
+`app_id` (the stable App ID), `ready: true`, and `database_ready: true`. Return
+readiness only after initialization/migrations complete and the database works.
+Serve deployment health without caches (`Cache-Control: no-store`).
+No HTTP redirects, URL credentials, query secrets, or oversized health bodies
+are accepted. An HTTP 200 alone is insufficient. The service-route probe uses
+the deployer's ordinary HTTP proxy identity; it does not mint an owner token.
+
+Stage the next full commit with the component's complete tests/build as
+`--check-json` (an absolute executable and argv; no shell), then deploy explicitly:
+
+```bash
+python3 scripts/app-deploy deploy --root /machine/apps-deployed/example \
+  --treer /absolute/path/to/treer --app STABLE_APP_ID \
+  --release NEXT_FULL_SHA --operation-id deploy-unique-id \
+  --health-url http://127.0.0.1:8080/deployment-health \
+  --route-url http://example.treer/deployment-health --timeout 20
+# After a crash, inspect the private receipt, then explicitly recover:
+python3 scripts/app-deploy recover --root /machine/apps-deployed/example \
+  --treer /absolute/path/to/treer --app STABLE_APP_ID --operation-id deploy-unique-id
+```
+
+The machine/App-specific private root has a nonblocking `flock`. Deployment
+checks the local machine and exact saved entry command, confirms old-version
+health, binds the private root to that App's stable identity, persists a receipt,
+stops that App, makes an SQLite backup with the
+SQLite backup API (including WAL, with a 120-second backup budget) and
+`integrity_check`, switches `previous` and
+`current` atomically, starts the same App, and verifies both health surfaces.
+Other Agents, Host and Controller are never restarted. A stopped App is rejected
+before deployment; the tool does not change its stopped intent. Replaying a
+completed operation verifies health without restarting again.
+
+Failure stops the candidate before restoring the old SQLite snapshot and
+version, then restarts and verifies the old App. This deliberately discards all
+candidate writes since the backup: use only for Apps whose single SQLite
+database is the complete rollback state, with no other writers. External side
+effects, other files/databases, queues and remote migrations are not rolled back.
+Any external writer must be quiesced separately; stopping this App is not a
+distributed write lock. This is maintenance downtime, not zero-downtime delivery.
+`rollback_failed` and incomplete receipts block new deployments. A crash requires
+explicit `recover`; it never guesses success or silently reruns a migration.
+
+The exported git component ignores dirty checkout changes and rejects archive
+links/special files; staged checks run without inherited Treer/UI credentials.
+Hashes detect accidental asset corruption, not a malicious same-account writer
+or an unauthenticated release origin. Review the source and check command before
+staging: they execute with the local OS account's authority. Versions are retained
+for rollback; do not edit/prune any directory still used by a process. Backup,
+config and receipt directories are 0700, files 0600 (executable assets 0700).
+Receipts omit argv, tokens and application content; they contain paths, App
+identity, versions, health URLs and backup hashes. Same-account processes can
+read/change these files; use separate OS accounts/containers for isolation.
+
 When wildcard ingress is configured, every Managed App receives a stable
 `public_url` on its own origin. It requires Workspace authentication by default;
 an Agent can explicitly pass `--public` at creation time to allow anonymous

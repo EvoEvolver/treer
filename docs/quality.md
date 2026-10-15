@@ -1,5 +1,18 @@
 # Quality And Maintenance
 
+### App-layer deployment checks
+
+`python3 -m unittest discover -s scripts/tests -p test_app_deploy.py -v` runs
+the POSIX `scripts/app-deploy` fixture with disposable git repositories, real
+Python App subprocesses, dynamic loopback HTTP ports, SQLite/WAL and a fake Treer
+CLI boundary. It covers version/identity readiness on local and service-route
+surfaces, stable identity, successful and failed migrations, SQLite snapshot
+integrity/tampering, interrupted pointer-switch recovery, failed rollback blocking,
+idempotent replay, locks, unsafe paths, dirty checkout exclusion and asset hashes.
+It never controls an enrolled App or existing Host/Controller. This is not a
+native Windows test, authenticated multi-machine ingress test, malicious
+same-account filesystem isolation test, or a guarantee of external-effect rollback.
+
 For ordinary development, run only the focused checks that cover the changed
 boundary. PostgreSQL-backed tests are optional unless the change directly
 touches Proxy persistence, authentication, membership, Policy, or Core Message.
