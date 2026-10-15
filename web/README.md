@@ -181,7 +181,7 @@ nonce CSP. See [the size/review notes](tree-map-report.md).
 
 ## Retained workspace tabs
 
-Overview is a pinned page. Opening an Agent or App from the Tree or Overview
+Overview is a pinned page; its desktop tab stays visible when the tab strip scrolls. Opening an Agent or App from the Tree or Overview
 opens or selects its stable-ID tab; a tab’s full Tree path distinguishes repeated
 names. Desktop tabs support Left/Right, Home/End, Delete to close, and
 Ctrl/Cmd+1–9 and Ctrl/Cmd+W. Shortcuts apply while focus is in the Console

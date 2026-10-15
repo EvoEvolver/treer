@@ -206,3 +206,24 @@ test('shrinking to phone clamps LRU without unloading the active terminal', asyn
   await expect(page.getByRole('dialog', { name: /^Open tabs/ }).getByText('Live 4/4', { exact: true })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
+
+for (const theme of ['light', 'dark']) test(`pinned Overview remains visible while tabs overflow ${theme}`, async ({ page }, info) => {
+  await page.setViewportSize({ width: 1000, height: 900 })
+  await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
+  await fixture(page)
+  await page.goto('/')
+  for (const name of names) await open(page, name)
+  const list = page.getByRole('tablist', { name: 'Open pages' })
+  await expect.poll(() => list.evaluate((element) => element.scrollLeft)).toBeGreaterThan(100)
+  const overview = page.getByRole('tab', { name: 'Tab Overview', exact: true })
+  const listBox = (await list.boundingBox())!
+  const overviewBox = (await overview.boundingBox())!
+  expect(Math.abs(overviewBox.x - listBox.x)).toBeLessThan(1)
+  expect(await overview.evaluate((element) => {
+    const rect = element.getBoundingClientRect()
+    return element.contains(document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2))
+  })).toBe(true)
+  await page.screenshot({ path: info.outputPath(`tabs-overflow-${theme}.png`) })
+  await overview.click()
+  await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
+})
