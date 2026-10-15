@@ -4,7 +4,8 @@ A folder-scoped Managed App for email reminders and browser Core Message replies
 The tree contains the endpoint App; contacts are configured email addresses, not
 nodes or new accounts. Run independent instances in different folders. Email
 contains a summary and thread link; replies happen on the web, never via inbound
-email. Core remains the canonical body/thread store. No build step is needed.
+email. Core remains the canonical body/thread store. The committed React frontend runs
+without Node or a runtime build; Node is used only when developing the UI.
 
 ## Deployment and activation
 
@@ -74,9 +75,54 @@ tree/Agent/App read permissions. Lookup failure fails closed, with an explicit
 a concurrent move can race an already-authorized in-flight Message, but queued
 email is rechecked before delivery. There is no Core transaction spanning them.
 
-Only configuration/state paths appear in deployment argv. Config/contact changes
-are read at process startup; leader/release-eng schedules any App-only restart.
+Only configuration/state paths appear in deployment argv. Operator transport
+configuration is read at startup. Contact settings saved in the App take effect
+without restarting and persist in SQLite; see below. Leader/release-eng schedules
+any App-only restart.
 Do not restart anything during development or migrate the running deployment.
+
+## Settings and contact administration
+
+The React page has Overview, Settings, Delivery and Audit sections for current
+human workspace owners/admins. Other members see only their own bound contacts
+and recent conversations. Agent identities cannot use management APIs even if
+their token contains a claimed owner role. Every request uses the existing shared
+mail identity/OAuth implementation, with fresh Core verification and current
+membership. Invalid supplied identity tokens never fall back to cookies.
+
+Settings list current human member IDs from the App directory. Binding an email
+to one is an **administrator assertion**, not OAuth proof of email ownership.
+An unbound contact is retained for future guest support but is `reply_unavailable`.
+No invitations, mailbox discovery or real test email are sent.
+
+- `GET /v1/admin/settings`: current contacts/revision, visible human directory,
+  transport mode, admission/limits and latest 100 audit entries.
+- `POST /v1/admin/contacts`: `{ "revision": N, "contacts": [...] }`, at most
+  100 contacts. Rejects unknown fields, invalid emails/member IDs, duplicate
+  IDs/addresses and stale revision (409). New IDs allow ASCII letters, digits,
+  underscore and hyphen; existing legacy IDs remain usable. Address/member bindings on existing IDs are immutable:
+  remove and add a new ID to change one. Removed IDs remain retired and cannot
+  resurrect old conversations. Labels and enabled flags remain editable.
+- `POST /v1/admin/activation` still requires current folder confirmation.
+  Both management writes require exact approved Origin, non-cross-site Fetch
+  Metadata and `X-Requested-With: email-settings`, including forwarded human
+  identity. Use a non-`x-treer-*` custom header: Proxy strips that namespace.
+
+The initial config/legacy members seed contacts; after the first UI save the
+SQLite `endpoint_state` contacts document takes precedence at every startup.
+Contact updates, monotonic revision, retired IDs and audit entry commit together.
+There is no UI transfer of old conversations. Disabling then enabling the same
+unchanged contact restores that same recipient's access deliberately; removing
+it permanently revokes that ID. A fresh browser reload resolves stale edits.
+Operator config changes cannot override a saved contact document. Restore a
+matching SQLite backup to recover a previous configuration; do not hand-edit IDs.
+
+Audit retains latest 1,000 administration events, shows 100, and contains only
+stable actor, fixed action, revision and UTC timestamp. It excludes email
+addresses, labels, tokens and message contents. No tamper-evident audit guarantee.
+Transport credentials remain in Core: the UI has no credential read/write fields
+and cannot change transport mode, allowlist or rate limits. Consequently there
+is no new local-secret storage/validation or SSRF destination introduced here.
 
 ## Deploy a fixed version (P0 production layout)
 
@@ -231,9 +277,37 @@ summary 500, body 32768; high urgency does not bypass them. Worker retries
 transient failures 5 times, starting at 30 seconds, exponential backoff to 1 hour
 (`agent_limit`, `recipient_limit`, `max_attempts`, `retry_seconds`). Failed entries
 need inspection. Do not create a new key to blindly resend ambiguous provider
-outcomes. Email contains no complete body. Explicit summary/subject are still
-sensitive; keep secrets out. Core thread is canonical; no inbound email or promise
+outcomes. Email uses only a fixed thread-ID/count summary plus the authenticated link.
+User-supplied subject/summary are retained for API compatibility and local status,
+but are no longer emitted into email. Keep secrets out of local metadata too. Core thread is canonical; no inbound email or promise
 of replying in a mail client to the RFC email thread.
+
+## Notification windows and failures
+
+Every Agent send still writes its complete Message with **that Agent's own
+verified token** before it becomes eligible for email. There is no extra Core
+notification sent as the App. A failed/pending Core intent never joins a digest;
+the original Agent must retry with the identical idempotency key. Human replies
+continue with the human token and fixed initiating Agent/context.
+
+Email reminders use a durable five-minute window keyed by Agent + recipient +
+thread. First delivery is immediate; subsequent accepted events wait until the
+window expires, then one email names the thread and number of new Messages.
+Each Message remains independently readable in Core. Different Agents/recipients
+cannot join each other's batch; existing global recipient and Agent hourly
+admission limits still apply across all threads. Delivery reports `queued`,
+`sent`, `coalesced` or `failed`; `core_pending`, transport and fixed failure code
+are shown in Delivery. Outbox `sent` is a private preview, not email delivery.
+
+Batch membership is frozen in SQLite before transport. Retries/restarts use the
+same notification ID, count and payload; later Messages cannot change that batch.
+Transport success marks other included reminders `coalesced`; terminal failure
+marks the whole batch failed. A lost provider response relies on the provider's
+idempotency contract; never blindly create another intent. Worker rechecks current
+placement, activation, contact binding, membership and allowlist before delivery.
+The email transport runs under the App's narrow email permission for already
+accepted Messages; it cannot re-evaluate an expired original token or promise
+revocation cancels an email already accepted by an external provider.
 
 ## Migration, backup and rollback
 
@@ -251,8 +325,9 @@ than assuming all will resume.
 
 Automatic backup covers SQLite only (outbox is unchanged by schema migration).
 For routine backup, use SQLite online backup plus a consistent private outbox
-copy, or stop this App and copy the entire state directory/config. Restoring only
-SQLite does not restore old configuration/contact bindings. Rollback: stop v2,
+copy, or stop this App and copy the entire state directory/config. Contact overrides, retired IDs, revisions, audit and mail windows/batches are
+part of SQLite. Restoring only SQLite does not restore startup transport
+configuration or the outbox. Rollback: stop v2,
 restore the full pre-deployment state/config and old code, then let the operator
 start it. A pre-v2 database may be used with its matching pre-upgrade config;
 post-upgrade changes are not in that backup. Never print tokens/config/state in
@@ -263,7 +338,8 @@ logs. SQLite contains OAuth access/session data; restrict backup access too.
 ```sh
 python3 -m unittest discover -s apps/email-endpoint/tests -v
 cd apps/email-endpoint
-npm install --ignore-scripts
+npm ci --ignore-scripts
+npm run check
 npx playwright install chromium
 npm run test:browser
 ```
@@ -279,8 +355,9 @@ prefix, header stripping, XSS, contacts and admin placement activation. Screensh
 default to `/tmp/email-endpoint-browser`; override `EMAIL_ENDPOINT_SCREENSHOTS`.
 CLI tests use a fake `treer` executable and local HTTP proxy, no real machines.
 
-One process owns each instance database; no multi-process/HA guarantee. Config is
-operator-managed and requires a coordinated App-only restart. There is no guest
+One process owns each instance database; no multi-process/HA guarantee. Transport config is
+operator-managed and requires a coordinated App-only restart; contacts are
+managed live in SQLite with optimistic revisions. There is no guest
 access, public gateway, inbound email, attachment handling, per-contact OAuth
 provider, automatic invitation/mailbox discovery, subtree sending, transport
 credential management or indefinite retries. Current OAuth assumes configured

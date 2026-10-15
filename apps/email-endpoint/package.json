@@ -1,1 +1,17 @@
-{"name":"treer-email-endpoint-tests","private":true,"type":"module","scripts":{"test:browser":"node tests/browser.mjs"},"devDependencies":{"playwright":"1.58.2"}}
+{
+  "name": "treer-email-endpoint-ui",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-ui.mjs",
+    "check": "node scripts/build-ui.mjs --check",
+    "test:browser": "node tests/browser.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
+    "playwright": "1.58.2"
+  }
+}

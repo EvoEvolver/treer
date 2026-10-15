@@ -93,12 +93,12 @@ def signed_api(method, path, access_token=None, body=None, form=None):
         except (ValueError, KeyError):
             return {"active": False}
         verified.add(claims["jti"])
-        result = original_api_request(method, path, body={"token": "human"})
+        result = original_api_request(method, path, body={"token": claims.get("principal", "human")})
         result["claims"]["exp"] = claims["exp"]
         return result
     if access_token and "." in access_token:
         decode_token(access_token)
-        access_token = "human"
+        access_token = decode_token(access_token).get("principal", "human")
     return original_api_request(
         method, path, access_token=access_token, body=body, form=form
     )
@@ -161,6 +161,7 @@ class Gateway(BaseHTTPRequestHandler):
             self.send_error(401)
             return
         claims = {
+            "principal": "admin" if "treer_test_platform=logged-in-admin" in self.headers.get("Cookie", "") else "human",
             "aud": "svc_test",
             "exp": time.time() + 60,
             "jti": secrets.token_hex(12),

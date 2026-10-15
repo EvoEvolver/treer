@@ -34,12 +34,15 @@ remains a send alias. Identity comes from Treer, never a sender field in JSON.
 
 POST /v1/notify requires `to`, `subject`, `body`, optional `summary`, `urgency`
 (normal/high), `thread_id`, and Idempotency-Key. Body comes from stdin in CLI and
-stays in Core. Email contains summary/link only; never put secrets in its subject
-or explicit summary. Repeat identical content/key to recover an interrupted
+stays in Core. Email contains a fixed thread-ID/count summary and link; supplied
+subject/summary remain local metadata, not email content. Keep them free of secrets. Repeat identical content/key to recover an interrupted
 request; changing it conflicts. `core_pending` requires that original retry.
 GET /v1/notifications/ID returns own delivery state and thread URL.
 GET /v1/endpoint lists allowed contacts, current placement and activation.
 
+Reminders for one Agent/recipient/thread combine within five minutes; each Core
+Message stays separate. `coalesced` means another reminder includes this event.
+A pending Core intent never joins a batch; its Agent must retry the original key.
 Outbox sent means a local file, **no email sent**. Real transport is restricted
 to doomspec@outlook.com plus configured admission; tests always outbox. High
 urgency does not bypass limits. Moving/revoking after queueing is rechecked by

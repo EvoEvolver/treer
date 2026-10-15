@@ -97,8 +97,44 @@ try {
     await page.screenshot({path:`${artifacts}/endpoint-admin-390.png`,fullPage:true});
     await context.close();
   }
+  for(const width of [1280,390]) {
+    const context=await browser.newContext({viewport:{width,height:1000},colorScheme:width===390?'dark':'light'});
+    await context.addCookies([{name:'treer_test_platform',value:'logged-in-admin',url:gateway,httpOnly:true,sameSite:'Lax'}]);
+    const page=await context.newPage();const errors=[];page.on('pageerror',e=>errors.push(e.message));
+    await page.goto(`${gateway}/control-plane/`);
+    const frame=page.frameLocator('iframe');
+    await frame.getByRole('button',{name:'Settings',exact:true}).click();
+    await frame.getByRole('heading',{name:'Contact settings'}).waitFor();
+    await frame.getByRole('button',{name:'Add contact',exact:true}).click();
+    await frame.getByRole('textbox',{name:'Label 3',exact:true}).fill('<script>window.XSS=true</script>');
+    await frame.getByRole('textbox',{name:'Email address 3',exact:true}).fill(`new-${width}@example.test`);
+    await frame.getByRole('combobox',{name:'Workspace member 3',exact:true}).selectOption('u2');
+    await frame.getByRole('button',{name:'Save contacts',exact:true}).click();
+    await frame.getByText('Contacts saved.',{exact:true}).waitFor();
+    assert.equal(await frame.locator('input[aria-label="Email address 3"]').getAttribute('readonly'),'');
+    await page.reload();
+    await frame.getByRole('button',{name:'Settings',exact:true}).click();
+    await frame.getByRole('textbox',{name:'Email address 3',exact:true}).waitFor();
+    assert.equal(await frame.getByRole('textbox',{name:'Email address 3',exact:true}).inputValue(),`new-${width}@example.test`);
+    assert.equal(await frame.locator('main').evaluate(()=>window.XSS),undefined);
+    assert.equal(await frame.locator('html').evaluate(el=>el.scrollWidth<=innerWidth),true);
+    await page.screenshot({path:`${artifacts}/settings-embedded-${width}.png`,fullPage:true});
+    await frame.getByRole('button',{name:'Save contacts',exact:true}).scrollIntoViewIfNeeded();
+    await page.screenshot({path:`${artifacts}/settings-actions-embedded-${width}.png`,fullPage:true});
+    await frame.getByRole('button',{name:'Remove contact 3',exact:true}).click();
+    await frame.getByRole('button',{name:'Save contacts',exact:true}).click();
+    await frame.getByText('Contacts saved.',{exact:true}).waitFor();
+    await frame.getByRole('button',{name:'Audit',exact:true}).click();
+    await frame.getByText('Management audit',{exact:true}).waitFor();
+    await frame.getByText('contacts_saved · u1',{exact:true}).first().waitFor();
+    await frame.getByRole('button',{name:'Delivery',exact:true}).click();
+    await frame.getByRole('heading',{name:'Local outbox & delivery status'}).waitFor();
+    await page.screenshot({path:`${artifacts}/delivery-embedded-${width}.png`,fullPage:true});
+    assert.deepEqual(errors,[]);
+    await context.close();
+  }
   const context=await browser.newContext({extraHTTPHeaders:{'X-Treer-Identity-Token':'other-human'}});
   const page=await context.newPage();const response=await page.goto(`${url}/t/${thread}/`);
   assert.equal(response.status(),403);await page.getByRole('heading',{name:'Access denied'}).waitFor();
-  console.log(`Browser checks passed: OAuth/PKCE roundtrip and replies at desktop/390px, instance contacts/admin activation, desktop, 390px dark, XSS, replies, denial, signed per-request gateway identity, iframe/tunnel assets, no OAuth/cookie login. Screenshots: ${artifacts}`);
+  console.log(`Browser checks passed: React settings save/reload/delete/audit/delivery at desktop/390px through signed embedded gateway; OAuth/PKCE and replies, contacts/admin activation, dark/light, XSS, denial, ingress/tunnel assets, automatic identity without OAuth/cookie login. Screenshots: ${artifacts}`);
 } finally {await browser?.close();child.kill();lines.close();}
