@@ -3,6 +3,8 @@ import { execFileSync } from "node:child_process";
 import { isAbsolute, join, relative, resolve, sep, toNamespacedPath } from "node:path";
 import { compatibility, digest, regular, verifyBundle } from "./bundle-contract.mjs";
 import { profileTransaction } from "./profile-transaction.mjs";
+import { installShim } from "./path-shim.mjs";
+import { managedProfile, portableCommand } from "./portable-profile.mjs";
 
 function present(path) { try { lstatSync(path); return true; } catch (error) { if (error.code === "ENOENT") return false; throw error; } }
 function directory(path) {
@@ -100,56 +102,12 @@ export function controllerInstall(request) {
     const originalReceipt = present(receiptPath) ? regular(receiptPath) : null;
     const receipt = Object.assign(Object.create(null), originalReceipt ? JSON.parse(originalReceipt.toString("utf8")) : {});
     const runner = join(root, "run.mjs");
-    const specification = (profile) => ({ command: profile.command, cwd: profile.cwd, args: profile.args ?? [] });
-    const names = receipt.$profile_names ?? {};
-    if (!names || typeof names !== "object" || Array.isArray(names)) throw new Error("Invalid launcher profile-name receipt");
     const originals = new Map();
-    let machineName;
-    function qualifiedName(profile) {
-      if (!machineName) {
-        let machine = request.controller?.machine;
-        if (!machine?.name) {
-          const reported = transaction.machine(machine?.server_id);
-          if (!machine?.server_id || reported?.server_id !== machine.server_id) throw new Error("Unable to verify launcher machine name");
-          machine = reported;
-        }
-        const name = machine.name;
-        if (typeof name !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(name)) throw new Error("Launcher machine name must be 1-64 ASCII letters, digits, dots, underscores or hyphens");
-        machineName = name;
-      }
-      return `${profile.name} (${machineName})`;
-    }
-    profiles = profiles.map((profile) => {
-      const savedName = Object.hasOwn(names, profile.id) ? names[profile.id] : undefined;
-      if (savedName !== undefined && (typeof savedName !== "string" || savedName.length > 128 || !Object.hasOwn(receipt, savedName))) throw new Error("Invalid launcher profile-name receipt");
-      let name = savedName ?? profile.name, current = transaction.show(name);
-      const legacy = !Object.hasOwn(receipt, name) && current?.command === join(root, "current/launchers/agent/scripts/treer-agent.sh") && current.cwd === cwd && JSON.stringify(current.args) === JSON.stringify(profile.args);
-      // Workspace names are global: another machine's default must never be
-      // overwritten. Once selected, persist the name with the same transaction
-      // as its ownership receipt, so renaming a machine cannot redirect updates.
-      if (!savedName && current && !Object.hasOwn(receipt, name) && !legacy) {
-        name = qualifiedName(profile);
-        current = transaction.show(name);
-        if (current && !Object.hasOwn(receipt, name)) {
-          const id = request.controller?.machine?.server_id;
-          if (typeof id !== "string" || !/^srv_[A-Za-z0-9_-]{1,64}$/.test(id)) throw new Error("Unable to verify launcher machine identity");
-          name = `${profile.name} (${machineName}-${id})`;
-          if (name.length > 128) throw new Error("Launcher profile name exceeds 128 characters");
-          current = transaction.show(name);
-        }
-      }
-      if (name.length > 128) throw new Error("Launcher profile name exceeds 128 characters");
-      originals.set(name, current);
-      return { ...profile, name };
-    });
     for (const profile of profiles) {
-      const current = originals.get(profile.name);
-      if (!current) continue;
+      const current = transaction.show(profile.name);
+      originals.set(profile.name, current);
       const previous = Object.hasOwn(receipt, profile.name) ? receipt[profile.name] : undefined;
-      // A first takeover only adopts a known legacy launcher entry, never an
-      // arbitrary owner's command. Any subsequent customization is protected.
-      const legacy = !previous && current.command === join(root, "current/launchers/agent/scripts/treer-agent.sh") && current.cwd === cwd && JSON.stringify(current.args) === JSON.stringify(profile.args);
-      if (!legacy && (!previous || JSON.stringify(specification(current)) !== JSON.stringify(previous))) throw new Error(`Launcher profile is customized; preserve or remove it explicitly before installation: ${profile.name}`);
+      if (!managedProfile(current, profile, previous)) throw new Error(`Launcher profile is customized; preserve or remove it explicitly before installation: ${profile.name}`);
     }
     const changed = [];
     // A running Node process already loaded this trampoline. Atomically repair
@@ -158,23 +116,30 @@ export function controllerInstall(request) {
     if (!present(runner) || digest(regular(runner)) !== digest(runnerBytes)) atomic(runner, runnerBytes);
     const next = { schema: "treer.launcher-current/v1", version, previous: pointer?.version !== version ? pointer?.version ?? null : pointer?.previous ?? null, node: request.node, treer: request.treer };
     atomic(pointerPath, JSON.stringify(next) + "\n");
+    let shim;
     try {
+      // Isolated --skip-profiles previews must not redirect the user's default
+      // command away from the production installation.
+      if (request.skip_profiles !== true) shim = installShim(request.node, runner);
       for (const profile of profiles) {
         changed.push({ name: profile.name, previous: originals.get(profile.name) });
-        transaction.saveProfile({ ...profile, args: [runner, ...profile.args] }, request.node, cwd, originals.get(profile.name));
-        receipt[profile.name] = { command: request.node, cwd, args: [runner, ...profile.args] };
+        transaction.saveProfile(profile, portableCommand, ".", originals.get(profile.name));
+        receipt[profile.name] = { command: portableCommand, cwd: ".", args: profile.args };
       }
-      receipt.$profile_names = { ...names, ...Object.fromEntries(profiles.map((profile) => [profile.id, profile.name])) };
-      atomic(receiptPath, JSON.stringify(receipt) + "\n");
+      if (request.skip_profiles !== true) {
+        receipt.$profile_names = Object.fromEntries(profiles.map((profile) => [profile.id, profile.name]));
+        atomic(receiptPath, JSON.stringify(receipt) + "\n");
+      }
     } catch (error) {
       let failed = false;
       for (const original of changed.reverse()) { try { transaction.restoreProfile(original); } catch { failed = true; } }
+      try { shim?.rollback(); } catch { failed = true; }
       try { if (originalReceipt) atomic(receiptPath, originalReceipt); else if (present(receiptPath)) rmSync(receiptPath); } catch { failed = true; }
       if (failed) throw new Error("Profile rollback incomplete; retained usable candidate pointer, inspect profiles before retry");
       if (pointer) atomic(pointerPath, JSON.stringify(pointer) + "\n"); else rmSync(pointerPath);
       throw error;
     }
     return { schema: "treer.launcher-install-result/v1", operation: request.operation, version, source_commit: verified.manifest.source_commit, previous: next.previous,
-      compatibility: aligned, profiles: profiles.map((profile) => profile.name), command: request.node, entry: runner, portable: verified.portable };
+      compatibility: aligned, profiles: profiles.map((profile) => profile.name), command: portableCommand, entry: runner, shim: shim?.path ?? null, portable: verified.portable };
   } finally { if (stage) rmSync(stage, { recursive: true, force: true }); rmdirSync(lock); }
 }

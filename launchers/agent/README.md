@@ -71,6 +71,60 @@ do not limit concurrent requests, accumulated transcripts or model tool output.
 
 ## Installation and updates
 
+### Create an Agent
+
+Install the matching launcher on each machine with `treer-agent-server launcher --node /absolute/node install` (Node.js 22+).
+Web: **+ → Add agent → choose Claude + UI, Codex + UI, or another launcher profile**, then choose the machine.
+CLI: `treer agent admin create --machine <m> --kind command --name <n> -- treer-agent --harness claude`.
+
+Installation pins the selected Node and local launcher entry in one per-user
+command: `~/.local/bin/treer-agent` on macOS/Linux, or
+`%LOCALAPPDATA%\Treer\bin\treer-agent.exe` on Windows. Node is not searched on
+PATH when that command runs. Ensure the bin directory is on your shell PATH;
+the installer does not rewrite shell profiles, registry values, or running Host
+environments. Controller Agent PATH also prepends the Treer CLI directory.
+All three current workspace machines have the matching bin directory on PATH;
+other machines must configure it before using a portable profile. Profiles use
+`command=treer-agent`, `cwd=.`, and the same provider arguments on every machine.
+The executable/provider login is still the user's responsibility.
+
+Windows uses a small console PE compiled by the OS .NET Framework 4 `csc.exe`
+at a fixed `%SystemRoot%\Microsoft.NET\Framework64\v4.0.30319` (or Framework)
+path; a missing compiler is a clear installation failure, not a `.cmd` fallback.
+Compilation adds no npm dependency or global package. The entry inherits the
+ConPTY console/cwd/environment, forwards argv and exit status without a shell,
+and creates Node suspended, assigns it to a `KILL_ON_JOB_CLOSE` Job Object, then
+resumes it. Killing the entry therefore kills Node and its descendants. It does
+not escape the Host's enclosing Job. Same-user executable files remain trusted;
+this locally compiled entry is not a separately signed release artifact.
+
+Only the named managed shim and its integrity receipt are atomically replaced;
+other files in the bin directory are untouched. Links, unknown existing commands,
+and bin directories writable by another POSIX user are refused. Symlinked
+`~/.local`, linked home ancestors (including some Home Manager setups), and linked
+bin directories are unsupported: use a physical home/bin directory instead.
+A failed profile
+transaction restores the previous pointer, shim and profiles. Already running
+Agents retain their immutable launcher assets and copied startup specifications.
+
+To collapse an existing workspace, first install the new shim on **all** machines.
+Run `node launchers/agent/scripts/migrate-profiles.mjs --dry-run` and review the
+diff, then run it with `--apply`.
+Before applying any mutation it saves the original profile inventory and plan
+in a private temporary directory (0700, current-user/SYSTEM-only ACL on Windows),
+with a 0600 `profiles.json` backup,
+and prints only the backup path to stderr. Keep that file somewhere private
+before temporary-directory cleanup if you need a durable manual rollback;
+profile commands/descriptions in it may contain sensitive information.
+It adopts only recognized launcher commands
+with exact provider arguments, saves/reads back six canonical profiles, and
+removes recognized machine-qualified/old preview entries. Custom/Pockymoe
+profiles and any explicitly referenced profile stay intact. Concurrent profile
+edits cause failure and rollback. Restoring a deleted profile recreates its name
+and command but can assign a new profile ID. This operation does not change any
+Agent startup copy or restart anything. Rollback to older installer versions can
+recreate machine-qualified profiles; rerun the dry-run after returning forward.
+
 ### Local prepared bundles (launcher-only delivery)
 
 An operator can deliver a launcher change without rebuilding/restarting the
@@ -172,8 +226,8 @@ The installer checks every file's size/SHA256, the interface contract and the
 actual selected Controller handshake before activation. The content version is
 `sha256-<SHA256 of bundle-manifest.json bytes>`; that manifest covers all payload
 files and records the source commit. The private machine-local installation is
-`<machine.root>/.treer/launchers/agent/<content-version>/`. New profiles use an
-absolute Node executable plus stable `run.mjs`; an atomic `current.json` pointer
+`<machine.root>/.treer/launchers/agent/<content-version>/`. Profiles use the
+portable `treer-agent` command, whose per-user shim pins Node and stable `run.mjs`; an atomic `current.json` pointer
 works without Windows symlink privileges. Running launchers resolve physical
 assets once and retain them across updates. Version directories remain for
 rollback; profile writes are read back, and failures restore prior profiles and
@@ -202,27 +256,15 @@ last-verified receipt; owner customizations are preserved by refusing the update
 requiring explicit operator review rather than silent overwrite. The stable
 trampoline is hash-compared with verified candidate bytes and atomically repaired
 on update; status exposes its integrity separately from immutable version assets.
-
 Profiles live in the workspace, while installations live on individual machines.
-The official Controller installer preserves existing local/legacy profile names.
-If an unowned default name belongs to another machine, it saves a new profile
-such as `Codex + UI (win_native)` instead of replacing the existing one. If that
-name is also occupied, the suffix includes the full stable machine ID. Improving
-long ID suffix readability is deferred. Machine names must match
-`[A-Za-z0-9][A-Za-z0-9._-]{0,63}`; complete profile names are
-limited to 128 characters. Names come from Controller metadata, or the authenticated
-`treer machine list` record matching its enrolled server ID (operator installation
-does not require Agent-only `whoami`). Profile subprocess failures report bounded
-exit/spawn status and recognized error codes; arbitrary stderr, paths and secrets
-are withheld. Names never come from a guessed hostname or PATH.
-The private receipt records provider-to-name mappings atomically with ownership
-specifications. Updates and rollbacks reuse these exact names even after a
-machine rename; modifications to a receipted profile still require explicit
-operator review. Existing profiles on other machines remain untouched.
-Commands remain absolute: the trusted Node executable and version-independent
-runner are specific to that machine, and Windows/POSIX provider entry points
-differ. Machine-relative command rewriting is outside this change. The legacy
-Git/source installer below does not gain this production multi-machine policy.
+All machines share one canonical profile per provider. The machine-local shim
+selects its own Node and launcher installation. Known legacy launcher profiles
+are adopted only when their provider arguments match exactly; arbitrary commands
+and owner customizations remain protected. The private receipt records the last
+verified specifications. A machine rename does not affect shared profile names.
+Use the dry-run migration above to remove obsolete machine-qualified entries.
+Profile subprocess failures report bounded exit/spawn status and recognized
+error codes; arbitrary stderr, paths and secrets are withheld.
 
 Windows Controller cwd and provider paths can use the `\\?\` verbatim prefix.
 Runtime and installer synchronous canonicalization uses `realpathSync.native`;

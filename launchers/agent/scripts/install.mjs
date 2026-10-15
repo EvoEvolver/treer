@@ -3,6 +3,8 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readSync, realpathSync, renameSync, rmSync, symlinkSync, unlinkSync } from "node:fs";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { profileTransaction } from "./profile-transaction.mjs";
+import { installShim } from "./path-shim.mjs";
+import { managedProfile, portableCommand } from "./portable-profile.mjs";
 const { show, saveProfile, restoreProfile } = profileTransaction("treer");
 
 function run(command, args, options = {}) {
@@ -42,7 +44,7 @@ function main() {
   mkdirSync(root, { recursive: true, mode: 0o700 });
   const lock = join(root, ".install-lock");
   try { mkdirSync(lock); } catch { throw new Error(`Another installation owns ${lock}`); }
-  let stage, previous, activated = false;
+  let stage, previous, shim, activated = false;
   const changedProfiles = [];
   try {
     stage = mkdtempSync(join(root, ".install-"));
@@ -78,13 +80,14 @@ function main() {
     // Read every original profile before activation or mutation. A later
     // verification/write error must not leave profiles on a missing entry point.
     const originals = new Map(profiles.map((profile) => [profile.name, show(profile.name)]));
+    for (const profile of profiles) if (!managedProfile(originals.get(profile.name), profile)) throw new Error(`Launcher profile is customized: ${profile.name}`);
     previous = existsSync(join(root, "current")) ? realpathSync.native(join(root, "current")) : null;
     activate(root, commit);
     activated = true;
-    const command = join(root, "current/launchers/agent/scripts/treer-agent.sh");
+    shim = installShim(process.execPath, join(root, "current/launchers/agent/scripts/treer-agent.mjs"));
     for (const profile of profiles) {
       changedProfiles.push({ name: profile.name, previous: originals.get(profile.name) });
-      saveProfile(profile, command, cwd, originals.get(profile.name));
+      saveProfile(profile, portableCommand, ".", originals.get(profile.name));
     }
     console.log(`Agent launcher installed: ${version}`);
   } catch (error) {
@@ -93,6 +96,7 @@ function main() {
       try { restoreProfile(profile); }
       catch (rollbackError) { rollbackErrors.push(`${profile.name}: ${rollbackError.message}`); }
     }
+    try { shim?.rollback(); } catch (rollbackError) { rollbackErrors.push("shim: " + rollbackError.message); }
     if (rollbackErrors.length) {
       // If the control plane is unavailable, keep an executable entry point
       // for any profile that could not be undone, including a first install.
