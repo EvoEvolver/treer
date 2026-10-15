@@ -4,6 +4,9 @@
 No implementation yet. Owner: ui-dev. Server/packaging sections need launcher-dev
 sign-off (marked **[LD]**). Conflicts are recorded in "Open questions".
 
+Companion: [launcher-react-contract](2026-10-14-launcher-react-contract.md)
+(launcher-dev, server/DTO/packaging ground truth; wins on any conflict).
+
 Scope: replace `launchers/agent/public/{app,files,goal,tasks,theme}.js` and
 `styles.css` (~1,300 lines of vanilla JS/CSS) with a React UI while keeping the
 server contract identical. The visual and interaction design borrows ideas from a
@@ -66,9 +69,11 @@ The server already delivers flat `items` per turn. The UI groups on the client:
 * A **turn** renders: user message → run of *activity items* (reasoning,
   commandExecution, fileChange, toolCall, other) → agent message(s).
 * Consecutive activity items collapse into one **ActivityGroup** summary row:
-  `Worked for 12s · 3 commands · 1 file change ▸`. Duration comes from the turn
-  (`startedAt` → next turn's `startedAt` / now while running; omitted when
-  unavailable — never invented). Expanding shows each item as today's cards.
+  `Worked for 12s · 3 commands · 1 file change ▸`. The duration is shown only
+  when the DTO supplies it: live elapsed while the turn is `inProgress` (from
+  `startedAt`), or `endedAt − startedAt` once the optional `endedAt` exists. No
+  guess from the next turn's start; otherwise the row is just `3 commands · 1
+  file change`. Expanding shows each item as today's cards.
   An item that is `status: failed`/error forces its group to show a
   warning mark and stays discoverable without expanding.
 * `plan` items stay visible (they are the agent's communication, not machine
@@ -79,6 +84,7 @@ The server already delivers flat `items` per turn. The UI groups on the client:
   optional `parentId` (see §4). Without it, no nesting. Not required for v1.
 * Per-turn usage line, 11px muted: `1.2k in · 340 out · 4.1s`. Entirely optional
   (§4); rendered only if the DTO provides it.
+* Counts come from item kinds only; hierarchy is never inferred.
 * Open/closed state of groups is UI state keyed by `turnId:itemId`, preserved
   across snapshot updates (same guarantee as the current `details[open]` set).
 
@@ -218,6 +224,10 @@ nicer but is out of scope.)
   one `useStream()` effect (fetch `api/state`, WebSocket with 1 s reconnect,
   `history-limit` handshake — ported unchanged). Actions replace the snapshot
   wholesale (the server snapshot is authoritative; no client-side merging).
+  The selected history limit lives in the reducer; it is re-sent on every
+  reconnect, and an HTTP response carrying a smaller `history.limit` than the
+  current one never replaces a larger window. Reconnect/poll errors keep drafts,
+  expansion state and visible history.
 * `UiContext` (local only): `{error, notice, settingsBusy, submitting, panel:
   "none"|"files"|"tasks", openGroups:Set, filesState, theme, locale}`.
 * Mutations go through one `api()` helper (same JSON/error rules as `request`)
@@ -271,7 +281,7 @@ today.
   sourcemap in the payload).
 * Output: `public/ui.html`, `public/u.js`, `public/u.css` — **3 files, short
   names, flat** (no nested dirs → Windows long-path safe). `markdown.js` is
-  folded into `u.js` (the legacy `markdown.js` stays until deletion). Relative
+  folded into `ui.js` (the legacy `markdown.js` stays until deletion). Relative
   `<base href="./">`; the script tag is `<script src="u.js" defer>` (classic IIFE
   avoids module-MIME and base-URL edge cases in the iframe tunnel).
 * **Artifacts are committed**, same as `markdown.js` today. Reason:
@@ -289,7 +299,7 @@ today.
   `index.html`, but `public/ui.html` is served as a static file). The switch is a
   single commit that renames `ui.html → index.html` and deletes the legacy
   files; revert = revert that commit.
-* Budget (uncompressed): `u.js` ≤ 520 KB, `u.css` ≤ 40 KB, `ui.html` ≤ 2 KB
+* Budget (uncompressed): `ui.js` ≤ 520 KB, `ui.css` ≤ 40 KB, `ui.html` ≤ 2 KB
   → **≤ 600 KB total**. Estimated: React+ReactDOM ≈ 190 KB, marked+DOMPurify
   ≈ 65 KB (today's `markdown.js` is the measured value), app ≈ 120–150 KB.
   Measured numbers will be posted after the first build; the budget gate is a
@@ -340,8 +350,9 @@ Windows == POSIX.
 * **R1 Size**: React alone is a third of the budget. Mitigation: production
   build, no extra libs; gate in test. If it overshoots, `preact/compat` is the
   fallback (not proposed now; would need its own review).
-* **R2 Long transcripts**: no virtualization. History is already paged by the
-  server (default 50 turns, grows on "Load earlier"). Memoized turns plus
+* **R2 Long transcripts**: no virtualization. History is paged by the
+  server as the most recent N *items* (default 50; "Load earlier" raises the window
+  by 50, up to 10,000). Memoized turns plus
   `content-visibility: auto` on turn containers should suffice; measured with a
   2,000-item fixture before the switch.
 * **R3 Stream churn**: full-snapshot pushes while streaming. Mitigated by
@@ -368,7 +379,9 @@ viewer, split workbench, account/device sharing.
 
 ## 14. Open questions
 
-1. **[LD]** Commit built `u.js`/`u.css` (recommended, §8) vs. build in
+0. Resolved with launcher-dev: output names are `ui.js`/`ui.css` (fixed, no hash
+   chunks); no invented durations/hierarchy (§2.1); images stay self/data/blob.
+1. **[LD]** Commit built `ui.js`/`ui.css` (recommended, §8) vs. build in
    `prepare-bundle` only (breaks `bootstrap.sh` git installs).
 2. **[LD]** Provide optional `usage`, `endedAt`, `parentId` per §4 — which
    harnesses can fill them? Claude Code transcripts carry usage; Codex and ACP
