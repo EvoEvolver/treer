@@ -329,10 +329,21 @@ test.describe('resizable tree sidebar', () => {
   }
   test('drag persists across refresh/workspaces, protects terminal, and double click resets', async ({ page }, testInfo) => {
     const resizeColumns: number[] = []
+    let lastResizeAt = 0
     let initialColumns = 0
+    // Dragging emits intermediate sizes. Capture the baseline only after the
+    // final layout/fit has settled, rather than the first smaller resize.
+    async function settledColumns() {
+      let columns = 0
+      await expect.poll(() => {
+        columns = resizeColumns.at(-1) ?? 0
+        return columns > 0 && Date.now() - lastResizeAt >= 300
+      }).toBe(true)
+      return columns
+    }
     await page.routeWebSocket(/\/agents\/[^/]+\/terminal(?:\?.*)?$/, (ws) => {
       initialColumns = Number(new URL(ws.url()).searchParams.get('cols'))
-      ws.onMessage((message) => { if (typeof message === 'string') { const control = JSON.parse(message); if (control.type === 'resize') resizeColumns.push(control.cols) } })
+      ws.onMessage((message) => { if (typeof message === 'string') { const control = JSON.parse(message); if (control.type === 'resize') { resizeColumns.push(control.cols); lastResizeAt = Date.now() } } })
       ws.send(JSON.stringify({ type: 'ready', stream_epoch: 'resize', revision: 0, replay_chunks: 0 }))
     })
     await page.goto('/')
@@ -344,12 +355,14 @@ test.describe('resizable tree sidebar', () => {
     await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'none')
     await page.mouse.up()
     await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'auto')
-    await expect.poll(() => resizeColumns.at(-1)!).toBeLessThan(initialColumns)
-    const expandedColumns = resizeColumns.at(-1)!
+    const expandedColumns = await settledColumns()
+    expect(expandedColumns).toBeLessThan(initialColumns)
     await page.getByRole('button', { name: 'Collapse tree sidebar', exact: true }).click()
     await expect.poll(() => resizeColumns.at(-1)!).toBeGreaterThan(expandedColumns)
+    expect(await settledColumns()).toBeGreaterThan(expandedColumns)
     await page.getByRole('button', { name: 'Expand tree sidebar', exact: true }).click()
     await expect.poll(() => resizeColumns.at(-1)!).toBe(expandedColumns)
+    expect(await settledColumns()).toBe(expandedColumns)
     expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe('368')
     await page.screenshot({ path: testInfo.outputPath('tree-resizer-desktop.png') })
     await page.reload()
