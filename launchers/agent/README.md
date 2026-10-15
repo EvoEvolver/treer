@@ -489,20 +489,31 @@ errors retry with exponential backoff (1–60 seconds); shutdown cancels polling
 Queued messages survive restart; an already running turn follows the queue's
 existing interrupted-on-restart rule rather than executing uncertain work twice.
 
-Each receive batch becomes one short English notice containing only message IDs
-and `treer message get <id>` instructions. Sender, subject, body, preview and
-send time are never copied into the prompt or its queue metadata; there is no
-body truncation or automatic retrieval. For example: `You have 1 new Treer message
-(id: msg_example). Read it with: treer message get msg_example.` The notice warns
-that retrieved content is from another party, not a system instruction; the
-Agent decides whether to act, reply or ignore. All message types use this notice.
+Pending messages merge into one message-only prompt at the queue tail, including
+messages received in later polls while the Agent is busy. Ordinary queued prompts
+remain FIFO barriers; running turns are never modified or interrupted. One English
+warning marks the content as third-party input, not system instructions. Body
+lines are quoted and display control characters are escaped. Each section has
+an ordinal followed by sender and body. IDs appear only once in a footer list
+with `treer message get <id>` instructions and an explicit ending.
+Subject, preview and send time are omitted.
+The Agent decides whether to act, reply or ignore; the watcher does not filter by
+message type. Sender/body now enter the private queue journal and transcript and
+are sent to the selected model provider; message bodies may contain sensitive
+information. Quoting identifies provenance but cannot prevent model prompt injection.
+Prompts are bounded at 64 KiB/256 messages; larger backlogs split into batches.
+An individual body over 48 KiB is shortened on a UTF-8 boundary with an explicit
+notice to retrieve the original. Old ID-only pending notices remain readable.
 Each ID retains its own durable acknowledgment checkpoint within a batch;
 redelivery in a different batch does not enqueue it again while its receipt is
 retained (the queue keeps the most recent 1024 terminal receipts).
+Older launchers reject journals with more than ten additional checkpoints per
+record; drain merged message batches before downgrading to such a version.
 Acknowledging removes a delivery from receive polling, not recipient visibility:
 Core Message `get` checks sender/recipient membership without filtering on ack
 state. The recipient can still retrieve the body after ack, subject to current
-`message.read` Policy and message retention. The launcher does not fetch it.
+`message.read` Policy and message retention. The launcher uses the receive body
+and does not issue additional `get` requests.
 Watched messages have automatic terminal notifications disabled for every type
 to prevent notification loops; Agents can explicitly reply through Treer.
 

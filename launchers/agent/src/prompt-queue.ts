@@ -3,6 +3,7 @@ import type { HarnessRuntime } from "./runtime.js";
 import type { QueuedPrompt } from "./model.js";
 import { QueueStore } from "./queue-store.js";
 import { fingerprint, preview, QueueError, submissionOptions, messageCheckpoints, type Outcome, type PromptNotify, type PromptSender, type SubmissionRecord } from "./prompt-submission.js";
+import { mergeMessagePrompts } from "./message-prompt.js";
 
 export type PromptMode = "steer" | "queue";
 export class InvalidPromptMode extends Error {}
@@ -12,7 +13,7 @@ interface QueueOptions {
   notify?: (record: SubmissionRecord) => Promise<void>;
   retryMs?: number;
 }
-interface SubmitOptions { operationId?: string; sender?: PromptSender | null; notify?: PromptNotify | null; sourceMessage?: { messageId: string; deliveryId: string }; sourceMessages?: { messageId: string; deliveryId: string }[] }
+interface SubmitOptions { operationId?: string; sender?: PromptSender | null; notify?: PromptNotify | null; sourceMessage?: { messageId: string; deliveryId: string }; sourceMessages?: { messageId: string; deliveryId: string }[]; coalesceMessages?: boolean }
 
 /** One server-owned journal and turn correlator, shared by every harness. */
 export class PromptQueue {
@@ -85,6 +86,19 @@ export class PromptQueue {
     }
     if (!this.runtime.snapshot().ready) throw new QueueError("Harness is not ready", 503);
     if (this.closed) throw new QueueError("Prompt queue is closed after shutdown or a journal failure", 503);
+    const last = this.records.filter((record) => ["queued", "running"].includes(record.submission.state)).at(-1);
+    if (options.coalesceMessages && mode === "queue" && options.sourceMessage && metadata.sender === null && !metadata.notify?.on.length && last?.submission.state === "queued" && last.sourceMessage && last.delivery === "queue" && !last.submission.sender && !last.notify?.on.length) {
+      const checkpoints = [options.sourceMessage, ...(options.sourceMessages ?? [])];
+      const merged = mergeMessagePrompts(last.text, messageCheckpoints(last).map((message) => message.messageId), text, checkpoints.map((message) => message.messageId));
+      if (merged) {
+        last.text = merged; last.submission.text_preview = preview(merged, 1024);
+        last.sourceMessages = [...(last.sourceMessages ?? []), ...checkpoints.map((message) => ({ ...message, ackPending: true }))];
+        // Keep the original submission fingerprint/receipt: retrying its
+        // operation_id must still return the same receipt after coalescing.
+        this.persist(); this.changed();
+        return { ...last.receipt, duplicate: false, mode: last.delivery, downgraded: false };
+      }
+    }
     if (this.records.filter((record) => ["queued", "running"].includes(record.submission.state) || messageCheckpoints(record).some((message) => message.ackPending) || record.notification && !record.notification.delivered).length >= this.limit) throw new QueueError(`Prompt queue is full (limit ${this.limit}, including pending notifications and acknowledgments)`, 429);
     const busy = this.busy;
     const downgraded = mode === "steer" && !this.runtime.harness.capabilities.steer;
