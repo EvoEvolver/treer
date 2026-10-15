@@ -315,3 +315,22 @@ dependency. Everything lives in `src/i18n/`:
 - Adding a string: add the key to `en.ts` and `zh.ts`, use `t()`. App UIs
   (Issues, Telegram, email) are not part of the console dictionary.
 
+
+### Tab page actions
+
+Agent/App pages use a single tab bar. Right-click a tab (including an inactive
+one), or press Shift+F10 / the ContextMenu key on it, for its page actions.
+On phones, long-press the active title or a card in the tab switcher; moving a
+finger cancels the long-press so scrolling still works. Menus support arrow
+keys, Enter and Escape, and return focus to their originating tab. Agent status
+stays on tabs; full paths appear in tab titles and menu headers.
+
+The menu contains App/logs switching, rename, upload, interface reload or
+terminal reconnect, stop and delete, plus close/close others/close to the right.
+Overview stays pinned. A reload affects only that browser page, not the running
+Agent. Stop asks for confirmation; delete keeps its existing confirmation.
+Uploads pin the target machine from the selected menu, even when another page
+is active, and stay disabled for offline machines. On phones, the menu also
+contains full-screen opening and Back to workloads. App settings retain their
+existing lifecycle actions and authorization. No menu grants additional access;
+the Core API still authorizes mutations.

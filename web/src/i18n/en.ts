@@ -653,6 +653,14 @@ export const en = {
   "cmd.command_is_required": "Command is required",
 
   "wsettings.apply": "Apply",
+  "tabs.actions": "Page actions",
+  "tabs.active_actions": "Page {path}; long-press for actions",
+  "tabs.close_page": "Close tab",
+  "tabs.close_others": "Close other tabs",
+  "tabs.close_right": "Close tabs to the right",
+  "tabs.unloaded_select": "↻ Unloaded · select to reload",
+  "tabs.stop_confirm": "Stop {path}?",
+  "tabs.stop_detail": "This stops the running process. Unsaved work may be lost.",
 } as const
 
 export type MessageKey = keyof typeof en

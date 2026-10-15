@@ -1,3 +1,4 @@
+import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect } from '@playwright/test'
 import { browseTreeOnMobile, openOverviewMap } from './fixtures/navigation'
 import { mockTreeMapApi, mockDeepTreeMapApi, mapSnapshot } from './fixtures/treemap'
@@ -59,7 +60,7 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await offline.focus()
     await page.keyboard.press('Enter')
     await expect(dialog).toHaveCount(0)
-    if (mobile) await page.getByRole('button', { name: 'Back to workloads', exact: true }).click()
+    if (mobile) await backToWorkloads(page)
     await expect(page.locator('[data-agent-id="reviewer-b"]')).toHaveAttribute('aria-selected', 'true')
     await expect(page.locator('[data-agent-id="reviewer-a"][aria-selected="true"]')).toHaveCount(0)
   })
@@ -167,7 +168,7 @@ for (const sample of ["small", "medium", "large"] as const) for (const mobile of
     await deepAgent.focus()
     await page.keyboard.press('Enter')
     await expect(dialog).toHaveCount(0)
-    if (mobile) await page.getByRole('button', { name: 'Close full-screen terminal', exact: true }).click()
+    if (mobile) await backToWorkloads(page)
     await expect(page.locator('[data-agent-id="deep-0"]')).toHaveAttribute('aria-selected', 'true')
     await expect(page.locator('[data-agent-id="deep-0"] [data-workload-icon="agent"]')).toBeVisible()
   })

@@ -53,7 +53,8 @@ export function useWorkspaceTabs(userId: string | undefined, workspaceId: string
     return bounded(list, limit)
   })
   const close = (id: string) => update((current) => current.filter((tab) => tab.id !== id))
+  const closeMany = (ids: string[]) => update((current) => current.filter((tab) => !ids.includes(tab.id)))
   const setLogs = (id: string, logs: boolean, appId: string | null) => update((current) => current.map((tab) => tab.id === id ? { ...tab, logs, appId } : tab))
   const reload = (id: string) => update((current) => current.map((tab) => tab.id === id ? { ...tab, revision: tab.revision + 1 } : tab))
-  return { tabs, open, close, setLogs, reload, limit, scope, liveCount: 1 + tabs.filter((tab) => tab.live).length }
+  return { tabs, open, close, closeMany, setLogs, reload, limit, scope, liveCount: 1 + tabs.filter((tab) => tab.live).length }
 }

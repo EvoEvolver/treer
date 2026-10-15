@@ -1,3 +1,4 @@
+import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect, type Page, type WebSocketRoute } from '@playwright/test'
 import { mockTreeMapApi, mapSnapshot } from './fixtures/treemap'
 const names = ['Terminal', 'Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Archive']
@@ -157,10 +158,10 @@ test('App tab stays mounted through Agent, overview and settings; log choice is 
   await page.getByRole('button', { name: 'Workspace settings', exact: true }).click()
   await switchTab(page, 'Archive')
   await expect(frame.getByRole('textbox', { name: 'Draft' })).toHaveValue('App draft')
-  await page.getByRole('button', { name: 'Show logs', exact: true }).click()
+  await tabAction(page, 'Show logs')
   await expect.poll(() => backend.connections).toContain('tab-7')
   await open(page, 'Alpha'); await switchTab(page, 'Archive')
-  await expect(page.getByRole('button', { name: 'Show App', exact: true })).toBeVisible()
+  { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Show App', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
   await expect(page.locator('#workspace-panel-tab-7 .xterm')).toBeVisible()
 })
 for (const mode of ['throws', 'invalid'] as const) test(`tabs tolerate ${mode} storage and keep navigation usable`, async ({ page }) => {
@@ -252,4 +253,131 @@ test('mobile switcher recovers after delayed initial workspace discovery', async
   await expect(page.getByRole('dialog', { name: /^Open tabs/ })).toHaveCount(0)
   await open(page, 'Terminal', true)
   await expect(page.locator('.xterm')).toBeVisible()
+})
+
+for (const theme of ['light', 'dark']) test(`tab context actions target background page and keyboard focus ${theme}`, async ({ page }, info) => {
+  await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
+  await fixture(page); await gotoWorkspace(page)
+  await open(page, 'Archive'); await open(page, 'Alpha')
+  await openTabMenu(page, '/Archive')
+  await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('menuitem', { name: 'Show logs', exact: true })).toBeVisible()
+  await page.screenshot({ path: info.outputPath(`tab-actions-${theme}-desktop.png`) })
+  await page.getByRole('menuitem', { name: 'Show logs', exact: true }).click()
+  await expect(page.locator('#workspace-panel-tab-7 iframe')).toHaveCount(0)
+  await expect(page.locator('#workspace-panel-tab-1 iframe')).toBeVisible()
+  const archive = page.getByRole('tab', { name: 'Tab /Archive', exact: true })
+  await archive.focus(); await page.keyboard.press('Shift+F10')
+  await expect(page.getByRole('menuitem', { name: 'Show App', exact: true })).toBeVisible()
+  await page.keyboard.press('Escape'); await expect(archive).toBeFocused()
+  await archive.press('ContextMenu'); await expect(page.getByRole('menu')).toBeVisible()
+  await page.keyboard.press('Home'); await page.keyboard.press('Enter')
+  await expect(page.locator('#workspace-panel-tab-7 iframe')).toHaveCount(1)
+  await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await expect(page.getByRole('button', { name: 'Upload file', exact: true })).toHaveCount(0)
+})
+
+test('tab destructive actions require confirmation and target inactive stable IDs', async ({ page }) => {
+  await fixture(page); const calls: string[] = []
+  await page.route('**/agents/*/stop', (route) => { calls.push(route.request().url()); return route.fulfill({ json: {} }) })
+  await gotoWorkspace(page); await open(page, 'Terminal'); await open(page, 'Alpha')
+  await tabAction(page, 'Stop agent', '/Terminal')
+  await expect(page.getByRole('heading', { name: 'Stop /Terminal?' })).toBeVisible()
+  expect(calls).toEqual([])
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  expect(calls).toEqual([])
+  await tabAction(page, 'Stop agent', '/Terminal')
+  await page.getByRole('dialog').getByRole('button', { name: 'Stop agent', exact: true }).click()
+  await expect.poll(() => calls.length).toBe(1)
+  expect(calls[0]).toContain('/agents/tab-0/stop')
+  await tabAction(page, 'Delete agent', '/Terminal')
+  await expect(page.getByRole('heading', { name: 'Delete agent', exact: true })).toBeVisible()
+  await expect(page.getByRole('dialog')).toContainText('Terminal')
+})
+
+test('tab upload pins the background target machine; offline upload disabled', async ({ page }) => {
+  await fixture(page)
+  let uploadedTo = ''
+  await page.route('**/machines/*/files', (route) => { uploadedTo = route.request().url(); return route.fulfill({ json: { path: 'sample.txt', bytes_written: 4 } }) })
+  await page.route('**/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, agents: [
+    { agent_id: 'one', name: 'One', kind: 'command', server_id: 'local', status: 'working' },
+    { agent_id: 'two', name: 'Two', kind: 'command', server_id: 'remote', status: 'idle' },
+  ] } }))
+  await page.goto('/'); await expect(page.getByRole('button', { name: 'Open /One', exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Open /One', exact: true }).click()
+  await switchTab(page, 'Overview'); await page.getByRole('button', { name: 'Open /Two', exact: true }).click()
+  await openTabMenu(page, '/Two'); await expect(page.getByRole('menuitem', { name: 'Upload file' })).toBeDisabled(); await page.keyboard.press('Escape')
+  await tabAction(page, 'Upload file', '/One')
+  await expect(page.getByRole('dialog')).toContainText('Upload to workstation.')
+  await expect(page.getByRole('tab', { name: 'Tab /Two', exact: true, includeHidden: true })).toHaveAttribute('aria-selected', 'true')
+  await page.getByRole('dialog').locator('input[type=file]').setInputFiles({ name: 'sample.txt', mimeType: 'text/plain', buffer: Buffer.from('test') })
+  await page.getByRole('dialog').getByRole('button', { name: 'Upload', exact: true }).click()
+  await expect.poll(() => uploadedTo).toContain('/machines/local/files')
+})
+
+test('tab close others and close right are atomic and preserve Overview', async ({ page }) => {
+  await fixture(page); await gotoWorkspace(page)
+  await open(page, 'Terminal'); await open(page, 'Alpha'); await open(page, 'Beta')
+  await tabAction(page, 'Close tabs to the right', '/Terminal')
+  await expect(page.getByRole('tab')).toHaveCount(2)
+  await expect(page.getByRole('tab', { name: 'Tab /Terminal', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await open(page, 'Alpha'); await open(page, 'Beta')
+  await tabAction(page, 'Close other tabs', '/Alpha')
+  await expect(page.getByRole('tab')).toHaveCount(2)
+  await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+  await openTabMenu(page, 'Overview'); await expect(page.getByRole('menuitem', { name: 'Close tab', exact: true })).toBeDisabled()
+})
+
+for (const theme of ['light', 'dark']) test(`390 long press active title and switcher card ${theme}`, async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
+  await fixture(page); await gotoWorkspace(page); await open(page, 'Archive', true)
+  const active = page.getByRole('button', { name: /^Page .*; long-press for actions$/ })
+  await active.dispatchEvent('pointerdown', { pointerType: 'touch', button: 0, clientX: 60, clientY: 20 })
+  await expect(page.getByRole('menu', { name: 'Page actions' })).toBeVisible()
+  await active.dispatchEvent('pointerup', { pointerType: 'touch' })
+  await active.dispatchEvent('click')
+  await expect(page.getByRole('dialog', { name: /^Open tabs/ })).toHaveCount(0)
+  await expect(page.getByRole('menu')).toBeVisible()
+  await page.screenshot({ path: info.outputPath(`tab-actions-${theme}-390.png`) })
+  await page.keyboard.press('Escape')
+  await page.getByRole('button', { name: /^Show all tabs/ }).click()
+  const card = page.getByRole('button', { name: 'Open tab /Archive', exact: true })
+  await card.dispatchEvent('pointerdown', { pointerType: 'touch', button: 0, clientX: 180, clientY: 200 })
+  await expect(page.getByRole('menu')).toBeVisible()
+  await card.dispatchEvent('pointerup', { pointerType: 'touch' })
+  await page.keyboard.press('Escape'); await expect(card).toBeFocused()
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await card.dispatchEvent('pointerdown', { pointerType: 'touch', button: 0, clientX: 180, clientY: 200 })
+  await card.dispatchEvent('pointermove', { pointerType: 'touch', clientX: 180, clientY: 240 })
+  await card.dispatchEvent('pointerup', { pointerType: 'touch' })
+  await expect(page.getByRole('menu')).toHaveCount(0)
+})
+
+test('tab rename targets the inactive page and preserves backend denial in dialog', async ({ page }) => {
+  await fixture(page); let target = ''
+  await page.route('**/agents/tab-0', (route) => {
+    target = route.request().url()
+    return route.fulfill({ status: 403, json: { error: { code: 'forbidden', message: 'Synthetic policy denies rename' } } })
+  })
+  await gotoWorkspace(page); await open(page, 'Terminal'); await open(page, 'Alpha')
+  await tabAction(page, 'Rename agent', '/Terminal')
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('heading', { name: 'Rename agent' })).toBeVisible()
+  await dialog.getByRole('textbox').fill('Changed')
+  await dialog.getByRole('button', { name: 'Rename', exact: true }).click()
+  await expect(dialog).toContainText('Synthetic policy denies rename')
+  expect(target).toContain('/agents/tab-0')
+  await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true, includeHidden: true })).toHaveAttribute('aria-selected', 'true')
+})
+
+test('tab context new actions and confirmation render in Chinese', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
+  await fixture(page); await page.goto('/')
+  await page.getByRole('button', { name: '打开 /Terminal', exact: true }).click()
+  await page.getByRole('tab', { name: '标签页 /Terminal', exact: true }).click({ button: 'right' })
+  await expect(page.getByRole('menuitem', { name: '关闭其他标签页', exact: true })).toBeVisible()
+  await expect(page.getByRole('menuitem', { name: '关闭右侧标签页', exact: true })).toBeVisible()
+  await page.getByRole('menuitem', { name: '停止 Agent', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '停止 /Terminal？', exact: true })).toBeVisible()
 })

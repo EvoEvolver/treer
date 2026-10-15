@@ -1,3 +1,4 @@
+import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect, type Page, type WebSocketRoute } from '@playwright/test'
 import { mapSnapshot, mockTreeMapApi } from './fixtures/treemap'
 
@@ -68,10 +69,10 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await expect.poll(() => backend.terminals.length).toBeGreaterThan(0)
     expect(backend.terminals[0]).toContain('/agents/reviewer-a/terminal')
     if (mobile) {
-      await page.getByRole('button', { name: 'Close full-screen terminal', exact: true }).click()
+      await backToWorkloads(page)
       await page.getByRole('button', { name: 'Workspace overview', exact: true }).click()
     }
-    else await page.getByRole('button', { name: 'Back to workspace overview', exact: true }).click()
+    else await page.getByRole('tab', { name: 'Tab Overview', exact: true }).click()
     await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
     if (mobile) await page.getByRole('button', { name: 'Browse tree', exact: true }).click()
     await expect(page.getByRole('tree', { name: 'Workspace workloads' })).toBeVisible()
@@ -171,5 +172,5 @@ test('overview shares canonical App identity with Tree, including a missing runt
   await expect(open.locator('[data-workload-icon=app]')).toBeVisible()
   await open.click()
   await expect(page.frameLocator('iframe').getByRole('heading', { name: 'Overview App', exact: true })).toBeVisible()
-  await expect(page.getByRole('button', { name: 'Show logs', exact: true })).toBeVisible()
+  { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Show logs', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
 })

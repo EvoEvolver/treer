@@ -1,3 +1,4 @@
+import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect, type Page, type Route } from "@playwright/test"
 import { browseTreeOnMobile } from './fixtures/navigation'
 import { embedThemeMessage, withEmbedTheme } from "../src/lib/embed-ui"
@@ -219,13 +220,13 @@ for (const mobile of [false, true]) {
       backend.release()
       const frame = page.locator("iframe[title='/Late App interface']")
       await expect(frame).toBeVisible()
-      if (!mobile) await expect(page.getByRole('button', { name: 'Show logs', exact: true })).toBeVisible()
+      if (!mobile) { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Show logs', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
       await expect(page.frameLocator("iframe[title='/Late App interface']").getByRole('heading', { name: 'Late human interface' })).toBeVisible()
-      if (mobile) await page.getByRole('button', { name: 'Close full-screen interface', exact: true }).click()
+      if (mobile) await backToWorkloads(page)
       if (mobile) {
         await page.getByRole('button', { name: 'Actions for Late App', exact: true }).click()
         await page.getByRole('menuitem', { name: 'Logs', exact: true }).click()
-      } else await page.getByRole('button', { name: 'Show logs', exact: true }).click()
+      } else await tabAction(page, 'Show logs')
       await expect(page.locator('.xterm')).toBeVisible()
       backend.setApps([{ ...backend.app, hostname: 'changed.internal', public_url: 'https://changed.apps.example.com/', restart_count: 1 }])
       const metadataResponse = page.waitForResponse((item) => item.url().endsWith('/workspaces/ws-1/apps'))
@@ -233,14 +234,14 @@ for (const mobile of [false, true]) {
       await metadataResponse
       await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))))
       if (mobile) await expect(page.locator('.xterm')).toBeVisible()
-      else await expect(page.getByRole('button', { name: 'Show App', exact: true })).toBeVisible()
+      else { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Show App', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
       await expect(frame).toHaveCount(0)
       if (mobile) {
-        await page.getByRole('button', { name: 'Close full-screen terminal', exact: true }).click()
+        await backToWorkloads(page)
         await page.getByRole('button', { name: /^Late App app / }).click()
         await expect(page.locator('.xterm')).toBeVisible()
-        await page.getByRole('button', { name: 'Show App', exact: true }).click()
-      } else await page.getByRole('button', { name: 'Show App', exact: true }).click()
+        await tabAction(page, 'Show App')
+      } else await tabAction(page, 'Show App')
       await expect(frame).toBeVisible()
       backend.setApps([{ ...backend.app, status: 'exited' }])
       backend.send('agent.updated', { ...backend.runtime, status: 'exited' })
@@ -252,8 +253,8 @@ for (const mobile of [false, true]) {
       await page.screenshot({ path: testInfo.outputPath('live-app-discovery.png') })
       backend.setApps([{ ...backend.app, name: 'Renamed App' }])
       backend.send('agent.renamed', { ...backend.runtime, name: 'Renamed App', path: '/Renamed App' })
-      if (mobile) await page.getByRole('button', { name: 'Close full-screen interface', exact: true }).click()
-      if (!mobile) await expect(page.getByRole('button', { name: 'Show logs', exact: true })).toBeVisible()
+      if (mobile) await backToWorkloads(page)
+      if (!mobile) { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Show logs', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
       await expect(page.getByRole('treeitem', { name: 'Renamed App', exact: true })).toBeVisible()
       backend.setApps([]); backend.send('agent.deleted', backend.runtime)
       await expect(page.getByRole('treeitem', { name: 'Renamed App', exact: true })).toHaveCount(0)
@@ -330,12 +331,12 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await expect(page.locator(".xterm")).toBeHidden()
 
     const reload = page.waitForRequest((request) => new URL(request.url()).pathname.endsWith("/apps/app-1/ui/"))
-    await page.getByRole("button", { name: "Reload interface" }).click()
+    await tabAction(page, 'Reload interface')
     await reload
-    await page.getByRole("button", { name: "Show logs", exact: true }).click()
+    await tabAction(page, 'Show logs')
     await expect(frame).toBeHidden()
     await expect(page.locator(".xterm")).toBeVisible()
-    await page.getByRole("button", { name: "Show App", exact: true }).click()
+    await tabAction(page, 'Show App')
     await expect(frame).toBeVisible()
 
     await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
@@ -344,7 +345,7 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await expect(page.locator(".xterm")).toBeVisible()
     await page.getByRole("button", { name: /^Soul Archive / }).click()
     await expect(page.locator(".xterm")).toBeVisible() // Selecting the same tab preserves its Logs choice.
-    await page.getByRole("button", { name: "Show App", exact: true }).click()
+    await tabAction(page, 'Show App')
     await expect(frame).toBeVisible()
   })
 }
@@ -356,7 +357,7 @@ test("mobile: selecting an App opens its human interface and closes back to work
   await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^Soul Archive / }).click()
   await expect(page.frameLocator("iframe[title='/Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
-  await page.getByRole("button", { name: "Close full-screen interface" }).click()
+  await backToWorkloads(page)
   await expect(page.locator("aside")).toBeVisible()
   await expect(page.locator("iframe")).toBeHidden()
 })
@@ -394,7 +395,7 @@ test("an App on an offline machine shows recovery and lets mobile users return",
   await page.getByRole("button", { name: /^Soul Archive / }).click()
   await expect(page.getByText("Machine is offline")).toBeVisible()
   await expect(page.locator("iframe")).toHaveCount(0)
-  await page.getByRole("button", { name: "Back to workloads" }).click()
+  await backToWorkloads(page)
   await expect(page.locator("aside")).toBeVisible()
 })
 
@@ -502,7 +503,7 @@ test('embedded UI logs use the shared replay-safe terminal', async ({ page }) =>
   await browseTreeOnMobile(page)
   await page.getByRole('button', { name: /^Soul Archive / }).click()
   await expect(page.locator("iframe[title='/Soul Archive interface']")).toBeVisible()
-  await page.getByRole('button', { name: 'Show logs', exact: true }).click()
+  await tabAction(page, 'Show logs')
   await expect(page.locator('.xterm')).toBeVisible()
   await expect.poll(() => ack).toBe(history.byteLength)
   expect(input).toEqual([])
@@ -517,11 +518,11 @@ test("reload button label changes when an agent has an embedded UI", async ({ pa
 
   // Plain agent: Reconnect terminal
   await page.getByRole("button", { name: /^plain-tty / }).click()
-  await expect(page.getByRole("button", { name: "Reconnect terminal" })).toBeVisible()
+  { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Reconnect terminal', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
 
   // Agent with UI: label switches to Reload interface
   await page.getByRole("button", { name: /^dashboard / }).click()
-  await expect(page.getByRole("button", { name: "Reload interface" })).toBeVisible()
+  { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Reload interface', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
 })
 
 test("mobile: selecting an embedded UI agent opens a full-screen iframe", async ({ page }) => {
@@ -536,10 +537,10 @@ test("mobile: selecting an embedded UI agent opens a full-screen iframe", async 
   await page.getByRole("button", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
-  await expect(page.getByRole("button", { name: "Close full-screen interface" })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Page .*; long-press for actions$/ })).toBeVisible()
   await expect(page.locator(".xterm")).toBeHidden()
 
-  await page.getByRole("button", { name: "Close full-screen interface" }).click()
+  await backToWorkloads(page)
   await expect(frame).toBeHidden()
   await expect(page.locator("aside")).toBeVisible()
 })
@@ -562,7 +563,7 @@ test("reload button triggers an iframe reload (key changes)", async ({ page }) =
   })
 
   const hitsBefore = uiProxyHits
-  await page.getByRole("button", { name: "Reload interface" }).click()
+  await tabAction(page, 'Reload interface')
 
   // The iframe should re-fetch its src
   await expect.poll(() => uiProxyHits, { timeout: 5000 }).toBeGreaterThan(hitsBefore)

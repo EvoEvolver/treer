@@ -654,4 +654,12 @@ export const zh: Messages = {
   "cmd.command_is_required": "必须填写命令",
 
   "wsettings.apply": "应用",
+  "tabs.actions": "页面操作",
+  "tabs.active_actions": "页面 {path}；长按查看操作",
+  "tabs.close_page": "关闭标签页",
+  "tabs.close_others": "关闭其他标签页",
+  "tabs.close_right": "关闭右侧标签页",
+  "tabs.unloaded_select": "↻ 已卸载 · 点按重新加载",
+  "tabs.stop_confirm": "停止 {path}？",
+  "tabs.stop_detail": "这会停止正在运行的进程，未保存的工作可能丢失。",
 }

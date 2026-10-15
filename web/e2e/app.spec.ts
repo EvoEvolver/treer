@@ -1,3 +1,4 @@
+import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect, type Page, type Route } from "@playwright/test"
 import { browseTreeOnMobile, openOverviewMap } from './fixtures/navigation'
 
@@ -688,7 +689,7 @@ for (const mobile of [false, true]) {
         await dialog.getByRole("button", { name: launch === "Terminal" ? "Create terminal" : "Create agent", exact: true }).click()
         await expect.poll(() => creations).toBe(1)
         expect(placementWrites).toEqual([])
-        if (mobile) await page.getByRole("button", { name: /^Close full-screen (terminal|interface)$/ }).click()
+        if (mobile) await backToWorkloads(page)
         await expect(page.getByRole("treeitem", { name: "experiments", exact: true }).getByRole("treeitem", { name: "reviewer", exact: true })).toBeVisible()
         await page.reload()
         await browseTreeOnMobile(page)
@@ -882,7 +883,7 @@ test("an App missing from machine inventory remains visible with its stable runt
   await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
   await page.getByRole("menuitem", { name: "Logs", exact: true }).click()
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveAttribute("aria-selected", "true")
-  await expect(page.locator("header").getByText("Soul Archive", { exact: true })).toBeVisible()
+  await expect(page.getByRole("tab", { name: "Tab /Soul Archive", exact: true })).toHaveAttribute("aria-selected", "true")
 })
 
 test("shared App rename and delete update metadata without resurrecting a placeholder", async ({ page }) => {
@@ -1097,8 +1098,8 @@ test("workload folders remain workspace scoped and mobile navigation returns to 
   await page.getByRole("option", { name: "Acme", exact: true }).click()
   await expect(page.getByRole("treeitem", { name: "Private organization", exact: true })).toBeVisible()
   await page.getByRole("treeitem", { name: "Soul Archive", exact: true }).getByRole("button", { name: /^Soul Archive / }).click()
-  await expect(page.getByRole("button", { name: "Close full-screen interface", exact: true })).toBeVisible()
-  await page.getByRole("button", { name: "Close full-screen interface", exact: true }).click()
+  await expect(page.getByRole('button', { name: /^Page .*; long-press for actions$/ })).toBeVisible()
+  await backToWorkloads(page)
   await expect(page.getByRole("tree", { name: "Workspace workloads" })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
 })
@@ -1386,7 +1387,7 @@ test("agent toolbar uploads a file to its machine", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^api-server / }).click()
-  await page.getByRole("button", { name: "Upload file" }).last().click()
+  await tabAction(page, 'Upload file')
   const dialog = page.getByRole("dialog")
   await expect(dialog.getByRole("heading", { name: "Upload file" })).toBeVisible()
   await expect(dialog.getByText("Upload to workstation.")).toBeVisible()
@@ -1413,7 +1414,7 @@ test("mobile upload dialog fits the viewport", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^api-server / }).click()
-  await page.getByRole("button", { name: "Upload file" }).last().click()
+  await tabAction(page, 'Upload file')
 
   await expect(page.getByRole("dialog").getByRole("heading", { name: "Upload file" })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
@@ -1490,8 +1491,8 @@ test("from a machine overview, clicking Terminal opens the agent terminal", asyn
   await workstationRow(page).click()
   await page.getByRole("button", { name: "Terminal", exact: true }).first().click()
 
-  // Returns to the terminal main view; header shows agent name
-  await expect(page.locator("header").getByText("api-server")).toBeVisible()
+  // Returns to the terminal main view; the selected tab identifies its path.
+  await expect(page.getByRole("tab", { name: "Tab /api-server", exact: true })).toHaveAttribute("aria-selected", "true")
 })
 
 test("terminal drains a burst of small output frames without stalling", async ({ page }) => {
@@ -1905,8 +1906,8 @@ for (const mobile of [false, true]) {
         await expect(row).toHaveAttribute("aria-selected", "true")
         if (mobile) {
           await expect(page.getByRole("tabpanel").locator(`span[title="${path}"]`)).toBeVisible()
-          await page.getByRole("button", { name: "Close full-screen terminal", exact: true }).click()
-        } else await expect(page.getByRole("navigation", { name: "Agent path" })).toHaveAttribute("title", path)
+          await backToWorkloads(page)
+        } else await expect(page.getByRole("tab", { name: `Tab ${path}`, exact: true })).toHaveAttribute("title", path)
         await row.getByRole("button", { name: "Actions for reviewer", exact: true }).click()
         await page.getByRole("menuitem", { name: "Copy path", exact: true }).click()
         await expect.poll(() => page.evaluate(() => (window as Window & { copiedPath: string }).copiedPath)).toBe(path)
@@ -2079,7 +2080,7 @@ for (const mobile of [false, true]) {
       await openWorkspaceSettings(page)
       await cloudboxRow(page).click()
       await page.locator('main section', { has: page.getByRole('heading', { name: 'Agents on this machine' }) }).getByRole('button', { name: 'Terminal', exact: true }).click()
-      if (mobile) await page.getByRole('button', { name: 'Close full-screen terminal', exact: true }).click()
+      if (mobile) await backToWorkloads(page)
       await expect(page.getByRole('treeitem', { name: 'Parent', exact: true })).toHaveAttribute('aria-expanded', 'true')
       await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
       await expect(page.getByRole('treeitem', { name: 'Other folder', exact: true })).toHaveAttribute('aria-expanded', 'false')
