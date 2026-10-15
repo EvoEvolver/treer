@@ -11,7 +11,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
-from notify import Digest, enabled as notify_enabled, hourly_limit
+from notify import Digest, TreePaths, candidates, enabled as notify_enabled, hourly_limit, path_tokens
 from reminders import Reminders, enabled as reminders_enabled
 from store import Store, fields, fail
 
@@ -43,6 +43,7 @@ class Application:
     def __init__(self, store, auth=None):
         self.store, self.auth = store, auth
         self.lock = threading.Lock()
+        self.tree_paths = TreePaths(os.environ.get('TREER_BIN', 'treer'))
 
     def identity_provider(self):
         with self.lock:
@@ -68,8 +69,55 @@ class Application:
                 self.auth = Auth(self.store, os.environ['ISSUES_PROXY_URL'], service_id, workspace, public_url)
             return self.auth
 
+    def resolve_paths(self, action, body, token):
+        """`@/team/agent` mentions are resolved by Core with the AUTHOR's own token (their Policy decides what a path
+        means and whether it is visible), before the write transaction. Returns {lower-case path: agent ID}."""
+        if not notify_enabled() or not isinstance(body, dict):
+            return {}
+        if action == 'comment':
+            text = body.get('body')
+        elif action in ('create', 'update'):
+            text = '\n'.join(v for v in (body.get('title'), body.get('description')) if isinstance(v, str))
+        else:
+            return {}
+        tokens = path_tokens(text) if isinstance(text, str) else []
+        if not tokens:
+            return {}
+        try:
+            auth = self.identity_provider()
+        except Error:
+            return {}
+        resolved = {}
+        for path in tokens:
+            try:
+                answer = auth.request('POST', f'/api/apps/{auth.service_id}/recipients/resolve', token, body={'recipients': [path]})
+            except Error:
+                continue
+            for entry in answer.get('recipients') or []:
+                if isinstance(entry, dict) and entry.get('kind') == 'agent' and isinstance(entry.get('id'), str):
+                    resolved[path.lower()] = entry['id']
+        return resolved
+
+    def path_verifier(self, token, budget=10):
+        """verify(path, agent_id): does Core, asked with the AUTHOR's token, resolve this tree path to that Agent?
+        At most `budget` Core calls per event; anything unverifiable counts as no."""
+        left = [budget]
+
+        def verify(path, agent_id):
+            if left[0] <= 0:
+                return False
+            left[0] -= 1
+            try:
+                auth = self.identity_provider()
+                answer = auth.request('POST', f'/api/apps/{auth.service_id}/recipients/resolve', token, body={'recipients': [path]})
+            except Error:
+                return False
+            return any(isinstance(e, dict) and e.get('kind') == 'agent' and e.get('id') == agent_id for e in answer.get('recipients') or [])
+        return verify
+
     def mutation(self, issue_id, action, body, actor, directory, token):
-        issue_id, event_id, event, recipients, notice, missed = self.store.mutate(issue_id, action, body, actor, directory)
+        paths = self.resolve_paths(action, body, token)
+        issue_id, event_id, event, recipients, notice, missed = self.store.mutate(issue_id, action, body, actor, directory, paths)
         notification = {'status': 'not_requested'}
         if action in ('create', 'update', 'comment'):
             if not notify_enabled():
@@ -101,6 +149,10 @@ class Application:
                     notification['throttled'] = len(throttled)
         if missed:
             notification = dict(notification, unresolved_mentions=missed)
+            verify = self.path_verifier(token)
+            options = {t: c for t in missed if (c := candidates(t, directory, self.tree_paths.get, verify))}
+            if options:
+                notification['mention_candidates'] = options
         self.store.notification(event_id, notification)
         return dict(self.store.show(issue_id), notification=notification)
 
