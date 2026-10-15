@@ -195,7 +195,7 @@ variants.
 
 | | Intent | Layout signature | Type | Accent (light / dark) | Radius / icons / motion |
 | --- | --- | --- | --- | --- | --- |
-| A Quiet Editor | calm, dense, out of the way | left icon rail; strip is the top row of the composer frame | system sans 13.5px, tabular figures | ink blue `#3358d4` / `#7ea3ff` | 8/5px; 16px 1.5 stroke; 120ms colour only |
+| A Quiet Editor | calm, dense, out of the way | strip is the top row of the composer frame (header actions top right like every look; the side rail was dropped) | system sans 13.5px, tabular figures | ink blue `#3358d4` / `#7ea3ff` | 8/5px; 16px 1.5 stroke; 120ms colour only |
 | **B Warm Paper (default)** | readable, unhurried, closest to today's launcher | centered title; pill chips above a rounded composer; floating panel cards | serif prose 16.5px/1.8 + sans UI | launcher green `#18725a` / `#58b99a` | 14/10px, pills; 18px 1.7 stroke; 220ms fades |
 | C Terminal Contrast | legible at a glance | glyph gutters (`❯ ● $ [x]`), inverse status line for goal/plan/queue | monospace throughout 13px | blue `#0a47c4` / mint `#4de3a2` | square; 15px 2px square-cap; blink cursor only |
 

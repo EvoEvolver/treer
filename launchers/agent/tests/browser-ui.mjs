@@ -391,6 +391,50 @@ try {
   await expect(tasksPanel).toBeHidden();
   await expect(tasksButton).toBeFocused();
 
+  // Every look puts the same entry points in the same places: header actions top right on desktop, bottom bar on phones.
+  const orders = {};
+  for (const look of ["a", "b", "c"]) {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${claude}/${page_}?look=${look}`);
+    await expect(page.locator("header.top .actions")).toBeVisible();
+    const desktop = await page.evaluate(() => {
+      const header = document.querySelector("header.top").getBoundingClientRect();
+      const buttons = [...document.querySelectorAll("header.top .actions button")].filter((b) => b.offsetParent !== null);
+      return { labels: buttons.map((b) => b.getAttribute("aria-label")), inside: buttons.every((b) => { const r = b.getBoundingClientRect(); return r.top >= header.top && r.bottom <= header.bottom + 1 && r.right <= header.right; }),
+        ascending: buttons.every((b, i) => i === 0 || b.getBoundingClientRect().x > buttons[i - 1].getBoundingClientRect().x), gapToEdge: Math.round(header.right - buttons.at(-1).getBoundingClientRect().right), rail: Boolean(document.querySelector(".rail")) };
+    });
+    assert.deepEqual(desktop.labels, ["Background tasks, 0 running", "Browse files", "Appearance", "Toggle theme"], `header actions in ${look}`);
+    assert.ok(desktop.inside && desktop.ascending, `header actions are left to right inside the header in ${look}`);
+    // C aligns its header to its centred content column, so only the full-width looks must hug the window edge.
+    if (look !== "c") assert.ok(desktop.gapToEdge >= 0 && desktop.gapToEdge <= 24, `header actions hug the right edge in ${look} (${desktop.gapToEdge}px)`);
+    assert.equal(desktop.rail, false, "no side rail in any look");
+    orders[look] = desktop.labels.join("|");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${claude}/${page_}?look=${look}`);
+    await expect(page.locator(".tabbar button", { hasText: "Tasks" })).toBeVisible();
+    const phone = await page.evaluate(() => ({ tabs: [...document.querySelectorAll(".tabbar button")].map((b) => b.textContent.trim()), headerButtons: [...document.querySelectorAll("header.top .actions button")].filter((b) => b.offsetParent !== null).length }));
+    assert.deepEqual(phone.tabs, ["Files", "Tasks", "Look", "Theme"], `bottom bar in ${look}`);
+    assert.equal(phone.headerButtons, 0, `no duplicate header buttons on phones in ${look}`);
+  }
+  assert.equal(new Set(Object.values(orders)).size, 1, "all looks order the header actions identically");
+
+  // Idle is still: the status block never animates unless the agent is working; reduced motion removes the working animation too.
+  const dotAnimation = () => page.evaluate(() => getComputedStyle(document.querySelector(".status .dot")).animationName);
+  for (const look of ["a", "b", "c"]) {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${claude}/${page_}?look=${look}`);
+    await expect(page.locator(".status-idle")).toBeVisible();
+    assert.equal(await dotAnimation(), "none", `idle status block does not animate in ${look}`);
+    assert.equal(await page.evaluate(() => { const h = document.querySelector(".v-empty h2"); return h ? getComputedStyle(h, "::after").animationName : "none"; }), "none", `the empty-state cursor is steady in ${look}`);
+    await page.goto(`${live}/${page_}?look=${look}`);
+    await expect(page.locator(".status-working")).toBeVisible();
+    if (look !== "b") assert.notEqual(await dotAnimation(), "none", `the working status block still animates in ${look}`);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    assert.ok(await page.evaluate(() => { const style = getComputedStyle(document.querySelector(".status .dot")); return style.animationName === "none" || parseFloat(style.animationDuration) <= 0.001; }), `reduced motion stops the working animation in ${look}`);
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   // A finished goal leaves a notice in the conversation (the fake completes a goal when its first turn starts).
   const done = await startServer("done", {});
   await page.goto(`${done}/${page_}?look=c`);

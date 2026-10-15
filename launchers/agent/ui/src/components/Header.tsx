@@ -8,7 +8,7 @@ import { Icon } from "./Icon";
 export type PanelName = "files" | "tasks";
 export interface PanelProps { panels: Record<PanelName, boolean>; onPanel: (name: PanelName, trigger: HTMLElement) => void }
 
-/** The look button. Rendered in the header and, for the rail look, in the rail; CSS shows the one that fits. */
+/** The look button, in the header actions of every look (phones use the bottom bar instead). */
 export const LookButton = forwardRef<HTMLButtonElement, { className: string; open: boolean; onToggle: () => void }>(function LookButton({ className, open, onToggle }, ref) {
   return (
     <button ref={ref} type="button" className={className} aria-haspopup="dialog" aria-expanded={open} aria-controls="appearance" aria-label={t("appearance.open")} title={t("appearance.open")} onClick={onToggle}>
@@ -54,19 +54,6 @@ export function Header({ menuOpen, onToggleMenu, lookRef, panels, onPanel }: { m
         <button type="button" className="tbtn" aria-label={t("appearance.toggleTheme")} title={t("appearance.toggleTheme")} onClick={toggleTheme}><Icon name="theme" /></button>
       </div>
     </header>
-  );
-}
-
-export function Rail({ menuOpen, onToggleMenu, panels, onPanel }: { menuOpen: boolean; onToggleMenu: () => void } & PanelProps) {
-  const tasks = useTasks();
-  return (
-    <nav className="rail" aria-label={t("tabbar.label")}>
-      <button type="button" className="rbtn" aria-expanded={panels.files} aria-controls="files" aria-label={t("header.filesAria")} title={t("header.files")} onClick={(event) => onPanel("files", event.currentTarget)}><Icon name="folder" /></button>
-      {tasks.available && <button type="button" className="rbtn" aria-expanded={panels.tasks} aria-controls="tasks" aria-label={t("header.tasksAria", { count: tasks.running })} title={t("tabbar.tasks")} onClick={(event) => onPanel("tasks", event.currentTarget)}><Icon name="tasks" />{tasks.running > 0 && <span className="badge">{tasks.running}</span>}</button>}
-      <span className="rail-sp" />
-      <LookButton className="rbtn" open={menuOpen} onToggle={onToggleMenu} />
-      <button type="button" className="rbtn" aria-label={t("appearance.toggleTheme")} title={t("appearance.toggleTheme")} onClick={toggleTheme}><Icon name="theme" /></button>
-    </nav>
   );
 }
 
