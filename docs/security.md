@@ -67,9 +67,15 @@ invitation tokens out of navigation and IdP/callback URLs. Pending IDs/tokens
 must not be put in browser storage. The original invitation table still stores
 bearer tokens in plaintext and has no invitation expiry field: database access
 can expose unused invitations. Hashing the short-lived OAuth/pending records is
-not a claim that all invitation storage is hashed. Without join consent, a valid
-org invite can admit account registration without being consumed; it is not then
-a one-account registration quota. Mixed old/new Proxy replicas are unsafe for
+not a claim that all invitation storage is hashed. In invitation-only deployments,
+an org invite without `join_organization:true` is rejected as `invalid_invitation`
+without creating an account or consuming the invite, for both password and new
+OAuth accounts. Open-registration deployments may still create a personal account
+without joining or consuming the org invite; that is open registration, not
+single-use invitation admission. Failure to retain pending state after successful
+OAuth login does not invalidate the session: only a fixed warning/code is logged
+at the handoff, and the user must reopen the invitation to join.
+Mixed old/new Proxy replicas are unsafe for
 the new consent contract; all replicas must upgrade before enabling the new web
 flow. Invitation payloads and tokens are excluded from acceptance/pending audit.
 

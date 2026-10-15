@@ -119,9 +119,8 @@ pub(crate) async fn oauth_callback(
                 pending.join_organization,
             )
             .await?;
-        if let Some(invite) = pending.invite.as_deref() {
-            auth.retain_pending_invitation(&session, invite).await?;
-        }
+        auth.retain_oauth_invitation_best_effort(&session, pending.invite.as_deref())
+            .await;
         Ok(session)
     }
     .await;

@@ -542,7 +542,7 @@ async fn user(store: &AuthStore, email: &str) -> CurrentSession {
 
 #[tokio::test]
 async fn organization_registration_without_consent_does_not_consume_or_join() {
-    let store = AuthStore::for_test("fixture").await;
+    let mut store = AuthStore::for_test("fixture").await;
     let owner = user(&store, "owner@example.test").await;
     let org = store
         .create_organization(&owner.user_id, "Team")
@@ -557,6 +557,35 @@ async fn organization_registration_without_consent_does_not_consume_or_join() {
         assert_eq!(preview.kind.as_deref(), Some("organization"));
         assert_eq!(preview.organization_name.as_deref(), Some("Team"));
     }
+    assert_eq!(
+        store
+            .register_with_client(
+                Some(&token),
+                "blocked@example.test",
+                "Blocked",
+                "password123",
+                None,
+                false
+            )
+            .await
+            .unwrap_err()
+            .code(),
+        "invalid_invitation"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM users WHERE email='blocked@example.test'"
+        )
+        .fetch_one(&store.pool)
+        .await
+        .unwrap(),
+        0
+    );
+    assert_eq!(
+        store.preview_invitation(&token).await.unwrap().status,
+        "valid"
+    );
+    store.oauth = Arc::new(OAuthConfig::new(None, None, false));
     let newcomer = store
         .register_with_client(
             Some(&token),
@@ -628,8 +657,17 @@ async fn oauth_admission_requires_explicit_accept_and_remains_single_use() {
         email: "oauth@example.test".into(),
         preferred_name: "OAuth".into(),
     };
+    assert_eq!(
+        store
+            .complete_oauth_login(profile(), Some(&token), false)
+            .await
+            .unwrap_err()
+            .code(),
+        "invalid_invitation"
+    );
+    let (personal, _) = store.create_personal_invitation().await.unwrap();
     let newcomer = store
-        .complete_oauth_login(profile(), Some(&token), false)
+        .complete_oauth_login(profile(), Some(&personal), false)
         .await
         .unwrap();
     assert!(store
@@ -660,6 +698,59 @@ async fn oauth_admission_requires_explicit_accept_and_remains_single_use() {
             .len(),
         2
     );
+}
+
+#[tokio::test]
+async fn pending_storage_failure_never_invalidates_a_completed_oauth_login() {
+    let store = AuthStore::for_test("fixture").await;
+    let owner = user(&store, "owner@example.test").await;
+    let org = store
+        .create_organization(&owner.user_id, "Team")
+        .await
+        .unwrap();
+    let (invite, _) = store
+        .create_invitation(&org.organization_id, &owner.user_id)
+        .await
+        .unwrap();
+    let (personal, _) = store.create_personal_invitation().await.unwrap();
+    let session = store
+        .complete_oauth_login(
+            OAuthProfile {
+                provider: "github",
+                subject: "fixture".into(),
+                email: "oauth@example.test".into(),
+                preferred_name: "OAuth".into(),
+            },
+            Some(&personal),
+            false,
+        )
+        .await
+        .unwrap();
+    sqlx::query("DROP TABLE pending_organization_invitations")
+        .execute(&store.pool)
+        .await
+        .unwrap();
+    store
+        .retain_oauth_invitation_best_effort(&session, Some(&invite))
+        .await;
+    assert_eq!(
+        store
+            .session(&session.token)
+            .await
+            .unwrap()
+            .unwrap()
+            .user_id,
+        session.user_id
+    );
+    let response = oauth_session_redirect(&store, &session);
+    assert!(response.status().is_redirection());
+    assert!(response.headers().contains_key(header::SET_COOKIE));
+    assert!(store
+        .list_organizations(&session.user_id)
+        .await
+        .unwrap()
+        .iter()
+        .all(|o| o.organization_id != org.organization_id));
 }
 
 #[tokio::test]

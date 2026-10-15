@@ -151,8 +151,10 @@ invites return `not_organization_invite`; invalid invites return
 `invalid_invitation`. Repeating acceptance by the consuming member is idempotent.
 
 Registration consumes an organization invite and joins in the account-creation
-transaction only with `join_organization:true`. Without that explicit flag it
-creates the personal account/organization and leaves the org invite unused.
+transaction only with `join_organization:true`. Without that flag, invitation-only
+deployments reject the registration as `invalid_invitation` without creating an
+account or consuming the invite. Open-registration deployments may instead create
+the personal account/organization and leave the org invite unused.
 `POST /api/auth/oauth/{provider}/start` accepts JSON with `invite_token` and
 `join_organization` (`true`/`false`), requires `X-Treer-Console: 1` and the exact
 Console Origin, and returns `{authorization_url}`. Console validates HTTPS and
@@ -162,6 +164,9 @@ stores an invitation hash, consent flag, state, browser-cookie hash and ten-minu
 expiry; the state is consumed once only with the matching browser cookie. The
 invitation never enters the IdP or callback URL. New OAuth accounts honor the
 explicit join flag in the creation transaction; existing accounts never autojoin.
+Pending handoff persistence after successful login is best-effort: failure logs
+only a fixed warning/code, does not invalidate the login, and requires the user to
+reopen their invitation link to join.
 
 After OAuth, a still-valid invitation is retained as one opaque pending ID per
 human session, with its invitation hash, user ID and ten-minute expiry. Console

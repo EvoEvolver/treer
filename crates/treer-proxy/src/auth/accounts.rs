@@ -6,6 +6,21 @@ pub(super) const LOGIN_ATTEMPT_LIMIT: i32 = 10;
 const LOGIN_ATTEMPT_WINDOW_SECONDS: i64 = 15 * 60;
 
 impl AuthStore {
+    pub(super) async fn retain_oauth_invitation_best_effort(
+        &self,
+        session: &CurrentSession,
+        invite: Option<&str>,
+    ) {
+        if let Some(invite) = invite {
+            if let Err(error) = self.retain_pending_invitation(session, invite).await {
+                // Login has committed. Do not log tokens, URLs or DB details here.
+                tracing::warn!(
+                    code = error.code(),
+                    "OAuth pending invitation unavailable; login remains successful"
+                );
+            }
+        }
+    }
     pub(super) async fn retain_pending_invitation(
         &self,
         session: &CurrentSession,
@@ -1443,6 +1458,9 @@ impl AuthStore {
         .map_err(AuthFailure::database)?
         .ok_or_else(invalid_invitation)?;
         if invitation.get::<String, _>("kind") == "organization" && !join_organization {
+            if self.oauth.invitation_required {
+                return Err(invalid_invitation());
+            }
             return Ok(None);
         }
         Ok(Some(RegistrationInvitation {

@@ -9,6 +9,10 @@ and Bearer rejection, JSON OAuth start with the Console custom header, state and
 browser-cookie binding, hash-only handoff records, expiry/replay, and session-bound
 pending preview/accept/decline. CORS tests retain the exact Console-origin allowlist
 and permit its OAuth custom header without permitting native-client headers.
+Invitation-only password/new-OAuth registration without join consent is rejected
+without creating a user; open-registration password behavior remains unchanged.
+A removed pending table simulates storage failure after OAuth login and verifies
+the resulting session remains valid and produces the session redirect cookie.
 These fixtures do not log into a real IdP, consume a user's invitation, or prove
 mixed-version rollout safety; upgrade all Proxy replicas before enabling the flow.
 

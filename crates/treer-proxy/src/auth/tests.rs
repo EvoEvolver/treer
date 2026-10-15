@@ -1553,7 +1553,14 @@ async fn workspace_deletion_requires_a_manager_and_revokes_credentials() {
         .await
         .expect("invite member");
     let member = store
-        .register(Some(&invite), "member@example.com", "Member", "password123")
+        .register_with_client(
+            Some(&invite),
+            "member@example.com",
+            "Member",
+            "password123",
+            None,
+            true,
+        )
         .await
         .expect("register member");
     store
@@ -1793,11 +1800,13 @@ async fn organization_roles_control_members_and_share_workspaces() {
         .await
         .expect("invite alice");
     let alice = store
-        .register(
+        .register_with_client(
             Some(&alice_invite),
             "alice@example.com",
             "Alice",
             "password123",
+            None,
+            true,
         )
         .await
         .expect("register alice");
@@ -1809,7 +1818,7 @@ async fn organization_roles_control_members_and_share_workspaces() {
         .list_organizations(&alice.user_id)
         .await
         .expect("alice organizations");
-    assert_eq!(alice_organizations.len(), 2);
+    assert_eq!(alice_organizations.len(), 1);
     assert!(alice_organizations
         .iter()
         .any(|o| o.organization_id == organization.organization_id));
@@ -1871,7 +1880,14 @@ async fn organization_roles_control_members_and_share_workspaces() {
         .await
         .expect("admin invite");
     let bob = store
-        .register(Some(&bob_invite), "bob@example.com", "Bob", "password123")
+        .register_with_client(
+            Some(&bob_invite),
+            "bob@example.com",
+            "Bob",
+            "password123",
+            None,
+            true,
+        )
         .await
         .expect("register bob");
     store
@@ -1935,7 +1951,14 @@ async fn workspace_access_is_limited_to_organization_members() {
         .await
         .expect("personal organization invite");
     let alice = store
-        .register(Some(&invite), "alice@example.com", "Alice", "password123")
+        .register_with_client(
+            Some(&invite),
+            "alice@example.com",
+            "Alice",
+            "password123",
+            None,
+            true,
+        )
         .await
         .expect("register alice");
     store
@@ -1985,11 +2008,13 @@ async fn restricted_workspaces_support_user_and_group_grants() {
         .await
         .expect("invite alice");
     let alice = store
-        .register(
+        .register_with_client(
             Some(&alice_invite),
             "alice@example.com",
             "Alice",
             "password123",
+            None,
+            true,
         )
         .await
         .expect("register alice");
@@ -2002,7 +2027,14 @@ async fn restricted_workspaces_support_user_and_group_grants() {
         .await
         .expect("invite bob");
     let bob = store
-        .register(Some(&bob_invite), "bob@example.com", "Bob", "password123")
+        .register_with_client(
+            Some(&bob_invite),
+            "bob@example.com",
+            "Bob",
+            "password123",
+            None,
+            true,
+        )
         .await
         .expect("register bob");
     store
