@@ -14,6 +14,7 @@ class CliContractTests(unittest.TestCase):
             ["message", "receive", "--limit", "5"],
             ["message", "send", "--to", "a", "--body=-1", "--external-source-file", "-"],
             ["message", "send", "--to", "a", "--body", "-"],
+            ["message", "send", "--to", "a", "--body=-x"],
             ["agent", "show", "/infra/x"],
             ["--workspace", "w", "agent", "show", "x"],
             ["exec", "--machine", "m", "--", "ls", "-la"],
@@ -26,6 +27,7 @@ class CliContractTests(unittest.TestCase):
             ["message", "send", "--to", "a", "--no-such-flag", "x"],
             ["message", "send", "--to"],
             ["message", "send", "--to", "a", "--body", "-1"],
+            ["message", "send", "--to", "a", "--body", "-x"],
             ["message", "send", "--to", "a", "--body", "--help"],
             ["nonsense"],
         ):

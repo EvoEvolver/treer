@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 
 CONTRACT = json.loads((Path(__file__).with_name("cli-contract.json")).read_text(encoding="utf-8"))
-GLOBAL_FLAGS = {"--workspace": True, "--url": True}
+GLOBAL_FLAGS = {"--workspace": "value", "--url": "value"}
 
 
 def violation(arguments: list[str]) -> str | None:
@@ -39,11 +39,11 @@ def violation(arguments: list[str]) -> str | None:
             takes_value = spec["flags"].get(name)
             if takes_value is None:
                 return f"treer {best}: unknown option {name}"
-            if takes_value and not equals:
+            if takes_value != "none" and not equals:
                 index += 1
                 if index >= len(rest):
                     return f"treer {best}: {name} needs a value"
-                if rest[index].startswith("-") and rest[index] != "-":
+                if takes_value == "value" and rest[index].startswith("-") and rest[index] != "-":
                     # clap reads this as another option; text like "-1" or "--help" must be passed as --flag=VALUE
                     return f"treer {best}: a value is required for {name} (use {name}=VALUE for values starting with '-')"
         else:

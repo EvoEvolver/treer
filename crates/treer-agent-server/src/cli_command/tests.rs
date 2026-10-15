@@ -911,7 +911,7 @@ fn agent_and_app_help_explain_paths_and_sibling_scope() {
     }
 }
 
-/// Every (sub)command with its long flags (and whether each takes a value) and positional count, hidden ones included, so Apps' fake CLIs can be
+/// Every (sub)command with its long flags (and whether each takes a value: none, value, or hyphen_value) and positional count, hidden ones included, so Apps' fake CLIs can be
 /// checked against the real argument contract (`apps/cli-contract.json`).
 fn contract(
     command: &clap::Command,
@@ -928,7 +928,14 @@ fn contract(
                 .get_num_args()
                 .is_some_and(|range| range.max_values() > 1);
         } else if let Some(long) = argument.get_long() {
-            let takes_value = argument.get_action().takes_values();
+            let takes_value = argument.get_action().takes_values().then(|| {
+                if argument.is_allow_hyphen_values_set() {
+                    "hyphen_value"
+                } else {
+                    "value"
+                }
+            });
+            let takes_value = takes_value.unwrap_or("none");
             flags.insert(format!("--{long}"), takes_value);
             for alias in argument.get_all_aliases().into_iter().flatten() {
                 flags.insert(format!("--{alias}"), takes_value);

@@ -1,20 +1,20 @@
 {
   "agent address": {
     "flags": {
-      "--json": false
+      "--json": "none"
     },
     "positionals": 1,
     "variadic": false
   },
   "agent admin create": {
     "flags": {
-      "--cwd": true,
-      "--folder": true,
-      "--kind": true,
-      "--machine": true,
-      "--name": true,
-      "--publish": true,
-      "--recipe": true
+      "--cwd": "value",
+      "--folder": "value",
+      "--kind": "value",
+      "--machine": "value",
+      "--name": "value",
+      "--publish": "value",
+      "--recipe": "value"
     },
     "positionals": 1,
     "variadic": true
@@ -26,8 +26,8 @@
   },
   "agent admin profile create": {
     "flags": {
-      "--cwd": true,
-      "--description": true
+      "--cwd": "value",
+      "--description": "value"
     },
     "positionals": 3,
     "variadic": true
@@ -39,10 +39,10 @@
   },
   "agent admin profile launch": {
     "flags": {
-      "--cwd": true,
-      "--folder": true,
-      "--machine": true,
-      "--name": true
+      "--cwd": "value",
+      "--folder": "value",
+      "--machine": "value",
+      "--name": "value"
     },
     "positionals": 1,
     "variadic": false
@@ -59,12 +59,12 @@
   },
   "agent admin profile update": {
     "flags": {
-      "--arg": true,
-      "--clear-args": false,
-      "--command": true,
-      "--cwd": true,
-      "--description": true,
-      "--name": true
+      "--arg": "hyphen_value",
+      "--clear-args": "none",
+      "--command": "value",
+      "--cwd": "value",
+      "--description": "value",
+      "--name": "value"
     },
     "positionals": 1,
     "variadic": false
@@ -86,7 +86,7 @@
   },
   "agent admin startup set": {
     "flags": {
-      "--cwd": true
+      "--cwd": "value"
     },
     "positionals": 2,
     "variadic": true
@@ -108,14 +108,14 @@
   },
   "agent ls": {
     "flags": {
-      "--recursive": false
+      "--recursive": "none"
     },
     "positionals": 1,
     "variadic": false
   },
   "agent mkdir": {
     "flags": {
-      "--parents": false
+      "--parents": "none"
     },
     "positionals": 1,
     "variadic": false
@@ -127,12 +127,12 @@
   },
   "agent prompt": {
     "flags": {
-      "--notify": false,
-      "--queue": false,
-      "--steer": false,
-      "--timeout": true,
-      "--until": true,
-      "--wait": false
+      "--notify": "none",
+      "--queue": "none",
+      "--steer": "none",
+      "--timeout": "value",
+      "--until": "value",
+      "--wait": "none"
     },
     "positionals": 2,
     "variadic": false
@@ -149,14 +149,14 @@
   },
   "agent read": {
     "flags": {
-      "--lines": true
+      "--lines": "value"
     },
     "positionals": 1,
     "variadic": false
   },
   "agent restart": {
     "flags": {
-      "--cwd": true
+      "--cwd": "value"
     },
     "positionals": 2,
     "variadic": true
@@ -188,8 +188,8 @@
   },
   "agent startup set": {
     "flags": {
-      "--cwd": true,
-      "--publish": true
+      "--cwd": "value",
+      "--publish": "value"
     },
     "positionals": 1,
     "variadic": true
@@ -206,29 +206,29 @@
   },
   "agent transcript": {
     "flags": {
-      "--cursor": true,
-      "--limit": true,
-      "--page": true
+      "--cursor": "value",
+      "--limit": "value",
+      "--page": "value"
     },
     "positionals": 1,
     "variadic": false
   },
   "agent wait": {
     "flags": {
-      "--timeout": true,
-      "--until": true
+      "--timeout": "value",
+      "--until": "value"
     },
     "positionals": 1,
     "variadic": false
   },
   "app create": {
     "flags": {
-      "--cwd": true,
-      "--folder": true,
-      "--machine": true,
-      "--name": true,
-      "--port": true,
-      "--public": false
+      "--cwd": "value",
+      "--folder": "value",
+      "--machine": "value",
+      "--name": "value",
+      "--port": "value",
+      "--public": "none"
     },
     "positionals": 2,
     "variadic": true
@@ -265,18 +265,18 @@
   },
   "app update": {
     "flags": {
-      "--clear-args": false,
-      "--command": true,
-      "--cwd": true
+      "--clear-args": "none",
+      "--command": "value",
+      "--cwd": "value"
     },
     "positionals": 2,
     "variadic": true
   },
   "exec": {
     "flags": {
-      "--cwd": true,
-      "--machine": true,
-      "--timeout": true
+      "--cwd": "value",
+      "--machine": "value",
+      "--timeout": "value"
     },
     "positionals": 1,
     "variadic": true
@@ -293,10 +293,10 @@
   },
   "interface register": {
     "flags": {
-      "--capability": true,
-      "--instance-id": true,
-      "--port": true,
-      "--ui-path": true
+      "--capability": "value",
+      "--instance-id": "value",
+      "--port": "value",
+      "--ui-path": "value"
     },
     "positionals": 0,
     "variadic": false
@@ -313,9 +313,9 @@
   },
   "machine get": {
     "flags": {
-      "--force": false,
-      "--machine": true,
-      "--mode": true
+      "--force": "none",
+      "--machine": "value",
+      "--mode": "value"
     },
     "positionals": 2,
     "variadic": false
@@ -327,9 +327,9 @@
   },
   "machine put": {
     "flags": {
-      "--force": false,
-      "--machine": true,
-      "--mode": true
+      "--force": "none",
+      "--machine": "value",
+      "--mode": "value"
     },
     "positionals": 2,
     "variadic": false
@@ -351,7 +351,7 @@
   },
   "message ack": {
     "flags": {
-      "--operation-id": true
+      "--operation-id": "value"
     },
     "positionals": 1,
     "variadic": true
@@ -363,52 +363,52 @@
   },
   "message import": {
     "flags": {
-      "--body-file": true,
-      "--format": true,
-      "--operation-id": true
+      "--body-file": "value",
+      "--format": "value",
+      "--operation-id": "value"
     },
     "positionals": 0,
     "variadic": false
   },
   "message list": {
     "flags": {
-      "--before": true,
-      "--limit": true
+      "--before": "value",
+      "--limit": "value"
     },
     "positionals": 0,
     "variadic": false
   },
   "message receive": {
     "flags": {
-      "--limit": true,
-      "--wait": true
+      "--limit": "value",
+      "--wait": "value"
     },
     "positionals": 0,
     "variadic": false
   },
   "message reply": {
     "flags": {
-      "--body": true,
-      "--body-file": true,
-      "--context": true,
-      "--external-source-file": true,
-      "--idempotency-key": true,
-      "--to": true
+      "--body": "value",
+      "--body-file": "value",
+      "--context": "value",
+      "--external-source-file": "value",
+      "--idempotency-key": "value",
+      "--to": "value"
     },
     "positionals": 1,
     "variadic": false
   },
   "message send": {
     "flags": {
-      "--body": true,
-      "--body-file": true,
-      "--context": true,
-      "--correlation-id": true,
-      "--expires-at": true,
-      "--external-source-file": true,
-      "--idempotency-key": true,
-      "--to": true,
-      "--trace-id": true
+      "--body": "value",
+      "--body-file": "value",
+      "--context": "value",
+      "--correlation-id": "value",
+      "--expires-at": "value",
+      "--external-source-file": "value",
+      "--idempotency-key": "value",
+      "--to": "value",
+      "--trace-id": "value"
     },
     "positionals": 0,
     "variadic": false
@@ -420,8 +420,8 @@
   },
   "runtime restore": {
     "flags": {
-      "--all": false,
-      "--server": true
+      "--all": "none",
+      "--server": "value"
     },
     "positionals": 0,
     "variadic": false
@@ -433,7 +433,7 @@
   },
   "service forward": {
     "flags": {
-      "--listen": true
+      "--listen": "value"
     },
     "positionals": 1,
     "variadic": false
@@ -445,27 +445,27 @@
   },
   "service publish": {
     "flags": {
-      "--access": true,
-      "--tcp": false
+      "--access": "value",
+      "--tcp": "none"
     },
     "positionals": 1,
     "variadic": false
   },
   "service register": {
     "flags": {
-      "--host": true,
-      "--machine": true,
-      "--name": true,
-      "--port": true,
-      "--primary": false,
-      "--protocol": true
+      "--host": "value",
+      "--machine": "value",
+      "--name": "value",
+      "--port": "value",
+      "--primary": "none",
+      "--protocol": "value"
     },
     "positionals": 0,
     "variadic": false
   },
   "service unpublish": {
     "flags": {
-      "--tcp": false
+      "--tcp": "none"
     },
     "positionals": 1,
     "variadic": false
@@ -477,7 +477,7 @@
   },
   "token create": {
     "flags": {
-      "--json": false
+      "--json": "none"
     },
     "positionals": 1,
     "variadic": false
