@@ -224,6 +224,24 @@ owner, containing the failing job, the test name, the exact SHA, the CI run and
 the saved log path. A rerun that passes is evidence of flakiness, not of
 correctness.
 
+## Release tickets
+
+Every release candidate, review and acceptance is its own Issues ticket, and the
+order between them is `blocked_by`, not a chat instruction. One `[Release]`
+ticket (label `type:release`, assigned to the release owner) carries one comment
+per step in the form `[release] <step> <SHA> <result>` for integrate, check,
+push, CI, native, canary and Policy check, quoting the exact full commit and the
+log or receipt path. Each required reviewer gets a `[Review]` ticket that blocks
+the release, and each real-target acceptance (for example an official Windows
+Controller) gets an `[Acceptance]` ticket blocked by the release. A gate that
+fails once and passes on its permitted rerun additionally gets a `flaky` ticket
+(see [Graded gates](#graded-gates-and-staging-batches)).
+
+`python3 scripts/release-tickets.py --name <release> --parent <epic>
+--release-owner <id> --review ROLE=<id> --acceptance ROLE=<id>` prints the
+`issues create` commands in dependency order; add `--create` to create them. The
+script uses the Issues CLI's own identity and never reads or stores credentials.
+
 ## Canary release
 
 For routine releases, use the wrapper from the development checkout:

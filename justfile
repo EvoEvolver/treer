@@ -132,6 +132,10 @@ canary *args:
 release-grade *args:
     python3 scripts/release-grade.py {{args}}
 
+# Print (or with --create, create) the Issues ticket chain for a release.
+release-tickets *args:
+    python3 scripts/release-tickets.py {{args}}
+
 canary-scripts-test:
     python3 -m unittest discover -s scripts/tests -p 'test_canary_release.py' -v
 
