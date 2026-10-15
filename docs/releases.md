@@ -172,13 +172,22 @@ the candidate, and only if all of the following hold:
   metadata, checksum, executable-bit and version verification as a fresh build;
 - the copy is verified again for the candidate before use.
 
-The reused `dist/` carries `artifact-provenance.json` (`source_commit`,
-`candidate_commit`). `verify-machine-artifacts.sh` accepts artifacts built for
+The reused `dist/` carries `artifact-provenance.json` (`source_commit` = the
+commit the binaries were really built from, `passed_release_commit`,
+`candidate_commit`, and the SHA-256 of all 25 files: three binaries,
+`SHA256SUMS` and `build-metadata.json` for each platform). When the passed
+release itself reused earlier binaries, the original build commit stays the
+source and the ancestry and path checks run against it. `verify-machine-artifacts.sh` accepts artifacts built for
 another commit only with that file and re-derives ancestry and the path
 allowlist from git itself, so a forged provenance file cannot launder a native
-change. The Canary manifest records `machine_artifacts: {source_commit, reused}`,
-the Proxy serves the reused bytes, and installed binaries keep reporting the
-commit they were actually built from. Set `TREER_REUSE_NATIVE_ARTIFACTS=0` to
+change, and bytes altered after the copy fail the recorded hashes even if the
+checksum files were rewritten. The Canary manifest records
+`machine_artifacts: {source_commit, reused, files}` for every release (the same
+25 hashes), the Proxy serves the reused bytes, and installed binaries and the
+embedded launcher keep reporting the commit they were actually built from. The
+trust base is the operator's local `.treer/canary-checkouts/` state, as for any
+collected `dist/`: the recorded hashes pin what was verified at copy time, but
+they are not a signature or an independent pin of the previous release's bytes. Set `TREER_REUSE_NATIVE_ARTIFACTS=0` to
 force a native build. The hosted Proxy and the Cloudflare Worker are always built
 or deployed from the candidate, so changes to `apps/policy` (embedded in the
 Proxy) and to the frontend still ship.

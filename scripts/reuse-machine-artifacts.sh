@@ -42,11 +42,20 @@ for source in $(candidates); do
         echo "not reusing $source: its artifacts failed verification" >&2
         continue
     }
+    # If the passed release itself reused earlier binaries, keep the commit they
+    # were really built from as the source and record the passed release apart.
+    built=$source
+    if [ -f "$release/dist/artifact-provenance.json" ]; then
+        built=$(jq -er '.source_commit' "$release/dist/artifact-provenance.json") || continue
+        printf '%s' "$built" | grep -Eq '^[0-9a-f]{40}$' || continue
+    fi
     temporary=$(mktemp -d "$root/.dist-reuse.XXXXXX")
     cp -R "$release/dist" "$temporary/dist"
-    jq -n --arg source "$source" --arg candidate "$commit" \
-        '{schema_version: 1, source_commit: $source, candidate_commit: $candidate,
-          reason: "only web/, apps/ or docs/ changed since the source commit"}' \
+    rm -f "$temporary/dist/artifact-provenance.json"
+    hashes=$(sh scripts/machine-artifact-hashes.sh "$temporary/dist") || { rm -rf "$temporary"; continue; }
+    jq -n --arg source "$built" --arg passed "$source" --arg candidate "$commit" --argjson files "$hashes" \
+        '{schema_version: 1, source_commit: $source, passed_release_commit: $passed, candidate_commit: $candidate,
+          reason: "only web/, apps/ or docs/ changed since the source commit", files: $files}' \
         > "$temporary/dist/artifact-provenance.json"
     if sh scripts/verify-machine-artifacts.sh "$commit" "$temporary/dist" >/dev/null 2>&1; then
         mv "$temporary/dist" dist

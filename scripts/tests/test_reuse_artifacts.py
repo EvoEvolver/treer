@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -51,7 +52,7 @@ class ReuseTest(unittest.TestCase):
         self.repo.mkdir()
         git(self.repo, "init", "-q")
         (self.repo / "scripts").mkdir()
-        for name in ("reuse-machine-artifacts.sh", "verify-machine-artifacts.sh"):
+        for name in ("reuse-machine-artifacts.sh", "verify-machine-artifacts.sh", "machine-artifact-hashes.sh"):
             shutil.copy(SCRIPTS / name, self.repo / "scripts" / name)
         self.source = commit_files(self.repo, {"crates/core/lib.rs": "1", "web/index.html": "1", "apps/a/app.py": "1", "docs/x.md": "1"}, "source")
         self.checkouts = Path(self.temp.name) / "checkouts"
@@ -140,6 +141,60 @@ class ReuseTest(unittest.TestCase):
         build_dist(self.repo / "dist", self.source)
         result = subprocess.run(["sh", "scripts/verify-machine-artifacts.sh", candidate, "dist"], cwd=self.repo, capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
+
+    def expected_hashes(self, directory):
+        return {f"{platform}/{name}": hashlib.sha256((directory / platform / name).read_bytes()).hexdigest()
+                for platform in PLATFORMS
+                for name in (*BINARIES, "SHA256SUMS", "build-metadata.json")}
+
+    def test_provenance_records_every_file_hash_and_they_match_the_copied_bytes(self):
+        commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        self.assertEqual(self.reuse().returncode, 0)
+        provenance = json.loads((self.repo / "dist" / "artifact-provenance.json").read_text())
+        self.assertEqual(len(provenance["files"]), 25)
+        self.assertEqual(provenance["files"], self.expected_hashes(self.repo / "dist"))
+        hashes = subprocess.run(["sh", "scripts/machine-artifact-hashes.sh", "dist"], cwd=self.repo,
+                                check=True, capture_output=True, text=True).stdout
+        self.assertEqual(json.loads(hashes), provenance["files"])
+
+    def test_bytes_changed_after_copy_fail_the_recorded_hashes_even_with_a_rewritten_checksum_file(self):
+        candidate = commit_files(self.repo, {"web/index.html": "2"}, "ui")
+        self.assertEqual(self.reuse().returncode, 0)
+        folder = self.repo / "dist" / "linux-x86_64"
+        (folder / "treer").write_bytes(b"\x7fELFtampered")
+        sums = subprocess.run(["shasum", "-a", "256", *BINARIES], cwd=folder, check=True, capture_output=True, text=True).stdout
+        (folder / "SHA256SUMS").write_text(sums)
+        result = subprocess.run(["sh", "scripts/verify-machine-artifacts.sh", candidate, "dist"], cwd=self.repo, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("recorded provenance hashes", result.stderr)
+
+    def test_consecutive_reuse_keeps_the_original_build_source(self):
+        middle = commit_files(self.repo, {"web/index.html": "2"}, "ui 1")
+        self.assertEqual(self.reuse().returncode, 0)
+        shutil.copytree(self.repo / "dist", self.checkouts / middle / "dist")
+        shutil.rmtree(self.repo / "dist")
+        manifest = self.checkouts / middle / ".treer" / "releases" / middle
+        manifest.mkdir(parents=True)
+        (manifest / "manifest.json").write_text(json.dumps({"status": "canary_passed", "commit": middle, "created_at": "2026-10-16T00:00:00Z"}))
+        candidate = commit_files(self.repo, {"web/index.html": "3"}, "ui 2")
+        result = self.reuse()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        provenance = json.loads((self.repo / "dist" / "artifact-provenance.json").read_text())
+        self.assertEqual((provenance["source_commit"], provenance["passed_release_commit"], provenance["candidate_commit"]),
+                         (self.source, middle, candidate))
+        verified = subprocess.run(["sh", "scripts/verify-machine-artifacts.sh", candidate, "dist"], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+
+    def test_consecutive_reuse_is_refused_when_a_native_path_changed_since_the_original_build(self):
+        middle = commit_files(self.repo, {"web/index.html": "2"}, "ui 1")
+        self.assertEqual(self.reuse().returncode, 0)
+        shutil.copytree(self.repo / "dist", self.checkouts / middle / "dist")
+        shutil.rmtree(self.repo / "dist")
+        manifest = self.checkouts / middle / ".treer" / "releases" / middle
+        manifest.mkdir(parents=True)
+        (manifest / "manifest.json").write_text(json.dumps({"status": "canary_passed", "commit": middle, "created_at": "2026-10-16T00:00:00Z"}))
+        commit_files(self.repo, {"crates/core/lib.rs": "changed later"}, "native")
+        self.assertNotEqual(self.reuse().returncode, 0)
 
 
 if __name__ == "__main__":

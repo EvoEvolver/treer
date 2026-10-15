@@ -16,6 +16,11 @@ if [ -e "$directory/artifact-provenance.json" ]; then
         echo "invalid artifact provenance for $commit" >&2; exit 1;
     }
     built_commit=$(jq -r '.source_commit' "$directory/artifact-provenance.json")
+    # Recorded hashes pin the bytes that were verified when the artifacts were copied.
+    recorded=$(jq -S '.files // empty' "$directory/artifact-provenance.json")
+    [ -z "$recorded" ] || [ "$recorded" = "$(sh "$root/scripts/machine-artifact-hashes.sh" "$directory" | jq -S .)" ] || {
+        echo "artifact bytes differ from the recorded provenance hashes" >&2; exit 1;
+    }
     git -C "$root" merge-base --is-ancestor "$built_commit" "$commit" || {
         echo "artifact source $built_commit is not an ancestor of $commit" >&2; exit 1;
     }
