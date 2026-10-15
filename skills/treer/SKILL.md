@@ -452,6 +452,17 @@ printf '%s\n' 'Review is complete.' | \
   treer message send --to /coordinator --idempotency-key task-42-result
 ```
 
+Bridges sending an external-channel Message can keep text and attribution out of argv:
+pipe a single JSON object `{"body":"text","external_source":{"channel":"telegram","conversation_id":"chat-id","message_id":"external-id","metadata":{"user_id":"user-id"}}}`
+to `treer message send --to /coordinator --stdin-envelope --idempotency-key telegram-update-42`.
+Generate and pipe this JSON in the bridge process; do not put private text in a
+shell command or an argument to `printf`. The envelope is limited to 1 MiB;
+`external_source` is optional (or null), and ordinary Message limits still apply.
+`--stdin-envelope` conflicts with `--body`, `--body-file` and
+`--external-source-file`. Older Controllers reject this unknown flag; upgrade
+instead of falling back to putting text in argv. Attribution does not replace
+the authenticated sender or grant permissions.
+
 Use a sender-scoped idempotency key whenever a send may be retried. Repeating an
 identical request returns the original Message; reusing the key with different
 content fails. Reply by stable Message ID to preserve conversational context:

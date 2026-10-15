@@ -550,6 +550,88 @@ fn member_directory_command_parses() {
 }
 
 #[test]
+fn message_stdin_envelope_parses_without_body_or_source_in_argv() {
+    let argv = [
+        "treer",
+        "message",
+        "send",
+        "--to",
+        "agent-a",
+        "--stdin-envelope",
+    ];
+    let args = Args::try_parse_from(argv).unwrap();
+    assert!(matches!(
+        args.command,
+        Some(Command::Message {
+            command: MessageCommand::Send {
+                stdin_envelope: true,
+                body: None,
+                body_file: None,
+                external_source_file: None,
+                ..
+            }
+        })
+    ));
+    for conflicting in [
+        vec!["--body", "secret"],
+        vec!["--body-file", "-"],
+        vec!["--external-source-file", "-"],
+    ] {
+        assert!(Args::try_parse_from(argv.into_iter().chain(conflicting)).is_err());
+    }
+}
+
+#[test]
+fn message_stdin_envelope_preserves_body_and_external_source() {
+    let source = json!({"channel":"telegram", "account_id":"fixture-bot",
+        "conversation_id":"chat-1", "message_id":"42", "metadata":{"user_id":"user-1"}});
+    let body = "私密消息\nquotes: \" and literal $()";
+    let input = serde_json::to_vec(&json!({"body":body,"external_source":source})).unwrap();
+    let envelope = read_message_envelope(input.as_slice()).unwrap();
+    assert_eq!(envelope.body, body);
+    assert_eq!(
+        serde_json::to_value(envelope.external_source).unwrap(),
+        source
+    );
+    for input in [
+        r#"{"body":"plain"}"#,
+        r#"{"body":"plain","external_source":null}"#,
+    ] {
+        let envelope = read_message_envelope(input.as_bytes()).unwrap();
+        assert_eq!(envelope.body, "plain");
+        assert!(envelope.external_source.is_none());
+    }
+}
+
+#[test]
+fn message_stdin_envelope_rejects_malformed_spoofed_and_oversized_input_without_echoing() {
+    for input in [
+        r#"{"body":false,"external_source":"private-text"}"#,
+        r#"{"body":"private-text","sender":{"id":"forged"}}"#,
+        r#"{"body":"private-text","external_source":{"channel":"telegram"}}"#,
+        r#"{"body":"private-text","external_source":{},"private-text":1}"#,
+        r#"{"body":"private-text"} {"body":"second"}"#,
+        r#"{"body":"private-text""#,
+        r#"{}"#,
+    ] {
+        let error = read_message_envelope(input.as_bytes()).err().unwrap();
+        assert!(error
+            .to_string()
+            .starts_with("invalid message stdin envelope"));
+        assert!(!format!("{error:#}").contains("private-text"));
+    }
+    let input = vec![b'x'; 1024 * 1024 + 1];
+    assert_eq!(
+        read_message_envelope(input.as_slice())
+            .err()
+            .unwrap()
+            .to_string(),
+        "message stdin envelope exceeds 1 MiB"
+    );
+    assert!(read_message_envelope(&b"\xff"[..]).is_err());
+}
+
+#[test]
 fn message_commands_parse_machine_readable_inputs() {
     let send = Args::try_parse_from([
         "treer",
