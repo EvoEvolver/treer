@@ -3,7 +3,7 @@ import os
 # Clean all inherited identities, harness settings and proxies before importing App code.
 for key in list(os.environ):
     if key.startswith(
-        ("TREER_", "AGENT_UI_", "CODEX_UI_", "EMAIL_ENDPOINT_", "SOUL_")
+        ("TREER_", "AGENT_UI_", "CODEX_UI_", "EMAIL_ENDPOINT_", "SOUL_", "APP_DEPLOY_")
     ) or key.lower() in ("http_proxy", "https_proxy", "all_proxy"):
         del os.environ[key]
 import sys
@@ -368,8 +368,78 @@ class Tests(unittest.TestCase):
         db.close()
         e.Application(settings,self.api,tree_loader=lambda:self.api.tree)
         self.assertEqual(len(list(legacy.parent.glob("legacy.sqlite3.pre-v2-*"))),1)
+        # Rehearse rollback with the pre-v2 copy: matching v1 rows and integrity survive.
+        restored = Path(self.tmp.name) / "restored-v1.sqlite3"
+        import shutil
+        shutil.copyfile(backups[0], restored)
+        self.assertEqual(backups[0].stat().st_mode & 0o077, 0)
+        with sqlite3.connect(restored) as before:
+            self.assertEqual(before.execute("PRAGMA integrity_check").fetchone()[0], "ok")
+            self.assertEqual(before.execute("SELECT recipient,email,subject FROM threads").fetchone(),
+                             ("u1", "alice@example.test", "Old"))
+            self.assertNotIn("contact", {r[1] for r in before.execute("PRAGMA table_info(threads)")})
         wrong = replace(settings, config=replace(settings.config, service_id="svc_another"))
         with self.assertRaises(ValueError): e.Application(wrong,self.api)
+
+    def test_deployment_snapshot_health_and_readiness(self):
+        import shutil
+        from dataclasses import replace
+        asset_root = Path(self.tmp.name) / "release"
+        shutil.copytree(e.ROOT / "web", asset_root / "web")
+        shutil.copyfile(e.ROOT / "AGENT.md", asset_root / "AGENT.md")
+        settings = replace(self.app.settings, config=replace(self.app.config,
+                           database_path=Path(self.tmp.name) / "snapshot.sqlite3"))
+        version = "a" * 40
+        with patch.object(e, "ROOT", asset_root), patch.dict(os.environ, {"APP_DEPLOY_VERSION": version}):
+            app = e.Application(settings, self.api, tree_loader=lambda: self.api.tree)
+        server = e.Server(("127.0.0.1", 0), app)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        base = f"http://127.0.0.1:{server.server_address[1]}/"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        def get(path, accept="*/*"):
+            return opener.open(urllib.request.Request(base + path, headers={"Accept": accept}))
+        try:
+            originals = {name: get(name, "text/html" if not name else "*/*").read()
+                         for name in ("", "app.js", "style.css")}
+            original_manual = get("").read()
+            for file in asset_root.rglob("*"):
+                if file.is_file(): file.write_text("edited after process startup")
+            for name, content in originals.items():
+                with get(name, "text/html" if not name else "*/*") as response:
+                    self.assertEqual(response.read(), content)
+                    self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertEqual(get("").read(), original_manual)
+            with get("deployment-health") as response:
+                health = json.load(response)
+            self.assertEqual(health["version"], version)
+            self.assertEqual(health["app_id"], "app_test")
+            self.assertEqual(health["api_version"], 2)
+            self.assertTrue(health["ready"] and health["database_ready"])
+            self.assertEqual(health["assets_sha256"], app.asset_hash)
+            self.assertFalse(app.activation()["enabled"])
+            with patch.object(app, "db", side_effect=e.sqlite3.OperationalError("test only")):
+                with self.assertRaises(urllib.error.HTTPError) as error: get("deployment-health")
+                self.assertEqual(error.exception.code, 503)
+                self.assertFalse(json.load(error.exception)["database_ready"])
+            with self.assertRaises(urllib.error.HTTPError) as error: get("unknown-route")
+            self.assertEqual(error.exception.code, 404)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+
+    def test_deployment_configuration_paths_and_database_override(self):
+        config = Path(self.tmp.name) / "config.json"
+        config.write_text(json.dumps({"service_id":"svc_test", "public_url":"http://127.0.0.1/",
+                         "proxy_public_url":"https://proxy.example.test/", "workspace_id":"ws_test",
+                         "runtime_agent_id":"app_test", "mode":"outbox"}))
+        config.chmod(0o600)
+        database = str(Path(self.tmp.name) / "managed/state/app.sqlite3")
+        with patch.dict(os.environ, {"EMAIL_ENDPOINT_DB":database}):
+            settings = e.load_settings(str(config), str(Path(self.tmp.name) / "state"))
+        self.assertEqual(settings.config.database_path, Path(database))
+        self.assertEqual(settings.mode, "outbox")
+        self.assertEqual(settings.runtime_id, "app_test")
+        config.chmod(0o644)
+        with self.assertRaises(ValueError): e.load_settings(str(config))
 
     def test_two_instances_independent_contacts_activation_and_threads(self):
         from dataclasses import replace
