@@ -166,11 +166,10 @@ class TelegramBridge:
                 f"telegram-{self.bot_id}-{update_id}",
                 "--external-source-file",
                 "-",
-                "--body",
-                text,
+                f"--body={text}",
             ]
         )
-        # The Controller cannot read client-local files: the source goes over stdin and the text as --body.
+        # The Controller cannot read client-local files: the source goes over stdin and the text as --body=TEXT (the joined form keeps text starting with '-' from being parsed as an option).
         response = self.cli.run(arguments, stdin=json.dumps(source, separators=(",", ":")))
         core_message = _object(response.get("message"), "Core Message")
         core_message_id = _string(core_message.get("message_id"), "Core Message ID", 256)

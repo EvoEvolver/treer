@@ -235,6 +235,11 @@ class TelegramBridgeTest(unittest.TestCase):
         restarted.run_inbound_once(timeout=0)
         self.assertEqual(self.bot_state.offsets[-1], 1003)
 
+    def test_text_starting_with_a_hyphen_is_delivered(self) -> None:
+        for update_id, text in ((2000, "-1"), (2001, "--help"), (2002, "- item")):
+            self.bridge.process_update(self.inbound(update_id, update_id, text))
+        self.assertEqual([m["body"] for m in self.cli_value()["messages"]], ["-1", "--help", "- item"])
+
     def test_unauthorized_updates_are_denied_before_treer(self) -> None:
         denied = self.inbound(2000, 200, "steal context", user_id=9876)
         self.bridge.process_update(denied)

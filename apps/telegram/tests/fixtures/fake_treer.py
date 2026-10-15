@@ -41,6 +41,13 @@ def main() -> int:
         state.setdefault("calls", [])
         state.setdefault("prompts", [])
         arguments = sys.argv[1:]
+        # clap treats a separate value that starts with '-' (other than '-') as an option, so such text needs --flag=VALUE.
+        for flag in ("--body", "--idempotency-key", "--to", "--context"):
+            for position, value in enumerate(arguments[:-1]):
+                nxt = arguments[position + 1]
+                if value == flag and nxt.startswith("-") and nxt != "-":
+                    print(json.dumps({"error": {"code": "cli_failed", "message": f"a value is required for '{flag}'"}}), file=sys.stderr)
+                    return 2
         files = options(arguments, "--external-source-file") + options(arguments, "--body-file")
         stdin = sys.stdin.read() if "-" in files else ""
         if any(value != "-" for value in files):
@@ -70,7 +77,7 @@ def main() -> int:
                         for target in options(arguments, "--to")
                     ],
                     "context_ids": options(arguments, "--context"),
-                    "body": option(arguments, "--body") if "--body" in arguments else stdin,
+                    "body": (next((v[7:] for v in arguments if v.startswith("--body=")), None) or stdin),
                     "created_at": datetime.now(timezone.utc).isoformat(),
                     "external_source": external_source,
                 }
