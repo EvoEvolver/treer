@@ -29,6 +29,12 @@ async function fixture(page: Page) {
   })
   return { connections, closed, inputs, output: (id: string, text: string) => terminals.get(id)!.send(Buffer.from(text)), remove: (id: string) => { snapshot = { ...snapshot, revision: snapshot.revision + 1, agents: snapshot.agents.filter((agent) => agent.agent_id !== id) }; apps = apps.filter((entry) => entry.runtime_agent_id !== id); events!.send(JSON.stringify({ event: 'workspace.snapshot', data: snapshot })) } }
 }
+async function gotoWorkspace(page: Page) {
+  await page.goto('/')
+  // Auth renders the tab bar before workspace discovery. Discovery changes its
+  // scope/key and closes a transient mobile switcher; wait for real inventory.
+  await expect(page.getByRole('button', { name: 'Open /Terminal', exact: true })).toBeVisible()
+}
 async function switchTab(page: Page, name: string, mobile = false) {
   if (mobile) {
     await page.getByRole('button', { name: /^Show all tabs/ }).click()
@@ -44,7 +50,7 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await page.setViewportSize({ width: mobile ? 390 : 1360, height: 900 })
     await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
     const backend = await fixture(page)
-    await page.goto('/')
+    await gotoWorkspace(page)
     await open(page, 'Alpha', mobile)
     const alpha = page.frameLocator('#workspace-panel-tab-1 iframe')
     await alpha.getByRole('textbox', { name: 'Draft' }).fill('Private draft remains in memory only')
@@ -80,7 +86,7 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
 for (const mobile of [false, true]) test(`tabs enforce LRU budget and reload on selection ${mobile ? '390' : 'desktop'}`, async ({ page }) => {
   await page.setViewportSize({ width: mobile ? 390 : 1360, height: 900 })
   const backend = await fixture(page)
-  await page.goto('/')
+  await gotoWorkspace(page)
   const count = mobile ? 4 : 6
   for (const name of names.slice(0, count)) await open(page, name, mobile)
   await expect.poll(() => backend.closed).toContain('tab-0')
@@ -98,7 +104,7 @@ for (const mobile of [false, true]) test(`tabs enforce LRU budget and reload on 
 })
 test('tabs persist only bounded IDs, restore cold and prune deleted IDs', async ({ page }) => {
   const backend = await fixture(page)
-  await page.goto('/')
+  await gotoWorkspace(page)
   await open(page, 'Alpha'); await open(page, 'Terminal')
   await page.reload()
   await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toBeVisible()
@@ -117,7 +123,7 @@ test('tabs persist only bounded IDs, restore cold and prune deleted IDs', async 
 })
 test('tabs have roving keyboard navigation, shortcuts and close fallback', async ({ page }) => {
   const backend = await fixture(page)
-  await page.goto('/')
+  await gotoWorkspace(page)
   await open(page, 'Alpha'); await open(page, 'Beta'); await open(page, 'Terminal')
   await page.locator('.xterm-helper-textarea').press('Control+w')
   await expect.poll(() => backend.inputs).toContain('\x17')
@@ -142,7 +148,7 @@ test('tabs have roving keyboard navigation, shortcuts and close fallback', async
 })
 test('App tab stays mounted through Agent, overview and settings; log choice is local', async ({ page }) => {
   const backend = await fixture(page)
-  await page.goto('/')
+  await gotoWorkspace(page)
   await open(page, 'Archive')
   const frame = page.frameLocator('#workspace-panel-tab-7 iframe')
   await frame.getByRole('textbox', { name: 'Draft' }).fill('App draft')
@@ -163,7 +169,7 @@ for (const mode of ['throws', 'invalid'] as const) test(`tabs tolerate ${mode} s
     if (mode === 'throws') for (const name of ['getItem', 'setItem']) Object.defineProperty(Storage.prototype, name, { value() { throw new Error('synthetic storage denied') } })
     else localStorage.setItem(key, JSON.stringify(['tab-1','https://bad.test/token','tab-1',null,...Array.from({ length: 100 }, (_, i) => `missing-${i}`)]))
   }, { key: storageKey, mode })
-  await page.goto('/')
+  await gotoWorkspace(page)
   await open(page, 'Alpha')
   await expect(page.frameLocator('#workspace-panel-tab-1 iframe').getByRole('textbox', { name: 'Draft' })).toBeVisible()
   await page.getByRole('button', { name: 'Close tab /Alpha', exact: true }).click()
@@ -175,7 +181,7 @@ test('workspace and user changes never retain another scope’s live surfaces or
   const second = { ...mapSnapshot.workspace, workspace_id: 'second', name: 'Second' }
   await page.route('**/api/workspaces?*', (route) => route.fulfill({ json: { workspaces: [mapSnapshot.workspace, second] } }))
   await page.route('**/api/workspaces/second/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, workspace: second, agents: [{ ...mapSnapshot.agents[0], agent_id: 'tab-1', name: 'Other scope', path: '/Other scope' }] } }))
-  await page.goto('/')
+  await gotoWorkspace(page)
   await open(page, 'Alpha')
   await expect(page.locator('iframe')).toHaveCount(1)
   await page.getByRole('combobox', { name: 'Workspace', exact: true }).click()
@@ -196,7 +202,7 @@ test('workspace and user changes never retain another scope’s live surfaces or
 
 test('shrinking to phone clamps LRU without unloading the active terminal', async ({ page }) => {
   const backend = await fixture(page)
-  await page.goto('/')
+  await gotoWorkspace(page)
   await open(page, 'Alpha'); await open(page, 'Beta'); await open(page, 'Gamma'); await open(page, 'Delta'); await open(page, 'Terminal')
   await page.setViewportSize({ width: 390, height: 844 })
   await expect(page.locator('iframe')).toHaveCount(2)
@@ -211,7 +217,7 @@ for (const theme of ['light', 'dark']) test(`pinned Overview remains visible whi
   await page.setViewportSize({ width: 1000, height: 900 })
   await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
   await fixture(page)
-  await page.goto('/')
+  await gotoWorkspace(page)
   for (const name of names) await open(page, name)
   const list = page.getByRole('tablist', { name: 'Open pages' })
   await expect.poll(() => list.evaluate((element) => element.scrollLeft)).toBeGreaterThan(100)
@@ -226,4 +232,24 @@ for (const theme of ['light', 'dark']) test(`pinned Overview remains visible whi
   await page.screenshot({ path: info.outputPath(`tabs-overflow-${theme}.png`) })
   await overview.click()
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
+})
+
+
+test('mobile switcher recovers after delayed initial workspace discovery', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 900 })
+  await fixture(page)
+  let release!: () => void
+  const discovery = new Promise<void>((resolve) => { release = resolve })
+  await page.route('**/api/workspaces?*', async (route) => {
+    await discovery
+    await route.fulfill({ json: { workspaces: [mapSnapshot.workspace] } })
+  })
+  await page.goto('/')
+  await page.getByRole('button', { name: /^Show all tabs/ }).click()
+  await expect(page.getByRole('dialog', { name: /^Open tabs/ })).toBeVisible()
+  release()
+  await expect(page.getByRole('button', { name: 'Open /Terminal', exact: true })).toBeVisible()
+  await expect(page.getByRole('dialog', { name: /^Open tabs/ })).toHaveCount(0)
+  await open(page, 'Terminal', true)
+  await expect(page.locator('.xterm')).toBeVisible()
 })
