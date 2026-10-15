@@ -407,6 +407,7 @@
       "--expires-at": "value",
       "--external-source-file": "value",
       "--idempotency-key": "value",
+      "--stdin-envelope": "none",
       "--to": "value",
       "--trace-id": "value"
     },
