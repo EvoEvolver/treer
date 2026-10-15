@@ -128,6 +128,10 @@ release-canary revision="HEAD":
 canary *args:
     python3 scripts/canary-release.py {{args}}
 
+# Plan the gates for a candidate from its changed paths; runs nothing.
+release-grade *args:
+    python3 scripts/release-grade.py {{args}}
+
 canary-scripts-test:
     python3 -m unittest discover -s scripts/tests -p 'test_canary_release.py' -v
 

@@ -167,6 +167,63 @@ Python bytecode, channel secrets, and App state are never release artifacts.
 App supervision, rollback, state migration, and isolation use the deployment's
 normal service tooling; Treer has no App package installer.
 
+## Graded gates and staging batches
+
+`python3 scripts/release-grade.py <base> <head>` classifies a candidate by the
+paths it changes and prints the gates it must pass (`--json` for tooling,
+`--urgent` for a release that must never be batched). It only plans; it runs no
+gate, pushes nothing and deploys nothing. Any path that is not listed below,
+including a new top-level directory, classifies as core, so a new area can only
+make a release stricter.
+
+| Changed paths | Local gate | Native build, Canary and Policy check |
+| --- | --- | --- |
+| `docs/`, root `*.md` only | `node scripts/check-docs.mjs` | not required |
+| `apps/` only | docs check plus each changed App's own tests and `npm run check` | not required; the App owner deploys the App after CI |
+| `web/`, `mobile/` | web typecheck, build and Playwright | required before machines or Canary use the build |
+| `launchers/` | `just agent-launcher-test` | required: the Controller embeds the launcher payload |
+| `crates/`, `scripts/`, `.github/`, `deploy/`, `canary/`, `skills/`, build files, unknown paths | `just check` | required |
+
+A mixed change takes the union of its components' gates, and any core path
+makes it a core release. `.gitattributes` and `.gitignore` alone do not raise the
+grade. Graded gating changes only which local gate and which shipping steps
+apply. `just check` itself is unchanged, CI still runs every job on the exact
+SHA, a skipped gate is never replaced by a rerun, and nothing here lets a
+candidate reach Canary without the exact-commit native artifacts that
+`just canary` already requires.
+
+Frozen branches that their owners and the required reviewers have approved can
+be released together instead of one Canary per branch:
+
+1. Merge approved web, launcher and apps branches into a staging integration
+   branch based on `origin/main`, one merge per branch, recording each source
+   commit and proving by `git diff` that the staged tree is the union of the
+   sources.
+2. Cut one candidate from staging, run the graded local gate for the union of
+   its paths, push the exact SHA to `main`, then run CI, the native workflow and
+   `just canary` once for the whole batch. Record each step on the batch's
+   release ticket.
+3. Machine upgrades take the whole batch at once. Launcher changes always travel
+   inside the Controller build, so a batch that contains one is upgraded through
+   the normal Controller update, not a separate launcher path.
+
+A batch is cut when the leader asks for it, when approved work has waited a day,
+or when a release candidate has accumulated enough approved branches that
+testing them separately would cost more than testing them together. These rules
+do not batch:
+
+- Security fixes and blocking bugs release alone and immediately.
+- Core changes (`crates/`, authentication, Policy, migrations, release tooling)
+  release alone so that a failure points at one change.
+- A branch whose review is incomplete or whose tests are red waits for the next
+  batch; it is never carried in with a note.
+
+When a gate fails and passes on its single permitted rerun, the release does not
+continue until a ticket labelled `flaky` exists, assigned to the component
+owner, containing the failing job, the test name, the exact SHA, the CI run and
+the saved log path. A rerun that passes is evidence of flakiness, not of
+correctness.
+
 ## Canary release
 
 For routine releases, use the wrapper from the development checkout:
