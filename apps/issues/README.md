@@ -8,8 +8,10 @@ or Agent prompting. No Treer core code is changed.
 
 ## Design
 
-Python 3.10+ standard library, SQLite and native HTML/CSS/JavaScript keep the
-runtime and build footprint small. There is no frontend build. Treer owns the
+The backend is Python 3.10+ standard library and SQLite; it does not need Node
+at runtime. The browser UI is React (TypeScript, `ui/src`) built with a pinned
+esbuild into four committed files in `dist/` that the App serves as-is, so
+deploying is still `python3 apps/issues/issues.py` from a checkout. Treer owns the
 identity directory, service tokens and browser OAuth; there are no local users.
 All state, including OAuth session mappings, lives in one SQLite database.
 Writes use `BEGIN IMMEDIATE`: permissions and claim ownership are checked inside
@@ -19,11 +21,50 @@ cycles are validated before commit. Progress counts all descendants, with
 and status; expiry immediately makes it available without resetting either.
 
 The HTTP root negotiates an [Agent manual](AGENT.md) or the human UI. APIs use
-`/v1/`, bounded pages and JSON errors. Browser assets and API calls preserve a
-Treer tunnel prefix. The UI includes filters, hierarchy tree, detail editor,
-identity selector, comments, activity, claim controls, mobile layout and both
-themes. Descriptions/comments are **text**, including their Markdown source;
-no user content is inserted through HTML or evaluated.
+`/v1/`, bounded pages and JSON errors. Browser assets (`./app.js`, `./app.css`,
+`./boot.js`) and API calls are document-relative and preserve a Treer tunnel
+prefix. Descriptions/comments are **text**, including their Markdown source;
+no user content is inserted through HTML or evaluated, and the CSP allows only
+same-origin scripts and styles.
+
+### Interface
+
+A quiet, dense, keyboard-first layout in the launcher's green palette, light and
+dark (it follows the system theme until the toggle is used). Issues are grouped
+by status (done/closed collapsed by default) or shown as a hierarchy tree, with
+status, assignee, label and text filters; the detail pane edits status,
+assignee and priority in place. On phones the list is one column and the detail
+is a full-screen sheet with a Back button.
+
+**Close** is one click in every list row, child row and the detail header
+(reopen for closed issues); closing from a row or with `X` offers an Undo toast.
+The buttons mirror the backend rule: they are disabled, with the reason shown,
+unless the viewer is the creator, assignee, live lease holder or a human
+owner/admin (a live lease held by someone else blocks everyone else). The server
+still enforces permissions; the UI only explains them.
+
+The **Needs me** view lists issues assigned to you that are not done/closed
+(the API form is `GET /v1/issues?assignee=me&unresolved=1`; add `&label=x` or the
+Label filter to narrow it).
+
+Shortcuts: `J`/`K` move, `Enter`/`O` open, `X` close, `E` edit, `C` new issue,
+`/` search, `Esc` back, `?` help.
+
+### Building the UI
+
+Sources live in `ui/`; `dist/` is generated and committed, like the launcher UI,
+and is compared byte for byte with a fresh build. Versions are pinned exactly in
+`package.json`/`package-lock.json`. After changing anything under `ui/`:
+
+```sh
+cd apps/issues
+npm ci --ignore-scripts
+npm run build:ui     # rewrites dist/
+npm run check        # tsc, rebuild-and-compare, size budget, no absolute paths or HTML sinks
+```
+
+`.gitattributes` forces LF for `ui/` and `dist/`. Markdown rendering is
+deliberately absent; adding marked/DOMPurify would need a security review.
 
 ## Deploy as a Managed App
 
@@ -74,6 +115,10 @@ request headers or bodies.
 | `ISSUES_WORKSPACE_ID` | injected workspace or own record | Workspace boundary; required for external supervision |
 | `TREER_BIN` | `treer` | CLI used only for own Managed App identity discovery |
 | `ISSUES_URL` | `http://issues.treer/` | Client-side root override for the `issues` CLI |
+| `ISSUES_NOTIFY_HOURLY_LIMIT` | `20` | Immediate Messages per recipient per hour before updates fold into one digest |
+| `ISSUES_NOTIFY` | `on` | `0`/`off`/`false`/`no` disables issue-change notifications and digests |
+| `ISSUES_REMINDER_SKIP_LABELS` | `epic` | Comma-separated labels (case-insensitive) whose issues are never counted by reminders; empty = none |
+| `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the hourly reminder poller |
 
 Protect the database directory: sessions contain short-lived human access
 tokens. Startup uses restrictive umask and database mode `0600`. OAuth uses
@@ -102,14 +147,102 @@ done. Human administrators can edit after a lease expires, but cannot steal it.
 This is a shared workspace tracker, not a per-issue ACL system. Treer's network
 Policy and App permissions remain additional upstream gates.
 
-Edits (including assignment/status) and comments notify creator and old/new
-assignee, excluding the actor, through `/api/apps/SERVICE/messages` using the
-**verified caller's** service token. Core therefore evaluates that caller's
-Message Policy. Notification body contains only issue ID, link and one action
-summary; titles, descriptions and comment bodies are excluded. Each event has
-a stable Message idempotency key. Core disabled, denied or unavailable results
-are recorded in the activity and API response; issue writes still succeed.
-The browser displays failed/disabled/pending delivery in the timeline.
+Edits and comments notify the people they concern, never the actor, through
+`/api/apps/SERVICE/messages` using the **verified caller's** service token, so
+Core evaluates that caller's Message Policy:
+
+| Event | Who is notified |
+| --- | --- |
+| Issue created | assignee |
+| Comment | assignee |
+| Status or assignee change | assignee, creator, and the previous assignee on reassignment |
+| Any other edit (priority, labels, text…) | assignee |
+| `@name` in a comment, or newly added to a title/description | the mentioned Agent, in addition to the above |
+
+Claims/leases and updates that change nothing send nothing. `@name` must match
+exactly one Agent name (case-insensitive); an ambiguous name is ignored, so use
+`@/tree/path` or `@ag_id` to disambiguate. Only Agents can be mentioned; the
+creator therefore hears plain comments only when mentioned (`@author`).
+
+A Message is one short fixed sentence plus a link, for example
+`Issue #22 · Status open→done · by security-claude`; it never contains titles,
+descriptions or comment bodies. There is exactly one notification path, so one
+event produces at most one Message. Each event has a stable idempotency key
+(`issues-event-ID`). Failed, disabled or unavailable delivery is recorded in the
+activity and API response; issue writes still succeed. The browser displays
+failed/disabled/pending delivery in the timeline.
+
+**Anti-spam window.** Per (recipient, issue, **actor**) the first event is delivered
+immediately with that actor's own token and opens a five-minute window. Later
+events *by the same actor* in the window are only recorded
+(`notification: coalesced`); when the window ends the App sends **one** digest
+(`Issue #N · 3 more updates in the last 5 minutes: …`; at most the last 50
+events are kept and the count reflects that) with `treer message send` under the
+App's own identity and starts a new quiet window. Windows are keyed by actor on
+purpose: the digest has no caller token, so it may only carry events of an actor
+whose own token Core already allowed to message that recipient. An event by a
+different actor never joins someone else's window; it is sent with its own token
+(and refused by Core if that actor's Policy forbids it). A failed immediate send
+discards its window together with anything merged into it meanwhile, so nothing
+Core did not authorise is ever delivered later. A failed digest is retried at most
+three times and then dropped. The App's Policy must allow the digest Message.
+
+**Per-recipient cap.** Each recipient also has an hourly budget of immediate
+Messages (`ISSUES_NOTIFY_HOURLY_LIMIT`, default 20, 1–1000). Beyond it, updates
+from any number of issues are folded into one per-recipient digest per window
+(`Issues · N more updates (over the hourly limit)…`), so the total sent to one
+Agent is bounded whatever anyone @-mentions. A single comment @-mentions at most
+10 Agents. The overflow digest is sent under the App identity too, so only an
+actor whom Core already let message that recipient *in the current hour* (a
+recorded successful send) may overflow into it; once the budget is spent, anyone
+else's event is dropped and the activity shows `notification: throttled`. A
+determined authorised sender can still use the 20 immediate slots, which delays
+other people's notifications to the next digest (at most five minutes, nothing
+is lost); there is no separate per-actor limit.
+
+**Names in Messages.** Directory names are attacker-influenced text, so a name
+appears in a Message only if it is 1–24 characters of `A–Z a–z 0–9 space . _ / -`;
+otherwise the stable ID is shown instead. Titles, descriptions and comment bodies
+never appear.
+
+**Unresolved mentions.** An `@name` that matches no Agent or several is ignored,
+and the write response and activity say so (`notification.unresolved_mentions`;
+the UI toast lists them), so an author does not assume the Agent was reached.
+
+`ISSUES_NOTIFY=off` disables all issue-change notifications (activity shows
+`notification: off`); it is independent of `ISSUES_REMINDERS`. Pending digests
+live in the SQLite `notify_windows`/`notify_budget` tables and survive restarts.
+
+## Hourly reminders
+
+> **On by default.** Upgrading a deployment starts the poller; set
+> `ISSUES_REMINDERS=off` (and restart only this App) to disable it. Anyone who
+> may edit an issue can set its assignee, so being able to assign an issue to an
+> Agent also lets that person make the App message that Agent once per hour. The
+> Message text is fixed (issue IDs and a link only), is sent as the App's own
+> identity, and remains subject to Treer's Message authorization and Policy.
+
+On every full hour (epoch hour) the App collects issues that are not `done` or
+`closed` and carry none of the labels in `ISSUES_REMINDER_SKIP_LABELS` (default
+`epic`, so long-lived epics are never nagged about) and whose assignee is an Agent (stable ID `ag_…`; humans are never
+messaged). For each such Agent it runs `treer agent show ID` and, only when the
+Agent's `status` is `idle` and it is not busy, sends **one** Message listing up
+to ten issue IDs (`+N more` beyond that) plus the App link (only a plain `http(s)` URL is
+ever included; anything else is omitted) with
+`treer message send` under the App's own runtime identity. Bodies never contain
+titles, descriptions or comments. No token is read, logged or put on a command
+line; the CLI resolves identity from the inherited environment.
+
+Anti-spam: at most one Message per Agent per hour. A `(hour, Agent)` row in the
+SQLite `reminders` table survives restarts, and the Message idempotency key
+`issues-reminder-AGENT-HOUR` makes a crash between send and record harmless. A
+busy, unknown or unreachable Agent is skipped until the next hour; a failed send
+is not recorded, so a restart within five minutes after the hour retries it. A
+restart later in the hour does not catch up. Resolving, closing or reassigning
+an issue stops reminders at the next hour. Set `ISSUES_REMINDERS=off` and restart
+only this App to disable the poller. The App's Policy must allow `agent show`
+and Messages to the assignee Agents; denials are skipped and logged by exit
+status only.
 
 ## Agent client
 
@@ -150,6 +283,7 @@ yet versioned.
 
 ```sh
 python3 -m unittest discover -s apps/issues/tests -p 'test_*.py' -v
+(cd apps/issues && npm ci --ignore-scripts && npm run check)
 cd apps/issues/tests
 npm install --ignore-scripts
 npx playwright install chromium
@@ -158,7 +292,7 @@ npm test
 node scripts/check-docs.mjs
 ```
 
-Playwright is a test-only dependency, not an App build chain. Browser tests can
+Playwright is a test-only dependency, separate from the UI build in `apps/issues`. Browser tests can
 reuse an installed module through `ISSUES_PLAYWRIGHT_MODULE=/absolute/module`.
 Screenshots go to `/tmp/treer-issues-screenshots` (override
 `ISSUES_SCREENSHOT_DIR`). Tests use the real Issues server and a local Treer
@@ -188,13 +322,15 @@ Each database test uses a random schema; do not select a shared database.
 
 This App targets small trusted teams. Graph operations load workspace issue
 metadata into memory; no full-text search, pagination snapshot, attachments,
-email, kanban, deletion, per-issue privacy or background scheduler is provided.
+email, kanban, deletion or per-issue privacy is provided. The only background
+work is the hourly reminder pass and the five-minute digest worker described
+above; neither has a retry queue beyond the limits stated there.
 The tree represents the currently loaded/filter-matching issues; load more to
 include additional branches. Activity and child collections page separately.
 Concurrent UI edits send an optimistic version; API callers should do likewise.
 Create/comment are not idempotent: inspect after an uncertain response before
-retrying. Notifications are best effort after commit, without a background
-outbox or retry; an interrupted send remains pending in activity. Issue state
+retrying. Immediate notifications are best effort after commit, without an outbox or
+retry (the next event retries); an interrupted send remains pending in activity. Issue state
 is canonical only in this App's SQLite file. Claims are coordination leases,
 not execution isolation, fencing tokens, status resets or automatic Agent runs.
 A workspace operator can administer the machine and data directly.

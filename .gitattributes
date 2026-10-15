@@ -4,3 +4,8 @@
 # rewrite them to CRLF and make a correct bundle look stale.
 launchers/agent/public/** text eol=lf
 launchers/agent/ui/** text eol=lf
+
+# The Issues UI follows the same rule: sources and the committed bundle are LF everywhere
+# (npm --prefix apps/issues run check:ui compares a fresh build byte for byte).
+apps/issues/ui/** text eol=lf
+apps/issues/dist/** text eol=lf

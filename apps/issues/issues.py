@@ -11,10 +11,14 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
+from notify import Digest, enabled as notify_enabled, hourly_limit
+from reminders import Reminders, enabled as reminders_enabled
 from store import Store, fields, fail
 
 ROOT = Path(__file__).resolve().parent
 COOKIE = 'treer_issues_session'
+# Committed React build (ui/ sources, `npm run build:ui`): a fixed allow-list, never a directory server.
+ASSETS = ('/app.js', '/app.css', '/boot.js')
 
 
 def representation(accept, ua):
@@ -65,22 +69,38 @@ class Application:
             return self.auth
 
     def mutation(self, issue_id, action, body, actor, directory, token):
-        issue_id, event_id, event, recipients = self.store.mutate(issue_id, action, body, actor, directory)
+        issue_id, event_id, event, recipients, notice, missed = self.store.mutate(issue_id, action, body, actor, directory)
         notification = {'status': 'not_requested'}
         if action in ('create', 'update', 'comment'):
-            if not recipients:
+            if not notify_enabled():
+                notification = {'status': 'off'}
+            elif not recipients:
                 notification = {'status': 'no_recipients'}
             else:
-                auth = self.identity_provider()
-                try:
-                    auth.request('POST', f'/api/apps/{auth.service_id}/messages', token, body={
-                        'recipients': recipients, 'context_ids': [],
-                        'body': f"Issue #{issue_id} · {event['summary']}\n{auth.public_url}#issue={issue_id}",
-                        'idempotency_key': f'issues-event-{event_id}'})
-                    notification = {'status': 'sent'}
-                except Error as exc:
-                    notification = {'status': 'disabled' if exc.code == 'core_messages_disabled' else 'unavailable',
-                                    'code': exc.code, 'message': 'Change saved; Core Message notification was not delivered'}
+                # One Message per event: this is the only notification path, so nothing is sent twice.
+                now = self.store.clock()
+                send, merged, throttled = self.store.claim_notifications(issue_id, recipients, notice, now, actor['id'], hourly_limit())
+                if not send:
+                    notification = {'status': 'coalesced' if merged else 'throttled'}
+                else:
+                    try:
+                        auth = self.identity_provider()
+                        auth.request('POST', f'/api/apps/{auth.service_id}/messages', token, body={
+                            'recipients': send, 'context_ids': [],
+                            'body': f"Issue #{issue_id} · {notice}\n{auth.public_url}#issue={issue_id}",
+                            'idempotency_key': f'issues-event-{event_id}'})
+                        self.store.prove_notifications(send, actor['id'], now)
+                        notification = {'status': 'sent'}
+                    except Error as exc:
+                        self.store.release_notifications(issue_id, send, actor['id'], now)
+                        notification = {'status': 'disabled' if exc.code == 'core_messages_disabled' else 'unavailable',
+                                        'code': exc.code, 'message': 'Change saved; Core Message notification was not delivered'}
+                if send and merged:
+                    notification['coalesced'] = len(merged)
+                if throttled:
+                    notification['throttled'] = len(throttled)
+        if missed:
+            notification = dict(notification, unresolved_mentions=missed)
         self.store.notification(event_id, notification)
         return dict(self.store.show(issue_id), notification=notification)
 
@@ -148,11 +168,11 @@ class Handler(BaseHTTPRequestHandler):
             app = self.server.application
             if path == '/' and method in ('GET', 'HEAD'):
                 media = representation(self.headers.get('Accept', ''), self.headers.get('User-Agent', ''))
-                file = ROOT / ('web/index.html' if media == 'text/html' else 'AGENT.md')
+                file = ROOT / ('dist/index.html' if media == 'text/html' else 'AGENT.md')
                 self.reply(200, file.read_bytes(), media+'; charset=utf-8', {'Vary': 'Accept, User-Agent'})
                 return
-            if path in ('/app.js', '/app.css', '/issues') and method in ('GET', 'HEAD'):
-                file = ROOT / ('issues' if path == '/issues' else 'web/'+path[1:])
+            if (path in ASSETS or path == '/issues') and method in ('GET', 'HEAD'):
+                file = ROOT / ('issues' if path == '/issues' else 'dist/'+path[1:])
                 self.reply(200, file.read_bytes(), 'text/plain; charset=utf-8' if path == '/issues' else mimetypes.guess_type(str(file))[0])
                 return
             if path == '/health' and method in ('GET', 'HEAD'):
@@ -181,6 +201,8 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/v1/directory' and method == 'GET':
                 self.json(200, {'principals': directory})
             elif path == '/v1/issues' and method == 'GET':
+                if query.get('assignee') == 'me':
+                    query['assignee'] = actor['id']
                 self.json(200, app.store.list(query))
             elif path == '/v1/issues' and method == 'POST':
                 self.json(201, app.mutation(None, 'create', self.body(), actor, directory, token))
@@ -238,6 +260,22 @@ def main():
     application = Application(Store(os.environ.get('ISSUES_DB', '.treer/apps/issues/issues.sqlite3')))
     server = Server((host, int(port)), application)
     print(f'Issues listening on {host}:{server.server_port}', flush=True)
+    if notify_enabled():
+        def digest_link():
+            try:
+                return application.identity_provider().public_url
+            except Error:
+                return os.environ.get('ISSUES_PUBLIC_URL') or 'http://issues.treer/'
+        Digest(application.store, digest_link, os.environ.get('TREER_BIN', 'treer')).start()
+        print('Issues change notifications enabled (ISSUES_NOTIFY=off disables)', flush=True)
+    if reminders_enabled():
+        def link():
+            try:
+                return application.identity_provider().public_url
+            except Error:
+                return os.environ.get('ISSUES_PUBLIC_URL') or 'http://issues.treer/'
+        Reminders(application.store, link, os.environ.get('TREER_BIN', 'treer')).start()
+        print('Issues hourly reminders enabled (ISSUES_REMINDERS=off disables)', flush=True)
     server.serve_forever()
 
 

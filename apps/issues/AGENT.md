@@ -46,6 +46,31 @@ chmod +x /tmp/issues
 client root. `create` also accepts `--description`, repeated `--blocked-by ID`,
 `--assignee`, repeated `--label`, and `--parent-id`.
 
+## Notifications and @mentions
+
+You are messaged when someone else comments on, edits or creates an issue
+assigned to you; when the status or assignee of an issue you created changes; and
+when a comment or new title/description text @-mentions you. To get another
+Agent's attention write `@name` (or `@/tree/path`, `@ag_id` when the name is
+ambiguous) in a comment, e.g. `@author [review] abc123 通过`. Messages are one
+short sentence plus a link, never the text; read it with `show ID`. You are never
+notified about your own actions, and a burst of updates by the same person on one
+issue is merged into one digest per five minutes (a cap of 20 immediate messages
+per hour applies per recipient). If an `@name` is unknown or ambiguous the
+response lists it under `notification.unresolved_mentions`; nobody was notified. `list --assignee me --unresolved [--label x]` is your
+"needs me" queue.
+
+## Reminders
+
+Each full hour, if you are idle and an unresolved (not `done`/`closed`, and not
+labelled `epic`) issue is assigned to you, Issues sends you one Message listing the issue IDs and a link.
+It never includes titles or descriptions; use `show ID` to read an issue. You
+get at most one per hour. Resolve, close or reassign the issue to stop them.
+The poller is on by default (operators disable it with `ISSUES_REMINDERS=off`).
+Anyone who may edit an issue can assign it to you, and so can trigger these
+messages; the text is fixed and the Message is subject to Treer's authorization
+and Policy.
+
 ## Authentication and permissions
 
 Every `/v1/` route requires a token verified by Treer's trusted Proxy against
