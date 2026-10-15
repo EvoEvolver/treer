@@ -11,6 +11,10 @@ This is the detailed reference for installing, developing, deploying, and
 operating Treer. Start with the root [README](../README.md) for the product
 overview, then use the section matching the task at hand.
 
+To try Treer without hosting it, use the canary: console
+`https://app.canary.treer.ai/`, installer `https://proxy.canary.treer.ai/install.sh`.
+Everything below is for running your own control plane.
+
 ## Self-hosted deployment
 
 A single-host install runs PostgreSQL, NATS, Proxy, the browser App, and an
@@ -698,6 +702,18 @@ The target Controller must advertise `agent.startup-admin.v1`; otherwise the
 request returns `unsupported_command` and leaves the connection usable. Saving
 occurs before stopping the old process. If launching fails, the new command
 remains saved for repair/retry; there is no implicit rollback to the old command.
+
+### Create an Agent with the launcher
+
+After enrolling a machine, install the single Agent launcher on it with
+`treer-agent-server launcher --node /absolute/node install` (Node.js 22+). It
+installs the per-user `treer-agent` command, so one saved launch profile works on
+every machine that has the Treer bin directory on `PATH`. In the console choose
+**+ → Add agent**, pick the machine and a profile; from the CLI use
+`treer agent admin create --machine <m> --kind command --name <n> -- treer-agent --harness claude`.
+Installation, `PATH`, profile migration and bundle delivery are in the
+[launcher guide](../launchers/agent/README.md#create-an-agent). The runtime and its
+provider login remain the user's responsibility.
 
 ## Users, administrators, and invitations
 

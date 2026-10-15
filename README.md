@@ -10,7 +10,7 @@ Treer is an open, self-hostable control plane for coding agents. Keep Codex,
 Claude, Pi, OpenCode, and plain terminals running on the machines that own your
 code, then connect their Apps and conversations in the same workspace.
 
-[Open Treer](https://app.treer.ai/) ·
+[Try the canary](https://app.canary.treer.ai/) ·
 [Product site](https://www.treer.ai/) ·
 [Documentation](docs/README.md) ·
 [Security model](docs/security.md)
@@ -70,10 +70,23 @@ publish SSH or local service ports.
 
 ## Get started
 
-1. [Open Treer](https://app.treer.ai/) and create or select a workspace.
-2. Choose **Add machine** and run the installer and enrollment command shown by
-   the App.
-3. Launch an editable command profile or open a plain terminal. Install and configure your Agent runtime yourself.
+The hosted canary is the current place to try Treer. Self-hosting is covered in
+the [operator guide](docs/operator-guide.md).
+
+1. Open the [canary console](https://app.canary.treer.ai/) and create or select a
+   workspace.
+2. Choose **Add machine** and run the installer and enrollment commands the
+   console shows. On macOS and Linux the installer is
+   `curl -fsSL 'https://proxy.canary.treer.ai/install.sh' | sh`; the console
+   also shows the Windows PowerShell form and the single-use enrollment command.
+3. Install the [Agent launcher](launchers/agent/README.md#create-an-agent) on that
+   machine with `treer-agent-server launcher --node /absolute/node install`
+   (Node.js 22+), then choose **+ → Add agent**, pick the machine, and pick a
+   profile such as Claude + UI or Codex + UI. A plain terminal needs no
+   launcher. Install and sign in to the Agent runtime yourself.
+
+The console opens on a workspace overview, keeps open agent pages in tabs, and
+is available in English and Simplified Chinese.
 
 > [!IMPORTANT]
 > Agents run with the operating-system authority of the account that starts the
