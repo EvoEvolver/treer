@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
 import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
+import { completionKey } from "../src/prompt-submission.js";
 const launcher = resolve(import.meta.dirname, "..");
 async function until<T>(read: () => Promise<T>, matches: (value: T) => boolean): Promise<T> {
   const deadline = Date.now() + 8000;
@@ -66,6 +67,9 @@ test("AIS queue persists across launcher restart, exposes correlated results and
   assert.equal(old.submission.state, "interrupted");
   const notified = await until(async () => (await readFile(calls, "utf8")).trim().split("\n").map((line) => JSON.parse(line)), (value) => value.length === 1);
   assert.equal(notified[0].agent, "ag_fixture");
-  assert.deepEqual(notified[0].args, ["message", "send", "--to", "ag_sender", "--idempotency-key", `prompt-submission/${queued.submission.id}/terminal`]);
+  const journal = JSON.parse(await readFile(join(cwd, ".treer/agents/ag_fixture/queue.json"), "utf8"));
+  const record = journal.records.find((record: { submission: { id: string } }) => record.submission.id === queued.submission.id);
+  assert.deepEqual(notified[0].args, ["message", "send", "--to", "ag_sender", "--idempotency-key", completionKey(record)]);
   assert.equal(JSON.parse(notified[0].body).status, "done");
+  assert.deepEqual(JSON.parse(notified[0].body).submission_ids, [queued.submission.id]);
 });
