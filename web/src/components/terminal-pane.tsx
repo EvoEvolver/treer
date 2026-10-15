@@ -10,6 +10,7 @@ type TerminalStatus = "not attached" | "connecting" | "live" | "reconnecting" | 
 interface TerminalPaneProps {
   workspaceId: string | null
   agentId: string | null
+  visible?: boolean
   active: boolean
   onStatusChange: (status: TerminalStatus) => void
   transformInput?: (data: string) => string
@@ -65,7 +66,9 @@ function terminalUrl(workspaceId: string, agentId: string, cols: number, rows: n
   return websocketUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/terminal?${params}`)
 }
 
-export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function TerminalPane({ workspaceId, agentId, active, onStatusChange, transformInput }, ref) {
+export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(function TerminalPane({ workspaceId, agentId, active, onStatusChange, transformInput, visible = true }, ref) {
+  const visibleRef = useRef(visible)
+  visibleRef.current = visible
   const hostRef = useRef<HTMLDivElement>(null)
   const focusRef = useRef<() => void>(() => undefined)
   const sendRef = useRef<(data: string) => void>(() => undefined)
@@ -197,6 +200,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
 
     const fitIfHostChanged = () => {
       const { width, height } = host.getBoundingClientRect()
+      if (width < 1 || height < 1) return // A retained, hidden tab must not resize the PTY.
       const widthChanged = Math.abs(width - lastHostWidth) >= 0.5
       const heightDelta = Math.abs(height - lastHostHeight)
       // On mobile (coarse pointer), the browser URL bar showing/hiding changes
@@ -214,6 +218,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
     fitRef.current = () => {
       if (disposed) return
       const { width, height } = host.getBoundingClientRect()
+      if (width < 1 || height < 1) return // A retained, hidden tab must not resize the PTY.
       lastHostWidth = width
       lastHostHeight = height
       fit.fit()
@@ -321,7 +326,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, TerminalPaneProps>(fu
             }
           }
           onStatusChange("live")
-          terminal.focus()
+          if (visibleRef.current && document.activeElement?.getAttribute("role") !== "tab") terminal.focus()
           flushPendingInput()
         } else if (message.type === "cursor") {
           if (message.stream_epoch && message.revision != null) {

@@ -179,6 +179,37 @@ The map adds no dependencies and keeps the existing single-file build and releas
 contract. The local Worker security test verifies the map under the unchanged
 nonce CSP. See [the size/review notes](tree-map-report.md).
 
+## Retained workspace tabs
+
+Overview is a pinned page; its desktop tab stays visible when the tab strip scrolls. Opening an Agent or App from the Tree or Overview
+opens or selects its stable-ID tab; a tab’s full Tree path distinguishes repeated
+names. Desktop tabs support Left/Right, Home/End, Delete to close, and
+Ctrl/Cmd+1–9 and Ctrl/Cmd+W. Shortcuts apply while focus is in the Console
+chrome; terminal, text-input and embedded-page keyboard events stay with their
+input surface. The overflow menu lists all tabs. Phones use a tab-count button and an
+accessible two-column switcher with individual close controls.
+
+Switching pages hides retained panels instead of unmounting their iframe/xterm,
+keeping drafts, scroll and terminal connections. Overview stays mounted; the
+most recently used **6 total pages on desktop / 4 on phones**, including Overview,
+stay live. Excess workload pages unmount; selecting an unloaded tab reconnects
+it and announces the reload. These limits bound retained browser instances, not
+connections an embedded application chooses to open. Closing a tab disposes its
+browser instance, never stops its machine workload. Closing the final workload
+tab returns to Overview. Switching workspace/user disposes the old scope’s live
+surfaces; registration/generation changes and explicit reload still rebuild the
+relevant surface. Hidden terminals continue receiving output but never resize
+the PTY to a zero-size container or take focus when they reconnect.
+
+`treer:tabs:v1:<user_id>:<workspace_id>` stores only up to 64 stable IDs in tab
+order. It contains no titles, URLs, tokens, draft text, terminal output or session
+state. Refresh restores the list with Overview selected and all workload pages
+cold, connecting only on explicit selection. Successful inventory reads prune
+deleted IDs; invalid/oversized cache data is ignored. Storage access is guarded;
+when unavailable, tabs operate in memory. App/Agent Interface sandbox and Proxy
+permissions are unchanged; hidden iframes retain their existing trusted authority.
+App settings’ explicit external URL controls still open a separate browser tab.
+
 ## Trusted Policy publication settings
 
 Workspace settings → Policy Provider shows the Core-confirmed `publish_authority`.
