@@ -182,7 +182,9 @@ make a release stricter.
 | `apps/` only | docs check plus each changed App's own tests and `npm run check` | not required; the App owner deploys the App after CI |
 | `web/`, `mobile/` | web typecheck, build and Playwright | required before machines or Canary use the build |
 | `launchers/` | `just agent-launcher-test` | required: the Controller embeds the launcher payload |
-| `crates/`, `scripts/`, `.github/`, `deploy/`, `canary/`, `skills/`, build files, unknown paths | `just check` | required |
+| `scripts/`, `.github/`, `justfile` that are not part of the release pipeline | `just check` | not required |
+| release pipeline: canary, deploy, promote, artifact staging/verification, machine-update scripts and `build-release-artifacts.yml`/`publish-ghcr.yml` | `just check` | required; ships alone |
+| `crates/`, `deploy/`, `canary/`, `native/`, `skills/` (embedded in the CLI), build files, unknown paths | `just check` | required; ships alone |
 
 A mixed change takes the union of its components' gates, and any core path
 makes it a core release. `.gitattributes` and `.gitignore` alone do not raise the
@@ -213,8 +215,9 @@ testing them separately would cost more than testing them together. These rules
 do not batch:
 
 - Security fixes and blocking bugs release alone and immediately.
-- Core changes (`crates/`, authentication, Policy, migrations, release tooling)
-  release alone so that a failure points at one change.
+- Core changes (`crates/`, authentication, Policy, migrations) and changes to the
+  release pipeline scripts release alone so that a failure points at one change.
+  Plain tooling changes may share a release with other tooling or docs.
 - A branch whose review is incomplete or whose tests are red waits for the next
   batch; it is never carried in with a note.
 

@@ -30,9 +30,24 @@ class ReleaseGradeTest(unittest.TestCase):
             self.assertTrue(result["policy_install_check"])
 
     def test_core_and_unknown_paths_run_everything_and_never_batch(self):
-        for paths in (["crates/treer-cli/src/main.rs"], ["scripts/canary-release.py"], [".github/workflows/ci.yml"], ["brand-new-dir/file"], ["skills/treer/SKILL.md"]):
+        for paths in (["crates/treer-cli/src/main.rs"], ["brand-new-dir/file"], ["skills/treer/SKILL.md"], ["deploy/updater/x.py"]):
             result = grade.plan(paths)
             self.assertEqual(result["local_gate"], ["just check"], paths)
+            self.assertTrue(result["native_build_and_canary"])
+            self.assertFalse(result["batchable"])
+
+    def test_plain_tooling_runs_just_check_and_ci_but_not_native_or_canary(self):
+        for paths in (["scripts/app-deploy"], ["scripts/release-grade.py"], [".github/workflows/ci.yml"], ["justfile"]):
+            result = grade.plan(paths)
+            self.assertEqual(result["components"], ["tooling"], paths)
+            self.assertEqual(result["local_gate"], ["just check"])
+            self.assertFalse(result["native_build_and_canary"])
+
+    def test_release_pipeline_scripts_still_need_native_and_canary_and_ship_alone(self):
+        for paths in (["scripts/canary-release.py"], ["scripts/deploy-canary.sh"], ["scripts/verify-served-frontend.py"],
+                      [".github/workflows/build-release-artifacts.yml"], ["scripts/update-machine.py"]):
+            result = grade.plan(paths)
+            self.assertEqual(result["components"], ["pipeline"], paths)
             self.assertTrue(result["native_build_and_canary"])
             self.assertFalse(result["batchable"])
 

@@ -19,13 +19,24 @@ RULES = [
     ("apps", ("apps/",)),
     ("web", ("web/", "mobile/")),
     ("launcher", ("launchers/",)),
+    ("pipeline", ("scripts/canary-", "scripts/release-canary.sh", "scripts/deploy-canary.sh",
+                  "scripts/test-canary.sh", "scripts/promote-production.sh",
+                  "scripts/release-checkpoint.py", "scripts/release-r2.mjs",
+                  "scripts/verify-", "scripts/stage-", "scripts/collect-build-artifacts.sh",
+                  "scripts/ensure-machine-artifacts.sh", "scripts/install.ps1",
+                  "scripts/update-machine", "scripts/prepare-launcher-release.mjs",
+                  "scripts/railway-error-summary.sh", "scripts/retag-ghcr.sh",
+                  ".github/workflows/build-release-artifacts.yml", ".github/workflows/publish-ghcr.yml")),
+    ("tooling", ("scripts/", ".github/", "justfile")),
 ]
-ORDER = ["docs", "apps", "web", "launcher", "core"]
+ORDER = ["docs", "apps", "tooling", "web", "launcher", "pipeline", "core"]
 
 LOCAL_GATE = {
     "docs": ["node scripts/check-docs.mjs"],
     "web": ["cd web && pnpm typecheck", "cd web && pnpm build", "cd web && pnpm test:e2e"],
     "launcher": ["just agent-launcher-test"],
+    "tooling": ["just check"],
+    "pipeline": ["just check"],
     "core": ["just check"],
 }
 
@@ -70,19 +81,19 @@ def plan(paths, urgent=False):
         else:
             local.extend(LOCAL_GATE[component])
     local = list(dict.fromkeys(local))
-    if "core" in components:
+    if any(c in components for c in ("core", "tooling", "pipeline")):
         # `just check` already contains every component gate.
         local = ["just check"]
     # Native artifacts and Canary prove the shipped binaries: the Controller
     # embeds the launcher, and the hosted Proxy bundles the Worker frontend.
-    ships = any(c in components for c in ("core", "launcher", "web"))
-    # Core changes are never batched; urgent work is never batched.
-    batch = not urgent and "core" not in components
+    ships = any(c in components for c in ("core", "launcher", "web", "pipeline"))
+    # Core and pipeline changes are never batched; urgent work is never batched.
+    batch = not urgent and not {"core", "pipeline"} & set(components)
     return {
         "components": components,
         "apps": apps,
         "neutral_files": neutral,
-        "unknown_paths_treated_as_core": [p for p in by_component.get("core", []) if not p.startswith(("crates/", "scripts/", ".github/", "deploy/", "canary/", "native/", "skills/"))],
+        "unknown_paths_treated_as_core": [p for p in by_component.get("core", []) if not p.startswith(("crates/", "deploy/", "canary/", "native/"))],
         "local_gate": local,
         "ci": "exact-SHA CI (all jobs; CI is not path-filtered)",
         "native_build_and_canary": ships,
