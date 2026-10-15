@@ -13,7 +13,7 @@ import { testRuntimeControlsUi } from "./browser-controls-ui.mjs";
 const app = resolve(import.meta.dirname, "..");
 const pageArgIndex = process.argv.indexOf("--page");
 const page_ = pageArgIndex > 0 ? process.argv[pageArgIndex + 1] : "index.html";
-const screenshots = process.env.UI_SCREENSHOTS || await mkdtemp(join(tmpdir(), "ui-shots-"));
+const screenshots = process.env.UI_SCREENSHOTS || process.env.CODEX_UI_SCREENSHOTS || await mkdtemp(join(tmpdir(), "ui-shots-"));
 await mkdir(screenshots, { recursive: true });
 const servers = [];
 async function startServer(name, extra, harness = "codex") {

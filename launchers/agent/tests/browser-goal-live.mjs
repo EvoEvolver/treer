@@ -26,18 +26,19 @@ try {
         try { base = `http://127.0.0.1:${Number(await readFile(portFile, "utf8"))}`; if ((await fetch(base + "/api/health")).ok) break; } catch { /* startup */ }
         await new Promise((done) => setTimeout(done, 100));
       }
-      await page.goto(base + "/?theme=light");
+      await page.goto(base + "/?theme=light&look=a");
       await page.getByRole("button", { name: "Set goal", exact: true }).click();
-      await page.locator("#goal-objective").fill("Reply exactly GOAL_DONE and finish this goal. Do not use any tools except the goal-completion tool if available.");
+      await page.getByLabel("Objective", { exact: true }).fill("Reply exactly GOAL_DONE and finish this goal. Do not use any tools except the goal-completion tool if available.");
       await page.getByRole("button", { name: "Save goal", exact: true }).click();
-      await expect(page.locator("#goal-editor")).not.toBeVisible();
-      await expect(page.locator(".goal-objective")).toContainText("GOAL_DONE");
+      await expect(page.locator("dialog.goal-dialog")).not.toBeVisible();
+      const goalSegment = page.getByRole("toolbar", { name: "Run status" }).getByRole("button", { name: /^Goal/ });
+      await expect(goalSegment).toContainText("GOAL_DONE");
       await page.screenshot({ path: join(shots, `${harness}-set-desktop.png`) });
       if (harness === "codex") {
-        await page.locator("#prompt").fill("Complete the current goal now.");
+        await page.getByRole("textbox", { name: /Message/ }).fill("Complete the current goal now.");
         await page.getByRole("button", { name: "Send message", exact: true }).click();
       }
-      await expect(page.locator(".goal-status")).toContainText("Complete", { timeout: 60000 });
+      await expect(page.locator(".goal-done")).toContainText("Goal complete", { timeout: 60000 }); // the conversation announces the finished goal
       // Codex can announce goal completion before final turn usage is accounted.
       await expect.poll(async () => (await fetch(base + "/api/state").then((response) => response.json())).thread.status, { timeout: 60000 }).toBe("idle");
       let state = await fetch(base + "/api/state").then((response) => response.json());
@@ -47,6 +48,7 @@ try {
       await page.screenshot({ path: join(shots, `${harness}-complete-desktop.png`) });
       await page.setViewportSize({ width: 390, height: 844 });
       await page.screenshot({ path: join(shots, `${harness}-complete-mobile.png`) });
+      await goalSegment.click();
       await page.getByRole("button", { name: "Clear goal", exact: true }).click();
       await page.getByRole("button", { name: "Confirm clear goal", exact: true }).click();
       await expect(page.getByRole("button", { name: "Set goal", exact: true })).toBeVisible({ timeout: 60000 });

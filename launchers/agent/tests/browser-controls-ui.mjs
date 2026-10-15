@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { expect } from "@playwright/test";
 import { WebSocketServer } from "ws";
 
-// The same pure HTTP/WS contract fixture as browser-controls.mjs, driving the React UI. Never starts a harness or reads credentials.
+// The same pure HTTP/WS contract fixture as the former browser-controls.mjs, driving the React UI. Never starts a harness or reads credentials.
 export async function testRuntimeControlsUi(browser, screenshots, pageName = "index.html") {
   let state = {
     type: "state", ready: true, runtime: { state: "idle" }, modelOptions: [],
