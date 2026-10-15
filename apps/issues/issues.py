@@ -11,10 +11,13 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
+from reminders import Reminders, enabled as reminders_enabled
 from store import Store, fields, fail
 
 ROOT = Path(__file__).resolve().parent
 COOKIE = 'treer_issues_session'
+# Committed React build (ui/ sources, `npm run build:ui`): a fixed allow-list, never a directory server.
+ASSETS = ('/app.js', '/app.css', '/boot.js')
 
 
 def representation(accept, ua):
@@ -148,11 +151,11 @@ class Handler(BaseHTTPRequestHandler):
             app = self.server.application
             if path == '/' and method in ('GET', 'HEAD'):
                 media = representation(self.headers.get('Accept', ''), self.headers.get('User-Agent', ''))
-                file = ROOT / ('web/index.html' if media == 'text/html' else 'AGENT.md')
+                file = ROOT / ('dist/index.html' if media == 'text/html' else 'AGENT.md')
                 self.reply(200, file.read_bytes(), media+'; charset=utf-8', {'Vary': 'Accept, User-Agent'})
                 return
-            if path in ('/app.js', '/app.css', '/issues') and method in ('GET', 'HEAD'):
-                file = ROOT / ('issues' if path == '/issues' else 'web/'+path[1:])
+            if (path in ASSETS or path == '/issues') and method in ('GET', 'HEAD'):
+                file = ROOT / ('issues' if path == '/issues' else 'dist/'+path[1:])
                 self.reply(200, file.read_bytes(), 'text/plain; charset=utf-8' if path == '/issues' else mimetypes.guess_type(str(file))[0])
                 return
             if path == '/health' and method in ('GET', 'HEAD'):
@@ -238,6 +241,14 @@ def main():
     application = Application(Store(os.environ.get('ISSUES_DB', '.treer/apps/issues/issues.sqlite3')))
     server = Server((host, int(port)), application)
     print(f'Issues listening on {host}:{server.server_port}', flush=True)
+    if reminders_enabled():
+        def link():
+            try:
+                return application.identity_provider().public_url
+            except Error:
+                return os.environ.get('ISSUES_PUBLIC_URL') or 'http://issues.treer/'
+        Reminders(application.store, link, os.environ.get('TREER_BIN', 'treer')).start()
+        print('Issues hourly reminders enabled (ISSUES_REMINDERS=off disables)', flush=True)
     server.serve_forever()
 
 

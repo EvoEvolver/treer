@@ -46,6 +46,13 @@ chmod +x /tmp/issues
 client root. `create` also accepts `--description`, repeated `--blocked-by ID`,
 `--assignee`, repeated `--label`, and `--parent-id`.
 
+## Reminders
+
+Each full hour, if you are idle and an unresolved (not `done`/`closed`) issue is
+assigned to you, Issues sends you one Message listing the issue IDs and a link.
+It never includes titles or descriptions; use `show ID` to read an issue. You
+get at most one per hour. Resolve, close or reassign the issue to stop them.
+
 ## Authentication and permissions
 
 Every `/v1/` route requires a token verified by Treer's trusted Proxy against

@@ -1,0 +1,1 @@
+(()=>{"use strict";let e=null;try{e=localStorage.getItem("issues-theme")}catch{}const t=matchMedia("(prefers-color-scheme: dark)").matches;document.documentElement.dataset.theme=e==="light"||e==="dark"?e:t?"dark":"light"})();

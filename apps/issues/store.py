@@ -51,6 +51,8 @@ class Store:
                     issue_id INTEGER NOT NULL REFERENCES issues(id), data TEXT NOT NULL);
                 CREATE INDEX IF NOT EXISTS activity_issue ON activity(issue_id,id);
                 CREATE TABLE IF NOT EXISTS oauth(state TEXT PRIMARY KEY, verifier TEXT NOT NULL, expires REAL NOT NULL, browser TEXT);
+                CREATE TABLE IF NOT EXISTS reminders(slot INTEGER NOT NULL, assignee TEXT NOT NULL, issue_ids TEXT NOT NULL,
+                    sent_at REAL NOT NULL, PRIMARY KEY(slot, assignee));
                 CREATE TABLE IF NOT EXISTS sessions(secret TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
             ''')
         with self.connect() as db:
@@ -266,6 +268,28 @@ class Store:
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
             recipients = sorted({issue['creator'], old_assignee, issue['assignee']} - {None, actor['id']})
         return issue_id, event_id, event, recipients
+
+    def unresolved_by_assignee(self, prefix='ag_'):
+        """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix."""
+        with self.connect() as db:
+            items = self.all(db)
+        result = {}
+        for issue in sorted(items.values(), key=lambda i: i['id']):
+            assignee = issue['assignee']
+            if assignee and assignee.startswith(prefix) and issue['status'] not in ('done', 'closed'):
+                result.setdefault(assignee, []).append(issue['id'])
+        return result
+
+    def reminded(self, slot, assignee):
+        with self.connect() as db:
+            return db.execute('SELECT 1 FROM reminders WHERE slot=? AND assignee=?', (slot, assignee)).fetchone() is not None
+
+    def record_reminder(self, slot, assignee, issue_ids):
+        with self.connect() as db:
+            db.execute('INSERT OR IGNORE INTO reminders(slot,assignee,issue_ids,sent_at) VALUES(?,?,?,?)',
+                       (slot, assignee, json.dumps(issue_ids), self.clock()))
+            # Bounded history: only recent slots matter for de-duplication.
+            db.execute('DELETE FROM reminders WHERE slot < ?', (slot - 24 * 14,))
 
     def notification(self, event_id, result):
         with self.connect() as db:

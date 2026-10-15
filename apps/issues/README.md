@@ -8,8 +8,10 @@ or Agent prompting. No Treer core code is changed.
 
 ## Design
 
-Python 3.10+ standard library, SQLite and native HTML/CSS/JavaScript keep the
-runtime and build footprint small. There is no frontend build. Treer owns the
+The backend is Python 3.10+ standard library and SQLite; it does not need Node
+at runtime. The browser UI is React (TypeScript, `ui/src`) built with a pinned
+esbuild into four committed files in `dist/` that the App serves as-is, so
+deploying is still `python3 apps/issues/issues.py` from a checkout. Treer owns the
 identity directory, service tokens and browser OAuth; there are no local users.
 All state, including OAuth session mappings, lives in one SQLite database.
 Writes use `BEGIN IMMEDIATE`: permissions and claim ownership are checked inside
@@ -19,11 +21,46 @@ cycles are validated before commit. Progress counts all descendants, with
 and status; expiry immediately makes it available without resetting either.
 
 The HTTP root negotiates an [Agent manual](AGENT.md) or the human UI. APIs use
-`/v1/`, bounded pages and JSON errors. Browser assets and API calls preserve a
-Treer tunnel prefix. The UI includes filters, hierarchy tree, detail editor,
-identity selector, comments, activity, claim controls, mobile layout and both
-themes. Descriptions/comments are **text**, including their Markdown source;
-no user content is inserted through HTML or evaluated.
+`/v1/`, bounded pages and JSON errors. Browser assets (`./app.js`, `./app.css`,
+`./boot.js`) and API calls are document-relative and preserve a Treer tunnel
+prefix. Descriptions/comments are **text**, including their Markdown source;
+no user content is inserted through HTML or evaluated, and the CSP allows only
+same-origin scripts and styles.
+
+### Interface
+
+A quiet, dense, keyboard-first layout in the launcher's green palette, light and
+dark (it follows the system theme until the toggle is used). Issues are grouped
+by status (done/closed collapsed by default) or shown as a hierarchy tree, with
+status, assignee, label and text filters; the detail pane edits status,
+assignee and priority in place. On phones the list is one column and the detail
+is a full-screen sheet with a Back button.
+
+**Close** is one click in every list row, child row and the detail header
+(reopen for closed issues); closing from a row or with `X` offers an Undo toast.
+The buttons mirror the backend rule: they are disabled, with the reason shown,
+unless the viewer is the creator, assignee, live lease holder or a human
+owner/admin (a live lease held by someone else blocks everyone else). The server
+still enforces permissions; the UI only explains them.
+
+Shortcuts: `J`/`K` move, `Enter`/`O` open, `X` close, `E` edit, `C` new issue,
+`/` search, `Esc` back, `?` help.
+
+### Building the UI
+
+Sources live in `ui/`; `dist/` is generated and committed, like the launcher UI,
+and is compared byte for byte with a fresh build. Versions are pinned exactly in
+`package.json`/`package-lock.json`. After changing anything under `ui/`:
+
+```sh
+cd apps/issues
+npm ci --ignore-scripts
+npm run build:ui     # rewrites dist/
+npm run check        # tsc, rebuild-and-compare, size budget, no absolute paths or HTML sinks
+```
+
+`.gitattributes` forces LF for `ui/` and `dist/`. Markdown rendering is
+deliberately absent; adding marked/DOMPurify would need a security review.
 
 ## Deploy as a Managed App
 
@@ -74,6 +111,7 @@ request headers or bodies.
 | `ISSUES_WORKSPACE_ID` | injected workspace or own record | Workspace boundary; required for external supervision |
 | `TREER_BIN` | `treer` | CLI used only for own Managed App identity discovery |
 | `ISSUES_URL` | `http://issues.treer/` | Client-side root override for the `issues` CLI |
+| `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the hourly reminder poller |
 
 Protect the database directory: sessions contain short-lived human access
 tokens. Startup uses restrictive umask and database mode `0600`. OAuth uses
@@ -110,6 +148,28 @@ summary; titles, descriptions and comment bodies are excluded. Each event has
 a stable Message idempotency key. Core disabled, denied or unavailable results
 are recorded in the activity and API response; issue writes still succeed.
 The browser displays failed/disabled/pending delivery in the timeline.
+
+## Hourly reminders
+
+On every full hour (epoch hour) the App collects issues that are not `done` or
+`closed` and whose assignee is an Agent (stable ID `ag_…`; humans are never
+messaged). For each such Agent it runs `treer agent show ID` and, only when the
+Agent's `status` is `idle` and it is not busy, sends **one** Message listing up
+to ten issue IDs (`+N more` beyond that) plus the App link with
+`treer message send` under the App's own runtime identity. Bodies never contain
+titles, descriptions or comments. No token is read, logged or put on a command
+line; the CLI resolves identity from the inherited environment.
+
+Anti-spam: at most one Message per Agent per hour. A `(hour, Agent)` row in the
+SQLite `reminders` table survives restarts, and the Message idempotency key
+`issues-reminder-AGENT-HOUR` makes a crash between send and record harmless. A
+busy, unknown or unreachable Agent is skipped until the next hour; a failed send
+is not recorded, so a restart within five minutes after the hour retries it. A
+restart later in the hour does not catch up. Resolving, closing or reassigning
+an issue stops reminders at the next hour. Set `ISSUES_REMINDERS=off` and restart
+only this App to disable the poller. The App's Policy must allow `agent show`
+and Messages to the assignee Agents; denials are skipped and logged by exit
+status only.
 
 ## Agent client
 
@@ -150,6 +210,7 @@ yet versioned.
 
 ```sh
 python3 -m unittest discover -s apps/issues/tests -p 'test_*.py' -v
+(cd apps/issues && npm ci --ignore-scripts && npm run check)
 cd apps/issues/tests
 npm install --ignore-scripts
 npx playwright install chromium
@@ -158,7 +219,7 @@ npm test
 node scripts/check-docs.mjs
 ```
 
-Playwright is a test-only dependency, not an App build chain. Browser tests can
+Playwright is a test-only dependency, separate from the UI build in `apps/issues`. Browser tests can
 reuse an installed module through `ISSUES_PLAYWRIGHT_MODULE=/absolute/module`.
 Screenshots go to `/tmp/treer-issues-screenshots` (override
 `ISSUES_SCREENSHOT_DIR`). Tests use the real Issues server and a local Treer
@@ -188,7 +249,9 @@ Each database test uses a random schema; do not select a shared database.
 
 This App targets small trusted teams. Graph operations load workspace issue
 metadata into memory; no full-text search, pagination snapshot, attachments,
-email, kanban, deletion, per-issue privacy or background scheduler is provided.
+email, kanban, deletion or per-issue privacy is provided. The only background
+work is the hourly reminder pass above, which has no retry queue beyond the
+five-minute catch-up window.
 The tree represents the currently loaded/filter-matching issues; load more to
 include additional branches. Activity and child collections page separately.
 Concurrent UI edits send an optimistic version; API callers should do likewise.

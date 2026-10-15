@@ -72,7 +72,6 @@ for (const width of [1280, 390]) test(`OAuth fallback with a contract double, is
     await page.getByRole('heading',{name:title,exact:true}).waitFor();
     for(const [id,path] of [['ag_b','/engineering/review/Reviewer'],['ag_c','/design/Reviewer']]) {
       await assign(page,id);
-      await page.getByRole('button',{name:'Save status / assignee',exact:true}).click();
       await page.waitForFunction(path=>document.querySelector('#list .issue-row')?.getAttribute('aria-label').includes(path) && document.querySelector('#detail .selected-name .person-path')?.textContent===path && !document.querySelector('#detail .assignee-trigger')?.disabled,path);
       const saved=await page.evaluate(async()=> (await (await fetch(new URL('v1/issues/1',document.baseURI))).json()).issue.assignee);
       assert.equal(saved,id,'Same-name selections persist the distinct Agent ID');
@@ -84,7 +83,6 @@ for (const width of [1280, 390]) test(`OAuth fallback with a contract double, is
     await page.getByRole('button',{name:'Create issue',exact:true}).click();
     await page.getByRole('heading',{name:'Reproduce build failure',exact:true}).waitFor();
     await page.locator('#detail').getByLabel('Status',{exact:true}).selectOption('done');
-    await page.getByRole('button',{name:'Save status / assignee',exact:true}).click();
     await page.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('done ·'));
     await page.locator('#detail').getByRole('link',{name:'#1',exact:true}).click();
     await page.getByRole('heading',{name:/Children · 1\/1/}).waitFor();
@@ -156,13 +154,11 @@ for (const mode of ['embedded', 'ingress']) for (const width of [1280, 390]) {
       await surface.getByRole('button',{name:'Create issue',exact:true}).click();
       await surface.getByRole('heading',{name:'Verify current user identity',exact:true}).waitFor();
       await surface.locator('#detail').getByLabel('Status',{exact:true}).selectOption('done');
-      await surface.getByRole('button',{name:'Save status / assignee',exact:true}).click();
       await surface.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('done ·'));
       await surface.locator('#detail').getByRole('link',{name:'#1',exact:true}).click();
       await surface.getByRole('heading',{name:/Children · 1\/1/}).waitFor();
       await assign(surface,'usr_a');
       await surface.locator('#detail').getByLabel('Status',{exact:true}).selectOption('in_progress');
-      await surface.getByRole('button',{name:'Save status / assignee',exact:true}).click();
       await surface.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('in progress ·'));
       await surface.getByRole('button',{name:'Claim for 15 min',exact:true}).click();
       await surface.getByRole('button',{name:'Renew lease',exact:true}).waitFor();
@@ -197,3 +193,104 @@ for (const mode of ['embedded', 'ingress']) for (const width of [1280, 390]) {
     } finally {await browser.close();fixture.kill();lines.close();await once(fixture,'exit');}
   });
 }
+
+
+async function seed(config) {
+  const agent = (token, body) => fetch(config.url + 'v1/issues', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Treer-Identity-Token': token}, body: JSON.stringify(body)}).then(r => r.json());
+  return {agent};
+}
+
+for (const width of [1280, 390]) test(`close buttons, keyboard, permissions and screenshots at ${width}px`, async () => {
+  const fixture = spawn(process.env.PYTHON || 'python3', [fileURLToPath(new URL('./fixture.py', import.meta.url))], {env:hermeticEnv(), stdio:['ignore','pipe','pipe']});
+  let stderr = ''; fixture.stderr.on('data',chunk => stderr += chunk);
+  const lines = createInterface({ input: fixture.stdout });
+  const [line] = await once(lines, 'line'); const config = JSON.parse(line);
+  const errors = [];
+  const browser = await chromium.launch({env:hermeticEnv()});
+  try {
+    const page = await browser.newPage({viewport:{width,height:900}});
+    page.setDefaultTimeout(8000);
+    page.on('pageerror',e=>errors.push(e.message));
+    await page.goto(config.url);
+    await page.getByRole('link',{name:'Sign in with Treer'}).click();
+    await page.getByRole('button',{name:'New issue',exact:true}).waitFor();
+    const create = body => page.evaluate(async body => (await (await fetch(new URL('v1/issues',document.baseURI),{method:'POST',headers:{'Content-Type':'application/json','X-Issues-Request':'1'},body:JSON.stringify(body)})).json()).issue.id, body);
+    const status = id => fetch(`${config.url}v1/issues/${id}`,{headers:{'X-Treer-Identity-Token':'agent-a'}}).then(r=>r.json()).then(r=>r.issue.status);
+    await create({title:'Linear-style Issues UI',priority:'high',labels:['ui'],assignee:'ag_a',status:'in_progress'});
+    await create({title:'Hourly assignee reminders',priority:'urgent',labels:['backend'],assignee:'ag_b'});
+    await create({title:'One-click Close button',labels:['ui'],parent_id:1,assignee:'usr_a'});
+    await create({title:'Dark theme polish',priority:'low',parent_id:1,status:'done'});
+    await create({title:'Mobile layout',parent_id:1,status:'blocked'});
+    await create({title:'Write release notes',priority:'low',labels:['docs']});
+    await create({title:'Old spike',status:'closed'});
+    const owned = (await (await seed(config)).agent('agent-b',{title:'Agent-owned issue',assignee:'ag_b'})).issue.id;
+    await page.reload();
+    await page.locator('#list .issue-row').first().waitFor();
+    // Done and closed start collapsed, so the active work is dense and uncluttered.
+    assert.equal(await page.locator('#list .issue-row').count(),6);
+    await page.locator('.status-group',{hasText:/closed\s*1/}).waitFor();
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'List fits the viewport');
+    await mkdir(screenshotDir,{recursive:true});
+    await page.screenshot({path:`${screenshotDir}/issues-list-${width}-light.png`,fullPage:true});
+    await page.getByRole('button',{name:'Theme',exact:true}).click();
+    await page.screenshot({path:`${screenshotDir}/issues-list-${width}-dark.png`,fullPage:true});
+    await page.getByRole('button',{name:'Theme',exact:true}).click();
+
+    // One-click Close from a list row, with undo.
+    await page.getByRole('button',{name:'Close ISS-6',exact:true}).click();
+    await page.getByRole('status').getByText('Closed ISS-6').waitFor();
+    assert.equal(await status(6),'closed');
+    await page.getByRole('status').getByRole('button',{name:'Undo'}).click();
+    await page.waitForFunction(()=>document.querySelector('#list [data-issue-id="6"]'));
+    assert.equal(await status(6),'open');
+
+    // Permissions mirror the backend: Alice may not edit an Agent-owned issue, so Close is disabled.
+    assert.equal(await page.getByRole('button',{name:`Close ISS-${owned}`,exact:true}).isDisabled(),true);
+
+    // Keyboard: j/k move the focus ring, x closes the focused issue, Enter opens, ? shows help.
+    await page.locator('body').press('j');
+    assert.equal(await page.locator('.issue-line.kb').count(),1);
+    const first = await page.locator('.issue-line.kb').getAttribute('data-issue-id');
+    await page.locator('body').press('j');
+    assert.notEqual(await page.locator('.issue-line.kb').getAttribute('data-issue-id'),first);
+    await page.locator('body').press('k');
+    assert.equal(await page.locator('.issue-line.kb').getAttribute('data-issue-id'),first);
+    await page.locator('body').press('Enter');
+    await page.waitForFunction(id=>document.querySelector('#detail h2')&&document.querySelector('.issue-line.selected')?.dataset.issueId===id,first);
+    assert.equal(await page.locator('.issue-line.selected').getAttribute('data-issue-id'),first);
+    // The detail view explains why a read-only issue cannot be closed instead of silently disabling the button.
+    assert.equal(first,String(owned));
+    assert.equal(await page.getByRole('button',{name:'Close issue',exact:true}).isDisabled(),true);
+    await page.locator('#detail').getByText(/You can comment, but only the creator/).waitFor();
+    await page.locator('body').press('?');
+    await page.getByRole('dialog',{name:'Keyboard shortcuts'}).waitFor();
+    await page.locator('body').press('Escape');
+    await page.getByRole('dialog',{name:'Keyboard shortcuts'}).waitFor({state:'hidden'});
+
+    // Close and reopen from the detail view of an issue Alice may edit.
+    await page.locator('body').press('Escape');
+    await page.locator('[data-issue-id="6"] .issue-row').click();
+    await page.getByRole('heading',{name:'Write release notes',exact:true}).waitFor();
+    await page.getByRole('button',{name:'Close issue',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('closed ·'));
+    assert.equal(await status(6),'closed');
+    await page.getByRole('button',{name:'Reopen issue',exact:true}).click();
+    await page.waitForFunction(()=>document.querySelector('#detail > p.meta')?.textContent.startsWith('open ·'));
+    assert.equal(await status(6),'open');
+    await page.screenshot({path:`${screenshotDir}/issues-detail-${width}-light.png`,fullPage:true});
+    await page.getByRole('button',{name:'Theme',exact:true}).click();
+    await page.screenshot({path:`${screenshotDir}/issues-detail-${width}-dark.png`,fullPage:true});
+
+    // Keyboard close on the focused row; Escape returns to the list on narrow screens.
+    await page.locator('body').press('Escape');
+    await page.locator('body').press('j');
+    const target = await page.locator('.issue-line.kb').getAttribute('data-issue-id');
+    await page.locator('body').press('x');
+    await page.getByRole('status').getByText(`Closed ISS-${target}`).waitFor();
+    assert.equal(await status(Number(target)),'closed');
+    assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth),'No horizontal overflow');
+    assert.deepEqual(errors,[]);assert.equal(stderr,'');
+  } finally {
+    await browser.close();fixture.kill();lines.close();await once(fixture,'exit');
+  }
+});
