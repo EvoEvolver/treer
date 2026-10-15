@@ -7,6 +7,7 @@ App's identity and opens a new quiet window. Digest keys are stable per (recipie
 digest is retried at most three times, and Messages carry only issue IDs, short fixed summaries and a link -
 never titles, descriptions or comment bodies. No credential is read, logged or placed on a command line.
 """
+import json
 import os
 import re
 import sys
@@ -21,6 +22,7 @@ MAX_ATTEMPTS = 3
 MAX_MENTIONS = 10
 DEFAULT_HOURLY = 20
 MENTION = re.compile(r'(?<![\w@/.\-])@(/[\w./\-]+|\w[\w.\-]*)')
+SAFE_PATH = re.compile(r'[A-Za-z0-9 ._/\-]{1,120}')
 
 
 def enabled(environ=None):
@@ -50,18 +52,35 @@ def hourly_limit(environ=None):
     return value if 1 <= value <= 1000 else DEFAULT_HOURLY
 
 
-def resolve_mentions(text, directory):
-    """Stable IDs of Agents @-mentioned in text. `@name` must match exactly one Agent name; ambiguous names are
-    ignored (use `@/tree/path` or `@ag_id`). Matching is case-insensitive."""
+def path_tokens(text):
+    """Absolute tree paths (`@/team/agent`) written in text, as typed, de-duplicated case-insensitively, at most MAX_MENTIONS."""
+    if not text or '@/' not in text:
+        return []
+    found, seen = [], set()
+    for token in MENTION.findall(text):
+        token = token.rstrip('.-')
+        if token.startswith('/') and token.lower() not in seen and SAFE_PATH.fullmatch(token):
+            seen.add(token.lower())
+            found.append(token)
+    return found[:MAX_MENTIONS]
+
+
+def resolve_mentions(text, directory, paths=None):
+    """Stable IDs of Agents @-mentioned in text. `@/tree/path` is looked up in `paths` ({lower-case path: ID}, resolved
+    beforehand by Core with the author's own token) or the directory's own `path`; `@ag_id` is exact; `@name` must
+    match exactly one Agent name (case-insensitive), ambiguous names are ignored. Only Agents visible in `directory`
+    can be mentioned, so a path can never reach someone the author's Policy hides."""
     if not text or '@' not in text:
         return set()
     agents = [p for p in directory if p.get('kind') == 'agent']
+    by_id = {p['id']: p for p in agents}
     found = set()
     for token in MENTION.findall(text):
         token = token.rstrip('.-')
         key = token.lower()
         if token.startswith('/'):
-            hits = [p for p in agents if str(p.get('path', '')).lower() == key]
+            hit = (paths or {}).get(key)
+            hits = [by_id[hit]] if hit in by_id else [p for p in agents if str(p.get('path', '')).lower() == key]
         else:
             hits = [p for p in agents if p['id'].lower() == key] or [p for p in agents if str(p.get('name', '')).lower() == key]
         if len(hits) == 1:
@@ -71,17 +90,69 @@ def resolve_mentions(text, directory):
     return found
 
 
-def unresolved_mentions(text, directory):
+def unresolved_mentions(text, directory, paths=None):
     """@tokens that notified nobody (unknown or ambiguous), so an author does not assume they were reached."""
     if not text or '@' not in text:
         return []
-    agents = [p for p in directory if p.get('kind') == 'agent']
     missed = []
     for token in MENTION.findall(text):
         token = token.rstrip('.-')
-        if len(resolve_mentions('@' + token, agents)) == 0 and token not in missed:
+        if not resolve_mentions('@' + token, directory, paths) and token not in missed:
             missed.append(token)
-    return [t for t in missed if SAFE_NAME.fullmatch(t)][:5]
+    return [t for t in missed if SAFE_PATH.fullmatch(t)][:5]
+
+
+def candidates(token, directory, tree_paths, verify=None):
+    """Ways to write an ambiguous `@name` unambiguously: the tree path when the AUTHOR may see it, else the stable ID.
+    A path in the directory itself came with the author's own token. A path from `tree_paths` (a callable returning
+    {agent ID: path}, fetched under the App identity) is shown only if `verify(path, agent_id)` - Core resolving it
+    for the author - confirms it, so the App identity never discloses a tree path the author's Policy hides."""
+    if token.startswith('/') or '/' in token:
+        return []
+    key = token.lower()
+    named = [p for p in directory if p.get('kind') == 'agent' and str(p.get('name', '')).lower() == key]
+    if len(named) < 2:
+        return []
+    out, known = [], None
+    for person in named[:5]:
+        path = person.get('path')
+        if not path:
+            known = tree_paths() if known is None else known
+            path = known.get(person['id'], '')
+            if path and not (verify and verify(path, person['id'])):
+                path = ''
+        out.append(path if path and SAFE_PATH.fullmatch(path) else person['id'])
+    return out
+
+
+class TreePaths:
+    """Best-effort map {agent ID: tree path} from `treer agent ls -R /` under the App identity, cached for a minute.
+    Only used to *suggest* paths for ambiguous names, and each suggestion is re-verified with the author's token;
+    never for delivery."""
+    TTL = 60
+
+    def __init__(self, treer_bin='treer', clock=time.time, runner=None):
+        self.treer_bin, self.clock = treer_bin, clock
+        self.runner = runner or (lambda args: run_cli(self.treer_bin, args))
+        self.cache, self.at = {}, -1e18
+        self.lock = threading.Lock()
+
+    def get(self):
+        with self.lock:
+            if self.clock() - self.at < self.TTL:
+                return self.cache
+            self.at = self.clock()
+            status, output = self.runner(['agent', 'ls', '-R', '/'])
+            paths = {}
+            if status == 0:
+                try:
+                    for agent in json.loads(output).get('agents', []):
+                        if isinstance(agent, dict) and str(agent.get('agent_id', '')).startswith('ag_') and isinstance(agent.get('path'), str):
+                            paths[agent['agent_id']] = agent['path']
+                except (ValueError, AttributeError):
+                    paths = {}
+            self.cache = paths
+            return paths
 
 
 def recipients_for(action, issue, old_assignee, changed, mentions, actor_id):

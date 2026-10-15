@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { HarnessRuntime } from "./runtime.js";
 import type { QueuedPrompt } from "./model.js";
 import { QueueStore } from "./queue-store.js";
-import { fingerprint, preview, QueueError, submissionOptions, messageCheckpoints, type Outcome, type PromptNotify, type PromptSender, type SubmissionRecord } from "./prompt-submission.js";
+import { completionKey, fingerprint, preview, QueueError, submissionOptions, messageCheckpoints, MAX_COMPLETION_SUBMISSIONS, type Outcome, type PromptNotify, type PromptSender, type SubmissionRecord } from "./prompt-submission.js";
 import { mergeMessagePrompts } from "./message-prompt.js";
 
 export type PromptMode = "steer" | "queue";
@@ -23,6 +23,8 @@ export class PromptQueue {
   private notifying = false;
   private retry?: ReturnType<typeof setTimeout>;
   private closed = false;
+  private exited = false;
+  private turnScope = randomUUID();
   private limit: number;
   constructor(private runtime: HarnessRuntime, private changed: () => void, private options: QueueOptions = {}) {
     this.limit = options.limit ?? 256;
@@ -32,6 +34,7 @@ export class PromptQueue {
     this.persist();
     runtime.on("state", () => { this.observe(); void this.drain(); });
     runtime.on("exit", () => {
+      this.exited = true;
       for (const record of this.records) if (record.submission.state === "running") this.finish(record, "interrupted", "Harness process exited");
       this.persist(); this.changed(); void this.flushNotifications();
     });
@@ -104,10 +107,12 @@ export class PromptQueue {
     const downgraded = mode === "steer" && !this.runtime.harness.capabilities.steer;
     const delivery = downgraded ? "queue" : mode;
     const steering = busy && delivery === "steer" && !this.dispatching;
+    const activeTurnId = this.runtime.snapshot().thread?.activeTurnId;
+    if (steering && activeTurnId && metadata.notify?.to && metadata.notify.on.length && this.records.filter((record) => record.turnScope === this.turnScope && record.submission.turn_id === activeTurnId && record.notify?.to === metadata.notify!.to && record.notify?.on.length).length >= MAX_COMPLETION_SUBMISSIONS) throw new QueueError(`Turn completion notification limit reached (${MAX_COMPLETION_SUBMISSIONS} submissions per recipient); queue the prompt for the next turn`, 429);
     const id = `sub_${randomUUID()}`;
     const record: SubmissionRecord = {
       submission: { id, sender: metadata.sender, created_at: new Date().toISOString(), position: null, text_preview: preview(text, 1024), state: steering ? "running" : "queued", turn_id: steering ? this.runtime.snapshot().thread?.activeTurnId ?? null : null, assistant_preview: null, error: null },
-      operationId, fingerprint: hash, text, delivery, notify: metadata.notify,
+      operationId, fingerprint: hash, text, delivery, notify: metadata.notify, turnScope: this.turnScope,
       receipt: { id, disposition: steering ? "steered" : busy || this.entries.length ? "queued" : "sent", position: null }, notification: null,
       ...(options.sourceMessage ? { sourceMessage: { ...options.sourceMessage, ackPending: true } } : {}),
       ...(options.sourceMessages ? { sourceMessages: options.sourceMessages.map((message) => ({ ...message, ackPending: true })) } : {}),
@@ -134,6 +139,7 @@ export class PromptQueue {
   }
 
   private async dispatch(record: SubmissionRecord) {
+    record.turnScope = this.turnScope;
     record.priorTurnId = this.runtime.snapshot(10_000).thread?.turns?.at(-1)?.id ?? null;
     record.submission.state = "running"; record.submission.position = null;
     this.persist(); this.changed();
@@ -167,6 +173,7 @@ export class PromptQueue {
   }
 
   private finish(record: SubmissionRecord, outcome: Outcome, error: string | null = null) {
+    if (!["queued", "running"].includes(record.submission.state)) return;
     record.submission.state = outcome; record.submission.position = null; record.submission.error = error;
     record.text = ""; // Terminal receipts retain bounded previews, not another copy of every conversation.
     if (record.notify?.to && record.notify.on.includes(outcome)) record.notification = { attempts: 0, nextAttempt: 0, error: null, delivered: false };
@@ -195,10 +202,30 @@ export class PromptQueue {
     if (this.closed || this.notifying || !this.options.notify) return;
     this.notifying = true;
     try {
-      for (const record of this.records) {
-        const notification = record.notification;
-        if (!notification || notification.delivered || notification.nextAttempt > Date.now()) continue;
-        try { await this.options.notify(record); notification.delivered = true; notification.error = null; }
+      for (const group of this.notificationGroups()) {
+        const record = group.find((member) => member.notification?.batch) ?? group[0];
+        const notification = record.notification!;
+        if (group.every((member) => member.notification!.delivered)) continue;
+        // A previous launcher may already have delivered one sibling. Do not
+        // resend that turn to the recipient during journal migration.
+        if (group.some((member) => member.notification!.delivered)) {
+          for (const member of group) member.notification!.delivered = true;
+          this.persist(); continue;
+        }
+        if (this.notificationWaiting(record) || notification.nextAttempt > Date.now()) continue;
+        if (!notification.batch) {
+          const turn = record.turnScope === this.turnScope ? this.runtime.snapshot(10_000).thread?.turns?.find((turn) => turn.id === record.submission.turn_id) : undefined;
+          notification.batch = { key: completionKey(record), recipient: record.notify!.to!,
+            submission_ids: group.map((member) => member.submission.id), turn_id: record.submission.turn_id,
+            status: turn?.status === "interrupted" ? "interrupted" : turn?.status === "failed" ? "failed" : turn?.status === "completed" ? "done" : record.submission.state as Outcome,
+            assistant_preview: turn ? preview(turn.items.filter((item) => item.kind === "agentMessage").at(-1)?.text ?? "", 4096) || null : record.submission.assistant_preview,
+            error: turn?.error ?? record.submission.error };
+          this.persist(); // Freeze membership, payload and key before the external send.
+        }
+        try {
+          await this.options.notify(record);
+          for (const member of group) { member.notification!.delivered = true; member.notification!.error = null; }
+        }
         catch (error) {
           notification.attempts++;
           notification.error = error instanceof Error ? error.message : String(error);
@@ -210,13 +237,32 @@ export class PromptQueue {
     } finally {
       this.notifying = false;
       if (this.retry) clearTimeout(this.retry);
-      const pending = this.records.filter((record) => record.notification && !record.notification.delivered);
+      const pending = this.notificationGroups().map((group) => group.find((member) => member.notification?.batch) ?? group[0])
+        .filter((record) => !record.notification!.delivered && !this.notificationWaiting(record));
       if (pending.length && !this.closed) {
         const next = Math.min(...pending.map((record) => record.notification!.nextAttempt));
         this.retry = setTimeout(() => { void this.flushNotifications(); }, Math.max(1, next - Date.now()));
         this.retry.unref();
       }
     }
+  }
+
+  private notificationGroups() {
+    const groups = new Map<string, SubmissionRecord[]>();
+    for (const record of this.records) if (record.notification) {
+      const key = completionKey(record), group = groups.get(key) ?? [];
+      group.push(record); groups.set(key, group);
+    }
+    return [...groups.values()];
+  }
+
+  private notificationWaiting(record: SubmissionRecord) {
+    const turnId = record.submission.turn_id;
+    if (turnId === null) return false;
+    if (this.records.some((member) => member.turnScope === record.turnScope && member.submission.turn_id === turnId && member.submission.state === "running")) return true;
+    if (record.turnScope !== this.turnScope) return false;
+    const snapshot = this.runtime.snapshot(10_000);
+    return !this.exited && snapshot.ready && (snapshot.thread?.activeTurnId === turnId || snapshot.thread?.turns?.some((turn) => turn.id === turnId && turn.status === "inProgress"));
   }
 }
 

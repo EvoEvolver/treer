@@ -212,7 +212,7 @@ class Store:
                 seen.add(dependency)
                 pending.extend(items[dependency]['blocked_by'])
 
-    def mutate(self, issue_id, action, body, actor, directory):
+    def mutate(self, issue_id, action, body, actor, directory, paths=None):
         allowed = ('title', 'description', 'status', 'priority', 'labels', 'assignee', 'parent_id', 'blocked_by')
         fields(body, allowed if action == 'create' else (*allowed, 'version') if action == 'update'
                else ('body',) if action == 'comment' else ('action', 'seconds'))
@@ -275,7 +275,7 @@ class Store:
                 earlier = before.get('title', '') + '\n' + before.get('description', '')
             else:
                 mention_text = earlier = ''
-            mentions = sorted(resolve_mentions(mention_text, directory) - resolve_mentions(earlier, directory) - {actor['id']})
+            mentions = sorted(resolve_mentions(mention_text, directory, paths) - resolve_mentions(earlier, directory, paths) - {actor['id']})
             if action in ('create', 'update') and issue['status'] in ('in_progress', 'done'):
                 if any(items[d]['status'] not in ('done', 'closed') for d in issue['blocked_by']):
                     fail('dependencies_unresolved', 'Resolve blocking issues before starting or completing', 409)
@@ -295,7 +295,7 @@ class Store:
             names = {p['id']: p.get('name', p['id']) for p in directory}
             notice = notice_for(action, actor, before, issue, changed, mentions, names)
             recipients = recipients_for(action, issue, old_assignee, changed, mentions, actor['id']) if notice else []
-            missed = unresolved_mentions(mention_text, directory) if mention_text != earlier else []
+            missed = unresolved_mentions(mention_text, directory, paths) if mention_text != earlier else []
         return issue_id, event_id, event, recipients, notice, missed
 
     def _overflow(self, db, recipient, text, now):

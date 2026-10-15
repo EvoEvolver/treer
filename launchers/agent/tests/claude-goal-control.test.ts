@@ -19,6 +19,16 @@ async function until(check: () => boolean, timeout = 5000) {
   while (!check() && Date.now() < end) await new Promise(done => setTimeout(done, 10));
   assert.ok(check(), "condition timed out");
 }
+function goalState(runtime: ClaudeRuntime, check: () => boolean, milestone: string) {
+  return new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      cleanup(); reject(new Error(`${milestone}: ${JSON.stringify({ goal: runtime.snapshot().goal, status: runtime.snapshot().thread?.status })}`));
+    }, 10_000);
+    const cleanup = () => { clearTimeout(timer); runtime.off("state", observed); };
+    const observed = () => { if (check()) { cleanup(); resolve(); } };
+    runtime.on("state", observed); observed();
+  });
+}
 async function fixture(t: TestContext, args: string[] = [], deadline = 1000) {
   const cwd = realpathSync(mkdtempSync(join(tmpdir(), "claude-goal-control-"))), calls = join(cwd, "calls.jsonl"), configDir = join(cwd, "claude");
   const runtime = new ClaudeRuntime(process.execPath, cwd, { stateFile: join(cwd, "state"), configDir, goalCommandTimeoutMs: deadline,
@@ -73,17 +83,34 @@ test("busy objective edit steers without interruption, exposes desync and applie
   assert.ok(!JSON.stringify(f.runtime.snapshot()).includes("Request interrupted by user"));
 });
 
-test("native hook's snake_case condition rejects three times then interrupt-clears and notifies", async t => {
-  const f = await fixture(t);
+for (const clearDelay of [0, 1200]) test(`native hook's snake_case condition rejects three times then interrupt-clears and notifies (clear ACK delay ${clearDelay}ms)`, async t => {
+  // Drive individual protocol events instead of racing an autonomous 30ms
+  // producer against a 1s native-command deadline on a busy CI runner. Keep
+  // the runtime's production 30s acknowledgement bound, with observable test
+  // milestones and a shorter overall test bound for useful failures.
+  const f = await fixture(t, ["--step-goal-hooks", "--clear-ack-delay-ms", String(clearDelay)], 30_000);
   const notices: any[] = []; f.runtime.on("goal-exit", goal => notices.push(goal));
   await f.runtime.updateGoal({ objective: "reject-loop native shape" });
-  await until(() => notices.length === 1);
+  for (let rejection = 1; rejection <= 2; rejection++) {
+    const observed = goalState(f.runtime, () => f.runtime.snapshot().goal?.rejectionCount === rejection, `Waiting for native rejection ${rejection}`);
+    await f.runtime.prompt("fixture:reject-goal", true);
+    await observed;
+    assert.equal(f.runtime.snapshot().goal?.rejectionCount, rejection, `native rejection ${rejection} must be observed before sending another`);
+    assert.equal(notices.length, 0);
+  }
+  const exited = once(f.runtime, "goal-exit", { signal: AbortSignal.timeout(10_000) });
+  await f.runtime.prompt("fixture:reject-goal", true);
+  await exited;
   assert.equal(f.runtime.snapshot().goal, null);
   assert.equal(notices[0].rejectionCount, 3);
   assert.equal(notices[0].consecutiveRejections, 3);
   assert.match(notices[0].reason, /without new/);
   assert.equal(notices.length, 1);
-  assert.ok(f.calls().some(call => call.request?.subtype === "interrupt"));
+  const calls = f.calls();
+  const interrupt = calls.findIndex(call => call.request?.subtype === "interrupt");
+  const clear = calls.findIndex(call => call.message?.content?.[0]?.text === "/goal clear");
+  assert.ok(interrupt >= 0 && clear > interrupt, "the blocked query must be interrupted before native clear");
+  assert.equal(calls.filter(call => call.message?.content?.[0]?.text === "/goal clear").length, 1);
 });
 
 test("unrelated Stop hooks containing the objective do not reject, complete or mark it impossible", async t => {
