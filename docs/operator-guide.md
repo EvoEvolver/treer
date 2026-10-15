@@ -115,6 +115,12 @@ configured interpreter with an absolute release script and physical cwd. Put all
 runtime writes outside the release. The selected database environment variable
 always points to `ROOT/state/app.sqlite3`; Python bytecode writing is disabled,
 and the child starts with umask 077. Normal workload identity remains intact.
+The entry is a frozen copy of the deployment tool at initialization. Updating
+`scripts/app-deploy` does not update installed entries; reinitializing with a
+different entry digest fails closed. To upgrade the entry, stage a separately
+reviewed deployment root and explicitly migrate the stopped App's saved command
+with Core App-update, preserving its stable identity. Do not overwrite a live
+entry in place.
 Apps must expose a deployment-health JSON response on loopback **and** through
 their real Treer service route, containing `version` (from `APP_DEPLOY_VERSION`),
 `app_id` (the stable App ID), `ready: true`, and `database_ready: true`. Return
@@ -150,7 +156,10 @@ before deployment; the tool does not change its stopped intent. Replaying a
 completed operation verifies health without restarting again.
 
 Failure stops the candidate before restoring the old SQLite snapshot and
-version, then restarts and verifies the old App. This deliberately discards all
+version, then restarts and verifies the old App. Restoration removes WAL/SHM
+sidecars and syncs their directory before publishing the old main database, so
+an interruption cannot replay the candidate's WAL against the restored database.
+This deliberately discards all
 candidate writes since the backup: use only for Apps whose single SQLite
 database is the complete rollback state, with no other writers. External side
 effects, other files/databases, queues and remote migrations are not rolled back.
@@ -166,6 +175,9 @@ or an unauthenticated release origin. Review the source and check command before
 staging: they execute with the local OS account's authority. Versions are retained
 for rollback; do not edit/prune any directory still used by a process. Backup,
 config and receipt directories are 0700, files 0600 (executable assets 0700).
+Backups contain complete business data and have no automatic retention or
+garbage collection. Monitor disk space and set an operator-owned retention
+policy; never delete a backup referenced by an incomplete recovery receipt.
 Receipts omit argv, tokens and application content; they contain paths, App
 identity, versions, health URLs and backup hashes. Same-account processes can
 read/change these files; use separate OS accounts/containers for isolation.

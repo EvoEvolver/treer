@@ -296,6 +296,50 @@ class DeploymentTests(unittest.TestCase):
                    "route_url": f"http://127.0.0.1:{self.port}/route"}
         deploy.health(receipt, self.old, 1)
 
+    def test_crash_at_restored_main_file_publication_cannot_replay_candidate_wal(self):
+        self.stop_process()
+        saved = deploy.backup(self.root, "before-migration")
+        target = self.root / "state/app.sqlite3"
+        # A real writer exits without closing SQLite, leaving committed candidate
+        # pages in its WAL. No user App/database is involved.
+        deploy.run([sys.executable, "-c", """
+import os,sqlite3,sys
+db=sqlite3.connect(sys.argv[1])
+db.execute('PRAGMA journal_mode=WAL')
+db.execute('PRAGMA wal_autocheckpoint=0')
+db.execute('CREATE TABLE candidate_only(n INTEGER)')
+db.executemany('INSERT INTO candidate_only VALUES(?)', [(i,) for i in range(250)])
+db.execute('UPDATE value SET n=999')
+db.commit()
+os._exit(0)
+""", str(target)])
+        self.assertGreater(Path(str(target) + "-wal").stat().st_size, 0)
+        class Crash(BaseException):
+            pass
+        actual_replace = os.replace
+        def publish_then_crash(source, destination):
+            actual_replace(source, destination)
+            if destination == target:
+                raise Crash()
+        with patch.object(deploy.os, "replace", side_effect=publish_then_crash), self.assertRaises(Crash):
+            deploy.restore(self.root, saved)
+        # This read happens BEFORE recover can retry restore. The old code let
+        # the candidate WAL recreate its table/value here while integrity was ok.
+        with sqlite3.connect(target) as database:
+            self.assertEqual(database.execute("SELECT n FROM value").fetchall(), [(1,)])
+            self.assertEqual(database.execute("SELECT name FROM sqlite_master WHERE name='candidate_only'").fetchall(), [])
+            self.assertEqual(database.execute("PRAGMA integrity_check").fetchall(), [("ok",)])
+        deploy.restore(self.root, saved)
+        self.assertEqual(self.value(), 1)
+
+    def test_backup_progress_exception_propagates_and_cleans_unpublished_backup(self):
+        with patch.object(deploy.time, "monotonic", side_effect=[0, 121]):
+            with self.assertRaisesRegex(deploy.Failure, "database_backup_timeout"):
+                deploy.backup(self.root, "deadline")
+        self.assertFalse((self.root / "backups/deadline.sqlite3").exists())
+        self.assertFalse(any(path.name.startswith(".backup-") for path in (self.root / "backups").iterdir()))
+        self.assertEqual(self.value(), 1)
+
     def test_failed_check_leaves_no_release_or_pointer_change(self):
         new = self.commit(2)
         with self.assertRaisesRegex(deploy.Failure, "command_failed"):

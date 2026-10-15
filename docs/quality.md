@@ -9,6 +9,11 @@ CLI boundary. It covers version/identity readiness on local and service-route
 surfaces, stable identity, successful and failed migrations, SQLite snapshot
 integrity/tampering, interrupted pointer-switch recovery, failed rollback blocking,
 idempotent replay, locks, unsafe paths, dirty checkout exclusion and asset hashes.
+An actual SQLite writer leaves committed candidate WAL behind; interruption
+immediately after main-file replacement must expose only the backed-up state,
+even before recovery is retried. This regression fails against the original
+restore ordering. A separate test forces the SQLite backup progress callback to
+expire and verifies exception propagation and unpublished-backup cleanup.
 It never controls an enrolled App or existing Host/Controller. This is not a
 native Windows test, authenticated multi-machine ingress test, malicious
 same-account filesystem isolation test, or a guarantee of external-effect rollback.

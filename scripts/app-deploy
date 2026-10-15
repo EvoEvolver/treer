@@ -369,6 +369,12 @@ def restore(root, saved):
     for path in (target, Path(str(target) + "-wal"), Path(str(target) + "-shm")):
         if path.exists() or path.is_symlink():
             regular(path)
+    def clear_sidecars():
+        # Never publish an old main file beside the candidate's WAL. Persist
+        # their removal before replacing the main file, including on recovery.
+        Path(str(target) + "-wal").unlink(missing_ok=True)
+        Path(str(target) + "-shm").unlink(missing_ok=True)
+        sync_directory(target.parent)
     if saved:
         require(re.fullmatch(r"[A-Za-z0-9_-]+\.sqlite3", saved["name"]) is not None,
                 "invalid_backup_name")
@@ -382,13 +388,13 @@ def restore(root, saved):
                 shutil.copyfileobj(before, after, 65536)
                 after.flush()
                 os.fsync(after.fileno())
+            clear_sidecars()
             os.replace(temporary, target)
         finally:
             temporary.unlink(missing_ok=True)
     else:
+        clear_sidecars()
         target.unlink(missing_ok=True)
-    Path(str(target) + "-wal").unlink(missing_ok=True)
-    Path(str(target) + "-shm").unlink(missing_ok=True)
     sync_directory(target.parent)
 
 
