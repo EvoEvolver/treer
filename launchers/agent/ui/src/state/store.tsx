@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useMemo, useReducer, useRef, type Dispatch, type ReactNode } from "react";
-import { request, socketUrl } from "../api";
+import { openSocket, request } from "../api";
 import { t } from "../i18n";
 import type { GoalInput, PromptMode, Snapshot, TurnDto } from "../types";
 
@@ -118,7 +118,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       .catch((error: Error) => dispatch({ type: "error", message: error.message }));
     function connect() {
       clearTimeout(timer);
-      socket = new WebSocket(socketUrl());
+      socket = openSocket();
       socketRef.current = socket;
       socket.addEventListener("open", () => {
         dispatch({ type: "connected", value: true });

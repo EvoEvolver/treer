@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { fetchRaw } from "../api";
 import { t, type MessageKey } from "../i18n";
 import { useNow } from "../lib/clock";
 import { duration } from "../lib/format";
@@ -30,7 +31,7 @@ function Card({ task, panelOpen }: { task: BackgroundTask; panelOpen: boolean })
     let timer: ReturnType<typeof setTimeout> | undefined;
     const run = async () => {
       try {
-        const response = await fetch(`api/tasks/${encodeURIComponent(task.id)}/output?tail=65536`, { signal: controller.signal });
+        const response = await fetchRaw(`api/tasks/${encodeURIComponent(task.id)}/output?tail=65536`, { signal: controller.signal });
         if (!response.ok) throw new Error(t("tasks.outputUnavailable", { status: response.status }));
         // Older task servers use a JSON envelope; the contract also permits plain text.
         const content = response.headers.get("content-type")?.includes("application/json") ? ((await response.json()) as { content?: string }).content ?? "" : await response.text();

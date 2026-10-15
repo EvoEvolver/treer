@@ -42,10 +42,14 @@ test("the source scanner rejects HTML sinks, eval and unsafe URLs, and accepts t
     "const vetted = safeUrl(link); export const e = <a href={vetted}>ok</a>; export const f = <Viewer src={link} />;",
     "eval('1'); new Function('1'); document.write('x'); el.innerHTML = 'x'; setTimeout('1', 1);",
     "fetch('/absolute'); fetch('https://example.test'); fetch('api/state');",
+    "el['innerHTML'] = x; const k = { ['dangerouslySetInnerHTML']: 1 }; export const g = <div {...props} />;",
+    "a.href = link; img.src = link; frame.srcdoc = '<p>'; a.setAttribute('href', link); i.setAttribute('srcdoc', x); window.open(u); location.href = u; location = u; document.createElement('iframe'); import('x'); navigator.sendBeacon('x');",
+    "export const h = <iframe src=\"x\" />; export const j = <a target=\"_blank\" href=\"#x\">x</a>; export const k2 = <form action=\"#\" />; new WebSocket('ws://x'); new XMLHttpRequest();",
   ].join("\n"));
   writeFileSync(join(directory, "components/Markdown.tsx"), "export const m = <div dangerouslySetInnerHTML={{ __html: x }} />; el.innerHTML = 'x';");
   const problems = scanSource(directory).join("\n");
   for (const expected of ["dangerouslySetInnerHTML outside", "href must go through safeUrl", "href literal must be relative", "eval is forbidden", "new Function", "document.write", "innerHTML outside", "string-argument timers", "network paths must be relative"]) assert.match(problems, new RegExp(expected), expected);
+  for (const expected of ["\\[\"innerHTML\"\\]", "computed dangerouslySetInnerHTML", "spread props", "\\.href assignment", "\\.src assignment", "\\.srcdoc assignment", "setAttribute\\(\"href\"\\)", "setAttribute\\(\"srcdoc\"\\)", "window\\.open", "assigning location", "createElement\\(\"iframe\"\\)", "dynamic import", "sendBeacon", "<iframe> is forbidden", "requires rel", "form action", "new WebSocket may only", "new XMLHttpRequest may only"]) assert.match(problems, new RegExp(expected), expected);
   assert.doesNotMatch(problems, /Markdown\.tsx/);
   assert.doesNotMatch(problems, /bad\.tsx:4/);
   assert.doesNotMatch(problems, /bad\.tsx:5/, "a variable initialised from safeUrl and a component prop are accepted");
