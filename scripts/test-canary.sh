@@ -151,7 +151,10 @@ refresh_machine() {
         | jq -r --arg name "$machine_name" \
             '.servers[]? | select(.name == $name) | .connected_at' \
         | head -n 1)
-    railway service restart --yes --json \
+    # Railway's API occasionally rejects a restart ("Problem processing request");
+    # only this idempotent call is retried, never the reconnect wait or any assertion.
+    sh "$script_dir/railway-retry.sh" "${TREER_CANARY_RESTART_ATTEMPTS:-3}" "${TREER_CANARY_RESTART_BACKOFF:-5}" -- \
+        railway service restart --yes --json \
         --project "$project_id" --environment "$environment" \
         --service "$service_id" >/dev/null
     deadline=$(( $(date +%s) + timeout ))

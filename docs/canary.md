@@ -101,6 +101,11 @@ canary evidence; those are separate future fixtures.
 2. Restart the existing deployment for two dedicated, long-lived Railway
    machine services. This replaces each running instance without rebuilding or
    replacing its image and avoids Railway's daily service-creation quota.
+   Railway's API occasionally rejects a restart with "Problem processing request";
+   only this idempotent restart call is retried (default three attempts with a
+   5-second step backoff, `TREER_CANARY_RESTART_ATTEMPTS` and
+   `TREER_CANARY_RESTART_BACKOFF`), each failed attempt prints one sanitized
+   summary line, and the reconnect wait and every assertion run exactly once.
 3. Each machine downloads the deployed Host, Controller, and CLI artifacts,
    reuses its volume-backed machine identity, and serves a machine-specific HTTP
    response on its loopback interface.
