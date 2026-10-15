@@ -87,7 +87,7 @@ export interface Goal {
   consecutiveRejections?: number;
 }
 
-export interface GoalDelivery { id: string; status: "sending" | "sent" | "failed"; error?: string | null }
+export interface GoalDelivery { id: string; status: "pending" | "sent" | "failed"; error?: string | null }
 export interface GoalInput { objective?: string; status?: "active" | "paused"; tokenBudget?: number | null }
 
 export interface HarnessInfo {
