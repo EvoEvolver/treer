@@ -25,9 +25,9 @@ export function submissionNotification(record: SubmissionRecord) {
   return { recipient, key: batch?.key ?? completionKey(record), body: JSON.stringify(body) };
 }
 
-export function sendNotification(recipient: string, key: string, body: string): Promise<void> {
+export function sendNotification(recipient: string, key: string, body: string, launch: typeof spawn = spawn): Promise<void> {
   return new Promise((resolve, reject) => {
-    const child = spawn("treer", ["message", "send", "--to", recipient, "--idempotency-key", key], { stdio: ["pipe", "pipe", "pipe"] });
+    const child = launch("treer", ["message", "send", "--to", recipient, "--idempotency-key", key], { stdio: ["pipe", "pipe", "pipe"] });
     let outputBytes = 0;
     const fail = (error: Error) => { clearTimeout(timer); child.kill("SIGKILL"); reject(error); };
     const timer = setTimeout(() => fail(new Error("Treer completion notification timed out")), 15_000);
@@ -38,6 +38,6 @@ export function sendNotification(recipient: string, key: string, body: string): 
     child.on("error", (error) => { clearTimeout(timer); reject(error); });
     child.on("close", (code) => { clearTimeout(timer); if (code === 0) resolve(); else reject(new Error(`Treer completion notification exited with code ${code}`)); });
     child.stdin.on("error", fail);
-    child.stdin.end(body + "\n");
+    child.stdin.end(body);
   });
 }

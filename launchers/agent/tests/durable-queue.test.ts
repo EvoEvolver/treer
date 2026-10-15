@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { spawn } from "node:child_process";
+import { PassThrough } from "node:stream";
 import { mkdtemp, readFile, lstat, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,7 +10,7 @@ import type { HarnessRuntime, ThreadState } from "../src/runtime.js";
 import { PromptQueue } from "../src/prompt-queue.js";
 import { QueueStore } from "../src/queue-store.js";
 import { completionKey, preview, submissionOptions, type SubmissionRecord } from "../src/prompt-submission.js";
-import { submissionNotification } from "../src/prompt-notify.js";
+import { sendNotification, submissionNotification } from "../src/prompt-notify.js";
 
 class Fake extends EventEmitter {
   harness = { id: "fake", name: "Fake", capabilities: { steer: true, backgroundTasks: false, goal: null } };
@@ -330,6 +332,25 @@ test("all 512 completion IDs fit Core's message limit, escaped previews are boun
   assert.deepEqual(parsed.submission_ids, ids); assert.equal(parsed.submission_id, ids[0]);
   assert.equal(parsed.turn_id, queue.submission(ids[0])!.turn_id); assert.equal(parsed.status, "failed");
   assert.ok(parsed.assistant_preview.length < 4096);
+  // Hit the *exact* Core boundary after JSON escaping, then capture the bytes
+  // passed through the transport's real stdin stream (including any suffix).
+  sent[0].notification!.batch!.error = null;
+  sent[0].notification!.batch!.assistant_preview = "";
+  const remaining = 32768 - Buffer.byteLength(submissionNotification(sent[0]).body);
+  sent[0].notification!.batch!.assistant_preview = "\u0001".repeat(Math.floor(remaining / 6)) + "a".repeat(remaining % 6);
+  const edge = submissionNotification(sent[0]); assert.equal(Buffer.byteLength(edge.body), 32768);
+  const chunks: Buffer[] = [];
+  const launch = ((_command: string, args: string[]) => {
+    assert.deepEqual(args, ["message", "send", "--to", edge.recipient, "--idempotency-key", edge.key]);
+    const stdin = new PassThrough(), child = Object.assign(new EventEmitter(), { stdin, stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true });
+    stdin.on("data", (chunk) => chunks.push(chunk));
+    stdin.on("finish", () => queueMicrotask(() => child.emit("close", 0)));
+    return child;
+  }) as unknown as typeof spawn;
+  await sendNotification(edge.recipient, edge.key, edge.body, launch);
+  assert.equal(Buffer.concat(chunks).length, 32768);
+  assert.equal(Buffer.concat(chunks).toString("utf8"), edge.body);
+  assert.deepEqual(JSON.parse(Buffer.concat(chunks).toString("utf8")).submission_ids, ids);
   sent[0].notification!.batch!.submission_ids = Array.from({ length: 8192 }, (_, index) => `sub_${index.toString().padStart(36, "0")}`);
   assert.throws(() => submissionNotification(sent[0]), /membership exceeds/);
 });
