@@ -93,8 +93,10 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
 export function TreeResizer({ settings }: { settings: ReturnType<typeof useTreeWidth> }) {
   return <div className="relative hidden min-h-0 bg-sidebar md:block">
     {!settings.collapsed && <div {...settings.separator} className="absolute inset-y-0 -left-2 z-20 w-6 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-2 before:w-2 before:border-x before:border-border hover:before:bg-accent focus-visible:before:bg-ring/30" />}
-    <button type="button" aria-label={settings.collapsed ? t("resizer.expand_tree_sidebar") : t("resizer.collapse_tree_sidebar")} aria-expanded={!settings.collapsed} aria-controls="tree-sidebar" title={settings.collapsed ? t("resizer.expand_tree_sidebar") : t("resizer.collapse_tree_sidebar")} onClick={settings.toggle} className="absolute left-1/2 top-3 z-30 flex h-10 w-6 -translate-x-1/2 items-center justify-center rounded border bg-sidebar text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
-      {settings.collapsed ? <ChevronRight className="size-3.5" /> : <ChevronLeft className="size-3.5" />}
+    <button type="button" aria-label={settings.collapsed ? t("resizer.expand_tree_sidebar") : t("resizer.collapse_tree_sidebar")} aria-expanded={!settings.collapsed} aria-controls="tree-sidebar" title={settings.collapsed ? t("resizer.expand_tree_sidebar") : t("resizer.collapse_tree_sidebar")} onClick={settings.toggle} className={`group absolute top-1/2 z-30 grid size-11 -translate-y-1/2 place-items-center rounded outline-none ${settings.collapsed ? "left-0" : "left-1/2 -translate-x-1/2"}`}>
+      <span aria-hidden="true" className={`pointer-events-none flex h-7 w-4 items-center justify-center rounded-sm border bg-sidebar text-muted-foreground shadow-sm group-hover:bg-accent group-hover:text-foreground group-focus-visible:ring-2 group-focus-visible:ring-ring ${settings.collapsed ? "-translate-x-2.5" : ""}`}>
+        {settings.collapsed ? <ChevronRight className="size-3" /> : <ChevronLeft className="size-3" />}
+      </span>
     </button>
     {settings.dragging && <div aria-hidden="true" className="fixed inset-0 z-[200] cursor-col-resize touch-none" />}
   </div>
