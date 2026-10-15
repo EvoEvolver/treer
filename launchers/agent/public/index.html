@@ -1,78 +1,16 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-look="b" data-theme="light">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
     <base href="./" />
     <title>Agent</title>
-    <link rel="stylesheet" href="styles.css" />
+    <script src="boot.js"></script>
+    <link rel="stylesheet" href="ui.css" />
   </head>
   <body>
-    <main class="app-shell">
-      <header class="topbar">
-        <div class="identity">
-          <button id="files-toggle" class="icon-button" type="button" aria-label="Browse files" title="Browse files" aria-expanded="false" aria-controls="file-browser">&#9776;</button>
-          <span id="brand-mark" class="brand-mark">A</span>
-          <div class="identity-copy">
-            <h1 id="title">Agent</h1>
-            <p id="cwd">Connecting</p>
-          </div>
-        </div>
-        <div class="controls">
-          <button id="tasks-toggle" class="tasks-toggle" type="button" aria-label="Background tasks" aria-expanded="false" aria-controls="tasks-panel" hidden>0 running</button>
-          <span id="status" class="status status-starting"><span class="status-dot"></span><span>Starting</span></span>
-          <label class="select-wrap" title="Model">
-            <span class="sr-only">Model</span>
-            <select id="model" aria-label="Model" disabled><option>Model</option></select>
-          </label>
-          <label class="select-wrap effort-wrap" title="Reasoning effort" hidden>
-            <span class="sr-only">Reasoning effort</span>
-            <select id="effort" aria-label="Reasoning effort" disabled><option>Effort</option></select>
-          </label>
-          <button id="interrupt" class="icon-button" type="button" aria-label="Stop current run" title="Stop current run" disabled>&#9632;</button>
-        </div>
-      </header>
-      <section id="feedback" class="feedback" role="status" hidden></section>
-      <div class="workspace">
-      <aside id="file-browser" class="file-browser" aria-label="Workspace files" hidden>
-        <header class="files-heading"><strong>Workspace files</strong><div><button id="files-refresh" type="button" title="Refresh expanded folders">Refresh</button><button id="files-close" type="button" aria-label="Close file browser">&#215;</button></div></header>
-        <div class="file-tabs"><button id="files-browse" type="button" aria-pressed="true">Browse</button><button id="files-preview-tab" type="button" aria-pressed="false" disabled>Preview</button></div>
-        <div id="file-tree" class="file-tree" aria-label="Files"></div>
-        <section class="file-preview" aria-label="File preview">
-          <header><strong id="file-path">Select a file</strong><span id="file-meta">Read-only preview</span></header>
-          <p id="file-error" role="status" hidden></p>
-          <pre id="file-content" tabindex="0">Browse the working directory to preview a file.</pre>
-        </section>
-      </aside>
-      <section id="timeline" class="timeline" aria-live="polite">
-        <div class="empty"><span class="empty-mark">C</span><strong>Ready</strong></div>
-      </section>
-      <aside id="tasks-panel" class="tasks-panel" aria-label="Background tasks" hidden>
-        <header class="files-heading"><strong>Background tasks</strong><button id="tasks-close" type="button" aria-label="Close background tasks">&#215;</button></header>
-        <div id="tasks-list" class="tasks-list"></div>
-      </aside>
-      </div>
-      <form id="composer" class="composer">
-        <section id="goal-bar" class="goal-bar" aria-label="Goal" hidden></section>
-        <section id="prompt-queue" class="prompt-queue" aria-label="Queued messages" hidden></section>
-        <textarea id="prompt" rows="1" placeholder="Message agent" aria-label="Message agent" aria-describedby="prompt-shortcuts"></textarea>
-        <div class="send-actions">
-          <button id="send" class="icon-button primary" type="submit" aria-label="Send message" title="Send message">&#8593;</button>
-          <button id="queue-send" class="queue-send" type="button" aria-label="Queue message" title="Queue message (Tab)" hidden>Queue</button>
-        </div>
-        <p id="prompt-shortcuts" class="prompt-shortcuts">Enter to send · Shift+Enter for a new line</p>
-      </form>
-      <dialog id="goal-editor" aria-labelledby="goal-editor-title">
-        <form id="goal-form">
-          <header><h2 id="goal-editor-title">Set goal</h2><button id="goal-editor-close" type="button" aria-label="Close goal editor">&#215;</button></header>
-          <label>Objective<textarea id="goal-objective" rows="3" required></textarea></label>
-          <label id="goal-budget-label">Token budget (optional)<input id="goal-budget" type="number" min="1" step="1" inputmode="numeric"></label>
-          <p id="goal-error" role="alert" hidden></p>
-          <div class="goal-actions"><button id="goal-editor-cancel" type="button">Cancel</button><button id="goal-save" type="submit">Save goal</button></div>
-        </form>
-      </dialog>
-    </main>
-    <script type="module" src="app.js"></script>
+    <div id="root"></div>
+    <script src="ui.js" defer></script>
   </body>
 </html>

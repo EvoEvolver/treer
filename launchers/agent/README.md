@@ -395,40 +395,66 @@ the printed temporary directory and leave managed Agent processes untouched.
 
 ## Browser interface
 
-When supported by the harness, the header's **N running** button opens background
-tasks with their status, duration, exit code, and summary. Expand a task to load
-its output tail; running tasks refresh every three seconds while open. On narrow
-screens, tasks and the file explorer share the drawer. Task content renders as text.
+The Interface page is a React app served from `public/`. It consumes only the routes in
+this document; the server contract is unchanged.
 
-Enter sends a message when idle and steers the current run when busy. Tab queues
-a nonempty draft; Shift+Enter adds a newline. While running, separate **Steer**
-and **Queue** buttons support touch input. Harnesses without steering automatically
-queue messages and display a notice. Queued messages appear above the input and
-can be canceled. Failed submissions retain the draft for retry.
+**Files and policy.** Four flat files: `index.html`, `boot.js` (runs in `<head>`, no flash
+of the wrong look or theme), `ui.js` (React, marked and DOMPurify, bundled) and `ui.css`
+(all looks). They are committed because the bootstrap installer checks out git without
+esbuild, and they are listed in the payload hash manifest like every other file; nothing
+needs `node_modules` at runtime. Budget: at most 5 files and 600 KB. The page is served
+with `style-src 'self'` (no inline styles or scripts, no eval), `object-src 'none'`,
+`base-uri 'self'` and `form-action 'none'`. HTML reaches the DOM through one component
+only (markdown, sanitized with DOMPurify); everything else is rendered as text, and
+file names, paths, diffs, task output and errors are never interpreted as markup.
+Assets and requests are relative (`<base href="./">`), so the page works behind Treer's
+iframe tunnel.
 
-Harnesses with Goal support show **Set goal**, or the current objective, status,
-token/time usage, and optional token budget progress. Edit, pause/resume (when
-supported), and clear controls appear on the goal bar; clearing requires inline
-confirmation. `/goal <objective>` sets a goal and `/goal clear` requests clearing
-instead of sending a chat message. Completed goals also produce a timeline notice.
+**Looks and themes.** Three selectable looks (A Quiet Editor, B Warm Paper, C Terminal
+Contrast; default B) times light/dark. Look: `?look=a|b|c`, else
+`localStorage["treer-launcher-look"]`, else B. Theme: a parent
+`{type: "treer:embed-theme", theme: "light"|"dark"}` message or `?theme=light|dark`,
+else the stored mode (`treer-launcher-theme`: system, light or dark), else the system
+preference, including later system changes. The Appearance button (header, left rail,
+or the bottom bar on phones) picks look and theme and exports the conversation as
+Markdown. Every stored or URL value is checked against a fixed list; storage access is
+guarded. `?lang=en|zh` (else the browser language) selects the interface language;
+a missing translation falls back to English.
 
-Use the **Browse files** button in the header to open the file explorer. Folders
-load only when expanded. Selecting a file opens a read-only text preview; on
-narrow screens the drawer has Browse/Preview tabs and a close button to return
-to the conversation. Refresh reloads expanded directories and the selected
-preview. File contents, names, paths, and diffs render as text, never as HTML.
+**Conversation.** Messages and plans stay in the conversation. Consecutive machine
+activity (reasoning, commands, file changes, tool calls) folds into one summary row
+with counts, a failure marker, and elapsed time only when the data supports it;
+rows expand to output, and file-change rows show each path's unified diff with signed
+lines. Markdown, including tables, code and sanitized links, renders in messages;
+images may only be same-origin, `data:` raster or `blob:` and open in a zoomable viewer;
+long output opens in a dialog. Earlier history loads through "Load earlier messages"
+without losing the reader's place; scrolling up shows "Jump to latest" instead of
+pulling the page.
 
-File-change cards expand to show each changed path and its unified diff, with
-additions and deletions colored separately (ACP agents report old and new
-text; the adapter renders them as unified diffs relative to the working
-directory). Plans (Codex plan/todo items and `turn/plan/updated`, ACP `plan`
-updates) appear as checklists with pending, active,
-and completed steps. Expanded activity cards stay open during state updates.
+**Composer.** Enter sends when idle and steers the current run when busy; Tab queues
+a non-empty draft; Shift+Enter adds a newline. While running, separate **Steer** and
+**Queue** buttons support touch. Harnesses without steering queue messages and show a
+notice. Failed submissions keep the draft. The status strip above the field shows the
+Goal, the latest Plan progress and the Queue count; one popover opens at a time (a
+bottom sheet on phones) and Esc closes it. Queued messages can be cancelled in the
+Queue popover. The model chip opens model and reasoning-effort pickers; harnesses
+without reasoning levels show no effort picker.
 
-The page honors `?theme=light|dark` and theme updates sent by its parent window
-as `{type: "treer:embed-theme", theme: "light"|"dark"}`. Without a valid explicit
-theme it follows the system preference, including subsequent system changes.
-All browser requests and assets are relative to the Interface page.
+**Goals.** Harnesses with Goal support show **Set goal**, or the current objective and
+status. The Goal popover shows usage, optional budget progress, delivery and sync
+notices, and Edit, Pause/Resume (when supported) and Clear (with inline confirmation).
+A goal that cannot make progress (blocked, stale, usage or budget limit, out of sync)
+turns the strip warning-coloured. `/goal <objective>` sets a goal and `/goal clear`
+asks to clear it instead of sending chat. A completed goal leaves a notice in the
+conversation; a cleared goal collapses back to **Set goal**.
+
+**Files and tasks.** The Files panel loads folders only when expanded, supports
+arrow-key navigation and a filter over loaded entries, previews a selected file as
+read-only text (truncated at 64 KiB, with local errors) and refreshes expanded
+folders. When the harness reports background tasks, the Tasks panel shows each
+task's status, duration, exit code and summary; expanding a task loads its output tail
+and a running task refreshes every three seconds while open. On phones the two panels
+share one full-screen slot.
 
 The additional read-only JSON routes are:
 
@@ -839,10 +865,20 @@ npm --prefix launchers/agent test
 node launchers/agent/tests/core-installer.mjs /absolute/path/to/treer-agent-server
 # Native Windows acceptance (Node 22+, rustc for fixture, Chromium installed):
 npm --prefix launchers/agent run test:windows -- --controller C:\Treer\treer-agent-server.exe --screenshots C:\artifacts\launcher
-# Browser regression and desktop/390px screenshots, with an isolated fake Codex.
+# Browser regression for the React page against the real server with fake Codex and
+# Claude processes (and the runtime-controls contract fixture): looks x themes, goals,
+# queue, tasks, files, dialogs, CSP violations, phone layout. Desktop/390px screenshots.
 # No inference, managed Agent mutation, or restart. Chromium is needed once:
 npm --prefix launchers/agent exec -- playwright install chromium
-CODEX_UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix launchers/agent run test:browser
+UI_SCREENSHOTS=/tmp/agent-ui-screenshots npm --prefix launchers/agent run test:browser
+# UI sources live in launchers/agent/ui. After editing them rebuild the four committed
+# files in public/; check:ui (part of `run check`) fails on any byte difference with a
+# fresh build, on budget overruns and on forbidden code patterns (HTML sinks outside the
+# markdown component, eval, unsafe URLs, absolute network paths).
+npm --prefix launchers/agent run build:ui
+npm --prefix launchers/agent run check:ui
+# Look at the page in a browser with sample data (a stand-in Proxy adds the identity headers):
+node launchers/agent/tests/serve-ui-fixture.mjs --port 8099
 # Opt-in: real Claude credentials/inference, new sessions in a temporary cwd only.
 # Covers start/model, tool-boundary steer, queue, background output, interrupt,
 # JSONL resume/continuation, and missing-session rejection; no Treer mutations.

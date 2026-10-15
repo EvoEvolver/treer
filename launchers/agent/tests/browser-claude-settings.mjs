@@ -28,13 +28,15 @@ try {
       }
       const state = () => fetch(base + "/api/state").then((r) => r.json());
       const post = (path, body) => fetch(base + path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }).then(async (r) => { assert.ok(r.ok, await r.clone().text()); return r.json(); });
-      await page.goto(base + "/?theme=light");
+      await page.goto(base + "/?theme=light&look=a");
       let before = await state();
       const firstId = before.thread.id;
-      await expect(page.locator("#model")).toHaveValue(before.thread.model);
-      assert.ok(await page.locator("#model option:checked").textContent());
-      if (unsupported) await expect(page.locator(".effort-wrap")).toBeHidden();
-      else await expect(page.locator(".effort-wrap")).toBeVisible();
+      // Model and effort live in the model popover opened from the composer chip.
+      await page.locator(".model").click();
+      await expect(page.locator("#model-select")).toHaveValue(before.thread.model);
+      assert.ok(await page.locator("#model-select option:checked").textContent());
+      if (unsupported) await expect(page.locator("#effort-select")).toHaveCount(0);
+      else await expect(page.locator("#effort-select")).toBeVisible();
       await page.screenshot({ path: join(shots, `${unsupported ? "unsupported" : "supported"}-initial-desktop.png`) });
       if (fake) await post("/api/prompt", { prompt: "work" });
       else {
@@ -45,7 +47,7 @@ try {
       const target = before.modelOptions.find((option) => option.id === (fake ? "opus" : "haiku"));
       assert.ok(target);
       const changed = page.waitForResponse((r) => r.url().endsWith("/api/settings") && r.request().postDataJSON()?.model === target.model);
-      await page.locator("#model").selectOption(target.model);
+      await page.locator("#model-select").selectOption(target.model);
       // Submitting during a switch must retain the message, not restart or drop it.
       await post("/api/prompt", { prompt: "Reply exactly SECOND_DONE. No tools.", mode: "queue" });
       assert.ok((await changed).ok());
@@ -64,22 +66,22 @@ try {
       }
       if (!unsupported) {
         const changedEffort = page.waitForResponse((r) => r.url().endsWith("/api/settings") && r.request().postDataJSON()?.reasoningEffort === "low");
-        await page.locator("#effort").selectOption("low");
+        await page.locator("#effort-select").selectOption("low");
         assert.ok((await changedEffort).ok());
-        await expect(page.locator("#effort")).toHaveValue("low");
+        await expect(page.locator("#effort-select")).toHaveValue("low");
         if (!fake) {
           await post("/api/prompt", { prompt: "/model" });
           await expect.poll(async () => (await state()).thread.status, { timeout: 30000 }).toBe("idle");
           assert.ok((await state()).thread.turns.at(-1).items.some((item) => item.text.includes("effort: low")), "Native /model must confirm live effort");
         }
       }
-      await expect(page.locator("#model")).toHaveValue(target.model);
+      await expect(page.locator("#model-select")).toHaveValue(target.model);
       await page.screenshot({ path: join(shots, `${unsupported ? "unsupported" : "supported"}-switched-desktop.png`) });
       await page.setViewportSize({ width: 390, height: 844 });
-      if (unsupported) await expect(page.locator(".effort-wrap")).toBeHidden();
-      else await expect(page.locator(".effort-wrap")).toBeVisible();
+      if (unsupported) await expect(page.locator("#effort-select")).toHaveCount(0);
+      else await expect(page.locator("#effort-select")).toBeVisible();
       await page.screenshot({ path: join(shots, `${unsupported ? "unsupported" : "supported"}-switched-mobile.png`) });
-      assert.ok(await page.evaluate(() => document.querySelector(".topbar").scrollWidth <= innerWidth), "Header controls must fit the narrow viewport");
+      assert.ok(await page.evaluate(() => document.querySelector(".top").scrollWidth <= innerWidth && document.documentElement.scrollWidth <= innerWidth), "Header controls must fit the narrow viewport");
       console.log(JSON.stringify({ fake, unsupported, cwd, sessionId: firstId, actualModel: target.model, result: "passed" }));
     } finally {
       await page.close();

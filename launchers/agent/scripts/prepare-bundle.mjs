@@ -4,6 +4,7 @@ import { cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, wr
 import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { buildUi } from "./ui-build.mjs";
 
 const source = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const options = {};
@@ -15,7 +16,14 @@ if (!isAbsolute(options.output || "") || !/^[a-f0-9]{40}$/.test(options["source-
 const output = options.output;
 if (existsSync(output) && (lstatSync(output).isSymbolicLink() || !lstatSync(output).isDirectory() || readdirSync(output).length)) throw new Error("Output must be a new or empty physical directory");
 mkdirSync(output, { recursive: true, mode: 0o700 });
-for (const name of ["public", "scripts", "profiles.json", "interface-contract.json"]) cpSync(join(source, name), join(output, name), { recursive: true, dereference: false });
+// The React UI is committed as public/{ui.html,boot.js,ui.js,ui.css} (bootstrap installs from git without esbuild).
+// A payload must carry exactly what the sources build to, so a stale commit fails here instead of shipping.
+for (const [name, bytes] of await buildUi(source)) {
+  if (!readFileSync(join(source, "public", name)).equals(bytes)) throw new Error(`public/${name} is stale; run npm run build:ui and commit it`);
+}
+// UI build tooling needs esbuild/typescript and never runs inside an installation.
+const uiTooling = /[\\/]scripts[\\/](?:ui-build|build-ui|check-ui|check-ui-source)(?:\.d)?\.m?[jt]s$/;
+for (const name of ["public", "scripts", "profiles.json", "interface-contract.json"]) cpSync(join(source, name), join(output, name), { recursive: true, dereference: false, filter: (path) => !uiTooling.test(path) });
 await build({ entryPoints: [join(source, "src/index.ts")], outfile: join(output, "runtime.mjs"), bundle: true,
   platform: "node", format: "esm", target: "node22", minify: false,
   external: ["bufferutil", "utf-8-validate"], define: { "process.env.WS_NO_BUFFER_UTIL": '"1"', "process.env.WS_NO_UTF_8_VALIDATE": '"1"' },

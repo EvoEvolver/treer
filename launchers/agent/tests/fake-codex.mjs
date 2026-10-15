@@ -26,6 +26,22 @@ if (process.env.FAKE_CODEX_UX) {
     { id: "answer-1", type: "agentMessage", text: "The file browser is ready. You can explore **src/** and preview files without leaving this conversation.\n\nThe changes below keep everything read-only." },
   );
 }
+// Rich fixtures for the React UI: reasoning, passing and failing commands, hostile markdown, and a long history for paging.
+if (process.env.FAKE_CODEX_RICH) {
+  turns[1].items.push(
+    { id: "think-1", type: "reasoning", summary: ["Compare the storage options"], text: "" },
+    { id: "cmd-1", type: "commandExecution", command: "npm test", aggregatedOutput: "ok 1 - queue\nok 2 - store", status: "completed" },
+    { id: "cmd-2", type: "commandExecution", command: "node --test tests/durable-queue.test.ts", aggregatedOutput: "not ok 1 - fixture path", status: "failed" },
+    { id: "rich-1", type: "agentMessage", text: "## Result\n\nSee [the docs](https://example.test/docs) and [bad](javascript:window.xss=3), [ftp](ftp://example.test/x), [tel](tel:123), [slash](/\\\\evil.test/x).<form><input name=\"x\"><button>go</button></form>\n\n<img src=x onerror=\"window.xss=1\">\n\n<svg onload=\"window.xss=2\"></svg><script>window.xss=4</script>\n\n![remote](https://example.test/x.png)\n\n- one\n- two\n\n```ts\nconst a = 1;\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n![pixel](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==)" },
+  );
+}
+if (process.env.FAKE_CODEX_MANY) {
+  const many = Array.from({ length: Number(process.env.FAKE_CODEX_MANY) }, (_, n) => ({ id: `old-${n}`, status: "completed", items: [
+    { id: `ou-${n}`, type: "userMessage", content: [{ type: "text", text: `older question ${n}` }] },
+    { id: `oa-${n}`, type: "agentMessage", text: `older answer ${n}` },
+  ] }));
+  turns.unshift(...many);
+}
 for await (const line of readline.createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
   if (process.env.FAKE_CODEX_CALLS) appendFileSync(process.env.FAKE_CODEX_CALLS, line + "\n");
@@ -42,7 +58,10 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     if (request.method === "thread/goal/clear") { goal = null; writeFileSync(goalFile, "null"); }
     result = request.method === "thread/goal/clear" ? { cleared: true } : { goal };
   }
-  if (request.method === "model/list") result = { data: [] };
+  if (request.method === "model/list") result = { data: process.env.FAKE_CODEX_MODELS ? [
+    { id: "gpt-a", model: "gpt-a", displayName: "GPT A", description: "", isDefault: true, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }, { reasoningEffort: "high", description: "" }], defaultReasoningEffort: "low" },
+    { id: "gpt-b", model: "gpt-b", displayName: "GPT B", description: "", isDefault: false, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "" }], defaultReasoningEffort: "medium" },
+  ] : [] };
   if (request.method === "turn/start") result = { turn: { id: "turn-new" } };
   if (request.method === "thread/resume") {
     if (request.params.threadId === "missing") {
@@ -66,7 +85,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   }
   console.log(JSON.stringify({ id: request.id, result }));
   if (request.method === "thread/goal/set" || request.method === "thread/goal/clear") console.log(JSON.stringify({ method: goal ? "thread/goal/updated" : "thread/goal/cleared", params: { threadId, goal } }));
-  if (request.method === "turn/start" && goal) {
+  if (request.method === "turn/start" && goal && !process.env.FAKE_CODEX_GOAL_ACTIVE) {
     goal = { ...goal, status: "complete", tokensUsed: 42, timeUsedSeconds: 2 };
     writeFileSync(goalFile, JSON.stringify(goal));
     console.log(JSON.stringify({ method: "thread/goal/updated", params: { threadId, turnId: "turn-new", goal } }));

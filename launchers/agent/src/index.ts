@@ -97,10 +97,13 @@ function serveFile(response: ServerResponse, file: string) {
   const headers: Record<string, string> = {
     "cache-control": "no-store",
     "content-type": mime(file),
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
   };
   if (extname(file) === ".html") {
+    // The page ships no inline styles or scripts, so it runs under a strict policy (no 'unsafe-inline', no plugins, no foreign forms).
     headers["content-security-policy"] =
-      "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self' data:";
+      "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'";
   }
   response.writeHead(200, headers);
   createReadStream(file).pipe(response);
