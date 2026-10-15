@@ -169,6 +169,11 @@ try {
   await expect(frame.locator("html")).toHaveAttribute("data-theme", "light");
   await page.evaluate(() => document.querySelector("iframe").contentWindow.postMessage({ type: "treer:embed-theme", theme: "dark" }, "*"));
   await expect(frame.locator("html")).toHaveAttribute("data-theme", "dark", "parent message");
+  await page.evaluate(() => document.querySelector("iframe").contentWindow.postMessage({ type: "treer:embed-theme", theme: "dark", look: "c", lang: "zh" }, "*"));
+  await expect(frame.locator("html")).toHaveAttribute("data-look", "c", "the parent message may set the look");
+  await page.evaluate(() => document.querySelector("iframe").contentWindow.postMessage({ type: "treer:embed-theme", theme: "dark", look: "<x>" }, "*"));
+  await expect(frame.locator("html")).toHaveAttribute("data-look", "c", "an unknown look in the message is ignored");
+  assert.equal(await frame.locator("html").evaluate(() => localStorage.getItem("treer-launcher-look")), null, "a console-sent look is not persisted");
 
   // Send a message through the real API; a fake Codex answers and the WebSocket pushes the state.
   await page.goto(url("?look=b"));

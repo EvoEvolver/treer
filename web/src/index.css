@@ -12,16 +12,16 @@
     --card-foreground: 45 5% 20%;
     --popover: 0 0% 100%;
     --popover-foreground: 45 5% 20%;
-    --primary: 209 76% 51%;
+    --primary: 209 76% 46%;
     --primary-foreground: 0 0% 100%;
     --secondary: 48 10% 96%;
     --secondary-foreground: 45 5% 20%;
     --muted: 48 10% 96%;
-    --muted-foreground: 40 2% 46%;
+    --muted-foreground: 40 3% 38%;
     --accent: 45 6% 92%;
     --accent-foreground: 45 5% 20%;
     --status-online: 150 47% 38%;
-    --destructive: 2 79% 63%;
+    --destructive: 2 72% 48%;
     --destructive-foreground: 0 0% 100%;
     --border: 45 6% 86%;
     --input: 45 6% 80%;
@@ -39,7 +39,7 @@
     --card-foreground: 45 10% 90%;
     --popover: 40 8% 12%;
     --popover-foreground: 45 10% 90%;
-    --primary: 209 76% 51%;
+    --primary: 209 76% 46%;
     --primary-foreground: 0 0% 100%;
     --secondary: 40 7% 13%;
     --secondary-foreground: 45 10% 90%;
@@ -144,4 +144,15 @@
   color: #694a73;
   background: #e8deee;
   border-bottom: 1px solid hsl(var(--border));
+}
+
+/* Respect the OS "reduce motion" setting: no animation or smooth scrolling,
+   transitions collapse to an instant change. State is still conveyed by colour. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

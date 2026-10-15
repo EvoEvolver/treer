@@ -147,8 +147,12 @@ pnpm test:e2e
 Browser tests mock the API and workspace events. The test runner creates a
 throwaway HOME and allows only basic process environment variables, excluding
 Agent identities, workload credentials, provider settings and HTTP proxies. It
-starts its own loopback Vite process and never reuses an existing server. Set
-`PW_PORT` to select a free port. Playwright browser binaries must be installed;
+starts its own loopback Vite and local-only Wrangler processes under Playwright
+management and never reuses an existing server. Set `PW_PORT` (1–65534) to select
+a free consecutive port pair: Vite uses `PW_PORT`, the security Worker uses
+`PW_PORT + 1`. An occupied port fails startup explicitly, even if another service
+answers `/health` with HTTP 200. Both child processes are stopped by Playwright;
+Worker state stays inside the throwaway HOME. Playwright browser binaries must be installed;
 `PLAYWRIGHT_BROWSERS_PATH` may point to an existing installation.
 
 The same-name Agent and startup editor cases cover desktop and 390px viewports;
@@ -170,3 +174,16 @@ Their sandbox is not a tenant or user-session security boundary. See the
 [security review](../docs/research/2026-10-12-security-web.md). The security suite
 starts its own local-only Wrangler and uses synthetic identities; build the
 bundle before running `pnpm test:e2e security.spec.ts --workers=1`.
+
+## Accessibility
+
+- The workload tree is one Tab stop (roving tabindex). Arrow Up/Down, Home and
+  End move between rows; Right expands a folder, enters it, or moves to a row's
+  actions menu button; Left collapses, returns to the row, or goes to the parent
+  folder. Actions buttons are reached with Right, not Tab.
+- The error toast is a `role="alert"` live region portalled to `<body>` so it is
+  announced and can be dismissed while a modal dialog is open.
+- `prefers-reduced-motion: reduce` disables animation and shortens transitions.
+- `pnpm run check:contrast` checks the HSL tokens in both themes against WCAG
+  2.1 (4.5:1 text, 3:1 non-text). Documented exceptions: dark-theme blue and red
+  as plain text reach 3:1 only, and input borders keep a 1.4:1 hairline floor.

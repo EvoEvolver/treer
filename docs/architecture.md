@@ -76,7 +76,11 @@ user menu opens a floating Settings overlay: Account edits preferred name and
 email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
 `localStorage` (`treer-theme`) and currently offers English only. Embedded Agent
 Interface iframes follow that setting through `theme` query, iframe
-`color-scheme`, and a `treer:embed-theme` postMessage. Usage &
+`color-scheme`, and a `treer:embed-theme` postMessage. The same URL and message
+also carry `look` (`a|b|c`, read from optional `localStorage` `treer-look`;
+omitted when unset) and `lang` (`en|zh` from the browser language); only
+whitelisted values are sent and the launcher UI validates them again. `look` is
+applied live without being stored by the launcher; `lang` applies at load. Usage &
 billing is a placeholder until a billing backend exists. Control-plane image
 updates are not in Settings. They live on `/admin` for the platform
 administrator.

@@ -207,7 +207,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     const app = agent && apps.find((entry) => entry.runtime_agent_id === agent.agent_id || entry.app_id === agent.agent_id)
     const siblings = orderedRows(parent)
     const index = agent ? siblings.findIndex((entry) => entry.agent_id === agent.agent_id) : -1
-    return <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`Actions for ${item.name}`}><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+    return <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`Actions for ${item.name}`} tabIndex={-1} data-tree-actions=""><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
       {agent && !app && agent.kind !== "app" && <DropdownMenuItem disabled={busy || preview || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => setStartupAgent(agent)}>Edit startup command</DropdownMenuItem>}
       {agent ? <><DropdownMenuItem disabled={busy || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => void lifecycle(agent, "start")}>Start</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "stop")}>Stop</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "restart")}>Restart</DropdownMenuItem><DropdownMenuItem onSelect={() => onOpen(agent.agent_id, true)}>Logs</DropdownMenuItem>{app && <DropdownMenuItem onSelect={() => onSettings(app)}>App settings</DropdownMenuItem>}<DropdownMenuItem onSelect={() => onRename(agent)}>Rename</DropdownMenuItem></> : <><DropdownMenuItem disabled={!workspaceId || busy || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew({ folderId: item.id, path: itemPath(item, parent) })}>New Agent</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("create", item.id)}>New folder</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("rename", parent, item)}>Rename</DropdownMenuItem></>}
       <DropdownMenuItem onSelect={() => void copyPath(itemPath(item, parent))}>Copy path</DropdownMenuItem>
@@ -216,14 +216,64 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       <DropdownMenuItem disabled={busy} onSelect={() => agent ? onDelete(agent) : void mutate(`/folders/${encodeURIComponent(item.id)}`, "DELETE")}>Delete</DropdownMenuItem>
     </DropdownMenuContent></DropdownMenu>
   }
+  // Keyboard model (WAI-ARIA tree): one Tab stop on the row buttons (roving
+  // tabindex), arrows move, Right/Left expand, collapse or enter/leave a row's
+  // actions menu button. Menu buttons are reachable by ArrowRight, not Tab.
+  const treeRoot = useRef<HTMLDivElement>(null)
+  const treeActive = useRef<string | null>(null)
+  function syncTreeTabStop() {
+    const primaries = Array.from(treeRoot.current?.querySelectorAll<HTMLElement>("[data-tree-primary]") ?? [])
+    const wanted = primaries.find((el) => el.dataset.treeKey === treeActive.current)
+      ?? primaries.find((el) => el.dataset.treeKey === selectedId) ?? primaries[0]
+    for (const el of primaries) el.tabIndex = el === wanted ? 0 : -1
+  }
+  useEffect(syncTreeTabStop)
+  function trackTreeFocus(event: React.FocusEvent<HTMLDivElement>) {
+    const key = (event.target as HTMLElement).closest<HTMLElement>("[data-tree-primary]")?.dataset.treeKey
+    if (key && key !== treeActive.current) { treeActive.current = key; syncTreeTabStop() }
+  }
+  function treeKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return
+    const target = event.target as HTMLElement
+    const root = event.currentTarget
+    if (!root.contains(target) || !(target.matches("[data-tree-primary]") || target.matches("[data-tree-actions]"))) return
+    const onActions = target.matches("[data-tree-actions]")
+    const item = target.closest<HTMLElement>('[role="treeitem"]')
+    const primary = item?.querySelector<HTMLElement>("[data-tree-primary]")
+    if (!item || !primary) return
+    const all = Array.from(root.querySelectorAll<HTMLElement>("[data-tree-primary]"))
+    const at = all.indexOf(primary)
+    const isFolder = item.hasAttribute("aria-expanded")
+    const open = item.getAttribute("aria-expanded") === "true"
+    let next: HTMLElement | undefined
+    switch (event.key) {
+      case "ArrowDown": next = all[Math.min(at + 1, all.length - 1)]; break
+      case "ArrowUp": next = all[Math.max(at - 1, 0)]; break
+      case "Home": next = all[0]; break
+      case "End": next = all[all.length - 1]; break
+      case "ArrowRight":
+        if (onActions) return
+        if (isFolder && !open) { primary.click(); event.preventDefault(); return }
+        if (isFolder) { const child = all[at + 1]; next = child && item.contains(child) ? child : undefined } else next = item.querySelector<HTMLElement>("[data-tree-actions]") ?? undefined
+        break
+      case "ArrowLeft":
+        if (onActions) next = primary
+        else if (isFolder && open) { primary.click(); event.preventDefault(); return }
+        else next = item.parentElement?.closest<HTMLElement>('[role="treeitem"]')?.querySelector<HTMLElement>("[data-tree-primary]") ?? undefined
+        break
+      default: return
+    }
+    event.preventDefault()
+    next?.focus()
+  }
   function render(parent: string | null, ancestors: Set<string> = new Set()): React.ReactNode {
     const folders = tree.folders.filter((folder) => folder.parent_id === parent && !ancestors.has(folder.folder_id)).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }) || a.folder_id.localeCompare(b.folder_id))
     const rows = orderedRows(parent)
-    return <>{folders.map((folder) => { const item: Item = { kind: "folder", id: folder.folder_id, name: folder.name }; return <div key={folder.folder_id} role="treeitem" aria-expanded={expanded[folder.folder_id] === true} aria-label={folder.name}>
+    return <>{folders.map((folder) => { const item: Item = { kind: "folder", id: folder.folder_id, name: folder.name }; return <div key={folder.folder_id} role="treeitem" aria-level={ancestors.size + 1} aria-expanded={expanded[folder.folder_id] === true} aria-label={folder.name}>
       <div title={folderPath(folder)} className="flex min-h-10 items-center rounded px-1 hover:bg-accent" draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => setDragged(null)} onDragOver={(event) => { event.preventDefault(); event.stopPropagation() }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (dragged) move(dragged, folder.folder_id); setDragged(null) }}>
-        <button className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs" onClick={() => { pendingReveal.current = null; saveExpansion({ ...expansion.current, [folder.folder_id]: expansion.current[folder.folder_id] !== true }) }}>{expanded[folder.folder_id] !== true ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}<Folder className="size-3.5" /><span className="truncate">{folder.name}</span></button>{menu(item, parent)}
+        <button data-tree-primary="" data-tree-key={folder.folder_id} className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs" onClick={() => { pendingReveal.current = null; saveExpansion({ ...expansion.current, [folder.folder_id]: expansion.current[folder.folder_id] !== true }) }}>{expanded[folder.folder_id] !== true ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}<Folder className="size-3.5" /><span className="truncate">{folder.name}</span></button>{menu(item, parent)}
       </div>{expanded[folder.folder_id] === true && <div role="group" className="ml-3 border-l pl-1">{render(folder.folder_id, new Set([...ancestors, folder.folder_id]))}</div>}
-    </div> })}{rows.map((agent) => { const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }; return <div role="treeitem" aria-label={agent.name} title={agentPath(agent, tree)} data-agent-id={agent.agent_id} aria-selected={selectedId === agent.agent_id} key={agent.agent_id} draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => { setDragged(null); setDropTarget(null) }} onDragOver={(event) => {
+    </div> })}{rows.map((agent) => { const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }; return <div role="treeitem" aria-level={ancestors.size + 1} aria-label={agent.name} title={agentPath(agent, tree)} data-agent-id={agent.agent_id} aria-selected={selectedId === agent.agent_id} key={agent.agent_id} draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => { setDragged(null); setDropTarget(null) }} onDragOver={(event) => {
       if (busy || dragged?.kind !== "agent" || dragged.id === agent.agent_id) return
       event.preventDefault(); event.stopPropagation()
       event.dataTransfer.dropEffect = "move"
@@ -238,7 +288,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       }
       setDragged(null); setDropTarget(null)
     }} className={`flex min-h-12 items-center gap-1 rounded px-2 py-1 hover:bg-accent ${selectedId === agent.agent_id ? "bg-accent" : ""} ${dropTarget?.id === agent.agent_id ? dropTarget.after ? "shadow-[inset_0_-2px_0_hsl(var(--primary))]" : "shadow-[inset_0_2px_0_hsl(var(--primary))]" : ""}`}>
-      <button className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="block truncate text-xs font-medium">{agent.name}</span><span className="block truncate text-[9px] text-muted-foreground">{workloadKind(agent)} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
+      <button data-tree-primary="" data-tree-key={agent.agent_id} className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="block truncate text-xs font-medium">{agent.name}</span><span className="block truncate text-[9px] text-muted-foreground">{workloadKind(agent)} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
     </div> })}</>
   }
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-tour="agents-tab">
@@ -257,7 +307,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
 
     {copyNotice && <p role="status" className="px-3 py-2 text-xs break-all">{copyNotice}</p>}
     {loading && <p role="status" className="px-3 text-xs">Loading folders…</p>}{error && !editor && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="mt-1 h-7" disabled={busy} onClick={() => setReload((value) => value + 1)}>Reload folders</Button></div>}
-    <div role="tree" aria-label="Workspace workloads" aria-busy={busy || loading} className="min-h-0 flex-1 overflow-auto px-2 pb-3" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (dragged) move(dragged, null); setDragged(null) }}>{render(null)}{!workloads.length && !tree.folders.length && !loading && <p className="px-2 py-4 text-xs text-muted-foreground">No workloads in this workspace</p>}<div aria-label="Move to workspace root" className="mt-2 min-h-8 border-t px-2 py-2 text-[10px] text-muted-foreground">Workspace root</div></div>
+    <div ref={treeRoot} role="tree" aria-label="Workspace workloads" aria-busy={busy || loading} onKeyDown={treeKeyDown} onFocus={trackTreeFocus} className="min-h-0 flex-1 overflow-auto px-2 pb-3" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (dragged) move(dragged, null); setDragged(null) }}>{render(null)}{!workloads.length && !tree.folders.length && !loading && <p className="px-2 py-4 text-xs text-muted-foreground">No workloads in this workspace</p>}<div aria-label="Move to workspace root" className="mt-2 min-h-8 border-t px-2 py-2 text-[10px] text-muted-foreground">Workspace root</div></div>
     <Dialog open={manualCopyPath !== null} onOpenChange={(open) => !open && setManualCopyPath(null)}><DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); copyInput.current?.focus(); copyInput.current?.select() }}><DialogHeader><DialogTitle>Copy path</DialogTitle><DialogDescription>Automatic copying is unavailable. Use your device's copy action on the selected path.</DialogDescription></DialogHeader><Input ref={copyInput} aria-label="Tree path" value={manualCopyPath ?? ""} readOnly className="font-mono" onFocus={(event) => event.target.select()} /><DialogFooter><Button onClick={() => setManualCopyPath(null)}>Done</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={Boolean(editor)} onOpenChange={(open) => !open && setEditor(null)}><DialogContent><DialogHeader><DialogTitle>{editor?.mode === "move" ? `Move ${editor.item?.name}` : editor?.mode === "rename" ? "Rename folder" : "New folder"}</DialogTitle></DialogHeader>
       {editor?.mode === "move" ? <label className="text-sm">Destination<select aria-label="Destination folder" className="mt-2 w-full rounded border bg-background p-2" value={destination} onChange={(event) => setDestination(event.target.value)}><option value="">Workspace root</option>{tree.folders.filter((folder) => editor.item?.kind !== "folder" || !descendants(editor.item.id).has(folder.folder_id)).map((folder) => <option key={folder.folder_id} value={folder.folder_id}>{folderPath(folder)}</option>)}</select></label> : <Input aria-label="Folder name" autoFocus value={name} onChange={(event) => setName(event.target.value)} />}
