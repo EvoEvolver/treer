@@ -14,7 +14,13 @@ DOMPurify.addHook("afterSanitizeAttributes", (node) => {
   if (node.tagName === "IMG") {
     const safe = safeImageUrl(node.getAttribute("src"));
     if (safe) node.setAttribute("src", safe);
-    else { node.removeAttribute("src"); if (!node.getAttribute("alt")) node.setAttribute("alt", "image"); }
+    else {
+      // A blocked image becomes its alt text, never a request and never a broken-image icon.
+      const label = document.createElement("span");
+      label.className = "blocked-image";
+      label.textContent = `[${node.getAttribute("alt") || "image"}]`;
+      node.replaceWith(label);
+    }
   }
 });
 

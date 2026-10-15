@@ -83,7 +83,12 @@ export interface Goal {
   requiredAction?: string;
   syncStatus?: "synced" | "desynced" | "exit_unconfirmed";
   syncError?: string;
+  rejectionCount?: number;
+  consecutiveRejections?: number;
 }
+
+export interface GoalDelivery { id: string; status: "sending" | "sent" | "failed"; error?: string | null }
+export interface GoalInput { objective?: string; status?: "active" | "paused"; tokenBudget?: number | null }
 
 export interface HarnessInfo {
   id: string;
@@ -104,6 +109,7 @@ export interface Snapshot {
   backgroundTasks: BackgroundTask[];
   queue: QueuedPrompt[];
   goal: Goal | null;
+  goalDelivery?: GoalDelivery | null;
   history: { limit: number };
   submission?: { downgraded?: boolean };
 }

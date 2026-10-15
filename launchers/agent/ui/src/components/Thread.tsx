@@ -1,10 +1,14 @@
-import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useLayoutEffect, useRef, useState } from "react";
 import { t, type MessageKey } from "../i18n";
 import { useAppearance } from "../appearance";
 import { useStore } from "../state/store";
 import type { TurnDto } from "../types";
 import { Icon } from "./Icon";
 import { TurnView } from "./Timeline";
+
+function GoalDone({ objective }: { objective: string }) {
+  return <section className="goal-done" role="status"><Icon name="check" /><span>{t("goal.done", { objective })}</span></section>;
+}
 
 const STICK = 160; // px from the bottom that still counts as "following the conversation"
 
@@ -76,7 +80,13 @@ export function Thread() {
             {snapshot?.thread?.hasOlderItems && (
               <div className="older"><button type="button" className="btn" disabled={state.loadingOlder} onClick={() => void older()}>{state.loadingOlder ? t("thread.loadingOlder") : t("thread.older")}</button></div>
             )}
-            {turns.map((turn, index) => <TurnView key={turn.id} turn={turn} latest={index === turns.length - 1} />)}
+            {turns.map((turn, index) => (
+              <Fragment key={turn.id}>
+                <TurnView turn={turn} latest={index === turns.length - 1} />
+                {state.notices.filter((notice) => notice.afterTurn === turn.id).map((notice, n) => <GoalDone key={n} objective={notice.objective} />)}
+              </Fragment>
+            ))}
+            {state.notices.filter((notice) => !turns.some((turn) => turn.id === notice.afterTurn)).map((notice, n) => <GoalDone key={`x${n}`} objective={notice.objective} />)}
             {running && <div className="working" role="status"><i className="spin" aria-hidden="true" /><span>{t("thread.working")}</span></div>}
           </div>
         </div>

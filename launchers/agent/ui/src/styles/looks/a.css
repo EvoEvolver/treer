@@ -146,4 +146,7 @@ pre code{background:none;padding:0}
   .dock{padding:28px 8px 8px}.pop{padding-bottom:20px}
   .titles{min-width:0}
 }
-
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}.btn.primary:hover{filter:brightness(1.08);color:var(--accent-fg)}
+.btn.danger{color:var(--danger)}.btn.danger:hover{border-color:var(--danger);color:var(--danger)}
+.btn:disabled{opacity:.5;cursor:default}
+@media (max-width:640px){.pop{left:0;right:0;bottom:0}}

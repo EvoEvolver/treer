@@ -146,3 +146,8 @@ pre{margin:0 0 8px;padding:8px 12px;background:var(--sunken);border:1px solid va
   .box{padding:6px 10px}.dock{padding:12px 8px 8px}.jump{right:12px}
   .seg{padding:0 8px}.seg .tx{display:none}.seg.goal .tx{display:inline;max-width:10ch}
 }
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--accent-fg)}.btn.primary:hover{background:var(--fg);color:var(--bg);border-color:var(--fg)}
+.btn.danger{color:var(--danger)}.btn.danger:hover{background:var(--danger);color:var(--bg);border-color:var(--danger)}
+.btn:disabled{opacity:.5;cursor:default}
+.queueb{height:26px}
+@media (max-width:640px){.pop{left:0;right:0;bottom:0}}
