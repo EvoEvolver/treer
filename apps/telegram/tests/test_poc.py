@@ -572,11 +572,14 @@ class TokenFileTest(unittest.TestCase):
         with self.assertRaises(BridgeError):
             self.load({"bot_token_file": ""})
 
-    def test_user_admin_is_open_by_default_and_a_list_restricts_it(self) -> None:
+    def test_user_admin_is_closed_by_default_any_opens_it_and_a_list_restricts_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = str(self.token_file(Path(directory)))
-            self.assertIsNone(self.load({"bot_token_file": path})[0].user_admin_agent_ids, "absent: any accepted sender")
+            self.assertEqual(self.load({"bot_token_file": path})[0].user_admin_agent_ids, frozenset(), "absent: nobody (the safe default)")
+            self.assertIsNone(self.load({"bot_token_file": path, "control": {"user_admin_agent_ids": "any"}})[0].user_admin_agent_ids, "\"any\": explicit opt-in")
             self.assertEqual(self.load({"bot_token_file": path, "control": {"user_admin_agent_ids": []}})[0].user_admin_agent_ids, frozenset(), "empty list: nobody")
+            with self.assertRaises(BridgeError):
+                self.load({"bot_token_file": path, "control": {"user_admin_agent_ids": "everyone"}})
             self.assertEqual(self.load({"bot_token_file": path, "control": {"user_admin_agent_ids": ["ag_a"]}})[0].user_admin_agent_ids, frozenset({"ag_a"}))
 
 
@@ -590,6 +593,18 @@ class OpenUserAdminTest(PocBase):
         self.assertEqual(self.audit()[0]["actor"], "agent:agent-x")
         self.say("hi", user=777)
         self.assertEqual(self.core_sends()[-1]["external_source"]["metadata"]["user_label"], "Dana")
+
+
+class UserAdmissionReportTest(PocBase):
+    admins = None
+
+    def test_users_list_reports_the_admission_mode(self) -> None:
+        listing, _ = self.result(self.control("agent-x", {"im": "users.list"}))
+        self.assertEqual(listing["user_admission"], "open")
+        self.bridge.poc.user_admin_agent_ids = frozenset({"ag_a"})
+        self.assertEqual(self.result(self.control("agent-x", {"im": "users.list"}))[0]["user_admission"], "restricted")
+        self.bridge.poc.user_admin_agent_ids = frozenset()
+        self.assertEqual(self.result(self.control("agent-x", {"im": "users.list"}))[0]["user_admission"], "closed")
 
 
 class EmptyUserAdminTest(PocBase):

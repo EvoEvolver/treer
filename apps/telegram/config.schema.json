@@ -145,13 +145,20 @@
       "additionalProperties": false,
       "properties": {
         "user_admin_agent_ids": {
-          "type": "array",
-          "items": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": 256
-          },
-          "description": "Restricts who may admit/disable IM users through control messages. Absent: any sender the bridge accepts (default). A list: only these Agent IDs. An empty list: nobody. POC changes are never restricted by this."
+          "description": "Who may admit/disable IM users through control messages. Absent or []: nobody (default). A list: only these Agent IDs. The string \"any\": any sender the bridge accepts (explicit opt-in). POC changes are never restricted by this.",
+          "oneOf": [
+            {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              }
+            },
+            {
+              "const": "any"
+            }
+          ]
         }
       }
     },

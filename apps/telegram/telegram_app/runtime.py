@@ -36,22 +36,26 @@ def read_token_file(path: str) -> str:
     user can access; messages never include the file's content."""
     if not os.path.isabs(path):
         raise BridgeError("bot_token_file must be an absolute path")
+    # Open first (never following a symlink), then validate and read through the SAME descriptor: nothing can be swapped
+    # between the check and the read.
     try:
-        info = os.lstat(path)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
     except OSError as error:
-        raise BridgeError("bot_token_file cannot be read") from error
-    if not stat.S_ISREG(info.st_mode):
-        raise BridgeError("bot_token_file must be a regular file, not a symlink or directory")
-    if info.st_uid != os.getuid() or info.st_mode & 0o077:
-        raise BridgeError("bot_token_file must be owned by this user with mode 0600 (no group/other access)")
-    if info.st_size == 0 or info.st_size > 512:
-        raise BridgeError("bot_token_file must hold one token of at most 512 bytes")
+        raise BridgeError("bot_token_file cannot be read (missing, a symlink, or not permitted)") from error
     try:
-        with open(path, "rb") as handle:
-            raw = handle.read(513)
-        return raw.decode("ascii").strip()
-    except (OSError, UnicodeDecodeError) as error:
-        raise BridgeError("bot_token_file cannot be read as an ASCII token") from error
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode):
+            raise BridgeError("bot_token_file must be a regular file")
+        if info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise BridgeError("bot_token_file must be owned by this user with mode 0600 (no group/other access)")
+        if info.st_size == 0 or info.st_size > 512:
+            raise BridgeError("bot_token_file must hold one token of at most 512 bytes")
+        try:
+            return os.read(descriptor, 513).decode("ascii").strip()
+        except (OSError, UnicodeDecodeError) as error:
+            raise BridgeError("bot_token_file cannot be read as an ASCII token") from error
+    finally:
+        os.close(descriptor)
 
 
 def resolve_token(token_file: Any, state_dir: Path) -> str | None:
@@ -164,8 +168,9 @@ def load_config() -> tuple[Config, Path, str, str | None]:
     control = _object(value.get("control", {}), "control")
     if set(control) - {"user_admin_agent_ids"}:
         raise BridgeError("control has unknown fields")
-    # Absent: any sender the bridge accepts may admit IM users (like POC changes). A list restricts it; [] means nobody.
-    admins = _list(control["user_admin_agent_ids"], "user_admin_agent_ids") if "user_admin_agent_ids" in control else None
+    # Absent or []: nobody admits IM users through control messages. A list: those Agents. The string "any": any accepted sender.
+    raw_admins = control.get("user_admin_agent_ids", [])
+    admins = None if raw_admins == "any" else _list(raw_admins, "user_admin_agent_ids")
     return (
         Config(
             api_base_url=base_url,

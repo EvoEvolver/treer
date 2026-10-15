@@ -62,6 +62,8 @@ class TelegramBridge:
         ):
             print(f"Treer Telegram registry: {change}", file=sys.stderr, flush=True)
         self.poc = PocService(state, cli, bot_id, config.user_admin_agent_ids)
+        if config.user_admin_agent_ids is None:
+            print("Treer Telegram: IM user admission is OPEN to any sender the bridge accepts (control.user_admin_agent_ids = \"any\")", file=sys.stderr, flush=True)
 
     def run_inbound_once(self, timeout: int | None = None) -> int:
         offset = self.state.last_update_id() + 1

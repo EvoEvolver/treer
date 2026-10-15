@@ -56,17 +56,22 @@ class TokenStore:
     def read(self) -> str | None:
         """The stored token, or None when there is none. Unsafe files raise instead of being used."""
         try:
-            info = os.lstat(self.path)
+            descriptor = os.open(self.path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
         except FileNotFoundError:
             return None
-        self._check(info)
-        if info.st_size == 0 or info.st_size > 512:
-            raise BridgeError("the stored bot token has an invalid size")
+        except OSError as error:                       # a symlink (ELOOP) or an unreadable file
+            raise BridgeError("the stored bot token is not a readable regular file") from error
         try:
-            with open(self.path, "rb") as handle:
-                return handle.read(513).decode("ascii").strip()
-        except (OSError, UnicodeDecodeError) as error:
-            raise BridgeError("the stored bot token cannot be read") from error
+            info = os.fstat(descriptor)                # validate and read through one descriptor: no check/use gap
+            self._check(info)
+            if info.st_size == 0 or info.st_size > 512:
+                raise BridgeError("the stored bot token has an invalid size")
+            try:
+                return os.read(descriptor, 513).decode("ascii").strip()
+            except (OSError, UnicodeDecodeError) as error:
+                raise BridgeError("the stored bot token cannot be read") from error
+        finally:
+            os.close(descriptor)
 
     def write(self, token: str) -> None:
         if not valid_shape(token):

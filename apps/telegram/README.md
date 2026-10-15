@@ -89,12 +89,11 @@ Redelivery is safe: the audit row is unique per Core delivery, so a change is
 applied once and the result is re-sent under the same idempotency key. A relayed
 reply whose whole body happens to be JSON with an `im` key is treated as control.
 
-**Admitting IM users** (`users.set`, `im-poc user-set`) is open to any sender the
-bridge accepts by default, like POC changes, and is audited the same way. Admitting an
-external person to talk to the POC is a wider trust decision than choosing a POC, so
-`control.user_admin_agent_ids` can restrict it to a list of Agent IDs (an empty list:
-nobody; then edit the config's `users` and restart). Unknown or disabled users are
-refused either way.
+**Admitting IM users** (`users.set`, `im-poc user-set`) is closed by default: nobody may do it through control
+messages. `control.user_admin_agent_ids` is either a list of the Agent IDs that may, or the string `"any"` to let any sender
+the bridge accepts do it (an explicit deployment decision, logged at start-up and reported by `users.list` as
+`user_admission`, audited like POC changes). Admitting an external person to talk to the POC is a wider trust decision than
+choosing a POC. Unknown or disabled users are refused either way; the settings App and `/pair` are the other ways in.
 
 ## Limits, audit and revoking access
 
