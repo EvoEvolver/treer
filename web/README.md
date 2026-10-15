@@ -292,3 +292,26 @@ bundle before running `pnpm test:e2e security.spec.ts --workers=1`.
 - `pnpm run check:contrast` checks the HSL tokens in both themes against WCAG
   2.1 (4.5:1 text, 3:1 non-text). Documented exceptions: dark-theme blue and red
   as plain text reach 3:1 only, and input borders keep a 1.4:1 hairline floor.
+
+## Internationalization
+
+The console is available in English and Simplified Chinese with no new
+dependency. Everything lives in `src/i18n/`:
+
+- `en.ts` is the source dictionary. Keys are `screen.name`; values may contain
+  `{name}` placeholders. `zh.ts` is typed `Record<keyof en, string>`, so a missing
+  key fails `typecheck`; `e2e/i18n.spec.ts` also checks placeholders and HTML
+  tags (tour texts) match.
+- Call `t("key", { name })` anywhere in render code. `App` subscribes to the
+  language once, so a switch re-renders the whole tree. Use `tnodes` to put
+  React elements inside a sentence, `statusLabel`/`roleLabel` for server enums,
+  and `intlLocale()` for `Intl`/`toLocale*` calls.
+- Do not evaluate `t()` at module load (it would freeze the language). Use keys in
+  constants and call `t(key)` when rendering.
+- Language order: stored `treer-lang`, then `navigator.language`, then English.
+  `document.documentElement.lang` follows, and embedded UIs receive `lang`.
+- Terms follow the launcher UI (`launchers/agent/ui/src/i18n`): 工作中, 空闲,
+  已阻塞, Agent, 工作区.
+- Adding a string: add the key to `en.ts` and `zh.ts`, use `t()`. App UIs
+  (Issues, Telegram, email) are not part of the console dictionary.
+

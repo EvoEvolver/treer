@@ -74,11 +74,14 @@ together in `components/workspace-app.tsx`.
 counts expand into lists, password-reset links, and live Agents per machine. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
 email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
-`localStorage` (`treer-theme`) and currently offers English only. Embedded Agent
+`localStorage` (`treer-theme`). Language is English or Simplified Chinese: the
+stored choice (`treer-lang`, set in Settings → General or on the sign-in screen)
+wins, otherwise the browser language (`zh*` selects Chinese). Server-provided
+messages (API errors, Agent names) are shown as received. Embedded Agent
 Interface iframes follow that setting through `theme` query, iframe
 `color-scheme`, and a `treer:embed-theme` postMessage. The same URL and message
 also carry `look` (`a|b|c`, read from optional `localStorage` `treer-look`;
-omitted when unset) and `lang` (`en|zh` from the browser language); only
+omitted when unset) and `lang` (`en|zh`, the console language); only
 whitelisted values are sent and the launcher UI validates them again. `look` is
 applied live without being stored by the launcher; `lang` applies at load. Usage &
 billing is a placeholder until a billing backend exists. Control-plane image

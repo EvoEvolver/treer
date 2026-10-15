@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button"
 import { machineName, type Agent, type Machine, type WorkloadTreeState } from "@/lib/api"
 import { agentPath, folderPath, workloadKind } from "@/lib/workload-path"
 import "./workload-treemap.css"
+import { statusLabel, t } from "@/i18n"
 
 type Branch = { id: string; label: string; path: string; agent?: Agent; children: Branch[]; count: number; nodes: number; parent?: Branch }
 
@@ -93,10 +94,10 @@ export default function WorkloadTreeMap({ tree, agents, machines, selectedId, on
         const online = machine?.status === "online"
         const status = online ? item.agent.status : "offline"
         const running = online && ["running", "idle", "working", "starting"].includes(status)
-        const description = `${item.path} · ${workloadKind(item.agent)} · ${machineName(machine, item.agent.server_id)} · ${status}`
-        return <button key={`agent:${item.id}`} title={description} aria-label={`Open ${description}`} aria-current={item.id === selectedId ? "true" : undefined} className="treemap-agent flex h-[72px] min-w-0 flex-col justify-start gap-1 overflow-hidden rounded-md border bg-card p-2 text-left transition-colors hover:border-primary focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onMouseEnter={() => setDetail(description)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(description)} onBlur={() => setDetail("")} onClick={() => onOpen(item.id)}>
+        const description = t("overview.row_title", { path: item.path, kind: t(`kind.${workloadKind(item.agent)}`), machine: machineName(machine, item.agent.server_id), status: statusLabel(status) })
+        return <button key={`agent:${item.id}`} title={description} aria-label={t("treemap.open_agent", { description })} aria-current={item.id === selectedId ? "true" : undefined} className="treemap-agent flex h-[72px] min-w-0 flex-col justify-start gap-1 overflow-hidden rounded-md border bg-card p-2 text-left transition-colors hover:border-primary focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onMouseEnter={() => setDetail(description)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(description)} onBlur={() => setDetail("")} onClick={() => onOpen(item.id)}>
           <span className="flex w-full min-w-0 items-center gap-2 text-xs font-medium"><WorkloadIcon kind={workloadKind(item.agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{item.label}</span></span>
-          <span className="block w-full min-w-0 text-[10px] leading-4 text-muted-foreground"><span className="block truncate">{workloadKind(item.agent)} · {machineName(machine, item.agent.server_id)}</span><span className="flex items-center gap-1.5"><span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${running ? "bg-[hsl(var(--status-online))]" : "bg-muted-foreground"}`} />{status}</span></span>
+          <span className="block w-full min-w-0 text-[10px] leading-4 text-muted-foreground"><span className="block truncate">{t(`kind.${workloadKind(item.agent)}`)} · {machineName(machine, item.agent.server_id)}</span><span className="flex items-center gap-1.5"><span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${running ? "bg-[hsl(var(--status-online))]" : "bg-muted-foreground"}`} />{statusLabel(status)}</span></span>
         </button>
       }
       const preview = item.children.length > 0 && item.count <= remainingLeaves && item.nodes - 1 <= remainingNodes
@@ -107,26 +108,26 @@ export default function WorkloadTreeMap({ tree, agents, machines, selectedId, on
       }
       const folded = !preview ? summary(item) : null
       return <section key={`folder:${item.id}`} aria-label={`Folder ${item.path}`} className={`treemap-folder col-span-full min-w-0 overflow-hidden rounded-lg border ${depth % 2 ? "bg-background" : "bg-muted/60"}`}>
-        <button title={item.path} aria-label={`Explore folder ${item.path}`} className="flex min-h-11 w-full min-w-0 items-center gap-2 px-2 text-left text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => navigate(item.id)} onMouseEnter={() => setDetail(item.path)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(item.path)} onBlur={() => setDetail("")}><Folder aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{item.label}</span><span className="text-[10px] text-muted-foreground">{item.count} {item.count === 1 ? "agent" : "agents"}</span><ChevronRight aria-hidden="true" className="size-3" /></button>
+        <button title={item.path} aria-label={t("treemap.explore", { path: item.path })} className="flex min-h-11 w-full min-w-0 items-center gap-2 px-2 text-left text-xs font-medium hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" onClick={() => navigate(item.id)} onMouseEnter={() => setDetail(item.path)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(item.path)} onBlur={() => setDetail("")}><Folder aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate">{item.label}</span><span className="text-[10px] text-muted-foreground">{item.count} {item.count === 1 ? "agent" : "agents"}</span><ChevronRight aria-hidden="true" className="size-3" /></button>
         {preview ? <div className="border-t p-1.5 sm:p-2">{render(item.children, depth + 1)}</div> : <div className="space-y-2 border-t p-2">
           {item.children.length ? <>
             <p className="break-words text-[10px] leading-4 text-muted-foreground">{folded?.states}</p>
-            <div className="flex min-w-0 flex-wrap gap-1" aria-label={`Preview of ${item.path}`}>{folded?.tags.map((child) => <span key={child.id} title={child.path} className="flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-1 text-[10px] text-muted-foreground">{child.agent ? <WorkloadIcon kind={workloadKind(child.agent)} className="size-3 shrink-0" /> : <Folder aria-hidden="true" className="size-3 shrink-0" />}<span className="max-w-40 truncate">{child.label}</span></span>)}</div>
-          </> : <p className="text-xs text-muted-foreground">Empty folder</p>}
-          <Button variant="outline" size="sm" aria-label={`View contents of ${item.path}`} onClick={() => navigate(item.id)}><Layers3 aria-hidden="true" className="size-3.5" />{item.children.length ? `Expand · ${item.count} ${item.count === 1 ? "agent" : "agents"}` : "Open folder"}</Button>
+            <div className="flex min-w-0 flex-wrap gap-1" aria-label={t("treemap.preview", { path: item.path })}>{folded?.tags.map((child) => <span key={child.id} title={child.path} className="flex max-w-full items-center gap-1 rounded border bg-background px-1.5 py-1 text-[10px] text-muted-foreground">{child.agent ? <WorkloadIcon kind={workloadKind(child.agent)} className="size-3 shrink-0" /> : <Folder aria-hidden="true" className="size-3 shrink-0" />}<span className="max-w-40 truncate">{child.label}</span></span>)}</div>
+          </> : <p className="text-xs text-muted-foreground">{t("treemap.empty_folder")}</p>}
+          <Button variant="outline" size="sm" aria-label={t("treemap.view_contents", { path: item.path })} onClick={() => navigate(item.id)}><Layers3 aria-hidden="true" className="size-3.5" />{item.children.length ? t(item.count === 1 ? "treemap.expand_one" : "treemap.expand_many", { count: item.count }) : t("treemap.open_folder")}</Button>
         </div>}
       </section>
     })}</div>
   }
   return <div className="flex min-h-0 flex-1 flex-col">
     <div className="flex shrink-0 items-center gap-2 border-b px-3 py-2 sm:px-5">
-      <Button size="icon" variant="ghost" aria-label="Back to parent folder" disabled={!current} onClick={() => navigate(current?.parent?.id ?? null)}><ArrowLeft className="size-3.5" /></Button>
-      <nav ref={breadcrumbs} tabIndex={-1} aria-label="Map breadcrumbs" className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><button className="shrink-0 rounded px-1 py-2 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate(null)} aria-current={!current ? "location" : undefined}>Workspace</button>{chain.map((branch) => <span key={branch.id} className="flex shrink-0 items-center gap-1"><ChevronRight aria-hidden="true" className="size-3 text-muted-foreground" /><button className="max-w-40 truncate rounded px-1 py-2 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={branch.path} aria-current={branch.id === current?.id ? "location" : undefined} onClick={() => navigate(branch.id)}>{branch.label}</button></span>)}</nav>
+      <Button size="icon" variant="ghost" aria-label={t("treemap.back_to_parent_folder")} disabled={!current} onClick={() => navigate(current?.parent?.id ?? null)}><ArrowLeft className="size-3.5" /></Button>
+      <nav ref={breadcrumbs} tabIndex={-1} aria-label={t("treemap.map_breadcrumbs")} className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto rounded text-xs focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"><button className="shrink-0 rounded px-1 py-2 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onClick={() => navigate(null)} aria-current={!current ? "location" : undefined}>{t("app.workspace")}</button>{chain.map((branch) => <span key={branch.id} className="flex shrink-0 items-center gap-1"><ChevronRight aria-hidden="true" className="size-3 text-muted-foreground" /><button className="max-w-40 truncate rounded px-1 py-2 hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" title={branch.path} aria-current={branch.id === current?.id ? "location" : undefined} onClick={() => navigate(branch.id)}>{branch.label}</button></span>)}</nav>
       <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground">{agents.length} agents</span>
     </div>
-    <div ref={container} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-background p-2 sm:p-3" role="group" aria-label="Workspace treemap">
-      {children.length ? size.width > 0 && <div className="w-full">{render(children, 0)}</div> : <p role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">{current ? "This folder is empty" : "No workloads in this workspace"}</p>}
+    <div ref={container} className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden bg-background p-2 sm:p-3" role="group" aria-label={t("treemap.workspace_treemap")}>
+      {children.length ? size.width > 0 && <div className="w-full">{render(children, 0)}</div> : <p role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">{current ? t("treemap.this_folder_is_empty") : t("tree.no_workloads_in_this_workspace")}</p>}
     </div>
-    <p className="min-h-10 shrink-0 truncate border-t px-5 py-3 text-[10px] text-muted-foreground" title={detail}>{detail || "Compact tiles · Folder previews adapt to space"}</p>
+    <p className="min-h-10 shrink-0 truncate border-t px-5 py-3 text-[10px] text-muted-foreground" title={detail}>{detail || t("treemap.compact_tiles_folder_previews_adapt")}</p>
   </div>
 }

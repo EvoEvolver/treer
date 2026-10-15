@@ -89,3 +89,17 @@ test('Settings dialog sections render in zh', async ({ page }) => {
   await expect(dialog.getByRole('button', { name: '浅色' })).toBeVisible()
   await expect(dialog.getByLabel('语言')).toHaveText('简体中文')
 })
+
+test('Overview, tree and filters render in zh and the filter chip works', async ({ page }) => {
+  await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
+  await mockTreeMapApi(page)
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: '工作区总览' })).toBeVisible()
+  await expect(page.getByRole('button', { name: '筛选:需要注意' })).toBeVisible()
+  await expect(page.getByText('台机器在线')).toBeVisible()
+  await expect(page.getByRole('tree', { name: '工作区工作负载' })).toBeVisible()
+  await page.getByRole('button', { name: '筛选:需要注意' }).click()
+  await expect(page.getByRole('button', { name: '筛选:需要注意' })).toHaveAttribute('aria-pressed', 'true')
+  const body = await page.locator('main').innerText()
+  for (const english of ['need attention', 'machines online', 'Workspace overview', 'Add agent']) expect(body).not.toContain(english)
+})

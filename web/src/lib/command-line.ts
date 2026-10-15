@@ -24,6 +24,6 @@ export function parseCommandLine(value: string): ParsedCommandLine {
   }
 
   const [command, ...args] = words
-  if (!command) throw new Error("Command is required")
+  if (!command) throw new Error(t("cmd.command_is_required"))
   return { command, args }
 }

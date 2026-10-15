@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from "react"
 import { formatBytes } from "@/lib/control-plane"
 import { trafficTime, type TrafficBucket, type TrafficHours, type TrafficMetric } from "@/lib/traffic"
-import { t } from "@/i18n"
+import { t, intlLocale } from "@/i18n"
 
 export function TrafficChart({ buckets, hours, metric }: { buckets: TrafficBucket[]; hours: TrafficHours; metric: TrafficMetric }) {
   const id = useId()
@@ -17,7 +17,7 @@ export function TrafficChart({ buckets, hours, metric }: { buckets: TrafficBucke
   const [active, setActive] = useState<number | null>(null)
   const peak = Math.max(0, ...buckets.map((bucket) => bucket[metric]))
   const maximum = Math.max(1, peak)
-  const format = (value: number) => metric === "bytes" ? formatBytes(value) : value.toLocaleString()
+  const format = (value: number) => metric === "bytes" ? formatBytes(value) : value.toLocaleString(intlLocale())
   const label = metric === "bytes" ? t("chart.billable_trend") : t("chart.frames_trend")
   const chosen = active === null ? null : buckets[active]
   const height = 156, bottom = 136, left = 44, usable = width - left - 4
@@ -38,6 +38,6 @@ export function TrafficChart({ buckets, hours, metric }: { buckets: TrafficBucke
       {[0, Math.floor((buckets.length - 1) / 2), buckets.length - 1].filter((index, position, items) => items.indexOf(index) === position).map((index) => <text key={index} x={left + (index + 0.5) * step} y={height - 1} textAnchor={index === 0 ? "start" : index === buckets.length - 1 ? "end" : "middle"} className="fill-muted-foreground text-[9px]">{trafficTime(buckets[index].start, hours)}</text>)}
     </svg>
     <p aria-live="polite" className="mt-3 min-h-4 text-[11px] text-muted-foreground">{chosen ? t("chart.chosen", { time: trafficTime(chosen.start, hours, true), value: format(chosen[metric]) }) : t("chart.hint")}</p>
-    <details className="mt-3 border-t pt-3 text-xs"><summary className="cursor-pointer rounded-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring">{t("traffic.view_traffic_data_table")}</summary><div className="mt-3 max-h-64 overflow-auto"><table className="w-full text-left tabular-nums"><caption className="sr-only">{t(hours <= 24 ? "chart.table_hour" : "chart.table_day")}</caption><thead><tr><th scope="col" className="py-2">{t("traffic.utc_window")}</th><th scope="col" className="py-2 text-right">{t("traffic.billable_usage")}</th><th scope="col" className="py-2 text-right">{t("traffic.data_frames")}</th></tr></thead><tbody>{buckets.map((bucket) => <tr key={bucket.start} className="border-t"><th scope="row" className="py-2 font-normal">{trafficTime(bucket.start, hours)}</th><td className="text-right">{formatBytes(bucket.bytes)}</td><td className="text-right">{bucket.frames.toLocaleString()}</td></tr>)}</tbody></table></div></details>
+    <details className="mt-3 border-t pt-3 text-xs"><summary className="cursor-pointer rounded-sm text-muted-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring">{t("traffic.view_traffic_data_table")}</summary><div className="mt-3 max-h-64 overflow-auto"><table className="w-full text-left tabular-nums"><caption className="sr-only">{t(hours <= 24 ? "chart.table_hour" : "chart.table_day")}</caption><thead><tr><th scope="col" className="py-2">{t("traffic.utc_window")}</th><th scope="col" className="py-2 text-right">{t("traffic.billable_usage")}</th><th scope="col" className="py-2 text-right">{t("traffic.data_frames")}</th></tr></thead><tbody>{buckets.map((bucket) => <tr key={bucket.start} className="border-t"><th scope="row" className="py-2 font-normal">{trafficTime(bucket.start, hours)}</th><td className="text-right">{formatBytes(bucket.bytes)}</td><td className="text-right">{bucket.frames.toLocaleString(intlLocale())}</td></tr>)}</tbody></table></div></details>
   </figure>
 }

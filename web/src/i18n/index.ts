@@ -77,3 +77,6 @@ export function roleLabel(value: string): string {
   const key = `role.${value}`
   return key in en ? t(key as MessageKey) : value
 }
+
+// Locale tag for Intl/Date formatting: Chinese follows the console choice, English keeps the browser's own formatting.
+export const intlLocale = (): string | undefined => (current === "zh" ? "zh-CN" : undefined)

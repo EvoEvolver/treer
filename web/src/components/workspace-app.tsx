@@ -49,7 +49,7 @@ X
 } from "lucide-react"
 import { FormEvent,useCallback,useEffect,useMemo,useRef,useState } from "react"
 import { useLocation,useParams } from "react-router"
-import { t } from "@/i18n"
+import { roleLabel, t } from "@/i18n"
 
 export function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
@@ -931,7 +931,7 @@ function WorkspaceAppContent() {
         <button type="button" aria-label={t("app.workspace_overview")} onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />{t("app.overview")}</button>
         <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
-        <UserMenu user={user} badge={initials(user.preferred_name)} role={currentRole} preview={preview} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
+        <UserMenu user={user} badge={initials(user.preferred_name)} role={roleLabel(currentRole)} preview={preview} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
       </aside>
       <TreeResizer settings={treeWidth} />
 
@@ -942,7 +942,7 @@ function WorkspaceAppContent() {
 
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
             {isMobile && mainView !== "terminal" && mainView !== "overview" && <IconButton label={t("org.back")} className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
-            <button type="button" onClick={showOverview} aria-label={t("app.back_to_workspace_overview")} className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "overview" ? "Overview" : mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
+            <button type="button" onClick={showOverview} aria-label={t("app.back_to_workspace_overview")} className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? t("app.organization") : workspace?.name ?? t("app.workspace")}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "overview" ? t("app.overview") : mainView === "organization" || mainView === "workspace" ? t("settings.title") : mainView === "apps" ? t("apps.apps") : mainView === "app" ? selectedApp?.name ?? t("apps.app") : mainView === "audit" ? t("audit.audit") : selectedAgent?.name ?? t("machine.terminal")}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
           {mainView === "overview" ? <Button variant="ghost" size="sm" aria-label={t("app.browse_tree")} className="md:hidden" onClick={() => setMobileTreeOpen(true)}><PanelLeft />{t("app.browse_tree")}</Button> : mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label={selectedAgentInterface || showAppUi ? t("app.open_full_screen_interface") : t("app.open_full_screen_terminal")} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs(!showWorkloadLogs)}>{showWorkloadLogs ? t("surface.show_app") : t("surface.show_logs")}</Button>}
@@ -954,7 +954,7 @@ function WorkspaceAppContent() {
           </div> : mainView === "apps" ? <IconButton label={t("app.refresh_apps")} onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label={t("app.refresh_audit")} onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
         </header>
         <div className={cn("relative min-h-0 flex-1", mainView !== "overview" && mainView !== "terminal" && "hidden")}>
-          <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? "Overview" : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">
+          <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? t("app.overview") : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">
             <WorkspaceOverview key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} onOpen={showAgentTerminal} onNewAgent={openCreateAgentOrMachineSetup} onWorkspaceSettings={openWorkspaceSettings} />
           </div>
           {workspaceId && tabs.tabs.map((tab) => {

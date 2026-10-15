@@ -17,7 +17,7 @@ import {
   TriangleAlert
 } from "lucide-react"
 import { useState } from "react"
-import { statusLabel, t } from "@/i18n"
+import { statusLabel, t, intlLocale } from "@/i18n"
 
 export function MachineOverviewView({ machine, agents, services, virtualHosts, traffic, machines, workspaceId, onOpenAgent, onClose, onCopy }: { machine?: Machine; agents: Agent[]; services: MachineService[]; virtualHosts: VirtualNetworkHost[]; traffic: MachineTrafficRecord[]; machines: Machine[]; workspaceId?: string | null; onOpenAgent: (agentId: string) => void; onClose: () => void; onCopy: (value: string) => void }) {
   const [localHealth, setLocalHealth] = useState<Record<string, "healthy" | "unreachable">>({})
@@ -41,7 +41,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
   if (!machine) return <div className="grid min-h-0 flex-1 place-items-center p-8 text-sm text-muted-foreground">{t("machine.not_found")} <Button variant="outline" className="mt-3" onClick={onClose}>{t("org.back")}</Button></div>
   const controller = buildLabel(machine.controller_build)
   const host = buildLabel(machine.host_build)
-  const supervision = machine.supervision ? supervisionLabel(machine.supervision.mode) : "Unknown"
+  const supervision = machine.supervision ? supervisionLabel(machine.supervision.mode) : t("machine.unknown")
 
   return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
     <div className="mb-8 flex items-start justify-between gap-4">
@@ -99,7 +99,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
       {services.length ? <div className="border-y">{services.map((service) => { const health = localHealth[service.service_id]; return <div key={service.service_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b py-3 last:border-b-0">
         <div className="min-w-0">
           <div className="truncate text-xs font-medium">{service.name} <span className="ml-2 font-mono text-[9px] uppercase text-muted-foreground">{service.protocol}</span>{health && <span className={cn("ml-2 text-[9px]", health === "healthy" ? "text-emerald-700" : "text-red-600")}>{health}</span>}</div>
-          <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{service.target_host}:{service.target_port} · {t("machine.updated", { time: new Date(service.updated_at).toLocaleString() })}</div>
+          <div className="mt-1 truncate font-mono text-[10px] text-muted-foreground">{service.target_host}:{service.target_port} · {t("machine.updated", { time: new Date(service.updated_at).toLocaleString(intlLocale()) })}</div>
         </div>
         <Button size="sm" variant="ghost" onClick={() => probe(service.service_id)} disabled={machine.status !== "online"}>{t("machine.probe")}</Button>
       </div>})}</div> : <EmptyState icon={<Server />} label={t("machine.no_services_registered_for_this")} />}

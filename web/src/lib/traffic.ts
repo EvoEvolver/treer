@@ -1,5 +1,5 @@
 import type { MachineTrafficRecord } from "@/lib/api"
-import type { MessageKey } from "@/i18n"
+import { intlLocale, type MessageKey } from "@/i18n"
 
 export const trafficRanges = [
   { hours: 6, labelKey: "traffic.range_6h" },
@@ -32,7 +32,7 @@ export function trafficBuckets(records: MachineTrafficRecord[], hours: TrafficHo
 }
 
 export function trafficTime(start: number, hours: TrafficHours, full = false) {
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat(intlLocale(), {
     timeZone: "UTC", month: "short", day: "numeric",
     ...(hours <= 24 || full ? { hour: "2-digit", minute: "2-digit", hourCycle: "h23" as const } : {}),
   }).format(start)

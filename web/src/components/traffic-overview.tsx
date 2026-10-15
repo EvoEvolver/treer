@@ -7,7 +7,7 @@ import { TrafficChart } from "@/components/traffic-chart"
 import { Button } from "@/components/ui/button"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { ArrowRight, RotateCw } from "lucide-react"
-import { t } from "@/i18n"
+import { t, intlLocale } from "@/i18n"
 
 interface TrafficData { hours: TrafficHours; traffic: MachineTrafficRecord[]; agentTraffic: AgentTrafficRecord[]; at: number; agentDetailAvailable: boolean }
 
@@ -101,7 +101,7 @@ export function TrafficOverview({ workspaceId, agents, machines, refreshRevision
       {error ? <div role="alert" className="flex flex-wrap items-center gap-3 rounded-md border p-4 text-xs"><span>{error}</span><Button size="sm" variant="outline" onClick={() => setRetry((value) => value + 1)}>{t("traffic.retry_traffic")}</Button></div> : !current ? <p role="status" className="flex items-center gap-2 py-8 text-sm text-muted-foreground"><RotateCw aria-hidden="true" className="size-4 animate-spin" />{t("traffic.loading_traffic")}</p> : <>
       <div role="group" aria-label={t("traffic.traffic_totals")} className="grid grid-cols-3 border-y">
       <div className="py-5 pr-3"><div className="text-[10px] text-muted-foreground">{t("traffic.billable_usage")}</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{formatBytes(totalBytes)}</div></div>
-      <div className="border-x px-3 py-5 sm:px-6"><div className="text-[10px] text-muted-foreground">{t("traffic.data_frames")}</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{totalFrames.toLocaleString()}</div></div>
+      <div className="border-x px-3 py-5 sm:px-6"><div className="text-[10px] text-muted-foreground">{t("traffic.data_frames")}</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{totalFrames.toLocaleString(intlLocale())}</div></div>
       <div className="py-5 pl-3 sm:pl-6"><div className="text-[10px] text-muted-foreground">{t("traffic.routes")}</div><div className="mt-1 text-xl font-semibold tabular-nums sm:text-2xl">{routes.length}</div></div>
     </div>
     <TrafficChart key={`${hours}:${metric}`} buckets={trafficBuckets(traffic, hours, current.at)} hours={hours} metric={metric} />

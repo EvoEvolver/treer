@@ -11,6 +11,7 @@ import { readFolderExpansion, writeFolderExpansion, type FolderExpansion } from 
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
 import { WorkloadIcon } from "@/components/workload-icon"
+import { statusLabel, t } from "@/i18n"
 
 export interface NewAgentFolder { folderId: string; path: string }
 type Item = { kind: "folder" | "agent"; id: string; name: string }
@@ -61,7 +62,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
         const data = await api<Tree>(base)
         if (active && generation === readGeneration.current) { setTree(data); setTreeLoaded(true) }
       } catch (reason) {
-        if (active && generation === readGeneration.current) setError(reason instanceof Error ? reason.message : "Unable to update workload tree")
+        if (active && generation === readGeneration.current) setError(reason instanceof Error ? reason.message : t("tree.unable_to_update_workload_tree"))
       } finally { reading = false; if (active) setLoading(false) }
     }
     void refresh()
@@ -134,11 +135,11 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   async function copyPath(path: string) {
     setCopyNotice("")
     try {
-      if (!navigator.clipboard?.writeText) throw new Error("Clipboard unavailable")
+      if (!navigator.clipboard?.writeText) throw new Error(t("tree.clipboard_unavailable"))
       await navigator.clipboard.writeText(path)
-      setCopyNotice(`Copied path: ${path}`)
+      setCopyNotice(t("tree.copied", { path }))
     } catch {
-      setCopyNotice("Unable to copy automatically. Select and copy the path below.")
+      setCopyNotice(t("tree.unable_to_copy_automatically_select"))
       setManualCopyPath(path)
     }
   }
@@ -150,7 +151,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       await api(`${base}${path}`, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
       const updated = await api<Tree>(base)
       setTree(updated); setTreeLoaded(true); setEditor(null)
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") } finally { mutation.current = false; setBusy(false) }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : t("tree.unable_to_update_workload_tree")) } finally { mutation.current = false; setBusy(false) }
   }
   function move(item: Item, folderId: string | null) {
     if (item.kind === "folder") {
@@ -182,29 +183,29 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       await api(`${base}/placements/${encodeURIComponent(agentId)}`, {
         method: "PUT", body: JSON.stringify({ folder_id: parent, position }),
       })
-    } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") }
+    } catch (reason) { setError(reason instanceof Error ? reason.message : t("tree.unable_to_update_workload_tree")) }
     finally {
       // Also read after a partial failure: initialization may have succeeded.
-      try { setTree(await api<Tree>(base)); setTreeLoaded(true) } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") }
+      try { setTree(await api<Tree>(base)); setTreeLoaded(true) } catch (reason) { setError(reason instanceof Error ? reason.message : t("tree.unable_to_update_workload_tree")) }
       mutation.current = false; setBusy(false)
     }
   }
   async function lifecycle(agent: Agent, action: string) {
     setBusy(true); setError("")
-    try { await api(`/api/workspaces/${encodeURIComponent(workspaceId ?? "")}/agents/${encodeURIComponent(agent.agent_id)}/${action}`, { method: "POST", body: "{}" }) } catch (reason) { setError(reason instanceof Error ? reason.message : "Unable to update workload tree") } finally { setBusy(false) }
+    try { await api(`/api/workspaces/${encodeURIComponent(workspaceId ?? "")}/agents/${encodeURIComponent(agent.agent_id)}/${action}`, { method: "POST", body: "{}" }) } catch (reason) { setError(reason instanceof Error ? reason.message : t("tree.unable_to_update_workload_tree")) } finally { setBusy(false) }
   }
   function edit(mode: "create" | "rename" | "move", parent: string | null, item?: Item) { setName(mode === "rename" ? item?.name ?? "" : ""); setDestination(parent ?? ""); setError(""); setEditor({ mode, parent, item }) }
   function menu(item: Item, parent: string | null, agent?: Agent) {
     const app = agent && apps.find((entry) => entry.runtime_agent_id === agent.agent_id || entry.app_id === agent.agent_id)
     const siblings = orderedRows(parent)
     const index = agent ? siblings.findIndex((entry) => entry.agent_id === agent.agent_id) : -1
-    return <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0" aria-label={`Actions for ${item.name}`} tabIndex={-1} data-tree-actions=""><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
-      {agent && !app && agent.kind !== "app" && <DropdownMenuItem disabled={busy || preview || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => setStartupAgent(agent)}>Edit startup command</DropdownMenuItem>}
-      {agent ? <><DropdownMenuItem disabled={busy || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => void lifecycle(agent, "start")}>Start</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "stop")}>Stop</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "restart")}>Restart</DropdownMenuItem><DropdownMenuItem onSelect={() => onOpen(agent.agent_id, true)}>Logs</DropdownMenuItem>{app && <DropdownMenuItem onSelect={() => onSettings(app)}>App settings</DropdownMenuItem>}<DropdownMenuItem onSelect={() => onRename(agent)}>Rename</DropdownMenuItem></> : <><DropdownMenuItem disabled={!workspaceId || busy || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew({ folderId: item.id, path: itemPath(item, parent) })}>New Agent</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("create", item.id)}>New folder</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("rename", parent, item)}>Rename</DropdownMenuItem></>}
-      <DropdownMenuItem onSelect={() => void copyPath(itemPath(item, parent))}>Copy path</DropdownMenuItem>
-      <DropdownMenuItem onSelect={() => edit("move", parent, item)}>Move to folder</DropdownMenuItem>
-      {agent && <><DropdownMenuItem disabled={busy || index <= 0} onSelect={() => void reorder(agent.agent_id, siblings[index - 1].agent_id, false, parent)}>Move up</DropdownMenuItem><DropdownMenuItem disabled={busy || index < 0 || index >= siblings.length - 1} onSelect={() => void reorder(agent.agent_id, siblings[index + 1].agent_id, true, parent)}>Move down</DropdownMenuItem></>}
-      <DropdownMenuItem disabled={busy} onSelect={() => agent ? onDelete(agent) : void mutate(`/folders/${encodeURIComponent(item.id)}`, "DELETE")}>Delete</DropdownMenuItem>
+    return <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0" aria-label={t("tree.actions_for", { name: item.name })} tabIndex={-1} data-tree-actions=""><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+      {agent && !app && agent.kind !== "app" && <DropdownMenuItem disabled={busy || preview || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => setStartupAgent(agent)}>{t("startup.edit_startup_command")}</DropdownMenuItem>}
+      {agent ? <><DropdownMenuItem disabled={busy || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => void lifecycle(agent, "start")}>{t("apps.start")}</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "stop")}>{t("apps.stop")}</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "restart")}>{t("apps.restart")}</DropdownMenuItem><DropdownMenuItem onSelect={() => onOpen(agent.agent_id, true)}>{t("tree.logs")}</DropdownMenuItem>{app && <DropdownMenuItem onSelect={() => onSettings(app)}>{t("tree.app_settings")}</DropdownMenuItem>}<DropdownMenuItem onSelect={() => onRename(agent)}>{t("machine.rename")}</DropdownMenuItem></> : <><DropdownMenuItem disabled={!workspaceId || busy || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew({ folderId: item.id, path: itemPath(item, parent) })}>{t("tree.new_agent")}</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("create", item.id)}>{t("tree.new_folder")}</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("rename", parent, item)}>{t("machine.rename")}</DropdownMenuItem></>}
+      <DropdownMenuItem onSelect={() => void copyPath(itemPath(item, parent))}>{t("tree.copy_path")}</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => edit("move", parent, item)}>{t("tree.move_to_folder")}</DropdownMenuItem>
+      {agent && <><DropdownMenuItem disabled={busy || index <= 0} onSelect={() => void reorder(agent.agent_id, siblings[index - 1].agent_id, false, parent)}>{t("tree.move_up")}</DropdownMenuItem><DropdownMenuItem disabled={busy || index < 0 || index >= siblings.length - 1} onSelect={() => void reorder(agent.agent_id, siblings[index + 1].agent_id, true, parent)}>{t("tree.move_down")}</DropdownMenuItem></>}
+      <DropdownMenuItem disabled={busy} onSelect={() => agent ? onDelete(agent) : void mutate(`/folders/${encodeURIComponent(item.id)}`, "DELETE")}>{t("machine.delete")}</DropdownMenuItem>
     </DropdownMenuContent></DropdownMenu>
   }
   // Keyboard model (WAI-ARIA tree): one Tab stop on the row buttons (roving
@@ -279,25 +280,25 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       }
       setDragged(null); setDropTarget(null)
     }} className={`flex min-h-12 items-center gap-1 rounded px-2 py-1 hover:bg-accent ${selectedId === agent.agent_id ? "bg-accent" : ""} ${dropTarget?.id === agent.agent_id ? dropTarget.after ? "shadow-[inset_0_-2px_0_hsl(var(--primary))]" : "shadow-[inset_0_2px_0_hsl(var(--primary))]" : ""}`}>
-      <button data-tree-primary="" data-tree-key={agent.agent_id} className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="flex min-w-0 items-center gap-1.5 text-xs font-medium"><WorkloadIcon kind={workloadKind(agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{agent.name}</span></span><span className="block truncate text-[9px] text-muted-foreground">{workloadKind(agent)} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
+      <button data-tree-primary="" data-tree-key={agent.agent_id} className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="flex min-w-0 items-center gap-1.5 text-xs font-medium"><WorkloadIcon kind={workloadKind(agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{agent.name}</span></span><span className="block truncate text-[9px] text-muted-foreground">{t(`kind.${workloadKind(agent)}`)} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? statusLabel(agent.status) : statusLabel("offline")}{agent.run_generation !== undefined && ` · ${t("tree.run_generation", { generation: agent.run_generation })}`}</span></button>{menu(item, parent, agent)}
     </div> })}</>
   }
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-tour="agents-tab">
     {startupAgent && workspaceId && <AgentStartupDialog key={`${workspaceId}/${startupAgent.agent_id}`} workspaceId={workspaceId} agent={{ ...startupAgent, path: agentPath(startupAgent, tree) }} onClose={() => setStartupAgent(null)} onSaved={() => setCopyNotice(`Saved startup command and restarted ${agentPath(startupAgent, tree)}`)} />}
-    <div className="flex h-10 shrink-0 items-center justify-between px-3 text-[11px] font-medium text-muted-foreground"><span>Tree</span><div className="flex items-center gap-1">
-      <DropdownMenu><DropdownMenuTrigger asChild><Button data-tour="create-agent" variant="ghost" size="icon" className="size-7" aria-label="Add to tree" disabled={!workspaceId}><Plus className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
-        <DropdownMenuItem disabled={!workspaceId || busy || loading} onSelect={() => edit("create", null)}><Folder className="mr-2 size-3.5" />Add folder</DropdownMenuItem>
-        <DropdownMenuItem aria-label={!preview && !machines.length ? "Set up a machine before creating an agent" : undefined} disabled={!workspaceId || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew()}><Plus className="mr-2 size-3.5" />Add agent{!preview && !machines.length && <span className="ml-2 text-[10px] text-muted-foreground">Set up a machine first</span>}</DropdownMenuItem>
+    <div className="flex h-10 shrink-0 items-center justify-between px-3 text-[11px] font-medium text-muted-foreground"><span>{t("tree.tree")}</span><div className="flex items-center gap-1">
+      <DropdownMenu><DropdownMenuTrigger asChild><Button data-tour="create-agent" variant="ghost" size="icon" className="size-7" aria-label={t("tree.add_to_tree")} disabled={!workspaceId}><Plus className="size-4" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">
+        <DropdownMenuItem disabled={!workspaceId || busy || loading} onSelect={() => edit("create", null)}><Folder className="mr-2 size-3.5" />{t("tree.add_folder")}</DropdownMenuItem>
+        <DropdownMenuItem aria-label={!preview && !machines.length ? t("tree.set_up_a_machine_before") : undefined} disabled={!workspaceId || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew()}><Plus className="mr-2 size-3.5" />{t("overview.add_agent")}{!preview && !machines.length && <span className="ml-2 text-[10px] text-muted-foreground">{t("tree.set_up_a_machine_first")}</span>}</DropdownMenuItem>
       </DropdownMenuContent></DropdownMenu>
     </div></div>
     {copyNotice && <p role="status" className="px-3 py-2 text-xs break-all">{copyNotice}</p>}
-    {loading && <p role="status" className="px-3 text-xs">Loading folders…</p>}{error && !editor && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="mt-1 h-7" disabled={busy} onClick={() => setReload((value) => value + 1)}>Reload folders</Button></div>}
-    <div ref={treeRoot} role="tree" aria-label="Workspace workloads" aria-busy={busy || loading} onKeyDown={treeKeyDown} onFocus={trackTreeFocus} className="min-h-0 flex-1 overflow-auto px-2 pb-3" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (dragged) move(dragged, null); setDragged(null) }}>{render(null)}{!workloads.length && !tree.folders.length && !loading && <p className="px-2 py-4 text-xs text-muted-foreground">No workloads in this workspace</p>}<div aria-label="Move to workspace root" className="mt-2 min-h-8 border-t px-2 py-2 text-[10px] text-muted-foreground">Workspace root</div></div>
-    <Dialog open={manualCopyPath !== null} onOpenChange={(open) => !open && setManualCopyPath(null)}><DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); copyInput.current?.focus(); copyInput.current?.select() }}><DialogHeader><DialogTitle>Copy path</DialogTitle><DialogDescription>Automatic copying is unavailable. Use your device's copy action on the selected path.</DialogDescription></DialogHeader><Input ref={copyInput} aria-label="Tree path" value={manualCopyPath ?? ""} readOnly className="font-mono" onFocus={(event) => event.target.select()} /><DialogFooter><Button onClick={() => setManualCopyPath(null)}>Done</Button></DialogFooter></DialogContent></Dialog>
-    <Dialog open={Boolean(editor)} onOpenChange={(open) => !open && setEditor(null)}><DialogContent><DialogHeader><DialogTitle>{editor?.mode === "move" ? `Move ${editor.item?.name}` : editor?.mode === "rename" ? "Rename folder" : "New folder"}</DialogTitle></DialogHeader>
-      {editor?.mode === "move" ? <label className="text-sm">Destination<select aria-label="Destination folder" className="mt-2 w-full rounded border bg-background p-2" value={destination} onChange={(event) => setDestination(event.target.value)}><option value="">Workspace root</option>{tree.folders.filter((folder) => editor.item?.kind !== "folder" || !descendants(editor.item.id).has(folder.folder_id)).map((folder) => <option key={folder.folder_id} value={folder.folder_id}>{folderPath(folder)}</option>)}</select></label> : <Input aria-label="Folder name" autoFocus value={name} onChange={(event) => setName(event.target.value)} />}
+    {loading && <p role="status" className="px-3 text-xs">{t("tree.loading_folders")}</p>}{error && !editor && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="mt-1 h-7" disabled={busy} onClick={() => setReload((value) => value + 1)}>{t("tree.reload_folders")}</Button></div>}
+    <div ref={treeRoot} role="tree" aria-label={t("tree.workspace_workloads")} aria-busy={busy || loading} onKeyDown={treeKeyDown} onFocus={trackTreeFocus} className="min-h-0 flex-1 overflow-auto px-2 pb-3" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (dragged) move(dragged, null); setDragged(null) }}>{render(null)}{!workloads.length && !tree.folders.length && !loading && <p className="px-2 py-4 text-xs text-muted-foreground">{t("tree.no_workloads_in_this_workspace")}</p>}<div aria-label={t("tree.move_to_workspace_root")} className="mt-2 min-h-8 border-t px-2 py-2 text-[10px] text-muted-foreground">{t("tree.workspace_root")}</div></div>
+    <Dialog open={manualCopyPath !== null} onOpenChange={(open) => !open && setManualCopyPath(null)}><DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); copyInput.current?.focus(); copyInput.current?.select() }}><DialogHeader><DialogTitle>{t("tree.copy_path")}</DialogTitle><DialogDescription>{t("tree.automatic_copying_is_unavailable_use")}</DialogDescription></DialogHeader><Input ref={copyInput} aria-label={t("tree.tree_path")} value={manualCopyPath ?? ""} readOnly className="font-mono" onFocus={(event) => event.target.select()} /><DialogFooter><Button onClick={() => setManualCopyPath(null)}>{t("tabs.done")}</Button></DialogFooter></DialogContent></Dialog>
+    <Dialog open={Boolean(editor)} onOpenChange={(open) => !open && setEditor(null)}><DialogContent><DialogHeader><DialogTitle>{editor?.mode === "move" ? t("tree.move", { name: editor.item?.name ?? "" }) : editor?.mode === "rename" ? t("tree.rename_folder") : t("tree.new_folder")}</DialogTitle></DialogHeader>
+      {editor?.mode === "move" ? <label className="text-sm">{t("tree.destination")}<select aria-label={t("tree.destination_folder")} className="mt-2 w-full rounded border bg-background p-2" value={destination} onChange={(event) => setDestination(event.target.value)}><option value="">{t("tree.workspace_root")}</option>{tree.folders.filter((folder) => editor.item?.kind !== "folder" || !descendants(editor.item.id).has(folder.folder_id)).map((folder) => <option key={folder.folder_id} value={folder.folder_id}>{folderPath(folder)}</option>)}</select></label> : <Input aria-label={t("tree.folder_name")} autoFocus value={name} onChange={(event) => setName(event.target.value)} />}
       {error && <p role="alert" className="break-words text-sm text-destructive">{error}</p>}
-      <DialogFooter><Button variant="outline" onClick={() => setEditor(null)}>Cancel</Button><Button disabled={busy || (editor?.mode !== "move" && !name.trim())} onClick={() => { if (!editor) return; if (editor.mode === "move" && editor.item) move(editor.item, destination || null); else if (editor.mode === "rename" && editor.item) void mutate(`/folders/${encodeURIComponent(editor.item.id)}`, "PATCH", { name: name.trim() }); else void mutate("/folders", "POST", { name: name.trim(), parent_id: editor.parent }) }}>{busy ? "Saving…" : "Save"}</Button></DialogFooter>
+      <DialogFooter><Button variant="outline" onClick={() => setEditor(null)}>{t("common.cancel")}</Button><Button disabled={busy || (editor?.mode !== "move" && !name.trim())} onClick={() => { if (!editor) return; if (editor.mode === "move" && editor.item) move(editor.item, destination || null); else if (editor.mode === "rename" && editor.item) void mutate(`/folders/${encodeURIComponent(editor.item.id)}`, "PATCH", { name: name.trim() }); else void mutate("/folders", "POST", { name: name.trim(), parent_id: editor.parent }) }}>{busy ? t("policy.saving") : t("common.save")}</Button></DialogFooter>
     </DialogContent></Dialog>
   </div>
 }
