@@ -1,4 +1,4 @@
-/* Direction A — Quiet Editor. Hairlines, cool neutrals, one ink-blue accent, left icon rail, dense and calm. */
+/* Direction A — Quiet Editor. Hairlines, cool neutrals, one ink-blue accent, dense and calm. Header actions sit top right like every look. */
 :root{
   color-scheme:light;
   --bg:#fafafb;--panel:#ffffff;--sunken:#f2f3f5;--line:#e6e8ec;--line-strong:#c4cad3;--edge:#7f8899;
@@ -19,7 +19,7 @@
   --danger:#f0847f;--warn:#f2b866;--ok:#62d39b;--add:#0f2c1d;--del:#33201f;
 }
 body{letter-spacing:-.003em}
-.app{display:grid;grid-template-columns:48px minmax(0,1fr);grid-template-rows:40px minmax(0,1fr);grid-template-areas:"rail top" "rail main"}
+.app{display:grid;grid-template-columns:minmax(0,1fr);grid-template-rows:40px minmax(0,1fr);grid-template-areas:"top" "main"}
 .top{grid-area:top;display:flex;align-items:center;justify-content:space-between;gap:16px;padding:0 16px;border-bottom:1px solid var(--b-div);background:var(--panel)}
 .brand{display:flex;align-items:baseline;gap:12px;min-width:0}
 .mark{display:none}
@@ -27,15 +27,11 @@ body{letter-spacing:-.003em}
 h1{margin:0;font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .cwd{margin:0;font-size:11.5px;color:var(--fg3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .actions{display:flex;align-items:center;gap:8px}
-.actions .tbtn{display:none}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 9px;border:1px solid var(--b-pill);border-radius:var(--rs);background:var(--panel);font-size:12px;color:var(--fg2)}
+.tbtn:hover{background:var(--sunken);color:var(--fg)}.tbtn[aria-expanded=true]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}
 .status{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--fg2)}
-.dot{width:6px;height:6px;border-radius:50%;background:var(--ok);animation:pulse 2s ease-in-out infinite}
-.rail{grid-area:rail;display:flex;flex-direction:column;align-items:center;gap:4px;padding:8px 0;border-right:1px solid var(--b-div);background:var(--panel)}
-.rail-sp{flex:1}
-.rbtn{position:relative;display:grid;place-items:center;width:36px;height:36px;border-radius:var(--r);color:var(--fg2)}
-.rbtn:hover{background:var(--sunken);color:var(--fg)}
-.rbtn[aria-expanded=true]{background:var(--accent-soft);color:var(--accent)}
-.rbtn .badge{right:2px;top:2px;min-width:15px;height:15px;padding:0 4px;border-radius:8px;background:var(--accent);color:var(--accent-fg);font-size:10px;line-height:15px;text-align:center;font-weight:600}
+.dot{width:6px;height:6px;border-radius:50%;background:var(--ok)}
+.status-working .dot{animation:pulse 2s ease-in-out infinite}
 .main{grid-area:main}
 .thread{padding-top:28px;padding-inline:24px}
 .col{max-width:720px}
@@ -138,11 +134,8 @@ pre code{background:none;padding:0}
 .task pre{margin-top:8px;padding:8px 10px;background:var(--sunken);border:0;border-radius:var(--rs);max-height:200px;font-size:11.5px}
 @media (max-width:900px){.files,.tasks{background:var(--panel)}}
 @media (max-width:640px){
-  .app{grid-template-columns:minmax(0,1fr);grid-template-rows:40px minmax(0,1fr) auto;grid-template-areas:"top" "main" "bar"}
-  .rail{display:none}.tabbar{grid-area:bar;border-top:1px solid var(--b-div);background:var(--panel);justify-content:space-around;padding:2px 0 max(4px,env(safe-area-inset-bottom))}
-  .tabbar button{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:2px;min-width:72px;min-height:48px;font-size:11px;color:var(--fg2)}
-  .tabbar [aria-expanded=true]{color:var(--accent)}
-  .top{padding:0 12px}.cwd{display:none}.thread{padding-top:18px;padding-inline:12px}:root{--gap:16px}
+  .app{grid-template-columns:minmax(0,1fr);grid-template-rows:40px minmax(0,1fr);grid-template-areas:"top" "main"}
+  .top{padding:0 12px}.cwd{display:none}.status .status-t{display:none}.actions .tbtn{display:none}.thread{padding-top:18px;padding-inline:12px}:root{--gap:16px}
   .dock{padding:28px 8px 8px}.pop{padding-bottom:20px}
   .titles{min-width:0}
 }

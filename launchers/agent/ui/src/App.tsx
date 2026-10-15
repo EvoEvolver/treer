@@ -3,7 +3,7 @@ import { AppearanceMenu } from "./components/AppearanceMenu";
 import { DialogsProvider } from "./components/Dialogs";
 import { Dock } from "./components/Dock";
 import { FilesPanel } from "./components/FilesPanel";
-import { Header, Rail, Tabbar, useTasks, type PanelName } from "./components/Header";
+import { Header, useTasks, type PanelName } from "./components/Header";
 import { IconSprite } from "./components/Icon";
 import { PanelBoundary } from "./components/PanelBoundary";
 import { TasksPanel } from "./components/TasksPanel";
@@ -42,7 +42,6 @@ function Shell() {
       <div className="app" id="app">
         <IconSprite />
         <Header menuOpen={menuOpen} onToggleMenu={toggleMenu} lookRef={lookRef} {...panelProps} />
-        <Rail menuOpen={menuOpen} onToggleMenu={toggleMenu} {...panelProps} />
         <div className="main">
           <PanelBoundary><FilesPanel open={panels.files} onClose={() => closePanel("files")} /></PanelBoundary>
           <main className="pane">
@@ -52,7 +51,6 @@ function Shell() {
           {tasks.available && <PanelBoundary><TasksPanel open={panels.tasks} onClose={() => closePanel("tasks")} /></PanelBoundary>}
         </div>
         <AppearanceMenu open={menuOpen} onClose={closeMenu} />
-        <Tabbar menuOpen={menuOpen} onToggleMenu={toggleMenu} {...panelProps} />
       </div>
     </DialogsProvider>
   );

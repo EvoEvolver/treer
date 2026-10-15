@@ -415,9 +415,9 @@ Contrast; default B) times light/dark. Look: `?look=a|b|c`, else
 `localStorage["treer-launcher-look"]`, else B. Theme: a parent
 `{type: "treer:embed-theme", theme: "light"|"dark"}` message or `?theme=light|dark`,
 else the stored mode (`treer-launcher-theme`: system, light or dark), else the system
-preference, including later system changes. The Appearance button (header, left rail,
-or the bottom bar on phones) picks look and theme and exports the conversation as
-Markdown. Every stored or URL value is checked against a fixed list; storage access is
+preference, including later system changes. The Appearance button (the header on every look) picks look and theme and exports the
+conversation as Markdown. On phones there is no bottom bar: one Menu button in the top
+bar opens a keyboard-reachable menu with Files, Tasks, Appearance and Theme. Every stored or URL value is checked against a fixed list; storage access is
 guarded. `?lang=en|zh` (else the browser language) selects the interface language;
 a missing translation falls back to English.
 

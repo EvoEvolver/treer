@@ -13,6 +13,7 @@ const symbols: Record<string, string> = {
   spark: "M12 4l1.8 4.7 4.7 1.8-4.7 1.8L12 17l-1.8-4.7L5.5 10.5l4.7-1.8z",
   warn: "M12 4l9 16H3zM12 10v4M12 17v.5",
   queue: "M12 4l8 4-8 4-8-4zM4 12l8 4 8-4M4 16l8 4 8-4",
+  menu: "M4 7h16M4 12h16M4 17h16",
   plan: "M5 6h3M5 12h3M5 18h3M11 6h8M11 12h8M11 18h8",
 };
 

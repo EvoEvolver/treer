@@ -46,6 +46,11 @@ async function startServer(name, extra, harness = "codex") {
   assert.ok(base, logs);
   return base;
 }
+// Phones have no bottom bar: Files, Tasks, Appearance and Theme live in the Menu button in the header.
+async function phoneNav(page, item) {
+  await page.getByRole("button", { name: "Menu", exact: true }).click();
+  await page.getByRole("menuitem", { name: item, exact: true }).click();
+}
 let browser;
 try {
   const base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1" });
@@ -330,7 +335,7 @@ try {
   await expect(filesButton).toBeFocused();
   // Phone: the panel is full screen with Browse / Preview tabs.
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.getByRole("button", { name: "Files", exact: true }).click();
+  await phoneNav(page, "Files");
   await expect(filesPanel).toBeVisible();
   await filesPanel.getByRole("treeitem", { name: "greeting.ts" }).click(); // src stayed expanded from the desktop session
   await expect(filesPanel.locator(".preview")).toBeVisible();
@@ -391,6 +396,80 @@ try {
   await expect(tasksPanel).toBeHidden();
   await expect(tasksButton).toBeFocused();
 
+  // Every look puts the same entry points in the same places: header actions top right on desktop, bottom bar on phones.
+  const orders = {};
+  for (const look of ["a", "b", "c"]) {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${claude}/${page_}?look=${look}`);
+    await expect(page.locator("header.top .actions")).toBeVisible();
+    const desktop = await page.evaluate(() => {
+      const header = document.querySelector("header.top").getBoundingClientRect();
+      const buttons = [...document.querySelectorAll("header.top .actions button")].filter((b) => b.offsetParent !== null);
+      return { labels: buttons.map((b) => b.getAttribute("aria-label")), inside: buttons.every((b) => { const r = b.getBoundingClientRect(); return r.top >= header.top && r.bottom <= header.bottom + 1 && r.right <= header.right; }),
+        ascending: buttons.every((b, i) => i === 0 || b.getBoundingClientRect().x > buttons[i - 1].getBoundingClientRect().x), gapToEdge: Math.round(header.right - buttons.at(-1).getBoundingClientRect().right), rail: Boolean(document.querySelector(".rail")) };
+    });
+    assert.deepEqual(desktop.labels, ["Background tasks, 0 running", "Browse files", "Appearance", "Toggle theme"], `header actions in ${look}`);
+    assert.ok(desktop.inside && desktop.ascending, `header actions are left to right inside the header in ${look}`);
+    // C aligns its header to its centred content column, so only the full-width looks must hug the window edge.
+    if (look !== "c") assert.ok(desktop.gapToEdge >= 0 && desktop.gapToEdge <= 24, `header actions hug the right edge in ${look} (${desktop.gapToEdge}px)`);
+    assert.equal(desktop.rail, false, "no side rail in any look");
+    orders[look] = desktop.labels.join("|");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(`${claude}/${page_}?look=${look}&theme=light`);
+    const menuButton = page.getByRole("button", { name: "Menu", exact: true });
+    await expect(menuButton).toBeVisible();
+    assert.equal(await page.locator(".tabbar").count(), 0, `no bottom bar in ${look}`);
+    assert.equal(await page.evaluate(() => [...document.querySelectorAll("header.top .actions button")].filter((b) => b.offsetParent !== null).length), 1, `the Menu button is the only header action on a phone in ${look}`);
+    // Keyboard and aria: Enter opens, the first item takes focus, arrows move, Esc closes and returns focus.
+    await menuButton.focus();
+    await expect(menuButton).toHaveAttribute("aria-haspopup", "menu");
+    await expect(menuButton).toHaveAttribute("aria-expanded", "false");
+    await page.keyboard.press("Enter");
+    await expect(menuButton).toHaveAttribute("aria-expanded", "true");
+    const items = page.getByRole("menu", { name: "Menu" }).getByRole("menuitem");
+    await expect(items).toHaveText(["Files", "Tasks", "Appearance", "Theme"]);
+    await expect(items.first()).toBeFocused();
+    await page.keyboard.press("ArrowDown");
+    await expect(items.nth(1)).toBeFocused();
+    await page.keyboard.press("End");
+    await expect(items.last()).toBeFocused();
+    await page.screenshot({ path: join(screenshots, `phone-menu-open-${look}-light.png`) });
+    await page.keyboard.press("Escape");
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(menuButton).toBeFocused();
+    const bar = await page.evaluate(() => { const r = document.querySelector("header.top").getBoundingClientRect(), m = document.querySelector(".nav-btn").getBoundingClientRect(); return m.right <= r.right && m.top >= r.top && m.bottom <= r.bottom; });
+    assert.ok(bar, `the Menu button sits inside the top bar in ${look}`);
+    // Theme and Appearance work from the menu in both themes.
+    const before = await page.getAttribute("html", "data-theme");
+    await phoneNav(page, "Theme");
+    assert.notEqual(await page.getAttribute("html", "data-theme"), before, `Theme from the menu toggles in ${look}`);
+    await menuButton.click();
+    await page.screenshot({ path: join(screenshots, `phone-menu-open-${look}-dark.png`) });
+    await page.keyboard.press("Escape");
+    await phoneNav(page, "Appearance");
+    await expect(page.getByRole("dialog", { name: "Appearance" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await page.screenshot({ path: join(screenshots, `phone-menu-${look}.png`) });
+  }
+  assert.equal(new Set(Object.values(orders)).size, 1, "all looks order the header actions identically");
+
+  // Idle is still: the status block never animates unless the agent is working; reduced motion removes the working animation too.
+  const dotAnimation = () => page.evaluate(() => getComputedStyle(document.querySelector(".status .dot")).animationName);
+  for (const look of ["a", "b", "c"]) {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`${claude}/${page_}?look=${look}`);
+    await expect(page.locator(".status-idle")).toBeVisible();
+    assert.equal(await dotAnimation(), "none", `idle status block does not animate in ${look}`);
+    assert.equal(await page.evaluate(() => { const h = document.querySelector(".v-empty h2"); return h ? getComputedStyle(h, "::after").animationName : "none"; }), "none", `the empty-state cursor is steady in ${look}`);
+    await page.goto(`${live}/${page_}?look=${look}`);
+    await expect(page.locator(".status-working")).toBeVisible();
+    if (look !== "b") assert.notEqual(await dotAnimation(), "none", `the working status block still animates in ${look}`);
+    await page.emulateMedia({ reducedMotion: "reduce" });
+    assert.ok(await page.evaluate(() => { const style = getComputedStyle(document.querySelector(".status .dot")); return style.animationName === "none" || parseFloat(style.animationDuration) <= 0.001; }), `reduced motion stops the working animation in ${look}`);
+    await page.emulateMedia({ reducedMotion: "no-preference" });
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   // A finished goal leaves a notice in the conversation (the fake completes a goal when its first turn starts).
   const done = await startServer("done", {});
   await page.goto(`${done}/${page_}?look=c`);
@@ -412,7 +491,7 @@ try {
   for (const look of ["a", "b", "c"]) {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto(url(`?look=${look}`));
-    await expect(page.locator(".tabbar")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Menu", exact: true })).toBeVisible();
     assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth), `no horizontal overflow in look ${look}`);
     await page.getByRole("toolbar", { name: "Run status" }).getByRole("button", { name: /Plan/ }).click();
     const sheet = await page.locator("#pop-plan").boundingBox();
