@@ -1,4 +1,13 @@
-// WCAG 2.1 contrast check for the three direction token sets. Usage: node contrast.mjs
+// WCAG 2.1 contrast check for the three direction token sets. Usage: node contrast.mjs [--table]
+//
+// Lines are modelled in two classes (WCAG 1.4.11 asks for 3:1 only where a boundary is *needed* to identify a control):
+//  FUNCTIONAL (enforced)
+//   - text, labels, placeholders, icons: 4.5:1 (text) against every surface they sit on
+//   - focus ring (accent) and the focus/active edge: 3:1 against the surrounding fills
+//   - the strict `--edge` token (used by C at rest, and by A/B only as the "strict" fallback): 3:1
+//   - controls are identified by their label/placeholder + fill + the adjacent primary button; their resting border
+//     (--b-ctl, --b-pill, --b-pop) may be soft but must stay visible (floor ratios below), so the UI does not melt together
+//  DECORATIVE (floor only, no 3:1): dividers (--b-div) and card edges (--b-card): a hairline, still above a visible floor
 // Reads the hex tokens from a.css / b.css / c.css (light = :root, dark = [data-theme=dark]).
 import { readFileSync } from "node:fs";
 const lin = (v) => { v /= 255; return v <= 0.04045 ? v / 12.92 : ((v + 0.055) / 1.055) ** 2.4; };
@@ -13,12 +22,14 @@ const pairs = [
   ["edge", "panel", 3, "input edge"], ["edge", "bg", 3, "input edge"],
   ["accent", "panel", 3, "focus ring"], ["accent", "bg", 3, "focus ring"],
 ];
+const soft = [["b-ctl", "panel", 1.25, "soft control edge floor"], ["b-pill", "panel", 1.2, "soft pill edge floor"], ["b-pop", "panel", 1.2, "soft popover edge floor"], ["b-card", "panel", 1.12, "card edge floor"], ["b-div", "panel", 1.08, "divider floor"]];
 let failed = 0, total = 0;
 for (const d of ["a", "b", "c"]) {
   const css = readFileSync(new URL(`./${d}.css`, import.meta.url), "utf8");
   const light = tokens(css, /:root\{\s*color-scheme:light;([\s\S]*?)\n\}/);
   const dark = { ...light, ...tokens(css, /\[data-theme=dark\]\{([\s\S]*?)\n\}/) };
-  const extra = d === "c" ? [["bg", "fg", 4.5, "status line"], ["accent-fg", "accent", 4.5, "status line"]] : [];
+  const extra = d === "c" ? [["bg", "fg", 4.5, "status line"], ["accent-fg", "accent", 4.5, "status line"]] : soft;
+  if (process.argv.includes("--table") && d !== "c") for (const [theme, t] of [["light", light], ["dark", dark]]) console.log(d, theme, soft.map(([f]) => `${f} ${ratio(t[f], t.panel).toFixed(2)}`).join("  "));
   for (const [theme, t] of [["light", light], ["dark", dark]]) for (const [f, b, need, role] of [...pairs, ...extra]) {
     const r = ratio(t[f], t[b]); total++;
     if (r < need) { failed++; console.log(`FAIL ${d} ${theme} ${role} ${f} on ${b}: ${r.toFixed(2)} (need ${need})`); }

@@ -209,6 +209,34 @@ A `#b3302c`/`#f0847f`, C `#a5302a`/`#f08880`; diff delete tints are paler; error
 are a neutral panel with a 3-4px danger left bar (no red fills; the C connection
 banner is neutral with a danger bar and `!`).
 
+**Softer lines in A and B (user feedback: dark solid outlines are unpleasant).**
+Border colours are split into role tokens so a look can soften them without
+touching text or focus colours: `--b-div` (dividers, panel separators), `--b-card`
+(cards, tool rows, diff, plan, tasks), `--b-pop` (popovers, menu; plus a faint shadow
+instead of an outline), `--b-pill` (buttons, pills, tabs), `--b-ctl` (composer and
+filter at rest). Values are low-contrast hairlines (about 1.1-1.8:1 against the
+panel; see `contrast.mjs --table`); the previous strength remains reachable as
+`data-borders="classic"` for the comparison page only (not shipped). C keeps its
+terminal outlines by design.
+
+Classification and reasoning (WCAG 1.4.11 needs 3:1 only for visual information
+that is *required* to identify a control):
+* **Decorative (no 3:1; floor ratio only so the UI does not melt together):**
+  dividers (`--b-div`), card and panel edges (`--b-card`), the diff and code-block
+  frames, the plan card, the status-strip separator, panel header rules.
+* **Functional, identified without a dark outline (enforced):** text buttons,
+  pills and segments are identified by their label (>= 4.5:1) and a fill that
+  steps from the surface (`--panel`/`--sunken`/`--accent-soft`); selected items add
+  an accent fill and accent text. Text inputs (composer, file filter) are
+  identified by placeholder text (>= 4.5:1), the adjacent primary button or search
+  icon, and a visible-but-soft resting edge (`--b-ctl`, floor 1.25:1); on focus
+  the edge becomes the accent and a second ring appears (A: 3px accent-soft halo; B:
+  2px accent outline with a 2px offset), all >= 3:1. The `--edge` token (3:1) still
+  exists: C uses it at rest, and A/B can switch to it as a one-line "strict"
+  fallback if a stricter reading of 1.4.11 is required.
+* The judgement call (soft resting edge on text inputs) is deliberate and recorded
+  here for review by security/accessibility owners; focus visibility is not softened.
+
 **Structure (what is shared).** One component tree and one markup. Looks differ
 by CSS only, scoped as `:root[data-look="a|b|c"] ...` inside one `ui.css`, plus
 a few markup slots that every look contains and the others hide (brand mark,
@@ -273,7 +301,7 @@ starts. `--line-strong` is decorative; text-input and composer boundaries use
 Contrast: `directions/contrast.mjs` reads the hex tokens of every look and theme
 and checks text >= 4.5:1 on bg/panel/sunken, accent on accent-soft, diff text and
 gutters, the inverse status line (C), input edges and the focus ring >= 3:1.
-**Result: 202 checks, all pass.** It moves into the test suite at implementation
+**Result: 222 checks, all pass** (text, accent-on-soft, diff, strict edge, focus ring, plus floors for the soft role borders). It moves into the test suite at implementation
 time and runs on every build.
 
 Theme selection is unchanged: `data-theme` on `<html>` set by a tiny module

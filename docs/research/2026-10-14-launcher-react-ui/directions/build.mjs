@@ -22,7 +22,8 @@ function scope(css, look) {
   const scopeSel = (sel) => splitTop(sel).map((s) => {
     s = s.trim();
     if (s.startsWith(":root")) return prefix + s.slice(5);
-    if (s.startsWith("[data-theme=dark]")) return `${prefix}[data-theme=dark]${s.slice(17)}`;
+    const lead = /^((?:\[data-[\w-]+=[\w-]+\])+)(.*)$/.exec(s);
+    if (lead) return `${prefix}${lead[1]}${lead[2]}`;
     return `${prefix} ${s}`;
   }).join(",");
   function block() {
@@ -47,7 +48,7 @@ writeFileSync(join(out, "ui.css"), css);
 for (const f of ["boot.js", "app.js"]) copyFileSync(join(here, f), join(out, f));
 
 const tpl = readFileSync(join(here, "template.html"), "utf8");
-const lookCtl = '<span class="pv-g" role="group" aria-label="Look">Look <button data-look-set="a">A</button><button data-look-set="b">B</button><button data-look-set="c">C</button></span>';
+const lookCtl = '<span class="pv-g" role="group" aria-label="Look">Look <button data-look-set="a">A</button><button data-look-set="b">B</button><button data-look-set="c">C</button></span>\n    <span class="pv-g" role="group" aria-label="Borders">Borders <button data-borders-set="soft" aria-pressed="true">Soft</button><button data-borders-set="classic" aria-pressed="false">Classic</button></span>';
 const pages = { a: { look: "a", lock: true }, b: { look: "b", lock: true }, c: { look: "c", lock: true }, all: { look: "a", lock: false } };
 for (const [d, p] of Object.entries(pages)) {
   mkdirSync(join(out, d), { recursive: true });
@@ -87,6 +88,7 @@ a:focus-visible{outline:2px solid #fff;outline-offset:3px}
 <p class="lead">All three stay: they become user-selectable looks (appearance), each with light and dark. Each prototype is interactive: collapse activity, open Files / Tasks, click Goal · Plan · Queue, focus the input, filter and arrow through the file tree. The Appearance button switches look and theme.</p>
 <section class="hero"><div><h2>Compare live: all looks in one page</h2><p>Switch look (A / B / C) and light / dark in the same interface, with state and scroll kept. Try it at 390&nbsp;px too.</p></div><p class="links" style="margin:0"><a class="go" href="all/index.html">Open the live switcher</a><a href="phone.html?d=all">390&nbsp;px</a></p></section>
 <div class="grid">${Object.entries(looks).map(([d, v]) => card(d, v)).join("")}</div>
+<p class="links" style="margin-top:20px"><a href="borders-compare.html">Compare borders: classic vs soft (A and B)</a></p>
 <p class="note">Static mock-ups: no backend, no network, no remote fonts. Look is remembered in localStorage (treer-launcher-look) or set with ?look=a|b|c.</p>
 </main></body></html>`);
 writeFileSync(join(out, "phone.html"), `<!doctype html>
@@ -106,6 +108,17 @@ button,a{border:1px solid #3a4047;background:#181b1e;color:#dfe3e7;border-radius
 </div>
 <div class="dev"><iframe id="f" title="Prototype at 390 px"></iframe></div>
 <script src="phone.js"></script></body></html>`);
+writeFileSync(join(out, "borders-compare.html"), `<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Borders: classic vs soft</title>
+<style>*{box-sizing:border-box}body{margin:0;background:#0f1113;color:#e6e8ea;font:15px/1.5 system-ui,sans-serif}main{max-width:1320px;margin:0 auto;padding:32px 20px 64px}h1{margin:0 0 6px;font-size:24px}p{color:#a4abb2;max-width:80ch}
+figure{margin:28px 0 0}figcaption{margin-bottom:8px;font-weight:600}img{display:block;width:100%;height:auto;border:1px solid #2b3036;border-radius:8px}a{color:#9ec1ff}</style></head><body><main>
+<h1>Borders: classic (left) vs soft (right)</h1>
+<p>Same screen, centre of the window. Soft: decorative dividers and card edges are hairlines; controls are identified by fill, label and the focus ring; popovers and the composer get a faint shadow instead of a dark outline. Classic is the previous outline strength. Try it live: <a href="all/index.html?pv=1">live switcher</a> &rarr; Borders &rarr; Soft / Classic. C keeps its terminal outlines by design.</p>
+<figure><figcaption>A · Quiet Editor · light</figcaption><img src="borders-a-light.png" alt="A light, classic left, soft right"></figure>
+<figure><figcaption>A · Quiet Editor · dark</figcaption><img src="borders-a-dark.png" alt="A dark, classic left, soft right"></figure>
+<figure><figcaption>B · Warm Paper · light</figcaption><img src="borders-b-light.png" alt="B light, classic left, soft right"></figure>
+<figure><figcaption>B · Warm Paper · dark</figcaption><img src="borders-b-dark.png" alt="B dark, classic left, soft right"></figure>
+</main></body></html>`);
 writeFileSync(join(out, "phone.js"), `(() => {
   const params = new URLSearchParams(location.search), d = ["a", "b", "c", "all"].includes(params.get("d")) ? params.get("d") : "a", f = document.getElementById("f");
   let theme = "light", look = d === "all" ? "a" : d;

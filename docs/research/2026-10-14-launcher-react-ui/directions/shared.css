@@ -34,7 +34,7 @@ body[data-pv=off] .pv{display:none}
 :root[data-look=a] .m-a,:root[data-look=b] .m-b,:root[data-look=c] .m-c,:root[data-look=a] .empty [data-l=a],:root[data-look=b] .empty [data-l=b],:root[data-look=c] .empty [data-l=c]{display:inline}
 
 /* appearance menu (look + theme): uses the active look's tokens */
-.menu{position:absolute;top:var(--menu-top,52px);right:12px;width:min(320px,calc(100% - 24px));z-index:40;background:var(--panel);color:var(--fg);border:1px solid var(--line-strong);border-radius:var(--r);padding:8px 10px 12px;max-height:calc(100% - 64px);overflow:auto}
+.menu{position:absolute;top:var(--menu-top,52px);right:12px;width:min(320px,calc(100% - 24px));z-index:40;background:var(--panel);color:var(--fg);border:1px solid var(--menu-border,var(--line-strong));box-shadow:var(--shadow-pop,none);border-radius:var(--r);padding:8px 10px 12px;max-height:calc(100% - 64px);overflow:auto}
 .mh{display:flex;align-items:center;justify-content:space-between;padding-left:4px}.mh h2{margin:0;font-size:13px;font-weight:600}
 .mlabel{margin:8px 4px 6px;font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--fg3)}
 .mopt{display:flex;align-items:center;gap:12px;width:100%;padding:8px;border:1px solid transparent;border-radius:var(--rs)}
@@ -44,7 +44,7 @@ body[data-pv=off] .pv{display:none}
 .sw{position:relative;flex:none;width:44px;height:30px;border-radius:6px;border:1px solid rgb(128 128 128/45%);overflow:hidden}
 .sw i{position:absolute;left:6px;bottom:6px;width:20px;height:6px;border-radius:3px}
 .sw-a{background:#fafafb}.sw-a i{background:#3358d4}.sw-b{background:#f5f5f3}.sw-b i{background:#18725a;width:26px}.sw-c{background:#0b0d0c}.sw-c i{background:#4de3a2;border-radius:0}
-.mrow{display:flex;gap:6px}.mchip{flex:1;height:32px;border:1px solid var(--line-strong);border-radius:var(--rs);font-size:12.5px;text-align:center}
+.mrow{display:flex;gap:6px}.mchip{flex:1;height:32px;border:1px solid var(--b-pill,var(--line-strong));border-radius:var(--rs);font-size:12.5px;text-align:center}
 .mchip:hover{background:var(--sunken)}.mchip[aria-checked=true]{border-color:var(--accent);background:var(--accent-soft);color:var(--accent);font-weight:600}
 .main{position:relative;display:flex;min-height:0;min-width:0}
 .pane{position:relative;flex:1;min-width:0;min-height:0;display:flex;flex-direction:column}

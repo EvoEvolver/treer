@@ -39,6 +39,7 @@
     else if (t.dataset.act === "look") setMenu($("#menu").hidden);
     else if (t.hasAttribute("data-close-menu")) { setMenu(false); $$("[data-act=look]").find((b) => b.offsetParent)?.focus(); }
     else if (t.dataset.lookSet) A.setLook(t.dataset.lookSet);
+    else if (t.dataset.bordersSet) { if (t.dataset.bordersSet === "classic") root.dataset.borders = "classic"; else delete root.dataset.borders; $$("[data-borders-set]").forEach((b) => b.setAttribute("aria-pressed", String(b === t))); }
     else if (t.dataset.close) setPanel(t.dataset.close, false);
     else if (t.dataset.pop) { lastSeg = t; pop(t.getAttribute("aria-expanded") === "true" ? "" : t.dataset.pop, true); }
     else if (t.dataset.popSet) { lastSeg = null; pop(t.dataset.popSet); }
@@ -136,6 +137,7 @@
   if (q.get("panel")) setPanel(q.get("panel"), true);
   if (q.get("pop")) pop(q.get("pop"));
   if (q.get("menu")) setMenu(true);
+  if (q.get("borders") === "classic") { root.dataset.borders = "classic"; $$("[data-borders-set]").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.bordersSet === "classic"))); }
   if (q.get("composer") === "expanded") { forceExp = true; syncExp(); }
   if (q.get("pv") === "0") { $("#pv").open = false; document.body.dataset.pv = "off"; }
   setTimeout(() => { thread.scrollTop = thread.scrollHeight; jump(); }, 30);
