@@ -241,9 +241,8 @@ class PolicyAndInjectionTest(Base):
                          'once allowed, the reviewer gets their own immediate message and window')
 
     def test_failed_send_discards_events_merged_into_the_unproven_claim(self):
-        send, merged = self.store.claim_notifications(1, ['ag_work'], 'first', self.now, 'ag_rev')
-        self.assertEqual((send, merged), (['ag_work'], []))
-        self.assertEqual(self.store.claim_notifications(1, ['ag_work'], 'raced', self.now, 'ag_rev'), ([], ['ag_work']))
+        self.assertEqual(self.store.claim_notifications(1, ['ag_work'], 'first', self.now, 'ag_rev'), (['ag_work'], [], []))
+        self.assertEqual(self.store.claim_notifications(1, ['ag_work'], 'raced', self.now, 'ag_rev'), ([], ['ag_work'], []))
         self.store.release_notifications(1, ['ag_work'], 'ag_rev', self.now)
         self.assertEqual(self.store.due_digests(self.now + 10 * WINDOW), [], 'nothing Core did not authorise survives')
         self.assertEqual(self.store.claim_notifications(1, ['ag_work'], 'retry', self.now, 'ag_rev')[0], ['ag_work'])
@@ -280,6 +279,39 @@ class PolicyAndInjectionTest(Base):
             self.assertEqual(self.mutate(self.create(assignee='ag_work'), 'comment', {'body': 'x'}, AUTHOR)['notification']['status'], 'sent', 'next hour, new budget')
         finally:
             os.environ.pop('ISSUES_NOTIFY_HOURLY_LIMIT', None)
+
+    def test_only_proven_actors_can_overflow_into_the_app_identity_digest(self):
+        os.environ['ISSUES_NOTIFY_HOURLY_LIMIT'] = '1'
+        bob = {'id': 'ag_rev', 'kind': 'agent', 'name': 'Reviewer'}
+        try:
+            one, two, three = (self.create(assignee='ag_work') for _ in range(3))
+            self.assertEqual(len(self.auth.requests), 1, 'LEAD used the whole budget for ag_work; LEAD is now proven for this hour')
+            self.auth.denied.add('token-ag_rev')          # Core would refuse Bob's Message to ag_work...
+            result = self.mutate(one, 'comment', {'body': 'sneak'}, bob)
+            self.assertEqual(result['notification']['status'], 'throttled', '...so with the budget gone Bob is dropped, not folded into a digest')
+            self.assertEqual(result['activity'][0]['notification']['status'], 'throttled')
+            overflow = self.mutate(two, 'update', {'priority': 'high'}, LEAD)
+            self.assertEqual(overflow['notification']['status'], 'coalesced', 'a proven actor may overflow')
+            sent = []
+            digest = Digest(self.store, lambda: '', clock=lambda: self.now + WINDOW + 1, runner=lambda a: sent.append(a) or (0, ''), log=lambda m: None)
+            self.assertEqual(digest.flush(), 1)
+            body = sent[0][sent[0].index('--body') + 1]
+            self.assertIn('Updated priority · by leader', body)
+            self.assertNotIn('Reviewer', body); self.assertNotIn('sneak', body); self.assertNotIn('by ag_rev', body)
+            # once Core accepts Bob's own send this hour, Bob is proven and may overflow too
+            self.auth.denied.clear()
+            self.assertEqual(self.mutate(three, 'comment', {'body': 'ok'}, bob)['notification']['status'], 'throttled', 'budget is still empty and Bob is not yet proven')
+            self.now += 3600
+            self.assertEqual(self.mutate(three, 'comment', {'body': 'ok'}, bob)['notification']['status'], 'sent')
+        finally:
+            os.environ.pop('ISSUES_NOTIFY_HOURLY_LIMIT', None)
+
+    def test_a_failure_revokes_the_proof(self):
+        self.store.prove_notifications(['ag_work'], 'ag_rev', self.now)
+        self.store.claim_notifications(1, ['ag_work'], 'x', self.now, 'ag_rev')
+        self.store.release_notifications(1, ['ag_work'], 'ag_rev', self.now)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM notify_proven').fetchone()[0], 0)
 
     def test_a_failed_send_gives_the_budget_back_and_limits_parse_safely(self):
         from notify import hourly_limit

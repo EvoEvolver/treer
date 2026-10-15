@@ -57,6 +57,8 @@ class Store:
                 CREATE TABLE IF NOT EXISTS notify_windows(recipient TEXT NOT NULL, issue_id INTEGER NOT NULL, actor TEXT NOT NULL,
                     window_start REAL NOT NULL, pending TEXT NOT NULL DEFAULT '[]', attempts INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY(recipient, issue_id, actor));
+                CREATE TABLE IF NOT EXISTS notify_proven(recipient TEXT NOT NULL, actor TEXT NOT NULL, hour INTEGER NOT NULL,
+                    PRIMARY KEY(recipient, actor, hour));
                 CREATE TABLE IF NOT EXISTS notify_budget(recipient TEXT NOT NULL, hour INTEGER NOT NULL, immediate INTEGER NOT NULL,
                     PRIMARY KEY(recipient, hour));
                 CREATE TABLE IF NOT EXISTS sessions(secret TEXT PRIMARY KEY, token TEXT NOT NULL, expires REAL NOT NULL);
@@ -306,12 +308,14 @@ class Store:
                        (recipient, now, json.dumps([text])))
 
     def claim_notifications(self, issue_id, recipients, summary, now, actor_id, limit=20):
-        """Split recipients into (send now, coalesced). Windows are per (recipient, issue, ACTOR): an event is only
+        """Split recipients into (send now, coalesced, throttled). Windows are per (recipient, issue, ACTOR): an event is only
         ever merged into a window opened by a send that the same actor's token already got Core to accept, so a
         digest (sent under the App identity) can never carry an actor's event to someone their Policy denies.
         Each recipient also has an hourly budget of immediate Messages; the excess goes to one per-recipient
-        digest, which bounds the total regardless of how many issues are touched."""
-        send, merged = [], []
+        digest, which bounds the total regardless of how many issues are touched. The overflow digest is also sent
+        under the App identity, so only an actor whom Core already let message that recipient THIS HOUR
+        (notify_proven, written after a successful send) may overflow into it; anyone else is throttled (dropped)."""
+        send, merged, throttled = [], [], []
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             for recipient in recipients:
@@ -326,15 +330,24 @@ class Store:
                 hour = int(now // 3600)
                 used = db.execute('SELECT immediate FROM notify_budget WHERE recipient=? AND hour=?', (recipient, hour)).fetchone()
                 if used and used['immediate'] >= limit:
-                    self._overflow(db, recipient, f'#{issue_id} {summary}', now)
-                    merged.append(recipient)
+                    if db.execute('SELECT 1 FROM notify_proven WHERE recipient=? AND actor=? AND hour=?', (recipient, actor_id, hour)).fetchone():
+                        self._overflow(db, recipient, f'#{issue_id} {summary}', now)
+                        merged.append(recipient)
+                    else:
+                        throttled.append(recipient)
                     continue
                 db.execute('INSERT INTO notify_budget(recipient,hour,immediate) VALUES(?,?,1) ON CONFLICT(recipient,hour) DO UPDATE SET immediate=immediate+1',
                            (recipient, hour))
                 db.execute('INSERT OR REPLACE INTO notify_windows(recipient,issue_id,actor,window_start,pending,attempts) VALUES(?,?,?,?,?,0)',
                            (recipient, issue_id, actor_id, now, '[]'))
                 send.append(recipient)
-        return send, merged
+        return send, merged, throttled
+
+    def prove_notifications(self, recipients, actor_id, now):
+        """Core accepted this actor's Message to these recipients: they may use the overflow digest this hour."""
+        with self.connect() as db:
+            for recipient in recipients:
+                db.execute('INSERT OR IGNORE INTO notify_proven(recipient,actor,hour) VALUES(?,?,?)', (recipient, actor_id, int(now // 3600)))
 
     def release_notifications(self, issue_id, recipients, actor_id, now):
         """A failed immediate send proved nothing: drop the claim INCLUDING anything merged into it meanwhile (it was
@@ -343,6 +356,7 @@ class Store:
             for recipient in recipients:
                 db.execute('DELETE FROM notify_windows WHERE recipient=? AND issue_id=? AND actor=?', (recipient, issue_id, actor_id))
                 db.execute('UPDATE notify_budget SET immediate=MAX(0,immediate-1) WHERE recipient=? AND hour=?', (recipient, int(now // 3600)))
+                db.execute('DELETE FROM notify_proven WHERE recipient=? AND actor=? AND hour=?', (recipient, actor_id, int(now // 3600)))
 
     def due_digests(self, now):
         with self.connect() as db:
@@ -365,6 +379,7 @@ class Store:
         with self.connect() as db:
             db.execute("DELETE FROM notify_windows WHERE pending='[]' AND window_start+?<=?", (WINDOW, now))
             db.execute('DELETE FROM notify_budget WHERE hour < ?', (int(now // 3600) - 2,))
+            db.execute('DELETE FROM notify_proven WHERE hour < ?', (int(now // 3600) - 2,))
 
     def unresolved_by_assignee(self, prefix='ag_'):
         """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix."""

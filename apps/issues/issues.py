@@ -79,9 +79,9 @@ class Application:
             else:
                 # One Message per event: this is the only notification path, so nothing is sent twice.
                 now = self.store.clock()
-                send, merged = self.store.claim_notifications(issue_id, recipients, notice, now, actor['id'], hourly_limit())
+                send, merged, throttled = self.store.claim_notifications(issue_id, recipients, notice, now, actor['id'], hourly_limit())
                 if not send:
-                    notification = {'status': 'coalesced', 'coalesced': len(merged)}
+                    notification = {'status': 'coalesced' if merged else 'throttled'}
                 else:
                     try:
                         auth = self.identity_provider()
@@ -89,11 +89,16 @@ class Application:
                             'recipients': send, 'context_ids': [],
                             'body': f"Issue #{issue_id} · {notice}\n{auth.public_url}#issue={issue_id}",
                             'idempotency_key': f'issues-event-{event_id}'})
-                        notification = {'status': 'sent', **({'coalesced': len(merged)} if merged else {})}
+                        self.store.prove_notifications(send, actor['id'], now)
+                        notification = {'status': 'sent'}
                     except Error as exc:
                         self.store.release_notifications(issue_id, send, actor['id'], now)
                         notification = {'status': 'disabled' if exc.code == 'core_messages_disabled' else 'unavailable',
                                         'code': exc.code, 'message': 'Change saved; Core Message notification was not delivered'}
+                if send and merged:
+                    notification['coalesced'] = len(merged)
+                if throttled:
+                    notification['throttled'] = len(throttled)
         if missed:
             notification = dict(notification, unresolved_mentions=missed)
         self.store.notification(event_id, notification)

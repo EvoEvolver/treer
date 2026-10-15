@@ -191,7 +191,13 @@ Messages (`ISSUES_NOTIFY_HOURLY_LIMIT`, default 20, 1–1000). Beyond it, update
 from any number of issues are folded into one per-recipient digest per window
 (`Issues · N more updates (over the hourly limit)…`), so the total sent to one
 Agent is bounded whatever anyone @-mentions. A single comment @-mentions at most
-10 Agents.
+10 Agents. The overflow digest is sent under the App identity too, so only an
+actor whom Core already let message that recipient *in the current hour* (a
+recorded successful send) may overflow into it; once the budget is spent, anyone
+else's event is dropped and the activity shows `notification: throttled`. A
+determined authorised sender can still use the 20 immediate slots, which delays
+other people's notifications to the next digest (at most five minutes, nothing
+is lost); there is no separate per-actor limit.
 
 **Names in Messages.** Directory names are attacker-influenced text, so a name
 appears in a Message only if it is 1–24 characters of `A–Z a–z 0–9 space . _ / -`;
