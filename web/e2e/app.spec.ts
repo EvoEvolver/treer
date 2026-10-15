@@ -1,5 +1,5 @@
 import { test, expect, type Page, type Route } from "@playwright/test"
-import { browseTreeOnMobile } from './fixtures/navigation'
+import { browseTreeOnMobile, openOverviewMap } from './fixtures/navigation'
 
 const NOW = new Date().toISOString()
 
@@ -762,7 +762,7 @@ test("Tree and map distinguish App identity from a command runtime kind", async 
   await expect(page.getByRole("button", { name: /^api-server agent ·/ })).toBeVisible()
   await expect(page.getByRole("button", { name: /^worker agent ·/ })).toBeVisible()
   await expect(page.getByRole("button", { name: /^Soul Archive app ·/ })).toBeVisible()
-  await page.getByRole("button", { name: "Expand tree map" }).click()
+  await openOverviewMap(page)
   const app = page.getByRole("dialog").getByRole("button", { name: /^Open \/Soul Archive · app ·/ })
   await expect(app).toBeVisible()
   await expect(app).toHaveAttribute("title", / · app ·/)

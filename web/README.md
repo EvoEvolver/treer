@@ -146,7 +146,7 @@ recognition stays with that workspace/runtime/App identity across metadata and
 status refreshes. Mobile uses the same component and its existing full-screen
 interface and workload **Logs** menu.
 
-## Tree creation menu and map
+## Tree creation menu and Overview map
 
 The Tree header has one **+** menu for **Add folder** and **Add agent**. Each item
 keeps its original disabled conditions; without machines, Add agent explains the
@@ -154,7 +154,9 @@ required setup and opens machine settings, with a visible explanation and a
 **Set up a machine** button that opens enrollment instructions. The tour still targets `create-agent`.
 Folder context menus retain their existing creation actions and destinations.
 
-**Expand tree map** opens a read-only treemap in a large dialog.
+**Workspace map** in the Overview header opens a read-only treemap in a large
+dialog. The sidebar Tree header contains only the creation menu; open Overview
+to explore the map on desktop or phones.
 The map uses content-driven, top-aligned flow: folders shrink to their contents,
 and 72px Agent tiles wrap in an auto-fill grid rather than stretching to fill area.
 Empty folders keep a compact placeholder.

@@ -5,14 +5,12 @@ import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
-import { ChevronDown, ChevronRight, Folder, Maximize2, MoreVertical, Plus } from "lucide-react"
+import { ChevronDown, ChevronRight, Folder, MoreVertical, Plus } from "lucide-react"
 import { agentPath, workloadKind, folderPath as resolveFolderPath } from "@/lib/workload-path"
 import { readFolderExpansion, writeFolderExpansion, type FolderExpansion } from "@/lib/folder-expansion"
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
 import { WorkloadIcon } from "@/components/workload-icon"
-
-import TreeMap from "@/components/workload-treemap"
 
 export interface NewAgentFolder { folderId: string; path: string }
 type Item = { kind: "folder" | "agent"; id: string; name: string }
@@ -21,9 +19,6 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   workspaceId: string | null; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; selectedId: string | null
   onOpen: (id: string, logs?: boolean) => void; onSettings: (app: AppDeployment) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void; onNew: (folder?: NewAgentFolder) => void; preview: boolean; placementRevision?: number; onTreeChange?: (tree: Tree) => void
 }) {
-  const [mapOpen, setMapOpen] = useState(false)
-  const isOpeningAgent = useRef(false)
-  const mapTrigger = useRef<HTMLButtonElement>(null)
   const [tree, setTree] = useState<Tree>({ folders: [], placements: [] })
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
@@ -50,7 +45,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
   const readGeneration = useRef(0)
   const base = `/api/workspaces/${encodeURIComponent(workspaceId ?? "")}/workload-tree`
   useEffect(() => {
-    setMapOpen(false); setTree({ folders: [], placements: [] }); setError(""); setEditor(null); setTreeLoaded(false); expansion.current = readFolderExpansion(workspaceId); setExpanded(expansion.current); previousSelection.current = null; pendingReveal.current = null; setCopyNotice(""); setManualCopyPath(null)
+    setTree({ folders: [], placements: [] }); setError(""); setEditor(null); setTreeLoaded(false); expansion.current = readFolderExpansion(workspaceId); setExpanded(expansion.current); previousSelection.current = null; pendingReveal.current = null; setCopyNotice(""); setManualCopyPath(null)
   }, [workspaceId, preview])
   useEffect(() => {
     let active = true
@@ -294,13 +289,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
         <DropdownMenuItem disabled={!workspaceId || busy || loading} onSelect={() => edit("create", null)}><Folder className="mr-2 size-3.5" />Add folder</DropdownMenuItem>
         <DropdownMenuItem aria-label={!preview && !machines.length ? "Set up a machine before creating an agent" : undefined} disabled={!workspaceId || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew()}><Plus className="mr-2 size-3.5" />Add agent{!preview && !machines.length && <span className="ml-2 text-[10px] text-muted-foreground">Set up a machine first</span>}</DropdownMenuItem>
       </DropdownMenuContent></DropdownMenu>
-      <Button variant="ghost" size="icon" className="size-7" ref={mapTrigger} aria-label="Expand tree map" disabled={!workspaceId || loading} onClick={() => setMapOpen(true)}><Maximize2 className="size-3.5" /></Button>
     </div></div>
-    <Dialog open={mapOpen} onOpenChange={setMapOpen}><DialogContent className="flex h-[min(820px,calc(100dvh-2rem))] w-[calc(100%-1rem)] max-w-6xl flex-col gap-0 overflow-hidden p-0 sm:w-[calc(100%-3rem)]" onCloseAutoFocus={(event) => { event.preventDefault(); if (!isOpeningAgent.current) mapTrigger.current?.focus(); isOpeningAgent.current = false }}>
-      <DialogHeader className="shrink-0 border-b px-5 py-4 pr-12"><DialogTitle>Workspace map</DialogTitle><DialogDescription className="text-xs">Explore folders and open agents.</DialogDescription></DialogHeader>
-      {mapOpen && <TreeMap tree={tree} agents={workloads} machines={machines} selectedId={selectedId} onOpen={(id) => { isOpeningAgent.current = true; onOpen(id); setMapOpen(false) }} />}
-    </DialogContent></Dialog>
-
     {copyNotice && <p role="status" className="px-3 py-2 text-xs break-all">{copyNotice}</p>}
     {loading && <p role="status" className="px-3 text-xs">Loading folders…</p>}{error && !editor && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="mt-1 h-7" disabled={busy} onClick={() => setReload((value) => value + 1)}>Reload folders</Button></div>}
     <div ref={treeRoot} role="tree" aria-label="Workspace workloads" aria-busy={busy || loading} onKeyDown={treeKeyDown} onFocus={trackTreeFocus} className="min-h-0 flex-1 overflow-auto px-2 pb-3" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (dragged) move(dragged, null); setDragged(null) }}>{render(null)}{!workloads.length && !tree.folders.length && !loading && <p className="px-2 py-4 text-xs text-muted-foreground">No workloads in this workspace</p>}<div aria-label="Move to workspace root" className="mt-2 min-h-8 border-t px-2 py-2 text-[10px] text-muted-foreground">Workspace root</div></div>

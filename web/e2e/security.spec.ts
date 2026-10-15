@@ -1,3 +1,4 @@
+import { openOverviewMap } from './fixtures/navigation'
 import { test, expect } from '@playwright/test'
 import { securityHeaders } from '../worker/security-headers'
 import { postEmbedTheme } from '../src/lib/embed-ui'
@@ -112,7 +113,7 @@ test('built treemap works inside the unchanged single-file Worker CSP', async ({
     document.addEventListener('securitypolicyviolation', (event) => (window as Window & { cspViolations: string[] }).cspViolations.push(event.violatedDirective))
   })
   await page.goto(origin)
-  await page.getByRole('button', { name: 'Expand tree map' }).click()
+  await openOverviewMap(page)
   await expect(page.getByRole('button', { name: 'Explore folder /Research', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Explore folder /Product', exact: true }).click()
   await expect(page.getByRole('button', { name: /^Open \/Product\/reviewer · agent · build-node · offline$/ })).toBeVisible()

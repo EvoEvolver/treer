@@ -11,3 +11,11 @@ export async function browseTreeOnMobile(page: Page) {
   const browse = page.getByRole('button', { name: 'Browse tree', exact: true })
   if (await browse.isVisible()) await browse.click()
 }
+
+// The map belongs to Overview, independently of the mobile Tree's visibility.
+export async function openOverviewMap(page: Page) {
+  const overview = page.getByRole('button', { name: 'Workspace overview', exact: true })
+  if (await overview.isVisible()) await overview.click()
+  await page.getByRole('heading', { name: 'Workspace overview', exact: true }).waitFor({ state: 'visible' })
+  await page.getByRole('button', { name: 'Expand tree map', exact: true }).click()
+}
