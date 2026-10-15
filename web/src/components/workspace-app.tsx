@@ -4,7 +4,7 @@ import { OVERVIEW_TAB, useWorkspaceTabs } from "@/components/use-workspace-tabs"
 import { workspaceWorkloads } from "@/lib/workspace-workloads"
 import { UserMenu } from "@/components/user-menu"
 import { WorkspaceOverview } from "@/components/workspace-overview"
-import { LayoutDashboard, PanelLeft } from "lucide-react"
+import { LayoutDashboard } from "lucide-react"
 import { AppSettingsView,AppsView } from "@/components/apps-view"
 import { AuditView } from "@/components/audit-view"
 import { InvitationEntry, readPendingInvitation, type InvitationIntent } from "@/components/invitation-entry"
@@ -295,6 +295,20 @@ function WorkspaceAppContent() {
     setMobileTerminalOpen(false)
     setMobileTreeOpen(false)
     setCtrlModifier(false)
+  }
+
+  function browseMobileTree() {
+    setMobileTerminalOpen(false)
+    setMobileTreeOpen(true)
+    setCtrlModifier(false)
+    if (mainView !== "terminal") setMainView("overview")
+    requestAnimationFrame(() => {
+      const sidebar = document.getElementById("tree-sidebar")
+      if (!sidebar?.getClientRects().length) return
+      const target = sidebar.querySelector<HTMLElement>('[aria-selected="true"] [data-tree-primary]')
+        ?? sidebar.querySelector<HTMLElement>('[data-tree-primary]') ?? sidebar.querySelector<HTMLElement>("button")
+      target?.focus()
+    })
   }
 
   function closeMobileSurface() {
@@ -992,14 +1006,14 @@ function WorkspaceAppContent() {
       <TreeResizer settings={treeWidth} />
 
       <section className={cn("min-h-0 min-w-0 flex-col", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:flex" : "flex")}>
-        <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} />
+        <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} />
         <p role="status" className="sr-only">{tabNotice}</p>
         {mainView !== "terminal" && <header className="flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
 
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
             {isMobile && mainView !== "overview" && <IconButton label={t("org.back")} className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
             <button type="button" onClick={showOverview} aria-label={t("app.back_to_workspace_overview")} className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? t("app.organization") : workspace?.name ?? t("app.workspace")}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" /><strong className="truncate font-medium text-foreground">{mainView === "overview" ? t("app.overview") : mainView === "organization" || mainView === "workspace" ? t("settings.title") : mainView === "apps" ? t("apps.apps") : mainView === "app" ? selectedApp?.name ?? t("apps.app") : mainView === "audit" ? t("audit.audit") : t("machine.terminal")}</strong></div>
-          {mainView === "overview" ? <Button variant="ghost" size="sm" aria-label={t("app.browse_tree")} className="md:hidden" onClick={() => setMobileTreeOpen(true)}><PanelLeft />{t("app.browse_tree")}</Button> : mainView === "apps" ? <IconButton label={t("app.refresh_apps")} onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label={t("app.refresh_audit")} onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
+          {mainView === "apps" ? <IconButton label={t("app.refresh_apps")} onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label={t("app.refresh_audit")} onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
         </header>}
         <div className={cn("relative min-h-0 flex-1", mainView !== "overview" && mainView !== "terminal" && "hidden")}>
           <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? t("app.overview") : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">

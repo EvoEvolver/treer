@@ -412,3 +412,46 @@ test('Chinese App menu uses type-specific action labels', async ({ page }) => {
   await page.getByRole('button', { name: '/Archive 的更多操作', exact: true }).click()
   for (const name of ['重命名 App', '停止 App', '删除 App']) await expect(page.getByRole('menuitem', { name, exact: true })).toBeVisible()
 })
+
+for (const theme of ['light', 'dark']) for (const surface of ['Terminal', 'Alpha']) {
+  test(`mobile top bar returns directly to Tree and retains ${surface} ${theme}`, async ({ page }, info) => {
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
+    const backend = await fixture(page)
+    await gotoWorkspace(page)
+    await open(page, surface, true)
+    const frame = page.frameLocator('#workspace-panel-tab-1 iframe')
+    if (surface === 'Alpha') await frame.getByRole('textbox', { name: 'Draft' }).fill('Retain this draft')
+    const connections = [...backend.connections]
+    const browse = page.getByRole('button', { name: 'Browse tree', exact: true })
+    await expect(browse).toBeVisible()
+    await expect(browse).toHaveAttribute('aria-controls', 'tree-sidebar')
+    const hit = (await browse.boundingBox())!
+    expect(hit.width).toBeGreaterThanOrEqual(44)
+    expect(hit.height).toBeGreaterThanOrEqual(44)
+    await page.screenshot({ path: info.outputPath(`tree-return-${surface}-${theme}-390.png`) })
+    await browse.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.locator('#tree-sidebar')).toBeVisible()
+    await expect(page.getByRole('heading', { name: 'Workspace overview', exact: true })).not.toBeVisible()
+    await expect(page.locator(`[data-agent-id="tab-${surface === 'Alpha' ? 1 : 0}"]`)).toHaveAttribute('aria-selected', 'true')
+    const selectedRow = page.locator(`[data-agent-id="tab-${surface === 'Alpha' ? 1 : 0}"] [data-tree-primary]`)
+    await expect(selectedRow).toBeFocused()
+    await selectedRow.click()
+    if (surface === 'Alpha') await expect(frame.getByRole('textbox', { name: 'Draft' })).toHaveValue('Retain this draft')
+    else expect(backend.connections).toEqual(connections)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+}
+
+test('Tree top-bar entry works from mobile settings and is absent on desktop', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 })
+  await fixture(page)
+  await gotoWorkspace(page)
+  await page.getByRole('button', { name: 'Browse tree', exact: true }).click()
+  await page.getByRole('button', { name: 'Workspace settings', exact: true }).click()
+  await page.getByRole('button', { name: 'Browse tree', exact: true }).click()
+  await expect(page.locator('#tree-sidebar')).toBeVisible()
+  await page.setViewportSize({ width: 1360, height: 960 })
+  await expect(page.getByRole('button', { name: 'Browse tree', exact: true })).toHaveCount(0)
+})

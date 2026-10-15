@@ -184,6 +184,12 @@ nonce CSP. See [the size/review notes](tree-map-report.md).
 
 ## Retained workspace tabs
 
+On phones, the page top bar has a **Browse tree** button with a 44px touch
+target. It opens the existing Tree directly from Overview, Agent/App pages or
+settings, preserving selected workloads, retained tabs, terminals and iframe
+drafts. It does not require visiting Overview first. Desktop navigation is
+unchanged.
+
 Overview is a pinned page; its desktop tab stays visible when the tab strip scrolls. Opening an Agent or App from the Tree or Overview
 opens or selects its stable-ID tab; a tab’s full Tree path distinguishes repeated
 names. Desktop tabs support Left/Right, Home/End, Delete to close, and
