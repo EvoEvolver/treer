@@ -50,7 +50,7 @@ test("AIS queue persists across launcher restart, exposes correlated results and
   assert.equal((await fetch(first.base + "/v1/queue", { headers: { ...first.headers, origin: "https://attacker.example" } })).status, 403);
   const hold = await first.post({ operation_id: "hold", text: "hold", mode: "prompt" }).then((response) => response.json());
   const sender = { agent_id: "ag_sender", path: "/team/sender", name: "sender" };
-  const body = { operation_id: "queued", text: "continue", sender, delivery: "queue" };
+  const body = { operation_id: "queued", text: "continue", sender, delivery: "queue", notify: { on: ["done", "failed", "interrupted"] } };
   const queued = await first.post(body).then((response) => response.json());
   assert.equal(queued.submission.disposition, "queued"); assert.equal(queued.submission.position, 1);
   const status = await fetch(first.base + "/v1/status").then((response) => response.json());
