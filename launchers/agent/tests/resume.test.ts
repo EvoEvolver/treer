@@ -248,10 +248,20 @@ test("switch saves startup and detaches a self-only restart with private result/
   const state = join(parent, readdirSync(parent)[0]);
   const result = join(state, "result.json");
   const deadline = Date.now() + 5000;
+  let receipt: { restart_exit_code: number } | undefined;
   while (Date.now() < deadline) {
-    try { readFileSync(result); break; } catch { await new Promise((resolve) => setTimeout(resolve, 20)); }
+    try {
+      // The detached Python writer creates the file before writing its JSON.
+      // Presence (or even a successful read) is not a completion receipt.
+      receipt = JSON.parse(readFileSync(result, "utf8"));
+      break;
+    } catch (error) {
+      if (!(error instanceof SyntaxError) && (error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
   }
-  assert.equal(JSON.parse(readFileSync(result, "utf8")).restart_exit_code, 0);
+  assert.ok(receipt, "detached switch must publish a complete JSON receipt within 5 seconds");
+  assert.equal(receipt.restart_exit_code, 0);
   assert.equal(statSync(state).mode & 0o777, 0o700);
   for (const file of ["plan.json", "restart.log", "result.json"]) {
     assert.equal(statSync(join(state, file)).mode & 0o777, 0o600);
