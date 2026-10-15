@@ -19,6 +19,7 @@ from .common import (
     _bounded_int,
     _http_url,
     _integer,
+    _list,
     _object,
     _string,
 )
@@ -50,19 +51,36 @@ def load_config() -> tuple[Config, Path, str, str]:
         "retry_max_seconds",
         "ambiguous_retry_seconds",
         "respond_to_denied",
+        "users",
+        "limits",
+        "control",
     }
     unknown = set(value) - allowed_keys
     if unknown:
         raise BridgeError(f"Telegram config has unknown fields: {', '.join(sorted(unknown))}")
-    users = value.get("allowed_user_ids")
-    if not isinstance(users, list) or not users or len(users) > 1_000:
-        raise BridgeError("allowed_user_ids must contain 1-1000 numeric user IDs")
-    allowed_users = frozenset(_integer(user, "allowed Telegram user ID") for user in users)
-    if len(allowed_users) != len(users):
-        raise BridgeError("allowed_user_ids must be unique")
-    binding_values = value.get("bindings")
-    if not isinstance(binding_values, list) or not binding_values or len(binding_values) > 1_000:
-        raise BridgeError("bindings must contain 1-1000 chat/topic bindings")
+    users = value.get("allowed_user_ids", [])
+    if not isinstance(users, list) or len(users) > 1_000:
+        raise BridgeError("allowed_user_ids must contain at most 1000 numeric user IDs")
+    allowed_ids = [_integer(user, "allowed Telegram user ID") for user in users]
+    labels: dict[int, str] = {}
+    labelled = value.get("users", [])
+    if not isinstance(labelled, list) or len(labelled) > 1_000:
+        raise BridgeError("users must be a list of at most 1000 {id, label} objects")
+    for raw in labelled:
+        item = _object(raw, "user")
+        if set(item) - {"id", "label"}:
+            raise BridgeError("user has unknown fields")
+        user_id = _integer(item.get("id"), "Telegram user ID")
+        labels[user_id] = " ".join(_string(item.get("label"), "user label", 64).split())
+        allowed_ids.append(user_id)
+    if not allowed_ids:
+        raise BridgeError("configure at least one of allowed_user_ids or users")
+    allowed_users = frozenset(allowed_ids)
+    if len(allowed_users) != len(allowed_ids):
+        raise BridgeError("Telegram user IDs must be unique")
+    binding_values = value.get("bindings", [])
+    if not isinstance(binding_values, list) or len(binding_values) > 1_000:
+        raise BridgeError("bindings must contain at most 1000 chat/topic bindings (more can be set later with /poc)")
     bindings: list[Binding] = []
     for raw in binding_values:
         item = _object(raw, "binding")
@@ -98,6 +116,13 @@ def load_config() -> tuple[Config, Path, str, str]:
     respond = value.get("respond_to_denied", True)
     if not isinstance(respond, bool):
         raise BridgeError("respond_to_denied must be boolean")
+    limits = _object(value.get("limits", {}), "limits")
+    if set(limits) - {"per_user_per_hour", "per_conversation_per_minute", "max_unreplied"}:
+        raise BridgeError("limits has unknown fields")
+    control = _object(value.get("control", {}), "control")
+    if set(control) - {"user_admin_agent_ids"}:
+        raise BridgeError("control has unknown fields")
+    admins = _list(control.get("user_admin_agent_ids", []), "user_admin_agent_ids")
     state_dir = Path(state_value)
     state_dir.mkdir(parents=True, exist_ok=True)
     return (
@@ -112,6 +137,11 @@ def load_config() -> tuple[Config, Path, str, str]:
             retry_max_seconds=maximum,
             ambiguous_retry_seconds=ambiguous,
             respond_to_denied=respond,
+            user_labels=tuple(sorted(labels.items())),
+            per_user_per_hour=_bounded_int(limits.get("per_user_per_hour", 60), "per_user_per_hour", 1, 10_000),
+            per_conversation_per_minute=_bounded_int(limits.get("per_conversation_per_minute", 20), "per_conversation_per_minute", 1, 1_000),
+            max_unreplied=_bounded_int(limits.get("max_unreplied", 50), "max_unreplied", 1, 10_000),
+            user_admin_agent_ids=frozenset(_string(item, "user admin Agent ID", 256) for item in admins),
         ),
         state_dir,
         cli,

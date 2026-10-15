@@ -64,6 +64,15 @@ class Config:
     retry_max_seconds: float
     ambiguous_retry_seconds: float
     respond_to_denied: bool
+    # Registry seeding and abuse limits (all optional so existing configs keep working).
+    user_labels: tuple[tuple[int, str], ...] = ()
+    per_user_per_hour: int = 60
+    per_conversation_per_minute: int = 20
+    max_unreplied: int = 50
+    user_admin_agent_ids: frozenset[str] = frozenset()
+
+    def user_label(self, user_id: int) -> str:
+        return dict(self.user_labels).get(user_id, f"user-{user_id}")
 
     def binding(self, chat_id: int, thread_id: int | None) -> Binding | None:
         key = (str(chat_id), _thread_key(thread_id))

@@ -104,9 +104,15 @@ def main() -> int:
                 "acknowledged_delivery_ids": [delivery_id],
                 "already_acknowledged_delivery_ids": [],
             }
-        elif arguments[:2] == ["agent", "get"]:
+        elif arguments[:2] in (["agent", "get"], ["agent", "show"]):
+            paths = json.loads(os.environ.get("FAKE_TREER_PATHS", "{}"))
+            target = arguments[2]
+            if target.startswith("/") or target in os.environ.get("FAKE_TREER_UNKNOWN_AGENTS", "").split(","):
+                if target not in paths:
+                    fail("agent_not_found", "no such Agent")
+                target = paths[target]
             response = {
-                "agent_id": arguments[2],
+                "agent_id": target,
                 "workspace_id": "workspace-a",
                 "server_id": "server-a",
                 "kind": "codex",
