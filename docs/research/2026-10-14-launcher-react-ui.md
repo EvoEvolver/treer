@@ -1,7 +1,7 @@
-# Launcher browser UI: React rebuild design
+# Launcher browser UI: React rebuild (design and implementation record)
 
-2026-10-14. Status: **draft for review by launcher-dev, security-claude, leader.**
-No implementation yet. Owner: ui-dev. Server/packaging sections need launcher-dev
+2026-10-14. Status: **implemented** (sections 1-15 are the design; section 16 records what was built, how it
+was verified, and what is still open). Owner: ui-dev. Server/packaging sections need launcher-dev
 sign-off (marked **[LD]**). Conflicts are recorded in "Open questions".
 
 Companion: [launcher-react-contract](2026-10-14-launcher-react-contract.md)
@@ -587,3 +587,58 @@ HTML/CSS/JS (no framework, no network). Views: chat, empty, loading, error;
 panels: files (keyboard tree, filter, preview), tasks; Goal/Plan/Queue popovers;
 compact/expanded composer; light/dark; 390px layout with bottom sheets and tab
 bar. Not drawn: goal editor dialog, image viewer, model/effort menu, `zh` strings.
+
+## 16. Implementation record
+
+**Where.** Branch `launcher-react-ui` (not pushed). Sources `launchers/agent/ui/`; committed
+artifacts `public/{index.html,boot.js,ui.js,ui.css}` (the page is `index.html`; there is no
+`ui.html`). Commit groups, each reviewable and revertible on its own:
+
+| Stage | Commits | Content |
+| --- | --- | --- |
+| Design | prototypes and this document | three looks, token contract, contrast script |
+| 1 Pipeline | scaffold, strict CSP | esbuild build, `check:ui` byte comparison, AST source scan, pinned deps, looks and appearance switching, three theme sources |
+| 2 Conversation | conversation, tests | markdown sink, folded activity, diffs, plans, paging with scroll anchoring, jump to latest |
+| 3 Composer | strip/goal/model/queue, tests | status strip with one popover, goal lifecycle, model and effort, Steer/Queue/interrupt, zh dictionary |
+| 4 Panels | files/tasks/dialogs, tests | read-only file browser, task panel, text and image dialogs, Markdown export |
+| 5 Parity and switch | contract port, **Make the React UI the default page**, **Remove the legacy browser UI** | the legacy mock-contract assertions ported; default switched; legacy deleted separately |
+
+**Measured.** Four files, 437,118 bytes of the 600,000 byte budget: `ui.js` ~328 KB (React 19.3.1,
+marked, DOMPurify, app), `ui.css` ~64 KB (shared plus three looks), `boot.js` ~1 KB, `index.html`
+< 1 KB. `npm test`: 158 tests green, including the ported runtime-controls contract fixture
+(queue, tasks, goal, slash commands, deliberate 503/204 responses, phone panels) and 8
+unit tests; `tests/browser-ui.mjs` drives the real server with fake Codex and fake Claude
+processes (looks x themes, CSP violations limited to the two inline handlers the hostile
+fixture plants, phone layout without overflow). The Windows smoke UI step passes in bundle
+mode on macOS against the prepared payload.
+
+**Parity matrix result.** Transcript and older paging, streaming, steer/queue/Tab, queue
+cancel, draft retention, steer downgrade notice, interrupt, model and effort, goal
+(set, edit, pause/resume, confirm-clear, retry, reconcile, `/goal` commands, completion
+notices, budget and usage), tasks and output polling, files (browse, preview, refresh,
+truncation, text-only), diffs, plans, reasoning, markdown through DOMPurify, theme
+(`?theme`, parent message, system), 390px layout and shared panel slot, iframe `<base>`,
+no console errors: all covered by automated checks. Deliberate differences from the
+legacy page:
+* The queue is a count in the strip with a popover for the entries (design 2.2a).
+* A goal whose status is `cleared` collapses to "Set goal" instead of showing a Cleared card.
+* The model and effort pickers sit in a popover opened from the composer chip.
+* Goal notices and statuses use words, not glyph prefixes.
+* Task output, file text and errors are unchanged in meaning; markdown images that are not
+  same-origin, `data:` raster or `blob:` render as their alt text.
+
+**Bugs the port found and fixed.** A button pressed while the field was focused could be moved
+away from under the pointer by the layout change; a send in flight wiped a newer draft; a
+queue popover reopened by itself after its queue drained; a 204 acknowledgement was treated
+as an error; a label wrapping a field leaked the field's value into its accessible name.
+
+**Not done or not verifiable here.** Native Windows runtime acceptance on a real machine
+and the official Controller path (the smoke test ran in bundle mode on macOS); the
+real-provider goal script (`test:goal:live`) was ported to the new DOM but not run (it needs
+provider credentials); security-claude's review of the final dependency list, CSP and
+sinks; release-claude's gate. The pre-existing `dompurify@3.4.14` low advisory (IN_PLACE
+option, not used here) still needs its own upgrade review.
+
+**Maintenance.** A new component must style itself in all three looks in the same change;
+`npm run check:ui` and `npm run test:browser` are the gates; the three looks and the token
+contract live in `ui/src/styles/`.
