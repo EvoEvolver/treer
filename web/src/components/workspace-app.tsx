@@ -2,6 +2,7 @@ import { AgentBreadcrumbs } from "@/components/agent-breadcrumbs"
 import { AppSettingsView, AppsView } from "@/components/apps-view"
 import { AuditView } from "@/components/audit-view"
 import { AuthScreen } from "@/components/auth-screen"
+import { UserMenu } from "@/components/user-menu"
 import { Field, IconButton, MachineRecovery, MobileTerminalKey, SimpleNameDialog } from "@/components/control-plane-ui"
 import { MachineOverviewView } from "@/components/machine-view"
 import { OrganizationSettingsView } from "@/components/organization-settings-view"
@@ -10,7 +11,6 @@ import { TerminalPane, type TerminalPaneHandle } from "@/components/terminal-pan
 import { TreeResizer, useTreeWidth } from "@/components/tree-resizer"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
@@ -38,8 +38,6 @@ import {
   Delete,
   FolderKanban,
   Keyboard,
-  ListChecks,
-  LogOut,
   Maximize2,
   MoreHorizontal,
   Pencil,
@@ -47,7 +45,6 @@ import {
   Plus,
   Rocket,
   RotateCw,
-  Settings as SettingsIcon,
   Square,
   Trash2,
   Upload,
@@ -1239,12 +1236,7 @@ function WorkspaceAppContent() {
         </div>
         <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
-        <div className="shrink-0 border-t p-2">
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild><button type="button" aria-label="User menu" className="grid h-11 w-full grid-cols-[28px_minmax(0,1fr)_20px] items-center gap-2 rounded-[5px] px-2 text-left hover:bg-accent"><span className="grid size-7 place-items-center rounded bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(user.preferred_name)}</span><span className="min-w-0"><span className="block truncate text-xs font-medium">{user.preferred_name}</span><span className="block truncate text-[9px] text-muted-foreground">{user.email}</span></span><MoreHorizontal className="size-4 text-muted-foreground" /></button></DropdownMenuTrigger>
-            <DropdownMenuContent side="top" align="start" className="w-60"><DropdownMenuLabel><span className="block truncate">{user.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] font-normal text-muted-foreground">{user.email} · {currentRole}</span></DropdownMenuLabel><DropdownMenuSeparator /><DropdownMenuItem onSelect={openSettings}><SettingsIcon />Settings</DropdownMenuItem><DropdownMenuItem onSelect={replayFirstRunTour}><ListChecks />Replay product tour</DropdownMenuItem><DropdownMenuSeparator /><DropdownMenuItem onSelect={logout} disabled={preview}><LogOut />Log out</DropdownMenuItem></DropdownMenuContent>
-          </DropdownMenu>
-        </div>
+        <UserMenu user={user} badge={initials(user.preferred_name)} role={currentRole} preview={preview} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
       </aside>
       <TreeResizer settings={treeWidth} />
 
