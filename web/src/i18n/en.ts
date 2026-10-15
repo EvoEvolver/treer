@@ -664,6 +664,21 @@ export const en = {
   "tabs.more_actions": "More actions for {path}",
   "tabs.rename_app": "Rename App",
   "tabs.stop_app": "Stop App",
+  "invite.decline_failed": "Unable to dismiss this invitation. Please try again.",
+  "invite.invalid": "This invitation is invalid or no longer available. Ask an organization administrator for a new link.",
+  "invite.unsupported": "Invitations are not supported by this server version. Ask your administrator to update Treer.",
+  "invite.unavailable": "Unable to check this invitation. Please try opening the link again later.",
+  "invite.switch_failed": "Your account is ready, but the organization could not be opened. Close this notice and refresh the organization list.",
+  "invite.accept_failed": "Unable to join the organization. No successful acceptance was confirmed. Please try again.",
+  "invite.unavailable_title": "Invitation unavailable",
+  "invite.personal_title": "Account registration invitation",
+  "invite.personal_signed_in": "This link is for creating a Treer account, not joining an organization. You are already signed in.",
+  "invite.join_title": "Join {organization}?",
+  "invite.loading": "Checking invitation…",
+  "invite.signed_in": "You are signed in as {email}. Join this organization as a member?",
+  "invite.sign_in_detail": "Continue to sign in or create an account to join this organization. Creating an account with this invitation joins the organization.",
+  "invite.preview_detail": "Checking the organization before you choose whether to join.",
+  "invite.join": "Join organization",
 } as const
 
 export type MessageKey = keyof typeof en

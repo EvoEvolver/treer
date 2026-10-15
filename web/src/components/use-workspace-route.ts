@@ -14,7 +14,9 @@ export function useWorkspaceRoute() {
   // socket when React Router changes the navigate function's identity.
   const replaceWorkspaceRoute = useCallback((organizationId: string | null, workspaceId: string | null) => {
     const routing = routingRef.current
-    routing.navigate({ pathname: workspacePath(organizationId, workspaceId), search: routing.search, hash: routing.hash }, { replace: true })
+    const parameters = new URLSearchParams(routing.search)
+    parameters.delete("invite")
+    routing.navigate({ pathname: workspacePath(organizationId, workspaceId), search: parameters.toString(), hash: routing.hash }, { replace: true })
   }, [])
   return { route, location, routeSelectionRef, routingRef, replaceWorkspaceRoute }
 }

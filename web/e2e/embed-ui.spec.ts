@@ -139,6 +139,7 @@ async function mockApi(page: Page) {
     const url = new URL(route.request().url())
     const path = url.pathname.replace(/^\/api/, "")
 
+    if (path === "/invitations/pending") return route.fulfill({ status: 204 })
     if (path === "/auth/me") return ok(route, user)
     if (path === "/organizations") return ok(route, { organizations: [organization] })
     if (path === "/organizations/org-1/members") return ok(route, { members: [{ user_id: user.user_id, email: user.email, preferred_name: user.preferred_name, role: "owner" }] })
