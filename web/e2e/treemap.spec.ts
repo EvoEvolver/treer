@@ -1,26 +1,5 @@
 import { test, expect } from '@playwright/test'
-import { treemap } from '../src/lib/treemap'
 import { mockTreeMapApi, mockDeepTreeMapApi, mapSnapshot } from './fixtures/treemap'
-
-test('squarified cells preserve area, bounds and non-overlap for wide, tall and empty layouts', () => {
-  expect(treemap([], { x: 0, y: 0, width: 100, height: 100 })).toEqual([])
-  for (const [width, height] of [[900, 500], [300, 1500], [1, 1]]) {
-    const weights = [9, 4, 1, 1, 1, 1, 1]
-    const cells = treemap(weights, { x: 7, y: 11, width, height })
-    expect(cells).toHaveLength(weights.length)
-    cells.forEach((cell, index) => {
-      expect(cell.x).toBeGreaterThanOrEqual(7 - 1e-8)
-      expect(cell.y).toBeGreaterThanOrEqual(11 - 1e-8)
-      expect(cell.x + cell.width).toBeLessThanOrEqual(7 + width + 1e-8)
-      expect(cell.y + cell.height).toBeLessThanOrEqual(11 + height + 1e-8)
-      expect(cell.width * cell.height).toBeCloseTo(weights[index] / 18 * width * height)
-      for (const other of cells.slice(index + 1)) {
-        const overlap = Math.max(0, Math.min(cell.x + cell.width, other.x + other.width) - Math.max(cell.x, other.x)) * Math.max(0, Math.min(cell.y + cell.height, other.y + other.height) - Math.max(cell.y, other.y))
-        expect(overlap).toBeLessThan(1e-7)
-      }
-    })
-  }
-})
 
 for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
   test(`treemap ${mobile ? '390px' : 'desktop'} ${theme}: drill down, breadcrumbs and stable-ID keyboard selection`, async ({ page }, testInfo) => {
@@ -116,10 +95,11 @@ test('loading folders disables only Add folder; an empty workspace disables both
   await expect(page.getByRole('button', { name: 'Expand tree map', exact: true })).toBeDisabled()
 })
 
-for (const large of [false, true]) for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
-  test(`nested map ${large ? 'large' : 'small'} ${mobile ? '390px' : 'desktop'} ${theme}: compact identity and budgeted previews`, async ({ page }, testInfo) => {
+for (const sample of ["small", "medium", "large"] as const) for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
+  test(`nested map ${sample} ${mobile ? '390px' : 'desktop'} ${theme}: compact identity and budgeted previews`, async ({ page }, testInfo) => {
     await page.setViewportSize(mobile ? { width: 390, height: 844 } : { width: 1360, height: 960 })
-    await mockDeepTreeMapApi(page, large)
+    const large = sample === "large"
+    await mockDeepTreeMapApi(page, large ? true : sample === "medium" ? "medium" : false)
     await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
     await page.goto('/')
     const appRow = page.getByRole('treeitem', { name: 'dashboard', exact: true })
@@ -131,6 +111,10 @@ for (const large of [false, true]) for (const mobile of [false, true]) for (cons
     if (large) {
       await expect(deepAgent).toHaveCount(0)
       await expect(dialog.getByRole('button', { name: 'View contents of /Team', exact: true })).toContainText('80 agents')
+      const folder = dialog.getByRole('region', { name: 'Folder /Team', exact: true })
+      await expect(folder).toContainText('offline 7')
+      await expect(folder.getByLabel('Preview of /Team', { exact: true })).toContainText('agent-01')
+      expect((await folder.boundingBox())!.height).toBeLessThan(220)
     } else {
       // Four folder levels automatically expand; no drilling required.
       await expect(deepAgent).toBeVisible()
@@ -138,10 +122,11 @@ for (const large of [false, true]) for (const mobile of [false, true]) for (cons
       const name = await deepAgent.locator('span.truncate').first().boundingBox()
       const status = await deepAgent.getByText('working', { exact: true }).boundingBox()
       expect(status!.y - name!.y).toBeLessThan(52)
+      await expect(deepAgent).toHaveCSS('height', '72px')
       await expect(deepAgent).toHaveAttribute('title', /\/Team\/Research\/Experiments\/Lab\/agent-01/)
     }
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await page.screenshot({ path: testInfo.outputPath(`nested-${large ? 'large' : 'small'}-${theme}-${mobile ? '390' : 'desktop'}.png`) })
+    await page.screenshot({ path: testInfo.outputPath(`nested-${sample}-${theme}-${mobile ? '390' : 'desktop'}.png`) })
     if (large) {
       for (const path of ['/Team', '/Team/Research', '/Team/Research/Experiments', '/Team/Research/Experiments/Lab']) {
         await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).click()
@@ -166,7 +151,7 @@ test('a very deep small tree respects the node budget instead of recursively mou
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
   await expect(dialog.getByRole('button', { name: 'View contents of /Team', exact: true })).toContainText('3 agents')
   await expect(dialog.getByRole('region', { name: /^Folder / })).toHaveCount(1)
-  await expect(dialog.locator('[data-workload-icon="agent"]')).toHaveCount(0)
+  await expect(dialog.getByRole('button', { name: /^Open .*agent-01/ })).toHaveCount(0)
   await dialog.getByRole('button', { name: 'View contents of /Team', exact: true }).click()
   await expect(dialog.getByRole('button', { name: 'Team', exact: true })).toHaveAttribute('aria-current', 'location')
 })

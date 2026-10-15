@@ -9,10 +9,11 @@ existing authorized inventories, stable Agent IDs and Tree folder placements;
 there are no new API routes, writes, storage keys or credentials. No chart library
 or other dependency was added. The existing single-file build plugin is retained.
 
-Folder containers nest Agent cards. Each Agent has unit weight; empty folders
-retain visible space. Desktop uses a small squarified layout; phone layouts use
-proportional vertical strips with enough space for readable labels. Nested previews use available block dimensions and bounded node/leaf budgets;
-there is no fixed two-level cutoff. Large or tight branches can be drilled into. Breadcrumbs return
+Folder containers nest compact, fixed-height Agent tiles using a content-driven
+CSS grid on desktop and phones. Folder heights follow their contents; nothing
+stretches to fill the dialog. Empty folders retain compact placeholders. Nested
+previews use width and bounded node/leaf budgets, with no two-level cutoff.
+Large or tight branches use counted summaries and drill-down. Breadcrumbs return
 to any ancestor. Folder exploration is local to the dialog and does not alter
 sidebar collapse preferences. Live inventories continue to update while open;
 a deleted current folder returns to the workspace. Malformed parent cycles are
@@ -32,8 +33,8 @@ level 9; these are bundle measurements, not live network timings.
 | Payload | Raw bytes | gzip bytes |
 | --- | ---: | ---: |
 | Before: index.html | 956,335 | 269,467 |
-| After: index.html | 970,640 | 273,422 |
-| Difference | +14,305 (+1.50%) | +3,955 (+1.47%) |
+| After: index.html | 970,407 | 273,140 |
+| Difference | +14,072 (+1.47%) | +3,673 (+1.36%) |
 
 Per the final requirement the small map component uses a normal static import;
 only its dialog DOM/layout is mounted when opened. No build, dependency, Worker,
@@ -42,7 +43,7 @@ restore, and the existing single-index.html publication contract is unchanged.
 The actual local Worker/browser test opens and drills into the map under the
 unchanged nonce CSP and checks for security-policy violations.
 
-## Validation
+## Initial implementation validation (historical)
 
 Focused tests cover original creation flows plus menu disabled states, no-machine
 setup, layout area/bounds/non-overlap, desktop and 390px in both themes, drill-down,
@@ -117,37 +118,42 @@ full browser log is `/tmp/treer-tree-collapse-e2e.log`; build/typecheck logs are
 `/Users/dooms/treer-tree-map/.treer/reviews/tree-collapse/`. Relative to 92371db,
 the single-file bundle grows by 1,048 raw bytes / 286 gzip bytes (Python level 9).
 
-## Issue #17: compact content and deeper previews
+## Issue #17: second revision supersedes 2dbe611
 
-Agent cards use 8px padding, a top-aligned compact name/category/machine/status
-stack, and a shared Bot icon. Tree rows use the same icon; Apps use AppWindow.
-Labels, full-path title/aria, keyboard opening and focus return remain intact.
+The first density revision kept area-filling rectangles; it was rejected because
+cards still stretched with blank space below their content. The new layout uses
+normal document flow: folders are full-width sections sized by their contents,
+and Agents use an auto-fill grid with 180px minimum width (clamped to available
+width) and fixed 72px height. Everything aligns to the top. Unused dialog space
+stays outside cards. The obsolete squarified-layout helper and its implementation
+unit test are removed; the existing single-file build is retained.
 
-Nested previews admit at most 48 leaves and 96 nodes including the current root
-items, provided each immediate child has a 112×76px cell. Checks continue at each
-level; no depth-two stop remains. Explicit drill-down lists all immediate children
-rather than hiding them. Over-budget branches retain their descendant count and
-an Explore action, and receive bounded layout weight to avoid huge empty scroll
-canvases. Phone layout includes folder-header overhead in proportional sizing,
-with 44px folder buttons and compact cards. Cyclic parents are still broken;
-node budgets also prevent very deep chains from recursively rendering forever.
+Each Agent has an 8px-padded compact name/category/machine/status stack. Tree and
+map share Bot icons; Apps use AppWindow. Full paths remain in title/aria and the
+focus/hover detail, and buttons preserve keyboard opening and stable IDs.
 
-Four-level fixtures cover three nested Agents and an 80-Agent branch, plus a
-root App to verify distinct icons. Light/dark desktop and 390px cases verify
-compact name/status spacing, automatic small-tree previews, large-tree folding,
-counted drill-down, full hover paths, keyboard selection and matching Tree icons.
+Nested previews retain the 48-leaf/96-node budget, counting current root items,
+and require an estimated 180px remaining width. No two-level cutoff remains.
+Explicit drill-down always lists immediate children. Over-budget/tight folders
+render a compact summary with total Agents, counts by effective status (including
+offline machine state), up to four folder/Agent preview labels and an Expand
+button. Summary previews are text, not additional navigation targets. Folder
+buttons remain 44px and breadcrumbs/focus management are unchanged.
 
-Issue #17 review artifacts (eight screenshots: small/large × light/dark ×
-desktop/390px) are retained under the ignored local directory
-`/Users/dooms/treer-treemap-density/.treer/reviews/treemap-density/`.
-The single-file build is 970,640 raw bytes / 273,422 gzip bytes (Python level 9):
-+1,420 raw / +430 gzip compared with 654e1b4. The branch starts at origin/main
-43aeca4 and carries the separately frozen Worker-port test fix 30c1239 as a
-cherry-pick (66857b7); the density change is a separate product commit.
+Fixtures: small (four folder levels, three Agents), medium (20 Agents across
+multiple folders), large (80 Agents including seven offline), each light/dark and
+desktop/390px. Assertions check 72px tiles, tight name/status spacing, deep small
+previews, summary height below 220px, offline counts and preview labels, drilling
+into all 80 Agents, full hover paths, keyboard selection and consistent icons.
+A 110-level small tree checks the independent node budget. APIs are synthetic;
+no live machine/session is used.
 
-Issue #17 checks passed: full hermetic e2e **215/215**, `pnpm build`, isolated
-`pnpm typecheck`, docs and diff checks. Test ports were OS-selected 60472/60473;
-all APIs, terminals and inventories were synthetic/local. Logs:
-`/tmp/treer-treemap-density-e2e.log`, `/tmp/treer-treemap-density-build.log`, and
-`/tmp/treer-treemap-density-typecheck.log`. No Rust checks were necessary; no
-Core/native-mobile code changed, and no deployment or runtime restart occurred.
+Second revision bundle: 970,407 raw / 273,140 gzip bytes (Python level 9), compared
+with 969,220 / 272,992 at 654e1b4. No dependency/build/Worker/release changes.
+
+Second revision verification: full hermetic Playwright **218/218**, `pnpm build`,
+isolated `pnpm typecheck`, documentation and diff checks passed. Logs are
+`/tmp/treer-treemap-flow-{e2e,build,typecheck}.log`. All 12 screenshots were
+visually checked and are retained locally in the ignored directory
+`/Users/dooms/treer-treemap-density/.treer/reviews/treemap-flow/`, named
+`nested-{small,medium,large}-{light,dark}-{desktop,390}.png`.
