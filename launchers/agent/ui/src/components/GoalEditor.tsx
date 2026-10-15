@@ -11,6 +11,7 @@ export function GoalEditor({ open, onClose, onSaved }: { open: boolean; onClose:
   const objective = useRef<HTMLTextAreaElement>(null);
   const [text, setText] = useState("");
   const [budget, setBudget] = useState("");
+  const [roundBudget, setRoundBudget] = useState("");
   const [error, setError] = useState<string | null>(null);
   const snapshot = state.snapshot;
   const goal = snapshot ? currentGoal(snapshot) : null;
@@ -21,6 +22,7 @@ export function GoalEditor({ open, onClose, onSaved }: { open: boolean; onClose:
     if (!element) return;
     if (open && !element.open) {
       setText(goal?.objective ?? ""); setBudget(goal?.tokenBudget != null ? String(goal.tokenBudget) : ""); setError(null);
+      setRoundBudget(goal?.roundBudget != null ? String(goal.roundBudget) : "");
       element.showModal();
       objective.current?.focus();
     } else if (!open && element.open) element.close();
@@ -31,10 +33,12 @@ export function GoalEditor({ open, onClose, onSaved }: { open: boolean; onClose:
     event.preventDefault();
     const trimmed = text.trim();
     if (!trimmed || state.goalBusy) return;
-    const input: { objective: string; tokenBudget?: number | null } = { objective: trimmed };
+    const input: { objective: string; tokenBudget?: number | null; roundBudget?: number | null } = { objective: trimmed };
     if (budgetSupported) {
       input.tokenBudget = budget === "" ? null : Number(budget);
       if (input.tokenBudget != null && (!Number.isSafeInteger(input.tokenBudget) || input.tokenBudget <= 0)) { setError(t("goal.editor.budgetError")); return; }
+      input.roundBudget = roundBudget === "" ? null : Number(roundBudget);
+      if (input.roundBudget != null && (!Number.isSafeInteger(input.roundBudget) || input.roundBudget < 1 || input.roundBudget > 10000)) { setError(t("goal.editor.roundBudgetError")); return; }
     }
     setError(null);
     const failure = await actions.putGoal(input);
@@ -46,7 +50,11 @@ export function GoalEditor({ open, onClose, onSaved }: { open: boolean; onClose:
       <form onSubmit={(event) => void submit(event)}>
         <header className="dialog-h"><h2 id="goal-editor-title">{goal ? t("goal.editor.editTitle") : t("goal.editor.setTitle")}</h2><button type="button" className="xbtn" aria-label={t("goal.editor.close")} onClick={onClose}><Icon name="close" /></button></header>
         <div className="field"><label htmlFor="goal-objective">{t("goal.editor.objective")}</label><textarea id="goal-objective" ref={objective} rows={3} required value={text} onChange={(event) => setText(event.target.value)} /></div>
-        {budgetSupported && <div className="field"><label htmlFor="goal-budget">{t("goal.editor.budget")}</label><input id="goal-budget" type="number" min={1} step={1} inputMode="numeric" value={budget} onChange={(event) => setBudget(event.target.value)} /></div>}
+        {budgetSupported && <>
+          <div className="field"><label htmlFor="goal-budget">{t("goal.editor.budget")}</label><input id="goal-budget" type="number" min={1} step={1} inputMode="numeric" placeholder={t("goal.unlimited")} aria-describedby="goal-budget-help" value={budget} onChange={(event) => setBudget(event.target.value)} /></div>
+          <div className="field"><label htmlFor="goal-round-budget">{t("goal.editor.roundBudget")}</label><input id="goal-round-budget" type="number" min={1} max={10000} step={1} inputMode="numeric" placeholder={t("goal.unlimited")} aria-describedby="goal-budget-help" value={roundBudget} onChange={(event) => setRoundBudget(event.target.value)} /></div>
+          <p id="goal-budget-help" className="meta">{t("goal.editor.unlimitedHelp")}</p>
+        </>}
         {error && <p className="field-error" role="alert">{error}</p>}
         <div className="dialog-actions"><button type="button" className="btn" onClick={onClose}>{t("goal.editor.cancel")}</button><button type="submit" className="btn primary" disabled={state.goalBusy}>{t("goal.editor.save")}</button></div>
       </form>

@@ -170,7 +170,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     try {
       this.goal = mapGoal((await client.request<{ goal: unknown }>("thread/goal/get", { threadId: this.thread.id })).goal);
       if (this.options.stateFile) {
-        const saved = readGoalState(this.options.stateFile + ".goal-exit.json") as { threadId?: string; goal?: Goal; pendingExit?: Goal; guard?: { id?: string; objective?: string; roundBudget?: number; roundsUsed?: number } } | undefined;
+        const saved = readGoalState(this.options.stateFile + ".goal-exit.json") as { threadId?: string; goal?: Goal; pendingExit?: Goal; guard?: { id?: string; objective?: string; roundBudget?: number | null; roundsUsed?: number } } | undefined;
         if (saved?.threadId === this.thread.id) {
           // A durable intent belongs to this thread/generation. Native absence
           // confirms release even when we crashed before saving its receipt.
@@ -178,7 +178,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
           if (this.goal && saved.guard?.objective === this.goal.objective) { this.goal.id = saved.guard.id; this.goal.roundBudget = saved.guard.roundBudget; this.goal.roundsUsed = saved.guard.roundsUsed; }
         }
       }
-      if (this.goal) { this.goal.id ??= randomUUID(); this.goalGuard = new GoalGuard(undefined, this.goal.roundBudget, this.goal.tokenBudget ?? undefined); this.goalGuard.rounds = this.goal.roundsUsed ?? 0; }
+      if (this.goal) { this.goal.id ??= randomUUID(); this.goal.roundBudget ??= null; this.goalGuard = new GoalGuard(undefined, this.goal.roundBudget, this.goal.tokenBudget); this.goalGuard.rounds = this.goal.roundsUsed ?? 0; }
     } catch (error) {
       if (!/method not found|unknown (?:method|variant)|not supported|unrecognized/i.test(String(error))) throw error;
       this.harness.capabilities.goal = null;
@@ -311,12 +311,12 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     const changedObjective = input.objective && input.objective !== this.goal?.objective;
     const goalId = changedObjective ? randomUUID() : this.goal?.id || randomUUID();
     if (changedObjective) {
-      this.goalGuard = new GoalGuard(undefined, input.roundBudget, input.tokenBudget ?? undefined);
+      this.goalGuard = new GoalGuard(undefined, input.roundBudget, input.tokenBudget);
       this.goalTurnsSeen.clear();
       native.tokenBudget = this.goalGuard.tokenBudget;
       native.status = input.status ?? "active";
-    } else if (input.roundBudget) {
-      const guard = new GoalGuard(undefined, input.roundBudget, this.goal?.tokenBudget ?? undefined);
+    } else if (input.roundBudget !== undefined || input.tokenBudget !== undefined) {
+      const guard = new GoalGuard(undefined, input.roundBudget !== undefined ? input.roundBudget : this.goal?.roundBudget ?? null, input.tokenBudget !== undefined ? input.tokenBudget : this.goal?.tokenBudget ?? null);
       guard.rounds = this.goalGuard.rounds; this.goalGuard = guard;
     }
     const result = await this.client.request<{ goal: unknown }>("thread/goal/set", { threadId: this.thread.id, origin: "user", ...native });
@@ -599,7 +599,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
         this.goalTurnsSeen.add(turnId); this.goalGuard.rounds++;
         this.goal.roundsUsed = this.goalGuard.rounds;
         this.saveGoalExit();
-        if (this.goalGuard.rounds >= this.goalGuard.roundBudget) this.blockForBudget("Goal round budget reached");
+        if (this.goalGuard.roundBudget !== null && this.goalGuard.rounds >= this.goalGuard.roundBudget) this.blockForBudget("Goal round budget reached");
       }
       if (turnId && this.thread) {
         for (const item of turn.items ?? []) this.upsertLiveItem(turnId, item);

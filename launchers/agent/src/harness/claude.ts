@@ -145,6 +145,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
           // Checkpoints supply budgets/usage only for the same native goal.
           // They must never resurrect a cleared goal or replay a cached edit.
           this.goal = { ...saved.goal as unknown as Goal, objective: this.goal.objective, status: this.goal.status };
+          this.goal.tokenBudget ??= null; this.goal.roundBudget ??= null;
           if (this.goal.syncStatus === "desynced") {
             this.goal.syncStatus = "synced"; this.goal.syncError = undefined;
             this.goal.nativeObjective = this.goal.objective;
@@ -152,7 +153,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
           if (this.goal) {
             this.goal.tokensUsed = typeof saved.tokensUsed === "number" ? saved.tokensUsed : null;
             this.goal.timeUsedSeconds = typeof saved.timeUsedSeconds === "number" ? saved.timeUsedSeconds : null;
-            this.goalGuard = new GoalGuard(undefined, this.goal.roundBudget, this.goal.tokenBudget ?? undefined);
+            this.goalGuard = new GoalGuard(undefined, this.goal.roundBudget ?? null, this.goal.tokenBudget);
             this.goalGuard.rounds = this.goal.roundsUsed ?? 0;
             this.goalGuard.tokens = this.goal.tokensUsed ?? 0;
             this.goalGuard.totalRejections = this.goal.rejectionCount ?? 0;
@@ -163,7 +164,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
             if (legacyUsage && this.goal.status === "active") {
               // Old counters could contain millions of pre-goal session tokens.
               // Their epoch cannot be reconstructed reliably after a UI edit.
-              this.resetGoalGuard({ tokenBudget: this.goal.tokenBudget, roundBudget: this.goal.roundBudget });
+              this.resetGoalGuard({ tokenBudget: this.goal.tokenBudget, roundBudget: this.goal.roundBudget ?? null });
               this.goal.reason = "Legacy per-goal usage could not be verified; counters restarted during launcher upgrade.";
               await this.saveGoalUsage();
             }
@@ -342,7 +343,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     if (input.status !== undefined) throw new GoalError("Claude goals do not support pause/resume or other explicit status", 501);
     if (!input.objective?.trim()) {
       if (!this.goal) throw new GoalError("objective or a budget update for an existing goal is required");
-      const guard = new GoalGuard(undefined, input.roundBudget ?? this.goal.roundBudget, input.tokenBudget ?? this.goal.tokenBudget ?? undefined);
+      const guard = new GoalGuard(undefined, input.roundBudget !== undefined ? input.roundBudget : this.goal.roundBudget ?? null, input.tokenBudget !== undefined ? input.tokenBudget : this.goal.tokenBudget);
       this.goalGuard = guard; this.goal.tokenBudget = guard.tokenBudget; this.goal.roundBudget = guard.roundBudget;
       if (this.goal.status === "active") this.resetGoalGuard({ roundBudget: guard.roundBudget, tokenBudget: guard.tokenBudget });
       await this.saveGoalUsage(); this.publish();
@@ -418,7 +419,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   private resetGoalGuard(input: GoalUpdate) {
-    this.goalGuard = new GoalGuard(undefined, input.roundBudget, input.tokenBudget ?? undefined);
+    this.goalGuard = new GoalGuard(undefined, input.roundBudget, input.tokenBudget);
     this.queryGoalTokens = 0; this.goalClock = Date.now();
     this.goalResultBaseline = this.resultTokens + this.queryTokens;
     if (this.goal) Object.assign(this.goal, { tokensUsed: 0, timeUsedSeconds: 0, roundsUsed: 0, rejectionCount: 0, consecutiveRejections: 0,
