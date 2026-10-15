@@ -54,7 +54,6 @@ export function scanSource(sourceRoot) {
         if (ts.isPropertyAccessExpression(left) && URL_ATTRIBUTE_NAMES.has(left.name.text.toLowerCase()) && !safeValue(node.right)) report(node, `.${left.name.text} assignment must use safeUrl()/safeImageUrl() or a blob URL`);
         if (ts.isPropertyAccessExpression(left) && left.name.text === "location" || (ts.isIdentifier(left) && left.text === "location") || (ts.isPropertyAccessExpression(left) && left.expression.getText().endsWith("location"))) report(node, "navigation by assigning location is forbidden");
       }
-      if (ts.isImportKeyword?.(node)) report(node, "dynamic import is forbidden");
       if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword) report(node, "dynamic import() is forbidden");
       if (ts.isCallExpression(node)) {
         const callee = node.expression;
