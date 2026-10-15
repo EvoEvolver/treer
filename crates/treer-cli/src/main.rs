@@ -81,8 +81,20 @@ fn installed_config(
     Ok(matched)
 }
 fn connection(raw: Vec<String>) -> anyhow::Result<Connection> {
-    let mut workspace = env::var("TREER_WORKSPACE_ID").ok();
-    let mut explicit_url = env::var("TREER_AGENT_SERVER_URL").ok();
+    connection_with_environment(raw, |key| env::var(key).ok(), config_directory)
+}
+
+fn connection_with_environment(
+    raw: Vec<String>,
+    environment: impl Fn(&str) -> Option<String>,
+    discover_directory: impl Fn() -> Option<PathBuf>,
+) -> anyhow::Result<Connection> {
+    let bound_workspace = environment("TREER_WORKSPACE_ID");
+    let bound_url = environment("TREER_AGENT_SERVER_URL");
+    let mut workspace = bound_workspace.clone();
+    let mut explicit_url = bound_url.clone();
+    let mut requested_workspace = None;
+    let mut requested_url = None;
     let mut argv = Vec::new();
     let mut iter = raw.into_iter();
     let mut literal = false;
@@ -96,29 +108,59 @@ fn connection(raw: Vec<String>) -> anyhow::Result<Connection> {
             argv.push(arg);
         } else if arg == "--url" {
             explicit_url = Some(iter.next().context("--url requires an address")?);
+            requested_url = explicit_url.clone();
         } else if let Some(value) = arg.strip_prefix("--url=") {
             explicit_url = Some(value.into());
+            requested_url = explicit_url.clone();
         } else if arg == "--workspace" {
             workspace = Some(iter.next().context("--workspace requires an ID")?);
+            requested_workspace = workspace.clone();
         } else if let Some(value) = arg.strip_prefix("--workspace=") {
             workspace = Some(value.into());
+            requested_workspace = workspace.clone();
         } else {
             literal = true;
             argv.push(arg);
         }
     }
-    let agent = env::var("TREER_AGENT_ID").ok();
-    let workload = env::var("TREER_WORKLOAD_CREDENTIAL").ok();
+    let agent = environment("TREER_AGENT_ID");
+    let workload = environment("TREER_WORKLOAD_CREDENTIAL");
     let managed = agent.is_some()
         || workload.is_some()
-        || env::var("TREER_IDENTITY_MODE").as_deref() == Ok("agent");
-    let operator = env::var("TREER_OPERATOR_CREDENTIAL")
-        .ok()
-        .filter(|value| !value.is_empty());
+        || environment("TREER_IDENTITY_MODE").as_deref() == Some("agent");
+    let operator = environment("TREER_OPERATOR_CREDENTIAL").filter(|value| !value.is_empty());
+    // An explicit connection flag must never redirect an environment-bound
+    // workload/operator credential. Reject before discovery or network I/O.
+    if managed || (operator.is_some() && (bound_workspace.is_some() || bound_url.is_some())) {
+        let label = |value: Option<&str>| {
+            value
+                .filter(|s| {
+                    s.starts_with("ws_")
+                        && s.len() <= 96
+                        && s.bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                })
+                .unwrap_or("(bound workspace)")
+                .to_owned()
+        };
+        if let Some(requested) = requested_workspace.as_deref() {
+            anyhow::ensure!(bound_workspace.as_deref() == Some(requested),
+                "current identity belongs to workspace {}; cannot operate in {} with --workspace; use an operator terminal in the requested workspace with its own credentials",
+                label(bound_workspace.as_deref()), label(Some(requested)));
+        }
+        if let Some(requested) = requested_url.as_deref() {
+            let same = bound_url.as_deref().is_some_and(|bound| {
+                matches!((Url::parse(bound), Url::parse(requested)), (Ok(a), Ok(b)) if a == b)
+            });
+            anyhow::ensure!(same,
+                "current identity belongs to workspace {}; cannot change --url for this identity; use an operator terminal in the destination workspace with its own credentials",
+                label(bound_workspace.as_deref()));
+        }
+    }
     let config = if managed || (operator.is_some() && explicit_url.is_some()) {
         None
     } else {
-        config_directory()
+        discover_directory()
             .map(|path| installed_config(&path, workspace.as_deref(), explicit_url.as_deref()))
             .transpose()?
             .flatten()
@@ -431,6 +473,90 @@ async fn run(raw: Vec<String>) -> anyhow::Result<i32> {
 #[cfg(test)]
 mod configuration_tests {
     use super::*;
+    // Even partial identity contexts must never inspect the test runner's
+    // real installation while exercising connection discovery/fallback.
+    fn connection_with_environment(
+        raw: Vec<String>,
+        environment: impl Fn(&str) -> Option<String>,
+    ) -> anyhow::Result<Connection> {
+        super::connection_with_environment(raw, environment, || None)
+    }
+    #[test]
+    fn bound_identity_rejects_explicit_workspace_and_url_before_dispatch() {
+        let context = |key: &str| match key {
+            "TREER_WORKSPACE_ID" => Some("ws_one".into()),
+            "TREER_AGENT_SERVER_URL" => Some("http://127.0.0.1:8790".into()),
+            "TREER_AGENT_ID" => Some("ag_fixture".into()),
+            "TREER_WORKLOAD_CREDENTIAL" => Some("synthetic-secret".into()),
+            _ => None,
+        };
+        for argv in [
+            vec!["--workspace", "ws_two", "status"],
+            vec!["--workspace=ws_two", "exec"],
+            vec!["--url", "http://127.0.0.1:8791", "status"],
+            vec!["--url=https://user:password@other.invalid", "status"],
+        ] {
+            let error =
+                connection_with_environment(argv.into_iter().map(str::to_owned).collect(), context)
+                    .err()
+                    .expect("must reject the connection override")
+                    .to_string();
+            assert!(error.contains("current identity belongs to workspace ws_one"));
+            assert!(error.contains("operator terminal"));
+            for secret in ["synthetic-secret", "password", "other.invalid"] {
+                assert!(!error.contains(secret));
+            }
+        }
+        for argv in [
+            vec!["status"],
+            vec!["--workspace", "ws_one", "status"],
+            vec!["--url=http://127.0.0.1:8790/", "status"],
+        ] {
+            let connection =
+                connection_with_environment(argv.into_iter().map(str::to_owned).collect(), context)
+                    .unwrap();
+            assert_eq!(connection.url.as_str(), "http://127.0.0.1:8790/");
+            assert_eq!(connection.argv, ["status"]);
+            assert_eq!(connection.headers.len(), 2);
+        }
+        let operator_context = |key: &str| match key {
+            "TREER_AGENT_ID" | "TREER_WORKLOAD_CREDENTIAL" => None,
+            "TREER_OPERATOR_CREDENTIAL" => Some("synthetic-operator".into()),
+            _ => context(key),
+        };
+        assert!(connection_with_environment(
+            vec!["--workspace=ws_two".into(), "status".into()],
+            operator_context
+        )
+        .is_err());
+        assert!(connection_with_environment(
+            vec!["--url=http://127.0.0.1:8791".into(), "status".into()],
+            operator_context
+        )
+        .is_err());
+        assert!(connection_with_environment(vec!["status".into()], operator_context).is_ok());
+        for missing in ["TREER_WORKSPACE_ID", "TREER_AGENT_SERVER_URL"] {
+            let partial = |key: &str| {
+                if key == missing {
+                    None
+                } else {
+                    operator_context(key)
+                }
+            };
+            assert!(connection_with_environment(
+                vec!["--workspace=ws_two".into(), "status".into()],
+                partial
+            )
+            .is_err());
+            assert!(connection_with_environment(
+                vec!["--url=http://127.0.0.1:8791".into(), "status".into()],
+                partial
+            )
+            .is_err());
+            assert!(connection_with_environment(vec!["status".into()], partial).is_ok());
+        }
+    }
+
     #[test]
     fn installed_machine_configs_resolve_workspace_hostname_and_ambiguity() {
         let directory = env::temp_dir().join(format!("treer-cli-config-{}", uuid::Uuid::new_v4()));

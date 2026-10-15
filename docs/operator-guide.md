@@ -276,6 +276,24 @@ use `treer --workspace WORKSPACE_ID …` when several workspaces are installed.
 Multiple matches require an explicit `--url` as well. Explicit Agent credentials
 never fall back to an installed operator credential.
 
+An environment-bound Agent/operator identity cannot be switched by flags:
+explicit `--workspace` must match `TREER_WORKSPACE_ID`, and explicit `--url`
+must match its bound `TREER_AGENT_SERVER_URL`. A conflict fails before sending
+credentials. Use an operator terminal configured with the destination
+workspace's own credentials instead; flag-free managed CLI behavior is unchanged.
+
+**One OS account = one trust domain.** Same-account workspaces/Controllers are
+mutually trusted: A's exec/Agent can read and impersonate B's local identities.
+0700/0600 permissions (or current-user Windows ACLs) do not isolate the same
+user. Use independent OS users or containers when isolation is required. For
+trusted multi-workspace use, pass different `connect --root` directories to
+avoid shared launcher assets. Connect emits a non-blocking shared-account
+warning based only on other enrollment filenames, without reading their contents.
+New enrollment checks an explicit `--listen` for an occupied port before
+exchanging the key or saving enrollment identity/configuration; release the port
+or choose another and retry the same command/key. This preflight does not reserve
+the port against a concurrent bind after the check.
+
 The separate connection command contains a 10-minute, single-use enrollment key:
 
 ```bash
@@ -1604,8 +1622,28 @@ epoch, matching build/workspace/server identity, `proxy_connected`, path-target
 capability, and unchanged Agent IDs/PIDs/generations before replacing CLI.
 It verifies installed hashes and versions afterward. The Host is untouched;
 different Controller/Host versions, including an older locally built Host, are
-normal while the protocol remains compatible. Shared binary directories with
-multiple local workspace installs are refused and require a coordinated plan.
+normal while the protocol remains compatible. With multiple local installs,
+`--workspace` is required and ambiguous selection fails with candidate commands.
+Replacing the shared binaries affects other workspaces on their next start;
+the tool warns and requires `--accept-shared-binaries` before staging or
+activation. Only the selected Controller is activated. Coordinate compatibility
+and any later activation of the other Controllers; this flag does not update
+them as a group or promise cross-version CLI compatibility. The worker repeats
+selection/confirmation under its binary lock to detect newly added installs.
+The guard is conservative: multiple local enrollments require confirmation even
+when an operator has arranged separate binary directories.
+
+```sh
+python3 scripts/update-machine.py --machine local --workspace ws_… \
+  --accept-shared-binaries --apply
+```
+
+This Python workflow remains Unix-only. Native Windows configurations use
+per-server filenames but often share `%LOCALAPPDATA%\Treer\bin` and a default
+root. An occupied shared `.exe` cannot be treated like a replaceable Unix inode;
+the Windows installer refuses replacement of running binaries. Use an explicitly
+coordinated Windows installation procedure; the Python tool rejects Windows
+before creating an update job or replacing files.
 
 Failure after activation restores the saved binaries and reactivates the old
 Controller. `result.json` distinguishes `rolled_back` from `rollback_failed`;

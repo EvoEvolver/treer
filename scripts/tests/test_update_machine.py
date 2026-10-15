@@ -224,16 +224,80 @@ else:
         self.assertTrue(result["host_changed"])
         self.assertEqual(result["agents"]["ag_fixture"]["generation"], 4)
 
-    def test_hot_download_path_and_single_install_guard(self):
+    def test_hot_download_path_and_ambiguous_install_guard(self):
         self.config["artifacts"] = None
         code, result = self.invoke()
         self.assertEqual(code, 0, result)
         (self.configdir / "other-controller.json").write_text(self.configpath.read_text())
-        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+        with self.assertRaisesRegex(RuntimeError, "select --workspace explicitly"):
             update.installed(self.configdir)
+
+    def other_install(self):
+        other = self.configdir / "srv_other-controller.json"
+        value = json.loads(self.configpath.read_text())
+        value.update(workspace="ws_other", server_id="srv_other")
+        other.write_text(json.dumps(value))
+        return other
+
+    def test_multiple_installs_need_selection_and_confirmation_before_any_update(self):
+        other = self.other_install()
+        original = other.read_bytes()
+        with self.assertRaisesRegex(RuntimeError, "--workspace ws_other --accept-shared-binaries --apply"):
+            update.installed(self.configdir)
+        for confirmation in (False, None, "true", 1):
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaisesRegex(RuntimeError, "require --accept-shared-binaries"):
+                update.installed(self.configdir, "ws_fixture", confirmation)
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            update.installed(self.configdir, "ws_missing", True)
+        self.assertEqual(update.installed(self.configdir, "ws_other", True)[0], other)
+        with patch.object(update, "fetch", side_effect=AssertionError("must fail before fetching")):
+            code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertIn("--accept-shared-binaries", result["error"])
+        self.assertEqual(json.loads(self.state.read_text())["events"], [])
+        self.assertIn(self.old, (self.bindir / "treer").read_text())
+        self.assertEqual(other.read_bytes(), original)
+
+    def test_confirmed_multi_install_updates_selected_controller_only(self):
+        other = self.other_install()
+        original = other.read_bytes()
+        self.config["accept_shared_binaries"] = True
+        warning = io.StringIO()
+        with contextlib.redirect_stderr(warning):
+            code, result = self.invoke()
+        self.assertEqual(code, 0, result)
+        self.assertIn("other workspaces", warning.getvalue())
+        self.assertIn("next start", warning.getvalue())
+        self.assertNotIn("test-only-secret", warning.getvalue())
+        self.assertEqual(other.read_bytes(), original)
+        self.assertEqual(json.loads(self.state.read_text())["events"], ["bbbbbbb:restart-controller"])
+
+    def test_workspace_selection_keeps_duplicate_and_foreign_hostname_guards(self):
+        other = self.other_install()
+        value = json.loads(other.read_text())
+        value["install_hostname"] = "foreign-machine"
+        other.write_text(json.dumps(value))
+        self.assertEqual(update.installed(self.configdir)[0], self.configpath)
+        other.write_text(self.configpath.read_text())
+        with self.assertRaisesRegex(RuntimeError, "exactly one"):
+            update.installed(self.configdir, "ws_fixture", True)
 
 
 class TransportTest(unittest.TestCase):
+    def test_windows_update_is_rejected_before_job_or_binary_writes(self):
+        # Native Windows has detached services/shared locked .exe files. This
+        # Unix updater must not pretend that Unix rename/activation is supported.
+        probe = json.dumps({"home": r"C:\Users\fixture", "system": "Windows", "arch": "AMD64",
+                            "controller": r"C:\Users\fixture\Treer\bin\treer-agent-server.exe",
+                            "config_base": r"C:\Users\fixture\AppData\Local"})
+        with patch.object(sys, "argv", [str(SCRIPT), "--machine", "local", "--apply", "--workspace", "ws_fixture", "--accept-shared-binaries"]), \
+             patch.object(update.Machine, "python", return_value=probe) as python, \
+             patch.object(update.Machine, "upload") as upload:
+            with self.assertRaisesRegex(RuntimeError, "require a Unix machine"):
+                update.main()
+            self.assertEqual(python.call_count, 1)
+            upload.assert_not_called()
+
     def test_remote_exec_uses_no_stdin_short_timeout_and_checks_envelope(self):
         with patch.object(update.subprocess, "run") as run:
             run.return_value = subprocess.CompletedProcess([], 0, json.dumps({"exit_code": 0,

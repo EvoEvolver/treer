@@ -3,6 +3,40 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde_json::json;
 
+#[tokio::test]
+async fn explicit_listen_conflict_fails_before_enrollment_and_allows_retry() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let address = listener.local_addr().unwrap();
+    let error = resolve_listen("ws_fixture", Some(address))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("port is already in use"));
+    drop(listener);
+    assert_eq!(
+        resolve_listen("ws_fixture", Some(address)).await.unwrap(),
+        address
+    );
+}
+
+#[test]
+fn shared_account_warning_checks_only_other_config_names() {
+    let directory = env::temp_dir().join(format!("treer-config-names-{}", Uuid::new_v4()));
+    assert!(!has_other_controller_config(&directory, "srv_one").unwrap());
+    fs::create_dir(&directory).unwrap();
+    fs::write(directory.join("srv_one-controller.json"), b"not even JSON").unwrap();
+    fs::write(directory.join("srv_two-host.json"), b"not a controller").unwrap();
+    assert!(!has_other_controller_config(&directory, "srv_one").unwrap());
+    let other = directory.join("srv_two-controller.json");
+    fs::write(&other, b"must never parse another enrollment").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&other, fs::Permissions::from_mode(0o000)).unwrap();
+    }
+    assert!(has_other_controller_config(&directory, "srv_one").unwrap());
+    fs::remove_dir_all(directory).unwrap();
+}
+
 #[cfg(windows)]
 #[test]
 fn windows_supervision_and_identity_paths() {
