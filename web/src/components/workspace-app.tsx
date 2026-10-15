@@ -1,57 +1,52 @@
+import { UserMenu } from "@/components/user-menu"
+import { WorkspaceOverview } from "@/components/workspace-overview"
+import { LayoutDashboard, PanelLeft } from "lucide-react"
 import { AgentBreadcrumbs } from "@/components/agent-breadcrumbs"
-import { AppSettingsView, AppsView } from "@/components/apps-view"
+import { AppSettingsView,AppsView } from "@/components/apps-view"
 import { AuditView } from "@/components/audit-view"
 import { AuthScreen } from "@/components/auth-screen"
-import { UserMenu } from "@/components/user-menu"
-import { Field, IconButton, MachineRecovery, MobileTerminalKey, SimpleNameDialog } from "@/components/control-plane-ui"
-import { MachineOverviewView } from "@/components/machine-view"
-import { OrganizationSettingsView } from "@/components/organization-settings-view"
-import { SettingsDialog } from "@/components/settings"
-import { TerminalPane, type TerminalPaneHandle } from "@/components/terminal-pane"
-import { TreeResizer, useTreeWidth } from "@/components/tree-resizer"
-import { Button } from "@/components/ui/button"
-import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
-import { Input } from "@/components/ui/input"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Textarea } from "@/components/ui/textarea"
-import { TooltipProvider } from "@/components/ui/tooltip"
-import { WorkloadTree, type NewAgentFolder } from "@/components/workload-tree"
-import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
-import { ApiError, api, machineName, proxyUrl, websocketUrl, type Agent, type AgentLaunchProfile, type AgentTrafficRecord, type AppDeployment, type MachineFileUpload, type MachineService, type MachineTrafficRecord, type Member, type Organization, type OrganizationAuditEvent, type OrganizationGroup, type Snapshot, type User, type VirtualNetworkHost, type Workspace, type WorkloadTreeState } from "@/lib/api"
-import { formatCommandLine, parseCommandLine } from "@/lib/command-line"
-import { DeleteTarget, MainView, PREVIEW_CONNECT, PREVIEW_INSTALL, PREVIEW_ORG, PREVIEW_PROFILES, PREVIEW_USER, PREVIEW_WORKSPACE, RenameTarget, TerminalState, activeStatuses, arrayBufferToBase64, authorizationReturnUrl, controlCharacter, defaultAgentName, defaultProfileAgentName, formatBytes, initials, machineOnline, replaceWorkspace, visibleWorkspaceSnapshot, workspacePath } from "@/lib/control-plane"
+import { IconButton,MachineRecovery } from "@/components/control-plane-ui"
 import { ErrorToast } from "@/components/error-toast"
-import { interfaceFrameKey, postEmbedTheme, readEmbedAppearance, withEmbedTheme } from "@/lib/embed-ui"
-import { clearFirstRunTour, firstRunTourMode, shouldAutoStartFirstRunTour, startFirstRunTour, stopFirstRunTour, type FirstRunTourHost } from "@/lib/first-run-tour"
-import { readTheme, subscribeTheme, type Theme } from "@/lib/theme"
-import { agentPath } from "@/lib/workload-path"
+import { MachineOverviewView } from "@/components/machine-view"
+import { MobileTerminalKeys } from "@/components/mobile-terminal-keys"
+import { OrganizationSettingsView } from "@/components/organization-settings-view"
+import { TerminalPane,type TerminalPaneHandle } from "@/components/terminal-pane"
+import { TreeResizer,useTreeWidth } from "@/components/tree-resizer"
+import { Button } from "@/components/ui/button"
+import { Select,SelectContent,SelectItem,SelectTrigger,SelectValue } from "@/components/ui/select"
+import { TooltipProvider } from "@/components/ui/tooltip"
+import { useOrganizationMembers } from "@/components/use-organization-members"
+import { useWorkspaceLiveFeed } from "@/components/use-workspace-live-feed"
+import { useWorkspaceMetrics } from "@/components/use-workspace-metrics"
+import { useWorkspaceRoute } from "@/components/use-workspace-route"
+import { WorkloadTree,type NewAgentFolder } from "@/components/workload-tree"
+import { useWorkspaceDialogState } from "@/components/workspace-dialog-state"
+import { WorkspaceDialogs } from "@/components/workspace-dialogs"
+import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
+import { ApiError,api,machineName,proxyUrl,type Agent,type AgentLaunchProfile,type AppDeployment,type MachineFileUpload,type Organization,type Snapshot,type User,type WorkloadTreeState,type Workspace } from "@/lib/api"
+import { formatCommandLine,parseCommandLine } from "@/lib/command-line"
+import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,TerminalState,activeStatuses,arrayBufferToBase64,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,formatBytes,initials,machineOnline,replaceWorkspace } from "@/lib/control-plane"
+import { interfaceFrameKey,postEmbedTheme,readEmbedAppearance,withEmbedTheme } from "@/lib/embed-ui"
+import { clearFirstRunTour,firstRunTourMode,shouldAutoStartFirstRunTour,startFirstRunTour,stopFirstRunTour,type FirstRunTourHost } from "@/lib/first-run-tour"
+import { readTheme,subscribeTheme,type Theme } from "@/lib/theme"
 import { cn } from "@/lib/utils"
+import { agentPath } from "@/lib/workload-path"
 import {
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
-  ArrowUp,
-  ChevronLeft,
-  ChevronRight,
-  Copy,
-  CornerDownLeft,
-  Delete,
-  FolderKanban,
-  Keyboard,
-  Maximize2,
-  MoreHorizontal,
-  Pencil,
-  Play,
-  Plus,
-  Rocket,
-  RotateCw,
-  Square,
-  Trash2,
-  Upload,
-  X
+ChevronLeft,
+ChevronRight,
+FolderKanban,
+Maximize2,
+MoreHorizontal,
+Pencil,
+Plus,
+RotateCw,
+Square,
+Trash2,
+Upload,
+X
 } from "lucide-react"
-import { FormEvent, useCallback, useEffect, useMemo, useRef, useState, type SetStateAction } from "react"
-import { useLocation, useNavigate, useParams } from "react-router"
+import { FormEvent,useCallback,useEffect,useMemo,useRef,useState } from "react"
+import { useLocation,useParams } from "react-router"
 
 export function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
@@ -63,19 +58,7 @@ export function WorkspaceApp() {
 }
 
 function WorkspaceAppContent() {
-  const route = useParams<{ organizationId?: string; workspaceId?: string }>()
-  const navigate = useNavigate()
-  const location = useLocation()
-  const routeSelectionRef = useRef({ organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null })
-  routeSelectionRef.current = { organizationId: route.organizationId ?? null, workspaceId: route.workspaceId ?? null }
-  const routingRef = useRef({ navigate, search: location.search, hash: location.hash })
-  routingRef.current = { navigate, search: location.search, hash: location.hash }
-  // Canonicalizing the URL must not reset workspace loading or close its event
-  // socket when React Router changes the navigate function's identity.
-  const replaceWorkspaceRoute = useCallback((organizationId: string | null, workspaceId: string | null) => {
-    const routing = routingRef.current
-    routing.navigate({ pathname: workspacePath(organizationId, workspaceId), search: routing.search, hash: routing.hash }, { replace: true })
-  }, [])
+  const { route, location, routeSelectionRef, routingRef, replaceWorkspaceRoute } = useWorkspaceRoute()
   const preview = firstRunTourMode() === "preview"
   const [user, setUser] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
   const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
@@ -94,9 +77,9 @@ function WorkspaceAppContent() {
   const [terminalStatus, setTerminalStatus] = useState<TerminalState>("not attached")
   const [interfaceUiRevision, setInterfaceUiRevision] = useState(0)
   const [theme, setTheme] = useState<Theme>(() => readTheme())
-  const [mainView, setMainView] = useState<MainView>("terminal")
-  const [settingsOpen, setSettingsOpen] = useState(false)
+  const [mainView, setMainView] = useState<MainView>("overview")
   const [mobileTerminalOpen, setMobileTerminalOpen] = useState(false)
+  const [mobileTreeOpen, setMobileTreeOpen] = useState(preview)
   const [isMobile, setIsMobile] = useState(() => window.matchMedia("(max-width: 767px)").matches)
   const [ctrlArmed, setCtrlArmed] = useState(false)
   const terminalPaneRef = useRef<TerminalPaneHandle>(null)
@@ -106,83 +89,31 @@ function WorkspaceAppContent() {
   themeRef.current = theme
   const ctrlArmedRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
-  const [createOrganizationOpen, setCreateOrganizationOpen] = useState(false)
-  const [createWorkspaceOpen, setCreateWorkspaceOpen] = useState(false)
-  const [deleteWorkspaceOpen, setDeleteWorkspaceOpen] = useState(false)
-  const [createAgentOpen, setCreateAgentOpen] = useState(false)
-  const [agentFolder, setAgentFolder] = useState<NewAgentFolder | null>(null)
+  const dialogState = useWorkspaceDialogState()
+  const {
+    setSettingsOpen, setCreateOrganizationOpen, setCreateWorkspaceOpen, setDeleteWorkspaceOpen,
+    createAgentOpen, setCreateAgentOpen, agentFolder, setAgentFolder, setRenameError,
+    setCreateAgentError, creatingAgent, setCreatingAgent, deletingApp, setDeletingApp,
+    setProfileEditorOpen, editingLaunchProfile, setEditingLaunchProfile, launchingProfile,
+    setLaunchingProfile, deletingProfile, setDeletingProfile, setInstallOpen, setInviteOpen,
+    setUploadOpen, uploadDirectory, setUploadDirectory, uploadFile, setUploadFile, overwriteUpload,
+    setOverwriteUpload, setUploading, setUploadInputKey, setUploadMessage, setUploadError, renameTarget,
+    setRenameTarget, deleteTarget, setDeleteTarget, createOrganizationName, setCreateOrganizationName,
+    createWorkspaceName, setCreateWorkspaceName, agentName, setAgentName, agentNameCustomized,
+    setAgentNameCustomized, agentProfileId, setAgentProfileId, agentServerId, setAgentServerId, agentCwd,
+    agentCommandLine, setAgentCommandLine, launchProfileName, setLaunchProfileName,
+    launchProfileDescription, setLaunchProfileDescription, launchProfileCwd, setLaunchProfileCwd,
+    launchProfileCommandLine, setLaunchProfileCommandLine, launchMachineId, setLaunchMachineId,
+    launchAgentName, setLaunchAgentName, renameName, setRenameName, setInstallCommand, setConnectCommand,
+    setWindowsInstallCommand, setWindowsConnectCommand, setInviteUrl,
+  } = dialogState
   const [placementRevision, setPlacementRevision] = useState(0)
   const [workloadTree, setWorkloadTree] = useState<WorkloadTreeState>({ folders: [], placements: [] })
-  const [renameError, setRenameError] = useState("")
-  const [createAgentError, setCreateAgentError] = useState("")
-  const [creatingAgent, setCreatingAgent] = useState(false)
-  const [deletingApp, setDeletingApp] = useState<AppDeployment | null>(null)
-  const [profileEditorOpen, setProfileEditorOpen] = useState(false)
-  const [editingLaunchProfile, setEditingLaunchProfile] = useState<AgentLaunchProfile | null>(null)
-  const [launchingProfile, setLaunchingProfile] = useState<AgentLaunchProfile | null>(null)
-  const [deletingProfile, setDeletingProfile] = useState<AgentLaunchProfile | null>(null)
-  const [installOpen, setInstallOpen] = useState(false)
-  const [inviteOpen, setInviteOpen] = useState(false)
-  const [uploadOpen, setUploadOpen] = useState(false)
-  const [uploadDirectory, setUploadDirectory] = useState(".")
-  const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [overwriteUpload, setOverwriteUpload] = useState(false)
-  const [uploading, setUploading] = useState(false)
-  const [uploadInputKey, setUploadInputKey] = useState(0)
-  const [uploadMessage, setUploadMessage] = useState("")
-  const [uploadError, setUploadError] = useState("")
-  const [renameTarget, setRenameTarget] = useState<RenameTarget>(null)
-  const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
-  const [createOrganizationName, setCreateOrganizationName] = useState("")
   const [organizationName, setOrganizationName] = useState("")
-  const [createWorkspaceName, setCreateWorkspaceName] = useState("")
   const [workspaceName, setWorkspaceName] = useState("")
-  const [agentName, setAgentName] = useState(defaultAgentName("terminal"))
-  const [agentNameCustomized, setAgentNameCustomized] = useState(false)
-  const [agentProfileId, setAgentProfileId] = useState("terminal")
-  const [agentServerId, setAgentServerId] = useState("")
-  const [agentCwd, setAgentCwd] = useState(".")
-  const [agentCommandLine, setAgentCommandLine] = useState("")
   const [launchProfiles, setLaunchProfiles] = useState<AgentLaunchProfile[]>(preview ? PREVIEW_PROFILES : [])
-  const [apps, setAppsState] = useState<AppDeployment[]>([])
-  const appsRef = useRef(apps)
-  appsRef.current = apps
-  // Local rename/delete must win over requests that started before the event.
-  const appsMutation = useRef(0)
-  const appsRequest = useRef(0)
-  const appsRefreshTimer = useRef<number | undefined>(undefined)
-  const appsRefreshMaxTimer = useRef<number | undefined>(undefined)
-  const setApps = useCallback((value: SetStateAction<AppDeployment[]>) => {
-    appsMutation.current += 1
-    setAppsState(value)
-  }, [])
-  const [appsLoading, setAppsLoading] = useState(false)
   const createAgentOpenRef = useRef(false)
   const [launchProfilesLoading, setLaunchProfilesLoading] = useState(false)
-  const [launchProfileName, setLaunchProfileName] = useState("")
-  const [launchProfileDescription, setLaunchProfileDescription] = useState("")
-  const [launchProfileCwd, setLaunchProfileCwd] = useState(".")
-  const [launchProfileCommandLine, setLaunchProfileCommandLine] = useState("")
-  const [launchMachineId, setLaunchMachineId] = useState("")
-  const [launchAgentName, setLaunchAgentName] = useState("")
-  const [renameName, setRenameName] = useState("")
-  const [unixInstallCommand, setInstallCommand] = useState("")
-  const [unixConnectCommand, setConnectCommand] = useState("")
-  const [windowsInstallCommand, setWindowsInstallCommand] = useState("")
-  const [windowsConnectCommand, setWindowsConnectCommand] = useState("")
-  const [installPlatform, setInstallPlatform] = useState("unix")
-  const installCommand = installPlatform === "windows" ? windowsInstallCommand : unixInstallCommand
-  const connectCommand = installPlatform === "windows" ? windowsConnectCommand : unixConnectCommand
-  const [inviteUrl, setInviteUrl] = useState("")
-  const [members, setMembers] = useState<Member[]>([])
-  const [groups, setGroups] = useState<OrganizationGroup[]>([])
-  const [groupName, setGroupName] = useState("")
-  const [auditEvents, setAuditEvents] = useState<OrganizationAuditEvent[]>([])
-  const [traffic, setTraffic] = useState<MachineTrafficRecord[]>([])
-  const [agentTraffic, setAgentTraffic] = useState<AgentTrafficRecord[]>([])
-  const [auditLoading, setAuditLoading] = useState(false)
-  const [virtualHosts, setVirtualHosts] = useState<VirtualNetworkHost[]>([])
-  const [services, setServices] = useState<MachineService[]>([])
 
   const showError = useCallback((reason: unknown) => setError(reason instanceof Error ? reason.message : "Something went wrong"), [])
 
@@ -254,154 +185,27 @@ function WorkspaceAppContent() {
     void syncWorkspaces().catch(showError)
   }, [organizationId, preview, syncWorkspaces, showError])
 
-  const loadApps = useCallback(async () => {
-    const request = ++appsRequest.current
-    const mutation = appsMutation.current
-    if (preview || !workspaceId) {
-      setApps([])
-      return
-    }
-    setAppsLoading(true)
-    const requestedWorkspaceId = workspaceId
-    try {
-      const data = await api<{ apps: AppDeployment[] }>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/apps`)
-      if (workspaceIdRef.current !== requestedWorkspaceId || request !== appsRequest.current || mutation !== appsMutation.current) return
-      setAppsState(data.apps)
-    } catch (reason) {
-      if (workspaceIdRef.current === requestedWorkspaceId && request === appsRequest.current) throw reason
-    } finally {
-      if (workspaceIdRef.current === requestedWorkspaceId && request === appsRequest.current) setAppsLoading(false)
-    }
-  }, [preview, workspaceId, setApps])
-
-  // App mutations are audit events, not dedicated workspace broadcasts. Coalesce
-  // runtime/snapshot hints and foreground checks; only Core lists establish mapping.
-  const scheduleAppsRefresh = useCallback(() => {
-    if (preview || !workspaceId) return
-    const refresh = () => {
-      window.clearTimeout(appsRefreshTimer.current)
-      window.clearTimeout(appsRefreshMaxTimer.current)
-      appsRefreshTimer.current = undefined
-      appsRefreshMaxTimer.current = undefined
-      if (workspaceIdRef.current === workspaceId) void loadApps().catch(showError)
-    }
-    window.clearTimeout(appsRefreshTimer.current)
-    appsRefreshTimer.current = window.setTimeout(refresh, 200)
-    // A continuous stream must not keep an App undiscovered indefinitely.
-    if (appsRefreshMaxTimer.current === undefined) appsRefreshMaxTimer.current = window.setTimeout(refresh, 2000)
-  }, [preview, workspaceId, loadApps, showError])
+  const { apps, setApps, appsLoading, loadApps, refreshSnapshot } = useWorkspaceLiveFeed({
+    preview, workspaceId, workspaceIdRef, snapshot, setSnapshot, setWorkspaces,
+    setSelectedAgentId, setSelectedMachineId, syncWorkspaces, showError,
+  })
 
   useEffect(() => {
-    const refresh = () => { if (document.visibilityState === "visible") scheduleAppsRefresh() }
-    window.addEventListener("focus", refresh)
-    document.addEventListener("visibilitychange", refresh)
-    return () => {
-      window.clearTimeout(appsRefreshTimer.current)
-      window.clearTimeout(appsRefreshMaxTimer.current)
-      appsRefreshTimer.current = undefined
-      appsRefreshMaxTimer.current = undefined
-      window.removeEventListener("focus", refresh)
-      document.removeEventListener("visibilitychange", refresh)
-    }
-  }, [scheduleAppsRefresh])
-
-  const refreshSnapshot = useCallback(async () => {
-    if (preview || !workspaceId) return
-    const requestedWorkspaceId = workspaceId
-    const data = visibleWorkspaceSnapshot(await api<Snapshot>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/snapshot`))
-    if (workspaceIdRef.current !== requestedWorkspaceId || data.workspace.workspace_id !== requestedWorkspaceId) return
-    setSnapshot(data)
-    setWorkspaces((items) => replaceWorkspace(items, data.workspace))
-  }, [preview, workspaceId])
+    if (!selectedAgentId) return
+    const exists = snapshot?.agents.some((agent) => agent.agent_id === selectedAgentId)
+      || apps.some((app) => (app.runtime_agent_id ?? app.app_id) === selectedAgentId)
+    if (exists) return
+    setSelectedAgentId(null)
+    setMainView((current) => current === "terminal" ? "overview" : current)
+  }, [snapshot, apps, selectedAgentId])
 
   useEffect(() => {
-    if (preview) return
-    if (!workspaceId) {
-      setSnapshot(null)
-      setSelectedAgentId(null)
-      return
-    }
-    let disposed = false
-    let socket: WebSocket | null = null
-    let timer: number | undefined
-    setSnapshot((current) => current?.workspace.workspace_id === workspaceId ? current : null)
-    refreshSnapshot().catch(showError)
-    const connect = () => {
-      if (disposed || workspaceIdRef.current !== workspaceId) return
-      socket = new WebSocket(websocketUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/events`))
-      socket.onmessage = (event) => {
-        if (disposed || workspaceIdRef.current !== workspaceId) return
-        const message = JSON.parse(event.data) as { event: string; revision?: number; data?: Snapshot | Workspace | Agent }
-        if (message.event === "workspace.snapshot" && message.data) {
-          const next = visibleWorkspaceSnapshot(message.data as Snapshot)
-          if (next.workspace.workspace_id !== workspaceId) return
-          setSnapshot(next)
-          setWorkspaces((items) => replaceWorkspace(items, next.workspace))
-          scheduleAppsRefresh()
-        } else if (message.event === "workspace.renamed" && message.data) {
-          const updated = message.data as Workspace
-          setWorkspaces((items) => replaceWorkspace(items, updated))
-          setSnapshot((current) => current?.workspace.workspace_id === updated.workspace_id ? { ...current, workspace: updated } : current)
-        } else if ((message.event === "agent.updated" || message.event === "agent.renamed") && message.data) {
-          const updated = message.data as Agent
-          const knownApp = appsRef.current.find((app) => (app.runtime_agent_id ?? app.app_id) === updated.agent_id)
-          if (updated.kind === "app" || updated.name.startsWith("app:") || knownApp) scheduleAppsRefresh()
-          if (knownApp && updated.name !== knownApp.name && updated.name !== `app:${knownApp.name}`) setApps((current) => current.map((app) => app.runtime_agent_id === updated.agent_id || app.app_id === updated.agent_id ? { ...app, name: updated.name === `app:${app.name}` ? app.name : updated.name } : app))
-          setSnapshot((current) => {
-            if (!current || current.workspace.workspace_id !== workspaceId) return current
-            const agents = current.agents.some((agent) => agent.agent_id === updated.agent_id)
-              ? current.agents.map((agent) => agent.agent_id === updated.agent_id ? updated : agent)
-              : [...current.agents, updated]
-            return { ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents }
-          })
-        } else if (message.event === "agent.deleted" && message.data) {
-          const removed = message.data as Agent
-          if (appsRef.current.some((app) => (app.runtime_agent_id ?? app.app_id) === removed.agent_id)) {
-            scheduleAppsRefresh()
-            setApps((current) => current.filter((app) => app.runtime_agent_id !== removed.agent_id && app.app_id !== removed.agent_id))
-          }
-          setSnapshot((current) => {
-            if (!current || current.workspace.workspace_id !== workspaceId) return current
-            return { ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents: current.agents.filter((agent) => agent.agent_id !== removed.agent_id) }
-          })
-        } else if (message.event === "workspace.deleted" && message.data) {
-          const removed = message.data as Workspace
-          setWorkspaces((items) => items.filter((item) => item.workspace_id !== removed.workspace_id))
-          if (removed.workspace_id === workspaceId) {
-            workspaceIdRef.current = null
-            setSnapshot(null)
-            setSelectedAgentId(null)
-            setSelectedMachineId(null)
-            void syncWorkspaces().catch(showError)
-          }
-        }
-        else {
-          if (message.event.startsWith("server.")) scheduleAppsRefresh()
-          refreshSnapshot().catch(showError)
-        }
-      }
-      socket.onclose = () => {
-        if (disposed || workspaceIdRef.current !== workspaceId) return
-        timer = window.setTimeout(() => connect(), 1200)
-      }
-    }
-    connect()
-    return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
-  }, [preview, workspaceId, refreshSnapshot, syncWorkspaces, showError, scheduleAppsRefresh, setApps])
-
-  const appRuntimeSignature = useRef("")
-  useEffect(() => {
-    const runtimes = snapshot?.agents.filter((agent) => agent.kind === "app" || agent.name.startsWith("app:") || appsRef.current.some((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id)) ?? []
-    const signature = JSON.stringify([workspaceId, runtimes.map(({ agent_id, name, status }) => [agent_id, name, status])])
-    if (signature === appRuntimeSignature.current) return
-    appRuntimeSignature.current = signature
-    if (runtimes.length) scheduleAppsRefresh()
-  }, [snapshot, workspaceId, scheduleAppsRefresh])
-
-  useEffect(() => {
-    const agents = snapshot?.agents ?? []
-    setSelectedAgentId((current) => current && (agents.some((agent) => agent.agent_id === current) || apps.some((app) => (app.runtime_agent_id ?? app.app_id) === current)) ? current : agents[0]?.agent_id ?? (apps[0] ? apps[0].runtime_agent_id ?? apps[0].app_id : null))
-  }, [snapshot, apps])
+    setSelectedAgentId(null)
+    setLogsTarget(null)
+    setMobileTerminalOpen(false)
+    setMobileTreeOpen((current) => preview || current)
+    setMainView((current) => current === "terminal" || current === "app" || current === "machine" || current === "audit" ? "overview" : current)
+  }, [workspaceId, preview])
 
   const selectedAgentApp = apps.find((app) => (app.runtime_agent_id ?? app.app_id) === selectedAgentId)
   const showWorkloadLogs = Boolean(logsTarget && logsTarget.workspaceId === workspaceId && logsTarget.agentId === selectedAgentId && logsTarget.appId === (selectedAgentApp?.app_id ?? null))
@@ -460,8 +264,8 @@ function WorkspaceAppContent() {
     if (mainView === "organization") setOrganizationName(organization?.name ?? "")
     if (mainView === "workspace") setWorkspaceName(workspace?.name ?? "")
   }, [mainView, organization?.organization_id, organization?.name, workspace?.workspace_id, workspace?.name])
-  const mobileTerminalIdle = isMobile && mainView === "terminal" && !mobileTerminalOpen
-  const mobileSidebarHidden = isMobile && mainView !== "terminal"
+  const mobileTerminalIdle = isMobile && ((mainView === "terminal" && !mobileTerminalOpen) || (mainView === "overview" && mobileTreeOpen))
+  const mobileSidebarHidden = isMobile && mainView !== "terminal" && !(mainView === "overview" && mobileTreeOpen)
   const selectedMachine = snapshot?.servers.find((machine) => machine.server_id === selectedMachineId)
 
   const transformTerminalInput = useCallback((data: string) => {
@@ -481,6 +285,14 @@ function WorkspaceAppContent() {
 
   function openMobileTerminal() {
     setMobileTerminalOpen(true)
+  }
+
+  function showOverview() {
+    setMainView("overview")
+    setSelectedAgentId(null)
+    setMobileTerminalOpen(false)
+    setMobileTreeOpen(false)
+    setCtrlModifier(false)
   }
 
   function closeMobileSurface() {
@@ -531,6 +343,7 @@ function WorkspaceAppContent() {
   }, [isMobile, mobileTerminalOpen])
 
   function showAgentTerminal(agentId: string, logs = false) {
+    setMobileTreeOpen(false)
     setSelectedAgentId(agentId)
     setShowWorkloadLogs(logs, agentId)
     setMainView("terminal")
@@ -655,8 +468,8 @@ function WorkspaceAppContent() {
       if (folder && workspaceIdRef.current === creationWorkspaceId) setPlacementRevision((revision) => revision + 1)
       if (workspaceIdRef.current !== creationWorkspaceId) return
       setCreateAgentOpen(false)
-      showAgentTerminal(agentId)
       await refreshSnapshot()
+      if (workspaceIdRef.current === creationWorkspaceId) showAgentTerminal(agentId)
     } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) setCreateAgentError(reason instanceof Error ? reason.message : "Create failed") }
     finally { setCreatingAgent(false) }
   }
@@ -746,12 +559,11 @@ function WorkspaceAppContent() {
   }, [loadApps, showError, setApps])
 
   useEffect(() => {
-    if (mainView === "app" && selectedAppId && !appsLoading && !selectedApp) setMainView("terminal")
+    if (mainView === "app" && selectedAppId && !appsLoading && !selectedApp) setMainView("overview")
   }, [mainView, selectedAppId, selectedApp, appsLoading])
 
   function openApps() {
-    setMainView("terminal")
-    setMobileTerminalOpen(false)
+    showOverview()
   }
 
   function openAppSettings(app: AppDeployment) {
@@ -785,7 +597,7 @@ function WorkspaceAppContent() {
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/apps/${encodeURIComponent(deletingApp.app_id)}`, { method: "DELETE" })
       setDeletingApp(null)
       setSelectedAppId(null)
-      setMainView("terminal")
+      showOverview()
       await loadApps()
     } catch (reason) { showError(reason) }
   }
@@ -820,7 +632,7 @@ function WorkspaceAppContent() {
   }
 
   function closeMainView() {
-    setMainView("terminal")
+    showOverview()
   }
 
   function closeMachineOverview() {
@@ -957,6 +769,7 @@ function WorkspaceAppContent() {
 
   function replayFirstRunTour() {
     if (!user) return
+    setMobileTreeOpen(true)
     clearFirstRunTour(user.user_id)
     if (tourHostRef.current) startFirstRunTour(tourHostRef.current, { userId: user.user_id, persist: !preview })
   }
@@ -964,6 +777,7 @@ function WorkspaceAppContent() {
   useEffect(() => {
     if (!user) return
     if (!shouldAutoStartFirstRunTour(user.user_id)) return
+    setMobileTreeOpen(true)
     const timer = window.setTimeout(() => {
       if (!tourHostRef.current) return
       startFirstRunTour(tourHostRef.current, { userId: user.user_id, persist: !preview })
@@ -1047,72 +861,9 @@ function WorkspaceAppContent() {
     catch (reason) { showError(reason) }
   }
 
-  const loadOrganizationSettings = useCallback(async () => {
-    if (preview) {
-      setMembers([{ ...PREVIEW_USER, role: "owner" }])
-      setGroups([])
-      return
-    }
-    const requestedOrganizationId = organizationId
-    if (!requestedOrganizationId) {
-      setMembers([])
-      setGroups([])
-      return
-    }
-    const [memberData, groupData] = await Promise.all([
-      api<{ members: Member[] }>(`/api/organizations/${encodeURIComponent(requestedOrganizationId)}/members`),
-      api<{ groups: OrganizationGroup[] }>(`/api/organizations/${encodeURIComponent(requestedOrganizationId)}/groups`),
-    ])
-    if (organizationIdRef.current !== requestedOrganizationId) return
-    setMembers(memberData.members)
-    setGroups(groupData.groups)
-  }, [preview, organizationId])
-
-  useEffect(() => {
-    if (mainView === "organization") loadOrganizationSettings().catch(showError)
-  }, [mainView, loadOrganizationSettings, showError])
-
-  async function createGroup(event: FormEvent) {
-    event.preventDefault()
-    if (!organizationId) return
-    try {
-      await api(`/api/organizations/${encodeURIComponent(organizationId)}/groups`, { method: "POST", body: JSON.stringify({ name: groupName }) })
-      setGroupName("")
-      await loadOrganizationSettings()
-    } catch (reason) { showError(reason) }
-  }
-
-  async function deleteGroup(groupId: string) {
-    if (!organizationId) return
-    try {
-      await api(`/api/organizations/${encodeURIComponent(organizationId)}/groups/${encodeURIComponent(groupId)}`, { method: "DELETE" })
-      await loadOrganizationSettings()
-    } catch (reason) { showError(reason) }
-  }
-
-  async function setGroupMember(groupId: string, userId: string, present: boolean) {
-    if (!organizationId) return
-    try {
-      const data = await api<{ groups: OrganizationGroup[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/groups/${encodeURIComponent(groupId)}/members/${encodeURIComponent(userId)}`, { method: present ? "PUT" : "DELETE" })
-      setGroups(data.groups)
-    } catch (reason) { showError(reason) }
-  }
-
-  async function updateMemberRole(userId: string, role: Member["role"]) {
-    if (!organizationId) return
-    try {
-      await api(`/api/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`, { method: "PATCH", body: JSON.stringify({ role }) })
-      await loadOrganizationSettings()
-    } catch (reason) { showError(reason) }
-  }
-
-  async function removeMember(userId: string) {
-    if (!organizationId) return
-    try {
-      await api(`/api/organizations/${encodeURIComponent(organizationId)}/members/${encodeURIComponent(userId)}`, { method: "DELETE" })
-      await loadOrganizationSettings()
-    } catch (reason) { showError(reason) }
-  }
+  const { members, groups, groupName, setGroupName, createGroup, deleteGroup, setGroupMember, updateMemberRole, removeMember } = useOrganizationMembers({
+    preview, organizationId, organizationIdRef, mainView, showError,
+  })
 
   async function createInvite() {
     if (!organizationId) return
@@ -1122,69 +873,14 @@ function WorkspaceAppContent() {
     } catch (reason) { showError(reason) }
   }
 
-  const loadNetwork = useCallback(async () => {
-    if (!workspaceId) {
-      setVirtualHosts([])
-      setServices([])
-      return
-    }
-    const [hostData, serviceData] = await Promise.all([
-      api<{ hosts: VirtualNetworkHost[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/virtual-hosts`),
-      api<{ services: MachineService[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/services`),
-    ])
-    setVirtualHosts(hostData.hosts)
-    setServices(serviceData.services)
-  }, [workspaceId])
+  const { auditEvents, traffic, auditRefreshRevision, auditLoading, virtualHosts, services, refreshAudit } = useWorkspaceMetrics({
+    workspaceId, workspaceIdRef, organizationId, canManageMembers, mainView, showError,
+  })
 
   function showMachineOverview(serverId: string) {
     setSelectedMachineId(serverId)
     setMainView("machine")
   }
-
-  const loadAudit = useCallback(async () => {
-    if (!organizationId || !workspaceId || !canManageMembers) {
-      setAuditEvents([])
-      return
-    }
-    setAuditLoading(true)
-    try {
-      const auditData = await api<{ events: OrganizationAuditEvent[] }>(`/api/organizations/${encodeURIComponent(organizationId)}/audit-events?workspace_id=${encodeURIComponent(workspaceId)}&limit=100`)
-      setAuditEvents(auditData.events)
-    } finally {
-      setAuditLoading(false)
-    }
-  }, [organizationId, workspaceId, canManageMembers])
-
-  const loadTraffic = useCallback(async () => {
-    const requestedWorkspaceId = workspaceId
-    if (!requestedWorkspaceId) {
-      setTraffic([])
-      setAgentTraffic([])
-      return
-    }
-    const data = await api<{ traffic: MachineTrafficRecord[] }>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/traffic?hours=24`)
-    const detail = await api<{ traffic: AgentTrafficRecord[] }>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/traffic/agents?hours=24`).catch((error: unknown) => {
-      if (error instanceof ApiError && error.status === 404) return { traffic: [] }
-      throw error
-    })
-    if (workspaceIdRef.current === requestedWorkspaceId) {
-      setTraffic(data.traffic)
-      setAgentTraffic(detail.traffic)
-    }
-  }, [workspaceId])
-
-  const refreshAudit = useCallback(() => {
-    void Promise.all([loadAudit(), loadTraffic()]).catch(showError)
-  }, [loadAudit, loadTraffic, showError])
-
-  useEffect(() => {
-    if (mainView === "audit") loadAudit().catch(showError)
-    if (mainView === "machine") loadNetwork().catch(showError)
-    if (mainView !== "audit" && mainView !== "machine") return
-    loadTraffic().catch(showError)
-    const timer = window.setInterval(() => loadTraffic().catch(showError), 10_000)
-    return () => window.clearInterval(timer)
-  }, [mainView, loadAudit, loadNetwork, loadTraffic, showError])
 
   function openAudit() {
     setMainView("audit")
@@ -1234,6 +930,7 @@ function WorkspaceAppContent() {
           </div>
           <span data-tour="create-workspace"><IconButton label={workspace ? "Workspace settings" : "Create workspace"} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
+        <button type="button" aria-label="Workspace overview" onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />Overview</button>
         <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <UserMenu user={user} badge={initials(user.preferred_name)} role={currentRole} preview={preview} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
@@ -1243,9 +940,9 @@ function WorkspaceAppContent() {
       <section className={cn("min-h-0 min-w-0 grid-rows-[48px_minmax(0,1fr)]", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:grid" : "grid")}>
         <header className="flex min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
           <div className="flex min-w-0 items-center gap-1.5 overflow-hidden text-xs text-muted-foreground">
-            {isMobile && mainView !== "terminal" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
-            <span className="hidden truncate sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</span><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
-          {mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
+            {isMobile && mainView !== "terminal" && mainView !== "overview" && <IconButton label="Back" className="mr-1 md:hidden" onClick={mainView === "machine" ? closeMachineOverview : mainView === "app" ? openApps : mainView === "audit" ? openOrganizationSettings : closeMainView}><ChevronLeft /></IconButton>}
+            <button type="button" onClick={showOverview} aria-label="Back to workspace overview" className="hidden truncate rounded-sm outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring sm:block">{mainView === "organization" || mainView === "audit" ? organization?.name ?? "Organization" : workspace?.name ?? "Workspace"}</button><ChevronRight className="hidden size-3 shrink-0 sm:block" />{!(mainView === "terminal" && selectedAgent) && <strong title={mainView === "terminal" ? selectedAgentPath : undefined} className="truncate font-medium text-foreground">{mainView === "overview" ? "Overview" : mainView === "organization" || mainView === "workspace" ? "Settings" : mainView === "apps" ? "Apps" : mainView === "app" ? selectedApp?.name ?? "App" : mainView === "audit" ? "Audit" : selectedAgent?.name ?? "Terminal"}</strong>}{mainView === "terminal" && selectedAgent && <AgentBreadcrumbs path={selectedAgentPath} />}</div>
+          {mainView === "overview" ? <Button variant="ghost" size="sm" aria-label="Browse tree" className="md:hidden" onClick={() => setMobileTreeOpen(true)}><PanelLeft />Browse tree</Button> : mainView === "terminal" ? <div className="flex shrink-0 items-center gap-0.5">
             <IconButton label={selectedAgentInterface || showAppUi ? "Open full-screen interface" : "Open full-screen terminal"} className="md:hidden" disabled={!selectedAgent} onClick={openMobileTerminal}><Maximize2 /></IconButton>
             {selectedAgentApp && <Button size="sm" variant="ghost" onClick={() => setShowWorkloadLogs(!showWorkloadLogs)}>{showWorkloadLogs ? "Show App" : "Show logs"}</Button>}
             <IconButton label="Rename agent" disabled={!selectedAgent} onClick={() => selectedAgent && openRename({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Pencil /></IconButton>
@@ -1255,7 +952,7 @@ function WorkspaceAppContent() {
             <IconButton label="Delete agent" disabled={!selectedAgent} className="text-destructive hover:text-destructive" onClick={() => selectedAgent && setDeleteTarget({ kind: "agent", id: selectedAgent.agent_id, name: selectedAgent.name })}><Trash2 /></IconButton>
           </div> : mainView === "apps" ? <IconButton label="Refresh Apps" onClick={loadApps} disabled={appsLoading}><RotateCw /></IconButton> : mainView === "audit" ? <IconButton label="Refresh audit" onClick={refreshAudit} disabled={auditLoading}><RotateCw /></IconButton> : null}
         </header>
-        {mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
+        {mainView === "overview" ? <WorkspaceOverview key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} onOpen={showAgentTerminal} onNewAgent={openCreateAgentOrMachineSetup} onWorkspaceSettings={openWorkspaceSettings} /> : mainView === "organization" ? <OrganizationSettingsView organization={organization} name={organizationName} workspaces={workspaces} selectedWorkspaceId={workspaceId} members={members} groups={groups} groupName={groupName} canManage={canManageMembers} currentRole={currentRole} onNameChange={setOrganizationName} onRename={renameOrganization} onCreateOrganization={() => { setCreateOrganizationName(""); setCreateOrganizationOpen(true) }} onCreateWorkspace={() => { setCreateWorkspaceName(""); setCreateWorkspaceOpen(true) }} onSelectWorkspace={(selectedWorkspaceId) => { selectWorkspace(selectedWorkspaceId); closeMainView() }} onInvite={createInvite} onMemberRoleChange={updateMemberRole} onRemoveMember={removeMember} onGroupNameChange={setGroupName} onCreateGroup={createGroup} onDeleteGroup={deleteGroup} onSetGroupMember={setGroupMember} onOpenAudit={openAudit} onClose={closeMainView} /> : mainView === "terminal" && selectedAgent && !selectedAgentMachineOnline ? <div className={cn("grid min-h-0 place-items-center bg-sidebar px-6 text-center", mobileTerminalOpen && "fixed inset-0 z-[100] bg-sidebar pt-[env(safe-area-inset-top)]")}>
           <div className="max-w-sm">
             {mobileTerminalOpen && <Button variant="ghost" onClick={closeMobileSurface}>Back to workloads</Button>}
             <p className="text-sm font-medium text-zinc-800">Machine is offline</p>
@@ -1276,106 +973,43 @@ function WorkspaceAppContent() {
           <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobileTerminalOpen && "fixed inset-0 z-[100] h-[100dvh] max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>
             <div className="flex min-w-0 items-center justify-between gap-3 border-b border-zinc-800 bg-[#191d20] px-3.5"><div className="flex min-w-0 items-baseline gap-2"><span title={selectedAgentPath} className="truncate text-xs font-semibold text-zinc-200">{selectedAgentPath || "Terminal"}</span>{selectedAgent && <span className="hidden truncate font-mono text-[9px] text-zinc-500 sm:block">{selectedAgent.agent_id} · {machineName(snapshot?.servers.find((item) => item.server_id === selectedAgent.server_id))}</span>}</div><div className="flex shrink-0 items-center gap-2"><span className="inline-flex items-center gap-1.5 text-[9px] uppercase text-zinc-500"><span className="size-1.5 rounded-full bg-current" />{terminalStatus}</span>{mobileTerminalOpen && <><IconButton label="Upload file" className="text-zinc-400 hover:bg-white/10 hover:text-zinc-100" disabled={!selectedAgentMachineOnline} onClick={openUpload}><Upload /></IconButton><button type="button" className="grid size-8 place-items-center rounded-[5px] text-zinc-400 hover:bg-white/10 hover:text-zinc-100" aria-label="Close full-screen terminal" onClick={closeMobileSurface}><X className="size-4" /></button></>}</div></div>
             <div className="min-h-0 min-w-0 overflow-hidden"><TerminalPane ref={terminalPaneRef} key={`${workspaceId}:${selectedAgentId}`} workspaceId={workspaceId} agentId={selectedAgentId} active={terminalActive} onStatusChange={setTerminalState} transformInput={transformTerminalInput} /></div>
-            {mobileTerminalOpen && <div className="border-t border-zinc-800 bg-[#191d20] px-2 pt-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-              <div className="grid grid-cols-6 gap-1.5">
-                <MobileTerminalKey label="Escape" onClick={() => terminalPaneRef.current?.send("\x1b")}>Esc</MobileTerminalKey>
-                <MobileTerminalKey label="Tab" onClick={() => terminalPaneRef.current?.send("\t")}>Tab</MobileTerminalKey>
-                <MobileTerminalKey label="Control modifier for next key" active={ctrlArmed} onClick={() => setCtrlModifier(!ctrlArmedRef.current)}>Ctrl</MobileTerminalKey>
-                <MobileTerminalKey label="Open keyboard" onClick={() => terminalPaneRef.current?.focus()}><Keyboard className="size-4" /></MobileTerminalKey>
-                <MobileTerminalKey label="Backspace" onClick={() => terminalPaneRef.current?.send("\x7f")}><Delete className="size-4" /></MobileTerminalKey>
-                <MobileTerminalKey label="Enter" onClick={() => terminalPaneRef.current?.send("\r")}><CornerDownLeft className="size-4" /></MobileTerminalKey>
-              </div>
-              <div className="mt-1.5 grid grid-cols-8 gap-1.5">
-                <MobileTerminalKey label="Control C" onClick={() => terminalPaneRef.current?.send("\x03")}>^C</MobileTerminalKey>
-                <MobileTerminalKey label="Control D" onClick={() => terminalPaneRef.current?.send("\x04")}>^D</MobileTerminalKey>
-                <MobileTerminalKey label="Control Z" onClick={() => terminalPaneRef.current?.send("\x1a")}>^Z</MobileTerminalKey>
-                <MobileTerminalKey label="Control L" onClick={() => terminalPaneRef.current?.send("\x0c")}>^L</MobileTerminalKey>
-                <MobileTerminalKey label="Left arrow" onClick={() => terminalPaneRef.current?.send("\x1b[D")}><ArrowLeft className="size-4" /></MobileTerminalKey>
-                <MobileTerminalKey label="Up arrow" onClick={() => terminalPaneRef.current?.send("\x1b[A")}><ArrowUp className="size-4" /></MobileTerminalKey>
-                <MobileTerminalKey label="Down arrow" onClick={() => terminalPaneRef.current?.send("\x1b[B")}><ArrowDown className="size-4" /></MobileTerminalKey>
-                <MobileTerminalKey label="Right arrow" onClick={() => terminalPaneRef.current?.send("\x1b[C")}><ArrowRight className="size-4" /></MobileTerminalKey>
-              </div>
-            </div>}
+            {mobileTerminalOpen && <MobileTerminalKeys terminalRef={terminalPaneRef} ctrlArmed={ctrlArmed} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} />}
           </div>
-        </div> : mainView === "workspace" ? <WorkspaceSettingsView key={workspaceId} workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} traffic={traffic} agentTraffic={agentTraffic} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
+        </div> : mainView === "workspace" ? <WorkspaceSettingsView key={workspaceId} workspace={workspace} organization={organization} name={workspaceName} machines={snapshot?.servers ?? []} machineCount={workspaceMachineCount} profiles={launchProfiles} profilesLoading={launchProfilesLoading} apps={apps} onPolicyAppInstalled={(app) => setApps((current) => [...current.filter((item) => item.app_id !== app.app_id), app].sort((left, right) => left.name.localeCompare(right.name)))} canDelete={canManageMembers} preview={preview} onNameChange={setWorkspaceName} onRename={renameWorkspace} onAddMachine={openInstall} onOpenMachine={(machine) => showMachineOverview(machine.server_id)} onRenameMachine={(machine) => openRename({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onDeleteMachine={(machine) => setDeleteTarget({ kind: "machine", id: machine.server_id, name: machineName(machine) })} onCopy={copy} onRefreshProfiles={loadLaunchProfiles} onNewProfile={openNewLaunchProfile} onEditProfile={openEditLaunchProfile} onLaunchProfile={openLaunchProfile} onDeleteProfile={setDeletingProfile} onDelete={() => setDeleteWorkspaceOpen(true)} onClose={closeMainView} /> : mainView === "apps" ? <AppsView apps={apps} machines={snapshot?.servers ?? []} loading={appsLoading} onOpen={openApp} onSettings={openAppSettings} /> : mainView === "app" ? <AppSettingsView app={selectedApp} machine={selectedAppMachine} onOpen={openApp} onAccess={updateAppAccess} onAction={appLifecycle} onDelete={setDeletingApp} onClose={openApps} onCopy={copy} /> : mainView === "machine" ? <MachineOverviewView machine={selectedMachine} agents={snapshot?.agents.filter((agent) => agent.server_id === selectedMachineId) ?? []} services={services.filter((service) => service.server_id === selectedMachineId)} virtualHosts={virtualHosts.filter((host) => host.destination_server_id === selectedMachineId)} traffic={traffic} machines={snapshot?.servers ?? []} workspaceId={workspaceId} onOpenAgent={showAgentTerminal} onClose={closeMachineOverview} onCopy={copy} /> : mainView === "audit" ? <AuditView events={auditEvents} workspaceId={workspaceId!} refreshRevision={auditRefreshRevision} agents={snapshot?.agents ?? []} machines={snapshot?.servers ?? []} loading={auditLoading} /> : null}
       </section>
     </main>
 
     <ErrorToast message={error} onDismiss={() => setError(null)} />
 
-    <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} user={user} onUserChange={setUser} onError={showError} />
-
-    <SimpleNameDialog open={createOrganizationOpen} onOpenChange={setCreateOrganizationOpen} title="Create organization" description="Organizations contain members and workspaces." label="Organization name" value={createOrganizationName} onValueChange={setCreateOrganizationName} onSubmit={createOrganization} />
-    <SimpleNameDialog open={createWorkspaceOpen} onOpenChange={setCreateWorkspaceOpen} title="Create workspace" description={`Add a workspace to ${organization?.name ?? "this organization"}.`} label="Workspace name" value={createWorkspaceName} onValueChange={setCreateWorkspaceName} onSubmit={createWorkspace} dataTour="create-workspace-dialog" />
-
-    <Dialog open={profileEditorOpen} onOpenChange={(open) => { setProfileEditorOpen(open); if (!open) setEditingLaunchProfile(null) }}><DialogContent className="max-w-xl"><form onSubmit={saveLaunchProfile} className="grid gap-4 sm:grid-cols-2"><DialogHeader className="sm:col-span-2"><DialogTitle>{editingLaunchProfile ? "Edit launch profile" : "New launch profile"}</DialogTitle><DialogDescription>Reusable Agent process settings for this workspace.</DialogDescription></DialogHeader><Field label="Profile name"><Input value={launchProfileName} onChange={(event) => setLaunchProfileName(event.target.value)} required autoFocus maxLength={80} /></Field><Field label="Working directory"><Input className="font-mono" value={launchProfileCwd} onChange={(event) => setLaunchProfileCwd(event.target.value)} required /></Field><div className="sm:col-span-2"><Field label="Description"><Input value={launchProfileDescription} onChange={(event) => setLaunchProfileDescription(event.target.value)} maxLength={1000} /></Field></div><div className="sm:col-span-2"><Field label="Command"><Input className="font-mono" value={launchProfileCommandLine} onChange={(event) => setLaunchProfileCommandLine(event.target.value)} placeholder="codex review --base main" required /></Field></div><DialogFooter className="sm:col-span-2"><Button type="button" variant="outline" onClick={() => setProfileEditorOpen(false)}>Cancel</Button><Button type="submit"><Rocket />{editingLaunchProfile ? "Save profile" : "Create profile"}</Button></DialogFooter></form></DialogContent></Dialog>
-
-    <Dialog open={Boolean(launchingProfile)} onOpenChange={(open) => !open && setLaunchingProfile(null)}><DialogContent><form onSubmit={launchFromProfile} className="space-y-4"><DialogHeader><DialogTitle>Run {launchingProfile?.name}</DialogTitle><DialogDescription>Choose where to start this Agent.</DialogDescription></DialogHeader><Field label="Machine"><Select value={launchMachineId} onValueChange={setLaunchMachineId} required><SelectTrigger><SelectValue placeholder="Select an online machine" /></SelectTrigger><SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent></Select></Field><Field label="Agent name"><Input value={launchAgentName} onChange={(event) => setLaunchAgentName(event.target.value)} required maxLength={80} /></Field><DialogFooter><Button type="button" variant="outline" onClick={() => setLaunchingProfile(null)}>Cancel</Button><Button type="submit" disabled={!launchMachineId}><Play />Run Agent</Button></DialogFooter></form></DialogContent></Dialog>
-
-    <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>Delete launch profile</DialogTitle><DialogDescription>Delete {deletingProfile?.name}? Existing Agents are not affected.</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>Cancel</Button><Button variant="destructive" onClick={deleteLaunchProfile}>Delete profile</Button></DialogFooter></DialogContent></Dialog>
-
-    <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}>
-      <DialogContent data-tour="create-agent-dialog">
-        <form onSubmit={createAgent} className="min-w-0 space-y-4">
-          <DialogHeader>
-            <DialogTitle>Create agent</DialogTitle>
-            <DialogDescription>Start a terminal or agent on an online machine in this workspace.</DialogDescription>
-          </DialogHeader>
-          {agentFolder && <p className="break-all text-xs text-muted-foreground">Tree folder: {agentFolder.path}</p>}
-          <Field label="Machine">
-            <Select value={agentServerId} onValueChange={setAgentServerId} required>
-              <SelectTrigger aria-label="Machine"><SelectValue placeholder="Select a machine" /></SelectTrigger>
-              <SelectContent>{onlineMachines.map((machine) => <SelectItem key={machine.server_id} value={machine.server_id}>{machineName(machine)}</SelectItem>)}</SelectContent>
-            </Select>
-          </Field>
-          <Field label="Launch">
-            <Select value={agentProfileId} onValueChange={selectAgentProfile}>
-              <SelectTrigger aria-label="Launch" data-tour="agent-launch"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="terminal">Terminal</SelectItem>
-                <SelectItem value="manual">Custom command</SelectItem>
-                {launchProfiles.map((profile) => <SelectItem key={profile.profile_id} value={profile.profile_id}>{profile.name}</SelectItem>)}
-              </SelectContent>
-            </Select>
-          </Field>
-          {agentProfileId === "terminal" || agentProfileId === "manual"
-            ? <Field label="Working directory"><Input value={agentCwd} onChange={(event) => setAgentCwd(event.target.value)} /></Field>
-            : selectedCreateProfile
-              ? <div className="min-w-0 max-w-full overflow-hidden rounded-md border bg-muted/30 px-3 py-2"><code className="block max-w-full truncate text-xs" title={formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}>{formatCommandLine(selectedCreateProfile.command, selectedCreateProfile.args)}</code><span className="mt-1 block max-w-full truncate text-[10px] text-muted-foreground">{selectedCreateProfile.cwd || "."}</span></div>
-              : null}
-          {agentProfileId === "manual" && <Field label="Command"><Input aria-label="Command" className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder="/path/to/your-launcher --option" required /></Field>}
-          {selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">Runs the saved command on this machine. Install its runtime and dependencies before launching.</span>}
-          <Field label="Name"><Input aria-label="Name" value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
-          {createAgentError && <p role="alert" className="break-words text-sm text-destructive">{createAgentError}</p>}
-          <DialogFooter>
-            <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>Cancel</Button>
-            <Button type="submit" disabled={creatingAgent || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? "Starting…" : agentProfileId === "terminal" ? "Create terminal" : "Create agent"}</Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
-    <Dialog open={Boolean(deletingApp)} onOpenChange={(open) => !open && setDeletingApp(null)}><DialogContent><DialogHeader><DialogTitle>Delete App</DialogTitle><DialogDescription>Delete {deletingApp?.name}, stop its process, and remove its service and virtual hostname?</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingApp(null)}>Cancel</Button><Button variant="destructive" onClick={deleteAppDeployment}>Delete App</Button></DialogFooter></DialogContent></Dialog>
-
-
-    <Dialog open={installOpen} onOpenChange={setInstallOpen}>
-      <DialogContent className="max-w-xl" data-tour="add-machine-dialog">
-        <DialogHeader><DialogTitle>Add machine</DialogTitle><DialogDescription>Install Treer, then connect this workspace.</DialogDescription></DialogHeader>
-        <div className="space-y-4">
-          <Field label="Operating system"><Select value={installPlatform} onValueChange={setInstallPlatform}><SelectTrigger aria-label="Installation operating system"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="unix">Linux / macOS</SelectItem><SelectItem value="windows">Windows · PowerShell</SelectItem></SelectContent></Select></Field>
-          <Field label="1. Install Treer"><div className="space-y-2"><Textarea readOnly value={installCommand} className="min-h-20 font-mono text-xs" /><Button size="sm" variant="outline" onClick={() => copy(installCommand)}><Copy />Copy install command</Button></div></Field>
-          <Field label="2. Connect workspace"><div className="space-y-2"><Textarea readOnly value={connectCommand} className="min-h-24 font-mono text-xs" /><Button size="sm" onClick={() => copy(connectCommand)}><Copy />Copy connection command</Button></div></Field>
-        </div>
-        <DialogFooter><Button variant="outline" onClick={() => setInstallOpen(false)}>Close</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
-
-    <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>Rename {renameTarget?.kind}</DialogTitle><DialogDescription>Rename {renameTarget?.kind === "agent" ? agentPath(snapshot?.agents.find((agent) => agent.agent_id === renameTarget.id) ?? { agent_id: renameTarget.id, name: renameTarget.name, server_id: "", kind: "", status: "" }, workloadTree) : renameTarget?.name}. Names must be unique within the same folder.</DialogDescription></DialogHeader><div className="my-5"><Field label="Name"><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div>{renameError && <p role="alert" className="mb-4 break-words text-sm text-destructive">{renameError}</p>}<DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>Cancel</Button><Button type="submit">Rename</Button></DialogFooter></form></DialogContent></Dialog>
-
-    <Dialog open={uploadOpen} onOpenChange={(open) => !uploading && setUploadOpen(open)}><DialogContent><form onSubmit={uploadToAgentMachine} className="space-y-4"><DialogHeader><DialogTitle>Upload file</DialogTitle><DialogDescription>Upload to {machineName(selectedAgentMachine, selectedAgent?.server_id)}. The destination directory is relative to the Machine root.</DialogDescription></DialogHeader><Field label="Destination directory"><Input aria-label="Destination directory" className="font-mono" value={uploadDirectory} onChange={(event) => setUploadDirectory(event.target.value)} placeholder="." required disabled={uploading} /></Field><Field label="File"><Input key={uploadInputKey} aria-label="File" type="file" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} disabled={uploading} /></Field><label className="flex items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" className="size-4 accent-foreground" checked={overwriteUpload} onChange={(event) => setOverwriteUpload(event.target.checked)} disabled={uploading} />Replace an existing file with the same name</label><p className="text-[10px] text-muted-foreground">Maximum 16 MiB</p>{uploadMessage && <p className="text-xs text-emerald-700">{uploadMessage}</p>}{uploadError && <p className="text-xs text-red-600">{uploadError}</p>}<DialogFooter><Button type="button" variant="outline" onClick={() => setUploadOpen(false)} disabled={uploading}>Close</Button><Button type="submit" disabled={!uploadFile || uploading || !selectedAgentMachineOnline}><Upload />{uploading ? "Uploading" : "Upload"}</Button></DialogFooter></form></DialogContent></Dialog>
-
-    <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>Delete {deleteTarget?.kind}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? `Remove ${deleteTarget.name} and all of its agents? Its credential will be revoked, but its local service will not be uninstalled.` : `Delete ${deleteTarget ? agentPath(snapshot?.agents.find((agent) => agent.agent_id === deleteTarget.id) ?? { agent_id: deleteTarget.id, name: deleteTarget.name, server_id: "", kind: "", status: "" }, workloadTree) : "Agent"} and stop its process? This agent will not return after reconnecting.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>Cancel</Button><Button variant="destructive" onClick={confirmDelete}>Delete</Button></DialogFooter></DialogContent></Dialog>
-    <Dialog open={deleteWorkspaceOpen} onOpenChange={(open) => !open && setDeleteWorkspaceOpen(false)}><DialogContent><DialogHeader><DialogTitle>Delete workspace</DialogTitle><DialogDescription>{workspaceMachineCount === undefined ? "Checking the workspace machine inventory..." : workspaceMachineCount > 0 ? `Delete all ${workspaceMachineCount} ${workspaceMachineCount === 1 ? "machine" : "machines"} from ${workspace?.name ?? "this workspace"} first.` : `Delete ${workspace?.name}? It will disappear from active views while historical traffic and messages are retained. This cannot be undone.`}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteWorkspaceOpen(false)}>Cancel</Button><Button variant="destructive" disabled={workspaceMachineCount !== 0} onClick={() => void confirmDeleteWorkspace()}>Delete workspace</Button></DialogFooter></DialogContent></Dialog>
-
-    <Dialog open={inviteOpen} onOpenChange={setInviteOpen}><DialogContent><DialogHeader><DialogTitle>Invite member</DialogTitle><DialogDescription>This registration link can be used once.</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteOpen(false)}>Close</Button><Button onClick={() => copy(inviteUrl)}><Copy />Copy link</Button></DialogFooter></DialogContent></Dialog>
+    <WorkspaceDialogs state={dialogState}
+      user={user}
+      setUser={setUser}
+      showError={showError}
+      createOrganization={createOrganization}
+      organization={organization}
+      createWorkspace={createWorkspace}
+      saveLaunchProfile={saveLaunchProfile}
+      launchFromProfile={launchFromProfile}
+      onlineMachines={onlineMachines}
+      deleteLaunchProfile={deleteLaunchProfile}
+      createAgent={createAgent}
+      selectAgentProfile={selectAgentProfile}
+      launchProfiles={launchProfiles}
+      selectedCreateProfile={selectedCreateProfile}
+      changeAgentCommandLine={changeAgentCommandLine}
+      deleteAppDeployment={deleteAppDeployment}
+      copy={copy}
+      submitRename={submitRename}
+      snapshot={snapshot}
+      workloadTree={workloadTree}
+      uploadToAgentMachine={uploadToAgentMachine}
+      selectedAgentMachine={selectedAgentMachine}
+      selectedAgent={selectedAgent}
+      selectedAgentMachineOnline={selectedAgentMachineOnline}
+      confirmDelete={confirmDelete}
+      workspaceMachineCount={workspaceMachineCount}
+      workspace={workspace}
+      confirmDeleteWorkspace={confirmDeleteWorkspace}
+    />
   </TooltipProvider>
 }

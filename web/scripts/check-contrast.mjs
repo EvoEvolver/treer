@@ -28,6 +28,9 @@ const text = [
   ["muted-foreground", "background"], ["muted-foreground", "card"], ["muted-foreground", "muted"],
   ["muted-foreground", "sidebar"], ["muted-foreground", "accent"],
   ["primary", "background"], ["destructive", "background"],
+  // Small overview status text needs the full text threshold, including row hover.
+  ["status-working-text", "background"], ["status-working-text", "accent"],
+  ["status-attention-text", "background"], ["status-attention-text", "accent"],
 ].map(([f, b]) => [f, b, 4.5, "text"]);
 const nonText = [["ring", "background"], ["ring", "card"], ["status-online", "background"], ["status-online", "sidebar"]]
   .map(([f, b]) => [f, b, 3, "non-text"]);

@@ -1,0 +1,61 @@
+import { useMemo, useState } from "react"
+import { ChevronDown, ChevronRight, CircleDot, Folder, LayoutDashboard, Plus } from "lucide-react"
+import { machineName, type Agent, type AppDeployment, type Machine, type Workspace, type WorkloadTreeState } from "@/lib/api"
+import { attentionGroups } from "@/lib/attention"
+import { overviewForest, visibleOverviewRows, type AttentionFilter } from "@/lib/overview-tree"
+import { workspaceWorkloads } from "@/lib/workspace-workloads"
+import { workloadKind } from "@/lib/workload-path"
+import { WorkloadIcon } from "@/components/workload-icon"
+import { Button } from "@/components/ui/button"
+import { cn } from "@/lib/utils"
+
+const filters = [
+  { key: "attention" as const, label: "need attention", color: "text-status-attention" },
+  { key: "working" as const, label: "working", color: "text-status-working" },
+  { key: "idle" as const, label: "idle", color: "text-muted-foreground" },
+]
+
+export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loading, onOpen, onNewAgent, onWorkspaceSettings }: {
+  workspace?: Workspace; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; tree: WorkloadTreeState; loading: boolean
+  onOpen: (id: string) => void; onNewAgent: () => void; onWorkspaceSettings: () => void
+}) {
+  const [filter, setFilter] = useState<AttentionFilter | null>(null)
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({})
+  const [filteredExpanded, setFilteredExpanded] = useState<Record<string, boolean>>({})
+  const workloads = useMemo(() => workspaceWorkloads(agents, apps), [agents, apps])
+  const groups = useMemo(() => attentionGroups(workloads, machines), [workloads, machines])
+  const forest = useMemo(() => overviewForest(tree, workloads, groups, filter), [tree, workloads, groups, filter])
+  const rows = visibleOverviewRows(forest.roots, filter, filter ? filteredExpanded : expanded)
+  const attention = new Set(groups.attention.map((agent) => agent.agent_id))
+  const working = new Set(groups.working.map((agent) => agent.agent_id))
+  const inventory = new Map(machines.map((machine) => [machine.server_id, machine]))
+  function toggleFilter(key: AttentionFilter) {
+    setFilter((current) => current === key ? null : key)
+    setFilteredExpanded({})
+  }
+  return <div className="min-h-0 overflow-auto"><div className="mx-auto w-full max-w-[1120px] px-5 py-8 sm:px-8 sm:py-12 lg:px-14">
+    <div className="mb-5 flex flex-wrap items-start justify-between gap-4"><div><LayoutDashboard aria-hidden="true" className="mb-4 size-5 text-muted-foreground" /><h1 className="text-2xl font-semibold">Workspace overview</h1><p className="mt-2 text-xs text-muted-foreground">{workspace?.name ?? "Choose a workspace"}</p></div>{workspace && <Button variant="outline" onClick={onNewAgent}><Plus />Add agent</Button>}</div>
+    {!workspace ? <p className="rounded-md border p-5 text-sm text-muted-foreground">Choose or create a workspace from the Tree to get started.</p> : loading ? <p role="status" className="py-8 text-sm text-muted-foreground">Loading workspace…</p> : <>
+      <div role="group" aria-label="Attention filters" className="mb-4 flex flex-wrap gap-2">{filters.map(({ key, label, color }) => <button key={key} type="button" aria-pressed={filter === key} aria-label={`Filter ${label}`} onClick={() => toggleFilter(key)} className={cn("flex min-h-10 items-center gap-2 rounded-full border px-3 text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", filter === key && "border-primary bg-primary/10 ring-1 ring-primary")}><CircleDot aria-hidden="true" className={cn("size-3", color)} /><span className="tabular-nums">{groups[key].length}</span>{label}</button>)}<span className="flex min-h-10 cursor-default items-center px-1 text-xs text-muted-foreground">{machines.filter((machine) => machine.status === "online").length}/{machines.length} machines online</span></div>
+      <p role="status" className="mb-5 text-xs leading-5 text-muted-foreground">{filter ? "Showing matching agents and their folders. Select the filter again to clear." : "Active folders expand by default; idle folders stay collapsed. Your toggles take priority."}</p>
+      {workloads.length === 0 && <div className="mb-6 rounded-md border bg-muted/20 p-5"><h2 className="text-sm font-medium">Your workspace is ready</h2><p className="mt-2 text-xs text-muted-foreground">{machines.length ? "Add your first agent to start working." : "Connect a machine, then add your first agent."}</p>{!machines.length && <Button variant="outline" className="mt-4" onClick={onWorkspaceSettings}>Set up a machine</Button>}</div>}
+      <section aria-label="Workspace overview tree" className="min-w-0">
+        {rows.length ? <ul className="space-y-1">{rows.map(({ node, depth, open }) => {
+          const key = `${node.agent ? "agent" : "folder"}:${node.id}`
+          const indent = { paddingInlineStart: `${Math.min(depth, 8) * 14}px` }
+          if (!node.agent) return <li key={key} style={indent}><button type="button" title={node.path} aria-label={`Folder ${node.path}`} aria-expanded={open} onClick={() => (filter ? setFilteredExpanded : setExpanded)((current) => ({ ...current, [node.id]: !open }))} className="flex min-h-11 w-full min-w-0 flex-wrap items-center gap-x-2 gap-y-1 rounded-md px-2 py-2 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring">
+            {open ? <ChevronDown aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" />}<Folder aria-hidden="true" className="size-4 shrink-0 text-muted-foreground" /><span className="min-w-0 flex-1 truncate text-xs font-semibold">{node.name}</span>
+            <span className="flex max-w-full flex-wrap justify-end gap-x-2 text-[10px] sm:text-xs">{filters.map(({ key: group, label, color }) => node.counts[group] > 0 && (group !== "idle" || (!node.counts.attention && !node.counts.working)) && <span key={group} className={cn("whitespace-nowrap", color, group === "idle" && "hidden sm:inline")}>{node.counts[group]} {label}</span>)}</span>
+          </button></li>
+          const agent = node.agent, machine = inventory.get(agent.server_id), needsAttention = attention.has(agent.agent_id), isWorking = working.has(agent.agent_id)
+          const status = machine?.status === "online" || ["blocked", "failed", "exited", "stopped"].includes(agent.status) ? agent.status : "machine offline"
+          return <li key={key} style={indent}><button type="button" onClick={() => onOpen(agent.agent_id)} aria-label={`Open ${node.path}`} title={`${node.path} · ${workloadKind(agent)} · ${machineName(machine, agent.server_id)} · ${status}`} className={cn("flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", needsAttention && "bg-destructive/[0.07]")}>
+            <span className="w-3.5 shrink-0" aria-hidden="true" /><WorkloadIcon kind={agent.kind} className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3"><span className="block truncate text-xs font-medium">{node.name}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground sm:mt-0 sm:text-xs">{workloadKind(agent)} · {machineName(machine, agent.server_id)}</span></span>
+            <span className={cn("max-w-[112px] shrink-0 rounded border px-1.5 py-1 text-[10px]", needsAttention ? "border-destructive/40 text-status-attention" : isWorking ? "border-primary/40 text-status-working" : "text-muted-foreground")}>{status}</span>
+          </button></li>
+        })}</ul> : <p className="rounded-md border p-5 text-xs text-muted-foreground">{filter ? "No agents match this filter." : "No workloads in this workspace."}</p>}
+      </section>
+    </>}
+  </div></div>
+}

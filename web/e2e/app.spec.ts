@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from "@playwright/test"
+import { browseTreeOnMobile } from './fixtures/navigation'
 
 const NOW = new Date().toISOString()
 
@@ -347,6 +348,7 @@ test.describe('resizable tree sidebar', () => {
       ws.send(JSON.stringify({ type: 'ready', stream_epoch: 'resize', revision: 0, replay_chunks: 0 }))
     })
     await page.goto('/')
+    await browseTreeOnMobile(page)
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
     await page.getByRole('button', { name: /^api-server / }).click()
     await expect.poll(() => initialColumns).toBeGreaterThan(0)
@@ -366,16 +368,20 @@ test.describe('resizable tree sidebar', () => {
     expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe('368')
     await page.screenshot({ path: testInfo.outputPath('tree-resizer-desktop.png') })
     await page.reload()
+    await browseTreeOnMobile(page)
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '368')
     await page.goto('/orgs/org-2/workspaces/ws-2')
+    await browseTreeOnMobile(page)
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '368')
     await separator(page).dblclick()
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
     await page.reload()
+    await browseTreeOnMobile(page)
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
   })
   test('collapse is keyboard accessible and persists without losing width or mobile navigation', async ({ page }, testInfo) => {
     await page.goto('/')
+    await browseTreeOnMobile(page)
     await separator(page).press('ArrowRight')
     const collapse = page.getByRole('button', { name: 'Collapse tree sidebar', exact: true })
     await collapse.focus()
@@ -388,11 +394,14 @@ test.describe('resizable tree sidebar', () => {
     expect(await page.evaluate((key) => localStorage.getItem(key), key)).toBe('288')
     await page.screenshot({ path: testInfo.outputPath('tree-collapsed-desktop.png') })
     await page.reload()
+    await browseTreeOnMobile(page)
     await expect(expand).toBeVisible()
     await expect(page.locator('#tree-sidebar')).toBeHidden()
     await page.goto('/orgs/org-2/workspaces/ws-2')
+    await browseTreeOnMobile(page)
     await expect(expand).toBeVisible()
     await page.setViewportSize({ width: 390, height: 844 })
+    await browseTreeOnMobile(page)
     await expect(expand).toBeHidden()
     await expect(page.locator('#tree-sidebar')).toBeVisible()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
@@ -403,11 +412,13 @@ test.describe('resizable tree sidebar', () => {
     await expect(collapse).toHaveAttribute('aria-expanded', 'true')
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '288')
     await page.reload()
+    await browseTreeOnMobile(page)
     await expect(collapse).toBeVisible()
     await expect(page.locator('#tree-sidebar')).toBeVisible()
   })
   test('keyboard exposes separator values, clamps on resize and stays hidden at 390px', async ({ page }, testInfo) => {
     await page.goto('/')
+    await browseTreeOnMobile(page)
     const bar = separator(page)
     await expect(bar).toHaveAttribute('aria-orientation', 'vertical')
     await bar.focus()
@@ -424,6 +435,7 @@ test.describe('resizable tree sidebar', () => {
     await expect(bar).toHaveAttribute('aria-valuenow', '360')
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.setViewportSize({ width: 390, height: 844 })
+    await browseTreeOnMobile(page)
     await expect(bar).toHaveCount(0)
     await expect(page.locator('aside')).toBeVisible()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
@@ -436,6 +448,7 @@ test.describe('resizable tree sidebar', () => {
         else Object.defineProperty(Storage.prototype, failure === 'read' ? 'getItem' : 'setItem', { value() { throw new Error('disabled') } })
       }, failure)
       await page.goto('/')
+      await browseTreeOnMobile(page)
       await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
       await separator(page).press('ArrowRight')
       await expect(separator(page)).toHaveAttribute('aria-valuenow', '288')
@@ -448,6 +461,7 @@ test.describe('resizable tree sidebar', () => {
   test('width belongs to the signed in user and invalid cache uses default', async ({ page }) => {
     await page.addInitScript(() => { localStorage.setItem('treer:tree-width:v1:other-user', '480'); localStorage.setItem('treer:tree-width:v1:u1', 'invalid'); localStorage.setItem('treer:tree-collapsed:v1:other-user', 'true'); localStorage.setItem('treer:tree-collapsed:v1:u1', 'invalid') })
     await page.goto('/')
+    await browseTreeOnMobile(page)
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
     await separator(page).press('ArrowRight')
     expect(await page.evaluate(() => localStorage.getItem('treer:tree-width:v1:other-user'))).toBe('480')
@@ -457,6 +471,7 @@ test.describe('resizable tree sidebar', () => {
   })
   test('touch pointer drag resizes on a large touch screen', async ({ page, context }) => {
     await page.goto('/')
+    await browseTreeOnMobile(page)
     const box = (await separator(page).boundingBox())!
     const session = await context.newCDPSession(page)
     const start = { x: box.x + box.width / 2, y: box.y + 200 }
@@ -468,6 +483,7 @@ test.describe('resizable tree sidebar', () => {
   })
   test('losing window focus ends protection and the terminal remains usable', async ({ page }) => {
     await page.goto('/')
+    await browseTreeOnMobile(page)
     await drag(page, 48)
     await expect(page.locator('main > section')).toHaveCSS('pointer-events', 'none')
     await page.evaluate(() => dispatchEvent(new Event('blur')))
@@ -490,6 +506,7 @@ for (const mobile of [false, true]) {
         await ok(route, { ...agentA, run_generation: 4 })
       })
       await page.goto("/")
+      await browseTreeOnMobile(page)
       await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
       await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
       const dialog = page.getByRole("dialog")
@@ -499,7 +516,7 @@ for (const mobile of [false, true]) {
       await dialog.getByRole("textbox", { name: "Startup working directory" }).fill("other repo")
       await dialog.getByRole("button", { name: "Save and restart" }).click()
       await expect(dialog).not.toBeVisible()
-      await expect(page.getByRole("status")).toContainText("Saved startup command and restarted /api-server")
+      await expect(page.locator("[data-tour=agents-tab]").getByRole("status")).toContainText("Saved startup command and restarted /api-server")
       expect(replacements).toBe(1)
       await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
       await expect(page.getByRole("menuitem", { name: "Edit startup command", exact: true })).toHaveCount(0)
@@ -509,6 +526,7 @@ for (const mobile of [false, true]) {
       await page.route("**/agents/ag-1/admin/startup", (route) => route.fulfill({ status: 400, contentType: "application/json", body: JSON.stringify({ error: { code: "unsupported_command", message: "Controller requires agent.startup-admin.v1" } }) }))
       await page.route("**/agents/ag-1/restart-with-startup", (route) => { replacements++; return ok(route, {}) })
       await page.goto("/")
+      await browseTreeOnMobile(page)
       await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
       await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
       await expect(page.getByRole("dialog").getByRole("alert")).toContainText("agent.startup-admin.v1")
@@ -521,6 +539,7 @@ for (const mobile of [false, true]) {
       const saved = page.waitForRequest("**/agents/ag-1/restart-with-startup")
       await page.route("**/agents/ag-1/restart-with-startup", (route) => ok(route, agentA))
       await page.goto("/")
+      await browseTreeOnMobile(page)
       await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
       await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
       await expect(page.getByRole("textbox", { name: "Startup command", exact: true })).toHaveValue(/exec sleep 120/)
@@ -532,6 +551,7 @@ for (const mobile of [false, true]) {
       await page.route("**/agents/ag-1/admin/startup", (route) => ok(route, { command: "sh", args: [], cwd: "." }))
       await page.route("**/agents/ag-1/restart-with-startup", (route) => { replacements++; return route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: { code: "policy_denied", message: "startup management denied" } }) }) })
       await page.goto("/")
+      await browseTreeOnMobile(page)
       await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
       await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
       await expect(page.getByRole("textbox", { name: "Startup command", exact: true })).toHaveValue("sh")
@@ -567,6 +587,7 @@ async function expandFolder(page: Page, name: string) {
 
 async function createResearchTree(page: Page) {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("research")
@@ -629,6 +650,7 @@ for (const mobile of [false, true]) {
         if (mobile) await page.getByRole("button", { name: /^Close full-screen (terminal|interface)$/ }).click()
         await expect(page.getByRole("treeitem", { name: "experiments", exact: true }).getByRole("treeitem", { name: "reviewer", exact: true })).toBeVisible()
         await page.reload()
+        await browseTreeOnMobile(page)
         await expect(page.getByRole("treeitem", { name: "experiments", exact: true }).getByRole("treeitem", { name: "reviewer", exact: true })).toBeVisible()
         expect(creations).toBe(1)
       })
@@ -704,6 +726,7 @@ for (const mobile of [false, true]) {
 
 test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.locator("aside").getByText("Acme")).toBeVisible()
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
   await expect.poll(() => new URL(page.url()).pathname).toBe("/orgs/org-1/workspaces/ws-1")
@@ -718,6 +741,7 @@ test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
 
 test("mixed workloads use common lifecycle endpoints and logs", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   for (const [name, id] of [["api-server", "ag-1"], ["Soul Archive", "appw-1"]]) {
     for (const action of ["Start", "Stop", "Restart"]) {
       await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
@@ -734,6 +758,7 @@ test("mixed workloads use common lifecycle endpoints and logs", async ({ page })
 test("Tree and map distinguish App identity from a command runtime kind", async ({ page }) => {
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB, { ...appRuntimeAgent, kind: "command" }] }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("button", { name: /^api-server agent ·/ })).toBeVisible()
   await expect(page.getByRole("button", { name: /^worker agent ·/ })).toBeVisible()
   await expect(page.getByRole("button", { name: /^Soul Archive app ·/ })).toBeVisible()
@@ -751,6 +776,7 @@ test("folder loading failure keeps workloads usable and supports retry", async (
     return ok(route, { folders: [{ folder_id: "restored", name: "Recovered folder", parent_id: null }], placements: [] })
   })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("alert")).toBeVisible()
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
   fail = false
@@ -764,6 +790,7 @@ test("external folder changes refresh without resetting an open editor", async (
   let folders: { folder_id: string; name: string; parent_id: string | null }[] = []
   await page.route("**/api/workspaces/ws-1/workload-tree", (route) => ok(route, { folders, placements: folders.length ? [{ agent_id: "ag-1", folder_id: "cli-folder", position: 0 }] : [] }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
@@ -790,6 +817,7 @@ test("a stale background tree read cannot undo a local folder mutation", async (
     return ok(route, { folders: [], placements: [] })
   })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("button", { name: "Add to tree", exact: true })).toBeEnabled()
   blockRead = true
   await page.evaluate(() => window.dispatchEvent(new Event("focus")))
@@ -808,6 +836,7 @@ test("a stale background tree read cannot undo a local folder mutation", async (
 test("an App missing from machine inventory remains visible with its stable runtime ID", async ({ page }) => {
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB] }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(1)
   await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
   await page.getByRole("menuitem", { name: "Logs", exact: true }).click()
@@ -831,6 +860,7 @@ test("shared App rename and delete update metadata without resurrecting a placeh
     return ok(route, runtime)
   })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Actions for Soul Archive", exact: true }).click()
   await page.getByRole("menuitem", { name: "Rename", exact: true }).click()
   await page.getByRole("dialog").getByRole("textbox").fill("Research Archive")
@@ -877,6 +907,7 @@ test("remote App rename and delete events keep tree metadata synchronized", asyn
   let events: { send: (message: string) => void } | undefined
   await page.routeWebSocket(/\/api\/workspaces\/[^/]+\/events$/, (socket) => { events = socket })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
   await expect.poll(() => Boolean(events)).toBe(true)
   await expect.poll(() => page.evaluate(() => (window as Window & { workspaceEvents?: WebSocket }).workspaceEvents?.readyState)).toBe(1)
@@ -893,29 +924,34 @@ test("remote App rename and delete events keep tree metadata synchronized", asyn
 test("workloads start in name order independent of machine inventory order", async ({ page }) => {
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [...snapshot.agents].reverse() }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("treeitem")).toHaveCount(3)
   await expect.poll(() => page.getByRole("treeitem").evaluateAll((rows) => rows.map((row) => row.getAttribute("aria-label")))).toEqual(["api-server", "Soul Archive", "worker"])
 })
 
 test("dragging workloads before and after siblings saves order across reloads", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   const row = (name: string) => page.getByRole("treeitem", { name, exact: true })
   const names = () => page.getByRole("treeitem").evaluateAll((rows) => rows.map((item) => item.getAttribute("aria-label")))
   await expect.poll(names).toEqual(["api-server", "Soul Archive", "worker"])
   await row("worker").dragTo(row("api-server"), { targetPosition: { x: 20, y: 4 } })
   await expect.poll(names).toEqual(["worker", "api-server", "Soul Archive"])
   await page.reload()
+  await browseTreeOnMobile(page)
   await expect.poll(names).toEqual(["worker", "api-server", "Soul Archive"])
   const bottom = (await row("Soul Archive").boundingBox())!.height - 4
   await row("worker").dragTo(row("Soul Archive"), { targetPosition: { x: 20, y: bottom } })
   await expect.poll(names).toEqual(["api-server", "Soul Archive", "worker"])
   await page.reload()
+  await browseTreeOnMobile(page)
   await expect.poll(names).toEqual(["api-server", "Soul Archive", "worker"])
 })
 
 test("mobile workload menus move entries up and down and disable list boundaries", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   const names = () => page.getByRole("treeitem").evaluateAll((rows) => rows.map((item) => item.getAttribute("aria-label")))
   await expect.poll(names).toEqual(["api-server", "Soul Archive", "worker"])
   await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
@@ -927,11 +963,13 @@ test("mobile workload menus move entries up and down and disable list boundaries
   await page.getByRole("menuitem", { name: "Move up", exact: true }).click()
   await expect.poll(names).toEqual(["Soul Archive", "worker", "api-server"])
   await page.reload()
+  await browseTreeOnMobile(page)
   await expect.poll(names).toEqual(["Soul Archive", "worker", "api-server"])
 })
 
 test("dragging into a folder inserts at the chosen sibling and preserves that order", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Research")
@@ -949,11 +987,13 @@ test("dragging into a folder inserts at the chosen sibling and preserves that or
   const names = () => folder.getByRole("treeitem").evaluateAll((rows) => rows.map((item) => item.getAttribute("aria-label")))
   await expect.poll(names).toEqual(["worker", "api-server", "Soul Archive"])
   await page.reload()
+  await browseTreeOnMobile(page)
   await expect.poll(names).toEqual(["worker", "api-server", "Soul Archive"])
 })
 
 test("folders support persistent drag and keyboard moves, nesting, rename and deletion", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Research")
@@ -980,6 +1020,7 @@ test("folders support persistent drag and keyboard moves, nesting, rename and de
   await expect(page.getByRole("combobox", { name: "Destination folder" }).getByRole("option")).toHaveCount(1)
   await page.getByRole("button", { name: "Cancel", exact: true }).click()
   await page.reload()
+  await browseTreeOnMobile(page)
   await expect(folder.getByRole("treeitem", { name: "api-server", exact: true })).toBeVisible()
   await expect(folder.getByRole("treeitem", { name: "Soul Archive", exact: true })).toBeVisible()
   await page.getByRole("button", { name: "Actions for Models", exact: true }).click()
@@ -1003,6 +1044,7 @@ test("folders support persistent drag and keyboard moves, nesting, rename and de
 test("workload folders remain workspace scoped and mobile navigation returns to the tree", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add folder", exact: true }).click()
   await page.getByRole("textbox", { name: "Folder name" }).fill("Private organization")
@@ -1022,12 +1064,14 @@ test("workload folders remain workspace scoped and mobile navigation returns to 
 
 test("restores organization and workspace from the URL after reload", async ({ page }) => {
   await page.goto("/orgs/org-2/workspaces/ws-2?source=bookmark")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
   await expect.poll(() => new URL(page.url()).searchParams.get("source")).toBe("bookmark")
   await expect(page).toHaveTitle("Research / Experiments")
 
   await page.reload()
+  await browseTreeOnMobile(page)
 
   await expect(page.getByRole("combobox", { name: "Organization" })).toHaveText("Research")
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Experiments")
@@ -1049,6 +1093,7 @@ test("late snapshots from the previous workspace cannot replace the current inve
   })
 
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect.poll(() => firstSnapshotStarted).toBe(true)
   await page.getByRole("combobox", { name: "Organization" }).click()
   await page.getByRole("option", { name: "Research" }).click()
@@ -1065,6 +1110,7 @@ test("late snapshots from the previous workspace cannot replace the current inve
 
 test("agent list row menu can rename and delete", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await agentsTab(page).click()
   const row = page.getByRole("button", { name: /^api-server / })
   await row.hover()
@@ -1086,6 +1132,7 @@ for (const mobile of [false, true]) test(`new agent visibly guides an empty work
   await page.route("**/api/workspaces/ws-1/bootstrap", (route) => ok(route, { install_command: "echo synthetic install instructions", connect_command: "echo synthetic connect instructions" }))
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [], agents: [] }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await expect(page.getByText("Set up a machine first", { exact: true })).toBeVisible()
   const addMachinePrompt = page.getByRole("menuitem", { name: "Set up a machine before creating an agent" })
@@ -1101,6 +1148,7 @@ for (const mobile of [false, true]) test(`new agent visibly guides an empty work
 
 test("organization actions open a settings page with inline management", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   const organizationSettings = page.getByRole("button", { name: "Organization settings" })
   await expect(organizationSettings.locator("svg")).toHaveClass(/lucide-ellipsis/)
   await organizationSettings.click()
@@ -1122,6 +1170,7 @@ test("organization actions open a settings page with inline management", async (
 test("mobile organization settings hide the sidebar and fit the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Organization settings" }).click()
 
   await expect(page.locator("aside")).toBeHidden()
@@ -1132,16 +1181,18 @@ test("mobile organization settings hide the sidebar and fit the viewport", async
 
 test("audit view presents versioned traffic as billable usage", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Organization settings" }).click()
   await page.getByRole("button", { name: "Open audit" }).click()
 
-  await expect(page.getByText("Billable usage")).toBeVisible()
-  await expect(page.getByText("Data frames")).toBeVisible()
+  await expect(page.getByRole("group", { name: "Traffic totals" }).getByText("Billable usage", { exact: true })).toBeVisible()
+  await expect(page.getByRole("group", { name: "Traffic totals" }).getByText("Data frames", { exact: true })).toBeVisible()
   await expect(page.getByText("Machine", { exact: true })).toHaveCount(2)
 })
 
 test("workspace settings contain Machines and launch profiles without a separate views menu", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("button", { name: "Workspace views" })).toHaveCount(0)
   await openWorkspaceSettings(page)
   await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
@@ -1153,6 +1204,7 @@ test("workspace settings contain Machines and launch profiles without a separate
 
 test("workspace settings show the default policy and install its bundled App", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
 
   await expect(page.getByText("Treer Default", { exact: true })).toBeVisible()
@@ -1169,6 +1221,7 @@ test("workspace settings show the default policy and install its bundled App", a
 test("default policy controls fit a mobile workspace view", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
   await expect(page.getByRole("button", { name: "Install Default Policy App" })).toBeVisible()
   await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true)
@@ -1176,6 +1229,7 @@ test("default policy controls fit a mobile workspace view", async ({ page }) => 
 
 test("workspace controls open a settings page with inline rename", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   const workspaceSettings = page.getByRole("button", { name: "Workspace settings" })
   await expect(workspaceSettings).toHaveCount(1)
   await expect(workspaceSettings.locator("svg")).toHaveClass(/lucide-ellipsis/)
@@ -1200,6 +1254,7 @@ test("workspace controls open a settings page with inline rename", async ({ page
 
 test("managed App settings control access and lifecycle without creation or Network UI", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Actions for Soul Archive" }).click()
   await page.getByRole("menuitem", { name: "App settings", exact: true }).click()
   await expect(page.getByRole("heading", { name: "Network" })).toHaveCount(0)
@@ -1230,6 +1285,7 @@ test("managed App settings control access and lifecycle without creation or Netw
 test("mobile App settings hide the sidebar and fit the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Actions for Soul Archive" }).click()
   await page.getByRole("menuitem", { name: "App settings", exact: true }).click()
 
@@ -1241,6 +1297,7 @@ test("mobile App settings hide the sidebar and fit the viewport", async ({ page 
 
 test("clicking a machine opens an overview with identity, agents, services, virtual hosts, and traffic", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
   await workstationRow(page).click()
 
@@ -1286,6 +1343,7 @@ test("agent toolbar uploads a file to its machine", async ({ page }) => {
   })
 
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^api-server / }).click()
   await page.getByRole("button", { name: "Upload file" }).last().click()
   const dialog = page.getByRole("dialog")
@@ -1312,6 +1370,7 @@ test("agent toolbar uploads a file to its machine", async ({ page }) => {
 test("mobile upload dialog fits the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^api-server / }).click()
   await page.getByRole("button", { name: "Upload file" }).last().click()
 
@@ -1333,6 +1392,7 @@ test("workspace members can see machine traffic without audit permission", async
     })),
   }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
   await workstationRow(page).click()
 
@@ -1352,6 +1412,7 @@ test("offline machines show copyable recovery commands with the workspace id", a
     agents: [agentA, agentB],
   }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
   await expect(page.getByText("workstation · srv-b :8794")).toBeVisible()
   await page.getByRole("button", { name: /^workstation / }).first().click()
@@ -1362,6 +1423,7 @@ test("offline machines show copyable recovery commands with the workspace id", a
 
 test("machine overview only shows agents for the selected machine", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
   await workstationRow(page).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeVisible()
@@ -1382,6 +1444,7 @@ test("machine overview only shows agents for the selected machine", async ({ pag
 
 test("from a machine overview, clicking Terminal opens the agent terminal", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
   await workstationRow(page).click()
   await page.getByRole("button", { name: "Terminal", exact: true }).first().click()
@@ -1417,6 +1480,7 @@ test("terminal drains a burst of small output frames without stalling", async ({
   })
 
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^api-server / }).click()
 
   await expect(page.locator(".xterm-rows")).toContainText(`burst-frame-${frameCount}`, { timeout: 2_000 })
@@ -1429,6 +1493,7 @@ for (const mobile of [false, true]) {
     const queries = '\x1b]10;?\x07\x1b]11;?\x1b\\\x1b[c\x1b[>c\x1b[6n\x1b[?6n\x1b[5n\x1b]12;?\x07\x1b]4;1;?\x07\x1b[4$p\x1b[?25$p\x1bP$qm\x1b\\\x1b[?15n\x1b[?25n\x1b[?26n\x1b[?53n'
     async function open(page: Page) {
       await page.goto('/')
+      await browseTreeOnMobile(page)
       await page.getByRole('button', { name: /^api-server / }).click()
       await expect(page.locator('.xterm')).toBeVisible()
     }
@@ -1496,7 +1561,8 @@ for (const mobile of [false, true]) {
       await expect.poll(() => ack).toBe(2 * Buffer.byteLength(first + last))
       expect(input).toEqual([])
       await page.reload()
-      if (mobile) await page.getByRole('button', { name: /^api-server / }).click()
+      await browseTreeOnMobile(page)
+      await page.getByRole('button', { name: /^api-server / }).click()
       await expect.poll(() => connections).toBe(3)
       await expect.poll(() => ack).toBe(3 * Buffer.byteLength(first + last))
       expect(input).toEqual([])
@@ -1530,6 +1596,7 @@ test("terminal uses a browser-safe close code when output backlog exceeds its li
   })
 
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: /^api-server / }).click()
 
   await expect.poll(() => page.evaluate(() => (window as unknown as { __terminalCloseCodes: number[] }).__terminalCloseCodes)).toContain(4001)
@@ -1538,6 +1605,7 @@ test("terminal uses a browser-safe close code when output backlog exceeds its li
 
 test("create agent dialog offers profiles and explicit commands without provider installation", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await agentsTab(page).click()
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
@@ -1551,6 +1619,7 @@ test("create agent dialog offers profiles and explicit commands without provider
 
 test("create agent custom command preserves argv without a provider installer", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await agentsTab(page).click()
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
@@ -1570,6 +1639,7 @@ test("create agent custom command preserves argv without a provider installer", 
 
 test("create agent dialog lists an installed recipe launch profile", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await agentsTab(page).click()
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
@@ -1584,6 +1654,7 @@ test("create agent dialog lists an installed recipe launch profile", async ({ pa
 test("create agent dialog contains a long profile command on narrow screens", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await agentsTab(page).click()
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
   await page.getByRole("menuitem", { name: "Add agent", exact: true }).click()
@@ -1604,6 +1675,7 @@ test("create agent dialog contains a long profile command on narrow screens", as
 test("mobile: machine overview hides sidebar and shows back button", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openWorkspaceSettings(page)
   await workstationRow(page).click()
   await expect(page.getByRole("heading", { name: "workstation" })).toBeVisible()
@@ -1612,6 +1684,8 @@ test("mobile: machine overview hides sidebar and shows back button", async ({ pa
   await expect(page.getByRole("heading", { name: "Launch profiles" })).toBeVisible()
   await expect(page.locator("aside")).toBeHidden()
   await page.getByRole("button", { name: "Back" }).dispatchEvent("click")
+  await expect(page.getByRole("heading", { name: "Workspace overview", exact: true })).toBeVisible()
+  await browseTreeOnMobile(page)
   await expect(page.locator("aside")).toBeVisible()
 })
 
@@ -1621,6 +1695,7 @@ async function openUserMenu(page: Page) {
 
 test("user menu contains Settings and Log out, not Edit profile", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openUserMenu(page)
   await expect(page.getByRole("menuitem", { name: "Settings" })).toBeVisible()
   await expect(page.getByRole("menuitem", { name: "Log out" })).toBeVisible()
@@ -1629,6 +1704,7 @@ test("user menu contains Settings and Log out, not Edit profile", async ({ page 
 
 test("opening Settings shows a floating panel with Usage & billing, Account, and General", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openUserMenu(page)
   await page.getByRole("menuitem", { name: "Settings" }).click()
   const settings = page.getByRole("dialog", { name: "Settings" })
@@ -1642,6 +1718,7 @@ test("opening Settings shows a floating panel with Usage & billing, Account, and
 
 test("Account settings save preferred name via PATCH /api/auth/profile", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openUserMenu(page)
   await page.getByRole("menuitem", { name: "Settings" }).click()
 
@@ -1662,6 +1739,7 @@ test("Account settings save preferred name via PATCH /api/auth/profile", async (
 
 test("General settings show theme and English language, and toggle dark class", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await openUserMenu(page)
   await page.getByRole("menuitem", { name: "Settings" }).click()
   const settings = page.getByRole("dialog", { name: "Settings" })
@@ -1714,6 +1792,7 @@ test("manager can delete a workspace and the app recovers to no workspace", asyn
   })
 
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await expect(page.getByRole("combobox", { name: "Workspace" })).toHaveText("Demo")
 
   await page.getByRole("button", { name: "Workspace settings" }).click()
@@ -1732,6 +1811,7 @@ test("manager can delete a workspace and the app recovers to no workspace", asyn
 
 test("workspace deletion is blocked until every machine is deleted", async ({ page }) => {
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Workspace settings" }).click()
   await expect(page.getByText("Delete all 2 machines before deleting this workspace.")).toBeVisible()
   await expect(page.getByRole("button", { name: "Delete workspace" })).toBeDisabled()
@@ -1772,6 +1852,7 @@ for (const mobile of [false, true]) {
         return ok(route, agents[0])
       })
       await page.goto("/")
+      await browseTreeOnMobile(page)
       await expandFolder(page, "research")
       await expandFolder(page, "delivery")
       const first = page.locator('[data-agent-id="ag-1"]')
@@ -1822,6 +1903,7 @@ test("startup command fits 390px and short screens with long argv and errors", a
   await page.route("**/agents/ag-1/admin/startup", (route) => ok(route, { command: "sh", args: ["-lc", script], cwd: "repo" }))
   await page.route("**/agents/ag-1/restart-with-startup", (route) => route.fulfill({ status: 403, contentType: "application/json", body: JSON.stringify({ error: { message: "Denied: " + "long-path/".repeat(20) } }) }))
   await page.goto("/")
+  await browseTreeOnMobile(page)
   await page.getByRole("button", { name: "Actions for api-server", exact: true }).click()
   await page.getByRole("menuitem", { name: "Edit startup command", exact: true }).click()
   const dialog = page.getByRole("dialog")
@@ -1850,6 +1932,7 @@ test('untrusted Agent names render as text without running markup', async ({ pag
   const payload = '<img src=x onerror="window.fakeXss=true">'
   await page.route('**/api/workspaces/ws-1/snapshot', (route) => ok(route, { ...snapshot, agents: [{ ...agentA, name: payload, path: '/' + payload }] }))
   await page.goto('/')
+  await browseTreeOnMobile(page)
   await expect(page.getByRole('treeitem', { name: payload, exact: true })).toBeVisible()
   expect(await page.evaluate(() => (window as Window & { fakeXss?: boolean }).fakeXss)).toBeUndefined()
   expect(await page.locator('img[onerror]').count()).toBe(0)
@@ -1857,6 +1940,7 @@ test('untrusted Agent names render as text without running markup', async ({ pag
 
 test('authorization return rejects external, credential and fragment destinations', async ({ page }) => {
   await page.goto('/')
+  await browseTreeOnMobile(page)
   const results = await page.evaluate(async () => {
     const { authorizationReturnUrl } = await import('/src/lib/control-plane.ts')
     const { proxyUrl } = await import('/src/lib/api.ts')
@@ -1884,11 +1968,13 @@ for (const mobile of [false, true]) {
     })
     test('defaults collapsed and persists both toggles immediately across reload and workspace switch', async ({ page }, testInfo) => {
       await page.goto('/')
+      await browseTreeOnMobile(page)
       await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
       await expect(page.getByRole('treeitem', { name: 'Other folder', exact: true })).toHaveAttribute('aria-expanded', 'false')
       await toggle(page)
       expect(await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!)['cached-id'], key)).toBe(true)
       await page.reload()
+      await browseTreeOnMobile(page)
       await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
       await page.getByRole('combobox', { name: 'Organization' }).click()
       await page.getByRole('option', { name: 'Research', exact: true }).click()
@@ -1900,6 +1986,7 @@ for (const mobile of [false, true]) {
       await toggle(page)
       expect(await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!)['cached-id'], key)).toBe(false)
       await page.reload()
+      await browseTreeOnMobile(page)
       await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
       await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
       await page.screenshot({ path: testInfo.outputPath('collapsed.png') })
@@ -1907,6 +1994,7 @@ for (const mobile of [false, true]) {
     test('deleted IDs are pruned only after a successful tree response', async ({ page }) => {
       await page.addInitScript(({ key }) => localStorage.setItem(key, JSON.stringify({ 'deleted-id': true, 'cached-id': true, 'other-id': false })), { key })
       await page.goto('/')
+      await browseTreeOnMobile(page)
       await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
       await expect.poll(() => page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), key)).toEqual({ 'cached-id': true, 'other-id': false })
     })
@@ -1914,6 +2002,7 @@ for (const mobile of [false, true]) {
       let folders = [{ folder_id: 'cached-id', name: 'Cached folder', parent_id: null as string | null }]
       await page.route('**/api/workspaces/ws-1/workload-tree', (route) => ok(route, { folders, placements: [] }))
       await page.goto('/')
+      await browseTreeOnMobile(page)
       await toggle(page)
       folders = [{ folder_id: 'parent', name: 'Parent', parent_id: null }, { folder_id: 'cached-id', name: 'Renamed', parent_id: 'parent' }]
       await page.evaluate(() => window.dispatchEvent(new Event('focus')))
@@ -1931,6 +2020,7 @@ for (const mobile of [false, true]) {
       await page.route('**/api/workspaces/ws-1/workload-tree', (route) => fail
         ? route.fulfill({ status: 503, contentType: 'application/json', body: '{}' }) : route.fallback())
       await page.goto('/')
+      await browseTreeOnMobile(page)
       await expect(page.getByRole('button', { name: 'Reload folders', exact: true })).toBeVisible()
       expect(await page.evaluate((key) => JSON.parse(localStorage.getItem(key)!), key)).toEqual({ 'cached-id': true })
       fail = false
@@ -1943,6 +2033,7 @@ for (const mobile of [false, true]) {
         placements: [{ agent_id: 'ag-2', folder_id: 'cached-id', position: 0 }],
       }))
       await page.goto('/')
+      await browseTreeOnMobile(page)
       await expect(page.getByRole('treeitem', { name: 'Parent', exact: true })).toHaveAttribute('aria-expanded', 'false')
       await openWorkspaceSettings(page)
       await cloudboxRow(page).click()
@@ -1953,6 +2044,7 @@ for (const mobile of [false, true]) {
       await expect(page.getByRole('treeitem', { name: 'Other folder', exact: true })).toHaveAttribute('aria-expanded', 'false')
       await toggle(page)
       await page.reload()
+      await browseTreeOnMobile(page)
       await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
     })
     for (const failure of ['getter', 'read', 'write']) {
@@ -1962,12 +2054,14 @@ for (const mobile of [false, true]) {
           else Object.defineProperty(Storage.prototype, failure === 'read' ? 'getItem' : 'setItem', { value() { throw new Error('disabled') } })
         }, failure)
         await page.goto('/')
+        await browseTreeOnMobile(page)
         await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
         await toggle(page)
         await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
         await toggle(page)
         await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
         await page.reload()
+        await browseTreeOnMobile(page)
         await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
       })
     }

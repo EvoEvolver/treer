@@ -9,7 +9,7 @@ test('test server ports derive from PW_PORT without overlapping', () => {
   }
 })
 
-test('an occupied Worker port fails startup instead of testing an unrelated HTTP server', async () => {
+test('an occupied Worker port fails startup instead of testing an unrelated HTTP server', async ({}, testInfo) => {
   test.setTimeout(45_000)
   const { createServer } = await import('node:http')
   const { execFile } = await import('node:child_process')
@@ -38,7 +38,7 @@ test('an occupied Worker port fails startup instead of testing an unrelated HTTP
   try {
     let failure: { code?: number; stdout?: string; stderr?: string } | undefined
     try {
-      await promisify(execFile)(process.execPath, ['e2e/run.mjs', 'security.spec.ts', '--grep', '^CSP restricts', '--workers=1'], {
+      await promisify(execFile)(process.execPath, ['e2e/run.mjs', 'security.spec.ts', '--grep', '^CSP restricts', '--workers=1', '--output', testInfo.outputPath('nested-worker-results')], {
         env: { ...process.env, PW_PORT: String(workerPort - 1) }, timeout: 30_000,
       })
     } catch (error) { failure = error as typeof failure }

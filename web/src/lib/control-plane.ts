@@ -3,7 +3,7 @@ import { machineName, proxyUrl, type Agent, type AgentLaunchProfile, type Machin
 
 export type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
 
-export type MainView = "terminal" | "apps" | "app" | "audit" | "machine" | "organization" | "workspace"
+export type MainView = "overview" | "terminal" | "apps" | "app" | "audit" | "machine" | "organization" | "workspace"
 
 export type RenameTarget = { kind: "machine" | "agent"; id: string; name: string } | null
 

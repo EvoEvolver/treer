@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Route } from "@playwright/test"
+import { browseTreeOnMobile } from "./fixtures/navigation"
 
 // Self-contained on purpose: this file only covers the personal menu / Settings sheet (issue #19) and must not
 // depend on, or conflict with, the shared mocks in app.spec.ts.
@@ -39,6 +40,7 @@ test.describe("personal menu on a phone (390px)", () => {
   test("menu stays on screen with 44px touch targets and readable text", async ({ page }, testInfo) => {
     await mockApi(page)
     await page.goto("/")
+    await browseTreeOnMobile(page)
     const trigger = page.getByRole("button", { name: "User menu" })
     const box = (await trigger.boundingBox())!
     expect(box.height).toBeGreaterThanOrEqual(44)
@@ -67,6 +69,7 @@ test.describe("personal menu on a phone (390px)", () => {
     const pageErrors: string[] = []
     page.on("pageerror", (error) => pageErrors.push(error.message))
     await page.goto("/")
+    await browseTreeOnMobile(page)
     await page.getByRole("button", { name: "User menu" }).tap()
     await page.getByRole("menuitem", { name: "Settings" }).tap()
     const dialog = page.getByRole("dialog", { name: "Settings" })
@@ -110,6 +113,7 @@ test.describe("personal menu on a phone (390px)", () => {
   test("Log out is reachable and works from the phone menu", async ({ page }) => {
     const calls = await mockApi(page)
     await page.goto("/")
+    await browseTreeOnMobile(page)
     await page.getByRole("button", { name: "User menu" }).tap()
     await page.getByRole("menuitem", { name: "Log out" }).tap()
     await expect.poll(() => calls.logout).toBe(1)
@@ -123,6 +127,7 @@ test.describe("personal menu on desktop keeps its compact layout", () => {
   test("compact menu and a centred Settings dialog", async ({ page }) => {
     await mockApi(page)
     await page.goto("/")
+    await browseTreeOnMobile(page)
     await page.getByRole("button", { name: "User menu" }).click()
     expect((await page.getByRole("menu").boundingBox())!.width).toBe(240)
     expect((await page.getByRole("menuitem", { name: "Settings" }).boundingBox())!.height).toBeLessThan(40)
