@@ -71,6 +71,34 @@ class DeploymentHealthTest(unittest.TestCase):
         self.assertEqual(caught.exception.code, 404)
         self.assertEqual(json.loads(self.get('health')[2]), {'status': 'ok', 'service': 'issues'})
 
+    def test_the_database_probe_is_memoised_briefly(self):
+        application = self.server.application
+        probes = []
+        real = self.store.connect
+        self.store.connect = lambda: probes.append(1) or real()
+        try:
+            clock = iter([100.0, 100.5, 101.9, 102.1]).__next__
+            for _ in range(3):
+                self.assertTrue(application.deployment_health(clock)['ready'])
+            self.assertEqual(len(probes), 1, 'requests within the TTL share one probe')
+            self.assertTrue(application.deployment_health(clock)['ready'])
+            self.assertEqual(len(probes), 2, 'after the TTL the database is probed again')
+        finally:
+            self.store.connect = real
+
+    def test_the_cache_does_not_hide_a_failure_beyond_the_ttl(self):
+        application = self.server.application
+        self.assertTrue(application.deployment_health(lambda: 0.0)['ready'])
+        real = self.store.connect
+        def broken():
+            raise RuntimeError('db gone')
+        self.store.connect = broken
+        try:
+            self.assertTrue(application.deployment_health(lambda: 1.0)['ready'], 'within the TTL: cached')
+            self.assertFalse(application.deployment_health(lambda: 3.0)['ready'], 'after the TTL: the failure is visible')
+        finally:
+            self.store.connect = real
+
     def test_proxy_url_argument(self):
         self.assertEqual(parse_args(['--proxy-url', 'https://proxy.example/']).proxy_url, 'https://proxy.example/')
         self.assertIsNone(parse_args([]).proxy_url)

@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -44,6 +45,7 @@ class Application:
     def __init__(self, store, auth=None):
         self.store, self.auth = store, auth
         self.lock = threading.Lock()
+        self.health_at, self.health_value = -1e9, None
         self.tree_paths = TreePaths(os.environ.get('TREER_BIN', 'treer'))
 
     def identity_provider(self):
@@ -116,17 +118,27 @@ class Application:
             return any(isinstance(e, dict) and e.get('kind') == 'agent' and e.get('id') == agent_id for e in answer.get('recipients') or [])
         return verify
 
-    def deployment_health(self):
+    HEALTH_TTL = 2.0
+
+    def deployment_health(self, clock=time.monotonic):
         """Readiness for scripts/app-deploy: running version (APP_DEPLOY_VERSION), the App's stable ID and a working
-        database. Unauthenticated and cacheless like /health; reveals only a commit SHA and the App ID."""
+        database. Unauthenticated and cacheless for clients like /health; reveals only a commit SHA and the App ID.
+        The database probe is memoised for HEALTH_TTL seconds so repeated requests cannot be used as DB load."""
+        now = clock()
+        with self.lock:
+            if now - self.health_at < self.HEALTH_TTL and self.health_value is not None:
+                return dict(self.health_value)
         try:
             with self.store.connect() as db:
                 db.execute('SELECT 1 FROM issues LIMIT 1').fetchall()
             database = True
         except Exception:
             database = False
-        return {'version': os.environ.get('APP_DEPLOY_VERSION'), 'app_id': os.environ.get('TREER_AGENT_ID'),
-                'ready': database, 'database_ready': database}
+        value = {'version': os.environ.get('APP_DEPLOY_VERSION'), 'app_id': os.environ.get('TREER_AGENT_ID'),
+                 'ready': database, 'database_ready': database}
+        with self.lock:
+            self.health_at, self.health_value = now, value
+        return dict(value)
 
     def mutation(self, issue_id, action, body, actor, directory, token):
         paths = self.resolve_paths(action, body, token)
