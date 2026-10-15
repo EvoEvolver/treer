@@ -301,11 +301,12 @@ class AggregationAndDeliveryTest(ReminderBase):
             keys.append(treer.key())
         self.assertEqual(len(set(keys)), 3, 'every step has its own key')
         self.assertTrue(all(k.startswith('issues-reminder-ag_a-') for k in keys))
-        rows = [{'issue_id': 1, 'count': 2}]
-        self.assertNotEqual(Reminders.key('ag_a', rows), Reminders.key('ag_a', rows + [{'issue_id': 2, 'count': 0}]), 'a different issue set is a different key')
+        rows = [{'issue_id': 1, 'version': 4, 'count': 2}]
+        self.assertNotEqual(Reminders.key('ag_a', rows), Reminders.key('ag_a', rows + [{'issue_id': 2, 'version': 1, 'count': 0}]), 'a different issue set is a different key')
         self.assertNotEqual(Reminders.key('ag_a', rows), Reminders.key('ag_b', rows), 'a different agent is a different key')
-        self.assertNotEqual(Reminders.key('ag_a', rows), Reminders.key('ag_a', [{'issue_id': 1, 'count': 3}]), 'a different step is a different key')
-        self.assertEqual(Reminders.key('ag_a', rows), Reminders.key('ag_a', [{'issue_id': 1, 'count': 2, 'assignee': 'ag_a', 'interval': 9}]), 'only issue and step matter')
+        self.assertNotEqual(Reminders.key('ag_a', rows), Reminders.key('ag_a', [{'issue_id': 1, 'version': 4, 'count': 3}]), 'a different step is a different key')
+        self.assertEqual(Reminders.key('ag_a', rows), Reminders.key('ag_a', [{'issue_id': 1, 'version': 4, 'count': 2, 'assignee': 'ag_a', 'interval': 9}]), 'only issue, version and step matter')
+        self.assertNotEqual(Reminders.key('ag_a', rows), Reminders.key('ag_a', [{'issue_id': 1, 'version': 5, 'count': 2}]), 'a new version (after activity) is a different key')
 
     def test_only_agents_with_due_issues_are_probed(self):
         self.issue(assignee='ag_a')
@@ -365,6 +366,63 @@ class SchedulerTest(ReminderBase):
         waits = self.drive(r, T0 + 35 * MIN)
         self.assertLessEqual(max(waits), POLL, 'the poll granularity is a minute, not an hour')
         self.assertEqual(len(treer.sends()), 2, 'reminders at ~10m and ~30m')
+
+    def test_a_busy_agent_with_an_overdue_issue_is_probed_at_most_once_a_minute(self):
+        self.issue(assignee='ag_a')
+        treer = FakeTreer({'ag_a': 'working'})
+        r = self.reminders(treer)
+        r.tick()
+        self.advance(FIRST)                                    # due, and the Agent stays busy for the next ten minutes
+        waits = self.drive(r, T0 + FIRST + 10 * MIN)
+        self.assertGreaterEqual(min(waits), POLL - 1, 'an overdue row never makes the scheduler wake every second')
+        self.assertLessEqual(len(treer.probes()), 12, 'about one probe per minute, not one per second')
+        self.assertEqual(self.store.reminder_states()[1]['count'], 0)
+
+    def test_other_wakeups_do_not_re_probe_a_busy_agent_before_the_minute_is_up(self):
+        busy = self.issue(assignee='ag_a')
+        treer = FakeTreer({'ag_a': 'working', 'ag_b': 'idle'})
+        r = self.reminders(treer)
+        r.tick()
+        self.advance(FIRST)
+        r.tick()
+        self.assertEqual(treer.probes().count('ag_a'), 1)
+        self.advance(5)
+        r.tick()                                               # a wake-up for some other reason
+        self.assertEqual(treer.probes().count('ag_a'), 1, 'no second probe inside the same minute')
+        self.advance(POLL)
+        treer.states['ag_a'] = 'idle'
+        self.assertEqual(r.tick()['sent'], 1, 'it is looked at again once the minute has passed')
+
+    def test_a_reset_issue_never_reuses_the_key_of_its_earlier_first_reminder(self):
+        a = self.issue(assignee='ag_a')
+        treer = FakeTreer({'ag_a': 'idle'})
+        r = self.reminders(treer)
+        r.tick()
+        self.advance(FIRST)
+        r.tick()
+        first_key = treer.key()
+        self.act(a, 'comment', {'body': 'activity'}, OTHER)    # resets the sequence to step 0 again
+        r.tick()
+        self.advance(FIRST)
+        r.tick()
+        self.assertEqual(len(treer.sends()), 2)
+        self.assertNotEqual(treer.key(), first_key, 'the same issue at step 0 again must not collide with its earlier reminder')
+
+    def test_a_crash_between_send_and_record_retries_with_the_same_key(self):
+        self.issue(assignee='ag_a')
+        treer = FakeTreer({'ag_a': 'idle'})
+        r = self.reminders(treer)
+        r.tick()
+        self.advance(FIRST)
+        real = self.store.reminder_advance
+        self.store.reminder_advance = lambda *a, **k: (_ for _ in ()).throw(RuntimeError('crash before recording'))
+        with self.assertRaises(RuntimeError):
+            r.tick()
+        self.store.reminder_advance = real
+        self.advance(POLL)
+        r2 = self.reminders(treer)                             # a restarted process
+        self.assertEqual(r2.tick()['sent'], 1)
+        self.assertEqual(treer.key(0), treer.key(1), 'the unrecorded send is retried under the same key')
 
     def test_an_idle_system_still_polls_and_a_failing_poll_does_not_kill_the_loop(self):
         r = self.reminders(lambda args: 1 / 0)

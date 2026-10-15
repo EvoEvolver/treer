@@ -104,6 +104,7 @@ class Reminders:
         self.schedule = schedule or backoff()
         self.runner = runner or self.run_treer
         self.log = log or (lambda message: print(message, file=sys.stderr, flush=True))
+        self.retry_after = {}      # agent -> earliest next probe: a busy or unreachable Agent is looked at at most once per POLL
         self.stop = threading.Event()
         self.thread = None
 
@@ -129,7 +130,9 @@ class Reminders:
 
     @staticmethod
     def key(agent, rows):
-        steps = json.dumps([[row['issue_id'], row['count']] for row in rows], separators=(',', ':'))
+        # The version is part of the key: after a reset the sequence starts at step 0 again, and a repeated key could be
+        # silently de-duplicated by Core against the issue's earlier first reminder.
+        steps = json.dumps([[row['issue_id'], row['version'], row['count']] for row in rows], separators=(',', ':'))
         return f'issues-reminder-{agent}-' + hashlib.sha256(steps.encode()).hexdigest()[:20]
 
     def tick(self, now=None):
@@ -143,16 +146,22 @@ class Reminders:
         sent = skipped = 0
         link = None
         for agent, rows in by_agent.items():
+            if self.retry_after.get(agent, 0) > now:
+                skipped += 1            # looked at a moment ago and it was busy: do not probe again before the next poll
+                continue
             if not self.idle(agent):
+                self.retry_after[agent] = now + POLL
                 skipped += 1            # busy, unknown or unreachable: no message and no growth; look again next poll
                 continue
             link = link if link is not None else safe_link(self.base_url)   # resolved once per poll, only when sending
             status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body([r['issue_id'] for r in rows], link),
                                      '--idempotency-key', self.key(agent, rows)])
             if status != 0:
+                self.retry_after[agent] = now + POLL
                 skipped += 1
                 self.log(f'Issues reminder not delivered to {agent} (treer exit {status})')
                 continue
+            self.retry_after.pop(agent, None)
             self.store.reminder_advance([r['issue_id'] for r in rows], now, self.schedule.factor, self.schedule.maximum)
             sent += 1
         return {'sent': sent, 'skipped': skipped, 'due': len(due)}
@@ -162,7 +171,7 @@ class Reminders:
         while not self.stop.is_set():
             self.guarded()
             try:
-                nearest = self.store.reminder_next_due()
+                nearest = self.store.reminder_next_due(self.clock())
             except Exception:
                 nearest = None
             delay = POLL if nearest is None else min(POLL, max(1.0, nearest - self.clock()))

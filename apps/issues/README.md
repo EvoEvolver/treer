@@ -304,16 +304,18 @@ later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) 
 - **Only when idle.** At the due time the App runs `treer agent show ID`; only when the
   Agent's `status` is `idle` and it is not busy does it send. A busy, unknown or
   unreachable Agent gets nothing and its interval does **not** grow; the next poll looks
-  again. Polling runs every minute (or at the nearest due time) and only Agents that
-  have something due are probed.
+  again. Polling runs every minute (or at the nearest FUTURE due time) and only Agents that
+  have something due are probed; an Agent found busy or unreachable is not probed again
+  within the same minute, however many other wake-ups there are.
 - **One Message per Agent per moment.** Everything due for the same Agent at the same poll
   is one Message listing up to ten issue IDs (`+N more` beyond that) plus the App link
   (only a plain `http(s)` URL is ever included) sent with `treer message send` under the
   App's own runtime identity; each issue keeps its own backoff. Bodies never contain titles,
   descriptions or comments. No token is read, logged or put on a command line.
 - **Idempotent and honest about failure.** The Message idempotency key covers the Agent,
-  the issue set and each issue's backoff step, so a crash between send and record cannot
-  duplicate a reminder and different steps never collide. A failed send is not recorded;
+  the issue set and each issue's version and backoff step, so a crash between send and
+  record cannot duplicate a reminder, different steps never collide, and a reset issue
+  never reuses the key of its earlier first reminder. A failed send is not recorded;
   the next poll retries with the same key.
 - **Deployment.** Issues unresolved when this version first runs simply start their first
   interval then; nobody receives a burst. The old hourly `reminders` table is no longer

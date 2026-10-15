@@ -431,7 +431,7 @@ class Store:
 
     def reminder_due(self, now):
         with self.connect() as db:
-            rows = db.execute('SELECT issue_id,assignee,interval,count FROM reminder_backoff WHERE next_due<=? ORDER BY assignee,issue_id', (now,)).fetchall()
+            rows = db.execute('SELECT issue_id,assignee,version,interval,count FROM reminder_backoff WHERE next_due<=? ORDER BY assignee,issue_id', (now,)).fetchall()
         return [dict(row) for row in rows]
 
     def reminder_advance(self, issue_ids, now, factor, maximum):
@@ -445,9 +445,11 @@ class Store:
                 interval = min(row['interval'] * factor, maximum)
                 db.execute('UPDATE reminder_backoff SET interval=?, next_due=?, count=count+1 WHERE issue_id=?', (interval, now + interval, issue_id))
 
-    def reminder_next_due(self):
+    def reminder_next_due(self, after):
+        """The nearest FUTURE due time. Rows that are already due (but were not sent because the Agent was busy) must not count,
+        or the scheduler would wake every second for them."""
         with self.connect() as db:
-            return db.execute('SELECT MIN(next_due) FROM reminder_backoff').fetchone()[0]
+            return db.execute('SELECT MIN(next_due) FROM reminder_backoff WHERE next_due>?', (after,)).fetchone()[0]
 
     def reminder_states(self):
         with self.connect() as db:
