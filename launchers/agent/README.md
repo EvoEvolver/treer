@@ -125,7 +125,8 @@ ready and keep the same native session ID within 90 seconds (`--timeout
 1000..300000` milliseconds). It then receives one queued continuation through
 its local AIS, with a stable operation ID. This explicit local operator action
 asserts no sender and requests no completion notification; it also works from
-Controller exec without an Agent identity or message watcher. There are no
+Controller exec without an Agent identity or message watcher. This local queue
+injection does not pass through Core Message Policy. There are no
 automatic workspace-wide targets.
 
 The private `rollouts/ID.json` journal stores original/replacement startups and
