@@ -1,11 +1,12 @@
 import type { MachineTrafficRecord } from "@/lib/api"
+import type { MessageKey } from "@/i18n"
 
 export const trafficRanges = [
-  { hours: 6, label: "Last 6 hours" },
-  { hours: 24, label: "Last 24 hours" },
-  { hours: 168, label: "Last 7 days" },
-  { hours: 720, label: "Last 30 days" },
-] as const
+  { hours: 6, labelKey: "traffic.range_6h" },
+  { hours: 24, labelKey: "traffic.range_24h" },
+  { hours: 168, labelKey: "traffic.range_7d" },
+  { hours: 720, labelKey: "traffic.range_30d" },
+] as const satisfies readonly { hours: number; labelKey: MessageKey }[]
 export type TrafficHours = typeof trafficRanges[number]["hours"]
 export type TrafficMetric = "bytes" | "frames"
 export interface TrafficBucket { start: number; bytes: number; frames: number }

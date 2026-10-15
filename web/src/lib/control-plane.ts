@@ -1,4 +1,5 @@
 import { machineName, proxyUrl, type Agent, type AgentLaunchProfile, type Machine, type Organization, type Snapshot, type User, type Workspace } from "@/lib/api"
+import { t } from "@/i18n"
 
 
 export type TerminalState = "not attached" | "connecting" | "live" | "reconnecting" | "closed" | "error"
@@ -77,7 +78,7 @@ export function supervisionLabel(mode: NonNullable<Machine["supervision"]>["mode
   if (mode === "systemd_user") return "systemd user"
   if (mode === "launchd") return "LaunchAgent"
   if (mode === "nohup") return "nohup"
-  if (mode === "detached") return "Windows background"
+  if (mode === "detached") return t("machine.supervision_windows")
   return "foreground"
 }
 

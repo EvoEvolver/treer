@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type KeyboardEvent } from "react"
 
 import { ChevronLeft, ChevronRight } from "lucide-react"
+import { t } from "@/i18n"
 
 const DEFAULT_WIDTH = 272
 const MIN_WIDTH = 240
@@ -61,9 +62,9 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
     },
     style: { "--tree-width": collapsed ? "0px" : `${width}px`, "--tree-divider": collapsed ? "24px" : "8px" } as CSSProperties,
     separator: {
-      role: "separator", tabIndex: 0, "aria-label": "Resize tree sidebar", "aria-orientation": "vertical" as const,
+      role: "separator", tabIndex: 0, "aria-label": t("resizer.resize_tree_sidebar"), "aria-orientation": "vertical" as const,
       "aria-controls": "tree-sidebar", "aria-valuemin": MIN_WIDTH, "aria-valuemax": max, "aria-valuenow": width,
-      "aria-valuetext": `${width} pixels`,
+      "aria-valuetext": t("resizer.pixels", { width }),
       onPointerDown(event: PointerEvent<HTMLDivElement>) {
         if (viewport < 768 || !event.isPrimary || event.button !== 0) return
         event.preventDefault()
@@ -92,7 +93,7 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
 export function TreeResizer({ settings }: { settings: ReturnType<typeof useTreeWidth> }) {
   return <div className="relative hidden min-h-0 bg-sidebar md:block">
     {!settings.collapsed && <div {...settings.separator} className="absolute inset-y-0 -left-2 z-20 w-6 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-2 before:w-2 before:border-x before:border-border hover:before:bg-accent focus-visible:before:bg-ring/30" />}
-    <button type="button" aria-label={settings.collapsed ? "Expand tree sidebar" : "Collapse tree sidebar"} aria-expanded={!settings.collapsed} aria-controls="tree-sidebar" title={settings.collapsed ? "Expand tree sidebar" : "Collapse tree sidebar"} onClick={settings.toggle} className="absolute left-1/2 top-3 z-30 flex h-10 w-6 -translate-x-1/2 items-center justify-center rounded border bg-sidebar text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
+    <button type="button" aria-label={settings.collapsed ? t("resizer.expand_tree_sidebar") : t("resizer.collapse_tree_sidebar")} aria-expanded={!settings.collapsed} aria-controls="tree-sidebar" title={settings.collapsed ? t("resizer.expand_tree_sidebar") : t("resizer.collapse_tree_sidebar")} onClick={settings.toggle} className="absolute left-1/2 top-3 z-30 flex h-10 w-6 -translate-x-1/2 items-center justify-center rounded border bg-sidebar text-muted-foreground shadow-sm hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">
       {settings.collapsed ? <ChevronRight className="size-3.5" /> : <ChevronLeft className="size-3.5" />}
     </button>
     {settings.dragging && <div aria-hidden="true" className="fixed inset-0 z-[200] cursor-col-resize touch-none" />}

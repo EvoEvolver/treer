@@ -10,20 +10,21 @@ import {
 } from "lucide-react"
 import type * as React from "react"
 import { FormEvent } from "react"
+import { t } from "@/i18n"
 
 export function MachineRecovery({ workspaceId, onCopy, reason }: { workspaceId: string; onCopy: (value: string) => void; reason?: string }) {
   const commands = machineRecoveryCommands(workspaceId)
   return <div className="mt-3 space-y-2 text-left">
     {reason && <p className="text-xs leading-5 text-muted-foreground">{reason}</p>}
-    <p className="text-[10px] uppercase text-muted-foreground">On that machine</p>
+    <p className="text-[10px] uppercase text-muted-foreground">{t("ui.on_that_machine")}</p>
     <div className="space-y-2">
       <div className="rounded-md border bg-muted/30 p-2">
         <code className="block break-all font-mono text-[10px] leading-5">{commands.restartController}</code>
-        <Button size="sm" variant="outline" className="mt-2 h-7" onClick={() => onCopy(commands.restartController)}><Copy />Copy restart-controller</Button>
+        <Button size="sm" variant="outline" className="mt-2 h-7" onClick={() => onCopy(commands.restartController)}><Copy />{t("machine.copy_restart_controller")}</Button>
       </div>
       <div className="rounded-md border bg-muted/30 p-2">
         <code className="block break-all font-mono text-[10px] leading-5">{commands.start}</code>
-        <Button size="sm" variant="outline" className="mt-2 h-7" onClick={() => onCopy(commands.start)}><Copy />Copy restore</Button>
+        <Button size="sm" variant="outline" className="mt-2 h-7" onClick={() => onCopy(commands.start)}><Copy />{t("machine.copy_restore")}</Button>
       </div>
     </div>
   </div>
@@ -46,7 +47,7 @@ export function Field({ label, children }: { label: string; children: React.Reac
 }
 
 export function SimpleNameDialog({ open, onOpenChange, title, description, label, value, onValueChange, onSubmit, dataTour }: { open: boolean; onOpenChange: (open: boolean) => void; title: string; description: string; label: string; value: string; onValueChange: (value: string) => void; onSubmit: (event: FormEvent) => void; dataTour?: string }) {
-  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent data-tour={dataTour}><form onSubmit={onSubmit}><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader><div className="my-5"><Field label={label}><Input value={value} onChange={(event) => onValueChange(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit">Create</Button></DialogFooter></form></DialogContent></Dialog>
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogContent data-tour={dataTour}><form onSubmit={onSubmit}><DialogHeader><DialogTitle>{title}</DialogTitle><DialogDescription>{description}</DialogDescription></DialogHeader><div className="my-5"><Field label={label}><Input value={value} onChange={(event) => onValueChange(event.target.value)} required autoFocus maxLength={80} /></Field></div><DialogFooter><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>{t("common.cancel")}</Button><Button type="submit">{t("org.create")}</Button></DialogFooter></form></DialogContent></Dialog>
 }
 
 export function EmptyState({ icon, label }: { icon: React.ReactNode; label: string }) {

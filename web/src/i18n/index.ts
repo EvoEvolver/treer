@@ -1,4 +1,4 @@
-import { useSyncExternalStore } from "react"
+import { createElement, Fragment, useSyncExternalStore, type ReactNode } from "react"
 import { en, type MessageKey } from "./en"
 import { zh } from "./zh"
 
@@ -57,4 +57,13 @@ export function useT() {
 }
 export function useLocale(): Locale {
   return useSyncExternalStore(subscribeLocale, getLocale, () => "en" as Locale)
+}
+
+// Interpolates React nodes (links, code, bold) into a message: "Restart {path} now" -> ["Restart ", <path/>, " now"].
+export function tnodes(key: MessageKey, nodes: Record<string, ReactNode>): ReactNode {
+  const template = dictionaries[current][key] ?? en[key]
+  return template.split(/(\{\w+\})/).map((part, index) => {
+    const name = /^\{(\w+)\}$/.exec(part)?.[1]
+    return createElement(Fragment, { key: index }, name && name in nodes ? nodes[name] : part)
+  })
 }
