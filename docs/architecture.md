@@ -693,10 +693,12 @@ The public prompt request accepts only `text`, `delivery`, `notify`, and
 `require_receipt`; unknown fields (including `sender`) are rejected. The Proxy
 resolves sender ID/name/canonical tree path from the authenticated Policy
 subject and Controller forwards that attestation over its private AIS link.
-Queued Agent-to-Agent requests default to completion notification; an explicit
-empty `notify.on` disables it. Explicit steering requests require `--notify`
-for notifications, preserving legacy terminal steering without receipt support.
-`require_receipt` preflights correlated wait support before any task is sent.
+Both queued and steering requests require explicit `notify` (`--notify` in the
+CLI) for completion messages. Omitted or null `notify` stays absent through
+Proxy and Controller, including interrupted outcomes; sender attestation does
+not imply a notification subscription. An explicit empty `notify.on` selects
+no outcomes. `require_receipt` preflights correlated wait support before any
+task is sent; `--wait` only polls its submission and does not enable messages.
 
 An Agent may register one versioned Agent Interface Server (AIS) with its local
 Controller. AIS is a semantic adapter beside the Agent's native application

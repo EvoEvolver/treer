@@ -43,14 +43,8 @@ pub(crate) async fn prompt_agent(
         }
         _ => None,
     };
-    // Agent-to-Agent tasks report completion without a polling loop. An explicit
-    // empty `on` list remains the opt-out for API clients.
-    if sender.is_some()
-        && request.delivery == treer_protocol::PromptDelivery::Queue
-        && request.notify.is_none()
-    {
-        request.notify = Some(treer_protocol::PromptNotify::default());
-    }
+    // Sender attestation and correlated receipts do not imply a subscription.
+    // Omitted/null notifications remain disabled for both queue and steer.
     if let Some(notify) = request.notify.as_mut() {
         if notify.to.is_none() {
             notify.to = sender.as_ref().map(|sender| sender.agent_id.clone());

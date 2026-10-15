@@ -653,10 +653,12 @@ treer agent prompt /reviewer \
   --wait --timeout 120000
 ```
 
-Agent senders receive a Core Message on `done`, `failed`, or `interrupted`,
-including submission/turn IDs and a bounded assistant preview. `--notify`
-explicitly requests this behavior. Notifications use the target launcher's
-identity and normal Core Message Policy. Queue state and notification retries
+With explicit `--notify`, Agent senders receive a Core Message on `done`,
+`failed`, or `interrupted`, including submission/turn IDs and a bounded assistant
+preview. Without it, queued and steering prompts do not request completion
+messages; `--wait` alone polls its receipt without enabling messages.
+Notifications use the target launcher's identity and normal Core Message
+Policy. Queue state and notification retries
 survive launcher restarts. Inspect or cancel pending work with:
 
 ```bash
