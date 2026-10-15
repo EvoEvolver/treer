@@ -135,6 +135,6 @@ test('built treemap works inside the unchanged single-file Worker CSP', async ({
   await page.getByRole('button', { name: 'Expand tree map' }).click()
   await expect(page.getByRole('button', { name: 'Explore folder /Research', exact: true })).toBeVisible()
   await page.getByRole('button', { name: 'Explore folder /Product', exact: true }).click()
-  await expect(page.getByRole('button', { name: /^Open \/Product\/reviewer · claude · build-node · offline$/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /^Open \/Product\/reviewer · agent · build-node · offline$/ })).toBeVisible()
   expect(await page.evaluate(() => (window as Window & { cspViolations: string[] }).cspViolations)).toEqual([])
 })

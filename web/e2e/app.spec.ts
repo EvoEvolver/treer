@@ -674,6 +674,19 @@ test("mixed workloads use common lifecycle endpoints and logs", async ({ page })
   }
 })
 
+test("Tree and map distinguish App identity from a command runtime kind", async ({ page }) => {
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB, { ...appRuntimeAgent, kind: "command" }] }))
+  await page.goto("/")
+  await expect(page.getByRole("button", { name: /^api-server agent ·/ })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^worker agent ·/ })).toBeVisible()
+  await expect(page.getByRole("button", { name: /^Soul Archive app ·/ })).toBeVisible()
+  await page.getByRole("button", { name: "Expand tree map" }).click()
+  const app = page.getByRole("dialog").getByRole("button", { name: /^Open \/Soul Archive · app ·/ })
+  await expect(app).toBeVisible()
+  await expect(app).toHaveAttribute("title", / · app ·/)
+  await expect(page.getByRole("dialog").getByRole("button", { name: /^Open \/api-server · agent ·/ })).toBeVisible()
+})
+
 test("folder loading failure keeps workloads usable and supports retry", async ({ page }) => {
   let fail = true
   await page.route("**/api/workspaces/ws-1/workload-tree", async (route) => {
@@ -1011,22 +1024,22 @@ test("agent list row menu can rename and delete", async ({ page }) => {
   await expect(page.getByRole("heading", { name: "Delete agent" })).toBeVisible()
 })
 
-test("new agent sends an empty workspace to machine setup", async ({ page }) => {
-  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, {
-    ...snapshot,
-    servers: [],
-    agents: [],
-  }))
+for (const mobile of [false, true]) test(`new agent visibly guides an empty workspace to machine setup (${mobile ? '390px' : 'desktop'})`, async ({ page }) => {
+  if (mobile) await page.setViewportSize({ width: 390, height: 844 })
+  await page.route("**/api/workspaces/ws-1/bootstrap", (route) => ok(route, { install_command: "echo synthetic install instructions", connect_command: "echo synthetic connect instructions" }))
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [], agents: [] }))
   await page.goto("/")
-
   await page.getByRole("button", { name: "Add to tree", exact: true }).click()
+  await expect(page.getByText("Set up a machine first", { exact: true })).toBeVisible()
   const addMachinePrompt = page.getByRole("menuitem", { name: "Set up a machine before creating an agent" })
   await expect(addMachinePrompt).toBeEnabled()
   await addMachinePrompt.click()
-
-  await expect(page.getByRole("heading", { name: "Machines" })).toBeVisible()
-  await expect(page.locator("section[data-tour='workspace-machines']").getByRole("button", { name: "Add", exact: true })).toBeVisible()
+  await expect(page.getByText("Add a machine to create agents", { exact: true })).toBeVisible()
+  await expect(page.getByText("Agents run on machines.", { exact: false })).toBeVisible()
   await expect(page.getByRole("heading", { name: "Create agent" })).toHaveCount(0)
+  await page.getByRole("button", { name: "Set up a machine", exact: true }).click()
+  await expect(page.getByRole("dialog").getByRole("heading", { name: "Add machine", exact: true })).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
 })
 
 test("organization actions open a settings page with inline management", async ({ page }) => {

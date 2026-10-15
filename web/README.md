@@ -81,13 +81,15 @@ interface and workload **Logs** menu.
 
 The Tree header has one **+** menu for **Add folder** and **Add agent**. Each item
 keeps its original disabled conditions; without machines, Add agent explains the
-required setup and opens machine settings. The tour still targets `create-agent`.
+required setup and opens machine settings, with a visible explanation and a
+**Set up a machine** button that opens enrollment instructions. The tour still targets `create-agent`.
 Folder context menus retain their existing creation actions and destinations.
 
 **Expand tree map** opens a read-only treemap in a large dialog.
 Folders contain equally weighted Agent blocks; empty folders keep a placeholder.
-Green dots indicate running/idle/working/starting Agents on online machines;
-other states use muted dots and always have a text label. Names, harness kind,
+Both Tree rows and map blocks display only **agent** or **app**, including their
+accessible labels; runtime shell/command/harness kinds remain internal. Green dots indicate running/idle/working/starting Agents on online machines;
+other states use muted dots and always have a text label. Names, workload category,
 machine and state are text, with full paths on hover/focus. Opening an Agent uses
 its stable ID and closes the dialog. Folder headers drill down; breadcrumbs and
 the back button return to ancestors. Drill-down does not change sidebar expansion

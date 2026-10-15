@@ -23,3 +23,8 @@ export function agentPath(agent: Agent, tree?: WorkloadTreeState): string {
   if (placement.folder_id && !folder) return agent.path || agent.agent_id
   return `${folder ? folderPath(folder, tree!.folders) : ""}/${agent.name}`
 }
+
+// Runtime kinds describe process mechanics; the console distinguishes only Apps.
+export function workloadKind(agent: Pick<Agent, "kind">): "agent" | "app" {
+  return agent.kind === "app" ? "app" : "agent"
+}

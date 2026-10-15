@@ -5,7 +5,7 @@ import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu"
 import { ChevronDown, ChevronRight, Folder, Maximize2, MoreVertical, Plus } from "lucide-react"
-import { agentPath, folderPath as resolveFolderPath } from "@/lib/workload-path"
+import { agentPath, workloadKind, folderPath as resolveFolderPath } from "@/lib/workload-path"
 import { readFolderExpansion, writeFolderExpansion, type FolderExpansion } from "@/lib/folder-expansion"
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
@@ -109,7 +109,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     const id = app.runtime_agent_id ?? app.app_id
     const existing = workloads.findIndex((agent) => agent.agent_id === id || agent.agent_id === app.app_id)
     if (existing >= 0) {
-      if (workloads[existing].name === `app:${app.name}`) workloads[existing] = { ...workloads[existing], name: app.name }
+      workloads[existing] = { ...workloads[existing], kind: "app", name: workloads[existing].name === `app:${app.name}` ? app.name : workloads[existing].name }
     } else workloads.push({ agent_id: id, name: app.name, server_id: app.server_id, kind: "app", status: app.status })
   }
   const placements = new Map(tree.placements.map((entry) => [entry.agent_id, entry]))
@@ -238,7 +238,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       }
       setDragged(null); setDropTarget(null)
     }} className={`flex min-h-12 items-center gap-1 rounded px-2 py-1 hover:bg-accent ${selectedId === agent.agent_id ? "bg-accent" : ""} ${dropTarget?.id === agent.agent_id ? dropTarget.after ? "shadow-[inset_0_-2px_0_hsl(var(--primary))]" : "shadow-[inset_0_2px_0_hsl(var(--primary))]" : ""}`}>
-      <button className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="block truncate text-xs font-medium">{agent.name}</span><span className="block truncate text-[9px] text-muted-foreground">{agent.kind} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
+      <button className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} onClick={() => onOpen(agent.agent_id)}><span className="block truncate text-xs font-medium">{agent.name}</span><span className="block truncate text-[9px] text-muted-foreground">{workloadKind(agent)} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? agent.status : "offline"}{agent.run_generation !== undefined && ` · run ${agent.run_generation}`}</span></button>{menu(item, parent, agent)}
     </div> })}</>
   }
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-tour="agents-tab">

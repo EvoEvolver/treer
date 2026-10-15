@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react"
 import { ArrowLeft, ChevronRight, Folder, Layers3, Terminal } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { machineName, type Agent, type Machine, type WorkloadTreeState } from "@/lib/api"
-import { agentPath, folderPath } from "@/lib/workload-path"
+import { agentPath, folderPath, workloadKind } from "@/lib/workload-path"
 import { treemap, type Rectangle } from "@/lib/treemap"
 import "./workload-treemap.css"
 
@@ -87,10 +87,10 @@ export default function WorkloadTreeMap({ tree, agents, machines, selectedId, on
         const online = machine?.status === "online"
         const status = online ? item.agent.status : "offline"
         const running = online && ["running", "idle", "working", "starting"].includes(status)
-        const description = `${item.path} · ${item.agent.kind} · ${machineName(machine, item.agent.server_id)} · ${status}`
+        const description = `${item.path} · ${workloadKind(item.agent)} · ${machineName(machine, item.agent.server_id)} · ${status}`
         return <button key={`agent:${item.id}`} style={style} title={description} aria-label={`Open ${description}`} aria-current={item.id === selectedId ? "true" : undefined} className="treemap-agent absolute flex min-w-0 flex-col justify-between overflow-hidden rounded-md border bg-card p-3 text-left transition-colors hover:border-primary focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring" onMouseEnter={() => setDetail(description)} onMouseLeave={() => setDetail("")} onFocus={() => setDetail(description)} onBlur={() => setDetail("")} onClick={() => onOpen(item.id)}>
           <span className="flex w-full min-w-0 items-center gap-2 text-xs font-medium"><Terminal aria-hidden="true" className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{item.label}</span></span>
-          <span className="block w-full min-w-0 pt-2 text-[10px] leading-relaxed text-muted-foreground"><span className="block truncate">{item.agent.kind} · {machineName(machine, item.agent.server_id)}</span><span className="flex items-center gap-1.5"><span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${running ? "bg-[hsl(var(--status-online))]" : "bg-muted-foreground"}`} />{status}</span></span>
+          <span className="block w-full min-w-0 pt-2 text-[10px] leading-relaxed text-muted-foreground"><span className="block truncate">{workloadKind(item.agent)} · {machineName(machine, item.agent.server_id)}</span><span className="flex items-center gap-1.5"><span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${running ? "bg-[hsl(var(--status-online))]" : "bg-muted-foreground"}`} />{status}</span></span>
         </button>
       }
       const preview = depth < 2 && rect.width >= 180 && rect.height >= 180 && item.children.length > 0
