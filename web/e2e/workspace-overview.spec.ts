@@ -223,6 +223,8 @@ test.describe('Tree row context menu', () => {
     await expect(folderMenu).toBeVisible()
     await expect(folderMenu.getByRole('menuitem', { name: 'New folder' })).toBeVisible()
     await expect(folderMenu.getByRole('menuitem', { name: 'Open in new browser tab' })).toHaveCount(0)
+    await folderMenu.getByRole('menuitem', { name: 'Rename', exact: true }).click()
+    await expect(page.getByRole('dialog').getByRole('textbox', { name: 'Folder name' })).toBeFocused()
     await page.keyboard.press('Escape')
     await expandResearch(page)
     await page.getByRole('tree').getByRole('link', { name: /^reviewer/ }).first().click({ button: 'right' })
@@ -230,6 +232,8 @@ test.describe('Tree row context menu', () => {
     for (const name of ['Open in new browser tab', 'Rename', 'Copy path', 'Move to folder', 'Logs']) await expect(agentMenu.getByRole('menuitem', { name, exact: true })).toBeVisible()
     await agentMenu.getByRole('menuitem', { name: 'Rename', exact: true }).click()
     await expect(page.getByRole('dialog')).toBeVisible()
+    // The menu's close autofocus must not pull focus back to the Tree row from the new dialog.
+    await expect(page.getByRole('dialog').getByRole('textbox')).toBeFocused()
   })
 
   test('Shift+F10 and the Menu key open the menu for the focused row and Escape returns focus', async ({ page }) => {
