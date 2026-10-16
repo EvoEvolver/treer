@@ -447,6 +447,12 @@ pub(crate) async fn provider_cli_operation(
         ));
     }
     let now = Utc::now();
+    // Durable status comes before output retention: a silent Controller makes
+    // the row unknown (and frees the slot) even when the output has expired.
+    if record.controller_silent_past_grace(now) {
+        auth.provider_cli_reconcile_stale(&scope).await?;
+        record = auth.provider_cli_operation(&scope, &operation_id).await?;
+    }
     if record.expired(now) {
         return Err(output_expired());
     }
@@ -481,6 +487,9 @@ pub(crate) async fn provider_cli_operation(
             }
             Some(report)
         }
+        // An unknown row has no output to fetch; its status is the answer even
+        // when the Controller is offline, old or has no record.
+        Err(_) if record.status == ProviderCliOperationStatus::Unknown => None,
         Err(error) if record.status.is_terminal() => {
             return Err(match error.code.as_str() {
                 "provider_cli_operation_not_found" => output_expired(),

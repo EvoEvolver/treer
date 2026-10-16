@@ -887,22 +887,33 @@ async fn provider_cli_concurrent_accepts_consume_exactly_one_token() {
         user_id: "creator",
         session_token: "session-one",
     };
-    // Both transactions pass the busy check before either commits; the partial
-    // unique index decides, and the loser's whole transaction rolls back.
-    let (first, second) = tokio::join!(
-        auth.provider_cli_accept(&scope, &tokens[0]),
-        auth.provider_cli_accept(&scope, &tokens[1])
+    // Deterministic race: an uncommitted competing insert is invisible to the
+    // busy check (READ COMMITTED) but blocks the unique index, so the accept
+    // passes the busy branch, waits, then loses on the index after the
+    // competitor commits; its whole transaction rolls back and the token stays.
+    let mut competitor = auth.pool().begin().await.unwrap();
+    sqlx::query("INSERT INTO provider_cli_operations(operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, status) VALUES('pco_competitor', $1, $2, 'other', 'codex-npm-posix', 1, $3, $4, 'c0ffee', 'h', 'queued')")
+        .bind(WORKSPACE).bind(MACHINE).bind(CODEX_HASH).bind(TABLE_HASH)
+        .execute(&mut *competitor).await.unwrap();
+    let racing = tokio::spawn({
+        let (auth, token) = (auth.clone(), tokens[0].clone());
+        async move {
+            let scope = ProviderCliScope {
+                workspace_id: WORKSPACE,
+                server_id: MACHINE,
+                user_id: "creator",
+                session_token: "session-one",
+            };
+            auth.provider_cli_accept(&scope, &token).await
+        }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(
+        !racing.is_finished(),
+        "the accept must be blocked on the unique index, not refused early"
     );
-    let outcomes = [first, second];
-    assert_eq!(
-        outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
-        1,
-        "{outcomes:?}"
-    );
-    let loser = outcomes
-        .iter()
-        .find_map(|outcome| outcome.as_ref().err())
-        .unwrap();
+    competitor.commit().await.unwrap();
+    let loser = racing.await.unwrap().unwrap_err();
     assert_eq!(loser.code(), "provider_cli_machine_busy");
     let live: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM provider_cli_install_tokens WHERE consumed_at IS NULL",
@@ -910,7 +921,7 @@ async fn provider_cli_concurrent_accepts_consume_exactly_one_token() {
     .fetch_one(&auth.pool())
     .await
     .unwrap();
-    assert_eq!(live, 1, "the losing token stays usable");
+    assert_eq!(live, 2, "the losing token stays usable");
     let active: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM provider_cli_operations WHERE status IN ('queued','running')",
     )
@@ -918,6 +929,19 @@ async fn provider_cli_concurrent_accepts_consume_exactly_one_token() {
     .await
     .unwrap();
     assert_eq!(active, 1);
+    // Without a competitor the same token is accepted once the slot is free.
+    sqlx::query("DELETE FROM provider_cli_operations WHERE operation_id='pco_competitor'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    assert!(auth.provider_cli_accept(&scope, &tokens[0]).await.is_ok());
+    assert_eq!(
+        auth.provider_cli_accept(&scope, &tokens[1])
+            .await
+            .unwrap_err()
+            .code(),
+        "provider_cli_machine_busy"
+    );
 }
 
 /// A silent Controller or an accepted-but-undispatched orphan is `unknown`
@@ -1035,5 +1059,119 @@ async fn provider_cli_silence_past_grace_is_unknown_and_releases_the_machine() {
             .await
             .len(),
         3
+    );
+}
+
+/// A stale active row older than the output retention must not hold the
+/// machine slot forever: polling returns 410 for the output but first makes
+/// the row unknown (audited once), and accepting a new token reconciles even
+/// without any poll.
+#[tokio::test]
+async fn provider_cli_stale_rows_reconcile_past_retention_and_free_the_slot() {
+    let auth = seeded_auth().await;
+    let state = super::tests::state_with_managed_agent().await;
+    let creator = session("creator", "session-one");
+    let scope = ProviderCliScope {
+        workspace_id: WORKSPACE,
+        server_id: MACHINE,
+        user_id: "creator",
+        session_token: "session-one",
+    };
+    let stale = |id: &'static str, age: &'static str| {
+        let auth = auth.clone();
+        async move {
+            sqlx::query(&format!("INSERT INTO provider_cli_operations(operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, status, created_at, dispatched_at, reported_at) VALUES($1,$2,$3,'creator','codex-npm-posix',1,$4,$5,'c0ffee','h','running', CURRENT_TIMESTAMP - INTERVAL '{age}', CURRENT_TIMESTAMP - INTERVAL '{age}', CURRENT_TIMESTAMP - INTERVAL '{age}')"))
+                .bind(id).bind(WORKSPACE).bind(MACHINE).bind(CODEX_HASH).bind(TABLE_HASH)
+                .execute(&auth.pool()).await.unwrap();
+        }
+    };
+    let token = |name: &'static str| {
+        let auth = auth.clone();
+        async move {
+            let plaintext = format!("pcl_{}", name.repeat(64 / name.len()));
+            sqlx::query("INSERT INTO provider_cli_install_tokens(token_hash, workspace_id, server_id, user_id, session_hash, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, expires_at) VALUES($1,$2,$3,'creator',$4,'codex-npm-posix',1,$5,$6,'c0ffee','h', CURRENT_TIMESTAMP + INTERVAL '2 minutes')")
+                .bind(crate::auth::sha256_hex(&plaintext)).bind(WORKSPACE).bind(MACHINE).bind(crate::auth::sha256_hex("session-one")).bind(CODEX_HASH).bind(TABLE_HASH)
+                .execute(&auth.pool()).await.unwrap();
+            plaintext
+        }
+    };
+    // Controller offline, no poll for more than a day.
+    stale("pco_old", "25 hours").await;
+    let error = provider_cli_operation(
+        State(state.clone()),
+        Extension(auth.clone()),
+        Extension(PolicyEngine::allow_all()),
+        Extension(creator.clone()),
+        Path((WORKSPACE.into(), MACHINE.into(), "pco_old".into())),
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        (error.status, error.error.code.as_str()),
+        (StatusCode::GONE, "provider_cli_output_expired")
+    );
+    let row: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, error_code FROM provider_cli_operations WHERE operation_id='pco_old'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        row,
+        ("unknown".into(), Some("controller_unreachable".into()))
+    );
+    assert_eq!(
+        audit_actions(&auth, "provider_cli.install.finished")
+            .await
+            .len(),
+        1
+    );
+    let accepted = auth
+        .provider_cli_accept(&scope, &token("a").await)
+        .await
+        .unwrap();
+    assert_eq!(accepted.status, ProviderCliOperationStatus::Queued);
+    sqlx::query("UPDATE provider_cli_operations SET status='failed', finished_at=CURRENT_TIMESTAMP WHERE operation_id=$1")
+        .bind(&accepted.operation_id).execute(&auth.pool()).await.unwrap();
+    // Accept alone reconciles a stale row that nobody polled.
+    stale("pco_silent", "26 hours").await;
+    let accepted = auth
+        .provider_cli_accept(&scope, &token("c").await)
+        .await
+        .unwrap();
+    assert_eq!(accepted.status, ProviderCliOperationStatus::Queued);
+    let silent: (String, Option<String>) = sqlx::query_as(
+        "SELECT status, error_code FROM provider_cli_operations WHERE operation_id='pco_silent'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        silent,
+        ("unknown".into(), Some("controller_unreachable".into()))
+    );
+    assert_eq!(
+        audit_actions(&auth, "provider_cli.install.finished")
+            .await
+            .len(),
+        2,
+        "each stale row is audited once"
+    );
+    // Rows inside the grace are left alone by both paths.
+    sqlx::query("UPDATE provider_cli_operations SET status='failed', finished_at=CURRENT_TIMESTAMP WHERE operation_id=$1")
+        .bind(&accepted.operation_id).execute(&auth.pool()).await.unwrap();
+    stale("pco_fresh", "5 minutes").await;
+    assert_eq!(
+        auth.provider_cli_accept(&scope, &token("d").await)
+            .await
+            .unwrap_err()
+            .code(),
+        "provider_cli_machine_busy"
+    );
+    assert_eq!(
+        audit_actions(&auth, "provider_cli.install.finished")
+            .await
+            .len(),
+        2
     );
 }

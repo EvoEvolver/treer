@@ -269,6 +269,44 @@ impl AuthStore {
         Ok((token, expires_at))
     }
 
+    /// Durable reconciliation independent of polling: an active row whose
+    /// Controller has been silent past the grace (last report, else dispatch,
+    /// else acceptance) becomes `unknown`, audited once, and stops holding the
+    /// machine slot. Nothing is assumed finished; the Controller still refuses a
+    /// second job while its own is active. Returns the number of rows changed.
+    pub(crate) async fn provider_cli_reconcile_stale(
+        &self,
+        scope: &ProviderCliScope<'_>,
+    ) -> Result<usize, AuthFailure> {
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let rows = sqlx::query(&format!(
+            "UPDATE provider_cli_operations SET status='unknown', error_code='controller_unreachable', finished_at=CURRENT_TIMESTAMP WHERE workspace_id=$1 AND server_id=$2 AND status IN ('queued','running') AND COALESCE(reported_at, dispatched_at, created_at) < CURRENT_TIMESTAMP - make_interval(secs => $3) RETURNING {OPERATION_COLUMNS}"
+        ))
+        .bind(scope.workspace_id)
+        .bind(scope.server_id)
+        .bind(PROVIDER_CLI_CONTROLLER_GRACE_SECONDS as f64)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        for row in &rows {
+            let record = row_to_record(row)?;
+            let mut payload = binding_payload(&record.binding);
+            payload["operation_id"] = Value::String(record.operation_id.clone());
+            payload["status"] = Value::String("unknown".into());
+            payload["error_code"] = Value::String("controller_unreachable".into());
+            payload["argv_hash"] = record.argv_hash.map(Value::String).unwrap_or(Value::Null);
+            self.provider_cli_audit(
+                &mut transaction,
+                scope,
+                "provider_cli.install.finished",
+                payload,
+            )
+            .await?;
+        }
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(rows.len())
+    }
+
     /// Consumes the token and inserts the queued operation atomically. A busy
     /// machine is refused before consumption so the confirmation stays usable.
     /// Expired, consumed, foreign or mismatched tokens are one uniform 409.
@@ -280,6 +318,8 @@ impl AuthStore {
         if !token_shape_ok(confirmation_token) {
             return Err(invalid_token());
         }
+        // A stale active row must not hold the slot forever (no poll required).
+        self.provider_cli_reconcile_stale(scope).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_cli_operations WHERE workspace_id=$1 AND server_id=$2 AND status IN ('queued','running'))")
             .bind(scope.workspace_id)
