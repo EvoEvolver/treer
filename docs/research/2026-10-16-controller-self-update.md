@@ -214,6 +214,18 @@ inventory. Missing, malformed, aliased, cross-job or changed evidence fails
 closed. The restart primitive additionally requires its in-memory observation
 to match this saved original; persisting a baseline is required before mutation.
 
+Saving the baseline now requires a typed initial Controller observation, not a
+caller-supplied epoch string. While the job is Preparing, the monitor finds the
+selected original image as the verified Host's actual OS child, reads bounded
+credential-free health at the selected literal address, and checks workspace,
+server, nonempty bounded epoch/build, source-SHA syntax and Proxy connectivity.
+It rechecks the Host, live process and installed image, then binds the observation
+to the job and original image digest. Saving rechecks this process on both sides
+of Host Sync. Recovery tests require the exact HTTP-observed old epoch, distinct
+from a caller default. An old build string is an observed claim, not signed
+release provenance. The detached coordinator and end-to-end activation gate
+remain outstanding.
+
 After activator death, the next explicit `self-update --recover JOB_ID` reconciles
 journal, actual hashes and live process identities under the same locks. Never
 infer success from a PID or an old receipt alone; never restart the Host or replay

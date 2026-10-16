@@ -491,6 +491,31 @@ struct Health {
     proxy_connected: bool,
 }
 
+/// Initial HTTP claims are bound to an independently checked old process image
+/// by Monitor. Its build string is observed, not authenticated release metadata.
+pub(super) fn initial_controller_epoch(
+    document: &[u8],
+    workspace: &str,
+    server: &str,
+) -> Result<String> {
+    if document.len() > HEALTH_LIMIT {
+        bail!("update_health_too_large");
+    }
+    let health: Health = serde_json::from_slice(document)
+        .map_err(|_| anyhow::anyhow!("update_health_unsupported"))?;
+    if health.service != "treer-agent-server"
+        || health.workspace_id != workspace
+        || health.server_id != server
+        || !label(&health.controller_epoch, 128)
+        || !label(&health.controller_build.version, 128)
+        || !hex(&health.controller_build.git_commit, 40)
+        || !health.proxy_connected
+    {
+        bail!("update_controller_health_mismatch");
+    }
+    Ok(health.controller_epoch)
+}
+
 impl ControllerExpectation {
     pub fn verify(&self, document: &[u8], installed_image_sha256: &str) -> Result<String> {
         if !identifier(&self.workspace, "ws_")
@@ -526,6 +551,43 @@ mod tests {
     use super::*;
     use serde_json::json;
     use treer_host_protocol::{HostOutputChunk, HostProcessInfo};
+
+    #[test]
+    fn initial_epoch_rejects_wrong_scope_or_unusable_old_controller_claims() {
+        let base = json!({"service":"treer-agent-server", "workspace_id":"ws_fixture",
+            "server_id":"srv_fixture", "controller_epoch":"observed-old",
+            "controller_build":{"version":"0.1.14", "git_commit":"a".repeat(40)},
+            "proxy_connected":true});
+        let check = |value: &serde_json::Value| {
+            initial_controller_epoch(
+                &serde_json::to_vec(value).unwrap(),
+                "ws_fixture",
+                "srv_fixture",
+            )
+        };
+        assert_eq!(check(&base).unwrap(), "observed-old");
+        for (field, value) in [
+            ("service", json!("other")),
+            ("workspace_id", json!("ws_other")),
+            ("server_id", json!("srv_other")),
+            ("controller_epoch", json!("")),
+            ("controller_epoch", json!("bad\nvalue")),
+            ("controller_epoch", json!("x".repeat(129))),
+            ("proxy_connected", json!(false)),
+            (
+                "controller_build",
+                json!({"version":"", "git_commit":"a".repeat(40)}),
+            ),
+            (
+                "controller_build",
+                json!({"version":"0.1.14", "git_commit":"bad"}),
+            ),
+        ] {
+            let mut value_under_test = base.clone();
+            value_under_test[field] = value;
+            assert!(check(&value_under_test).is_err(), "{field}");
+        }
+    }
 
     struct PrivateFixture(std::path::PathBuf);
     impl Drop for PrivateFixture {

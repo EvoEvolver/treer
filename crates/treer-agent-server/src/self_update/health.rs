@@ -20,7 +20,85 @@ pub struct Monitor {
     client: Client,
 }
 
+/// Constructible only by observing the old Controller, never from an argv
+/// epoch/default or the replacement Controller's first health response.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub struct InitialController {
+    job: uuid::Uuid,
+    workspace: String,
+    server: String,
+    digest: String,
+    epoch: String,
+    process: treer_platform::process_image::ProcessImage,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl InitialController {
+    pub(super) fn validate(&self, receipt: &super::Receipt) -> Result<&str> {
+        if self.job != receipt.job_id
+            || self.workspace != receipt.workspace_id
+            || self.server != receipt.server_id
+            || self.digest != receipt.publications.original_digest(Binary::Controller)
+            || receipt.phase != super::Phase::Preparing
+        {
+            bail!("update_baseline_binding_mismatch");
+        }
+        self.process
+            .verify_current()
+            .map_err(|_| anyhow::anyhow!("update_controller_identity_changed"))?;
+        Ok(&self.epoch)
+    }
+}
+
 impl Monitor {
+    /// Before publication, bind the HTTP epoch to the selected original image
+    /// executing as this verified Host's direct child. No mutation is performed.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub async fn observe_initial(
+        &self,
+        selected: &Selected,
+        locks: &SelectionLocks,
+        journal: &super::Journal,
+        host: &super::host::Observation,
+    ) -> Result<InitialController> {
+        let receipt = journal.read()?;
+        if receipt.phase != super::Phase::Preparing
+            || receipt.workspace_id != selected.workspace()
+            || receipt.server_id != selected.server_id()
+        {
+            bail!("update_baseline_binding_mismatch");
+        }
+        let digest = receipt
+            .publications
+            .original_digest(Binary::Controller)
+            .to_owned();
+        let process = host.controller_image(selected, locks, &digest)?;
+        let document = self.document(selected.health_address()?).await?;
+        let epoch = super::safety::initial_controller_epoch(
+            &document,
+            selected.workspace(),
+            selected.server_id(),
+        )?;
+        host.verify().await?;
+        let initial = InitialController {
+            job: receipt.job_id,
+            workspace: receipt.workspace_id.clone(),
+            server: receipt.server_id.clone(),
+            digest,
+            epoch,
+            process,
+        };
+        initial.validate(&journal.read()?)?;
+        let image = locks
+            .directory(selected, Binary::Controller)?
+            .read_file(Binary::Controller.name())
+            .map_err(|_| anyhow::anyhow!("unsafe_update_health_image"))?;
+        if digest_file(&image)? != initial.digest {
+            bail!("update_controller_health_mismatch");
+        }
+        Ok(initial)
+    }
+
     pub fn new() -> Result<Self> {
         Self::with_timeout(TIMEOUT)
     }

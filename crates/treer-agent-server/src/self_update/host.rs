@@ -40,15 +40,14 @@ fn identity(image: &ProcessImage) -> Result<HostIdentity> {
 }
 
 impl Observation {
-    /// The coordinator must hold both locks and independently establish the old
-    /// Controller epoch before saving this original pre-publication observation.
+    /// Require a typed old-Controller observation, not a caller-supplied epoch.
     pub async fn save_initial(
         &self,
         selected: &Selected,
         locks: &SelectionLocks,
         journal: &Journal,
         revision: u64,
-        previous_controller_epoch: &str,
+        initial: &super::health::InitialController,
     ) -> Result<()> {
         let receipt = journal.read()?;
         if receipt.workspace_id != self.workspace
@@ -62,7 +61,10 @@ impl Observation {
         for binary in [Binary::Controller, Binary::Cli] {
             locks.directory(selected, binary)?;
         }
+        initial.validate(&receipt)?;
         self.verify().await?;
+        let current = journal.read()?;
+        let previous_controller_epoch = initial.validate(&current)?;
         self.snapshot
             .persist(journal, revision, previous_controller_epoch)
     }
@@ -462,13 +464,13 @@ mod tests {
             let mut held_streams = Vec::new();
             for connection in 0..3 {
                 let (mut stream, _) = listener.accept().await.unwrap();
-                for index in 0..if connection == 0 { 5 } else { 1 } {
+                for index in 0..if connection == 0 { 6 } else { 1 } {
                     let length = stream.read_u32().await.unwrap() as usize;
                     assert!(length <= MAX_HOST_FRAME_BYTES);
                     let mut bytes = vec![0; length];
                     stream.read_exact(&mut bytes).await.unwrap();
                     let request: HostRequest = decode_message(&bytes).unwrap();
-                    let response = if connection != 0 || index < 4 {
+                    let response = if connection != 0 || index < 5 {
                         assert!(matches!(request.command, HostCommand::Sync { .. }));
                         assert!(request.operation_id.is_none());
                         HostResponse::Synced {
@@ -515,23 +517,25 @@ mod tests {
             let _ = held.await;
         });
         let http_server = tokio::spawn(async move {
-            let (mut stream, _) = http.accept().await.unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                request.push(stream.read_u8().await.unwrap());
-                assert!(request.len() < 8192);
-            }
-            let body = serde_json::json!({"service":"treer-agent-server", "workspace_id":"ws_fixture", "server_id":"srv_fixture", "controller_epoch":"new", "controller_build":{"version":"0.1.14", "git_commit":"b".repeat(40)}, "proxy_connected":true}).to_string();
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
-                        body.len()
+            for epoch in ["new", "observed-old"] {
+                let (mut stream, _) = http.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                    assert!(request.len() < 8192);
+                }
+                let body = serde_json::json!({"service":"treer-agent-server", "workspace_id":"ws_fixture", "server_id":"srv_fixture", "controller_epoch":epoch, "controller_build":{"version":"0.1.14", "git_commit":"b".repeat(40)}, "proxy_connected":true}).to_string();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
                     )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
+                    .await
+                    .unwrap();
+            }
         });
         let observation = Observation::capture(&selected).await.unwrap();
         assert_eq!(observation.image.pid(), std::process::id());
@@ -571,7 +575,6 @@ mod tests {
                 .unwrap(),
             "new"
         );
-        http_server.await.unwrap();
         let cli_digest = digest_file(&bin.read_file("treer").unwrap()).unwrap();
         let now = chrono::Utc::now();
         let receipt = super::super::Receipt {
@@ -635,11 +638,34 @@ mod tests {
                 .to_string(),
             "update_baseline_missing_or_unsafe"
         );
-        observation
-            .save_initial(&selected, &locks, &journal, 0, "old")
+        let initial = Monitor::new()
+            .unwrap()
+            .observe_initial(&selected, &locks, &journal, &observation)
             .await
             .unwrap();
+        let mut other_job = receipt.clone();
+        other_job.job_id = uuid::Uuid::new_v4();
+        assert!(initial.validate(&other_job).is_err());
+        let mut other_image = receipt.clone();
+        other_image.publications = super::super::publication::Publications::new(
+            "0".repeat(64),
+            cli_digest.clone(),
+            &digest,
+            &cli_digest,
+        );
+        assert!(initial.validate(&other_image).is_err());
+        assert!(initial.validate(&missing.read().unwrap()).is_err());
+        observation
+            .save_initial(&selected, &locks, &journal, 0, &initial)
+            .await
+            .unwrap();
+        http_server.await.unwrap();
         journal.advance(0, Phase::Prepared).unwrap();
+        assert!(Monitor::new()
+            .unwrap()
+            .observe_initial(&selected, &locks, &journal, &observation)
+            .await
+            .is_err());
         assert_eq!(
             observation
                 .request_restart_once(&selected, &locks, &journal, 1)
@@ -700,7 +726,7 @@ mod tests {
         let (recovered, previous_epoch) = Observation::recover(&selected, &locks, &reopened)
             .await
             .unwrap();
-        assert_eq!(previous_epoch, "old");
+        assert_eq!(previous_epoch, "observed-old");
         assert_eq!(recovered.image.pid(), observation.image.pid());
         assert_eq!(
             Observation::recover(&selected, &locks, &reopened)
