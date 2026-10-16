@@ -16,6 +16,7 @@ pub mod artifacts;
 pub mod images;
 pub mod publication;
 pub mod safety;
+pub mod selection;
 
 use publication::{FileStep, Publications};
 

@@ -34,6 +34,15 @@ pub struct InstallationDirectory {
 }
 
 impl InstallationDirectory {
+    /// Physical ordering key for taking more than one installation-parent lock.
+    /// Shared CLI and Controller parents may differ; order by object identity,
+    /// not caller-selected workspace/state paths, to avoid inverse lock order.
+    pub fn identity(&self) -> io::Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt;
+        let metadata = self.file.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
     pub fn sync(&self) -> io::Result<()> {
         self.file.sync_all()
     }

@@ -563,6 +563,17 @@ pub(crate) fn launcher_configs() -> Result<Vec<ServiceConfig>> {
         .collect())
 }
 
+/// Maintenance must resolve installed paths from the saved Host binding, not
+/// ServicePaths::new/current_exe: a detached updater runs a job-local copy.
+#[cfg(unix)]
+pub(crate) fn self_update_inventory() -> Result<crate::self_update::selection::Inventory> {
+    let directory =
+        config_dir().map_err(|_| anyhow::anyhow!("update_config_directory_unavailable"))?;
+    let hostname =
+        current_hostname().map_err(|_| anyhow::anyhow!("update_hostname_unavailable"))?;
+    crate::self_update::selection::Inventory::load(&directory, &hostname)
+}
+
 pub fn preflight_registration(workspace: &str, mode: ServiceMode) -> Result<ServiceSelection> {
     validate_workspace(workspace)?;
     require_host_binary(&ServicePaths::new("preflight")?)?;
