@@ -137,6 +137,13 @@ pub fn account_class() -> io::Result<WindowsAccountClass> {
     windows::account_class()
 }
 
+/// Windows only, diagnostics/tests: run the Administrators membership path
+/// (DuplicateToken + CheckTokenMembership) on the current process token.
+#[cfg(windows)]
+pub fn process_token_administrators_member() -> io::Result<bool> {
+    windows::process_token_administrators_member()
+}
+
 pub fn secure_directory(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]

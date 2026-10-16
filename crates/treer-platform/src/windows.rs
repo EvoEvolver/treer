@@ -117,9 +117,11 @@ impl Drop for Allocation {
 pub fn account_class() -> io::Result<super::WindowsAccountClass> {
     unsafe {
         let mut token = ptr::null_mut();
+        // TOKEN_DUPLICATE is required for the identification-level duplicate
+        // that the membership check below needs.
         checked(OpenProcessToken(
             GetCurrentProcess(),
-            TOKEN_QUERY,
+            TOKEN_QUERY | TOKEN_DUPLICATE,
             &mut token,
         ))?;
         let token = OwnedHandle::from_raw_handle(token);
@@ -140,6 +142,22 @@ pub fn account_class() -> io::Result<super::WindowsAccountClass> {
         }
         // Unsplit token (UAC off, built-in Administrator, service, or a
         // standard user): membership decides.
+        Ok(if administrators_member(&token)? {
+            super::WindowsAccountClass::Elevated
+        } else {
+            super::WindowsAccountClass::Standard
+        })
+    }
+}
+
+/// Whether BUILTIN\Administrators is an enabled group of `token` (a process
+/// token opened with TOKEN_QUERY | TOKEN_DUPLICATE). CheckTokenMembership needs
+/// an impersonation token, so an identification-level duplicate of the given
+/// token is used: the verdict is bound to that token, never to a thread's
+/// impersonation state. For a UAC-limited administrator token the group is
+/// deny-only and this returns false.
+fn administrators_member(token: &OwnedHandle) -> io::Result<bool> {
+    unsafe {
         let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
         let mut sid_size = SECURITY_MAX_SID_SIZE;
         checked(CreateWellKnownSid(
@@ -148,9 +166,6 @@ pub fn account_class() -> io::Result<super::WindowsAccountClass> {
             sid.as_mut_ptr().cast(),
             &mut sid_size,
         ))?;
-        // CheckTokenMembership needs an impersonation token: derive one from
-        // the process token opened above, so the verdict is bound to this
-        // process and never to a thread's impersonation state.
         let mut impersonation = ptr::null_mut();
         checked(DuplicateToken(
             token.as_raw_handle(),
@@ -164,11 +179,22 @@ pub fn account_class() -> io::Result<super::WindowsAccountClass> {
             sid.as_mut_ptr().cast(),
             &mut member,
         ))?;
-        Ok(if member != 0 {
-            super::WindowsAccountClass::Elevated
-        } else {
-            super::WindowsAccountClass::Standard
-        })
+        Ok(member != 0)
+    }
+}
+
+/// Exercise the membership path (DuplicateToken + CheckTokenMembership) on the
+/// current process token regardless of its elevation type. Diagnostic/test
+/// support: returns the raw membership verdict.
+pub fn process_token_administrators_member() -> io::Result<bool> {
+    unsafe {
+        let mut token = ptr::null_mut();
+        checked(OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        ))?;
+        administrators_member(&OwnedHandle::from_raw_handle(token))
     }
 }
 

@@ -1189,4 +1189,15 @@ fn windows_gate_runner_is_an_administrator_for_private_state() {
         treer_platform::WindowsAccountClass::Standard,
         "{class:?}"
     );
+    // The unsplit-token branch (DuplicateToken on a TOKEN_QUERY|TOKEN_DUPLICATE
+    // process token + CheckTokenMembership) must execute without an access
+    // error whatever the runner's elevation type; the verdict itself depends
+    // on that type (enabled group => true, UAC-limited => deny-only => false).
+    let member = treer_platform::process_token_administrators_member().unwrap();
+    if class == treer_platform::WindowsAccountClass::Elevated {
+        assert!(
+            member,
+            "an elevated or unsplit administrator token has the group enabled"
+        );
+    }
 }
