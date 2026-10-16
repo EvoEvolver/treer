@@ -22,7 +22,8 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
   const [tracked, setTracked] = useState<{ operation_id: string; recipe: ProviderCliRecipe } | null>(null)
   const [unconfirmed, setUnconfirmed] = useState(false)
   const [probe, setProbe] = useState<{ version: string; executable: string } | null>(null)
-  const [now, setNow] = useState(Date.now())
+  const [now, setNow] = useState(performance.now())
+  const expires = useRef(0)
   const live = useRef(true)
   const generation = useRef(0)
   const pending = useRef(false)
@@ -49,7 +50,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
   useEffect(() => {
     if (!prepared) return
     confirmationHeading.current?.focus()
-    const timer = window.setInterval(() => setNow(Date.now()), 1000)
+    const timer = window.setInterval(() => setNow(performance.now()), 1000)
     return () => window.clearInterval(timer)
   }, [prepared])
 
@@ -98,13 +99,16 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
       if (!result) throw new Error("invalid_response")
       const { confirmation_token, ...display } = result
       token.current = confirmation_token
-      setPrepared(display); setNow(Date.now())
+      // The server's DB clock owns token expiry. A local wall-clock offset
+      // must not reject a fresh confirmation; this is only a relative UX cap.
+      expires.current = performance.now() + 120_000
+      setPrepared(display); setNow(performance.now())
     } catch (reason) { if (live.current && generation.current === epoch) setError(failureText(reason)) }
     finally { pending.current = false; if (live.current) setBusy(false) }
   }
 
   async function install() {
-    if (pending.current || !prepared || !token.current || Date.parse(prepared.expires_at) <= Date.now()) return
+    if (pending.current || !prepared || !token.current || performance.now() >= expires.current) return
     const confirmation = token.current
     token.current = null // discard before dispatch; even an ambiguous failure cannot retry it
     const recipe = prepared.recipe
@@ -157,7 +161,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
     setOpen(next)
     if (!next) { generation.current++; token.current = null; setPrepared(null) }
   }
-  function cancel() { generation.current++; token.current = null; setPrepared(null) }
+  function cancel() { changeOpen(false) }
   const matched = command && catalog ? matchingProviderRecipe(catalog.recipes, command, "identity_removed", machine.server_id, machine.server_id) : null
   if (!available || !catalog || (command && !matched)) return null
   const recipes = command && matched ? [matched] : catalog.recipes
@@ -177,31 +181,38 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
             {prepared.recipe.lifecycle_scripts!.enabled && <p className="font-semibold">{t("cli.scripts")}</p>}
             <ol className="space-y-2" aria-label={t("cli.plan")}>{prepared.recipe.plan!.map(item => <li key={item.step} className="min-w-0 rounded-md border bg-muted/30 p-3">
               <span className="font-medium">{t("cli.step", { step: item.step })} · {purposeLabel(item.purpose)}</span>
-              {item.kind === "command" ? <div className="mt-1 space-y-1 break-all font-mono text-xs"><p>{item.executable}</p>{item.args.map((arg, i) => <p key={i}>{JSON.stringify(arg)}</p>)}</div>
+              {item.kind === "command" ? <div className="mt-1 space-y-1 [overflow-wrap:anywhere] font-mono text-xs"><p>{breakable(item.executable)}</p>{item.args.map((arg, i) => <p key={i}>{breakable(JSON.stringify(arg))}</p>)}</div>
                 : item.kind === "verify" ? <p className="mt-1 break-all font-mono text-xs">{item.algorithm}: {item.expected}</p>
                 : <p className="mt-1 break-all font-mono text-xs">{item.rule}</p>}
             </li>)}</ol>
             <p className="text-xs text-muted-foreground">{t("cli.expires", { time: new Date(prepared.expires_at).toLocaleTimeString() })}</p>
-            <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="max-md:min-h-11" onClick={cancel}>{t("common.cancel")}</Button><Button type="button" className="max-md:min-h-11" disabled={busy || now >= Date.parse(prepared.expires_at)} onClick={() => void install()}>{t("cli.confirm_install")}</Button></div>
+            <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="max-md:min-h-11" onClick={cancel}>{t("common.cancel")}</Button><Button type="button" className="max-md:min-h-11" disabled={busy || now >= expires.current} onClick={() => void install()}>{t("cli.confirm_install")}</Button></div>
           </> : tracked || unconfirmed ? <>
-            <p role="status">{unconfirmed ? t("cli.unknown") : t(`cli.state_${operation?.status ?? "running"}`)}</p>
-            {tracked && <code className="block break-all text-xs">{tracked.operation_id}</code>}
-            {operation?.status === "succeeded" && <><p>{t("cli.path_warning")}</p><p className="whitespace-pre-wrap break-words">{tracked?.recipe.login_hint}</p></>}
-            {operation && providerCliTerminal(operation.status) && <>
+            <div role="status" className="rounded-md border bg-muted/30 p-3 font-semibold">{unconfirmed ? t("cli.unknown") : probe ? t("cli.checked", { version: probe.version }) : t(`cli.state_${operation?.status ?? "running"}`)}</div>
+            {probe && <code className="block break-all">{probe.executable}</code>}
+            {(probe || operation?.status === "succeeded") && <><p>{t("cli.path_warning")}</p><p className="whitespace-pre-wrap break-words">{tracked?.recipe.login_hint}</p></>}
+            {tracked && <details className="min-w-0 rounded-md border p-3 text-muted-foreground"><summary className="cursor-pointer py-1 text-sm">{t("cli.details")}</summary><code className="mt-3 block break-all text-xs">{tracked.operation_id}</code>
+            {operation && providerCliTerminal(operation.status) && <div className="mt-3 space-y-3">
               {operation.error_code && <code className="block break-all text-xs">{operation.error_code}</code>}
               <p>{t("cli.npm_config")}</p>
-              {(operation.steps ?? [{ step: operation.step ?? 1, stdout: operation.stdout, stderr: operation.stderr, truncated: operation.truncated }]).map(item => <div key={item.step} className="min-w-0 space-y-1"><h4>{t("cli.step", { step: item.step })}</h4><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/30 p-3 text-xs">{item.stdout}{item.stderr ? `\n${item.stderr}` : ""}</pre>{item.truncated && <p>{t("cli.truncated")}</p>}</div>)}
-            </>}
+              {(operation.steps ?? [{ step: operation.step ?? 1, stdout: operation.stdout, stderr: operation.stderr, truncated: operation.truncated }]).map(item => <div key={item.step} className="min-w-0 space-y-1"><h4>{t("cli.step", { step: item.step })}</h4><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/30 p-3 text-xs">{visibleOutput(item.stdout)}{item.stderr ? `\n${visibleOutput(item.stderr)}` : ""}</pre>{item.truncated && <p>{t("cli.truncated")}</p>}</div>)}
+            </div>}</details>}
             {tracked && (unconfirmed || operation?.status === "unknown") && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void refreshResult()}>{t("cli.refresh_result")}</Button>}
             {tracked && (unconfirmed || operation && providerCliTerminal(operation.status)) && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void check()}>{t("cli.check")}</Button>}
-            {probe && <div role="status" className="space-y-2"><p>{t("cli.checked", { version: probe.version })}</p><code className="block break-all">{probe.executable}</code><p>{t("cli.path_warning")}</p><p className="whitespace-pre-wrap break-words">{tracked?.recipe.login_hint}</p></div>}
             <p className="text-xs text-muted-foreground">{t("cli.close_hint")}</p>
           </> : <div className="space-y-3">{recipes.map(recipe => <div key={recipe.recipe_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"><div className="min-w-0"><h3 className="font-medium">{recipe.provider_id}</h3><p className="break-words text-xs text-muted-foreground">{recipe.supported ? `${recipe.package!.version} · Node ≥ ${recipe.node_min}` : unsupportedText(recipe.unsupported_reason)}</p></div>{recipe.supported && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void prepare(recipe)}>{t("cli.install_provider", { provider: recipe.provider_id })}</Button>}</div>)}</div>}
         </div>
-        <DialogFooter><Button type="button" variant="outline" className="max-md:min-h-11" onClick={() => changeOpen(false)}>{t("org.close")}</Button></DialogFooter>
+        {!prepared && <DialogFooter><Button type="button" variant="outline" className="max-md:min-h-11" onClick={() => changeOpen(false)}>{t("org.close")}</Button></DialogFooter>}
       </DialogContent>
     </Dialog>
   </>
+}
+function breakable(value: string) {
+  return value.split(/(?<=[/=-])/).map((part, i) => <span key={i}>{part}<wbr /></span>)
+}
+function visibleOutput(value: string) {
+  // Keep output literal and readable, without interpreting terminal controls.
+  return value.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)
 }
 function failureText(reason: unknown) {
   if (reason instanceof ApiError) {

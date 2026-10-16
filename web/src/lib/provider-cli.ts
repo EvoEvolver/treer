@@ -112,7 +112,7 @@ export function providerCliRecipes(v: unknown, machineId: string): ProviderCliRe
 }
 export function providerCliPrepared(v: unknown, recipes: ProviderCliRecipes, selected: ProviderCliRecipe): ProviderCliPrepared | null {
   if (!record(v) || v.machine_id !== recipes.machine_id || v.table_hash !== recipes.table_hash || !text(v.confirmation_token, 512) ||
-    !text(v.expires_at, 128) || !Number.isFinite(Date.parse(v.expires_at)) || Date.parse(v.expires_at) <= Date.now()) return null
+    !text(v.expires_at, 128) || !Number.isFinite(Date.parse(v.expires_at))) return null
   const recipe = providerCliRecipe(v.recipe, recipes.platform)
   if (!recipe?.supported || recipe.recipe_id !== selected.recipe_id || recipe.recipe_version !== selected.recipe_version || recipe.recipe_hash !== selected.recipe_hash) return null
   // Always show the freshly prepared plan, including its machine-resolved paths.

@@ -2424,7 +2424,7 @@ const providerRecipe = {
     { step: 5, kind: 'resolve', purpose: 'check', rule: '<npm prefix --global>/bin/codex --version', binary: 'codex', args: ['--version'], prefix_from_step: 4 },
   ],
 }
-async function mockProviderApi(page: Page, options: { capability?: boolean; status?: string; prepareStatus?: number; oldMachine?: boolean; installStatus?: number; abortInstall?: boolean } = {}) {
+async function mockProviderApi(page: Page, options: { capability?: boolean; status?: string; prepareStatus?: number; oldMachine?: boolean; installStatus?: number; abortInstall?: boolean; output?: string } = {}) {
   const requests: { path: string; body: unknown }[] = []
   let polls = 0
   await page.route('**/api/auth/config', route => ok(route, { capabilities: options.capability === false ? [] : ['machine.provider-cli-install.v1'] }))
@@ -2450,7 +2450,7 @@ async function mockProviderApi(page: Page, options: { capability?: boolean; stat
       const status = options.status ?? 'succeeded'
       return ok(route, { operation_id: 'op-fixture', machine_id: 'srv-a', recipe_id: providerRecipe.recipe_id, recipe_version: 1, recipe_hash: providerRecipe.recipe_hash,
         status, step: status === 'running' ? 3 : 5, elapsed_ms: 1000, exit_code: status === 'succeeded' ? 0 : status === 'failed' ? 7 : null, timed_out: status === 'timed_out',
-        stdout: status === 'running' ? '' : '<img src=x onerror="window.providerXss=1"> fixture output', stderr: '', truncated: status === 'failed' })
+        stdout: status === 'running' ? '' : options.output ?? '<img src=x onerror="window.providerXss=1"> fixture output', stderr: '', truncated: status === 'failed' })
     }
     if (path.endsWith('/check')) return ok(route, { installed: true, found_in_prefix: true, version: 'codex 1.2.3', executable: '/opt/global/bin/codex', exit_code: 0, timed_out: false, stdout: 'codex 1.2.3', stderr: '', truncated: false })
     return route.fulfill({ status: 404 })
@@ -2480,15 +2480,22 @@ for (const width of [1280, 390]) for (const theme of ['light', 'dark']) test(`pr
   await dialog.getByRole('button', { name: 'Confirm and install', exact: true }).scrollIntoViewIfNeeded()
   await page.screenshot({ path: info.outputPath(`provider-confirm-${width}-${theme}.png`) })
   await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(dialog).toHaveCount(0)
   expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
   await dialog.getByRole('button', { name: 'Install codex', exact: true }).click()
   await dialog.getByRole('button', { name: 'Confirm and install', exact: true }).click()
   await expect(dialog.getByRole('status')).toContainText('The version probe in the npm global prefix passed.')
+  await dialog.getByText('Technical details and output', { exact: true }).click()
   await expect(dialog.getByText('<img src=x onerror="window.providerXss=1"> fixture output', { exact: true })).toBeVisible()
   expect(await page.evaluate(() => (window as unknown as Record<string, unknown>).providerXss)).toBeUndefined()
+  await dialog.getByText('Technical details and output', { exact: true }).click()
   await dialog.getByRole('button', { name: 'Check installed version' }).click()
+  await expect(dialog.getByRole('status')).toHaveText('Version check passed: codex 1.2.3')
   await expect(dialog.getByText('/opt/global/bin/codex', { exact: true })).toBeVisible()
-  await expect(dialog.getByText(/This does not prove the CLI is on the Controller PATH/).first()).toBeVisible()
+  await expect(dialog.getByText(/This does not prove the CLI is on the Controller PATH/)).toHaveCount(1)
+  await expect(dialog.getByText('Run codex explicitly to log in. Treer never handles provider credentials.', { exact: true })).toHaveCount(1)
+  await expect(dialog.locator('details')).not.toHaveAttribute('open', '')
   expect(backend.requests.filter(item => item.path.endsWith('/install')).map(item => item.body)).toEqual([{ confirmation_token: 'fixture-confirmation-token' }])
   expect(backend.requests.filter(item => item.path.endsWith('/prepare'))[0].body).toEqual({ recipe_id: providerRecipe.recipe_id, recipe_version: 1, recipe_hash: providerRecipe.recipe_hash })
   expect(backend.requests.filter(item => item.path.endsWith('/check'))[0].body).toEqual({ recipe_id: providerRecipe.recipe_id, recipe_version: 1, recipe_hash: providerRecipe.recipe_hash })
@@ -2671,4 +2678,26 @@ test('provider installer rejects a mismatched prepared machine', async ({ page }
   await expect(page.getByRole('dialog').getByRole('alert')).toBeVisible()
   await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
   expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})
+
+test('provider installer lets the server decide expiry when the browser clock is ahead', async ({ page }) => {
+  await page.clock.install({ time: new Date('2099-01-01T00:00:00Z') })
+  const backend = await mockProviderApi(page)
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toBeEnabled()
+  await page.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(1)
+})
+
+
+test('provider installer escapes terminal controls in technical output', async ({ page }) => {
+  await mockProviderApi(page, { output: '\u001b[31mred\u0007' })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await page.getByText('Technical details and output', { exact: true }).click()
+  await expect(page.getByRole('dialog').locator('pre')).toHaveText('\\u001b[31mred\\u0007')
 })

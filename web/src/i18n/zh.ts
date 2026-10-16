@@ -2,6 +2,7 @@ import type { Messages } from "./en"
 
 // 简体中文。键必须与 en.ts 完全一致(缺键会导致类型检查失败)。术语沿用 launcher 的中英对照。
 export const zh: Messages = {
+  "cli.details": "技术详情与输出",
   "cli.refresh_result": "刷新操作状态",
   "cli.pack": "下载包",
   "cli.integrity": "校验完整性",

@@ -1,6 +1,7 @@
 // English is the source dictionary. zh.ts must define every key (checked by the type system).
 // Keys are namespaced by screen. Values may contain {name} placeholders filled by t(key, { name }).
 export const en = {
+  "cli.details": "Technical details and output",
   "cli.refresh_result": "Refresh operation status",
   "cli.pack": "Download package",
   "cli.integrity": "Verify integrity",

@@ -550,7 +550,7 @@ failure offers the same flow only for a unique, supported server-declared bare
 binary, on the selected machine, with the reserved identity proven removed.
 Unconfirmed reservations retain the explicit cleanup flow and block creation.
 
-Choosing a provider fetches a fresh, 120-second confirmation. The dialog displays
+Choosing a provider fetches a fresh, 120-second confirmation. The database clock owns expiry; the browser uses a relative display timeout so local wall-clock skew does not reject a fresh token. The dialog displays
 Core's complete ordered plan, integrity digest, target machine/platform and
 network/global-prefix effects. The browser sends recipe ID/version/hash to
 prepare/check and only the in-memory confirmation token to install. Cancellation
@@ -578,3 +578,5 @@ OpenCode, Cursor, Grok and Windows stay unavailable until their separate review.
 Browser acceptance uses fake API responses only. Real package functionality must
 be verified separately in the sealed environment selected by release/security;
 Web tests never install packages on a live machine.
+
+Installation results show the outcome and latest version check first, with recovery guidance once and diagnostic output in expandable details. Terminal control bytes in that output are shown as literal escapes.
