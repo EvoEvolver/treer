@@ -143,7 +143,11 @@ After activator death, the next explicit `self-update --recover JOB_ID` reconcil
 journal, actual hashes and live process identities under the same locks. Never
 infer success from a PID or an old receipt alone; never restart the Host or replay
 a partial launcher/smoke operation implicitly. Keep completed backups/receipts
-until explicit retention cleanup, with exact validated owned paths only.
+under an explicit retention policy: keep the latest three completed transactions
+by default, never evict an unresolved transaction automatically. An explicit
+cleanup command removes only journal-registered, validated exact job directories;
+retain any job whose safety cannot be established. Backup paths live in the Treer
+reserved namespace denied by machine file transfer.
 
 Signed-channel P4 adds a durable highest accepted release sequence per trusted
 key/channel and signed monotonic metadata; current version strings do not supply
@@ -172,20 +176,20 @@ when the operator cannot establish forward order from authenticated metadata.
 Audit submission and outcome with actor/mode/hash/sequence/fixed code, not paths
 or credentials. Offline audit delivery must not erase the durable local receipt.
 
-Two decisions require agreement before implementation:
+Leader decision 1684 and security approval 1687 resolve the P0 questions:
 
-1. Comment 1676 requests pinned mode only for local operators and signed-only
-   remote triggers; the epic currently asks the coordinator to submit pinned
-   Canary jobs through `machine.exec`. Adopt signed-only for any **new dedicated
-   remote update endpoint**. Decide whether to retain the existing exec-origin
-   pinned transition or require signed Canary metadata before P3. An Agent-mode
-   environment guard prevents accidents, but cannot authenticate a local operator
-   against a same-account process clearing its environment. Existing authorized
-   machine.exec already permits arbitrary code as that account; do not claim the
-   binary subcommand removes that authority or resists a compromised Proxy.
-   Pins supplied through that path trust the authorized caller and its release
-   manifest, not an independent signature. A configured artifact-origin allowlist
-   reduces mistakes but cannot repair that trust model.
+1. The target is signed-only. Release will publish every `canary_passed` build
+   to a signed `canary` channel with monotonic sequence metadata. Any new dedicated
+   remote endpoint accepts signed manifests only. Until that channel exists,
+   exec-origin pinned updates require `--allow-pinned`, are marked unsigned in
+   receipt/audit, and default to the enrolled Proxy origin. Another origin needs
+   explicit `--allow-artifact-origin` acknowledgment recorded in the receipt.
+   Remove pinned mode in P3; do not release GA with this transition remaining.
+   No fictitious operator-only environment guard is added: authorized machine.exec
+   already permits arbitrary code as that OS account, so pins trust the authorized
+   caller and its release manifest, not an independent publisher signature. This
+   does not resist a compromised Proxy or a same-account Agent. Do not require
+   a human credential in argv/environment to create an unenforceable boundary.
 2. Build/hash checks of the staged successor happen **before** old Controller
    termination; Host-owned sequential respawn remains the lifecycle authority.
    A running successor cannot first connect with the same machine credential and
@@ -196,6 +200,16 @@ Two decisions require agreement before implementation:
    startup detect unfinished transactions and refuse ordinary activation until
    deterministic reconciliation; do not implicitly replay launcher/smoke work.
 
+Use OS advisory locks (`flock`/`LockFileEx`), released on process death, with the
+installation-before-enrollment ordering above. `--recover` takes those same locks
+and refuses an active activator. Job selectors are UUIDs only, never paths. Keep
+activator logs private and size bounded with fixed child failure codes; no raw
+child output, environment values or URL queries. P1 health assertions compare
+both source commit metadata and the installed image digest, and audit-delivery
+failure tests must prove the local receipt remains intact. Before P2, obtain an
+authorized non-mutating breakaway probe on the deployed Host and record it in
+the ticket; approval of this design is not approval of Windows implementation.
+
 Additional fault cases: truncate downloads, replace checked parent directories,
 crash during rollback, expired signed metadata and any same-version/downgrade
 override without operator acknowledgment. Neither an operator flag nor a local
@@ -205,10 +219,10 @@ receipt grants new remote permissions.
 
 | Phase | Deliverable / gate |
 | --- | --- |
-| P0 | This design; launcher coordination review, security approval before code. |
+| P0 | Security1687 conditionally approves Unix P1; leader1684 decisions recorded here. Launcher coordination review remains requested. |
 | P1 | Shared verifier/transaction/receipt engine + Unix activator; private fake HTTP/signatures, fault injection and real isolated Linux/macOS handoffs. |
 | P2 | Windows native filesystem/ACL/lock/Job helpers; hosted NTFS tests plus authorized win_native exact official-binary apply, launcher install and smoke. Establish whether existing Host permits breakaway before promising exec-origin activation. |
-| P3 | Coordinator submits/polls only; migrate per-machine receipts. Remove PS/Python engines only after replacement feature parity and platform acceptance; no double activation or fallback to legacy after ambiguous success. |
+| P3 | Signed Canary channel live; remove pinned mode. Coordinator submits/polls only; migrate per-machine receipts. Remove PS/Python engines only after replacement feature parity and platform acceptance; no double activation or fallback to legacy after ambiguous success. |
 | P4 | Signed sequence/replay protection, key-rotation and backward-compatibility tests; clearly advertise capability. |
 
 Required deterministic tests: bad/missing/duplicate SUMS, wrong digest/signature/
