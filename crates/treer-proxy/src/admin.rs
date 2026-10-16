@@ -3,6 +3,7 @@ use axum::routing::{any, delete, get};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use crate::audit::{self, NewPlatformAuditEvent};
@@ -17,7 +18,10 @@ pub fn routes() -> Router<AppState> {
             "/api/admin/invitations",
             get(list_invitations).post(create_invitation),
         )
-        .route("/api/admin/invitations/{token}", delete(revoke_invitation));
+        .route(
+            "/api/admin/invitations/{invitation_id}",
+            delete(revoke_invitation),
+        );
     // Tombstones also cover old mutation URLs and prevent ingress fallback from
     // interpreting removed admin routes as a service request. Never inspect IDs.
     for resource in ["users", "machines", "agents", "organizations", "activity"] {
@@ -26,7 +30,22 @@ pub fn routes() -> Router<AppState> {
             .route(&path, any(details_removed))
             .route(&format!("{path}/{{*rest}}"), any(details_removed));
     }
-    router
+    router.layer(axum::middleware::map_response(
+        |mut response: axum::response::Response| async move {
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            );
+            response
+        },
+    ))
+}
+
+fn invitation_id(token: &str) -> String {
+    format!(
+        "inv_{:x}",
+        Sha256::digest(format!("treer.admin-invitation/v1:{token}"))
+    )
 }
 
 async fn details_removed() -> (axum::http::StatusCode, Json<Value>) {
@@ -148,26 +167,21 @@ async fn list_invitations(
     Extension(auth): Extension<AuthStore>,
 ) -> Result<Json<Value>, AuthFailure> {
     let rows = sqlx::query(
-        "SELECT token, created_at FROM invitations \
-         WHERE kind = 'personal' AND used_at IS NULL \
-         ORDER BY created_at DESC",
+        "SELECT 'inv_' || encode(sha256(convert_to('treer.admin-invitation/v1:' || token, 'UTF8')), 'hex') AS invitation_id, \
+         CASE WHEN token ~ '^[A-Za-z0-9_-]{32,}$' THEN left(token, 8) ELSE '[redacted]' END AS token_prefix, \
+         created_at, used_at FROM invitations WHERE kind = 'personal' \
+         ORDER BY created_at DESC, token DESC LIMIT 100",
     )
     .fetch_all(&auth.pool())
     .await
     .map_err(AuthFailure::database)?;
-    let invitations: Vec<Value> = rows
+    let invitations: Vec<treer_protocol::PlatformInvitationRecord> = rows
         .into_iter()
-        .map(|row| {
-            let token: String = row.get("token");
-            let mut url = auth.app_public_url().clone();
-            url.set_path("/");
-            url.set_query(None);
-            url.query_pairs_mut().append_pair("invite", &token);
-            json!({
-                "token": token,
-                "created_at": row.get::<String, _>("created_at"),
-                "url": url.as_str(),
-            })
+        .map(|row| treer_protocol::PlatformInvitationRecord {
+            invitation_id: row.get("invitation_id"),
+            token_prefix: row.get("token_prefix"),
+            created_at: row.get("created_at"),
+            used_at: row.get("used_at"),
         })
         .collect();
     Ok(Json(json!({ "invitations": invitations })))
@@ -181,7 +195,7 @@ async fn create_invitation(
         &auth,
         "invitation.created",
         "invitation",
-        &token,
+        &invitation_id(&token),
         None,
         json!({ "kind": "personal" }),
     )
@@ -191,26 +205,34 @@ async fn create_invitation(
 
 async fn revoke_invitation(
     Extension(auth): Extension<AuthStore>,
-    Path(token): Path<String>,
+    Path(invitation_id): Path<String>,
 ) -> Result<Json<Value>, AuthFailure> {
+    let not_found =
+        || AuthFailure::not_found("invitation_not_found", "pending invitation does not exist");
+    if !invitation_id.strip_prefix("inv_").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err(not_found());
+    }
     let result = sqlx::query(
-        "DELETE FROM invitations WHERE token = $1 AND kind = 'personal' AND used_at IS NULL",
+        "DELETE FROM invitations WHERE kind = 'personal' AND used_at IS NULL \
+         AND 'inv_' || encode(sha256(convert_to('treer.admin-invitation/v1:' || token, 'UTF8')), 'hex') = $1",
     )
-    .bind(&token)
+    .bind(&invitation_id)
     .execute(&auth.pool())
     .await
     .map_err(AuthFailure::database)?;
     if result.rows_affected() == 0 {
-        return Err(AuthFailure::not_found(
-            "invitation_not_found",
-            "pending invitation does not exist",
-        ));
+        return Err(not_found());
     }
     record(
         &auth,
         "invitation.revoked",
         "invitation",
-        &token,
+        &invitation_id,
         None,
         json!({}),
     )
@@ -526,10 +548,174 @@ mod tests {
             .await
             .expect("list");
         assert_eq!(listed["invitations"].as_array().unwrap().len(), 1);
-        let Json(_) = revoke_invitation(Extension(store.clone()), Path(token))
+        let Json(_) = revoke_invitation(Extension(store.clone()), Path(invitation_id(&token)))
             .await
             .expect("revoke");
         let Json(empty) = list_invitations(Extension(store)).await.expect("empty");
         assert!(empty["invitations"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invitation_listing_redacts_bearers_and_revoke_uses_only_admin_handle() {
+        let store = AuthStore::for_test("admin-password").await;
+        let (pending, _) = store.create_personal_invitation().await.unwrap();
+        let (used, _) = store.create_personal_invitation().await.unwrap();
+        sqlx::query("UPDATE invitations SET used_at='used-time' WHERE token=$1")
+            .bind(&used)
+            .execute(&store.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO invitations(token,created_at,created_by,kind) VALUES('short','test','platform-admin','personal')").execute(&store.pool()).await.unwrap();
+        let app = test_router(&store);
+        let cookie = admin_cookie(&app).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/invitations")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        for secret in [&pending, &used, "short"] {
+            assert!(!text.contains(secret));
+        }
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let records = body["invitations"].as_array().unwrap();
+        assert_eq!(records.len(), 3);
+        for record in records {
+            let keys: std::collections::BTreeSet<_> = record
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                ["invitation_id", "token_prefix", "created_at", "used_at"]
+                    .into_iter()
+                    .collect()
+            );
+            let decoded: treer_protocol::PlatformInvitationRecord =
+                serde_json::from_value(record.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), *record);
+        }
+        assert_eq!(
+            records
+                .iter()
+                .find(|v| v["invitation_id"] == invitation_id(&pending))
+                .unwrap()["token_prefix"],
+            &pending[..8]
+        );
+        assert_eq!(
+            records
+                .iter()
+                .find(|v| v["invitation_id"] == invitation_id(&used))
+                .unwrap()["used_at"],
+            "used-time"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .find(|v| v["invitation_id"] == invitation_id("short"))
+                .unwrap()["token_prefix"],
+            "[redacted]"
+        );
+        // A non-bearer handle cannot be consumed by the registration API.
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM invitations WHERE token=$1)")
+                .bind(invitation_id(&pending))
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        assert!(!exists);
+        for (id, expected) in [
+            (pending.clone(), StatusCode::NOT_FOUND),
+            (invitation_id(&used), StatusCode::NOT_FOUND),
+            (invitation_id("missing"), StatusCode::NOT_FOUND),
+            (invitation_id(&pending), StatusCode::OK),
+            (invitation_id(&pending), StatusCode::NOT_FOUND),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/admin/invitations/{id}"))
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
+        let audits: Vec<String> = sqlx::query_scalar(
+            "SELECT resource_id FROM platform_audit_events WHERE resource_kind='invitation'",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(audits, vec![invitation_id(&pending)]);
+    }
+
+    #[tokio::test]
+    async fn invitation_creation_returns_link_once_and_listing_is_bounded() {
+        let store = AuthStore::for_test("admin-password").await;
+        let app = test_router(&store);
+        let cookie = admin_cookie(&app).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/invitations")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let created: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        let token = created["token"].as_str().unwrap();
+        assert!(created["url"].as_str().unwrap().contains(token));
+        let resource: String = sqlx::query_scalar(
+            "SELECT resource_id FROM platform_audit_events WHERE action='invitation.created'",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(resource, invitation_id(token));
+        sqlx::query("INSERT INTO invitations(token,created_at,created_by,kind) SELECT 'inv_' || lpad(n::text,32,'0'),'test','platform-admin','personal' FROM generate_series(1,110) AS n").execute(&store.pool()).await.unwrap();
+        let Json(listed) = list_invitations(Extension(store.clone())).await.unwrap();
+        assert_eq!(listed["invitations"].as_array().unwrap().len(), 100);
+        assert!(!listed.to_string().contains(token));
+        for path in [
+            "/api/admin/traffic",
+            "/api/admin/dashboard",
+            "/api/admin/users",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
     }
 }
