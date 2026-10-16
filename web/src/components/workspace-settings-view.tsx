@@ -1,3 +1,5 @@
+import { WorkspaceAudit } from "@/components/workspace-audit"
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs"
 import { PolicyPublishAuthoritySettings } from "@/components/policy-publish-authority"
 import { EmptyState, Field, IconButton, Status } from "@/components/control-plane-ui"
 import { LaunchProfilesList } from "@/components/launch-profiles-list"
@@ -5,7 +7,7 @@ import { MachineItem } from "@/components/machine-view"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { api, machineName, type AgentLaunchProfile, type AppDeployment, type Machine, type Member, type Organization, type OrganizationGroup, type PolicyProviderStatus, type Workspace, type WorkspaceAccess } from "@/lib/api"
+import { api, machineName, type Agent, type AgentLaunchProfile, type AppDeployment, type Machine, type Member, type Organization, type OrganizationGroup, type PolicyProviderStatus, type Workspace, type WorkspaceAccess } from "@/lib/api"
 import {
   Download,
   ExternalLink,
@@ -22,6 +24,7 @@ import { FormEvent, useEffect, useState } from "react"
 import { roleLabel, t } from "@/i18n"
 
 export type WorkspaceSettingsViewProps = {
+  agents: Agent[]
   workspace?: Workspace
   organization?: Organization
   name: string
@@ -49,7 +52,8 @@ export type WorkspaceSettingsViewProps = {
   onClose: () => void
 }
 
-export function WorkspaceSettingsView({ workspace, organization, name, machines, machineCount, profiles, profilesLoading, apps, onPolicyAppInstalled, preview, onNameChange, onRename, onAddMachine, onOpenMachine, onRenameMachine, onDeleteMachine, onCopy, onRefreshProfiles, onNewProfile, onEditProfile, onLaunchProfile, onDeleteProfile, onDelete, onClose }: WorkspaceSettingsViewProps) {
+export function WorkspaceSettingsView({ agents, workspace, organization, name, machines, machineCount, profiles, profilesLoading, apps, onPolicyAppInstalled, preview, onNameChange, onRename, onAddMachine, onOpenMachine, onRenameMachine, onDeleteMachine, onCopy, onRefreshProfiles, onNewProfile, onEditProfile, onLaunchProfile, onDeleteProfile, onDelete, onClose }: WorkspaceSettingsViewProps) {
+  const [settingsTab, setSettingsTab] = useState("settings")
   const [access, setAccess] = useState<WorkspaceAccess>()
   const [organizationMembers, setOrganizationMembers] = useState<Member[]>([])
   const [organizationGroups, setOrganizationGroups] = useState<OrganizationGroup[]>([])
@@ -92,7 +96,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
     setPolicyInstallMachineId(machines.find((machine) => machine.status === "online")?.server_id ?? "")
   }, [machines, policyInstallMachineId])
   useEffect(() => {
-    if (window.location.hash === "#policy-provider") document.getElementById("policy-provider")?.scrollIntoView({ block: "start" })
+    if (window.location.hash === "#policy-provider") { setSettingsTab("settings"); document.getElementById("policy-provider")?.scrollIntoView({ block: "start" }) }
   }, [workspace?.workspace_id, policyProvider])
   async function savePolicyProvider() {
     if (!workspace || !policyAppId) return
@@ -175,6 +179,13 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
       <Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button>
     </div>
 
+    <Tabs value={settingsTab} onValueChange={setSettingsTab}>
+      <TabsList aria-label={t("app.workspace_settings")} className="mb-4">
+        <TabsTrigger value="settings" className="min-h-11">{t("settings.title")}</TabsTrigger>
+        <TabsTrigger value="audit" className="min-h-11">{t("audit.audit")}</TabsTrigger>
+      </TabsList>
+      <TabsContent value="audit"><WorkspaceAudit key={workspace.workspace_id} workspaceId={workspace.workspace_id} agents={agents} preview={preview} /></TabsContent>
+      <TabsContent value="settings">
     {!preview && machines.length === 0 && machineCount === 0 && <div role="status" className="mb-6 flex flex-col items-start gap-3 rounded-md border bg-muted/50 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
       <div><p className="font-medium">{t("wsettings.add_a_machine_to_create")}</p><p className="mt-1 text-xs text-muted-foreground">{t("wsettings.agents_run_on_machines_connect")}</p></div>
       <Button variant="outline" className="shrink-0" onClick={onAddMachine}>{t("wsettings.set_up_a_machine")}</Button>
@@ -245,5 +256,7 @@ export function WorkspaceSettingsView({ workspace, organization, name, machines,
         <div className="grid gap-3 border border-destructive/30 p-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center"><p className="text-xs leading-5 text-muted-foreground">{machineCount === undefined ? t("wsettings.checking_machine_inventory") : machineCount > 0 ? t(machineCount === 1 ? "wsettings.delete_machines_first_one" : "wsettings.delete_machines_first_many", { count: machineCount }) : t("wsettings.this_action_cannot_be_undone")}</p><Button variant="destructive" className="w-full sm:w-auto" disabled={preview || deleteBlocked} onClick={onDelete}><Trash2 />{t("wsettings.delete_workspace")}</Button></div>
       </div>
     </section>}
+      </TabsContent>
+    </Tabs>
   </div></div>
 }

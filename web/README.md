@@ -425,3 +425,29 @@ are not shown or copied; used invitations cannot be revoked. Revocation sends
 only the non-bearer handle. An older list schema is refused with an upgrade
 notice. Creating a new invitation still displays its link in a temporary dialog
 for distribution, without writing it to browser storage.
+
+## Workspace audit
+
+Workspace settings → Audit reads `/api/workspaces/{workspace_id}/audit-events`
+when `/api/auth/config` advertises `workspace.audit.v1`. It uses the existing
+browser session, `cache: no-store`, exact workspace attribution, and server-side
+filters: inclusive `since`, exclusive `until` (RFC3339), exact `actor_id`,
+`action`, `resource_kind`, and 50-event pages with an exclusive `before` cursor.
+Times entered in the form are local time and converted to UTC; empty bounds
+include all available history. A bounded time range must not exceed 366 days.
+Changing filters resets pagination; switching workspaces or leaving the tab
+aborts pending requests and discards the displayed feed. There is no polling.
+
+Workspace owners are allowed by default, subject to Policy denial. Other
+principals require an explicit Policy grant; the UI does not infer permission
+from organization membership or hide authorization errors. A denied request
+shows a clear refusal. Missing capability or HTTP 404/405 shows unsupported,
+without falling back to organization audit. Organization audit remains separate.
+
+The shared event list resolves known Agent IDs to full tree paths and renders
+text only. The workspace reader validates scope and projects display fields;
+credentials, arbitrary payloads, names and raw server error bodies are not shown.
+Coverage is incomplete, missing historical attribution is not backfilled, and
+reads are not themselves audited. Workspace deletion can remove attribution.
+This is an operational log, not a complete or tamper-proof ledger; see the Core
+[security model](../docs/security.md) and [operator guide](../docs/operator-guide.md).
