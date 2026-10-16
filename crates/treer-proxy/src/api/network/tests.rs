@@ -518,6 +518,13 @@ async fn public_tcp_allocation_is_stable_and_explicitly_revocable() {
     let first = publish().await.unwrap().0;
     let second = publish().await.unwrap().0;
     assert_eq!(first["port"], second["port"]);
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM organization_audit_events WHERE action='ingress.tcp.publish'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 1, "repeat publication is not a state change");
     assert_eq!(first["hostname"], "proxy.example");
     let _ = unpublish_public_tcp_service(
         Extension(auth.clone()),
@@ -532,6 +539,19 @@ async fn public_tcp_allocation_is_stable_and_explicitly_revocable() {
             .await
             .unwrap();
     assert!(!enabled);
+    let _ = unpublish_public_tcp_service(
+        Extension(auth.clone()),
+        Path(("tcp-test".into(), service.service_id.clone())),
+    )
+    .await
+    .unwrap();
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM organization_audit_events WHERE action='ingress.tcp.unpublish'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 1, "repeat revocation is not a state change");
     assert_eq!(publish().await.unwrap().0["port"], first["port"]);
     let port = first["port"].as_u64().unwrap() as u16;
     let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))

@@ -438,8 +438,13 @@ configuration, prompt/message bodies and unknown payload keys are not returned
 by this endpoint. Stable actor/resource IDs and event types remain metadata; this
 does not make the underlying database or existing organization audit view secret
 free. No unattributed history is reconstructed. Reading audit is not itself
-audited. Runtime audit delivery can fail after a successful mutation, deleted
-workspace FKs become NULL, and database/Host operators can modify stored events:
+audited. Tree and enrollment audit writes share their mutation transaction;
+networking and accepted prompt audit writes are best-effort after success.
+The latter contain only authenticated actor/target IDs and event kinds, with no
+body or configuration. New events retain immutable workspace attribution after
+workspace deletion; already-unattributed history is not reconstructed, and
+organization deletion still removes its events. Runtime audit delivery can fail
+after a successful mutation, and database/Host operators can modify stored events:
 this is neither complete, tamperproof nor non-repudiable auditing.
 
 Proxy help hides configured administrator-password and NATS-URL environment

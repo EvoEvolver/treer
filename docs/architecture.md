@@ -925,8 +925,10 @@ and capability `workspace.audit.v1` in `/api/auth/config`. They query the same
 organization-wide NULL-workspace events never enter this feed. The existing
 organization audit endpoint and its projection are unchanged. Previously stored
 events with a workspace ID are readable; unattributed history is not backfilled
-or guessed. Workspace deletion sets the audit FK to NULL, so that history remains
-in the organization view but loses reliable workspace attribution.
+or guessed. New writes also retain an immutable `workspace_origin_id` without a
+workspace foreign key. Hard deletion clears the live FK but the organization
+view can still attribute these new events to the original workspace. Older
+already-unattributed rows remain unknown; organization deletion still cascades.
 
 The shared response is `{events, next_cursor}`. `before` is a positive, exclusive
 sequence cursor within the requested workspace; events sort by descending
@@ -955,9 +957,29 @@ payload fields. Known lifecycle/startup events may expose only machine ID and
 numeric startup revision; machine exec may expose numeric exit/timeout metadata
 and booleans. File paths, hashes, content, argv, environment and configuration
 payloads are excluded. Audit reads do not append events to their own feed. This
-is a partial activity record: tree, service/virtual-host/ingress and enrollment
-changes and ordinary prompt/message operations do not yet have universal audit
-writes; bodies must never be added as a way to fill those coverage gaps.
+is a partial activity record; bodies must never be added to fill coverage gaps.
+
+State-change audit delivery is explicit:
+
+| Mutation | Audit commit boundary |
+| --- | --- |
+| Folder create/update/delete, placement create/update/delete, workload rename | Same Tree SQL transaction; failed audit rolls back mutation. Folder removal includes child promotion in one event. |
+| Enrollment claim/re-enrollment | Same credential binding and single-use enrollment consumption transaction. Replayed keys fail without a success event. |
+| Service create/update/delete, virtual-host create/delete, HTTP ingress create/update/delete, TCP publish/unpublish | Best-effort after durable mutation; audit failure logs a body-free warning and does not turn a committed change into a retryable failure. |
+| Managed App compound creation/deletion | Service, virtual-host creation and placement events share the App transaction. Service deletion represents cascading routing removal rather than separate child events. |
+| Accepted prompt submission | Best-effort after Controller success; only actor, target ID and event kind. A repeated accepted submission request can produce another acceptance event; this is not a turn-completion log. |
+
+No-op updates and repeated ingress publication do not append state-change events.
+Authenticated request middleware scopes actor kind/ID to the request future,
+never caller-provided JSON. Internal work without that scope (including spawned
+recovery tasks) is attributed to `system`, not to an inherited user. Enrollment
+uses the trusted enrollment creator. New events have empty payloads and omit
+names, paths, hosts, ports, argv, environment, tokens and bodies. Existing runtime
+lifecycle audit events may additionally describe the operation's outcome.
+Core Message delivery and all failure paths do not have universal audit coverage;
+there is no transactional outbox or completeness guarantee for best-effort writes.
+Legacy/local-auth enrollments without a durable workspace retain their existing
+behavior and have no organization audit attribution; no organization is invented.
 
 Hold-to-talk audio stays on the Proxy only long enough to forward 16 kHz PCM16
 to the configured ASR vendor. After a transcript is available, `POST

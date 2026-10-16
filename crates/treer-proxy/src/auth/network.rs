@@ -138,6 +138,14 @@ impl AuthStore {
                 AuthFailure::database(error)
             }
         })?;
+        audit::mutation_best_effort(
+            &self.pool,
+            workspace_id,
+            "service.create",
+            "service",
+            &service.service_id,
+        )
+        .await;
         Ok(service)
     }
 
@@ -156,6 +164,7 @@ impl AuthStore {
         }
         let _update = self.virtual_hosts_update.lock().await;
         let current = self.resolve_machine_service(workspace_id, target).await?;
+        let original = current.clone();
         if current.target_agent_id.is_some() {
             if request
                 .server_id
@@ -203,10 +212,20 @@ impl AuthStore {
                 "target_port must be between 1 and 65535",
             ));
         }
-        sqlx::query(
+        if service.name == original.name
+            && service.server_id == original.server_id
+            && service.target_host == original.target_host
+            && service.target_port == original.target_port
+            && service.protocol == original.protocol
+            && service.primary == original.primary
+        {
+            return Ok(original);
+        }
+        let updated = sqlx::query(
             "UPDATE machine_services SET name = $1, server_id = $2, target_host = $3, \
              target_port = $4, protocol = $5, updated_at = $6, updated_by = $7, is_primary = $10 \
-             WHERE workspace_id = $8 AND service_id = $9",
+             WHERE workspace_id = $8 AND service_id = $9 AND \
+             (name,server_id,target_host,target_port,protocol,is_primary) IS DISTINCT FROM ($1,$2,$3,$4,$5,$10)",
         )
         .bind(&service.name)
         .bind(&service.server_id)
@@ -255,6 +274,16 @@ impl AuthStore {
             }
         }
         self.virtual_hosts_revision.fetch_add(1, Ordering::SeqCst);
+        if updated.rows_affected() != 0 {
+            audit::mutation_best_effort(
+                &self.pool,
+                workspace_id,
+                "service.update",
+                "service",
+                &service.service_id,
+            )
+            .await;
+        }
         Ok(service)
     }
 
@@ -265,12 +294,23 @@ impl AuthStore {
     ) -> Result<MachineService, AuthFailure> {
         let _update = self.virtual_hosts_update.lock().await;
         let service = self.resolve_machine_service(workspace_id, target).await?;
-        sqlx::query("DELETE FROM machine_services WHERE workspace_id = $1 AND service_id = $2")
-            .bind(workspace_id)
-            .bind(&service.service_id)
-            .execute(&self.pool)
-            .await
-            .map_err(AuthFailure::database)?;
+        let deleted =
+            sqlx::query("DELETE FROM machine_services WHERE workspace_id = $1 AND service_id = $2")
+                .bind(workspace_id)
+                .bind(&service.service_id)
+                .execute(&self.pool)
+                .await
+                .map_err(AuthFailure::database)?;
+        if deleted.rows_affected() != 0 {
+            audit::mutation_best_effort(
+                &self.pool,
+                workspace_id,
+                "service.delete",
+                "service",
+                &service.service_id,
+            )
+            .await;
+        }
         if let Some(hosts) = self.virtual_hosts.write().await.get_mut(workspace_id) {
             hosts.retain(|_, host| host.service_id != service.service_id);
         }
@@ -348,6 +388,14 @@ impl AuthStore {
         .await;
         match result {
             Ok(_) => {
+                audit::mutation_best_effort(
+                    &self.pool,
+                    workspace_id,
+                    "virtual_host.create",
+                    "service",
+                    &record.service_id,
+                )
+                .await;
                 self.virtual_hosts
                     .write()
                     .await
@@ -378,20 +426,25 @@ impl AuthStore {
     ) -> Result<(), AuthFailure> {
         let _update = self.virtual_hosts_update.lock().await;
         let hostname = normalize_virtual_hostname(hostname)?;
-        let result = sqlx::query(
-            "DELETE FROM virtual_network_hosts WHERE workspace_id = $1 AND hostname = $2",
+        let removed: Option<String> = sqlx::query_scalar(
+            "DELETE FROM virtual_network_hosts WHERE workspace_id = $1 AND hostname = $2 RETURNING service_id",
         )
         .bind(workspace_id)
         .bind(&hostname)
-        .execute(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        if result.rows_affected() == 0 {
-            return Err(AuthFailure::not_found(
-                "virtual_host_not_found",
-                "virtual host does not exist",
-            ));
-        }
+        let service_id = removed.ok_or_else(|| {
+            AuthFailure::not_found("virtual_host_not_found", "virtual host does not exist")
+        })?;
+        audit::mutation_best_effort(
+            &self.pool,
+            workspace_id,
+            "virtual_host.delete",
+            "service",
+            &service_id,
+        )
+        .await;
         if let Some(hosts) = self.virtual_hosts.write().await.get_mut(workspace_id) {
             hosts.remove(&hostname);
         }
@@ -622,6 +675,14 @@ impl AuthStore {
                 AuthFailure::database(error)
             }
         })?;
+        audit::mutation_best_effort(
+            &self.pool,
+            workspace_id,
+            "ingress.http.create",
+            "ingress",
+            &ingress.ingress_id,
+        )
+        .await;
         self.service_ingresses.write().await.insert(
             hostname.to_ascii_lowercase(),
             ResolvedServiceIngress {
@@ -705,6 +766,14 @@ impl AuthStore {
                     )
                 });
         }
+        audit::mutation_best_effort(
+            &self.pool,
+            &app.workspace_id,
+            "ingress.http.create",
+            "ingress",
+            &ingress.ingress_id,
+        )
+        .await;
         self.service_ingresses.write().await.insert(
             hostname,
             ResolvedServiceIngress {
@@ -788,13 +857,19 @@ impl AuthStore {
         let _update = self.service_ingresses_update.lock().await;
         let current = self.resolve_service_ingress(workspace_id, target).await?;
         let mut ingress = current.ingress;
+        if request.access.unwrap_or(ingress.access) == ingress.access
+            && request.enabled.unwrap_or(ingress.enabled) == ingress.enabled
+        {
+            return Ok(ingress);
+        }
         ingress.access = request.access.unwrap_or(ingress.access);
         ingress.enabled = request.enabled.unwrap_or(ingress.enabled);
         ingress.updated_at = Utc::now();
         ingress.updated_by = actor.to_string();
-        sqlx::query(
+        let updated = sqlx::query(
             "UPDATE service_ingresses SET access = $1, enabled = $2, updated_at = $3, \
-             updated_by = $4 WHERE workspace_id = $5 AND ingress_id = $6",
+             updated_by = $4 WHERE workspace_id = $5 AND ingress_id = $6 \
+             AND (access,enabled) IS DISTINCT FROM ($1,$2)",
         )
         .bind(service_ingress_access_str(ingress.access))
         .bind(ingress.enabled)
@@ -805,6 +880,16 @@ impl AuthStore {
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
+        if updated.rows_affected() != 0 {
+            audit::mutation_best_effort(
+                &self.pool,
+                workspace_id,
+                "ingress.http.update",
+                "ingress",
+                &ingress.ingress_id,
+            )
+            .await;
+        }
         self.service_ingresses.write().await.insert(
             ingress.hostname.to_ascii_lowercase(),
             ResolvedServiceIngress {
@@ -822,12 +907,24 @@ impl AuthStore {
     ) -> Result<ServiceIngress, AuthFailure> {
         let _update = self.service_ingresses_update.lock().await;
         let resolved = self.resolve_service_ingress(workspace_id, target).await?;
-        sqlx::query("DELETE FROM service_ingresses WHERE workspace_id = $1 AND ingress_id = $2")
-            .bind(workspace_id)
-            .bind(&resolved.ingress.ingress_id)
-            .execute(&self.pool)
-            .await
-            .map_err(AuthFailure::database)?;
+        let deleted = sqlx::query(
+            "DELETE FROM service_ingresses WHERE workspace_id = $1 AND ingress_id = $2",
+        )
+        .bind(workspace_id)
+        .bind(&resolved.ingress.ingress_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if deleted.rows_affected() != 0 {
+            audit::mutation_best_effort(
+                &self.pool,
+                workspace_id,
+                "ingress.http.delete",
+                "ingress",
+                &resolved.ingress.ingress_id,
+            )
+            .await;
+        }
         self.service_ingresses
             .write()
             .await

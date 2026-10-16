@@ -199,6 +199,9 @@ CREATE TABLE IF NOT EXISTS organization_audit_events (
     FOREIGN KEY(organization_id) REFERENCES organizations(organization_id) ON DELETE CASCADE,
     FOREIGN KEY(workspace_id) REFERENCES workspaces(workspace_id) ON DELETE SET NULL
 );
+-- Immutable attribution for newly written events; do not infer lost history.
+-- No FK: workspace deletion must not erase this identifier.
+ALTER TABLE organization_audit_events ADD COLUMN IF NOT EXISTS workspace_origin_id TEXT;
 CREATE INDEX IF NOT EXISTS organization_audit_events_org_sequence
     ON organization_audit_events(organization_id, sequence DESC);
 CREATE INDEX IF NOT EXISTS organization_audit_events_workspace_sequence

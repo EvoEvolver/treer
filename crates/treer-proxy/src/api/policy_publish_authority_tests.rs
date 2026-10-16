@@ -294,7 +294,7 @@ async fn binding_fence_legacy_writes_reset_and_audit_failure_rolls_back() {
         .await
         .unwrap()
         .is_none());
-    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM organization_audit_events")
+    let count: i64 = sqlx::query_scalar("SELECT count(*) FROM organization_audit_events WHERE action='policy_provider.publish_authority.set'")
         .fetch_one(&auth.pool())
         .await
         .unwrap();
