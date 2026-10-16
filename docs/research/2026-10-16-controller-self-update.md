@@ -183,6 +183,18 @@ runtime seam to cover ACK/health disagreement, lost ACK, a stalled observation,
 and rejection of a second activation. Real Host activation acceptance, the
 old-Controller restart/health half of rollback, production command dispatch,
 launcher work and post-worker-death recovery are still pending.
+Only fixed known startup-transition errors are retried. Explicit Host identity,
+workload/output continuity or binding failures, and unknown errors, immediately
+enter verified image restoration; they do not wait out the observation budget.
+The fixed 30-second budget is an availability limit, not a performance guarantee:
+a correct Controller whose cold startup exceeds it can trigger a safe rollback.
+Reassess that budget using release acceptance measurements, not retry-until-green.
+Restoration can race a previously accepted restart whose ACK was lost or whose
+execution is still pending. That request may then launch the restored old image;
+it is not evidence of rollback health. The pending rollback activation layer must
+use the existing independent `controller-rollback-intent.json` / `-rollback`
+operation ID at most once, reconcile the in-flight forward request, and prove
+the old running image and unchanged Host/workloads before writing RolledBack.
 
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the

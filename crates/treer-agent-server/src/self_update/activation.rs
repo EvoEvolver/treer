@@ -18,6 +18,20 @@ use super::{
 const HEALTH_BUDGET: Duration = Duration::from_secs(30);
 const POLL_INTERVAL: Duration = Duration::from_millis(250);
 
+/// Only known Controller startup transitions may heal during this observation.
+/// Host/workload/output/binding failures and new/unknown errors fail closed.
+/// Compare fixed internal diagnostics only; never log or return arbitrary text.
+fn retryable_observation(error: &anyhow::Error) -> bool {
+    matches!(
+        error.to_string().as_str(),
+        "update_running_controller_unproven"
+            | "update_controller_identity_changed"
+            | "update_controller_identity_unavailable"
+            | "update_health_unavailable"
+            | "update_controller_health_mismatch"
+    )
+}
+
 /// Neither outcome completes the update. CoreHealthy still needs launcher work;
 /// ImagesRestored still needs old-Controller activation and independent health.
 pub enum CoreActivation {
@@ -122,11 +136,15 @@ async fn drive(
             if journal.read()? != published {
                 bail!("update_activation_binding_mismatch");
             }
-            if runtime.observe(&expected).await.is_ok() {
-                if journal.read()? != published {
-                    bail!("update_activation_binding_mismatch");
+            match runtime.observe(&expected).await {
+                Ok(()) => {
+                    if journal.read()? != published {
+                        bail!("update_activation_binding_mismatch");
+                    }
+                    return Ok::<(), anyhow::Error>(());
                 }
-                return Ok::<(), anyhow::Error>(());
+                Err(error) if retryable_observation(&error) => {}
+                Err(_) => bail!("update_activation_observation_failed"),
             }
             sleep(POLL_INTERVAL).await;
         }
@@ -152,6 +170,8 @@ mod tests {
         ack: bool,
         healthy: bool,
         pending: bool,
+        failure: &'static str,
+        failures_before_healthy: usize,
         restarts: Cell<usize>,
         observations: Cell<usize>,
         expectation: RefCell<Option<ControllerExpectation>>,
@@ -180,10 +200,10 @@ mod tests {
             if self.pending {
                 std::future::pending::<()>().await;
             }
-            if self.healthy {
+            if self.healthy && self.observations.get() > self.failures_before_healthy {
                 Ok(())
             } else {
-                bail!("test_unhealthy")
+                bail!(self.failure)
             }
         }
     }
@@ -202,6 +222,8 @@ mod tests {
             ack: true,
             healthy: true,
             pending: false,
+            failure: "update_health_unavailable",
+            failures_before_healthy: 0,
             restarts: Cell::new(0),
             observations: Cell::new(0),
             expectation: RefCell::new(None),
@@ -255,6 +277,8 @@ mod tests {
                 ack,
                 healthy,
                 pending,
+                failure: "update_health_unavailable",
+                failures_before_healthy: 0,
                 restarts: Cell::new(0),
                 observations: Cell::new(0),
                 expectation: RefCell::new(None),
@@ -313,5 +337,113 @@ mod tests {
             .is_err());
             assert_eq!(runtime.restarts.get(), 1);
         }
+    }
+
+    #[test]
+    fn only_known_startup_errors_are_retryable() {
+        for code in [
+            "update_running_controller_unproven",
+            "update_controller_identity_changed",
+            "update_controller_identity_unavailable",
+            "update_health_unavailable",
+            "update_controller_health_mismatch",
+        ] {
+            assert!(retryable_observation(&anyhow::anyhow!(code)), "{code}");
+        }
+        for code in [
+            "update_host_changed",
+            "update_host_identity_changed",
+            "update_host_disconnected",
+            "update_workload_changed",
+            "update_output_continuity_unproven",
+            "update_health_binding_mismatch",
+            "update_controller_identity_binding_mismatch",
+            "update_enrollment_changed",
+            "update_controller_image_mismatch",
+            "update_multiple_running_controllers",
+            "update_health_unsupported",
+            "update_health_too_large",
+            "unknown failure with private text",
+        ] {
+            assert!(!retryable_observation(&anyhow::anyhow!(code)), "{code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn permanent_observation_failure_restores_without_waiting_for_health_budget() {
+        for failure in [
+            "update_host_changed",
+            "update_workload_changed",
+            "update_output_continuity_unproven",
+            "unknown_observation_failure",
+        ] {
+            let (f, selected, owned, journal) = fixture();
+            let runtime = Fake {
+                ack: true,
+                healthy: false,
+                pending: false,
+                failure,
+                failures_before_healthy: 0,
+                restarts: Cell::new(0),
+                observations: Cell::new(0),
+                expectation: RefCell::new(None),
+            };
+            let result = timeout(
+                Duration::from_secs(2),
+                drive(
+                    &selected,
+                    &owned,
+                    &journal,
+                    &runtime,
+                    "old-observed-epoch".into(),
+                    HEALTH_BUDGET,
+                ),
+            )
+            .await
+            .expect("permanent failure must not wait out the 30s health budget")
+            .unwrap();
+            assert!(matches!(result, CoreActivation::ImagesRestored(_)));
+            assert_eq!(journal.read().unwrap().phase, Phase::RollingBack);
+            assert_eq!(runtime.restarts.get(), 1);
+            assert_eq!(runtime.observations.get(), 1);
+            assert_eq!(
+                std::fs::read(f.bin.join(Binary::Controller.name())).unwrap(),
+                b"controller"
+            );
+            assert_eq!(
+                std::fs::read(f.bin.join(Binary::Cli.name())).unwrap(),
+                b"cli"
+            );
+            assert!(selected.lock().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn startup_transition_retries_observation_without_resending_restart() {
+        let (_f, selected, owned, journal) = fixture();
+        let runtime = Fake {
+            ack: true,
+            healthy: true,
+            pending: false,
+            failure: "update_running_controller_unproven",
+            failures_before_healthy: 1,
+            restarts: Cell::new(0),
+            observations: Cell::new(0),
+            expectation: RefCell::new(None),
+        };
+        let result = drive(
+            &selected,
+            &owned,
+            &journal,
+            &runtime,
+            "old-observed-epoch".into(),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, CoreActivation::CoreHealthy(_)));
+        assert_eq!(runtime.restarts.get(), 1);
+        assert_eq!(runtime.observations.get(), 2);
+        assert!(selected.lock().is_err());
     }
 }
