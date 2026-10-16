@@ -134,6 +134,11 @@ impl PrivateStateRoot {
         if !valid_identity(server_id) {
             return Err(invalid_identity());
         }
+        // Product rule first: a non-administrator Windows account gets the
+        // fixed code before any directory is created, resolved or inspected.
+        if !windows_account_is_administrator() {
+            return Err(requires_administrator());
+        }
         let (parent, name) = match (root.parent(), root.file_name()) {
             (Some(parent), Some(name)) => (parent, name),
             _ => {
@@ -179,6 +184,9 @@ impl PrivateStateRoot {
     /// unsafe level fails closed; nothing below the Agent directory is read.
     pub fn prepare(&self, agent_id: &str) -> Result<PathBuf, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
+        if !windows_account_is_administrator() {
+            return Err(requires_administrator());
+        }
         self.verify_levels()?;
         ensure_private_directory(&directory)?;
         Ok(directory)
@@ -189,6 +197,9 @@ impl PrivateStateRoot {
     /// its directory through the local API.
     pub fn verify_existing(&self, agent_id: &str) -> Result<PathBuf, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
+        if !windows_account_is_administrator() {
+            return Err(requires_administrator());
+        }
         self.verify_levels()?;
         match fs::symlink_metadata(&directory) {
             Ok(metadata) => verify_private_directory(&directory, &metadata)?,
@@ -227,6 +238,9 @@ impl PrivateStateRoot {
     /// before and after removal; a link at the Agent level is never followed.
     pub fn purge(&self, agent_id: &str) -> Result<bool, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
+        if !windows_account_is_administrator() {
+            return Err(requires_administrator());
+        }
         verify_ancestors(&self.root)?;
         for level in [&self.root, &self.server] {
             match fs::symlink_metadata(level) {

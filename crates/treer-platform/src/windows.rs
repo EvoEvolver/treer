@@ -107,11 +107,13 @@ impl Drop for Allocation {
     }
 }
 
-/// Classify the process token for the Windows administrator requirement.
+/// Classify the PROCESS token for the Windows administrator requirement.
 /// Elevated: full-elevation token, or an unsplit token that is a member of
 /// BUILTIN\Administrators (UAC off, built-in Administrator, elevated service).
 /// AdminCapable: the UAC-limited token of an Administrators member.
-/// Standard: an unsplit token that is not a member.
+/// Standard: an unsplit token that is not a member. Every query uses the
+/// process token (membership through an identification-level duplicate of
+/// it), so thread impersonation never influences the result.
 pub fn account_class() -> io::Result<super::WindowsAccountClass> {
     unsafe {
         let mut token = ptr::null_mut();
@@ -146,11 +148,19 @@ pub fn account_class() -> io::Result<super::WindowsAccountClass> {
             sid.as_mut_ptr().cast(),
             &mut sid_size,
         ))?;
+        // CheckTokenMembership needs an impersonation token: derive one from
+        // the process token opened above, so the verdict is bound to this
+        // process and never to a thread's impersonation state.
+        let mut impersonation = ptr::null_mut();
+        checked(DuplicateToken(
+            token.as_raw_handle(),
+            SecurityIdentification,
+            &mut impersonation,
+        ))?;
+        let impersonation = OwnedHandle::from_raw_handle(impersonation);
         let mut member = 0;
-        // A null token handle means the calling thread's token (the process
-        // token when not impersonating).
         checked(CheckTokenMembership(
-            ptr::null_mut(),
+            impersonation.as_raw_handle(),
             sid.as_mut_ptr().cast(),
             &mut member,
         ))?;

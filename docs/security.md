@@ -333,12 +333,12 @@ as non-administrator) and, for a standard account, reports the fixed code
 reservations refused, status API) instead of a DACL verdict; the owner and ACE
 rules are never relaxed for such accounts. On a hosted windows-2022 runner (an
 elevated account whose token owner is the Administrators group) the earlier
-owner-equals-user rule failed and a version accepting the fixed owner set
-{user, SYSTEM, Administrators} passed (run 38962540814); the current
-token-bound rule awaits its own run on that runner. Not exercised: a
-non-administrator account (unsupported by product rule), the win_native
-acceptance machine, and the reparse-point and free-space paths beyond
-compilation.
+owner-equals-user rule failed; the token-bound rule and the DACL negative
+regressions (wide DACL, DACL loosened after creation, callback ACE) ran
+natively and passed in the released train ed6390f (run 38965604130). Not
+exercised: a non-administrator account (unsupported by product rule), the
+win_native acceptance machine, and the reparse-point and free-space paths
+beyond compilation.
 The private state quota is cooperative
 admission control for launchers that reserve before writing; same-account code
 can bypass it, after which the Controller only refuses further reservations.
