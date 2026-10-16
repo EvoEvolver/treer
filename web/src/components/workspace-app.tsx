@@ -30,7 +30,7 @@ import { WorkspaceDialogs } from "@/components/workspace-dialogs"
 import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
 import { ApiError,api,machineName,proxyUrl,type Agent,type AgentLaunchProfile,type AppDeployment,type MachineFileUpload,type Organization,type Snapshot,type User,type WorkloadTreeState,type Workspace } from "@/lib/api"
 import { formatCommandLine,parseCommandLine } from "@/lib/command-line"
-import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,activeStatuses,arrayBufferToBase64,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,formatBytes,initials,machineOnline,replaceWorkspace ,workloadPath } from "@/lib/control-plane"
+import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,activeStatuses,arrayBufferToBase64,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,formatBytes,initials,machineOnline,replaceWorkspace ,workloadPath,isWorkloadDeepLink } from "@/lib/control-plane"
 import { clearFirstRunTour,firstRunTourMode,shouldAutoStartFirstRunTour,startFirstRunTour,stopFirstRunTour,type FirstRunTourHost } from "@/lib/first-run-tour"
 import { readTheme,subscribeTheme,type Theme } from "@/lib/theme"
 import { cn } from "@/lib/utils"
@@ -162,8 +162,11 @@ function WorkspaceAppContent() {
     if (requirePreferred && !data.organizations.some((item) => item.organization_id === preferred)) throw new Error(t("invite.switch_failed"))
     setOrganizations(data.organizations)
     const routeSelection = routeSelectionRef.current
-    if (routingRef.current.hash === "#policy-provider" && routeSelection.organizationId && !data.organizations.some((item) => item.organization_id === routeSelection.organizationId)) {
-      throw new Error(t("app.policy_settings_target_is_unavailable"))
+    // An explicit target (trusted Policy link or workload deep link) that is unavailable is reported, never replaced
+    // by the default organization, workspace or workload.
+    if (routeSelection.organizationId && !data.organizations.some((item) => item.organization_id === routeSelection.organizationId)) {
+      if (routingRef.current.hash === "#policy-provider") throw new Error(t("app.policy_settings_target_is_unavailable"))
+      if (isWorkloadDeepLink(routingRef.current.pathname)) throw new Error(t("app.workload_not_found"))
     }
     const selected = preferred && data.organizations.some((item) => item.organization_id === preferred)
       ? preferred
@@ -189,8 +192,9 @@ function WorkspaceAppContent() {
     if (organizationIdRef.current !== organizationId) return
     setWorkspaces(data.workspaces)
     const routeSelection = routeSelectionRef.current
-    if (routingRef.current.hash === "#policy-provider" && routeSelection.workspaceId && !data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)) {
-      throw new Error(t("app.policy_settings_target_is_unavailable"))
+    if (routeSelection.workspaceId && !data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)) {
+      if (routingRef.current.hash === "#policy-provider") throw new Error(t("app.policy_settings_target_is_unavailable"))
+      if (isWorkloadDeepLink(routingRef.current.pathname)) throw new Error(t("app.workload_not_found"))
     }
     const selected = routeSelection.organizationId === organizationId
       && routeSelection.workspaceId
@@ -223,12 +227,21 @@ function WorkspaceAppContent() {
   // or inaccessible ID is reported and never replaced by another workload. After that the URL only follows the
   // selection, so our own URL updates are never mistaken for a new link.
   const deepLinkWorkspace = useRef<string | null>(null)
+  const firstPathname = useRef(location.pathname)
   const inventoryReady = Boolean(snapshot) && !appsLoading
   const routeMatchesWorkspace = Boolean(workspaceId) && route.workspaceId === workspaceId
   useEffect(() => {
     if (!inventoryReady || !routeMatchesWorkspace || !workspaceId || deepLinkWorkspace.current === workspaceId) return
     deepLinkWorkspace.current = workspaceId
-    if (!routeWorkloadId) return
+    if (!routeWorkloadId) {
+      // A /workloads segment that is not a valid ID (malformed) is an explicit target too: report it. The URL may
+      // already have been canonicalized, so the first URL of the page load decides.
+      const requested = isWorkloadDeepLink(firstPathname.current)
+      firstPathname.current = ""
+      if (requested) setError(t("app.workload_not_found"))
+      return
+    }
+    firstPathname.current = ""
     if (workloads.some((agent) => agent.agent_id === routeWorkloadId)) showAgentTerminal(routeWorkloadId)
     else { setError(t("app.workload_not_found")); replaceWorkloadRoute(null) }
     // showAgentTerminal is recreated every render; the workspace marker makes this run once per workspace.

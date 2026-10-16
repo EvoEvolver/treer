@@ -485,7 +485,7 @@ This is an operational log, not a complete or tamper-proof ledger; see the Core
 Every Agent and App has a stable Console URL: `/orgs/<org>/workspaces/<workspace>/workloads/<id>`, where `<id>`
 is the stable Agent ID (an App uses its runtime Agent ID), never the path. The address bar follows the selected
 workload (replace, no history entry), so it can be copied, reloaded and shared; a member without access sees
-"not found, or you do not have access" and nothing else is selected. URLs carry IDs only, never tokens, and the
+"not found, or you do not have access" and nothing else is selected. The same applies when the organization or workspace in the link is unavailable (no default workspace is substituted) and when the `/workloads/` segment is malformed. URLs carry IDs only, never tokens, and the
 new page is the same Console origin with the same session. The iframe sandbox and CSRF rules are unchanged.
 
 `?focus=1` is focus mode: only that workload fills the window, with a narrow bar to open the full Console. Plain

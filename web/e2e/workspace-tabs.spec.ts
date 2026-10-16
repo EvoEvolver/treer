@@ -475,7 +475,7 @@ test.describe('workload deep links and new-tab entry points', () => {
     await expect(page).toHaveURL(new RegExp(`${workspaceUrl}/workloads/tab-1$`))
   })
 
-  test('an unknown or malformed workload id reports a clear error and selects nothing else', async ({ page }) => {
+  test('an unknown workload id reports a clear error and selects nothing else', async ({ page }) => {
     await page.setViewportSize({ width: 1360, height: 900 })
     await fixture(page)
     await page.goto(`${workspaceUrl}/workloads/not-a-workload`)
@@ -485,6 +485,32 @@ test.describe('workload deep links and new-tab entry points', () => {
     await page.goto(`${workspaceUrl}/workloads/..%2Fsecret`)
     await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
     await expect(page.locator('iframe')).toHaveCount(0)
+  })
+
+  test('a deep link into a missing workspace or organization reports the error and opens nothing else', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    for (const url of ['/orgs/map-org/workspaces/missing/workloads/tab-1', '/orgs/missing/workspaces/map-workspace/workloads/tab-1']) {
+      await page.goto(url)
+      await expect(page.getByRole('alert').filter({ hasText: 'not found, or you do not have access' })).toBeVisible()
+      // The accessible workspace was not substituted: no overview of it, no workload, URL untouched.
+      await expect(page.getByRole('button', { name: 'Open /Alpha', exact: true })).toHaveCount(0)
+      await expect(page.getByRole('tree').getByRole('treeitem')).toHaveCount(0)
+      await expect(page.locator('iframe,.xterm')).toHaveCount(0)
+      await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveCount(0)
+      expect(new URL(page.url()).pathname).toBe(url)
+    }
+  })
+
+  test('a malformed workloads segment is reported explicitly', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    for (const tail of ['workloads/..%2Fsecret', 'workloads/', 'workloads/' + 'a'.repeat(200)]) {
+      await page.goto(`${workspaceUrl}/${tail}`)
+      await expect(page.getByRole('alert').filter({ hasText: 'not found, or you do not have access' })).toBeVisible()
+      await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
+      await expect(page.locator('iframe,.xterm')).toHaveCount(0)
+    }
   })
 
   test('focus mode shows only the workload with a way back to the full Console', async ({ page }) => {

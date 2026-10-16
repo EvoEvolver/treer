@@ -62,6 +62,9 @@ export function workloadPath(organizationId: string | null, workspaceId: string 
   return `${base}/workloads/${encodeURIComponent(workloadId)}${focus ? "?focus=1" : ""}`
 }
 
+// True when the URL names a workload target at all, valid or not.
+export const isWorkloadDeepLink = (pathname: string) => /\/workloads(\/|$)/.test(pathname)
+
 export function workloadIdFromSplat(splat: string | undefined): string | null {
   const match = /^workloads\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(splat ?? "")
   return match ? match[1] : null
