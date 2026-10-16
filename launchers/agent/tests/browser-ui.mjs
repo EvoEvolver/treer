@@ -52,6 +52,15 @@ async function phoneNav(page, item) {
   await page.getByRole("button", { name: "Menu", exact: true }).click();
   await page.getByRole("menuitem", { name: item, exact: true }).click();
 }
+async function assertTouchTargets(page, selector, label) {
+  const controls = page.locator(selector).filter({ visible: true });
+  assert.ok(await controls.count() > 0, `${label}: controls must exist`);
+  for (const control of await controls.all()) {
+    const bounds = await control.boundingBox();
+    assert.ok(bounds && bounds.width >= 44 && bounds.height >= 44,
+      `${label}: ${await control.getAttribute("class")} is ${bounds?.width}x${bounds?.height}, expected >=44x44`);
+  }
+}
 let browser;
 try {
   const base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1", FAKE_CODEX_FILE_LINKS: "1" });
@@ -124,6 +133,25 @@ try {
   await expect(chat.locator(".plan li.cur")).toHaveCount(1);
   assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight && document.documentElement.scrollTop === 0), "the page itself never scrolls; only the thread does");
   await page.screenshot({ path: join(screenshots, "conversation-b-light.png") });
+
+  // Actual touch hit areas in all looks/themes, before paging consumes the earlier-messages button.
+  for (const look of ["a", "b", "c"]) {
+    for (const theme of ["light", "dark"]) {
+      await page.setViewportSize({ width: 390, height: 844 });
+      await page.goto(url(`?look=${look}&theme=${theme}`));
+      await expect(page.locator(".older .btn")).toBeVisible();
+      for (const selector of [".nav-btn", ".send", ".stopb", "button.model", ".seg", ".older .btn", ".sum"]) {
+        await assertTouchTargets(page, selector, `${look}/${theme} compact`);
+      }
+      await page.getByRole("textbox", { name: /Message/ }).fill("Touch target draft");
+      await assertTouchTargets(page, ".ctl button", `${look}/${theme} expanded`);
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), `${look}/${theme}: no page overflow`);
+      assert.ok(await page.locator(".ctl").evaluate((el) => el.scrollWidth <= el.clientWidth), `${look}/${theme}: no composer overflow`);
+      await page.screenshot({ path: join(screenshots, `touch-390-${look}-${theme}.png`) });
+    }
+  }
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(url());
 
   // Paging: 80 older turns exist; "Load earlier messages" keeps the reader's place and the window grows.
   await expect(page.locator(".older .btn")).toBeVisible();
@@ -268,6 +296,11 @@ try {
   await page.goto(`${live}/${page_}?look=a`);
   const liveBox = page.getByRole("textbox", { name: /Message/ });
   await expect(page.getByRole("button", { name: "Stop current run" })).toBeEnabled();
+  await page.setViewportSize({ width: 390, height: 844 });
+  await liveBox.fill("touch draft");
+  await assertTouchTargets(page, ".ctl button", "running steer/queue/stop");
+  assert.ok(await page.locator(".ctl").evaluate((el) => el.scrollWidth <= el.clientWidth), "running composer has no horizontal overflow");
+  await page.setViewportSize({ width: 1440, height: 900 });
   await liveBox.fill("steer me");
   const steered = page.waitForRequest((request) => request.url().endsWith("/api/prompt"));
   await page.getByRole("button", { name: "Steer current run" }).click();
@@ -452,6 +485,7 @@ try {
   const claude = await startServer("claude", {}, "claude");
   await page.goto(`${claude}/${page_}?look=c`);
   await page.getByRole("textbox", { name: /Message/ }).fill("report the tasks");
+  await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
   await page.getByRole("textbox", { name: /Message/ }).press("Enter");
   const tasksButton = page.getByRole("button", { name: /^Background tasks/ });
   await expect(tasksButton).toBeVisible();

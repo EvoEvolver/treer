@@ -201,4 +201,13 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
   .jump{right:12px}
   .seg:not(.goal){flex:none}.seg.goal{flex:1 1 0}.seg{gap:5px}
 }
+/* Real hit areas, not overlapping pseudo-elements. Keep desktop mouse density,
+   but give narrow layouts and coarse pointers room to tap every control. */
+@media (max-width:640px),(pointer:coarse){
+  :root[data-look][data-theme]{--menu-top:62px}
+  :root[data-look][data-theme] .app{grid-template-rows:56px minmax(0,1fr)}
+  :root[data-look] .app .ph{min-height:48px}
+  :root[data-look] .app button,:root[data-look] .app summary,
+  :root[data-look] .app .field input,:root[data-look] .app .field select{min-width:44px;min-height:44px}
+}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}.spin{animation:none}.sk{animation:none}}
