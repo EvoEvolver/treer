@@ -1765,7 +1765,7 @@ async fn workspace_deletion_requires_a_manager_and_revokes_credentials() {
     );
     assert_eq!(retained.get::<i64, _>("machines"), 1);
     assert_eq!(retained.get::<i64, _>("agents"), 1);
-    assert_eq!(retained.get::<i64, _>("profiles"), 5);
+    assert_eq!(retained.get::<i64, _>("profiles"), 9);
     assert_eq!(retained.get::<i64, _>("legacy_traffic"), 1);
     assert_eq!(retained.get::<i64, _>("traffic"), 1);
     assert_eq!(retained.get::<i64, _>("messages"), 1);
