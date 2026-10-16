@@ -2264,3 +2264,30 @@ fn lock_contender(config_dir: &Path, workspace: &str, mode: &str) -> String {
     }
     panic!("lock contender produced no verdict: {stdout}");
 }
+
+#[test]
+fn windows_administrator_requirement_refuses_only_standard_accounts() {
+    use treer_platform::WindowsAccountClass::*;
+    assert!(administrator_requirement(Elevated).is_ok());
+    assert!(administrator_requirement(AdminCapable).is_ok());
+    let error = administrator_requirement(Standard).unwrap_err().to_string();
+    assert!(error.starts_with(WINDOWS_REQUIRES_ADMINISTRATOR));
+    assert!(error.contains("Administrators group") && error.contains("Nothing was changed"));
+    for forbidden in ["S-1-", "\\", "/", "="] {
+        assert!(!error.contains(forbidden), "{error}");
+    }
+}
+
+/// Hosted and native Windows gates run as administrators; the live token must
+/// classify as such and the requirement must pass there.
+#[cfg(windows)]
+#[test]
+fn windows_hosted_runner_token_is_an_administrator() {
+    let class = treer_platform::account_class().unwrap();
+    assert_ne!(
+        class,
+        treer_platform::WindowsAccountClass::Standard,
+        "{class:?}"
+    );
+    require_windows_administrator().unwrap();
+}

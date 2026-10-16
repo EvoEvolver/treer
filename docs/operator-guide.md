@@ -403,8 +403,25 @@ treer-agent-server connect --root "$env:LOCALAPPDATA\Treer\workspace" --key 'enr
 The installer verifies SHA-256 and matching build identities before installing
 `treer.exe`, `treer-agent-host.exe`, and `treer-agent-server.exe` together under
 `%LOCALAPPDATA%\Treer\bin`. It updates the current session and user PATH. Other
-already-open shells must be reopened. Installation needs no administrator rights
-and does not enroll the machine. For a new enrollment, create the user-owned
+already-open shells must be reopened. Treer on Windows assumes an account in
+the Administrators group: the installer, `connect`, `restore`, service
+start/repair and the Controller process itself check the account first and
+refuse other accounts with the fixed code `windows_requires_administrator`
+before anything is written or started (UAC elevation is not required; both the
+elevated and the UAC-limited administrator token pass). `service status`
+prints the same code under a non-administrator account so the refusal is
+visible locally; an installation that an earlier release accepted under a
+standard account is refused at Controller startup after upgrading. The hosted
+Windows release job proves the refusal natively with
+`scripts/windows-standard-user-check.ps1`, which creates a temporary standard
+user on a disposable GitHub-hosted runner only (it refuses to run unless
+`TREER_DISPOSABLE_RUNNER=1`, `GITHUB_ACTIONS=true` and
+`RUNNER_ENVIRONMENT=github-hosted`), stages the installer and binary in a
+directory readable by Users, runs the installer, `service status` and
+`connect` as that user with its profile loaded, and asserts the fixed code
+for all three, a non-zero exit for the installer and `connect`, and no
+`%LOCALAPPDATA%\Treer` in that user's profile. Installation
+does not enroll the machine. For a new enrollment, create the user-owned
 workspace directory and pass `--root` explicitly as shown above; this avoids
 accidentally using a shell's current directory such as `C:\Windows\System32`.
 Choose another user-owned directory with `--root` if desired. Existing enrollments

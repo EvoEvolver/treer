@@ -255,6 +255,37 @@ fn validate_machine_identity(identity: &MachineIdentity) -> Result<()> {
     validate_machine_name(&identity.name)
 }
 
+/// Fixed code for the Windows product rule: Treer assumes an account in the
+/// Administrators group; other accounts are refused before anything is
+/// written or started, never half-supported.
+pub const WINDOWS_REQUIRES_ADMINISTRATOR: &str = "windows_requires_administrator";
+
+// Only Windows classifies a live token; other platforms exercise this through
+// the unit test alone.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn administrator_requirement(class: treer_platform::WindowsAccountClass) -> Result<()> {
+    use treer_platform::WindowsAccountClass::*;
+    match class {
+        Elevated | AdminCapable => Ok(()),
+        Standard => bail!(
+            "{WINDOWS_REQUIRES_ADMINISTRATOR}: Treer on Windows requires an account in the Administrators group. Sign in as an administrator (elevation is not required) and retry. Nothing was changed."
+        ),
+    }
+}
+
+/// Windows: refuse to install, enroll or start under a non-administrator
+/// account. No-op elsewhere.
+pub fn require_windows_administrator() -> Result<()> {
+    #[cfg(windows)]
+    {
+        let class = treer_platform::account_class()
+            .context("failed to classify the Windows account token")?;
+        administrator_requirement(class)
+    }
+    #[cfg(not(windows))]
+    Ok(())
+}
+
 pub fn validate_machine_name(name: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() || name.chars().count() > 80 || name.chars().any(char::is_control) {

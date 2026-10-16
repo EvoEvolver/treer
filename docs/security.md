@@ -34,6 +34,13 @@ same user boundary, with atomic file replacement. SID-scoped startup mutexes and
 PID creation-time checks avoid duplicate Host starts and terminating a reused
 PID. Job Objects provide process-tree cleanup, not resource isolation or an
 untrusted-code sandbox; processes under the same user remain mutually trusted.
+Treer on Windows assumes an account in the Administrators group. The installer
+and the Controller classify the process token (elevated, UAC-limited
+administrator, or standard) and refuse standard accounts with the fixed code
+`windows_requires_administrator` before writing, enrolling or starting
+anything; non-administrator layouts are not supported or partially supported.
+Administrator membership is a product precondition, not a trust boundary: it
+does not change the same-account trust domain described above.
 The Windows installer checks hashes supplied by the same artifact origin and
 matching binary build identities; this is not independent signature validation.
 Use a trusted HTTPS Proxy/artifact origin for public installation.
