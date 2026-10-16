@@ -5,6 +5,25 @@ use serde_json::json;
 
 #[tokio::test]
 async fn explicit_listen_conflict_fails_before_enrollment_and_allows_retry() {
+    // A parallel test can fork while this listener is open and retain the
+    // descriptor until exec, invalidating the retry-after-close assertion.
+    // Run only this test in the child, which never spawns another process.
+    const CHILD: &str = "TREER_TEST_ISOLATED_LISTEN_CONFLICT";
+    if env::var_os(CHILD).is_none() {
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "service::tests::explicit_listen_conflict_fails_before_enrollment_and_allows_retry",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated port test failed: {output:?}"
+        );
+        return;
+    }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let error = resolve_listen("ws_fixture", Some(address))
