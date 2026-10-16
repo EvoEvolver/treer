@@ -674,6 +674,9 @@ pub(super) mod tests {
                     std::thread::sleep(Duration::from_millis(5));
                 }
             }
+            // An authenticated image alone is not detached from the submitting
+            // exec's process group/session. Prove that before transferring locks.
+            image.verify_private_session().unwrap();
             let accepted = peer.offer_ownership(&journal, &selected, &held);
             if mode == "normal" {
                 assert_eq!(accepted.unwrap().prepared(), &prepared);
@@ -723,6 +726,7 @@ pub(super) mod tests {
         use std::{io::Read, os::unix::net::UnixStream};
         use treer_platform::process_image::ProcessImage;
 
+        treer_platform::process_image::enter_private_session().unwrap();
         let config = PathBuf::from(std::env::var_os("TREER_TEST_CONFIG").unwrap());
         let jobs = PathBuf::from(std::env::var_os("TREER_TEST_JOBS").unwrap());
         let job = std::env::var("TREER_TEST_JOB").unwrap();

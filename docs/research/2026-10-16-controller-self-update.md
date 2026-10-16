@@ -66,8 +66,16 @@ from Preparing to Prepared. A changed job/image or later phase is refused.
 The isolated ownership fixture launches this prepared native test image in its
 normal case, attests its running inode/digest through the connected peer, and
 checks exclusion survives release of the parent's original lock handles.
-This does not launch an activator or prove session detachment; wiring the
-synchronous internal worker entry and owned-child lifecycle remains pending.
+The platform session primitive calls `setsid` after exec without a shell or
+pre-exec callback and refuses an existing process-group/session leader rather
+than falling back. The parent can verify the owned process's session ID and
+process-group ID both equal its PID, rechecking its OS creation/image identity
+around those queries. The isolated ownership child now enters that session;
+the parent checks it before lock transfer. Separate owned-process tests reject
+a process group without a new session, repeated detach, and an exited identity.
+This is not proof of survival after parent exit or escape from a cgroup/service
+manager's termination scope. Wiring the synchronous internal worker entry,
+null/private bounded stdio and the complete owned-child lifecycle remain pending.
 
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the

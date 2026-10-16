@@ -16,6 +16,21 @@ fn invalid() -> io::Error {
     )
 }
 
+/// Called by the owned Unix worker after exec, before receiving descriptors or
+/// starting a runtime. No pre_exec/fork callback, shell, or external setsid tool.
+/// A process-group leader cannot detach this way: refuse rather than continuing
+/// in the submitter's session. This alone is not proof of handoff or ownership.
+pub fn enter_private_session() -> io::Result<()> {
+    let own = rustix::process::getpid();
+    if rustix::process::setsid()? != own
+        || rustix::process::getsid(None)? != own
+        || rustix::process::getpgid(None)? != own
+    {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 #[derive(PartialEq, Eq)]
 struct Identity {
     creation: String,
@@ -128,6 +143,20 @@ impl ProcessImage {
         Ok(metadata.is_file() && metadata.dev() == self.device && metadata.ino() == self.inode)
     }
 
+    /// A separate session and process group must both be led by this exact
+    /// live process. Recheck creation/image identity around the OS queries;
+    /// a saved PID/session number or merely a new process group is insufficient.
+    /// No claim about inherited descriptors, cgroups or service-manager scope.
+    pub fn verify_private_session(&self) -> io::Result<()> {
+        self.verify_current()?;
+        let pid = rustix::process::Pid::from_raw(self.pid as i32).ok_or_else(invalid)?;
+        if rustix::process::getsid(Some(pid))? != pid || rustix::process::getpgid(Some(pid))? != pid
+        {
+            return Err(invalid());
+        }
+        self.verify_current()
+    }
+
     /// Re-observe after hashing/other async work. A live PID alone is not enough:
     /// PID reuse and exec of a different inode must both fail this comparison.
     pub fn verify_current(&self) -> io::Result<()> {
@@ -149,6 +178,125 @@ mod tests {
         io::{BufRead, Write},
         process::{Command, Stdio},
     };
+
+    #[test]
+    fn private_session_is_verified_on_an_owned_process_not_a_group_only() {
+        use std::{
+            os::unix::{fs::DirBuilderExt, process::CommandExt},
+            time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+        };
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        struct Directory(std::path::PathBuf);
+        impl Drop for Directory {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        for group_only in [false, true] {
+            let path = std::env::temp_dir().join(format!(
+                "treer-session-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+            let directory = Directory(path);
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--exact",
+                    "process_image::tests::private_session_child",
+                    "--ignored",
+                ])
+                .env_clear()
+                .env("TREER_TEST_SESSION_DIR", &directory.0)
+                .env(
+                    "TREER_TEST_SESSION_GROUP_ONLY",
+                    if group_only { "1" } else { "0" },
+                )
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            if group_only {
+                command.process_group(0);
+            }
+            let mut child = Child(command.spawn().unwrap());
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !directory.0.join("ready").exists() {
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "session child exited early"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "session child did not become ready"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let image = ProcessImage::capture(child.0.id()).unwrap();
+            assert_eq!(image.verify_private_session().is_ok(), !group_only);
+            std::fs::write(directory.0.join("release"), b"release").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.0.try_wait().unwrap() {
+                    assert!(status.success(), "session child failed");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "session child did not exit");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            assert!(
+                image.verify_private_session().is_err(),
+                "exited identity refused"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore = "isolated process, invoked by private_session_is_verified_on_an_owned_process_not_a_group_only"]
+    fn private_session_child() {
+        use std::time::{Duration, Instant};
+        let directory =
+            std::path::PathBuf::from(std::env::var_os("TREER_TEST_SESSION_DIR").unwrap());
+        let group_only = std::env::var("TREER_TEST_SESSION_GROUP_ONLY").unwrap() == "1";
+        let before = ProcessImage::capture(std::process::id()).unwrap();
+        assert!(before.verify_private_session().is_err());
+        if group_only {
+            assert!(
+                enter_private_session().is_err(),
+                "no fallback for a group leader"
+            );
+            assert!(before.verify_private_session().is_err());
+        } else {
+            enter_private_session().unwrap();
+            before.verify_private_session().unwrap();
+            assert!(
+                enter_private_session().is_err(),
+                "second detach fails closed"
+            );
+            before.verify_private_session().unwrap();
+        }
+        std::fs::write(directory.join("ready"), b"ready").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !directory.join("release").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "parent did not release session fixture"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
 
     #[test]
     fn self_identity_uses_a_real_opened_image_and_rejects_invalid_pids() {
