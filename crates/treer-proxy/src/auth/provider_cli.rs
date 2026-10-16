@@ -279,13 +279,23 @@ impl AuthStore {
         scope: &ProviderCliScope<'_>,
     ) -> Result<usize, AuthFailure> {
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let changed = self.reconcile_stale_in(&mut transaction, scope).await?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        Ok(changed)
+    }
+
+    async fn reconcile_stale_in(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        scope: &ProviderCliScope<'_>,
+    ) -> Result<usize, AuthFailure> {
         let rows = sqlx::query(&format!(
             "UPDATE provider_cli_operations SET status='unknown', error_code='controller_unreachable', finished_at=CURRENT_TIMESTAMP WHERE workspace_id=$1 AND server_id=$2 AND status IN ('queued','running') AND COALESCE(reported_at, dispatched_at, created_at) < CURRENT_TIMESTAMP - make_interval(secs => $3) RETURNING {OPERATION_COLUMNS}"
         ))
         .bind(scope.workspace_id)
         .bind(scope.server_id)
         .bind(PROVIDER_CLI_CONTROLLER_GRACE_SECONDS as f64)
-        .fetch_all(&mut *transaction)
+        .fetch_all(&mut **transaction)
         .await
         .map_err(AuthFailure::database)?;
         for row in &rows {
@@ -295,15 +305,9 @@ impl AuthStore {
             payload["status"] = Value::String("unknown".into());
             payload["error_code"] = Value::String("controller_unreachable".into());
             payload["argv_hash"] = record.argv_hash.map(Value::String).unwrap_or(Value::Null);
-            self.provider_cli_audit(
-                &mut transaction,
-                scope,
-                "provider_cli.install.finished",
-                payload,
-            )
-            .await?;
+            self.provider_cli_audit(transaction, scope, "provider_cli.install.finished", payload)
+                .await?;
         }
-        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(rows.len())
     }
 
@@ -318,9 +322,10 @@ impl AuthStore {
         if !token_shape_ok(confirmation_token) {
             return Err(invalid_token());
         }
-        // A stale active row must not hold the slot forever (no poll required).
-        self.provider_cli_reconcile_stale(scope).await?;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        // A stale active row must not hold the slot forever (no poll required):
+        // reconcile in this same transaction, before the busy check.
+        self.reconcile_stale_in(&mut transaction, scope).await?;
         let busy: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM provider_cli_operations WHERE workspace_id=$1 AND server_id=$2 AND status IN ('queued','running'))")
             .bind(scope.workspace_id)
             .bind(scope.server_id)
