@@ -109,7 +109,7 @@ struct RegionWithPath {
 /// region to agree with that name AND compare its kernel-reported vnode below.
 /// Unusual address layouts, missing paths, protected processes or truncated ABI
 /// output fail closed rather than substituting a disk filename for this proof.
-pub(super) fn mapped_image_identity(pid: u32, path: &std::path::Path) -> io::Result<(u64, u64)> {
+pub(super) fn mapped_image_identity(pid: u32, path: &std::path::Path) -> io::Result<(u32, u64)> {
     let mut address = 0;
     for _ in 0..256 {
         // SAFETY: all fields are integer/char arrays, zero is valid; this exact
@@ -156,7 +156,7 @@ pub(super) fn mapped_image_identity(pid: u32, path: &std::path::Path) -> io::Res
         {
             return Err(invalid());
         }
-        return Ok((u64::from(stat.vst_dev), stat.vst_ino));
+        return Ok((stat.vst_dev, stat.vst_ino));
     }
     Err(invalid())
 }

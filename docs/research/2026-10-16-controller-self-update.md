@@ -148,7 +148,10 @@ Any eventual restore must exclude all store writers (including cached state
 which a live Controller could later flush), or fail explicitly without writing.
 
 Unix live observations bind the UID/PID to the same socket used for Host Sync.
-Linux uses boot ID/start ticks and the opened `/proc/PID/exe` inode. On macOS,
+Linux uses boot ID/start ticks and the opened `/proc/PID/exe` inode. Direct-child
+enumeration requires the kernel's `CONFIG_PROC_CHILDREN` support; without its
+per-thread `children` files, the running Controller cannot be proven and update
+fails closed. On macOS,
 `proc_pidpath` alone is insufficient: after replacement its saved name can open
 the new disk file while the old process remains running. Compare the first
 file-backed executable region's kernel vnode identity, creation time, and checked

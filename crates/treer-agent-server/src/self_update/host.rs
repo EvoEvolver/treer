@@ -56,6 +56,9 @@ impl Observation {
             .verify_current()
             .map_err(|_| anyhow::anyhow!("update_host_identity_changed"))?;
         let snapshot = HostSnapshot::capture(&response, before, workspace, server)?;
+        if *events.disconnected.borrow() {
+            bail!("update_host_disconnected");
+        }
         Ok(Self {
             client,
             events,

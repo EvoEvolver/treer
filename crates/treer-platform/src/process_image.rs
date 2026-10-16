@@ -65,7 +65,9 @@ impl ProcessImage {
             .into();
             let metadata = image.metadata()?;
             if macos::image_path(pid)? != path
-                || (metadata.dev(), metadata.ino()) != mapped_identity
+                // Darwin dev_t is 32 bits; MetadataExt may sign-extend it to
+                // u64, while libproc's vnode stat exposes the unsigned bits.
+                || (metadata.dev() as u32, metadata.ino()) != mapped_identity
                 || macos::mapped_image_identity(pid, &path)? != mapped_identity
             {
                 return Err(invalid());
