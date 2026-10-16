@@ -96,7 +96,12 @@ confirmation; native Windows update is explicitly unsupported by that script.
 Machine file-transfer coverage includes a bounded multi-chunk CLI round trip,
 checksum rejection without publication, destination preservation/explicit force,
 Controller caller/path/workspace binding, expiry/disconnect cleanup and a real
-subprocess exiting without destructors followed by journal recovery. Platform
+subprocess exiting without destructors followed by journal recovery. Controller
+regressions also cover rejected reserved uploads followed by restart, legacy
+reserved-namespace intents mixed with valid staging, stage/journal write failures,
+and refusal to discard other malformed or unsafe recovery records. Reserved
+intents are classified without filesystem access; recovery must never delete
+private-state files even if their names resemble transfer staging. Platform
 tests exercise hostile portable paths, symlinks/hard links and concurrent
 atomic no-replace publication. Proxy PostgreSQL tests cover separate read/write
 Policy denial and derived caller/body-free audit dispatch. These do not prove
