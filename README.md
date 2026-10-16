@@ -80,6 +80,8 @@ the [operator guide](docs/operator-guide.md).
    console shows. On macOS and Linux the installer is
    `curl -fsSL 'https://proxy.canary.treer.ai/install.sh' | sh`; the console
    also shows the Windows PowerShell form and the single-use enrollment command.
+   Windows requires an account in the Administrators group; other accounts are
+   refused with a clear error instead of a partial install.
 3. Install the [Agent launcher](launchers/agent/README.md#create-an-agent) on that
    machine with `treer-agent-server launcher --node /absolute/node install`
    (Node.js 22+), then choose **+ → Add agent**, pick the machine, and pick a
