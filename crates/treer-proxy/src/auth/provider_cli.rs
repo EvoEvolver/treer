@@ -305,8 +305,19 @@ impl AuthStore {
             payload["status"] = Value::String("unknown".into());
             payload["error_code"] = Value::String("controller_unreachable".into());
             payload["argv_hash"] = record.argv_hash.map(Value::String).unwrap_or(Value::Null);
-            self.provider_cli_audit(transaction, scope, "provider_cli.install.finished", payload)
-                .await?;
+            // The row may belong to another user: the control plane, not the
+            // requester, is the actor of this reconciliation.
+            payload["created_by"] = Value::String(record.created_by.clone());
+            payload["reconciled_during_request_by"] = Value::String(scope.user_id.to_owned());
+            self.provider_cli_audit_as(
+                transaction,
+                scope.workspace_id,
+                scope.server_id,
+                ("system", None),
+                "provider_cli.install.finished",
+                payload,
+            )
+            .await?;
         }
         Ok(rows.len())
     }
@@ -539,9 +550,29 @@ impl AuthStore {
         action: &str,
         payload: Value,
     ) -> Result<(), AuthFailure> {
+        self.provider_cli_audit_as(
+            transaction,
+            scope.workspace_id,
+            scope.server_id,
+            ("user", Some(scope.user_id)),
+            action,
+            payload,
+        )
+        .await
+    }
+
+    async fn provider_cli_audit_as(
+        &self,
+        transaction: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        workspace_id: &str,
+        server_id: &str,
+        (actor_kind, actor_id): (&str, Option<&str>),
+        action: &str,
+        payload: Value,
+    ) -> Result<(), AuthFailure> {
         let organization_id: String =
             sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE workspace_id = $1")
-                .bind(scope.workspace_id)
+                .bind(workspace_id)
                 .fetch_one(&mut **transaction)
                 .await
                 .map_err(AuthFailure::database)?;
@@ -549,13 +580,13 @@ impl AuthStore {
             transaction,
             NewAuditEvent {
                 organization_id: &organization_id,
-                workspace_id: Some(scope.workspace_id),
-                actor_kind: "user",
-                actor_id: Some(scope.user_id),
+                workspace_id: Some(workspace_id),
+                actor_kind,
+                actor_id,
                 source: "runtime",
                 action,
                 resource_kind: "machine",
-                resource_id: scope.server_id,
+                resource_id: server_id,
                 resource_name: None,
                 payload,
             },
