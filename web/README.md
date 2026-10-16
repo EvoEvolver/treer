@@ -397,3 +397,16 @@ operator actions. Organization/workspace Audit remains scoped to its authorized
 members. This UI change alone does not restrict a previous Proxy's admin APIs;
 server-side access and retention guarantees require the corresponding Core
 change and deployment.
+
+Platform traffic uses `/api/admin/traffic?hours=6|24|168|720`, authenticated
+with the separate platform-admin cookie session. It charts the combined
+database-recorded usage of **all organizations**, using the same UTC hourly/daily
+windows and byte/frame semantics as workspace Audit. It requests no individual
+organization, machine, Agent or route inventories. The view refreshes every
+10 seconds while open; refreshes are not concurrent and stop on logout. Current
+hours/edge days are partial, database flushes can lag by about 10 seconds, and
+unrecorded windows are shown as zero without asserting that no traffic occurred.
+Direct traffic is machine-reported and does not contribute frame counts.
+An older Proxy shows an explicit unsupported notice; errors clear stale totals
+and offer retry, without displaying server response bodies or falling back to
+private inventories. No new dependencies or build changes are required.

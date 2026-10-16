@@ -15,7 +15,7 @@ const DAY = 24 * HOUR
 
 // Core includes the current, possibly incomplete hour. Longer views group
 // these same records into UTC days; the first/last day may be partial.
-export function trafficBuckets(records: MachineTrafficRecord[], hours: TrafficHours, now: number): TrafficBucket[] {
+export function trafficBuckets(records: readonly Pick<MachineTrafficRecord, "window_start" | "traffic_class" | "payload_bytes" | "payload_frames" | "billable_bytes">[], hours: TrafficHours, now: number): TrafficBucket[] {
   const end = Math.floor(now / HOUR) * HOUR
   const cutoff = end - (hours - 1) * HOUR
   const step = hours <= 24 ? HOUR : DAY

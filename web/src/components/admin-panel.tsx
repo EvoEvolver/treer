@@ -1,3 +1,4 @@
+import { AdminTraffic } from "@/components/admin-traffic"
 import { EmptyState } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -34,12 +35,14 @@ export function AdminPanel() {
   const [dashboard, setDashboard] = useState<AdminDashboard | null>(preview ? EMPTY_ADMIN_DASHBOARD : null)
   const [invitationsOpen, setInvitationsOpen] = useState(false)
   const [inviteUrl, setInviteUrl] = useState("")
+  const [refreshRevision, setRefreshRevision] = useState(0)
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   const loadDashboard = useCallback(async () => {
     if (preview) return
-    setDashboard(await api<AdminDashboard>("/api/admin/dashboard"))
+    setDashboard(await api<AdminDashboard>("/api/admin/dashboard", { cache: "no-store" }))
+    setRefreshRevision((value) => value + 1)
   }, [preview])
 
   useEffect(() => {
@@ -122,6 +125,7 @@ export function AdminPanel() {
         <AdminCountCard label={t("wsettings.machines")} icon={<Server className="size-3.5" />} value={dashboard?.machine_count} />
         <AdminCountCard label={t("admin.agents")} icon={<TerminalSquare className="size-3.5" />} value={dashboard?.agent_count} />
       </div>
+      <AdminTraffic preview={preview} refreshRevision={refreshRevision} />
       <ControlPlaneUpdate preview={preview} onError={setError} />
       <section className="mt-12" data-tour="admin-invite">
         <h2 className="text-sm font-semibold">{t("admin.user_invitations")}</h2>
