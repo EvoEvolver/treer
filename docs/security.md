@@ -175,6 +175,22 @@ renewal cannot overwrite a different connection's owner record. Lease revision
 checks also prevent cleanup of an old socket from releasing its replacement's
 ownership. A missing lease alone is not evidence of another Controller.
 
+Enrollment binds a machine ID to one installation identity. A live machine
+cannot be taken over by another installation, and other workspaces never
+claim its ID. After the machine is deleted in the Console (its token and Agent
+credentials revoked), a different installation enrolling with a valid
+single-use key for that workspace receives a new machine ID; the revoked row
+keeps its binding, so Policy rules, history and Agents of the deleted machine
+are not inherited. The same installation reactivates its own row. Every
+rewrite of an existing row holds its row lock and restates eligibility in a
+conditional update, so concurrent claims never overwrite each other. Revoked
+Agent credentials stay revoked for the old and the new machine ID. The
+`machine.enroll` audit event records `replaced_revoked_machine` and the
+previous machine ID, never installation identities or paths. On the
+Controller, adopting the new ID is a journaled local transaction that keeps
+private backups and never reads the previous machine's startup store or
+private state.
+
 ## Process environment
 
 Host/Controller do not inherit a caller's Treer workload identity or Agent UI

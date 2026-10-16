@@ -1911,3 +1911,356 @@ fn service_table_includes_workspace_and_listen() {
     let ambiguous = format_ambiguous_services("Mac.home.com", &[config]);
     assert!(ambiguous.contains("pass --workspace <workspace_id>"));
 }
+
+#[test]
+fn machine_replacement_is_journaled_recoverable_and_never_adopts_old_state() {
+    let directory = env::temp_dir().join(format!("treer-replace-{}", Uuid::new_v4().simple()));
+    let config_dir = directory.join("config");
+    let state_dir = directory.join("state");
+    fs::create_dir_all(&config_dir).unwrap();
+    fs::create_dir_all(&state_dir).unwrap();
+    let workspace = format!("ws-replace-{}", Uuid::new_v4().simple());
+    let previous_id = "srv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let next_id = "srv_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let config = |server_id: &str, token: &str| ServiceConfig {
+        proxy: "http://127.0.0.1:9/".into(),
+        workspace: workspace.clone(),
+        server_id: server_id.into(),
+        machine_token: token.into(),
+        operator_credential: "synthetic-operator".into(),
+        root: directory.clone(),
+        listen: "127.0.0.1:9".into(),
+        host_socket: directory.join(format!("{server_id}.sock")),
+        install_hostname: "fixture".into(),
+        network_mode: None,
+        service_manager: ServiceManager::Foreground,
+        service_fallback_reason: None,
+    };
+    let previous = config(previous_id, "old-token");
+    let previous_paths =
+        ServicePaths::in_directories(&config_dir, state_dir.clone(), previous_id).unwrap();
+    previous.save(&previous_paths.config).unwrap();
+    save_json(
+        &HostDaemonConfig {
+            socket_path: previous.host_socket.clone(),
+            controller_path: previous_paths.executable.clone(),
+            controller_config_path: previous_paths.config.clone(),
+            root: directory.clone(),
+        },
+        &previous_paths.host_config,
+    )
+    .unwrap();
+    // Old-machine state that must never be touched or adopted.
+    let old_startup = state_dir.join(format!("{previous_id}-agent-startup.json"));
+    fs::write(&old_startup, b"{\"version\":1,\"entries\":[]}").unwrap();
+    let next = config(next_id, "new-token");
+    let next_paths = ServicePaths::in_directories(&config_dir, state_dir.clone(), next_id).unwrap();
+    let lock = lock_machine_registration_in(&config_dir, &workspace).unwrap();
+
+    // Invalid inputs change nothing.
+    let mut bad = next.clone();
+    bad.server_id = "srv_short".into();
+    assert!(replacement_transaction(
+        &lock,
+        &config_dir,
+        state_dir.clone(),
+        &previous,
+        &bad,
+        |_, _| Ok(())
+    )
+    .is_err());
+    let mut foreign = next.clone();
+    foreign.workspace = "other".into();
+    assert!(replacement_transaction(
+        &lock,
+        &config_dir,
+        state_dir.clone(),
+        &previous,
+        &foreign,
+        |_, _| Ok(())
+    )
+    .is_err());
+    assert!(ServiceConfig::load(&previous_paths.config).is_ok());
+    assert!(!next_paths.config.exists());
+    assert!(!replacement_journal_path(&config_dir, &workspace).exists());
+
+    // A failing stop of the previous machine leaves a finishable state: journal,
+    // backups, both configurations; the previous registration is intact.
+    let error = replacement_transaction(
+        &lock,
+        &config_dir,
+        state_dir.clone(),
+        &previous,
+        &next,
+        |_, _| bail!("host still running"),
+    )
+    .unwrap_err();
+    assert!(error.to_string().contains("repair"), "{error:#}");
+    let journal = load_replacement_journal(&config_dir, &workspace)
+        .unwrap()
+        .unwrap();
+    assert_eq!(journal.previous_server_id, previous_id);
+    assert_eq!(journal.server_id, next_id);
+    assert!(previous_paths.config.exists() && previous_paths.host_config.exists());
+    assert!(next_paths.config.exists() && next_paths.host_config.exists());
+    let backups: Vec<_> = fs::read_dir(&config_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains(".bak-"))
+        .collect();
+    assert_eq!(backups.len(), 2, "{backups:?}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for name in &backups {
+            let mode = fs::metadata(config_dir.join(name))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600, "{name}");
+        }
+    }
+    // A second attempt refuses to start another replacement over the journal
+    // (exclusive creation, so two connects cannot race the switch).
+    assert!(replacement_transaction(
+        &lock,
+        &config_dir,
+        state_dir.clone(),
+        &previous,
+        &next,
+        |_, _| Ok(())
+    )
+    .unwrap_err()
+    .to_string()
+    .contains("unfinished machine replacement"));
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(replacement_journal_path(&config_dir, &workspace))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600);
+    }
+
+    // Barrier: while this run (A) holds the lock with its journal published and
+    // 0, 1 or 2 new configuration files in place, a concurrent connect/repair
+    // in ANOTHER PROCESS (B) is refused as busy and cannot run recovery:
+    // nothing is removed or uninstalled. Windows mutexes are recursive for the
+    // owning thread, so only a separate process proves the exclusion.
+    for present in [2usize, 1, 0] {
+        if present == 1 {
+            fs::remove_file(&next_paths.host_config).unwrap();
+        }
+        if present == 0 {
+            fs::remove_file(&next_paths.config).unwrap();
+        }
+        assert_eq!(
+            lock_contender(&config_dir, &workspace, "try"),
+            "BUSY",
+            "another process must not acquire the lock while A holds it ({present} new files)"
+        );
+        assert!(replacement_journal_path(&config_dir, &workspace).exists());
+        assert!(previous_paths.config.exists() && previous_paths.host_config.exists());
+    }
+    #[cfg(unix)]
+    assert!(
+        treer_platform::file_is_close_on_exec(&lock._file).unwrap(),
+        "spawned services must not inherit the lock"
+    );
+    // Restore both new files (the transaction above had written them).
+    next.save(&next_paths.config).unwrap();
+    save_json(
+        &HostDaemonConfig {
+            socket_path: next.host_socket.clone(),
+            controller_path: next_paths.executable.clone(),
+            controller_config_path: next_paths.config.clone(),
+            root: directory.clone(),
+        },
+        &next_paths.host_config,
+    )
+    .unwrap();
+    drop(lock);
+    // A crashed holder: a child process takes the lock and exits without
+    // releasing it; the OS releases it, and only then does this process get it.
+    let held = config_dir.join("held");
+    let release = config_dir.join("release");
+    // The holder is owned by a guard: a failing assertion below kills it
+    // instead of leaving a fixture process waiting for the release marker.
+    let mut holder = ChildGuard(Some(
+        lock_contender_command(&config_dir, &workspace, "hold")
+            .spawn()
+            .unwrap(),
+    ));
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !held.exists() {
+        assert!(Instant::now() < deadline, "lock holder child did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let busy = lock_machine_registration_in(&config_dir, &workspace)
+        .err()
+        .expect("the lock held by another process must be busy here");
+    assert!(busy.to_string().contains("in progress"), "{busy:#}");
+    fs::write(&release, b"").unwrap();
+    assert!(holder.0.take().unwrap().wait().unwrap().success());
+    let lock = lock_machine_registration_in(&config_dir, &workspace)
+        .expect("the OS released the lock when the holder exited");
+    assert!(
+        lock_machine_registration_in(&config_dir, "other-workspace").is_ok(),
+        "workspaces lock independently"
+    );
+
+    // Finishing (connect/repair) stops the previous machine once, removes its
+    // files and the journal; the new configuration is the only registration.
+    let stopped = std::cell::RefCell::new(Vec::new());
+    finish_machine_replacement_in(
+        &lock,
+        &config_dir,
+        state_dir.clone(),
+        &workspace,
+        |_, config| {
+            stopped.borrow_mut().push(config.server_id.clone());
+            Ok(())
+        },
+    )
+    .unwrap();
+    assert_eq!(stopped.borrow().as_slice(), [previous_id.to_string()]);
+    assert!(!previous_paths.config.exists() && !previous_paths.host_config.exists());
+    assert!(!replacement_journal_path(&config_dir, &workspace).exists());
+    let adopted = ServiceConfig::load(&next_paths.config).unwrap();
+    assert_eq!(adopted.server_id, next_id);
+    assert_eq!(adopted.machine_token, "new-token");
+    assert_eq!(adopted.operator_credential, "synthetic-operator");
+    let host: HostDaemonConfig =
+        serde_json::from_slice(&fs::read(&next_paths.host_config).unwrap()).unwrap();
+    assert_eq!(host.socket_path, next.host_socket);
+    assert_eq!(host.controller_config_path, next_paths.config);
+    assert!(
+        old_startup.exists(),
+        "the old machine's startup store is left alone"
+    );
+    assert!(!state_dir
+        .join(format!("{next_id}-agent-startup.json"))
+        .exists());
+    // Finishing again is a no-op; a journal without new files is discarded.
+    finish_machine_replacement_in(&lock, &config_dir, state_dir.clone(), &workspace, |_, _| {
+        bail!("must not be called")
+    })
+    .unwrap();
+    save_json(
+        &MachineReplacementJournal {
+            workspace: workspace.clone(),
+            previous_server_id: next_id.into(),
+            server_id: "srv_cccccccccccccccccccccccccccccccc".into(),
+            created_at: "now".into(),
+        },
+        &replacement_journal_path(&config_dir, &workspace),
+    )
+    .unwrap();
+    finish_machine_replacement_in(&lock, &config_dir, state_dir, &workspace, |_, _| {
+        bail!("nothing was switched, nothing to stop")
+    })
+    .unwrap();
+    assert!(!replacement_journal_path(&config_dir, &workspace).exists());
+    assert!(ServiceConfig::load(&next_paths.config).is_ok());
+    // A journal that never became valid (crash while writing it, before any
+    // other step) is discarded and the registration is untouched.
+    fs::write(
+        replacement_journal_path(&config_dir, &workspace),
+        b"{\"work",
+    )
+    .unwrap();
+    assert!(load_replacement_journal(&config_dir, &workspace)
+        .unwrap()
+        .is_none());
+    assert!(!replacement_journal_path(&config_dir, &workspace).exists());
+    assert!(ServiceConfig::load(&next_paths.config).is_ok());
+    fs::remove_dir_all(directory).unwrap();
+}
+
+/// Subprocess side of the registration-lock regressions. "try" reports whether
+/// the lock could be taken; "hold" takes it, signals, waits for the release
+/// marker and exits WITHOUT releasing so the OS has to.
+#[test]
+fn machine_registration_lock_contender() {
+    let Some(directory) = env::var_os("TREER_TEST_REGISTRATION_LOCK_DIR") else {
+        return;
+    };
+    let directory = PathBuf::from(directory);
+    let workspace = env::var("TREER_TEST_REGISTRATION_LOCK_WORKSPACE").unwrap();
+    match env::var("TREER_TEST_REGISTRATION_LOCK_MODE")
+        .unwrap()
+        .as_str()
+    {
+        "try" => match lock_machine_registration_in(&directory, &workspace) {
+            Ok(_lock) => println!("ACQUIRED"),
+            Err(error) if error.to_string().contains("in progress") => println!("BUSY"),
+            Err(error) => println!("ERROR {error:#}"),
+        },
+        "hold" => {
+            let lock = lock_machine_registration_in(&directory, &workspace).unwrap();
+            fs::write(directory.join("held"), b"").unwrap();
+            let deadline = Instant::now() + Duration::from_secs(60);
+            while !directory.join("release").exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            std::mem::forget(lock);
+            std::process::exit(0);
+        }
+        other => panic!("unknown lock contender mode {other}"),
+    }
+}
+
+/// Kills a still-running fixture child when the owning test unwinds.
+struct ChildGuard(Option<std::process::Child>);
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.0.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
+}
+
+/// The contender is this test binary, re-invoked with a clean environment
+/// (only the fixture variables), no stdin and no inherited stdout noise.
+fn lock_contender_command(config_dir: &Path, workspace: &str, mode: &str) -> Command {
+    let mut command = Command::new(env::current_exe().unwrap());
+    command
+        .args([
+            "--exact",
+            "service::tests::machine_registration_lock_contender",
+            "--nocapture",
+        ])
+        .env_clear()
+        .env("TREER_TEST_REGISTRATION_LOCK_DIR", config_dir)
+        // Windows needs its system baseline to start any process at all.
+        .envs(
+            ["SystemRoot", "SYSTEMDRIVE", "TEMP", "TMP"]
+                .into_iter()
+                .filter(|_| cfg!(windows))
+                .filter_map(|name| env::var_os(name).map(|value| (name, value))),
+        )
+        .env("TREER_TEST_REGISTRATION_LOCK_WORKSPACE", workspace)
+        .env("TREER_TEST_REGISTRATION_LOCK_MODE", mode)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+fn lock_contender(config_dir: &Path, workspace: &str, mode: &str) -> String {
+    let output = lock_contender_command(config_dir, workspace, mode)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "lock contender failed: {output:?}");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for token in ["BUSY", "ACQUIRED"] {
+        if stdout.lines().any(|line| line.trim() == token) {
+            return token.to_string();
+        }
+    }
+    panic!("lock contender produced no verdict: {stdout}");
+}

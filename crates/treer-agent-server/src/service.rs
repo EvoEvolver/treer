@@ -836,6 +836,8 @@ pub async fn repair_and_wait(
     mode: ServiceMode,
     network_mode: NetworkMode,
 ) -> Result<ServiceActivation> {
+    let lock = lock_machine_registration(workspace)?;
+    finish_machine_replacement(&lock, workspace)?;
     let (_, mut config) = installed_service(workspace)?;
     let selection = preflight_registration(workspace, mode)?;
     selection.announce();
@@ -843,6 +845,7 @@ pub async fn repair_and_wait(
     config.service_fallback_reason = selection.fallback_reason;
     config.network_mode = Some(network_mode);
     let activation = refresh_registration_and_wait(config).await?;
+    drop(lock);
     println!("treer: service registration repaired without a new enrollment key");
     Ok(activation)
 }
@@ -1613,8 +1616,10 @@ pub(crate) struct ServicePaths {
 
 impl ServicePaths {
     fn new(server_id: &str) -> Result<Self> {
-        let config_dir = config_dir()?;
-        let state_dir = state_dir()?;
+        Self::in_directories(&config_dir()?, state_dir()?, server_id)
+    }
+
+    fn in_directories(config_dir: &Path, state_dir: PathBuf, server_id: &str) -> Result<Self> {
         let key = component_key(server_id);
         let executable = env::current_exe()
             .context("failed to find the treer-agent-server executable")?
@@ -1643,20 +1648,456 @@ fn installed_service(workspace: &str) -> Result<(ServicePaths, ServiceConfig)> {
 }
 
 fn find_installed_service(workspace: &str) -> Result<Option<(ServicePaths, ServiceConfig)>> {
-    let mut matched = None;
-    for (paths, config) in installed_services()? {
-        if config.workspace != workspace {
-            continue;
+    let mut matches: Vec<(ServicePaths, ServiceConfig)> = installed_services()?
+        .into_iter()
+        .filter(|(_, config)| config.workspace == workspace)
+        .collect();
+    if matches.len() > 1 {
+        // An interrupted machine replacement leaves the previous and the new
+        // configuration side by side; the journal names the one to keep.
+        if let Some(journal) = load_replacement_journal(&config_dir()?, workspace)? {
+            matches.retain(|(_, config)| config.server_id == journal.server_id);
         }
-        if matched.is_some() {
+    }
+    if matches.len() > 1 {
+        bail!(
+            "multiple agent-server services for workspace {workspace} are installed on {}",
+            current_hostname()?
+        );
+    }
+    Ok(matches.pop())
+}
+
+/// Durable record of a machine replacement in progress: the Proxy minted a
+/// new machine ID for this installation after the previous machine was
+/// deleted, and the local registration is being switched to it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct MachineReplacementJournal {
+    workspace: String,
+    previous_server_id: String,
+    server_id: String,
+    created_at: String,
+}
+
+fn replacement_journal_path(config_dir: &Path, workspace: &str) -> PathBuf {
+    config_dir.join(format!(
+        "{}-machine-replacement.json",
+        component_key(workspace)
+    ))
+}
+
+fn load_replacement_journal(
+    config_dir: &Path,
+    workspace: &str,
+) -> Result<Option<MachineReplacementJournal>> {
+    let path = replacement_journal_path(config_dir, workspace);
+    match fs::read(&path) {
+        Ok(bytes) => {
+            // The journal is fully written and synced before any other step,
+            // so an unparsable journal means nothing was switched: discard it.
+            let Ok(journal) = serde_json::from_slice::<MachineReplacementJournal>(&bytes) else {
+                eprintln!(
+                    "treer: discarding an incomplete machine replacement journal {}",
+                    path.display()
+                );
+                remove_if_exists(&path)?;
+                return Ok(None);
+            };
+            if journal.workspace != workspace {
+                bail!(
+                    "machine replacement journal {} names another workspace",
+                    path.display()
+                );
+            }
+            validate_proxy_server_id(&journal.server_id)?;
+            validate_proxy_server_id(&journal.previous_server_id)?;
+            Ok(Some(journal))
+        }
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+/// Proxy machine IDs: `srv_` followed by 32 hex digits. The Controller never
+/// adopts any other shape from an enrollment response.
+pub fn validate_proxy_server_id(value: &str) -> Result<()> {
+    if value.len() != 36
+        || !value.starts_with("srv_")
+        || !value[4..].bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        bail!("Proxy returned an invalid machine ID");
+    }
+    Ok(())
+}
+
+/// Publish `path` exclusively (it must not exist) with complete, synced,
+/// private content: the bytes go to a sibling temporary file first and are
+/// then hard-linked into place, so no reader ever observes a partial file and
+/// a concurrent publisher fails with `AlreadyExists`, returned unchanged.
+fn create_private_file_exclusively(path: &Path, bytes: &[u8]) -> Result<()> {
+    let parent = path
+        .parent()
+        .context("configuration path has no parent directory")?;
+    fs::create_dir_all(parent).with_context(|| format!("failed to create {}", parent.display()))?;
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("configuration path has no file name")?;
+    let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4().simple()));
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let result = (|| -> Result<()> {
+        let mut file = options
+            .open(&temporary)
+            .with_context(|| format!("failed to create {}", temporary.display()))?;
+        #[cfg(windows)]
+        treer_platform::secure_file(&temporary)?;
+        use std::io::Write;
+        file.write_all(bytes)
+            .with_context(|| format!("failed to write {}", temporary.display()))?;
+        file.sync_all()
+            .with_context(|| format!("failed to sync {}", temporary.display()))?;
+        drop(file);
+        match fs::hard_link(&temporary, path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => Err(error.into()),
+            Err(error) => {
+                Err(error).with_context(|| format!("failed to publish {}", path.display()))
+            }
+        }
+    })();
+    let _ = fs::remove_file(&temporary);
+    result
+}
+
+/// Copy a configuration file to a sibling `.bak-<timestamp>[-n]` that never
+/// overwrites an existing backup and stays private.
+fn backup_config_file(path: &Path) -> Result<Option<PathBuf>> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(error).with_context(|| format!("failed to read {}", path.display()))
+        }
+    };
+    let stamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default();
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .context("configuration path has no file name")?;
+    for attempt in 0..100u32 {
+        let suffix = if attempt == 0 {
+            format!("{file_name}.bak-{stamp}")
+        } else {
+            format!("{file_name}.bak-{stamp}-{attempt}")
+        };
+        let backup = path.with_file_name(suffix);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&backup) {
+            Ok(mut file) => {
+                #[cfg(windows)]
+                treer_platform::secure_file(&backup)?;
+                use std::io::Write;
+                file.write_all(&bytes)
+                    .with_context(|| format!("failed to write {}", backup.display()))?;
+                file.sync_all()
+                    .with_context(|| format!("failed to sync {}", backup.display()))?;
+                return Ok(Some(backup));
+            }
+            Err(error) if error.kind() == ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("failed to create {}", backup.display()))
+            }
+        }
+    }
+    bail!(
+        "too many configuration backups exist for {}",
+        path.display()
+    );
+}
+
+/// Cross-process, per-workspace exclusion around enrollment recovery, machine
+/// selection, the claim and the configuration replacement. Held by `connect`
+/// and `service repair` until the switch and registration are complete, so a
+/// concurrent run can never mistake an active replacement for crash residue.
+/// Unix: an advisory lock on a stable, never-unlinked 0600 file in the config
+/// directory (CLOEXEC, released by the OS when the process ends). Windows:
+/// the named per-user mutex `LocalLock`.
+pub struct RegistrationLock {
+    workspace: String,
+    #[cfg(unix)]
+    _file: fs::File,
+    #[cfg(windows)]
+    _lock: treer_platform::LocalLock,
+}
+
+impl RegistrationLock {
+    fn check(&self, workspace: &str) -> Result<()> {
+        if self.workspace != workspace {
+            bail!("registration lock belongs to another workspace");
+        }
+        Ok(())
+    }
+}
+
+fn registration_busy(workspace: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "another connect or repair for workspace {workspace} is in progress; retry after it finishes"
+    )
+}
+
+pub fn lock_machine_registration(workspace: &str) -> Result<RegistrationLock> {
+    validate_workspace(workspace)?;
+    lock_machine_registration_in(&config_dir()?, workspace)
+}
+
+fn lock_machine_registration_in(config_dir: &Path, workspace: &str) -> Result<RegistrationLock> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::create_dir_all(config_dir)
+            .with_context(|| format!("failed to create {}", config_dir.display()))?;
+        let path = config_dir.join(format!(
+            "{}-machine-registration.lock",
+            component_key(workspace)
+        ));
+        // std opens with O_CLOEXEC: spawned Hosts/Controllers never inherit it.
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
+        let locked = treer_platform::try_lock_file_exclusive(&file)
+            .with_context(|| format!("failed to lock {}", path.display()))?;
+        if !locked {
+            return Err(registration_busy(workspace));
+        }
+        Ok(RegistrationLock {
+            workspace: workspace.to_string(),
+            _file: file,
+        })
+    }
+    #[cfg(windows)]
+    {
+        let _ = config_dir;
+        let lock = treer_platform::LocalLock::acquire(&format!(
+            "machine-registration-{}",
+            component_key(workspace)
+        ))
+        .map_err(|error| {
+            if error.kind() == ErrorKind::TimedOut {
+                registration_busy(workspace)
+            } else {
+                anyhow::Error::new(error)
+            }
+        })?;
+        Ok(RegistrationLock {
+            workspace: workspace.to_string(),
+            _lock: lock,
+        })
+    }
+}
+
+/// Switch this installation's registration from `previous` to `next` (a new
+/// machine ID the Proxy minted for it). Steps, each durable before the next:
+/// journal, backups of the previous files, new configuration files, stop and
+/// remove the previous registration, remove the journal, register and start.
+/// The previous machine's state (startup store, private state) is neither
+/// read nor migrated: a deleted machine's Agents never come back.
+pub async fn replace_machine_registration(
+    lock: &RegistrationLock,
+    previous: &ServiceConfig,
+    next: ServiceConfig,
+) -> Result<ServiceActivation> {
+    let config_dir = config_dir()?;
+    replacement_transaction(
+        lock,
+        &config_dir,
+        state_dir()?,
+        previous,
+        &next,
+        platform::uninstall,
+    )?;
+    register(next.clone())?;
+    let (paths, installed) = installed_service(&next.workspace)?;
+    activate_registered_service(&paths, &installed).await
+}
+
+fn replacement_transaction(
+    lock: &RegistrationLock,
+    config_dir: &Path,
+    state_dir: PathBuf,
+    previous: &ServiceConfig,
+    next: &ServiceConfig,
+    uninstall_previous: impl Fn(&ServicePaths, &ServiceConfig) -> Result<()>,
+) -> Result<()> {
+    lock.check(&next.workspace)?;
+    validate_proxy_server_id(&next.server_id)?;
+    if next.workspace != previous.workspace {
+        bail!("machine replacement must stay within the enrolled workspace");
+    }
+    if next.server_id == previous.server_id {
+        bail!("machine replacement requires a new machine ID");
+    }
+    let journal_path = replacement_journal_path(config_dir, &next.workspace);
+    let previous_paths =
+        ServicePaths::in_directories(config_dir, state_dir.clone(), &previous.server_id)?;
+    let next_paths = ServicePaths::in_directories(config_dir, state_dir, &next.server_id)?;
+    let journal = MachineReplacementJournal {
+        workspace: next.workspace.clone(),
+        previous_server_id: previous.server_id.clone(),
+        server_id: next.server_id.clone(),
+        created_at: chrono::Utc::now().to_rfc3339(),
+    };
+    // Exclusive creation: a concurrent connect on the same host sees the
+    // journal and is refused instead of racing the switch.
+    create_private_file_exclusively(
+        &journal_path,
+        &serde_json::to_vec_pretty(&journal).context("failed to encode the replacement journal")?,
+    )
+    .map_err(|error| {
+        if error
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == ErrorKind::AlreadyExists)
+        {
+            anyhow::anyhow!(
+                "an unfinished machine replacement exists for workspace {}; run `treer-agent-server service --workspace {} repair` first",
+                next.workspace,
+                next.workspace
+            )
+        } else {
+            error
+        }
+    })?;
+    for path in [&next_paths.config, &next_paths.host_config] {
+        if path.exists() {
+            remove_if_exists(&journal_path)?;
             bail!(
-                "multiple agent-server services for workspace {workspace} are installed on {}",
-                current_hostname()?
+                "configuration for machine {} already exists at {}",
+                next.server_id,
+                path.display()
             );
         }
-        matched = Some((paths, config));
     }
-    Ok(matched)
+    backup_config_file(&previous_paths.config)?;
+    backup_config_file(&previous_paths.host_config)?;
+    // New files first: from here on an interruption is finished by
+    // `finish_machine_replacement`, which prefers the journal's new machine.
+    next.save(&next_paths.config)?;
+    save_json(
+        &HostDaemonConfig {
+            socket_path: next.host_socket.clone(),
+            controller_path: next_paths.executable.clone(),
+            controller_config_path: next_paths.config.clone(),
+            root: next.root.clone(),
+        },
+        &next_paths.host_config,
+    )?;
+    complete_machine_replacement(
+        config_dir,
+        &previous_paths,
+        &journal_path,
+        uninstall_previous,
+    )
+}
+
+fn complete_machine_replacement(
+    config_dir: &Path,
+    previous_paths: &ServicePaths,
+    journal_path: &Path,
+    uninstall_previous: impl Fn(&ServicePaths, &ServiceConfig) -> Result<()>,
+) -> Result<()> {
+    let _ = config_dir;
+    match ServiceConfig::load(&previous_paths.config) {
+        Ok(previous) => {
+            eprintln!(
+                "treer: stopping and removing the previous machine {} (its Host and any Agents still running on it end now)",
+                previous.server_id
+            );
+            uninstall_previous(previous_paths, &previous).with_context(|| {
+                format!(
+                    "the previous machine {} could not be stopped; rerun `treer-agent-server service --workspace {} repair` once it is stopped",
+                    previous.server_id, previous.workspace
+                )
+            })?;
+            remove_if_exists(&previous_paths.config)?;
+            remove_if_exists(&previous_paths.host_config)?;
+        }
+        Err(error) if previous_paths.config.exists() => return Err(error),
+        Err(_) => {}
+    }
+    remove_if_exists(journal_path)
+}
+
+/// Finish an interrupted machine replacement before any other service work.
+/// Without new configuration files nothing was switched: the journal is
+/// discarded and the previous registration stays authoritative.
+pub fn finish_machine_replacement(lock: &RegistrationLock, workspace: &str) -> Result<()> {
+    validate_workspace(workspace)?;
+    let config_dir = config_dir()?;
+    finish_machine_replacement_in(
+        lock,
+        &config_dir,
+        state_dir()?,
+        workspace,
+        platform::uninstall,
+    )
+}
+
+fn finish_machine_replacement_in(
+    lock: &RegistrationLock,
+    config_dir: &Path,
+    state_dir: PathBuf,
+    workspace: &str,
+    uninstall_previous: impl Fn(&ServicePaths, &ServiceConfig) -> Result<()>,
+) -> Result<()> {
+    lock.check(workspace)?;
+    let Some(journal) = load_replacement_journal(config_dir, workspace)? else {
+        return Ok(());
+    };
+    let journal_path = replacement_journal_path(config_dir, workspace);
+    let next_paths =
+        ServicePaths::in_directories(config_dir, state_dir.clone(), &journal.server_id)?;
+    if !next_paths.config.exists() || !next_paths.host_config.exists() {
+        remove_if_exists(&next_paths.config)?;
+        remove_if_exists(&next_paths.host_config)?;
+        remove_if_exists(&journal_path)?;
+        eprintln!(
+            "treer: discarded an unfinished machine replacement for workspace {workspace}; the previous registration stays in place"
+        );
+        return Ok(());
+    }
+    let previous_paths =
+        ServicePaths::in_directories(config_dir, state_dir, &journal.previous_server_id)?;
+    complete_machine_replacement(
+        config_dir,
+        &previous_paths,
+        &journal_path,
+        uninstall_previous,
+    )?;
+    eprintln!(
+        "treer: finished the machine replacement for workspace {workspace}; machine {} is registered",
+        journal.server_id
+    );
+    Ok(())
 }
 
 fn installed_services() -> Result<Vec<(ServicePaths, ServiceConfig)>> {
