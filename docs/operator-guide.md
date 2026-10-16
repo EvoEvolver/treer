@@ -1101,9 +1101,11 @@ the variable is omitted and attachments stay unavailable; nothing is deleted
 or repaired automatically, because the directories hold the Agents' sent
 attachments. To recover, stop the Controller, back up or move the affected
 `agent-private/<server_id>` tree, then either recreate it under the account
-and elevation the Controller runs with or take ownership and reapply the
-protected DACL (owner and `SYSTEM` plus the service user only), and start the
-Controller again.
+and elevation the Controller runs with, or repair the existing tree in two
+separate steps: set the owner to the Controller's own token user (or its token
+owner), and reapply a protected DACL whose allow entries name only the
+Controller's token user and `SYSTEM` (never the token-owner group), then start
+the Controller again.
 
 Workspace members and managed Agents can also save reusable launch profiles:
 
