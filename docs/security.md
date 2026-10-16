@@ -762,6 +762,7 @@ cookie as described below.
 
 These checks do not apply to arbitrary App ingress traffic: each App remains
 responsible for its own browser CSRF protection as described above.
+
 Workspace ingress login codes are bound to a browser handshake. The ingress
 hostname generates a random verifier with at least 256 bits of entropy; only
 its SHA-256 challenge travels to the Proxy authorization endpoint and is stored

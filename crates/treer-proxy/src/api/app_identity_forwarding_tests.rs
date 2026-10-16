@@ -670,11 +670,16 @@ async fn app_human_identity_workspace_ingress_issues_short_token_but_public_ingr
             .await
             .unwrap();
         let code = auth
-            .create_ingress_auth_code(&ingress, "alice", "/")
+            .create_ingress_auth_code(
+                &ingress,
+                "alice",
+                "/",
+                &auth::ingress_nonce_hash(&"f".repeat(64)),
+            )
             .await
             .unwrap();
         let session = auth
-            .consume_ingress_auth_code(&ingress.hostname, &code)
+            .consume_ingress_auth_code(&ingress.hostname, &code, Some(&"f".repeat(64)))
             .await
             .unwrap();
         let observer = observe(state.clone(), connection, rx);
@@ -741,11 +746,16 @@ async fn app_human_identity_membership_revocation_role_changes_and_workspace_bou
         .await
         .unwrap();
     let code = auth
-        .create_ingress_auth_code(&ingress, "alice", "/")
+        .create_ingress_auth_code(
+            &ingress,
+            "alice",
+            "/",
+            &auth::ingress_nonce_hash(&"f".repeat(64)),
+        )
         .await
         .unwrap();
     let session = auth
-        .consume_ingress_auth_code(&ingress.hostname, &code)
+        .consume_ingress_auth_code(&ingress.hostname, &code, Some(&"f".repeat(64)))
         .await
         .unwrap();
     sqlx::query("DELETE FROM organization_members WHERE user_id='alice'")
