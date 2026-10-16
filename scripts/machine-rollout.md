@@ -93,6 +93,33 @@ independent of the smoke Agent's filesystem cwd (a new empty `smoke` directory
 inside its private rollout job, passed as a path relative to the physical machine
 root as required by the Host).
 
+## Startup-store rollback floor
+
+Before choosing a rollback binary, inspect the selected machine's actual
+`startupStore` file locally as its operator. Never print the full JSON: startup
+entries contain credentials. These examples print only the schema and fence
+count, using an explicit operator-supplied absolute filename:
+
+```sh
+jq '{version, denied_count: ((.denied_agent_ids // []) | length)}' /absolute/private/srv_example-agent-startup.json
+```
+
+```powershell
+$store = Get-Content -LiteralPath 'C:\absolute\private\srv_example-agent-startup.json' -Raw | ConvertFrom-Json
+[pscustomobject]@{ version = $store.version; denied_count = @($store.denied_agent_ids).Count }
+Remove-Variable store
+```
+
+An absent file means no persisted startup intent; a read/parse error is not
+evidence of v1 and must stop rollback planning. Version 2 requires a Controller
+with `agent.reservation-fence.v1`; pin the rollback floor to the exact first
+supporting source SHA in the release receipt, rather than the non-unique crate
+version. No older published release is approved until that receipt is recorded.
+Uninvolved machines continue writing v1. Never strip denied IDs, lower the
+schema version, or restore a pre-cleanup startup backup to bypass this floor:
+late/replayed Creates could start a revoked identity. Old Controllers explicitly
+refuse v2 (`startup_store_error`); use a supporting build or repair forward.
+
 ## Execution and recovery
 
 Machines run sequentially, stopping on the first failure/partial/pending result.

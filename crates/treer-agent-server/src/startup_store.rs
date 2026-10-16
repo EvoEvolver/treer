@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use treer_protocol::AgentStartupSpec;
 use uuid::Uuid;
 
-const STORE_VERSION: u32 = 1;
+const STORE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredAgentStartup {
@@ -38,6 +38,14 @@ fn default_rows() -> u16 {
 struct StoreFile {
     version: u32,
     entries: Vec<StoredAgentStartup>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    denied_agent_ids: BTreeSet<String>,
+}
+
+#[derive(Clone, Default)]
+struct StoreState {
+    entries: HashMap<String, StoredAgentStartup>,
+    denied_agent_ids: BTreeSet<String>,
 }
 
 #[derive(Clone)]
@@ -47,34 +55,34 @@ pub struct StartupStore {
 
 struct StartupStoreInner {
     path: PathBuf,
-    entries: Mutex<HashMap<String, StoredAgentStartup>>,
+    state: Mutex<StoreState>,
 }
 
 impl StartupStore {
     pub fn load(path: PathBuf) -> io::Result<Self> {
-        let entries = read_store(&path)?;
+        let state = read_store(&path)?;
         Ok(Self {
             inner: Arc::new(StartupStoreInner {
                 path,
-                entries: Mutex::new(entries),
+                state: Mutex::new(state),
             }),
         })
     }
 
     pub fn entries(&self) -> Vec<StoredAgentStartup> {
         self.inner
-            .entries
+            .state
             .lock()
-            .map(|entries| entries.values().cloned().collect())
+            .map(|state| state.entries.values().cloned().collect())
             .unwrap_or_default()
     }
 
     pub fn get(&self, agent_id: &str) -> Option<StoredAgentStartup> {
         self.inner
-            .entries
+            .state
             .lock()
             .ok()
-            .and_then(|entries| entries.get(agent_id).cloned())
+            .and_then(|state| state.entries.get(agent_id).cloned())
     }
 
     pub fn candidate_ids(
@@ -99,29 +107,35 @@ impl StartupStore {
     }
 
     pub fn upsert(&self, entry: StoredAgentStartup) -> io::Result<()> {
-        let mut entries = self
+        let mut state = self
             .inner
-            .entries
+            .state
             .lock()
             .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
-        let mut updated = entries.clone();
-        updated.insert(entry.spec.agent_id.clone(), entry);
+        if state.denied_agent_ids.contains(&entry.spec.agent_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "Agent identity was permanently denied",
+            ));
+        }
+        let mut updated = state.clone();
+        updated.entries.insert(entry.spec.agent_id.clone(), entry);
         persist(&self.inner.path, &updated)?;
-        *entries = updated;
+        *state = updated;
         Ok(())
     }
 
     pub fn remove(&self, agent_id: &str) -> io::Result<bool> {
-        let mut entries = self
+        let mut state = self
             .inner
-            .entries
+            .state
             .lock()
             .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
-        let mut updated = entries.clone();
-        let removed = updated.remove(agent_id).is_some();
+        let mut updated = state.clone();
+        let removed = updated.entries.remove(agent_id).is_some();
         if removed {
             persist(&self.inner.path, &updated)?;
-            *entries = updated;
+            *state = updated;
         }
         Ok(removed)
     }
@@ -131,44 +145,93 @@ impl StartupStore {
         agent_id: &str,
         mutate: impl FnOnce(&mut StoredAgentStartup),
     ) -> io::Result<()> {
-        let mut entries = self
+        let mut state = self
             .inner
-            .entries
+            .state
             .lock()
             .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
-        let mut updated = entries.clone();
-        if let Some(entry) = updated.get_mut(agent_id) {
+        let mut updated = state.clone();
+        if let Some(entry) = updated.entries.get_mut(agent_id) {
             mutate(entry);
+            if entry.spec.agent_id != agent_id {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Agent startup update cannot change identity",
+                ));
+            }
             persist(&self.inner.path, &updated)?;
-            *entries = updated;
+            *state = updated;
         }
         Ok(())
     }
+
+    /// The caller holds the Controller recovery mutex and has checked Host and
+    /// runtime absence. Persist before acknowledging: delayed creates must fail
+    /// even after Controller replacement. A clear/remove never removes this fence.
+    pub fn deny_absent(&self, agent_id: &str) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        if state.entries.contains_key(agent_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Agent startup exists",
+            ));
+        }
+        if state.denied_agent_ids.contains(agent_id) {
+            return Ok(());
+        }
+        let mut updated = state.clone();
+        updated.denied_agent_ids.insert(agent_id.to_owned());
+        persist(&self.inner.path, &updated)?;
+        *state = updated;
+        Ok(())
+    }
+
+    pub fn is_denied(&self, agent_id: &str) -> io::Result<bool> {
+        self.inner
+            .state
+            .lock()
+            .map(|state| state.denied_agent_ids.contains(agent_id))
+            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))
+    }
 }
 
-fn read_store(path: &Path) -> io::Result<HashMap<String, StoredAgentStartup>> {
+fn read_store(path: &Path) -> io::Result<StoreState> {
     let bytes = match fs::read(path) {
         Ok(bytes) => bytes,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(StoreState::default()),
         Err(error) => return Err(error),
     };
     let store: StoreFile = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    if store.version != STORE_VERSION {
+    if !matches!(store.version, 1 | STORE_VERSION)
+        || (store.version == 1 && !store.denied_agent_ids.is_empty())
+        || store
+            .entries
+            .iter()
+            .any(|entry| store.denied_agent_ids.contains(&entry.spec.agent_id))
+    {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("unsupported Agent startup store version {}", store.version),
         ));
     }
-    Ok(store
+    let entries = store
         .entries
         .into_iter()
         .map(|entry| (entry.spec.agent_id.clone(), entry))
-        .collect())
+        .collect();
+    Ok(StoreState {
+        entries,
+        denied_agent_ids: store.denied_agent_ids,
+    })
 }
 
-fn persist(path: &Path, entries: &HashMap<String, StoredAgentStartup>) -> io::Result<()> {
-    if entries.is_empty() {
+fn persist(path: &Path, state: &StoreState) -> io::Result<()> {
+    if state.entries.is_empty() && state.denied_agent_ids.is_empty() {
         return match fs::remove_file(path) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -182,11 +245,18 @@ fn persist(path: &Path, entries: &HashMap<String, StoredAgentStartup>) -> io::Re
         .and_then(|name| name.to_str())
         .unwrap_or("agent-startup.json");
     let temporary = parent.join(format!(".{file_name}.{}.tmp", Uuid::new_v4().simple()));
-    let mut values: Vec<_> = entries.values().cloned().collect();
+    let mut values: Vec<_> = state.entries.values().cloned().collect();
     values.sort_by(|left, right| left.spec.agent_id.cmp(&right.spec.agent_id));
     let bytes = serde_json::to_vec_pretty(&StoreFile {
-        version: STORE_VERSION,
+        // Preserve legacy rollback until the first persistent denial is used.
+        // Older Controllers reject v2 instead of ignoring the denied-ID fence.
+        version: if state.denied_agent_ids.is_empty() {
+            1
+        } else {
+            STORE_VERSION
+        },
         entries: values,
+        denied_agent_ids: state.denied_agent_ids.clone(),
     })
     .map_err(io::Error::other)?;
     let mut options = fs::OpenOptions::new();
@@ -205,7 +275,10 @@ fn persist(path: &Path, entries: &HashMap<String, StoredAgentStartup>) -> io::Re
         file.write_all(&bytes)?;
         file.sync_all()?;
         drop(file);
-        treer_platform::replace_file(&temporary, path)
+        treer_platform::replace_file(&temporary, path)?;
+        #[cfg(unix)]
+        fs::File::open(parent)?.sync_all()?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -238,6 +311,164 @@ mod tests {
             initial_writes: vec![],
             cols: 120,
             rows: 36,
+        }
+    }
+
+    #[test]
+    fn legacy_reader_rejects_fenced_store_instead_of_ignoring_denials() {
+        // Frozen pre-fence reader contract: unknown JSON fields are ignored,
+        // but the version is checked before any startup entry can be restored.
+        #[derive(Deserialize)]
+        struct LegacyStoreFile {
+            version: u32,
+            entries: Vec<StoredAgentStartup>,
+        }
+        fn legacy_read(bytes: &[u8]) -> io::Result<Vec<StoredAgentStartup>> {
+            let store: LegacyStoreFile = serde_json::from_slice(bytes)?;
+            if store.version != 1 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unsupported Agent startup store version {}", store.version),
+                ));
+            }
+            Ok(store.entries)
+        }
+        let directory =
+            std::env::temp_dir().join(format!("treer-startup-legacy-{}", Uuid::new_v4().simple()));
+        let path = directory.join("startup.json");
+        let store = StartupStore::load(path.clone()).unwrap();
+        store.upsert(entry("unrelated")).unwrap();
+        assert_eq!(legacy_read(&fs::read(&path).unwrap()).unwrap().len(), 1);
+        store.deny_absent("denied").unwrap();
+        let error = legacy_read(&fs::read(&path).unwrap()).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            error.to_string(),
+            "unsupported Agent startup store version 2"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn startup_update_cannot_change_identity_to_bypass_a_denial() {
+        let directory =
+            std::env::temp_dir().join(format!("treer-startup-update-{}", Uuid::new_v4().simple()));
+        let path = directory.join("startup.json");
+        let store = StartupStore::load(path.clone()).unwrap();
+        store.upsert(entry("allowed")).unwrap();
+        store.deny_absent("denied").unwrap();
+        assert_eq!(
+            store
+                .update("allowed", |entry| entry.spec.agent_id = "denied".into())
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidInput
+        );
+        let reload = StartupStore::load(path).unwrap();
+        assert_eq!(reload.get("allowed").unwrap().spec.agent_id, "allowed");
+        assert!(reload.get("denied").is_none());
+        assert!(reload.is_denied("denied").unwrap());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn denied_ids_survive_reload_clear_and_other_startup_changes() {
+        let directory =
+            std::env::temp_dir().join(format!("treer-startup-denial-{}", Uuid::new_v4().simple()));
+        let path = directory.join("startup.json");
+        let store = StartupStore::load(path.clone()).unwrap();
+        store.upsert(entry("unrelated")).unwrap();
+        let legacy: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(legacy["version"], 1);
+        assert!(legacy.get("denied_agent_ids").is_none());
+        store.deny_absent("denied").unwrap();
+        let reload = StartupStore::load(path.clone()).unwrap();
+        assert!(reload.is_denied("denied").unwrap());
+        assert_eq!(
+            reload.upsert(entry("denied")).unwrap_err().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        assert!(!reload.remove("denied").unwrap());
+        reload.remove("unrelated").unwrap();
+        reload.deny_absent("denied").unwrap();
+        assert!(StartupStore::load(path.clone())
+            .unwrap()
+            .is_denied("denied")
+            .unwrap());
+        let fenced: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(
+            fenced["version"], 2,
+            "old Controller version==1 check rejects a fenced store"
+        );
+        assert_eq!(fenced["denied_agent_ids"], serde_json::json!(["denied"]));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_denial_persistence_does_not_acknowledge_or_change_memory() {
+        let directory = std::env::temp_dir().join(format!(
+            "treer-startup-denial-fail-{}",
+            Uuid::new_v4().simple()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("startup.json");
+        let store = StartupStore::load(path.clone()).unwrap();
+        fs::create_dir(&path).unwrap(); // deterministic replace failure on every OS
+        assert!(store.deny_absent("denied").is_err());
+        assert!(!store.is_denied("denied").unwrap());
+        assert!(
+            fs::read_dir(&directory)
+                .unwrap()
+                .all(|e| e.unwrap().path() == path),
+            "failed writes remove temporary files"
+        );
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn denial_and_startup_upsert_serialize_without_an_unfenced_success() {
+        for _ in 0..12 {
+            let directory = std::env::temp_dir().join(format!(
+                "treer-startup-denial-race-{}",
+                Uuid::new_v4().simple()
+            ));
+            let path = directory.join("startup.json");
+            let store = StartupStore::load(path.clone()).unwrap();
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let writer = std::thread::spawn({
+                let store = store.clone();
+                let barrier = barrier.clone();
+                move || {
+                    barrier.wait();
+                    store.upsert(entry("racing"))
+                }
+            });
+            barrier.wait();
+            let denied = store.deny_absent("racing");
+            let write = writer.join().unwrap();
+            let reload = StartupStore::load(path).unwrap();
+            match (denied, write) {
+                (Ok(()), Err(error)) => {
+                    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                    assert!(reload.is_denied("racing").unwrap());
+                    assert!(reload.get("racing").is_none());
+                }
+                (Err(error), Ok(())) => {
+                    assert_eq!(error.kind(), io::ErrorKind::AlreadyExists);
+                    assert!(!reload.is_denied("racing").unwrap());
+                    assert!(reload.get("racing").is_some());
+                }
+                _ => panic!("denial and startup cannot both succeed"),
+            }
+            fs::remove_dir_all(directory).unwrap();
         }
     }
 

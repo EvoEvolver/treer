@@ -24,6 +24,7 @@ pub const INSTALL_SKILL: &str = include_str!("../../../skills/treer-install/SKIL
 pub const SERVICE_STREAM_EOF: &str = "treer-service-eof-v1";
 pub const CAPABILITY_AGENT_PATH_TARGETS: &str = "agent.path-targets.v1";
 pub const CAPABILITY_WORKLOAD_CREATE_PLACEMENT: &str = "workload.create-placement.v1";
+pub const CAPABILITY_AGENT_RESERVATION_FENCE: &str = "agent.reservation-fence.v1";
 /// Explicit root destination on creation; omission inherits the trusted caller.
 pub const WORKLOAD_CREATE_ROOT: &str = "/";
 pub const CAPABILITY_AGENT_ABORT: &str = "agent.abort.v1";
@@ -42,6 +43,7 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_LAUNCHER_INSTALL,
     CAPABILITY_AGENT_INTERFACE_PROVENANCE,
     CAPABILITY_WORKLOAD_CREATE_PLACEMENT,
+    CAPABILITY_AGENT_RESERVATION_FENCE,
     CAPABILITY_AGENT_PATH_TARGETS,
     CAPABILITY_AGENT_ABORT,
     CAPABILITY_AGENT_STARTUP,

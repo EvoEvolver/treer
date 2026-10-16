@@ -444,6 +444,16 @@ branch.
 
 ## Compatibility and rollback
 
+- Reservation cleanup introduces Controller startup-store v2 only after a
+  durable denied-Agent fence is written. Machines without fences keep v1.
+  A v2 machine cannot roll back to a Controller lacking
+  `agent.reservation-fence.v1`: older readers reject the store at startup with
+  `startup_store_error`. Do not delete fences, restore a pre-cleanup backup, or
+  rewrite the version to force rollback; a delayed Create could resurrect the
+  revoked identity. The release receipt must pin the first published source SHA
+  supporting this capability as the rollback floor. Until that receipt exists,
+  no older published Controller is a safe rollback target for a v2 store.
+  See [the operator inspection procedure](../scripts/machine-rollout.md#startup-store-rollback-floor).
 - Add Proxy API fields before the App begins using them. Stop App use before a
   later release removes an API.
 - Use expand-first PostgreSQL changes so old and new Proxy replicas can overlap.

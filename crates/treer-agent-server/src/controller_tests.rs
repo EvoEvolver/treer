@@ -454,6 +454,59 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
     let serialized = serde_json::to_string(&missing).unwrap();
     assert!(!serialized.contains(&root.to_string_lossy().to_string()));
     assert!(!serialized.contains(&credential));
+    let denied_id = format!("ag_{}", Uuid::new_v4().simple());
+    let late_request = || CreateAgentRequest {
+        folder_id: None,
+        server_id: None,
+        kind: "command".into(),
+        name: "late".into(),
+        cwd: "repo".into(),
+        args: vec!["old-command".into()],
+        cols: 80,
+        rows: 24,
+        publish_ports: vec![],
+        recipe: None,
+    };
+    // join polls fencing first: it holds the recovery lock while awaiting Host
+    // inventory, so the racing Create cannot pass until denial is durable.
+    let (fenced, late) = tokio::join!(
+        runtime.fence_absent_agent_reservation(&denied_id),
+        runtime.create(
+            "late-create",
+            denied_id.clone(),
+            credential.clone(),
+            late_request()
+        ),
+    );
+    fenced.unwrap();
+    assert_eq!(late.unwrap_err().code, "agent_identity_denied");
+    runtime
+        .fence_absent_agent_reservation(&denied_id)
+        .await
+        .unwrap();
+    assert!(StartupStore::load(saved_path.clone())
+        .unwrap()
+        .is_denied(&denied_id)
+        .unwrap());
+    assert_eq!(
+        runtime
+            .ensure_lifecycle(
+                "late-ensure",
+                denied_id.clone(),
+                Some(credential.clone()),
+                late_request(),
+                true,
+                true
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "agent_identity_denied"
+    );
+    assert!(
+        spawns.lock().unwrap().is_empty(),
+        "denied identities never reach Host spawn"
+    );
     let original = runtime
         .create(
             "create",
@@ -474,6 +527,41 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
         )
         .await
         .unwrap();
+    assert_eq!(
+        runtime
+            .fence_absent_agent_reservation("stable-id")
+            .await
+            .unwrap_err()
+            .code,
+        "agent_reservation_observed"
+    );
+    // Even if the Controller projection/startup are absent, Host inventory is
+    // authoritative: an existing process must never be fenced as a reservation.
+    let projected = runtime
+        .inner
+        .agents
+        .write()
+        .unwrap()
+        .remove("stable-id")
+        .unwrap();
+    let saved = runtime.inner.startup_store.get("stable-id").unwrap();
+    runtime.inner.startup_store.remove("stable-id").unwrap();
+    assert_eq!(
+        runtime
+            .fence_absent_agent_reservation("stable-id")
+            .await
+            .unwrap_err()
+            .code,
+        "agent_reservation_observed"
+    );
+    assert!(!runtime.inner.startup_store.is_denied("stable-id").unwrap());
+    runtime.inner.startup_store.upsert(saved).unwrap();
+    runtime
+        .inner
+        .agents
+        .write()
+        .unwrap()
+        .insert("stable-id".into(), projected);
     let generation = original.run_generation;
     assert_eq!(
         runtime.get_startup("stable-id").unwrap().command,

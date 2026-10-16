@@ -479,6 +479,76 @@ impl ControllerRuntime {
         result
     }
 
+    fn require_not_denied(&self, agent_id: &str) -> Result<(), ProtocolError> {
+        if self
+            .inner
+            .startup_store
+            .is_denied(agent_id)
+            .map_err(startup_store_error)?
+        {
+            tracing::warn!(agent_id, "refused launch for a fenced Agent identity");
+            return Err(ProtocolError::new(
+                "agent_identity_denied",
+                "Agent identity was permanently denied",
+            ));
+        }
+        Ok(())
+    }
+
+    pub async fn fence_absent_agent_reservation(
+        &self,
+        agent_id: &str,
+    ) -> Result<(), ProtocolError> {
+        if agent_id.is_empty()
+            || agent_id.len() > 128
+            || !agent_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err(ProtocolError::new(
+                "invalid_agent_identity",
+                "A stable Agent ID is required",
+            ));
+        }
+        let _guard = self.inner.recovery_lock.lock().await;
+        let observed = ProtocolError::new(
+            "agent_reservation_observed",
+            "Agent has workload state; use normal lifecycle controls",
+        );
+        match self.get(agent_id) {
+            Err(error) if error.code == "agent_not_found" => {}
+            Err(error) => return Err(error),
+            Ok(_) => return Err(observed),
+        }
+        if self.inner.startup_store.get(agent_id).is_some() {
+            return Err(observed);
+        }
+        let inventory = self
+            .inner
+            .host
+            .sync(Default::default())
+            .await
+            .map_err(|_| {
+                ProtocolError::new("host_unavailable", "Host absence could not be confirmed")
+            })?;
+        let HostResponse::Synced { processes, .. } = inventory else {
+            return Err(ProtocolError::new(
+                "host_protocol_error",
+                "Host absence could not be confirmed",
+            ));
+        };
+        if processes
+            .iter()
+            .any(|process| process.process_id == agent_id)
+        {
+            return Err(observed);
+        }
+        self.inner
+            .startup_store
+            .deny_absent(agent_id)
+            .map_err(startup_store_error)
+    }
+
     pub async fn create(
         &self,
         operation_id: &str,
@@ -487,6 +557,7 @@ impl ControllerRuntime {
         request: CreateAgentRequest,
     ) -> Result<AgentInfo, ProtocolError> {
         let _guard = self.inner.recovery_lock.lock().await;
+        self.require_not_denied(&agent_id)?;
         if request.name.trim().is_empty() {
             return Err(ProtocolError::new(
                 "invalid_request",
@@ -504,7 +575,9 @@ impl ControllerRuntime {
         let command = resolve_agent_command(&launch.command, &env).map_err(|mut error| {
             if error.code == "command_not_found"
                 && self.inner.startup_store.get(&agent_id).is_none()
-                && self.get(&agent_id).is_err()
+                && self
+                    .get(&agent_id)
+                    .is_err_and(|error| error.code == "agent_not_found")
             {
                 error.message = "Required executable is not installed on this machine".into();
                 error.details = Some(Box::new(treer_protocol::AgentCreationErrorDetails {
@@ -709,6 +782,7 @@ impl ControllerRuntime {
         revision: Option<u64>,
     ) -> Result<AgentInfo, ProtocolError> {
         let _guard = self.inner.recovery_lock.lock().await;
+        self.require_not_denied(&agent_id)?;
         if let Some(revision) = revision {
             if revision == 0 || request.kind != "app" {
                 return Err(ProtocolError::new(

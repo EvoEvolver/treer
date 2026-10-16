@@ -804,6 +804,14 @@ impl ProxyClient {
             AgentCommand::CreationPlacementCheck {} => {
                 CommandResult::success(command_id.clone(), serde_json::json!({"supported":true}))
             }
+            AgentCommand::FenceAbsentAgentReservation { agent_id } => self
+                .runtime
+                .fence_absent_agent_reservation(&agent_id)
+                .await
+                .map(|()| {
+                    CommandResult::success(command_id.clone(), serde_json::json!({"fenced":true}))
+                })
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::Create {
                 agent_id,
                 workload_credential,

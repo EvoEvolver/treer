@@ -415,6 +415,11 @@ pub enum AgentCommand {
     },
     /// Side-effect-free preflight before reserving a new workload identity.
     CreationPlacementCheck {},
+    /// Core-owned reservation cleanup: refuse existing workloads, otherwise
+    /// persist a denied-ID fence before acknowledging absence.
+    FenceAbsentAgentReservation {
+        agent_id: String,
+    },
     Prompt {
         agent_id: String,
         text: String,
@@ -518,6 +523,7 @@ pub enum AgentCommand {
 impl AgentCommand {
     pub fn required_capability(&self) -> Option<&'static str> {
         match self {
+            Self::FenceAbsentAgentReservation { .. } => Some(CAPABILITY_AGENT_RESERVATION_FENCE),
             Self::AppStartupCheck { .. }
             | Self::AppStartupUpdate { .. }
             | Self::AppEnsureLifecycle { .. } => Some(CAPABILITY_APP_UPDATE),
