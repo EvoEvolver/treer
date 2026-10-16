@@ -252,6 +252,154 @@ mod tests {
         .unwrap();
     }
 
+    fn reopen(f: &Fixture, journal: &Journal) -> Journal {
+        let jobs = PrivateDirectory::open(&f.path.join("jobs")).unwrap();
+        Journal::open(&jobs, &journal.read().unwrap().job_id.to_string()).unwrap()
+    }
+
+    fn assert_old_images(f: &Fixture) {
+        for (binary, bytes) in [
+            (Binary::Controller, b"controller".as_slice()),
+            (Binary::Cli, b"cli".as_slice()),
+        ] {
+            let path = f.bin.join(binary.name());
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o7777,
+                0o700
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_publication_restores_from_every_durable_boundary_without_replay() {
+        // Exact durable prefixes, not process-kill acceptance: Prepared ownership
+        // and its locks remain held while only the journal handle is reopened.
+        // Seven boundaries: Activating, then intent/rename/completion per image.
+        for boundary in 0..=6 {
+            let (f, selected, owned, journal) = fixture();
+            let _batch = ImageBatch::begin(&selected, &owned, &journal).unwrap();
+            let mut receipt = journal.read().unwrap();
+            let mut operation = 0;
+            for binary in [Binary::Controller, Binary::Cli] {
+                if operation == boundary {
+                    break;
+                }
+                receipt = journal
+                    .record_file(receipt.revision, binary, FileStep::InstallIntent)
+                    .unwrap();
+                operation += 1;
+                if operation == boundary {
+                    break;
+                }
+                let staged = format!(".treer-update-{}-{}-install", receipt.job_id, binary.name());
+                owned
+                    .locks()
+                    .directory(&selected, binary)
+                    .unwrap()
+                    .replace_executable(&staged, binary.name())
+                    .unwrap();
+                operation += 1;
+                if operation == boundary {
+                    break;
+                }
+                receipt = journal
+                    .record_file(receipt.revision, binary, FileStep::Installed)
+                    .unwrap();
+                operation += 1;
+            }
+            assert_eq!(operation, boundary);
+            let journal = reopen(&f, &journal);
+            assert!(ImageBatch::begin(&selected, &owned, &journal).is_err());
+            // Restoration must not consume a still-unpublished new image.
+            let remaining_stages: Vec<_> = [Binary::Controller, Binary::Cli]
+                .into_iter()
+                .map(|binary| {
+                    f.bin.join(format!(
+                        ".treer-update-{}-{}-install",
+                        receipt.job_id,
+                        binary.name()
+                    ))
+                })
+                .filter(|path| path.exists())
+                .collect();
+            let restored = restore_images(&selected, &owned, &journal).unwrap();
+            assert_eq!(restored.phase, Phase::RollingBack);
+            assert_old_images(&f);
+            assert!(remaining_stages.iter().all(|path| path.exists()));
+            assert!(selected.lock().is_err());
+            // Reconciliation is idempotent, including revision and timestamp.
+            assert_eq!(
+                restore_images(&selected, &owned, &journal).unwrap(),
+                restored
+            );
+        }
+    }
+
+    #[test]
+    fn interrupted_reverse_restoration_reconciles_both_sides_of_each_rename() {
+        for binary in [Binary::Cli, Binary::Controller] {
+            for renamed in [false, true] {
+                let (f, selected, owned, journal) = fixture();
+                assert!(matches!(
+                    ImageBatch::begin(&selected, &owned, &journal)
+                        .unwrap()
+                        .publish()
+                        .unwrap(),
+                    PublicationResult::Published(_)
+                ));
+                let receipt = journal.read().unwrap();
+                let mut receipt = journal
+                    .advance(receipt.revision, Phase::RollingBack)
+                    .unwrap();
+                if matches!(binary, Binary::Controller) {
+                    receipt = images::restore(
+                        owned.locks().directory(&selected, Binary::Cli).unwrap(),
+                        &journal,
+                        receipt.revision,
+                        Binary::Cli,
+                    )
+                    .unwrap();
+                }
+                journal
+                    .record_file(receipt.revision, binary, FileStep::RestoreIntent)
+                    .unwrap();
+                if renamed {
+                    // Native replacement before the completion record, with the
+                    // original permissions, as in images::restore.
+                    let installed = owned.locks().directory(&selected, binary).unwrap();
+                    let staged =
+                        format!(".treer-update-{}-{}-restore", receipt.job_id, binary.name());
+                    let mut file = installed.create_file(&staged).unwrap();
+                    let bytes: &[u8] = match binary {
+                        Binary::Controller => b"controller",
+                        Binary::Cli => b"cli",
+                    };
+                    file.write_all(bytes).unwrap();
+                    file.set_permissions(std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                    file.sync_all().unwrap();
+                    drop(file);
+                    installed
+                        .replace_executable(&staged, binary.name())
+                        .unwrap();
+                }
+                let journal = reopen(&f, &journal);
+                let restored = restore_images(&selected, &owned, &journal).unwrap();
+                assert_eq!(restored.phase, Phase::RollingBack);
+                assert_old_images(&f);
+                for binary in [Binary::Controller, Binary::Cli] {
+                    assert_eq!(restored.publications.step(binary), FileStep::Restored);
+                }
+                assert!(selected.lock().is_err());
+                assert_eq!(
+                    restore_images(&selected, &owned, &journal).unwrap(),
+                    restored
+                );
+            }
+        }
+    }
+
     #[test]
     fn both_images_preflight_before_first_publication() {
         let (f, selected, owned, journal) = fixture();

@@ -161,6 +161,13 @@ does not prove that the old Controller is running or healthy. No Host request,
 startup-store overwrite, launcher installation or terminal success is performed
 by this layer. Isolated tests use a cfg(test)-only ownership constructor and
 synthetic image bytes; they do not constitute real handoff/activation acceptance.
+Deterministic interruption tests reopen the journal at all seven publication
+boundaries (Activating, then intent/rename/completion for each image), and on
+both sides of each reverse-order restoration rename. They verify convergence
+to both original bytes and modes without consuming unpublished stages, continued
+lock ownership and idempotent RollingBack receipts. These tests retain the
+original sealed ownership and locks: they cover durable file reconciliation,
+not recovery after worker death or reacquisition of abandoned ownership.
 
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
