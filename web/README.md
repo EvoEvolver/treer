@@ -195,7 +195,10 @@ nonce CSP. See [the size/review notes](tree-map-report.md).
 ## Retained workspace tabs
 
 On phones, the page top bar has a **Browse tree** button with a 44px touch
-target. It opens the existing Tree directly from Overview, Agent/App pages or
+target. Below 768px every Tree sidebar control also has a 44px target: the
+organization/workspace switchers and settings buttons, **Add to tree**, the row
+"⋯" buttons, and every dropdown menu row (`max-md:` classes; desktop keeps the
+compact sizes, covered by `e2e/touch-targets.spec.ts`). It opens the existing Tree directly from Overview, Agent/App pages or
 settings, preserving selected workloads, retained tabs, terminals and iframe
 drafts. It does not require visiting Overview first. Desktop navigation is
 unchanged.
