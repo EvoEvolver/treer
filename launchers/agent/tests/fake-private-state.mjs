@@ -10,6 +10,7 @@ export async function fakePrivateState(agent, credential = "fixture-only", optio
     const path = request.url;
     events.push({ method: request.method, path });
     if (path === "/api/private-state") return reply(200, { feature: "agent.private-state.v1", status: options.status ?? "available" });
+    if (options.status && options.status !== "available") return reply(409, { error: { code: options.status } });
     if (path === "/api/private-state/reservations") {
       if (options.reserveError) return reply(413, { error: { code: options.reserveError } });
       const id = `psr_${randomBytes(32).toString("hex")}`;

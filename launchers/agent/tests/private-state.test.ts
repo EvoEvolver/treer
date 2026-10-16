@@ -73,9 +73,14 @@ test("quota status is path-free, credentials stay bound to local Controller and 
     await assert.rejects(quota.commit(id), { code: "private_state_reservation_expired" });
     await quota.release(id); await quota.release(id);
     await assert.rejects(new PrivateStateClient(controller.url, "ag_other", "fixture-only").status(), { code: "agent_private_state_unavailable" });
-    for (const status of ["agent_private_state_unsafe", "agent_private_state_inside_cwd", "agent_private_state_unavailable"]) {
+    for (const status of ["agent_private_state_unsafe", "agent_private_state_inside_cwd", "agent_private_state_unavailable", "windows_requires_administrator"]) {
       controller.options.status = status; assert.equal(await quota.status(), status);
     }
+    for (const operation of [() => quota.reserve(100), () => quota.commit(id), () => quota.release(id)]) {
+      await assert.rejects(operation(), { code: "windows_requires_administrator", status: 409 });
+    }
+    controller.options.status = "unknown-future-code";
+    await assert.rejects(quota.status(), { code: "agent_private_state_unavailable" });
     for (const url of ["https://127.0.0.1", "http://example.com", "http://secret@127.0.0.1", `${controller.url}/evil`]) {
       assert.throws(() => new PrivateStateClient(url, "ag_owner", "fixture-only"));
     }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { spawn } from "node:child_process";
-import { mkdtempSync, realpathSync, rmSync, readFileSync, mkdirSync } from "node:fs";
+import { mkdtempSync, realpathSync, rmSync, readFileSync, mkdirSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { hermeticEnv, localFetch } from "./hermetic.mjs";
@@ -12,9 +12,9 @@ test("attachment HTTP routes retain guards, expose only IDs and fail closed with
   const root = mkdtempSync(join(realpathSync.native(tmpdir()), "attachments-http-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const app = resolve(import.meta.dirname, "..");
-  for (const mode of ["missing", "available", "unsafe", "inside", "old"] as const) {
+  for (const mode of ["missing", "available", "unsafe", "inside", "old", "administrator"] as const) {
     const enabled = mode === "available";
-    const controller = await fakePrivateState("ag_image_http", "fixture-only", { status: mode === "unsafe" ? "agent_private_state_unsafe" : mode === "old" ? "old-unsupported" : "available" });
+    const controller = await fakePrivateState("ag_image_http", "fixture-only", { status: mode === "administrator" ? "windows_requires_administrator" : mode === "unsafe" ? "agent_private_state_unsafe" : mode === "old" ? "old-unsupported" : "available" });
     const cwd = join(root, `cwd-${mode}`), privateRoot = join(root, `private-${mode}`), portFile = join(root, `port-${mode}`);
     mkdirSync(cwd); mkdirSync(privateRoot);
     const options = { cwd: app, stdio: "pipe" as const, env: hermeticEnv({ AGENT_UI_CWD: cwd, AGENT_UI_PORT_FILE: portFile, CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_IMAGES: "1", TREER_AGENT_ID: "ag_image_http", TREER_AGENT_SERVER_URL: controller.url, TREER_WORKLOAD_CREDENTIAL: "fixture-only", AGENT_UI_MESSAGE_WATCH: "0", ...(mode !== "missing" ? { TREER_AGENT_PRIVATE_STATE_DIR: mode === "inside" ? cwd : privateRoot } : {}) }) };
@@ -31,7 +31,7 @@ test("attachment HTTP routes retain guards, expose only IDs and fail closed with
       assert.ok(base);
       const storageState = await (await localFetch(`${base}/api/state`)).json();
       assert.equal(storageState.attachmentsAvailable, enabled);
-      assert.equal(storageState.attachmentStorageStatus, enabled ? "available" : mode === "inside" ? "agent_private_state_inside_cwd" : mode === "unsafe" ? "agent_private_state_unsafe" : "agent_private_state_unavailable");
+      assert.equal(storageState.attachmentStorageStatus, enabled ? "available" : mode === "administrator" ? "windows_requires_administrator" : mode === "inside" ? "agent_private_state_inside_cwd" : mode === "unsafe" ? "agent_private_state_unsafe" : "agent_private_state_unavailable");
       assert.ok(!JSON.stringify(storageState).includes(privateRoot), "private filesystem root never enters browser state");
       // localFetch uses node:http (and accepts Buffer); its shared declaration
       // has RequestInit's browser BodyInit spelling.
@@ -39,6 +39,12 @@ test("attachment HTTP routes retain guards, expose only IDs and fail closed with
       assert.equal((await post(GIF, { origin: "https://attacker.invalid" })).status, 403);
       const upload = await post(GIF);
       assert.equal(upload.status, enabled ? 201 : 503);
+      if (mode === "administrator") {
+        assert.deepEqual(readdirSync(privateRoot), [], "no attachment fallback or private file writes");
+        assert.equal(controller.events.length, 1, "disabled storage never requests a reservation");
+        const text = await localFetch(`${base}/api/prompt`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ prompt: "text-only recovery", mode: "queue" }) });
+        assert.equal(text.status, 200);
+      }
       if (!enabled) continue;
       const { attachment } = await upload.json();
       assert.deepEqual(Object.keys(attachment).sort(), ["id", "mime", "size"]);
