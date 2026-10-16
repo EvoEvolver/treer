@@ -185,3 +185,66 @@ test('an empty workspace shows its guidance and no "No workloads in this workspa
   await expect(page.getByRole('tree', { name: 'Workspace workloads' })).toBeVisible()
   await expect(page.getByText(/No workloads in this workspace/)).toHaveCount(0)
 })
+
+test.describe('Tree row context menu', () => {
+  const workspaceUrl = '/orgs/map-org/workspaces/map-workspace'
+  async function expandResearch(page: Page) {
+    const folder = page.getByRole('treeitem', { name: 'Research', exact: true })
+    if ((await folder.getAttribute('aria-expanded')) !== 'true') await folder.getByRole('button').first().click()
+  }
+
+  test('right-click on an Agent row opens its actions at the pointer, including Open in new browser tab', async ({ page, context }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await page.goto('/')
+    await expandResearch(page)
+    const row = page.getByRole('tree').getByRole('link', { name: /^reviewer/ }).first()
+    await expect(row).toBeVisible()
+    const box = (await row.boundingBox())!
+    const point = { x: box.x + 30, y: box.y + box.height / 2 }
+    await row.click({ button: 'right', position: { x: 30, y: box.height / 2 } })
+    const menu = page.getByRole('menu', { name: 'Actions for reviewer' })
+    await expect(menu).toBeVisible()
+    const menuBox = (await menu.boundingBox())!
+    expect(Math.abs(menuBox.x - point.x)).toBeLessThan(40)
+    // Right-click does not select or open the workload.
+    await expect(page.getByRole('tab', { name: 'Tab /Research/reviewer', exact: true })).toHaveCount(0)
+    const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
+    expect(new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/reviewer-a?focus=1`)
+    await popup.close()
+  })
+
+  test('the context menu offers the same actions as the row button and a folder has no new-tab item', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await page.goto('/')
+    await page.getByRole('treeitem', { name: 'Research', exact: true }).locator(':scope > div').first().click({ button: 'right' })
+    const folderMenu = page.getByRole('menu', { name: 'Actions for Research' })
+    await expect(folderMenu).toBeVisible()
+    await expect(folderMenu.getByRole('menuitem', { name: 'New folder' })).toBeVisible()
+    await expect(folderMenu.getByRole('menuitem', { name: 'Open in new browser tab' })).toHaveCount(0)
+    await page.keyboard.press('Escape')
+    await expandResearch(page)
+    await page.getByRole('tree').getByRole('link', { name: /^reviewer/ }).first().click({ button: 'right' })
+    const agentMenu = page.getByRole('menu', { name: 'Actions for reviewer' })
+    for (const name of ['Open in new browser tab', 'Rename', 'Copy path', 'Move to folder', 'Logs']) await expect(agentMenu.getByRole('menuitem', { name, exact: true })).toBeVisible()
+    await agentMenu.getByRole('menuitem', { name: 'Rename', exact: true }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+  })
+
+  test('Shift+F10 and the Menu key open the menu for the focused row and Escape returns focus', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await page.goto('/')
+    await expandResearch(page)
+    const row = page.getByRole('tree').getByRole('link', { name: /^reviewer/ }).first()
+    for (const key of ['Shift+F10', 'ContextMenu']) {
+      await row.focus()
+      await page.keyboard.press(key)
+      await expect(page.getByRole('menu', { name: 'Actions for reviewer' })).toBeVisible()
+      await page.keyboard.press('Escape')
+      await expect(page.getByRole('menu', { name: 'Actions for reviewer' })).toHaveCount(0)
+      await expect(row).toBeFocused()
+    }
+  })
+})

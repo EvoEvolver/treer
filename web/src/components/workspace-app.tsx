@@ -253,6 +253,8 @@ function WorkspaceAppContent() {
     if (selectedWorkloadId !== routeWorkloadId) replaceWorkloadRoute(selectedWorkloadId)
   }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute])
   const workloadHref = (id: string) => workloadPath(organizationId, workspaceId, id)
+  // Focus-mode page in a new browser tab; synchronous so it keeps the click gesture. Same origin and session, no token.
+  const openInNewTab = (id: string) => { window.open(workloadPath(organizationId, workspaceId, id, true), "_blank", "noopener") }
   const focusedId = focusMode && selectedWorkloadId ? selectedWorkloadId : null
   const tabLabels = new Map<string, TabLabel>(workloads.map((agent) => {
     const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === agent.agent_id)
@@ -444,7 +446,7 @@ function WorkspaceAppContent() {
     const agent = tabLabels.get(id)?.agent
     if (!agent || !workspaceId) return
     // Same origin, same session, no token in the URL. noopener keeps the new page from reaching this one.
-    if (action === "newtab") { window.open(workloadPath(organizationId, workspaceId, id, true), "_blank", "noopener"); return }
+    if (action === "newtab") { openInNewTab(id); return }
     if (action === "logs") setShowWorkloadLogs(!tabActions.get(id)?.logs, id)
     if (action === "rename") openRename({ kind: "agent", id, name: agent.name })
     if (action === "upload") openUpload(agent)
@@ -1028,7 +1030,7 @@ function WorkspaceAppContent() {
           <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
         <button type="button" aria-label={t("app.workspace_overview")} onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />{t("app.overview")}</button>
-        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
+        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <UserMenu user={user} badge={initials(user.preferred_name)} role={roleLabel(currentRole)} preview={preview} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
       </aside>

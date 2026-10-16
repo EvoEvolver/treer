@@ -302,6 +302,9 @@ bundle before running `pnpm test:e2e security.spec.ts --workers=1`.
   End move between rows; Right expands a folder, enters it, or moves to a row's
   actions menu button; Left collapses, returns to the row, or goes to the parent
   folder. Actions buttons are reached with Right, not Tab.
+- Right-clicking a Tree row (or Shift+F10 / the Menu key on the focused row) opens the same actions as its ⋯
+  button at the pointer. For an Agent or App that includes **Open in new browser tab**, which opens the focus-mode
+  page; Escape returns focus to the row. Right-click does not select or open the workload.
 - The error toast is a `role="alert"` live region portalled to `<body>` so it is
   announced and can be dismissed while a modal dialog is open.
 - `prefers-reduced-motion: reduce` disables animation and shortens transitions.
