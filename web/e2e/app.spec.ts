@@ -1184,9 +1184,35 @@ for (const mobile of [false, true]) test(`new agent visibly guides an empty work
   await expect(page.getByText("Add a machine to create agents", { exact: true })).toBeVisible()
   await expect(page.getByText("Agents run on machines.", { exact: false })).toBeVisible()
   await expect(page.getByRole("heading", { name: "Create agent" })).toHaveCount(0)
-  await page.getByRole("button", { name: "Set up a machine", exact: true }).click()
+  await page.getByRole("tabpanel", { name: "Settings", exact: true }).getByRole("button", { name: "Set up a machine", exact: true }).click()
   await expect(page.getByRole("dialog").getByRole("heading", { name: "Add machine", exact: true })).toBeVisible()
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+
+for (const mobile of [false, true]) for (const theme of ['light', 'dark']) test(`empty Tree offers machine setup without opening a menu (${theme}, ${mobile ? '390px' : 'desktop'})`, async ({ page }, info) => {
+  await page.setViewportSize({ width: mobile ? 390 : 1360, height: 844 })
+  await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
+  await page.route("**/api/workspaces/ws-1/bootstrap", (route) => ok(route, { install_command: "echo synthetic install", connect_command: "echo synthetic connect" }))
+  await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, servers: [], agents: [] }))
+  await page.goto("/")
+  await browseTreeOnMobile(page)
+  const sidebar = page.locator('#tree-sidebar')
+  await expect(sidebar.getByText('No machines in this workspace.', { exact: false })).toBeVisible()
+  const setup = sidebar.getByRole('button', { name: 'Set up a machine', exact: true })
+  await expect(setup).toBeVisible()
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: info.outputPath(`machine-guide-${theme}-${mobile ? '390' : '1360'}.png`) })
+  await expect.poll(async () => { await setup.focus(); return setup.evaluate((element) => element === document.activeElement) }).toBe(true)
+  await setup.press('Enter')
+  await expect(page.getByText('Add a machine to create agents', { exact: true })).toBeVisible()
+  await page.getByRole('tabpanel', { name: 'Settings', exact: true }).getByRole('button', { name: 'Set up a machine', exact: true }).click()
+  await expect(page.getByRole('dialog').getByRole('heading', { name: 'Add machine', exact: true })).toBeVisible()
+})
+
+test('Tree hides the machine guide when a machine is enrolled', async ({ page }) => {
+  await page.goto('/')
+  await browseTreeOnMobile(page)
+  await expect(page.locator('#tree-sidebar').getByRole('button', { name: 'Set up a machine', exact: true })).toHaveCount(0)
 })
 
 test("organization actions open a settings page with inline management", async ({ page }) => {

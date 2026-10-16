@@ -150,7 +150,7 @@ test('empty workspace gives visible machine setup guidance without attaching a t
   await page.route('**/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, servers: [], agents: [] } }))
   await page.goto('/')
   await expect(page.getByText('Connect a machine, then add your first agent.', { exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Set up a machine', exact: true }).click()
+  await page.locator('#workspace-panel-overview').getByRole('button', { name: 'Set up a machine', exact: true }).click()
   await expect(page.getByRole('heading', { name: 'Machines', exact: true })).toBeVisible()
   await page.locator('[data-tour=add-machine]').getByRole('button', { name: 'Add', exact: true }).click()
   await expect(page.getByRole('dialog', { name: 'Add machine', exact: true })).toBeVisible()

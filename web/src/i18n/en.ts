@@ -636,6 +636,7 @@ export const en = {
   "tree.move_to_folder": "Move to folder",
   "tree.move_up": "Move up",
   "tree.move_down": "Move down",
+  "tree.no_machines": "No machines in this workspace. Add one in settings to run agents.",
   "tree.tree": "Tree",
   "tree.add_folder": "Add folder",
   "tree.set_up_a_machine_first": "Set up a machine first",
