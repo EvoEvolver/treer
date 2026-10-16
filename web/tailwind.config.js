@@ -11,6 +11,8 @@ export default {
         ring: "hsl(var(--ring))",
         background: "hsl(var(--background))",
         foreground: "hsl(var(--foreground))",
+        "status-online": "hsl(var(--status-online))",
+        "status-success": "color-mix(in srgb, hsl(var(--status-online)) 75%, hsl(var(--foreground)))",
         "status-working": "hsl(var(--status-working-text))",
         "status-attention": "hsl(var(--status-attention-text))",
         primary: { DEFAULT: "hsl(var(--primary))", foreground: "hsl(var(--primary-foreground))" },
