@@ -1058,7 +1058,7 @@ function WorkspaceAppContent() {
         </header>}
         <div className={cn("relative min-h-0 flex-1", mainView !== "overview" && mainView !== "terminal" && "hidden")}>
           <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? t("app.overview") : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">
-            <WorkspaceOverview key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} workloadHref={workloadHref} onOpen={showAgentTerminal} onNewAgent={openCreateAgentOrMachineSetup} onWorkspaceSettings={openWorkspaceSettings} />
+            <WorkspaceOverview key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} workloadHref={workloadHref} onOpen={showAgentTerminal} onNewAgent={() => openCreateAgentOrMachineSetup()} onWorkspaceSettings={openWorkspaceSettings} />
           </div>
           {workspaceId && tabs.tabs.map((tab) => {
             const label = tabLabels.get(tab.id)

@@ -653,6 +653,20 @@ for (const mobile of [false, true]) {
   test.describe(`tree menu on ${mobile ? "mobile" : "desktop"}`, () => {
     test.use({ viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 900 }, hasTouch: mobile, isMobile: mobile })
 
+    for (const theme of ["light", "dark"] as const) {
+      test(`Overview Add agent creates at root without a Tree folder label (${theme})`, async ({ page }, testInfo) => {
+        await page.addInitScript((theme) => localStorage.setItem("treer-theme", theme), theme)
+        await page.goto("/")
+        const overview = page.locator("#workspace-panel-overview")
+        await expect(overview.getByRole("heading", { name: "Workspace overview", exact: true })).toBeVisible()
+        await overview.getByRole("button", { name: "Add agent", exact: true }).click()
+        const dialog = page.getByRole("dialog")
+        await expect(dialog.getByRole("heading", { name: "Create agent", exact: true })).toBeVisible()
+        await expect(dialog).not.toContainText("Tree folder:")
+        await page.screenshot({ path: testInfo.outputPath("overview-create-root.png") })
+      })
+    }
+
     for (const launch of ["Terminal", "Custom command", "Codex"]) {
       test(`New Agent reuses ${launch} creation and appends to the chosen folder`, async ({ page }) => {
         await createResearchTree(page)

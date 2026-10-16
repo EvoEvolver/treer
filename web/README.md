@@ -516,3 +516,5 @@ the Console. The server fills `public_url` only for the platform-hosted ingress 
 base domain (it is not user-settable), so the Console does not pin the host to a domain itself; the checks above are
 defense in depth. Menu opens use `noopener,noreferrer` so the Console URL is not sent as a referrer.
 
+Creating an Agent from Overview starts at the workspace root and shows no Tree folder hint.
+Creating from a folder in the Tree shows that folder’s full path and reserves placement there.
