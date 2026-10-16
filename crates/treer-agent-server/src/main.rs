@@ -10,6 +10,8 @@ mod machine_file_transfer;
 mod network;
 mod proxy;
 mod release_update;
+#[cfg(unix)]
+pub mod self_update;
 mod service;
 mod startup_store;
 mod tui;

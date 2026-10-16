@@ -7,6 +7,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 mod environment;
 pub mod machine_file;
+#[cfg(unix)]
+pub mod private_directory;
 pub use environment::{
     clean_process_environment_before_threads, inherited_environment, inherited_variable_allowed,
     machine_exec_environment, machine_exec_variable_allowed,
