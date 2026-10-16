@@ -138,6 +138,9 @@ or configuration contents. Failed launch retains the newly saved specification.
   a syntactically valid path matches the shared reserved namespace rule, without
   reading or deleting anything at that path. Its warning contains only a fixed
   code and count. Other corrupt metadata or unsafe cleanup remains fail-closed.
+  The current normalization/case rule also applies to old records: a newly
+  reserved Unicode alias may leave old staging untouched rather than risk
+  deleting private state.
   Temporary files remain private until digest
   verification; no-replace publication is atomic and overwrite is explicit.
   Portable paths reject Windows drive/UNC/device/ADS/short-name aliases too.

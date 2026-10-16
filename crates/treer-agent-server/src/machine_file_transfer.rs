@@ -586,7 +586,8 @@ impl Transfers {
             }
             if treer_platform::machine_file::is_reserved_namespace(&path).map_err(io_failure)? {
                 // Older Controllers journaled these before stage rejected them.
-                // They cannot own a valid staging file. Never stat/delete here.
+                // Never stat/delete paths now reserved, even if an older, narrower
+                // Unicode guard could have allowed staging there.
                 discarded += 1;
                 continue;
             }
