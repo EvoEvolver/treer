@@ -96,11 +96,23 @@ root as required by the Host).
 ## Execution and recovery
 
 Machines run sequentially, stopping on the first failure/partial/pending result.
+Before creating any job directory, the coordinator uploads a harmless small
+probe to a unique `rollout-probe-<uuid>.txt` in the machine root (mode 0600), then
+verifies and deletes that exact file through exec. Transfer denial fails clearly
+before setup; it is not retried through exec/base64 or a local authorization
+bypass. If probe verification/cleanup fails, inspect that exact probe name in
+the transfer audit before retrying. No binary or startup state has changed.
+
 The coordinator uploads only repo-owned worker code into a new private
-`<machine.root>/.treer/machine-rollouts/<sha>-<uuid>/` directory. It hashes the
+`<machine.root>/treer-rollouts/<sha>-<uuid>/` directory. The `.treer` namespace is
+reserved Core state and cannot be a machine-file-transfer destination. It hashes the
 uploaded worker files before executing them. POSIX uses an independent process
 session; Windows uses CIM `Win32_Process.Create`, so the worker survives the
 Controller exec timeout/restart. No broad process-name killing is used.
+Local machines use the same transfer checks; they are not guessed from machine
+names or silently changed to direct filesystem writes. A Controller with a
+poisoned legacy transfer journal must first receive the Core recovery fix through
+an authorized update; this script neither edits that journal nor changes Policy.
 
 The platform updaters are reused, with a binary lock, checksummed staging and
 private backups of installed binaries plus the selected startup store. They
@@ -150,6 +162,14 @@ credentials, startup contents or environment dumps. They do not prove isolation
 from another process running as the same OS user.
 
 ## Closed checks
+
+An unconfirmed probe cleanup records its exact root-relative filename in the
+private receipt's `preflightFailure.probe` and stderr. Inspect the transfer audit
+before removing that specific leftover file; no rollout setup has occurred.
+The visible `treer-rollouts` directory contains operational data including machine
+paths and hashes. Exclude it from root-level indexing/version control, or remove
+the specific completed job directory after confirming its receipt and that its
+worker has exited. Never delete a pending job or use broad prefix cleanup.
 
 ```sh
 node --test scripts/machine-rollout.test.mjs

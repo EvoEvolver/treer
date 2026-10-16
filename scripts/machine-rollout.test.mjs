@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -129,23 +129,43 @@ test("worker enforces pinned sums, core-before-launcher ordering, partial receip
     }
   } finally { for (const key of Object.keys(process.env)) delete process.env[key]; Object.assign(process.env, original); rmSync(directory, { recursive: true }); }
 });
-test("generated detached submission scripts compile on both platforms; pointer is saved before launch", { skip: process.platform === "win32" }, async () => {
+test("generated detached submission scripts compile on both platforms; pointer is saved before launch", async () => {
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "treer-rollout-submit-")));
   try {
-    const cli = join(directory, "treer");
-    writeFileSync(cli, `#!${process.execPath}
-const fs=require('node:fs'),vm=require('node:vm');const args=process.argv.slice(2);
+    const cli = [process.execPath, join(directory, "treer-fixture.mjs")];
+    writeFileSync(cli[1], `
+import fs from 'node:fs';import vm from 'node:vm';import cp from 'node:child_process';import path from 'node:path';const args=process.argv.slice(2);
+if(args[0]==='machine'&&args.includes('denied')){console.error('machine_file_denied: synthetic fixture denial');process.exit(1);}
 if(args[0]==='exec'){const code=args.at(-1);new vm.Script(code);fs.appendFileSync(${JSON.stringify(join(directory, "scripts.jsonl"))},JSON.stringify(code)+'\\n');
+if(args.includes('cleanup-denied')){console.log(JSON.stringify({exit_code:1,stdout:''}));process.exit(0);}
+if(code.includes('probe_mismatch'))cp.execFileSync(process.execPath,['--eval',code],{cwd:${JSON.stringify(directory)},env:{SystemRoot:process.env.SystemRoot},encoding:'utf8'});
 const started=code.includes('worker_not_started');if(started&&!fs.existsSync(${JSON.stringify(join(directory, "pointer"))}))process.exit(3);
 console.log(JSON.stringify({exit_code:0,stdout:JSON.stringify({directory:${JSON.stringify(directory)},environment:{},pid:started?1234:undefined})}));}
-else if(args[0]!=='machine')process.exit(2);
-`); chmodSync(cli, 0o700);
+else if(args[0]==='machine'){if(args.at(-1).startsWith('rollout-probe-'))fs.copyFileSync(args.at(-2),path.join(${JSON.stringify(directory)},args.at(-1)));else if(!args.at(-1).startsWith('treer-rollouts/'))process.exit(4);}
+else process.exit(2);
+`);
+    await assert.rejects(submit({ target: { ...target, machine: "denied" }, commit }, cli, () => assert.fail("denied preflight must not submit")), /preflight_denied_no_setup/);
+    assert.equal(existsSync(join(directory, "scripts.jsonl")), false, "denied tiny put must precede all setup execs");
+    let failedProbe;
+    await assert.rejects(submit({ target: { ...target, machine: "cleanup-denied" }, commit }, cli, () => assert.fail("uncertain probe cleanup must not submit")), error => {
+      assert.match(error.message, /probe_cleanup_unconfirmed_no_setup/);
+      assert.match(error.probe, /^rollout-probe-[0-9a-f-]{36}\.txt$/);
+      failedProbe = error.probe; return true;
+    });
+    const failedCodes = readFileSync(join(directory, "scripts.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
+    assert.equal(failedCodes.length, 1); assert.ok(failedCodes[0].includes("fs.unlinkSync(file)"));
+    const unconfirmed = readdirSync(directory).filter(name => name.startsWith("rollout-probe-"));
+    assert.deepEqual(unconfirmed, [failedProbe]); rmSync(join(directory, unconfirmed[0]));
+    rmSync(join(directory, "scripts.jsonl"));
     for (const current of [target, { ...target, platform: "windows-x86_64" }]) {
       const value = await submit({ target: current, commit }, cli, () => writeFileSync(join(directory, "pointer"), "saved"));
       assert.equal(value.pid, 1234);
     }
     const codes = readFileSync(join(directory, "scripts.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-    assert.equal(codes.length, 4); for (const code of codes) new Script(code);
-    assert.ok(codes[3].includes("Win32_Process")); assert.ok(codes[3].includes("detached:true"));
+    assert.equal(codes.length, 6); for (const code of codes) new Script(code);
+    assert.ok(codes[0].includes("fs.unlinkSync(file)"));
+    assert.ok(codes[1].includes("treer-rollouts")); assert.equal(codes[1].includes(".treer/machine-rollouts"), false);
+    assert.ok(codes[5].includes("Win32_Process")); assert.ok(codes[5].includes("detached:true"));
+    assert.equal(readdirSync(directory).some(name => name.startsWith("rollout-probe-")), false, "successful probes are actually verified and deleted");
   } finally { rmSync(directory, { recursive: true }); }
 });
