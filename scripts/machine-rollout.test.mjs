@@ -146,11 +146,16 @@ else process.exit(2);
 `);
     await assert.rejects(submit({ target: { ...target, machine: "denied" }, commit }, cli, () => assert.fail("denied preflight must not submit")), /preflight_denied_no_setup/);
     assert.equal(existsSync(join(directory, "scripts.jsonl")), false, "denied tiny put must precede all setup execs");
-    await assert.rejects(submit({ target: { ...target, machine: "cleanup-denied" }, commit }, cli, () => assert.fail("uncertain probe cleanup must not submit")), /probe_cleanup_unconfirmed_no_setup/);
+    let failedProbe;
+    await assert.rejects(submit({ target: { ...target, machine: "cleanup-denied" }, commit }, cli, () => assert.fail("uncertain probe cleanup must not submit")), error => {
+      assert.match(error.message, /probe_cleanup_unconfirmed_no_setup/);
+      assert.match(error.probe, /^rollout-probe-[0-9a-f-]{36}\.txt$/);
+      failedProbe = error.probe; return true;
+    });
     const failedCodes = readFileSync(join(directory, "scripts.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
     assert.equal(failedCodes.length, 1); assert.ok(failedCodes[0].includes("fs.unlinkSync(file)"));
     const unconfirmed = readdirSync(directory).filter(name => name.startsWith("rollout-probe-"));
-    assert.equal(unconfirmed.length, 1); rmSync(join(directory, unconfirmed[0]));
+    assert.deepEqual(unconfirmed, [failedProbe]); rmSync(join(directory, unconfirmed[0]));
     rmSync(join(directory, "scripts.jsonl"));
     for (const current of [target, { ...target, platform: "windows-x86_64" }]) {
       const value = await submit({ target: current, commit }, cli, () => writeFileSync(join(directory, "pointer"), "saved"));

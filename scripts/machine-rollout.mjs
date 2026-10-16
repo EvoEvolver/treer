@@ -84,7 +84,7 @@ export async function preflightTransfer(target, treer = "treer") {
     catch (error) { throw new Error(error.message.includes("denied") ? "machine_transfer_preflight_denied_no_setup_check_policy" : "machine_transfer_preflight_failed_no_setup"); }
     try {
       await remote(target, `const fs=require('node:fs'),p=require('node:path'),c=require('node:crypto'),file=p.join(fs.realpathSync.native(process.cwd()),${JSON.stringify(name)});if(!fs.lstatSync(file).isFile()||c.createHash('sha256').update(fs.readFileSync(file)).digest('hex')!==${JSON.stringify(digest(bytes))})throw Error('probe_mismatch');fs.unlinkSync(file);console.log('{}');`, treer);
-    } catch { throw new Error("machine_transfer_probe_cleanup_unconfirmed_no_setup_inspect_audit"); }
+    } catch { throw Object.assign(new Error("machine_transfer_probe_cleanup_unconfirmed_no_setup_inspect_audit"), { probe: name }); }
   } finally { rmSync(directory, { recursive: true }); }
 }
 export async function submit(job, treer = "treer", onPrepared = () => {}) {
@@ -172,7 +172,14 @@ async function main() {
       const started = await submit(job, treer, prepared => { item = prepared; receipt.submitted.push(item); save(options.receipt, receipt); });
       Object.assign(item, started);
     } catch (error) {
-      if (!item) throw error;
+      if (!item) {
+        if (/^rollout-probe-[0-9a-f-]{36}\.txt$/.test(error.probe || "")) {
+          receipt.preflightFailure = { code: "machine_transfer_probe_cleanup_unconfirmed_no_setup_inspect_audit", probe: error.probe };
+          save(options.receipt, receipt);
+          console.error(JSON.stringify(receipt.preflightFailure));
+        }
+        throw error;
+      }
       item.startAcknowledgement = "unknown"; // Poll, never retry the launch RPC.
     }
     item.result = await poll(item, treer); save(options.receipt, receipt);

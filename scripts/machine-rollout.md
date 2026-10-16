@@ -163,6 +163,14 @@ from another process running as the same OS user.
 
 ## Closed checks
 
+An unconfirmed probe cleanup records its exact root-relative filename in the
+private receipt's `preflightFailure.probe` and stderr. Inspect the transfer audit
+before removing that specific leftover file; no rollout setup has occurred.
+The visible `treer-rollouts` directory contains operational data including machine
+paths and hashes. Exclude it from root-level indexing/version control, or remove
+the specific completed job directory after confirming its receipt and that its
+worker has exited. Never delete a pending job or use broad prefix cleanup.
+
 ```sh
 node --test scripts/machine-rollout.test.mjs
 python3 -m unittest discover -s scripts/tests -p test_update_machine.py
