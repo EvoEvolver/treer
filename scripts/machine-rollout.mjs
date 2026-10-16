@@ -2,13 +2,19 @@
 // Leader-operated rollout: planning is offline; --apply explicitly changes machines.
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync, mkdirSync, existsSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join, resolve, win32, posix } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { digest, plainEntry, requirePhysical, save } from "./machine-rollout-worker.mjs";
 import { protectDirectory } from "../launchers/agent/scripts/private-state.mjs";
 const exec = promisify(execFile), root = resolve(import.meta.dirname, "..");
+// Array form is for closed cross-platform test fixtures (node + fake CLI script).
+const runTreer = (treer, argv, options) => {
+  const [binary, ...prefix] = Array.isArray(treer) ? treer : [treer];
+  return exec(binary, [...prefix, ...argv], options);
+};
 const assets = ["scripts/machine-rollout-worker.mjs", "scripts/update-machine.py", "scripts/update-machine.ps1", "launchers/agent/scripts/private-state.mjs"];
 export function validateTarget(target) {
   const fields = new Set(["machine", "workspace", "serverId", "platform", "node", "python", "controller", "cli", "config", "startupStore", "home", "harness", "acpCommand", "smokeFolder", "configHome", "acceptSharedBinaries"]);
@@ -55,7 +61,7 @@ export const windowsQuote = value => '"' + value.replace(/(\\*)"/g, '$1$1\\"').r
 export async function remote(target, code, treer = "treer") {
   let output;
   try {
-    output = (await exec(treer, ["exec", "--machine", target.machine, "--cwd", ".", "--timeout", "25000", "--",
+    output = (await runTreer(treer, ["exec", "--machine", target.machine, "--cwd", ".", "--timeout", "25000", "--",
       plainEntry(target.node), "--eval", code], { timeout: 30000, maxBuffer: 1024 * 1024 })).stdout;
   } catch { throw new Error("remote_exec_failed"); }
   const envelope = JSON.parse(output);
@@ -63,11 +69,27 @@ export async function remote(target, code, treer = "treer") {
   return JSON.parse(envelope.stdout);
 }
 async function upload(target, source, destination, treer) {
-  try { await exec(treer, ["machine", "put", "--machine", target.machine, "--mode", "600", source, destination], { timeout: 120000, maxBuffer: 65536 }); }
-  catch { throw new Error("machine_upload_failed"); }
+  try { await runTreer(treer, ["machine", "put", "--machine", target.machine, "--mode", "600", source, destination], { timeout: 120000, maxBuffer: 65536 }); }
+  catch (error) {
+    const denied = /machine_file_denied|policy_denied|403 Forbidden/.test(String(error.stderr));
+    throw new Error(denied ? "machine_upload_denied_check_policy_and_reserved_paths" : "machine_upload_failed");
+  }
+}
+export async function preflightTransfer(target, treer = "treer") {
+  const directory = mkdtempSync(join(tmpdir(), "treer-rollout-probe-")), file = join(directory, "probe"), name = "rollout-probe-" + randomUUID() + ".txt";
+  const bytes = Buffer.from("Treer rollout transfer probe\n");
+  try {
+    writeFileSync(file, bytes, { mode: 0o600 });
+    try { await upload(target, file, name, treer); }
+    catch (error) { throw new Error(error.message.includes("denied") ? "machine_transfer_preflight_denied_no_setup_check_policy" : "machine_transfer_preflight_failed_no_setup"); }
+    try {
+      await remote(target, `const fs=require('node:fs'),p=require('node:path'),c=require('node:crypto'),file=p.join(fs.realpathSync.native(process.cwd()),${JSON.stringify(name)});if(!fs.lstatSync(file).isFile()||c.createHash('sha256').update(fs.readFileSync(file)).digest('hex')!==${JSON.stringify(digest(bytes))})throw Error('probe_mismatch');fs.unlinkSync(file);console.log('{}');`, treer);
+    } catch { throw new Error("machine_transfer_probe_cleanup_unconfirmed_no_setup_inspect_audit"); }
+  } finally { rmSync(directory, { recursive: true }); }
 }
 export async function submit(job, treer = "treer", onPrepared = () => {}) {
-  const relative = ".treer/machine-rollouts/" + job.commit + "-" + randomUUID();
+  await preflightTransfer(job.target, treer);
+  const relative = "treer-rollouts/" + job.commit + "-" + randomUUID();
   const helper = Buffer.from(readFileSync(join(root, assets[3]))).toString("base64");
   // Only bounded, non-secret OS variables survive exec's inherited Agent env.
   const code = `const fs=require('node:fs'),p=require('node:path');(async()=>{
