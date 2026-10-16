@@ -62,7 +62,7 @@ export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loa
             <span className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3"><span className="block truncate text-xs font-medium">{node.name}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground sm:mt-0 sm:text-xs">{t(`kind.${workloadKind(agent)}`)} · {machineName(machine, agent.server_id)}</span></span>
             <span className={cn("max-w-[112px] shrink-0 rounded border px-1.5 py-1 text-[10px]", needsAttention ? "border-destructive/40 text-status-attention" : isWorking ? "border-primary/40 text-status-working" : "text-muted-foreground")}>{statusText}</span>
           </a></li>
-        })}</ul> : <p className="rounded-md border p-5 text-xs text-muted-foreground">{filter ? t("overview.no_agents_match_this_filter") : t("overview.no_workloads_in_this_workspace")}</p>}
+        })}</ul> : filter ? <p className="rounded-md border p-5 text-xs text-muted-foreground">{t("overview.no_agents_match_this_filter")}</p> : null}
       </section>
     </>}
   </div>

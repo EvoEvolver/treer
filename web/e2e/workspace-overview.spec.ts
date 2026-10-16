@@ -174,3 +174,14 @@ test('overview shares canonical App identity with Tree, including a missing runt
   await expect(page.frameLocator('iframe').getByRole('heading', { name: 'Overview App', exact: true })).toBeVisible()
   { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Show logs', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
 })
+
+test('an empty workspace shows its guidance and no "No workloads in this workspace" text', async ({ page }) => {
+  await fixture(page)
+  await page.route('**/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, agents: [] } }))
+  await page.route('**/workload-tree', (route) => route.fulfill({ json: { folders: [], placements: [] } }))
+  await page.route('**/apps', (route) => route.fulfill({ json: { apps: [] } }))
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: 'Your workspace is ready' })).toBeVisible()
+  await expect(page.getByRole('tree', { name: 'Workspace workloads' })).toBeVisible()
+  await expect(page.getByText(/No workloads in this workspace/)).toHaveCount(0)
+})
