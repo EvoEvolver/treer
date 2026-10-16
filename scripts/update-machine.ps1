@@ -21,7 +21,9 @@ function Write-UpdateJson($Path, $Value) {
     $temporary = $Path + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'
     [IO.File]::WriteAllText($temporary, ($Value | ConvertTo-Json -Depth 12), (New-Object Text.UTF8Encoding($false)))
     # File.Replace is atomic on Windows and preserves the private destination ACL.
-    if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, $null) }
+    # PS5.1 coerces $null to an empty string for this .NET string parameter,
+    # which File.Replace rejects as an invalid backup path. Pass a true null.
+    if ([IO.File]::Exists($Path)) { [IO.File]::Replace($temporary, $Path, [NullString]::Value) }
     else { [IO.File]::Move($temporary, $Path) }
 }
 function New-PrivateUpdateDirectory($Path) {

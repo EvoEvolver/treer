@@ -218,6 +218,20 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
     foreach($json in @('[{"run_generation":2}]','[{"agent_id":"ag_idle"}]')){
       $script:rows=$json|ConvertFrom-Json;$failed=$false;try{$null=Get-UpdateAgents $null}catch{$failed=$true};if(!$failed){throw 'required_identity_not_checked'}
     }
+    $directory=[IO.Path]::Combine($env:TEMP,('r96-receipt-'+[Guid]::NewGuid().ToString('N')))
+    try {
+      New-PrivateUpdateDirectory $directory
+      $receipt=[IO.Path]::Combine($directory,'progress.json')
+      Write-UpdateJson $receipt @{status='running'}
+      $acl=[IO.File]::GetAccessControl($receipt).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+      foreach($state in @('activating','complete')){
+        Write-UpdateJson $receipt @{status=$state}
+        if(([IO.File]::ReadAllText($receipt)|ConvertFrom-Json).status -cne $state){throw 'receipt_replacement_failed'}
+        if([IO.File]::GetAccessControl($receipt).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access) -cne $acl){throw 'receipt_acl_changed'}
+      }
+      if([IO.Directory]::GetFiles($directory,'*.tmp').Count -ne 0){throw 'receipt_temporary_leftover'}
+    } finally { if([IO.Directory]::Exists($directory)){[IO.Directory]::Delete($directory,$true)} }
+    Mark 'receipts_replaced'
     Write-Output 'real-inventory-optional-pid-passed'`;
   const shell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   let output;

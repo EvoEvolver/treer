@@ -15,6 +15,13 @@ try {
     $errors = $null; $tokens = $null
     [Management.Automation.Language.Parser]::ParseFile("$PSScriptRoot/update-machine.ps1", [ref]$tokens, [ref]$errors) | Out-Null
     Assert-UpdateTest ($errors.Count -eq 0) 'parser'
+    $receipt = Join-Path $temporary 'progress.json'
+    Write-UpdateJson $receipt @{status='running'}
+    Write-UpdateJson $receipt @{status='activating'}
+    Assert-UpdateTest (([IO.File]::ReadAllText($receipt) | ConvertFrom-Json).status -ceq 'activating') 'replace-existing-progress'
+    Write-UpdateJson $receipt @{status='complete'}
+    Assert-UpdateTest (([IO.File]::ReadAllText($receipt) | ConvertFrom-Json).status -ceq 'complete') 'replace-progress-again'
+    Assert-UpdateTest (@(Get-ChildItem -LiteralPath $temporary -Filter 'progress.json.*.tmp').Count -eq 0) 'no-receipt-temp-leftovers'
     Assert-UpdateTest (Test-UpdateCommit ('a' * 40) ('a' * 7)) 'short-commit-match'
     Assert-UpdateTest (Test-UpdateCommit ('a' * 7) ('a' * 40)) 'rollback-full-health-match'
     Assert-UpdateTest (!(Test-UpdateCommit ('a' * 40) '')) 'empty-health-commit-refused'

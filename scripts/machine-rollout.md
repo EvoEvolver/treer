@@ -190,6 +190,15 @@ run-generation changes still fail preservation. Required identity fields remain
 strict. This covers a pre-activation failure hidden by transaction mocks that
 previously replaced the inventory helper with a constant.
 
+The native gate also writes the real progress receipt through running,
+activating and complete, checks its DACL survives replacement, and rejects
+temporary-file leftovers. Windows PowerShell 5.1 needs `[NullString]::Value`
+for File.Replace's optional backup path; `$null` becomes an invalid empty path.
+These regression fixtures do not replace disposable-enrollment acceptance:
+the real updater must finish activation and launcher smoke against an isolated
+Controller before retrying an existing user's machine after a newly found
+transaction failure.
+
 Probe uploads canonicalize the local temporary directory before creating their
 0600 source file. This supports macOS `/var` and `/tmp` aliases without relaxing
 the CLI's no-follow local-file boundary.
