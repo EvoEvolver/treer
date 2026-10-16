@@ -107,6 +107,8 @@ test('tabs persist only bounded IDs, restore cold and prune deleted IDs', async 
   const backend = await fixture(page)
   await gotoWorkspace(page)
   await open(page, 'Alpha'); await open(page, 'Terminal')
+  // The URL names the selected workload and restores it on reload; leaving to Overview first keeps this a cold restore.
+  await switchTab(page, 'Overview')
   await page.reload()
   await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Tab /Terminal', exact: true })).toHaveAttribute('title', /Unloaded/)
@@ -454,4 +456,111 @@ test('Tree top-bar entry works from mobile settings and is absent on desktop', a
   await expect(page.locator('#tree-sidebar')).toBeVisible()
   await page.setViewportSize({ width: 1360, height: 960 })
   await expect(page.getByRole('button', { name: 'Browse tree', exact: true })).toHaveCount(0)
+})
+
+const workspaceUrl = '/orgs/map-org/workspaces/map-workspace'
+test.describe('workload deep links and new-tab entry points', () => {
+  test('a deep link opens that workload, keeps the URL, and the URL follows the selection', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await page.goto(`${workspaceUrl}/workloads/tab-1`)
+    await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator('#workspace-panel-tab-1 iframe')).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`${workspaceUrl}/workloads/tab-1$`))
+    await page.reload()
+    await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await switchTab(page, 'Overview')
+    await expect(page).toHaveURL(new RegExp(`${workspaceUrl}$`))
+    await switchTab(page, 'Alpha')
+    await expect(page).toHaveURL(new RegExp(`${workspaceUrl}/workloads/tab-1$`))
+  })
+
+  test('an unknown or malformed workload id reports a clear error and selects nothing else', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await page.goto(`${workspaceUrl}/workloads/not-a-workload`)
+    await expect(page.getByRole('alert').filter({ hasText: 'not found, or you do not have access' })).toBeVisible()
+    await expect(page).toHaveURL(new RegExp(`${workspaceUrl}$`))
+    await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await page.goto(`${workspaceUrl}/workloads/..%2Fsecret`)
+    await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await expect(page.locator('iframe')).toHaveCount(0)
+  })
+
+  test('focus mode shows only the workload with a way back to the full Console', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await page.goto(`${workspaceUrl}/workloads/tab-1?focus=1`)
+    await expect(page.locator('#workspace-panel-tab-1 iframe')).toBeVisible()
+    await expect(page.getByRole('tablist')).toHaveCount(0)
+    await expect(page.getByRole('tree')).toHaveCount(0)
+    const back = page.getByRole('link', { name: 'Open full Console' })
+    await expect(back).toHaveAttribute('href', `${workspaceUrl}/workloads/tab-1`)
+    await back.click()
+    await expect(page).toHaveURL(new RegExp(`${workspaceUrl}/workloads/tab-1$`))
+    await expect(page.getByRole('tablist')).toBeVisible()
+    await expect(page.getByRole('tree')).toBeVisible()
+  })
+
+  for (const mobile of [false, true]) test(`the tab menu opens the workload in a new browser tab ${mobile ? '390' : 'desktop'}`, async ({ page, context }) => {
+    await page.setViewportSize({ width: mobile ? 390 : 1360, height: 900 })
+    await fixture(page)
+    await gotoWorkspace(page)
+    await open(page, 'Alpha', mobile)
+    if (mobile) { await page.getByRole('button', { name: /^More actions/ }).first().click() }
+    else await page.getByRole('tab', { name: 'Tab /Alpha', exact: true }).click({ button: 'right' })
+    const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
+    expect(new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
+    expect(popup.url()).not.toMatch(/token|key|secret/i)
+    await popup.close()
+  })
+
+  test('the new-tab menu item is localized', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page); await page.goto('/')
+    await page.getByRole('button', { name: '打开 /Alpha', exact: true }).click()
+    await page.getByRole('tab', { name: '标签页 /Alpha', exact: true }).click({ button: 'right' })
+    await expect(page.getByRole('menuitem', { name: '在新浏览器标签页中打开' })).toBeVisible()
+  })
+})
+
+test.describe('ctrl/cmd-click and middle-click open a workload in a new browser tab', () => {
+  const expected = `${workspaceUrl}/workloads/tab-1?focus=1`
+  const where = (url: string) => new URL(url).pathname + new URL(url).search
+  for (const how of ['ctrl', 'middle'] as const) {
+    test(`overview rows and tree rows (${how})`, async ({ page, context }) => {
+      await page.setViewportSize({ width: 1360, height: 900 })
+      await fixture(page)
+      await gotoWorkspace(page)
+      const click = (locator: import('@playwright/test').Locator) => how === 'ctrl' ? locator.click({ modifiers: ['ControlOrMeta'] }) : locator.click({ button: 'middle' })
+      for (const target of [page.getByRole('button', { name: 'Open /Alpha', exact: true }), page.getByRole('tree').getByRole('button', { name: /^Alpha/ })]) {
+        const [popup] = await Promise.all([context.waitForEvent('page'), click(target)])
+        expect(where(popup.url())).toBe(expected)
+        await popup.close()
+        // The current page did not navigate in place.
+        await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
+      }
+    })
+  }
+
+  test('a plain click still opens in place', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await gotoWorkspace(page)
+    await page.getByRole('button', { name: 'Open /Alpha', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+  })
+
+  test('map blocks open a new browser tab on ctrl-click and keep the map open', async ({ page, context }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await gotoWorkspace(page)
+    await page.getByRole('button', { name: 'Expand tree map' }).click()
+    const block = page.getByRole('dialog').getByRole('button', { name: /Alpha/ }).first()
+    const [popup] = await Promise.all([context.waitForEvent('page'), block.click({ modifiers: ['ControlOrMeta'] })])
+    expect(where(popup.url())).toBe(expected)
+    await popup.close()
+    await expect(page.getByRole('dialog')).toBeVisible()
+  })
 })

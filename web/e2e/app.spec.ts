@@ -2087,6 +2087,8 @@ for (const mobile of [false, true]) {
       await expect(folder(page)).toHaveAttribute('aria-expanded', 'true')
       await expect(page.getByRole('treeitem', { name: 'Other folder', exact: true })).toHaveAttribute('aria-expanded', 'false')
       await toggle(page)
+      // The URL restores a selected workload (and reveals it); leave to Overview so this checks the stored preference.
+      await page.getByRole('button', { name: 'Workspace overview' }).click()
       await page.reload()
       await browseTreeOnMobile(page)
       await expect(folder(page)).toHaveAttribute('aria-expanded', 'false')
