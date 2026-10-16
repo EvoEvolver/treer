@@ -73,6 +73,12 @@ process-group ID both equal its PID, rechecking its OS creation/image identity
 around those queries. The isolated ownership child now enters that session;
 the parent checks it before lock transfer. Separate owned-process tests reject
 a process group without a new session, repeated detach, and an exited identity.
+The production endpoint now also enforces the session check after accepting a
+connection and before authenticating it into a transfer-capable peer; merely
+polling before the child connects does not abort startup. An attached owned
+child is rejected with a fixed error and permanently aborts that endpoint,
+leaving the journal, ownership record and the parent's locks unchanged. The
+ownership fixture exercises this rejection without sending any lock handles.
 This is not proof of survival after parent exit or escape from a cgroup/service
 manager's termination scope. Wiring the synchronous internal worker entry,
 null/private bounded stdio and the complete owned-child lifecycle remain pending.

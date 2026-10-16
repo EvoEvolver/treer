@@ -112,6 +112,12 @@ impl<'a> Endpoint<'a> {
             Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
             Err(_) => bail!("update_handoff_endpoint_unavailable"),
         };
+        // The child must detach before connecting. Check after acceptance so
+        // polling an endpoint while the child is still starting is harmless,
+        // but before peer authentication can yield a lock-transfer capability.
+        child
+            .verify_private_session()
+            .map_err(|_| anyhow::anyhow!("update_handoff_session_unavailable"))?;
         let peer = AuthenticatedPeer::authenticate(stream, child, verified_image, digest)?;
         self.verify()?;
         Ok(Some(peer))

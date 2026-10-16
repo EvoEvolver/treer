@@ -590,7 +590,13 @@ pub(super) mod tests {
             std::fs::Permissions::from_mode(0o700),
         )
         .unwrap();
-        for mode in ["normal", "exit-before-ack", "wrong-job", "existing-record"] {
+        for mode in [
+            "normal",
+            "attached",
+            "exit-before-ack",
+            "wrong-job",
+            "existing-record",
+        ] {
             let held = selected.lock().unwrap();
             let mut receipt = super::super::tests::receipt();
             receipt.workspace_id = "ws_a".into();
@@ -650,6 +656,40 @@ pub(super) mod tests {
                 .unwrap(),
             );
             let image = ProcessImage::capture(child.0.id()).unwrap();
+            if mode == "attached" {
+                let deadline = Instant::now() + Duration::from_secs(5);
+                loop {
+                    match endpoint.accept(&image, own.executable(), &digest) {
+                        Ok(None) => {
+                            assert!(Instant::now() < deadline);
+                            assert!(child.0.try_wait().unwrap().is_none());
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => {
+                            assert_eq!(error.to_string(), "update_handoff_session_unavailable");
+                            break;
+                        }
+                        Ok(Some(_)) => panic!("attached child must not get a transfer capability"),
+                    }
+                }
+                assert_eq!(
+                    endpoint
+                        .accept(&image, own.executable(), &digest)
+                        .err()
+                        .unwrap()
+                        .to_string(),
+                    "update_handoff_aborted"
+                );
+                assert_eq!(journal.read().unwrap(), prepared);
+                assert!(!job.join("ownership.json").exists());
+                assert!(selected.lock().is_err());
+                assert!(other.lock().is_err());
+                drop(child.0.stdin.take());
+                assert!(child.0.wait().unwrap().success());
+                drop(held);
+                assert!(selected.lock().is_ok());
+                continue;
+            }
             let deadline = Instant::now() + Duration::from_secs(5);
             let peer: AuthenticatedPeer = loop {
                 let verified = activator
@@ -726,11 +766,13 @@ pub(super) mod tests {
         use std::{io::Read, os::unix::net::UnixStream};
         use treer_platform::process_image::ProcessImage;
 
-        treer_platform::process_image::enter_private_session().unwrap();
         let config = PathBuf::from(std::env::var_os("TREER_TEST_CONFIG").unwrap());
         let jobs = PathBuf::from(std::env::var_os("TREER_TEST_JOBS").unwrap());
         let job = std::env::var("TREER_TEST_JOB").unwrap();
         let mode = std::env::var("TREER_TEST_MODE").unwrap();
+        if mode != "attached" {
+            treer_platform::process_image::enter_private_session().unwrap();
+        }
         let inventory = Inventory::load(&config, "fixture-host").unwrap();
         let selected = inventory.select(Some("ws_a"), true).unwrap();
         let root = PrivateDirectory::open(&jobs).unwrap();
@@ -740,7 +782,7 @@ pub(super) mod tests {
             ProcessImage::capture(std::env::var("TREER_TEST_PARENT").unwrap().parse().unwrap())
                 .unwrap();
         let digest = std::env::var("TREER_TEST_DIGEST").unwrap();
-        if mode == "exit-before-ack" || mode == "existing-record" {
+        if mode == "attached" || mode == "exit-before-ack" || mode == "existing-record" {
             // Keep the authenticated peer alive until parent consumes the
             // connection. Then EOF makes the transfer fail before any ACK.
             stream.read_to_end(&mut Vec::new()).unwrap();
