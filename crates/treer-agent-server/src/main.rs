@@ -471,6 +471,10 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
     let selection = service::preflight_registration(&enrollment.workspace_id, args.service_mode)?;
     selection.announce();
     let network = select_network_mode(None)?;
+    // One connect or repair per workspace at a time: recovery, machine
+    // selection, the claim and any configuration replacement run under it.
+    let registration = service::lock_machine_registration(&enrollment.workspace_id)?;
+    service::finish_machine_replacement(&registration, &enrollment.workspace_id)?;
     if let Some(mut config) = service::registered_config(&enrollment.workspace_id)? {
         service::warn_shared_account(&config.server_id)?;
         if let Some(root) = &args.root {
@@ -496,14 +500,14 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
             &identity,
             Some(config.server_id.clone()),
         )
-        .await?;
-        if response.server_id != config.server_id {
-            anyhow::bail!(
-                "Proxy returned machine {} instead of the installed machine {}",
-                response.server_id,
-                config.server_id
-            );
+        .await
+        .map_err(|error| {
+            stale_installation_hint(error, &enrollment.workspace_id, &config.server_id)
+        })?;
+        if response.workspace_id != enrollment.workspace_id {
+            anyhow::bail!("Proxy returned a workspace that does not match the enrollment key");
         }
+        let previous = config.clone();
         config.machine_token = response.machine_token;
         if config.operator_credential.is_empty() {
             config.operator_credential = new_operator_credential();
@@ -512,6 +516,29 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         config.service_manager = selection.manager;
         config.service_fallback_reason = selection.fallback_reason.clone();
         config.network_mode = Some(network);
+        if response.server_id != previous.server_id {
+            // The previous machine was deleted in the Console: the Proxy minted
+            // a new machine for this installation. Switch the registration to
+            // it; the old machine's local state is left behind, never adopted.
+            service::validate_proxy_server_id(&response.server_id)?;
+            config.server_id = response.server_id.clone();
+            config.host_socket = service::host_socket_path(&response.server_id)?;
+            let activation =
+                service::replace_machine_registration(&registration, &previous, config)
+                    .await
+                .with_context(|| {
+                    format!(
+                        "machine {} was enrolled but switching the local registration from {} failed; repair it with `treer-agent-server service --workspace {} repair`",
+                        response.server_id, previous.server_id, enrollment.workspace_id
+                    )
+                })?;
+            println!(
+                "treer: machine {} replaced the deleted machine {} for workspace {}",
+                response.server_id, previous.server_id, enrollment.workspace_id
+            );
+            drop(registration);
+            return service::wait_for_foreground(activation).await;
+        }
         let activation = service::refresh_registration_and_wait(config)
             .await
             .with_context(|| {
@@ -524,6 +551,7 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
             "treer: reusing machine {} for workspace {}",
             identity.name, enrollment.workspace_id
         );
+        drop(registration);
         return service::wait_for_foreground(activation).await;
     }
     let root = service::new_enrollment_root(args.root.as_deref())?;
@@ -562,7 +590,47 @@ async fn connect_machine(args: ConnectArgs) -> Result<()> {
         )
     })?;
     println!("treer: connected workspace {} to {}", workspace, proxy);
+    drop(registration);
     service::wait_for_foreground(activation).await
+}
+
+/// Proxy enrollment refusal with its fixed code; the message is user-facing.
+#[derive(Debug)]
+struct EnrollmentFailure {
+    code: String,
+    message: String,
+}
+
+impl std::fmt::Display for EnrollmentFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for EnrollmentFailure {}
+
+/// A conflict while reusing an installed service means the local service
+/// configuration names a machine this installation no longer owns (for example
+/// the state directory was recreated, or the machine was deleted in the Console
+/// while another installation still holds it). Point at the exact local reset.
+fn stale_installation_hint(
+    error: anyhow::Error,
+    workspace: &str,
+    server_id: &str,
+) -> anyhow::Error {
+    let Some(EnrollmentFailure { code, message }) = error.downcast_ref::<EnrollmentFailure>()
+    else {
+        return error;
+    };
+    if code != "machine_identity_conflict" {
+        return error;
+    }
+    let config_dir = treer_platform::config_directory()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "the Treer configuration directory".to_string());
+    anyhow::anyhow!(
+        "{message}. The installed service configuration in {config_dir} still names machine {server_id} for workspace {workspace}, but this installation identity does not own it. If that machine was deleted or replaced, remove the stale local service with `treer-agent-server service --workspace {workspace} uninstall`, then run connect again; a fresh machine will be enrolled."
+    )
 }
 
 fn new_operator_credential() -> String {
@@ -593,11 +661,14 @@ async fn claim_machine_enrollment(
         .with_context(|| format!("failed to connect to {endpoint}"))?;
     let status = response.status();
     if !status.is_success() {
-        let error = response.json::<ApiError>().await.ok();
-        let message = error
-            .map(|error| error.error.message)
-            .unwrap_or_else(|| format!("Proxy enrollment failed with HTTP {status}"));
-        anyhow::bail!(message);
+        return Err(match response.json::<ApiError>().await.ok() {
+            // Keep the structured code so callers can add local guidance.
+            Some(error) => anyhow::Error::new(EnrollmentFailure {
+                code: error.error.code,
+                message: error.error.message,
+            }),
+            None => anyhow::anyhow!("Proxy enrollment failed with HTTP {status}"),
+        });
     }
     response
         .json()
@@ -752,6 +823,31 @@ fn sibling_treer_binary() -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn stale_installation_hint_only_rewrites_identity_conflicts() {
+        let conflict = anyhow::Error::new(super::EnrollmentFailure {
+            code: "machine_identity_conflict".into(),
+            message: "the installed machine is bound to another installation identity".into(),
+        });
+        let hinted = super::stale_installation_hint(conflict, "ws_a", "srv_old").to_string();
+        assert!(hinted.contains("srv_old") && hinted.contains("ws_a"));
+        assert!(hinted.contains("treer-agent-server service --workspace ws_a uninstall"));
+        assert!(!hinted.contains("Bearer") && !hinted.contains("opc_"));
+        let other = anyhow::Error::new(super::EnrollmentFailure {
+            code: "invalid_machine_enrollment".into(),
+            message: "enrollment key is invalid".into(),
+        });
+        assert_eq!(
+            super::stale_installation_hint(other, "ws_a", "srv_old").to_string(),
+            "enrollment key is invalid"
+        );
+        let plain = anyhow::anyhow!("connection refused");
+        assert_eq!(
+            super::stale_installation_hint(plain, "ws_a", "srv_old").to_string(),
+            "connection refused"
+        );
+    }
+
     #[test]
     fn offline_root_migration_requires_explicit_acknowledgement() {
         use clap::Parser;

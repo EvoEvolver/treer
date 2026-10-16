@@ -164,6 +164,25 @@ pub fn available_disk_bytes(path: &Path) -> io::Result<u64> {
     }
 }
 
+/// Try to take an exclusive advisory lock on an open file without blocking.
+/// Returns `Ok(false)` when another holder has it; the lock lives with the
+/// file descriptor and the OS releases it when the process ends.
+#[cfg(unix)]
+pub fn try_lock_file_exclusive(file: &std::fs::File) -> io::Result<bool> {
+    match rustix::fs::flock(file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::WOULDBLOCK) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether a descriptor is closed on exec (spawned services must never inherit
+/// Controller-only locks or state handles).
+#[cfg(unix)]
+pub fn file_is_close_on_exec(file: &std::fs::File) -> io::Result<bool> {
+    Ok(rustix::io::fcntl_getfd(file)?.contains(rustix::io::FdFlags::CLOEXEC))
+}
+
 pub fn secure_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {

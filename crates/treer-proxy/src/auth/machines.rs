@@ -604,9 +604,12 @@ impl AuthStore {
         if workspace.is_some_and(|row| row.get::<Option<String>, _>("deleted_at").is_some()) {
             return Err(invalid_machine_enrollment());
         }
+        // Every path that may rewrite an existing machine row locks that row
+        // first, so concurrent claims (two installations, two valid keys)
+        // serialize and the loser re-reads the winner's live binding.
         let server_for_installation = if let Some(installation_id) = installation_id.as_deref() {
             sqlx::query_scalar::<_, String>(
-                "SELECT server_id FROM machines WHERE workspace_id = $1 AND installation_id = $2",
+                "SELECT server_id FROM machines WHERE workspace_id = $1 AND installation_id = $2 FOR UPDATE",
             )
             .bind(&workspace_id)
             .bind(installation_id)
@@ -616,6 +619,7 @@ impl AuthStore {
         } else {
             None
         };
+        let mut replaced_server_id: Option<String> = None;
         let server_id = match (
             server_for_installation.as_deref(),
             existing_server_id.as_deref(),
@@ -629,7 +633,7 @@ impl AuthStore {
             (Some(server_id), _) => server_id.to_string(),
             (None, Some(server_id)) => {
                 let existing = sqlx::query(
-                    "SELECT workspace_id, installation_id FROM machines WHERE server_id = $1",
+                    "SELECT workspace_id, installation_id, revoked_at FROM machines WHERE server_id = $1 FOR UPDATE",
                 )
                 .bind(server_id)
                 .fetch_optional(&mut *transaction)
@@ -638,18 +642,39 @@ impl AuthStore {
                 if let Some(existing) = existing {
                     let existing_workspace: String = existing.get("workspace_id");
                     let existing_installation: Option<String> = existing.get("installation_id");
-                    if existing_workspace != workspace_id
-                        || existing_installation
-                            .as_deref()
-                            .is_some_and(|value| Some(value) != installation_id.as_deref())
-                    {
+                    let revoked: Option<String> = existing.get("revoked_at");
+                    if existing_workspace != workspace_id {
                         return Err(AuthFailure::conflict(
                             "machine_identity_conflict",
-                            "the installed machine is bound to another workspace or installation identity",
+                            "the installed machine is bound to another workspace",
                         ));
                     }
+                    // A machine deleted in the Console (revoked, credentials and
+                    // Agents revoked with it) no longer owns its installation
+                    // binding: the next enrollment rebinds the server ID to the
+                    // enrolling installation. A live machine keeps its binding.
+                    let other_installation = existing_installation
+                        .as_deref()
+                        .is_some_and(|value| Some(value) != installation_id.as_deref());
+                    if revoked.is_none() && other_installation {
+                        return Err(AuthFailure::conflict(
+                            "machine_identity_conflict",
+                            "the installed machine is bound to another installation identity",
+                        ));
+                    }
+                    if other_installation {
+                        // A machine deleted in the Console is never taken over by
+                        // another installation: that installation becomes a NEW
+                        // machine with its own ID, and the revoked row (and any
+                        // Policy rule or history naming it) stays untouched.
+                        replaced_server_id = Some(server_id.to_string());
+                        format!("srv_{}", Uuid::new_v4().simple())
+                    } else {
+                        server_id.to_string()
+                    }
+                } else {
+                    server_id.to_string()
                 }
-                server_id.to_string()
             }
             (None, None) => format!("srv_{}", Uuid::new_v4().simple()),
         };
@@ -675,9 +700,12 @@ impl AuthStore {
                 .map_err(AuthFailure::database)?
                 != 0;
         if existing_machine {
-            sqlx::query(
+            // The eligibility read above holds the row lock; the write still
+            // restates it so no interleaving can take over a live machine.
+            let rebound = sqlx::query(
                 "UPDATE machines SET installation_id = $1, secret_hash = $2, enrolled_by = $3, revoked_at = NULL \
-                 WHERE server_id = $4 AND workspace_id = $5",
+                 WHERE server_id = $4 AND workspace_id = $5 \
+                 AND (revoked_at IS NOT NULL OR installation_id IS NULL OR installation_id IS NOT DISTINCT FROM $1)",
             )
             .bind(installation_id.as_deref())
             .bind(machine_secret_hash)
@@ -687,6 +715,13 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
+            if rebound.rows_affected() != 1 {
+                // Dropping the transaction rolls back the enrollment key use.
+                return Err(AuthFailure::conflict(
+                    "machine_identity_conflict",
+                    "the installed machine is bound to another installation identity",
+                ));
+            }
         } else {
             sqlx::query(
                 "INSERT INTO machines(\
@@ -743,7 +778,16 @@ impl AuthStore {
                     resource_kind: "machine",
                     resource_id: &server_id,
                     resource_name: None,
-                    payload: json!({}),
+                    // A new machine that replaces a deleted one names the
+                    // replaced machine ID only; never installation identities or
+                    // paths. Same-installation reconnects keep an empty payload.
+                    payload: match &replaced_server_id {
+                        Some(previous) => json!({
+                            "replaced_revoked_machine": true,
+                            "previous_server_id": previous,
+                        }),
+                        None => json!({}),
+                    },
                 },
             )
             .await

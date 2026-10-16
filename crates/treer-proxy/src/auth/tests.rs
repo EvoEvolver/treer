@@ -2657,6 +2657,298 @@ async fn enrollment_recovers_a_revoked_legacy_machine_without_its_old_credential
 }
 
 #[tokio::test]
+async fn deleted_machine_can_be_re_enrolled_from_a_new_installation_but_a_live_one_cannot() {
+    // Issue #126: a persistent service config still names the old server ID
+    // while the state directory (installation identity) was regenerated, after
+    // the operator deleted the machine in the Console.
+    let store = AuthStore::for_test("owner-password").await;
+    let first_installation = "mid_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    let second_installation = "mid_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    let enrollment = store
+        .create_machine_enrollment("workspace-a", "admin")
+        .await
+        .expect("create enrollment");
+    let first = store
+        .claim_machine_enrollment_for_installation(
+            &enrollment,
+            Some(first_installation),
+            Some("Container builder"),
+            None,
+        )
+        .await
+        .expect("claim first enrollment");
+
+    // Live machine: a different installation reusing the server ID is refused.
+    let live_retry = store
+        .create_machine_enrollment("workspace-a", "admin")
+        .await
+        .expect("create live retry enrollment");
+    let conflict = store
+        .claim_machine_enrollment_for_installation(
+            &live_retry,
+            Some(second_installation),
+            Some("Container builder"),
+            Some(&first.server_id),
+        )
+        .await
+        .expect_err("a live machine keeps its installation binding");
+    assert_eq!(conflict.into_parts().1.code, "machine_identity_conflict");
+
+    store
+        .delete_machine("workspace-a", &first.server_id, &[])
+        .await
+        .expect("delete machine in the Console");
+
+    // Deleted machine: re-adding from the regenerated installation works, but
+    // as a NEW machine; the revoked row keeps its binding and stays revoked.
+    let re_enrollment = store
+        .create_machine_enrollment("workspace-a", "admin")
+        .await
+        .expect("create re-enrollment");
+    let second = store
+        .claim_machine_enrollment_for_installation(
+            &re_enrollment,
+            Some(second_installation),
+            Some("Container builder"),
+            Some(&first.server_id),
+        )
+        .await
+        .expect("re-enroll after the machine was deleted");
+    assert_ne!(second.server_id, first.server_id);
+    assert_eq!(second.workspace_id, "workspace-a");
+    let old_row: (String, Option<String>) =
+        sqlx::query_as("SELECT installation_id, revoked_at FROM machines WHERE server_id = $1")
+            .bind(&first.server_id)
+            .fetch_one(&store.pool)
+            .await
+            .expect("load the revoked machine");
+    assert_eq!(
+        old_row.0, first_installation,
+        "the revoked row is untouched"
+    );
+    assert!(old_row.1.is_some());
+    let new_row: (String, Option<String>) =
+        sqlx::query_as("SELECT installation_id, revoked_at FROM machines WHERE server_id = $1")
+            .bind(&second.server_id)
+            .fetch_one(&store.pool)
+            .await
+            .expect("load the new machine");
+    assert_eq!(new_row.0, second_installation);
+    assert!(new_row.1.is_none());
+    let mut old_headers = HeaderMap::new();
+    old_headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", first.machine_token)).expect("old token"),
+    );
+    assert!(store.authenticate_machine(&old_headers).await.is_err());
+    let mut new_headers = HeaderMap::new();
+    new_headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {}", second.machine_token)).expect("new token"),
+    );
+    assert!(store.authenticate_machine(&new_headers).await.is_ok());
+
+    // The original installation reconnecting keeps today's behaviour: its own
+    // revoked row is reactivated under the same machine ID, and the new
+    // machine is unaffected.
+    let same_installation = store
+        .create_machine_enrollment("workspace-a", "admin")
+        .await
+        .expect("create same-installation enrollment");
+    let reactivated = store
+        .claim_machine_enrollment_for_installation(
+            &same_installation,
+            Some(first_installation),
+            Some("Container builder"),
+            Some(&first.server_id),
+        )
+        .await
+        .expect("the same installation reactivates its machine");
+    assert_eq!(reactivated.server_id, first.server_id);
+    assert!(store.authenticate_machine(&new_headers).await.is_ok());
+    assert!(store
+        .machine_is_active("workspace-a", &second.server_id)
+        .await
+        .expect("new machine stays active"));
+
+    // Another workspace never claims a server ID, deleted or not.
+    store
+        .delete_machine("workspace-a", &first.server_id, &[])
+        .await
+        .expect("delete again");
+    let foreign = store
+        .create_machine_enrollment("workspace-b", "admin")
+        .await
+        .expect("create foreign enrollment");
+    let conflict = store
+        .claim_machine_enrollment_for_installation(
+            &foreign,
+            Some(second_installation),
+            Some("Container builder"),
+            Some(&first.server_id),
+        )
+        .await
+        .expect_err("another workspace cannot claim the server ID");
+    assert_eq!(conflict.into_parts().1.code, "machine_identity_conflict");
+}
+
+#[tokio::test]
+async fn concurrent_claims_for_a_deleted_machine_each_become_their_own_machine() {
+    let store = AuthStore::for_test("owner-password").await;
+    let enrollment = store
+        .create_machine_enrollment("workspace-a", "admin")
+        .await
+        .expect("create enrollment");
+    let first = store
+        .claim_machine_enrollment_for_installation(
+            &enrollment,
+            Some("mid_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some("Builder"),
+            None,
+        )
+        .await
+        .expect("claim first enrollment");
+    store
+        .delete_machine("workspace-a", &first.server_id, &[])
+        .await
+        .expect("delete machine");
+    // Hold the machines row so both claims reach their locked eligibility
+    // read at the same time, then release and let PostgreSQL serialize them.
+    let pool = store.pool();
+    let mut holder = pool.begin().await.expect("begin holder");
+    sqlx::query("SELECT server_id FROM machines WHERE server_id = $1 FOR UPDATE")
+        .bind(&first.server_id)
+        .fetch_one(&mut *holder)
+        .await
+        .expect("hold row lock");
+    let mut claims = Vec::new();
+    for installation in [
+        "mid_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "mid_cccccccccccccccccccccccccccccccc",
+    ] {
+        let key = store
+            .create_machine_enrollment("workspace-a", "admin")
+            .await
+            .expect("create racing enrollment");
+        let store = store.clone();
+        let server_id = first.server_id.clone();
+        claims.push(tokio::spawn(async move {
+            store
+                .claim_machine_enrollment_for_installation(
+                    &key,
+                    Some(installation),
+                    Some("Builder"),
+                    Some(&server_id),
+                )
+                .await
+        }));
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    holder.commit().await.expect("release row lock");
+    // Neither installation takes the revoked machine over: each becomes its
+    // own new machine with a working token, and the revoked row is untouched.
+    let mut minted = Vec::new();
+    for claim in claims {
+        let claim = claim
+            .await
+            .expect("claim task")
+            .expect("new machine minted");
+        assert_ne!(claim.server_id, first.server_id);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", claim.machine_token)).expect("token"),
+        );
+        assert!(store.authenticate_machine(&headers).await.is_ok());
+        minted.push(claim.server_id);
+    }
+    assert_ne!(
+        minted[0], minted[1],
+        "concurrent installations never share an ID"
+    );
+    let old_row: (String, Option<String>) =
+        sqlx::query_as("SELECT installation_id, revoked_at FROM machines WHERE server_id = $1")
+            .bind(&first.server_id)
+            .fetch_one(&pool)
+            .await
+            .expect("load revoked row");
+    assert_eq!(old_row.0, "mid_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+    assert!(old_row.1.is_some(), "the deleted machine stays revoked");
+}
+
+#[tokio::test]
+async fn re_enrolling_a_deleted_machine_never_revives_its_agents() {
+    let store = AuthStore::for_test("owner-password").await;
+    store.seed_test_workspace("workspace-a").await;
+    let enrollment = store
+        .create_machine_enrollment("workspace-a", "admin")
+        .await
+        .expect("create enrollment");
+    let first = store
+        .claim_machine_enrollment_for_installation(
+            &enrollment,
+            Some("mid_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+            Some("Builder"),
+            None,
+        )
+        .await
+        .expect("claim first enrollment");
+    let credential = store
+        .create_agent_credential("workspace-a", &first.server_id, "ag_old")
+        .await
+        .expect("create agent credential");
+    store
+        .delete_machine("workspace-a", &first.server_id, &["ag_old".to_string()])
+        .await
+        .expect("delete machine with its agent");
+    let re_enrollment = store
+        .create_machine_enrollment("workspace-a", "admin")
+        .await
+        .expect("create re-enrollment");
+    let second = store
+        .claim_machine_enrollment_for_installation(
+            &re_enrollment,
+            Some("mid_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"),
+            Some("Builder"),
+            Some(&first.server_id),
+        )
+        .await
+        .expect("re-enroll from the new installation");
+    assert_ne!(second.server_id, first.server_id);
+    // Credential revocation is the authority: the old workload credential is
+    // refused for both machine IDs, startup validation does not treat the
+    // Agent as active anywhere, and the row stays revoked.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        treer_protocol::AGENT_ID_HEADER,
+        HeaderValue::from_static("ag_old"),
+    );
+    headers.insert(
+        treer_protocol::WORKLOAD_CREDENTIAL_HEADER,
+        HeaderValue::from_str(&credential).expect("credential header"),
+    );
+    for server_id in [&first.server_id, &second.server_id] {
+        let machine = MachineSession {
+            server_id: Some(server_id.clone()),
+            workspace_id: Some("workspace-a".into()),
+        };
+        assert!(store.authenticate_agent(&machine, &headers).await.is_err());
+        assert!(store
+            .active_agent_ids("workspace-a", server_id, &["ag_old".to_string()])
+            .await
+            .expect("active ids")
+            .is_empty());
+    }
+    let revoked: Option<String> =
+        sqlx::query_scalar("SELECT revoked_at FROM agent_credentials WHERE agent_id = $1")
+            .bind("ag_old")
+            .fetch_one(&store.pool())
+            .await
+            .expect("load credential");
+    assert!(revoked.is_some(), "the old Agent credential stays revoked");
+}
+
+#[tokio::test]
 async fn existing_machine_can_bind_an_installation_identity_for_migration() {
     let store = AuthStore::for_test("owner-password").await;
     let first_enrollment = store

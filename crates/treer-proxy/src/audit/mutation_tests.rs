@@ -190,11 +190,15 @@ async fn reenrollment_is_a_real_rotation_and_app_compound_mutations_are_atomic()
         rows.iter().filter(|e| e.action == "machine.enroll").count(),
         1
     );
+    let reenroll: Vec<_> = rows
+        .iter()
+        .filter(|e| e.action == "machine.reenroll")
+        .collect();
+    assert_eq!(reenroll.len(), 1);
     assert_eq!(
-        rows.iter()
-            .filter(|e| e.action == "machine.reenroll")
-            .count(),
-        1
+        reenroll[0].payload,
+        serde_json::json!({}),
+        "same-installation reconnects carry no replacement marker"
     );
     let app = store
         .create_app_deployment(

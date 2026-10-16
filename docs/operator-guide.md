@@ -1450,7 +1450,37 @@ treer runtime restore --all
 ```
 
 Recovery reuses the existing installation without re-enrollment. Agents and
-Apps save their actual launch snapshot before spawning. The Controller first
+Apps save their actual launch snapshot before spawning.
+
+Re-adding a machine after deleting it in the Console works from the same
+installation (its row is reactivated under the same machine ID) and, since
+#126, from a new installation identity as well: the Proxy then mints a NEW
+machine ID and leaves the deleted machine's row revoked, so nothing (Policy
+rules, history, Agents) is inherited by a different physical installation.
+Two local files take part: the installation identity in
+`<state dir>/machines/<hostname-key>/machine-identity.json` and the registered
+service in `<config dir>/<key>-controller.json` plus `<key>-host.json` (the
+config directory is separate from the state directory, so deleting
+`~/.local/state/treer` alone regenerates the identity but keeps the service).
+When a persistent service configuration still names the deleted machine, the
+Controller adopts the new machine ID itself: it journals the replacement,
+keeps `.bak-<timestamp>` copies of the previous files, writes the new
+configuration, stops and removes the previous registration (this ends the
+previous Host and any Agents still running on it, as `service uninstall`
+would; the Controller prints the machine ID it is stopping first), then
+registers and starts the new machine. The backups
+`<config dir>/<key>-controller.json.bak-<timestamp>` and
+`<key>-host.json.bak-<timestamp>` are private (0600) and still contain the
+previous, already revoked machine token; delete them once the new machine is
+confirmed working. An interrupted replacement is finished by the
+next `connect` or `service repair`; the previous machine's startup store and
+`agent-private/<old machine>` directory are never read or migrated and remain
+on disk for manual cleanup. The audit event `machine.enroll` carries
+`replaced_revoked_machine: true` and `previous_server_id` for such a
+replacement. A live machine keeps its binding; a conflict while reusing an
+installed service names the configuration directory and the reset:
+`treer-agent-server service --workspace WORKSPACE_ID uninstall`, then connect
+again. The Controller first
 checks Host inventory, so a hot restart or repeated restore attaches surviving
 processes. Missing intended-running processes restart under their stable Agent
 ID after Proxy credential validation. Explicitly stopped/deleted/revoked items
