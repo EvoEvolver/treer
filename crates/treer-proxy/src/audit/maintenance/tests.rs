@@ -192,6 +192,28 @@ async fn one_cleanup_cycle_catches_up_multiple_batches_and_configuration_is_audi
 }
 
 #[tokio::test]
+async fn exhausted_cleanup_budget_still_commits_the_first_batch() {
+    let auth = fixture().await;
+    let pool = auth.pool();
+    sqlx::query("INSERT INTO organization_audit_events(event_id,organization_id,workspace_id,occurred_at,actor_kind,source,action,outcome,resource_kind,resource_id) \
+        SELECT 'budget_'||i,'org_audit','audit',(CURRENT_TIMESTAMP-INTERVAL '181 days')::TEXT,'system','test','agent.prompt','succeeded','workspace','audit' FROM generate_series(1,300) AS i")
+        .execute(&pool).await.unwrap();
+    assert!(cleanup_with_budget(&pool, Duration::ZERO).await.unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM organization_audit_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        44
+    );
+    assert!(metadata(&pool, None, Some("audit"), false)
+        .await
+        .unwrap()
+        .deleted_through
+        .is_some());
+}
+
+#[tokio::test]
 async fn failed_insert_does_not_consume_capacity_and_failed_drain_keeps_durable_entry() {
     let auth = fixture().await;
     let pool = auth.pool();

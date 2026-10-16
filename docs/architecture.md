@@ -1013,8 +1013,10 @@ Every organization audit kind has the same maximum age, initially 180 days.
 `--audit-retention-days` / `TREER_AUDIT_RETENTION_DAYS` (30..3650) explicitly changes
 the shared database setting; omission preserves it. Workers use database time
 and bounded 256-row cleanup batches. Idle checks run every minute; each cleanup
-cycle catches up for up to one second/64 batches, then resumes next second if
-backlogged. Retention configuration is
+cycle starts additional batches within a one-second/64-batch budget, then resumes
+next second if backlogged. A started batch may finish beyond that budget (with a
+five-second database statement timeout), so slow first batches can make progress.
+Retention configuration is
 read from PostgreSQL, not a NATS cache. Deletion records monotonic scoped
 `maintenance.deleted_through` watermarks; these do not establish completeness.
 Increasing retention cannot recover deleted history, and cleanup may lag the

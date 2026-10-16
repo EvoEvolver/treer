@@ -818,7 +818,8 @@ UTC `rows_per_day` list (`day`, `action`, `rows`), `statistics_since` and
 cleanup backlog. Check the
 capability before using the new query against old Proxies. Statistics require
 the same authorization as audit reads and can fail rather than run longer than
-their two-second database statement budget.
+their two-second database statement budget. An opted-in statistics failure fails
+that request; retry without `include_statistics` to read the ordinary feed.
 
 Retention starts at 180 days for every organization audit kind, including
 security-sensitive events. Set Proxy `--audit-retention-days DAYS` or
@@ -827,7 +828,9 @@ setting. Omission preserves the existing setting; keep explicit settings equal
 across replicas: the last explicit configuration wins. A configuration change
 records old/new days in platform audit; startup logs effective days and source.
 Idle checks run each minute; cleanup commits 256-row batches for up to one second
-or 64 batches per cycle, then resumes next second while backlogged. Backlogs can
+or 64 batches per cycle, then resumes next second while backlogged. The budget
+limits starting the next batch; a started batch finishes under a five-second
+statement timeout rather than being repeatedly rolled back at one second. Backlogs can
 still exceed the configured age. Deletion begins at the first worker tick after
 startup: set a longer lifetime before deploying if needed. There is no forever
 setting or built-in export. Deletion is irreversible without an

@@ -199,6 +199,9 @@ fn timestamp(micros: i64) -> Result<DateTime<Utc>, sqlx::Error> {
 
 pub(crate) async fn cleanup_batch(pool: &PgPool) -> Result<u64, sqlx::Error> {
     let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await?;
     // One batch, DB clock, every kind equally. A one-day prefix margin handles
     // historical RFC3339 offsets; the exact timestamp remains authoritative.
     let rows = sqlx::query("DELETE FROM organization_audit_events WHERE sequence IN (\
@@ -234,20 +237,20 @@ pub(crate) struct Worker {
     task: JoinHandle<()>,
 }
 
-/// Catch up without an unbounded transaction or starving prompt drains. Budget
-/// exhaustion schedules another cycle on the next one-second worker tick.
+/// Budget limits starting another batch, not completing one. Cancelling every
+/// slow first batch at one second would roll it back forever without progress.
 async fn cleanup_cycle(pool: &PgPool) -> Result<bool, sqlx::Error> {
     cleanup_with_budget(pool, Duration::from_secs(1)).await
 }
 
 async fn cleanup_with_budget(pool: &PgPool, budget: Duration) -> Result<bool, sqlx::Error> {
     let deadline = tokio::time::Instant::now() + budget;
-    for _ in 0..64 {
-        match tokio::time::timeout_at(deadline, cleanup_batch(pool)).await {
-            Ok(Ok(rows)) if rows < BATCH as u64 => return Ok(false),
-            Ok(Ok(_)) => {}
-            Ok(Err(error)) => return Err(error),
-            Err(_) => return Ok(true),
+    for batch in 0..64 {
+        if batch > 0 && tokio::time::Instant::now() >= deadline {
+            return Ok(true);
+        }
+        if cleanup_batch(pool).await? < BATCH as u64 {
+            return Ok(false);
         }
     }
     Ok(true)
