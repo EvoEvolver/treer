@@ -310,6 +310,13 @@ async fn prompt_queue_policy_denies_send_and_listing_before_dispatch() {
     .await
     .unwrap_err();
     assert_eq!(error.error.code, "policy_denied");
+    let audit_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM organization_audit_events WHERE action='agent.prompt'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(audit_count, 0);
     let error = read_prompt_queue(
         State(state),
         Extension(auth),
@@ -384,21 +391,28 @@ async fn prompt_queue_attests_sender_and_checks_cancel_ownership() {
             machine.clone(),
         );
         async move {
-            prompt_agent(
-                State(state),
-                Extension(auth),
-                Extension(policy),
-                machine,
-                headers,
-                Path(("default".into(), "reviewer".into())),
-                Json(treer_protocol::SubmitAgentPromptRequest {
-                    text: "task".into(),
-                    delivery: treer_protocol::PromptDelivery::Queue,
-                    notify: Some(treer_protocol::PromptNotify::default()),
-                    require_receipt: true,
-                }),
-            )
-            .await
+            crate::audit::MUTATION_ACTOR
+                .scope(
+                    crate::audit::MutationActor {
+                        kind: "agent",
+                        id: Some("agent-a".into()),
+                    },
+                    prompt_agent(
+                        State(state),
+                        Extension(auth),
+                        Extension(policy),
+                        machine,
+                        headers,
+                        Path(("default".into(), "reviewer".into())),
+                        Json(treer_protocol::SubmitAgentPromptRequest {
+                            text: "task".into(),
+                            delivery: treer_protocol::PromptDelivery::Queue,
+                            notify: Some(treer_protocol::PromptNotify::default()),
+                            require_receipt: true,
+                        }),
+                    ),
+                )
+                .await
         }
     });
     let envelope = next_lifecycle_command(&mut rx).await;
@@ -424,6 +438,18 @@ async fn prompt_queue_attests_sender_and_checks_cancel_ownership() {
         ))
         .await;
     assert!(pending.await.unwrap().is_ok());
+    let audit_rows = crate::audit::list(&auth.pool(), "org_default", None, None, 100)
+        .await
+        .unwrap();
+    let prompts: Vec<_> = audit_rows
+        .iter()
+        .filter(|e| e.action == "agent.prompt")
+        .collect();
+    assert_eq!(prompts.len(), 1);
+    assert_eq!(prompts[0].actor_id.as_deref(), Some("agent-a"));
+    assert_eq!(prompts[0].resource_id, "agent-b");
+    assert_eq!(prompts[0].payload, json!({}));
+    assert!(prompts[0].resource_name.is_none());
     for sender in ["agent-b", "agent-a"] {
         let pending = tokio::spawn({
             let (state, auth, policy, headers, machine) = (
@@ -474,6 +500,42 @@ async fn prompt_queue_attests_sender_and_checks_cancel_ownership() {
             );
         }
     }
+}
+
+#[tokio::test]
+async fn failed_prompt_dispatch_does_not_append_an_acceptance_audit() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let result = prompt_agent(
+        State(state),
+        Extension(auth.clone()),
+        Extension(PolicyEngine::allow_all()),
+        Some(Extension(MachineSession {
+            server_id: Some("machine-a".into()),
+            workspace_id: Some("default".into()),
+        })),
+        HeaderMap::from_iter([(
+            AGENT_ID_HEADER.parse().unwrap(),
+            HeaderValue::from_static("agent-a"),
+        )]),
+        Path(("default".into(), "reviewer".into())),
+        Json(treer_protocol::SubmitAgentPromptRequest {
+            text: "synthetic-private-body".into(),
+            delivery: treer_protocol::PromptDelivery::Queue,
+            notify: None,
+            require_receipt: false,
+        }),
+    )
+    .await;
+    assert!(result.is_err());
+    let count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM organization_audit_events WHERE action='agent.prompt'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(count, 0);
 }
 
 #[tokio::test]
@@ -1304,11 +1366,22 @@ async fn workload_tree_agent_auth_and_directory_operations() {
         &headers,
         Method::POST,
         &format!("{base}/folders"),
-        json!({"name":"research"}),
+        json!({"name":"research","actor_id":"spoofed-owner","actor_kind":"user"}),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
     let id = folder["folder"]["folder_id"].as_str().unwrap();
+    let audit_rows = crate::audit::list(&auth.pool(), "org_default", None, None, 100)
+        .await
+        .unwrap();
+    let event = audit_rows
+        .iter()
+        .find(|e| e.action == "tree.folder.create")
+        .unwrap();
+    assert_eq!(event.actor_kind, "agent");
+    assert_eq!(event.actor_id.as_deref(), Some("agent-a"));
+    assert_eq!(event.resource_id, id);
+    assert_eq!(event.payload, json!({}));
     let duplicate = tree_request(
         &router,
         &headers,

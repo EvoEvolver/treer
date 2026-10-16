@@ -113,6 +113,15 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         sqlx::query("INSERT INTO workload_placements(workspace_id,agent_id,folder_id,position) SELECT $1,$2,$3,COALESCE(MAX(position)+1,0) FROM workload_placements WHERE workspace_id=$1 AND folder_id IS NOT DISTINCT FROM $3").bind(workspace).bind(agent).bind(folder).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        audit::insert_workspace_mutation(
+            &mut tx,
+            workspace,
+            "tree.placement.create",
+            "agent",
+            agent,
+        )
+        .await
+        .map_err(AuthFailure::database)?;
         tx.commit().await.map_err(AuthFailure::database)?;
         self.agent_credentials
             .write()
@@ -188,6 +197,15 @@ impl AuthStore {
             parent_id: request.parent_id,
         };
         sqlx::query("INSERT INTO workload_folders(workspace_id,folder_id,name,parent_id) VALUES($1,$2,$3,$4)").bind(workspace).bind(&result.folder_id).bind(&result.name).bind(&result.parent_id).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        audit::insert_workspace_mutation(
+            &mut tx,
+            workspace,
+            "tree.folder.create",
+            "folder",
+            &result.folder_id,
+        )
+        .await
+        .map_err(AuthFailure::database)?;
         tx.commit().await.map_err(AuthFailure::database)?;
         Ok(result)
     }
@@ -200,6 +218,7 @@ impl AuthStore {
     ) -> Result<WorkloadFolder, AuthFailure> {
         let mut tx = self.lock_workload_tree(workspace).await?;
         let mut result = load_folder(&mut tx, workspace, id).await?;
+        let original = result.clone();
         if let Some(name) = request.name {
             result.name = validate_folder_name(&name)?;
         }
@@ -215,7 +234,13 @@ impl AuthStore {
             Some(id),
         )
         .await?;
+        if result.name == original.name && result.parent_id == original.parent_id {
+            return Ok(result);
+        }
         sqlx::query("UPDATE workload_folders SET name=$3,parent_id=$4 WHERE workspace_id=$1 AND folder_id=$2").bind(workspace).bind(id).bind(&result.name).bind(&result.parent_id).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        audit::insert_workspace_mutation(&mut tx, workspace, "tree.folder.update", "folder", id)
+            .await
+            .map_err(AuthFailure::database)?;
         tx.commit().await.map_err(AuthFailure::database)?;
         Ok(result)
     }
@@ -275,6 +300,9 @@ impl AuthStore {
             .await
             .map_err(AuthFailure::database)?;
         normalize(&mut tx, workspace).await?;
+        audit::insert_workspace_mutation(&mut tx, workspace, "tree.folder.delete", "folder", id)
+            .await
+            .map_err(AuthFailure::database)?;
         tx.commit().await.map_err(AuthFailure::database)?;
         Ok(())
     }
@@ -310,6 +338,8 @@ impl AuthStore {
             .await?;
         }
 
+        let original: Option<(Option<String>, i64)> = sqlx::query_as("SELECT folder_id,position FROM workload_placements WHERE workspace_id=$1 AND agent_id=$2")
+            .bind(workspace).bind(agent).fetch_optional(&mut *tx).await.map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM workload_placements WHERE workspace_id=$1 AND agent_id=$2")
             .bind(workspace)
             .bind(agent)
@@ -321,6 +351,17 @@ impl AuthStore {
         let position = request.position.min(count);
         sqlx::query("UPDATE workload_placements SET position=position+1 WHERE workspace_id=$1 AND folder_id IS NOT DISTINCT FROM $2 AND position >= $3").bind(workspace).bind(&request.folder_id).bind(position).execute(&mut *tx).await.map_err(AuthFailure::database)?;
         sqlx::query("INSERT INTO workload_placements(workspace_id,agent_id,folder_id,position) VALUES($1,$2,$3,$4)").bind(workspace).bind(agent).bind(&request.folder_id).bind(position).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        if original.as_ref() != Some(&(request.folder_id.clone(), position)) {
+            audit::insert_workspace_mutation(
+                &mut tx,
+                workspace,
+                "tree.placement.update",
+                "agent",
+                agent,
+            )
+            .await
+            .map_err(AuthFailure::database)?;
+        }
         tx.commit().await.map_err(AuthFailure::database)?;
         Ok(WorkloadPlacement {
             agent_id: agent.into(),

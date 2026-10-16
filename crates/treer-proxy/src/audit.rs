@@ -4,6 +4,78 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use treer_protocol::{OrganizationAuditEvent, WorkspaceAuditEventsPage, WorkspaceAuditEventsQuery};
 use uuid::Uuid;
 
+#[cfg(test)]
+mod mutation_tests;
+
+/// Set only after authentication, never from an actor supplied in a JSON body.
+/// Scoped to the request future (not an OS thread or pooled DB connection).
+#[derive(Clone)]
+pub(crate) struct MutationActor {
+    pub kind: &'static str,
+    pub id: Option<String>,
+}
+
+tokio::task_local! {
+    pub(crate) static MUTATION_ACTOR: MutationActor;
+}
+
+pub(crate) async fn insert_workspace_mutation(
+    transaction: &mut Transaction<'_, Postgres>,
+    workspace: &str,
+    action: &str,
+    kind: &str,
+    id: &str,
+) -> Result<(), sqlx::Error> {
+    let actor = MUTATION_ACTOR
+        .try_with(Clone::clone)
+        .unwrap_or(MutationActor {
+            kind: "system",
+            id: None,
+        });
+    let organization: String =
+        sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE workspace_id=$1")
+            .bind(workspace)
+            .fetch_one(&mut **transaction)
+            .await?;
+    insert(
+        transaction,
+        NewAuditEvent {
+            organization_id: &organization,
+            workspace_id: Some(workspace),
+            actor_kind: actor.kind,
+            actor_id: actor.id.as_deref(),
+            source: "control-plane",
+            action,
+            resource_kind: kind,
+            resource_id: id,
+            resource_name: None,
+            payload: serde_json::json!({}),
+        },
+    )
+    .await
+}
+
+/// Network mutations span durable rows and in-memory routing/Controller state.
+/// Do not report rollback if this follow-up write fails after the mutation.
+pub(crate) async fn mutation_best_effort(
+    pool: &PgPool,
+    workspace: &str,
+    action: &str,
+    kind: &str,
+    id: &str,
+) {
+    let result = async {
+        let mut tx = pool.begin().await?;
+        insert_workspace_mutation(&mut tx, workspace, action, kind, id).await?;
+        tx.commit().await
+    }
+    .await;
+    if result.is_err() {
+        // Database errors may contain row values. Never log them here.
+        tracing::warn!(action, "mutation succeeded but audit persistence failed");
+    }
+}
+
 pub(crate) struct NewAuditEvent<'a> {
     pub organization_id: &'a str,
     pub workspace_id: Option<&'a str>,
@@ -35,9 +107,9 @@ pub(crate) async fn insert(
     sqlx::query(
         "INSERT INTO organization_audit_events(\
          event_id, organization_id, workspace_id, occurred_at, actor_kind, actor_id, \
-         actor_name, source, action, outcome, resource_kind, resource_id, resource_name, payload) \
+         actor_name, source, action, outcome, resource_kind, resource_id, resource_name, payload, workspace_origin_id) \
          VALUES($1, $2, $3, $4, $5, $6, \
-         (SELECT preferred_name FROM users WHERE id = $6), $7, $8, 'succeeded', $9, $10, $11, $12)",
+         (SELECT preferred_name FROM users WHERE id = $6), $7, $8, 'succeeded', $9, $10, $11, $12, $3)",
     )
     .bind(format!("aud_{}", Uuid::new_v4().simple()))
     .bind(event.organization_id)
@@ -64,11 +136,11 @@ pub(crate) async fn list(
     limit: i64,
 ) -> Result<Vec<OrganizationAuditEvent>, sqlx::Error> {
     let rows = sqlx::query(
-        "SELECT sequence, event_id, organization_id, workspace_id, occurred_at, actor_kind, \
+        "SELECT sequence, event_id, organization_id, COALESCE(workspace_id,workspace_origin_id) AS workspace_id, occurred_at, actor_kind, \
          actor_id, actor_name, source, action, outcome, resource_kind, resource_id, \
          resource_name, correlation_id, payload \
          FROM organization_audit_events \
-         WHERE organization_id = $1 AND ($2::TEXT IS NULL OR workspace_id = $2 OR workspace_id IS NULL) \
+         WHERE organization_id = $1 AND ($2::TEXT IS NULL OR COALESCE(workspace_id,workspace_origin_id) = $2 OR COALESCE(workspace_id,workspace_origin_id) IS NULL) \
          AND ($3::BIGINT IS NULL OR sequence < $3) ORDER BY sequence DESC LIMIT $4",
     )
     .bind(organization_id)
@@ -193,7 +265,27 @@ fn workspace_payload(action: &str, payload: &Value) -> Value {
         | "app.update"
         | "app.startup.update" => &["server_id", "startup_revision"],
         "machine.exec" => &["exit_code", "timed_out", "truncated", "timeout_ms"],
-        "workspace.audit.read" => &[],
+        "workspace.audit.read"
+        | "tree.folder.create"
+        | "tree.folder.update"
+        | "tree.folder.delete"
+        | "tree.placement.create"
+        | "tree.placement.update"
+        | "tree.placement.delete"
+        | "tree.workload.rename"
+        | "service.create"
+        | "service.update"
+        | "service.delete"
+        | "virtual_host.create"
+        | "virtual_host.delete"
+        | "ingress.http.create"
+        | "ingress.http.update"
+        | "ingress.http.delete"
+        | "ingress.tcp.publish"
+        | "ingress.tcp.unpublish"
+        | "machine.enroll"
+        | "machine.reenroll"
+        | "agent.prompt" => &[],
         _ => &[],
     };
     let mut result = serde_json::Map::new();

@@ -81,6 +81,14 @@ impl AuthStore {
         treer_protocol::validate_workload_label(name)
             .map_err(|e| AuthFailure::bad_request("invalid_agent_name", &e.message))?;
         let mut transaction = self.lock_workload_tree(workspace_id).await?;
+        let previous: Option<String> = sqlx::query_scalar(
+            "SELECT name FROM agent_names WHERE workspace_id=$1 AND agent_id=$2",
+        )
+        .bind(workspace_id)
+        .bind(agent_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         let folder: Option<String> = sqlx::query_scalar(
             "SELECT folder_id FROM workload_placements WHERE workspace_id=$1 AND agent_id=$2",
         )
@@ -115,6 +123,17 @@ impl AuthStore {
         sqlx::query("UPDATE app_deployments SET name = $3, updated_at = $4 WHERE workspace_id = $1 AND runtime_agent_id = $2")
             .bind(workspace_id).bind(agent_id).bind(name).bind(Utc::now().to_rfc3339())
             .execute(&mut *transaction).await.map_err(AuthFailure::database)?;
+        if previous.as_deref() != Some(name) {
+            audit::insert_workspace_mutation(
+                &mut transaction,
+                workspace_id,
+                "tree.workload.rename",
+                "agent",
+                agent_id,
+            )
+            .await
+            .map_err(AuthFailure::database)?;
+        }
         transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(())
     }
@@ -575,6 +594,38 @@ impl AuthStore {
             .bind(machine_name)
             .bind(now.to_rfc3339())
             .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        }
+        // Legacy/local-auth installations can have enrollment records without
+        // a durable workspace. Preserve that compatibility; never invent an org
+        // attribution. Ordinary workspace enrollment is audited atomically.
+        let organization: Option<String> =
+            sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE workspace_id=$1")
+                .bind(&workspace_id)
+                .fetch_optional(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        if let Some(organization) = organization {
+            audit::insert(
+                &mut transaction,
+                audit::NewAuditEvent {
+                    organization_id: &organization,
+                    workspace_id: Some(&workspace_id),
+                    actor_kind: "user",
+                    actor_id: Some(&created_by),
+                    source: "control-plane",
+                    action: if existing_machine {
+                        "machine.reenroll"
+                    } else {
+                        "machine.enroll"
+                    },
+                    resource_kind: "machine",
+                    resource_id: &server_id,
+                    resource_name: None,
+                    payload: json!({}),
+                },
+            )
             .await
             .map_err(AuthFailure::database)?;
         }

@@ -150,10 +150,20 @@ pub(in crate::api) async fn publish_public_tcp_service(
         .host_str()
         .unwrap_or("localhost")
         .to_owned();
-    sqlx::query("INSERT INTO public_tcp_services(service_id,public_port,enabled) VALUES($1,$2,TRUE) ON CONFLICT(service_id) DO UPDATE SET enabled=TRUE").bind(&service.service_id).bind(port).execute(&mut *tx).await.map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    let changed = sqlx::query("INSERT INTO public_tcp_services(service_id,public_port,enabled) VALUES($1,$2,TRUE) ON CONFLICT(service_id) DO UPDATE SET enabled=TRUE WHERE NOT public_tcp_services.enabled").bind(&service.service_id).bind(port).execute(&mut *tx).await.map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?.rows_affected();
     tx.commit()
         .await
         .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    if changed != 0 {
+        crate::audit::mutation_best_effort(
+            &auth.pool(),
+            &workspace_id,
+            "ingress.tcp.publish",
+            "service",
+            &service.service_id,
+        )
+        .await;
+    }
     Ok(Json(
         json!({"service_id": service.service_id, "access": "public", "hostname": host, "port": port}),
     ))
@@ -225,11 +235,23 @@ pub(in crate::api) async fn unpublish_public_tcp_service(
     let service = auth
         .resolve_machine_service(&workspace_id, &service_id)
         .await?;
-    sqlx::query("UPDATE public_tcp_services SET enabled=FALSE WHERE service_id=$1")
-        .bind(&service.service_id)
-        .execute(&auth.pool())
-        .await
-        .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?;
+    let changed =
+        sqlx::query("UPDATE public_tcp_services SET enabled=FALSE WHERE service_id=$1 AND enabled")
+            .bind(&service.service_id)
+            .execute(&auth.pool())
+            .await
+            .map_err(|e| ApiFailure::internal("database_error", &e.to_string()))?
+            .rows_affected();
+    if changed != 0 {
+        crate::audit::mutation_best_effort(
+            &auth.pool(),
+            &workspace_id,
+            "ingress.tcp.unpublish",
+            "service",
+            &service.service_id,
+        )
+        .await;
+    }
     Ok(Json(
         json!({"service_id":service.service_id,"enabled":false}),
     ))

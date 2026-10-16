@@ -47,7 +47,12 @@ The permission matrix covers owner/org admin, direct workspace owner, member,
 Agent/machine/service subjects, explicit enforce grants, monitor/default-allow
 refusal and enforced owner denial; App tokens are audience/caller bound. These
 tests do not imply complete event coverage, immutable audit storage, auditing of
-audit reads or reconstruction of unattributed/deleted-workspace history.
+audit reads or reconstruction of previously unattributed history. Mutation audit
+regressions additionally exercise Tree/enrollment transaction rollback, repeated
+and rejected writes, networking best-effort failures, future-scoped caller
+attribution, immutable attribution for newly written deleted-workspace events,
+and fail-closed payload projection. Networking and prompt audit delivery still
+has no completeness guarantee; an acceptance event is not proof of turn completion.
 
 Windows native artifact builds exercise ConPTY without an attached browser.
 The Host answers the initial cursor inheritance query required by portable-pty

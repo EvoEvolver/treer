@@ -63,12 +63,20 @@ pub(crate) async fn prompt_agent(
             context.workspace_id(),
             &agent.server_id,
             AgentCommand::SubmitPrompt {
-                agent_id: agent.agent_id,
+                agent_id: agent.agent_id.clone(),
                 request,
                 sender,
             },
         )
         .await?;
+    crate::audit::mutation_best_effort(
+        &auth.pool(),
+        &workspace_id,
+        "agent.prompt",
+        "agent",
+        &agent.agent_id,
+    )
+    .await;
     Ok(Json(data))
 }
 

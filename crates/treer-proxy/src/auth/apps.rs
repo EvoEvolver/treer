@@ -487,6 +487,19 @@ impl AuthStore {
             .execute(&mut *transaction).await.map_err(AuthFailure::database)?;
         sqlx::query("INSERT INTO workload_placements(workspace_id,agent_id,folder_id,position) SELECT $1,$2,$3,COALESCE(MAX(position)+1,0) FROM workload_placements WHERE workspace_id=$1 AND folder_id IS NOT DISTINCT FROM $3")
             .bind(workspace_id).bind(&deployment.app_id).bind(folder).execute(&mut *transaction).await.map_err(AuthFailure::database)?;
+        for (action, kind, id) in [
+            ("service.create", "service", deployment.service_id.as_str()),
+            (
+                "virtual_host.create",
+                "service",
+                deployment.service_id.as_str(),
+            ),
+            ("tree.placement.create", "agent", deployment.app_id.as_str()),
+        ] {
+            audit::insert_workspace_mutation(&mut transaction, workspace_id, action, kind, id)
+                .await
+                .map_err(AuthFailure::database)?;
+        }
         transaction.commit().await.map_err(AuthFailure::database)?;
         drop(update_guard);
         self.refresh_virtual_network_hosts()
@@ -616,24 +629,49 @@ impl AuthStore {
             .unwrap_or(&deployment.app_id);
         sqlx::query("UPDATE agent_credentials SET revoked_at=$3,recovery_enabled=FALSE WHERE workspace_id=$1 AND agent_id=$2 AND revoked_at IS NULL")
             .bind(workspace_id).bind(runtime_id).bind(Utc::now().to_rfc3339()).execute(&mut *transaction).await.map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM workload_placements WHERE workspace_id=$1 AND agent_id=$2")
-            .bind(workspace_id)
-            .bind(runtime_id)
-            .execute(&mut *transaction)
-            .await
-            .map_err(AuthFailure::database)?;
+        let placement_deleted =
+            sqlx::query("DELETE FROM workload_placements WHERE workspace_id=$1 AND agent_id=$2")
+                .bind(workspace_id)
+                .bind(runtime_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM app_deployments WHERE workspace_id = $1 AND app_id = $2")
             .bind(workspace_id)
             .bind(&deployment.app_id)
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
-        sqlx::query("DELETE FROM machine_services WHERE workspace_id = $1 AND service_id = $2")
-            .bind(workspace_id)
-            .bind(&deployment.service_id)
-            .execute(&mut *transaction)
+        let service_deleted =
+            sqlx::query("DELETE FROM machine_services WHERE workspace_id = $1 AND service_id = $2")
+                .bind(workspace_id)
+                .bind(&deployment.service_id)
+                .execute(&mut *transaction)
+                .await
+                .map_err(AuthFailure::database)?;
+        if placement_deleted.rows_affected() != 0 {
+            audit::insert_workspace_mutation(
+                &mut transaction,
+                workspace_id,
+                "tree.placement.delete",
+                "agent",
+                runtime_id,
+            )
             .await
             .map_err(AuthFailure::database)?;
+        }
+        if service_deleted.rows_affected() != 0 {
+            // One parent deletion also accounts for its cascading routing rows.
+            audit::insert_workspace_mutation(
+                &mut transaction,
+                workspace_id,
+                "service.delete",
+                "service",
+                &deployment.service_id,
+            )
+            .await
+            .map_err(AuthFailure::database)?;
+        }
         transaction.commit().await.map_err(AuthFailure::database)?;
         self.agent_credentials.write().await.remove(runtime_id);
         self.service_ingresses

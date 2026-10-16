@@ -17,8 +17,14 @@ pub(crate) async fn require_user(
     }
     match authenticate_request(&auth, request.headers()).await {
         Ok(session) => {
+            let actor = crate::audit::MutationActor {
+                kind: "user",
+                id: Some(session.user_id.clone()),
+            };
             request.extensions_mut().insert(session);
-            next.run(request).await
+            crate::audit::MUTATION_ACTOR
+                .scope(actor, next.run(request))
+                .await
         }
         Err(error) => error.into_response(),
     }
@@ -90,11 +96,23 @@ pub(crate) async fn require_machine(
         Ok(session) if machine_workspace_matches(&session, request.uri().path()) => {
             match auth.authenticate_agent(&session, request.headers()).await {
                 Ok(agent) => {
+                    let actor = match &agent {
+                        Some(agent) => crate::audit::MutationActor {
+                            kind: "agent",
+                            id: Some(agent.agent_id.clone()),
+                        },
+                        None => crate::audit::MutationActor {
+                            kind: "machine",
+                            id: session.server_id.clone(),
+                        },
+                    };
                     request.extensions_mut().insert(session);
                     if let Some(agent) = agent {
                         request.extensions_mut().insert(agent);
                     }
-                    next.run(request).await
+                    crate::audit::MUTATION_ACTOR
+                        .scope(actor, next.run(request))
+                        .await
                 }
                 Err(error) => error.into_response(),
             }
