@@ -537,6 +537,10 @@ the printed temporary directory and leave managed Agent processes untouched.
 The Interface page is a React app served from `public/`. It consumes only the routes in
 this document; the server contract is unchanged.
 
+On narrow layouts (640px or less) and devices with coarse pointers, buttons,
+task disclosures and form controls have at least 44px touch targets. Desktop
+mouse layouts retain compact controls; inline prose links retain text sizing.
+
 **Files and policy.** Four flat files: `index.html`, `boot.js` (runs in `<head>`, no flash
 of the wrong look or theme), `ui.js` (React, marked and DOMPurify, bundled) and `ui.css`
 (all looks). They are committed because the bootstrap installer checks out git without
