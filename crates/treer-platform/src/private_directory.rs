@@ -7,7 +7,7 @@ use std::{
     io,
     os::unix::net::{SocketAddr, UnixListener, UnixStream},
     path::{Component, Path, PathBuf},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use rustix::fs::{self as sys, AtFlags, FileType, Mode, OFlags};
@@ -99,6 +99,74 @@ impl PrivateDirectory {
         };
         result.verify()?;
         Ok(result)
+    }
+
+    /// Connect once to this directory's fixed endpoint, never an arbitrary
+    /// socket path. The returned blocking CLOEXEC stream is UNAUTHENTICATED:
+    /// Core must attest the exact expected parent before receiving any locks.
+    /// Backlog exhaustion fails closed; no blocking connect or retry loop.
+    /// On Darwin invoke before starting threads/subprocesses: socket creation
+    /// and setting CLOEXEC cannot be one atomic operation on that platform.
+    pub fn connect_handoff(&self, path: &Path) -> io::Result<UnixStream> {
+        use rustix::net::{self as net, AddressFamily, SocketAddrUnix, SocketFlags, SocketType};
+        let deadline = Instant::now() + Duration::from_secs(3);
+        self.matches_path(path)?;
+        let identity = socket_identity(self)?;
+        let address = SocketAddrUnix::new(path.join("handoff.sock"))?;
+        #[cfg(not(target_vendor = "apple"))]
+        let flags = SocketFlags::CLOEXEC | SocketFlags::NONBLOCK;
+        #[cfg(target_vendor = "apple")]
+        let flags = SocketFlags::empty();
+        let socket = net::socket_with(AddressFamily::UNIX, SocketType::STREAM, flags, None)?;
+        rustix::io::fcntl_setfd(&socket, rustix::io::FdFlags::CLOEXEC)?;
+        sys::fcntl_setfl(&socket, sys::fcntl_getfl(&socket)? | OFlags::NONBLOCK)?;
+        match net::connect(&socket, &address) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::INPROGRESS) => {
+                let remaining =
+                    deadline
+                        .checked_duration_since(Instant::now())
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::TimedOut,
+                                "private handoff connect timed out",
+                            )
+                        })?;
+                let timeout = rustix::event::Timespec::try_from(remaining).map_err(|_| denied())?;
+                let mut descriptor = [rustix::event::PollFd::new(
+                    &socket,
+                    rustix::event::PollFlags::OUT,
+                )];
+                if rustix::event::poll(&mut descriptor, Some(&timeout))? == 0 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        "private handoff connect timed out",
+                    ));
+                }
+                net::sockopt::socket_error(&socket)??;
+            }
+            // In particular, Linux AF_UNIX backlog exhaustion returns AGAIN,
+            // not INPROGRESS: never treat writable readiness as connected.
+            Err(error) => return Err(error.into()),
+        }
+        let stream = UnixStream::from(socket);
+        stream.peer_addr()?;
+        if Instant::now() >= deadline {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "private handoff connect timed out",
+            ));
+        }
+        self.matches_path(path)?;
+        if socket_identity(self)? != identity
+            || !rustix::io::fcntl_getfd(&stream)?.contains(rustix::io::FdFlags::CLOEXEC)
+        {
+            return Err(denied());
+        }
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        Ok(stream)
     }
 
     /// Validate address length/NUL using the host's sockaddr_un contract before
@@ -327,7 +395,18 @@ mod tests {
             listener.accept().err().unwrap().kind(),
             io::ErrorKind::WouldBlock
         );
-        let mut client = UnixStream::connect(f.0.join("handoff.sock")).unwrap();
+        let mut client = root.connect_handoff(&f.0).unwrap();
+        assert!(rustix::io::fcntl_getfd(&client)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC));
+        assert!(!rustix::fs::fcntl_getfl(&client)
+            .unwrap()
+            .contains(OFlags::NONBLOCK));
+        assert_eq!(client.read_timeout().unwrap(), Some(Duration::from_secs(3)));
+        assert_eq!(
+            client.write_timeout().unwrap(),
+            Some(Duration::from_secs(3))
+        );
         client.write_all(b"complete frame").unwrap();
         let mut accepted = listener.accept().unwrap();
         assert!(rustix::io::fcntl_getfd(&accepted)
@@ -347,6 +426,28 @@ mod tests {
         drop(listener);
         assert!(f.0.join("handoff.sock").exists());
         assert!(root.bind_handoff(&f.0).is_err());
+        assert!(root.connect_handoff(&f.0).is_err());
+    }
+
+    #[test]
+    fn handoff_full_backlog_fails_without_a_blocking_connect_or_false_success() {
+        let f = Fixture::new();
+        let root = PrivateDirectory::open(&f.0).unwrap();
+        let listener = UnixListener::bind(f.0.join("handoff.sock")).unwrap();
+        rustix::net::listen(&listener, 1).unwrap();
+        let mut queued = Vec::new();
+        for _ in 0..8 {
+            let start = Instant::now();
+            match root.connect_handoff(&f.0) {
+                Ok(stream) => queued.push(stream),
+                Err(_) => {
+                    assert!(start.elapsed() < Duration::from_secs(5));
+                    assert!(f.0.join("handoff.sock").exists());
+                    return;
+                }
+            }
+        }
+        panic!("small unconsumed handoff backlog unexpectedly accepted every connection");
     }
 
     #[test]
@@ -354,11 +455,14 @@ mod tests {
         let f = Fixture::new();
         let root = PrivateDirectory::open(&f.0).unwrap();
         let other = root.create_child("other").unwrap();
+        assert!(root.connect_handoff(&f.0).is_err());
         assert!(other.bind_handoff(&f.0).is_err());
         assert!(!f.0.join("handoff.sock").exists());
         symlink(&f.0, f.0.join("alias")).unwrap();
         assert!(root.bind_handoff(&f.0.join("alias")).is_err());
         let listener = root.bind_handoff(&f.0).unwrap();
+        assert!(other.connect_handoff(&f.0).is_err());
+        assert!(root.connect_handoff(&f.0.join("alias")).is_err());
         std::fs::rename(f.0.join("handoff.sock"), f.0.join("original.sock")).unwrap();
         let replacement = UnixListener::bind(f.0.join("handoff.sock")).unwrap();
         assert_eq!(

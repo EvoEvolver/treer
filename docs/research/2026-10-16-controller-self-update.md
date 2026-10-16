@@ -100,6 +100,17 @@ from a cgroup/service manager's termination scope. Wiring the synchronous
 production worker entry, stdio and the complete owned-child lifecycle remain
 pending, as do activation and rollback acceptance under service managers.
 
+The worker-side private endpoint connector now checks the physical directory
+and fixed socket entry before and after a single nonblocking connect. Pending
+connects have one three-second poll budget; queue exhaustion and other errors
+fail without reconnecting or removing the socket. Successful streams are
+blocking, CLOEXEC and have three-second read/write timeouts. The stream still
+requires exact parent peer authentication before any lock reception. On Darwin,
+where socket flags cannot atomically set CLOEXEC, invoke it in synchronous
+startup before any concurrent thread can fork. The parent-exit fixture uses this
+connector; platform regressions cover alias rejection, a closed listener, and
+an unconsumed full backlog without false connection success or an endless wait.
+
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
 child receives references to the same open file descriptions, so closing the

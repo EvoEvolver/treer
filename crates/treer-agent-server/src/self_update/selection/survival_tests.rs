@@ -9,7 +9,6 @@ use crate::self_update::{
 };
 use std::{
     os::unix::fs::{DirBuilderExt, PermissionsExt},
-    os::unix::net::UnixStream,
     process::{Child, Command, Stdio},
     time::{Duration, Instant},
 };
@@ -244,7 +243,7 @@ fn worker() {
         .original_digest(Binary::Controller)
         .to_owned();
     let peer = AuthenticatedPeer::authenticate(
-        UnixStream::connect(job.join("handoff.sock")).unwrap(),
+        journal.directory.connect_handoff(&job).unwrap(),
         &parent,
         parent.executable(),
         &digest,

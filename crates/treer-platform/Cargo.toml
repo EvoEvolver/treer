@@ -11,7 +11,7 @@ tracing.workspace = true
 unicode-normalization = "0.1"
 
 [target.'cfg(unix)'.dependencies]
-rustix = { version = "1.1", features = ["fs", "process", "net"] }
+rustix = { version = "1.1", features = ["fs", "process", "net", "event"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libc = "0.2"
