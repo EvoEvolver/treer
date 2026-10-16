@@ -325,8 +325,11 @@ the token user or LocalSystem; plain deny entries are parsed and rejected, and
 unsupported ACE types (object, callback, audit, unknown) are never parsed
 beyond their header and fail closed. Failures log a categorical report (owner class,
 control flags, ACE type/inherited/principal class) without SIDs or paths. The
-Windows variants (protected DACL, reparse-point rejection, free space) are
-compile-guarded and have not been exercised on a Windows runner.
+Windows DACL verification was exercised on a hosted windows-2022 runner (an
+elevated account whose token owner is the Administrators group), where the
+earlier owner-only rule failed and the token-bound rule passed. Not yet
+exercised: a non-administrator user account, the win_native acceptance
+machine, and the reparse-point and free-space paths beyond compilation.
 The private state quota is cooperative
 admission control for launchers that reserve before writing; same-account code
 can bypass it, after which the Controller only refuses further reservations.
