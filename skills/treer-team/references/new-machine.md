@@ -13,12 +13,20 @@ Run the installation and one-time connect instructions it generates on the
 or localhost URL. On POSIX the installer has this shape:
 
 ```sh
+treer_install_dir=$(mktemp -d "${TMPDIR:-/tmp}/treer-install.XXXXXX") &&
+  chmod 700 "$treer_install_dir" &&
+  curl -fsSL 'https://proxy.example.test/install.sh' -o "$treer_install_dir/install.sh"
+```
+
+**Stop here.** If the download failed, do not continue. Inspect the entire
+saved script in your editor and confirm its source and contents with the user
+before running the next block in the same shell. Downloading a file is not
+approval to execute it; a comment in a continuous script is not a review gate.
+
+```sh
 (
   set -eu
-  treer_install_dir=$(mktemp -d "${TMPDIR:-/tmp}/treer-install.XXXXXX")
-  chmod 700 "$treer_install_dir"
-  curl -fsSL 'https://proxy.example.test/install.sh' -o "$treer_install_dir/install.sh"
-  # Inspect the script; execute only when authorized.
+  : "${treer_install_dir:?The download block must succeed first}"
   sh "$treer_install_dir/install.sh"
   rm -f "$treer_install_dir/install.sh"
   rmdir "$treer_install_dir"
