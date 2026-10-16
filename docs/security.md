@@ -222,6 +222,11 @@ What Core does promise:
   (`cleanup_unconfirmed`). Descendants that both detach and close those pipes
   are outside what Core can prove; `unknown` is never resolved by assumption,
   only by the machine's own later report.
+  An `unknown` operation releases the Proxy's per-machine slot (the unique index
+  covers `queued` and `running` only), while the Controller still refuses a
+  second installation as long as its own job is active, so a job that is
+  `unknown` to the Proxy but still running on the machine cannot be joined by
+  a concurrent installation.
 - Output never enters Proxy storage, audit or logs. Results stay in the
   Controller's private `0600` store for 24 hours (64 results; a full store
   refuses new installations rather than evicting). Audit rows record actor,
