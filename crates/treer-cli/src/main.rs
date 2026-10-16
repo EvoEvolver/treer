@@ -673,6 +673,32 @@ mod configuration_tests {
             .unwrap_err()
             .to_string()
             .contains("multiple installed Controllers"));
+        // Test the actual connection path, not just the configuration helper:
+        // no workload environment must not silently select the first enrollment.
+        let connect = |args: &[&str]| {
+            super::connection_with_environment(
+                args.iter().map(|s| (*s).to_owned()).collect(),
+                |_| None,
+                || Some(directory.clone()),
+            )
+        };
+        assert!(connect(&["status"])
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("multiple installed Controllers"));
+        let selected = connect(&["--workspace", "ws_two", "status"]).unwrap();
+        assert_eq!(selected.url.as_str(), "http://127.0.0.1:8792/");
+        assert_eq!(
+            selected.headers,
+            vec![(OPERATOR_CREDENTIAL_HEADER, "srv_two".into())]
+        );
+        assert_eq!(
+            connect(&["--url", "http://127.0.0.1:8792", "status"])
+                .unwrap()
+                .url,
+            selected.url
+        );
         assert_eq!(
             installed_config(&directory, None, Some("http://127.0.0.1:8792"))
                 .unwrap()

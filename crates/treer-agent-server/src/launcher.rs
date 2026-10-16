@@ -51,8 +51,130 @@ pub struct LauncherArgs {
     /// Explicit trusted treer CLI (defaults to the Controller's installed sibling).
     #[arg(long, global = true)]
     treer: Option<PathBuf>,
+    /// Select a local enrollment. Required when discovery is ambiguous.
+    #[arg(long, global = true)]
+    workspace: Option<String>,
+    /// Select the exact local Controller URL (never an arbitrary remote endpoint).
+    #[arg(long, global = true)]
+    url: Option<String>,
     #[command(subcommand)]
     command: LauncherCommand,
+}
+
+#[derive(Clone, Default)]
+struct ControllerSelection {
+    workspace: Option<String>,
+    url: Option<String>,
+    server_id: Option<String>,
+}
+
+impl ControllerSelection {
+    fn from_environment(
+        workspace: Option<String>,
+        url: Option<String>,
+        env: impl Fn(&str) -> Option<String>,
+    ) -> Result<Self> {
+        let bound_workspace = env("TREER_WORKSPACE_ID");
+        let bound_url = env("TREER_AGENT_SERVER_URL");
+        let bound_identity = env("TREER_AGENT_ID").is_some()
+            || env("TREER_WORKLOAD_CREDENTIAL").is_some()
+            || env("TREER_IDENTITY_MODE").as_deref() == Some("agent")
+            || env("TREER_OPERATOR_CREDENTIAL").is_some_and(|v| !v.is_empty());
+        if bound_identity && (bound_workspace.is_some() || bound_url.is_some()) {
+            if let Some(requested) = &workspace {
+                anyhow::ensure!(
+                    bound_workspace.as_ref() == Some(requested),
+                    "launcher_identity_binding: cannot change --workspace for this identity"
+                );
+            }
+            if let Some(requested) = &url {
+                anyhow::ensure!(
+                    bound_url
+                        .as_ref()
+                        .is_some_and(|bound| same_url(bound, requested)),
+                    "launcher_identity_binding: cannot change --url for this identity"
+                );
+            }
+        }
+        Ok(Self {
+            workspace: workspace.or(bound_workspace),
+            url: url.or(bound_url),
+            server_id: env("TREER_SERVER_ID"),
+        })
+    }
+
+    fn select(
+        &self,
+        configs: Vec<crate::service::ServiceConfig>,
+    ) -> Result<crate::service::ServiceConfig> {
+        let mut matches: Vec<_> = configs
+            .into_iter()
+            .filter(|config| {
+                self.workspace
+                    .as_ref()
+                    .is_none_or(|v| v == &config.workspace)
+                    && self
+                        .server_id
+                        .as_ref()
+                        .is_none_or(|v| v == &config.server_id)
+                    && self
+                        .url
+                        .as_ref()
+                        .is_none_or(|v| same_url(v, &format!("http://{}", config.listen)))
+            })
+            .collect();
+        if matches.len() > 1 {
+            // Config fields are local but not assumed safe to print. Only bounded
+            // identifiers and parsed socket addresses enter candidate diagnostics.
+            matches.sort_by(|a, b| a.server_id.cmp(&b.server_id));
+            let identifier = |value: &str| -> String {
+                if value.len() <= 96
+                    && value
+                        .bytes()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'_' | b'-'))
+                {
+                    value.to_owned()
+                } else {
+                    "[invalid identifier]".into()
+                }
+            };
+            let candidates = matches
+                .iter()
+                .take(8)
+                .map(|config| {
+                    format!(
+                        "{} workspace={} listen={}",
+                        identifier(&config.server_id),
+                        identifier(&config.workspace),
+                        config
+                            .listen
+                            .parse::<std::net::SocketAddr>()
+                            .map(|a| a.to_string())
+                            .unwrap_or_else(|_| "[invalid address]".into())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; ");
+            bail!("launcher_controller_ambiguous: multiple local Controllers match; select --workspace and, if needed, --url. Candidates (up to 8): {candidates}");
+        }
+        matches.pop().context("launcher_controller_not_found: no matching local enrollment; check --workspace/--url or connect this machine first")
+    }
+
+    fn bind(&self, cmd: &mut Command) {
+        if let Some(workspace) = &self.workspace {
+            cmd.env("TREER_WORKSPACE_ID", workspace);
+        }
+        if let Some(url) = &self.url {
+            cmd.env("TREER_AGENT_SERVER_URL", url);
+        }
+        if let Some(server_id) = &self.server_id {
+            cmd.env("TREER_SERVER_ID", server_id);
+        }
+    }
+}
+
+fn same_url(left: &str, right: &str) -> bool {
+    matches!((url::Url::parse(left), url::Url::parse(right)), (Ok(a), Ok(b)) if a == b)
 }
 
 #[derive(Debug, Subcommand)]
@@ -451,12 +573,18 @@ async fn bounded_output(mut cmd: Command, input: Option<Vec<u8>>, seconds: u64) 
     }
 }
 
-async fn run_json(treer: &Path, args: &[&str]) -> Result<Value> {
-    run_json_with_timeout(treer, args, 30).await
+async fn run_json(treer: &Path, selection: &ControllerSelection, args: &[&str]) -> Result<Value> {
+    run_json_with_timeout(treer, selection, args, 30).await
 }
 
-async fn run_json_with_timeout(treer: &Path, args: &[&str], seconds: u64) -> Result<Value> {
+async fn run_json_with_timeout(
+    treer: &Path,
+    selection: &ControllerSelection,
+    args: &[&str],
+    seconds: u64,
+) -> Result<Value> {
     let mut cmd = command(treer);
+    selection.bind(&mut cmd);
     cmd.args(args);
     let output = bounded_output(cmd, None, seconds).await?;
     if !output.status.success() {
@@ -541,6 +669,15 @@ fn validate_controller_with_floor(value: &Value, minimum_epoch: u32) -> Result<(
 }
 
 pub async fn run(args: LauncherArgs) -> Result<()> {
+    let requested = ControllerSelection::from_environment(args.workspace, args.url, |key| {
+        std::env::var(key).ok()
+    })?;
+    let config = requested.select(crate::service::launcher_configs()?)?;
+    let selection = ControllerSelection {
+        workspace: Some(config.workspace.clone()),
+        url: Some(format!("http://{}", config.listen)),
+        server_id: Some(config.server_id.clone()),
+    };
     verify_payload(FILES, PAYLOAD_DIGEST)?;
     let node = node_executable(args.node)?;
     let mut version_cmd = command(&node);
@@ -553,15 +690,19 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
     }
     let treer = args.treer.or_else(crate::sibling_treer_binary).context("trusted treer CLI missing; install the matching CLI or pass --treer /absolute/path/to/treer")?;
     let treer = trusted_executable(&treer)?;
-    let controller_raw = run_json(&treer, &["interface", "contract"]).await;
-    let context = controller_raw.as_ref().ok().and_then(|value| {
+    let controller_raw = run_json(&treer, &selection, &["interface", "contract"]).await
+        .context("launcher_controller_probe_failed: selected Controller could not be queried; check connection/authentication (not a contract capability diagnosis)")?;
+    if let Ok(machine) = serde_json::from_value::<treer_protocol::LauncherMachineContext>(
+        controller_raw["machine"].clone(),
+    ) {
+        anyhow::ensure!(machine.server_id == config.server_id && machine.workspace_id == config.workspace,
+            "launcher_controller_identity_mismatch: selected enrollment differs from authenticated Controller");
+    }
+    let context = Some(&controller_raw).and_then(|value| {
         serde_json::from_value::<treer_protocol::LauncherMachineContext>(value["machine"].clone())
             .ok()
     });
-    let controller = controller_raw.and_then(|value| {
-        validate_controller(&value)?;
-        Ok(value)
-    });
+    let controller = validate_controller(&controller_raw).map(|()| controller_raw);
     let (operation, install, rollback) = match &args.command {
         LauncherCommand::Install(options) => ("install", Some(options), None),
         LauncherCommand::Update(options) => ("update", Some(options), None),
@@ -573,7 +714,11 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
     }
     let context = match context {
         Some(context) => context,
-        None if operation == "status" => crate::service::launcher_machine_context()?,
+        None if operation == "status" => treer_protocol::LauncherMachineContext {
+            root: config.root.display().to_string(),
+            server_id: config.server_id,
+            workspace_id: config.workspace,
+        },
         None => bail!("launcher_controller_unsupported: missing authenticated machine context"),
     };
     let root = PathBuf::from(&context.root);
@@ -600,6 +745,7 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
         "allow_network":install.is_some_and(|options| options.allow_network),"controller":controller.unwrap_or(Value::Null),
         "payload_manifest":manifest, "rollback_version":rollback});
     let mut install_cmd = command(&node);
+    selection.bind(&mut install_cmd);
     let verified_entry = payload_path(&stage.0, "scripts/install.mjs");
     let node_entry = node_entry_path(verified_entry.clone());
     #[cfg(windows)]
@@ -646,14 +792,20 @@ pub async fn run(args: LauncherArgs) -> Result<()> {
     let mut result: Value =
         serde_json::from_slice(&output.stdout).context("installer returned invalid status JSON")?;
     if operation == "status" {
-        result["agent_startups"] = startup_references(&treer, &context.server_id, &root).await;
+        result["agent_startups"] =
+            startup_references(&treer, &selection, &context.server_id, &root).await;
     }
     println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
-async fn startup_references(treer: &Path, server_id: &str, root: &Path) -> Value {
-    let Ok(agents) = run_json_with_timeout(treer, &["status"], 2).await else {
+async fn startup_references(
+    treer: &Path,
+    selection: &ControllerSelection,
+    server_id: &str,
+    root: &Path,
+) -> Value {
+    let Ok(agents) = run_json_with_timeout(treer, selection, &["status"], 2).await else {
         return json!({"available":false,"partial":true,"reason":"agent_list_unavailable_or_timed_out"});
     };
     let records = agents.as_array().or_else(|| agents["agents"].as_array());
@@ -676,7 +828,12 @@ async fn startup_references(treer: &Path, server_id: &str, root: &Path) -> Value
         } else {
             tokio::time::timeout_at(
                 deadline,
-                run_json_with_timeout(treer, &["agent", "admin", "startup", "show", id], 1),
+                run_json_with_timeout(
+                    treer,
+                    selection,
+                    &["agent", "admin", "startup", "show", id],
+                    1,
+                ),
             )
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("status budget exhausted")))
@@ -729,6 +886,150 @@ fn startup_version(saved: &Value, root: &Path) -> Option<String> {
 mod tests {
     use super::*;
 
+    fn selected_fixture(id: &str, workspace: &str, listen: &str) -> crate::service::ServiceConfig {
+        serde_json::from_value(json!({
+            "proxy":"https://proxy.invalid", "workspace":workspace, "server_id":id,
+            "machine_token":"synthetic-machine-secret", "operator_credential":"synthetic-operator-secret",
+            "root":"/synthetic-root", "listen":listen, "host_socket":"/synthetic-socket",
+            "install_hostname":"fixture"
+        })).unwrap()
+    }
+
+    #[test]
+    fn controller_selection_is_explicit_bounded_and_never_discloses_credentials() {
+        let configs = || {
+            vec![
+                selected_fixture("srv_a", "ws_a", "127.0.0.1:8790"),
+                selected_fixture("srv_b", "ws_b", "127.0.0.1:8791"),
+            ]
+        };
+        let error = ControllerSelection::default()
+            .select(configs())
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("launcher_controller_ambiguous"));
+        assert!(error.contains("srv_b workspace=ws_b listen=127.0.0.1:8791"));
+        assert!(!error.contains("secret"));
+        assert!(!error.contains("synthetic-root"));
+        for selection in [
+            ControllerSelection {
+                workspace: Some("ws_b".into()),
+                ..Default::default()
+            },
+            ControllerSelection {
+                url: Some("http://127.0.0.1:8791/".into()),
+                ..Default::default()
+            },
+        ] {
+            assert_eq!(selection.select(configs()).unwrap().server_id, "srv_b");
+        }
+        let error = ControllerSelection::default()
+            .select(
+                (0..100)
+                    .map(|i| {
+                        selected_fixture(&format!("srv_{i}"), "ws_fixture", "user:secret@invalid")
+                    })
+                    .collect(),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(error.len() < 2000);
+        assert!(!error.contains("user:secret"));
+        assert_eq!(error.matches("workspace=").count(), 8);
+        assert!(ControllerSelection {
+            workspace: Some("ws_missing".into()),
+            ..Default::default()
+        }
+        .select(configs())
+        .unwrap_err()
+        .to_string()
+        .starts_with("launcher_controller_not_found"));
+    }
+
+    #[test]
+    fn launcher_selectors_preserve_managed_and_operator_identity_bindings() {
+        for identity_key in ["TREER_AGENT_ID", "TREER_OPERATOR_CREDENTIAL"] {
+            let env = |key: &str| match key {
+                "TREER_WORKSPACE_ID" => Some("ws_a".into()),
+                "TREER_AGENT_SERVER_URL" => Some("http://127.0.0.1:8790".into()),
+                _ if key == identity_key => Some("synthetic-credential".into()),
+                _ => None,
+            };
+            assert!(ControllerSelection::from_environment(Some("ws_b".into()), None, env).is_err());
+            let error = ControllerSelection::from_environment(
+                None,
+                Some("https://user:secret@invalid".into()),
+                env,
+            )
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("launcher_identity_binding"));
+            assert!(!error.contains("secret"));
+            assert!(ControllerSelection::from_environment(
+                Some("ws_a".into()),
+                Some("http://127.0.0.1:8790/".into()),
+                env
+            )
+            .is_ok());
+        }
+        assert!(ControllerSelection::from_environment(
+            None,
+            Some("http://127.0.0.1:8790".into()),
+            |key| match key {
+                "TREER_AGENT_ID" => Some("ag_fixture".into()),
+                "TREER_WORKSPACE_ID" => Some("ws_a".into()),
+                _ => None,
+            }
+        )
+        .is_err());
+        assert!(ControllerSelection::from_environment(
+            None,
+            Some("http://127.0.0.1:8790".into()),
+            |_| None
+        )
+        .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn probe_and_followup_cli_calls_use_the_same_selected_controller() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("trr-selection-{}", uuid::Uuid::new_v4()));
+        treer_platform::secure_directory(&root).unwrap();
+        let cli = root.join("treer");
+        fs::write(&cli, "#!/bin/sh\n[ \"$TREER_WORKSPACE_ID\" = ws_b ] && [ \"$TREER_SERVER_ID\" = srv_b ] && [ \"$TREER_AGENT_SERVER_URL\" = http://127.0.0.1:8791 ] || exit 9\nprintf '%s' '{\"selected\":\"srv_b\"}'\n").unwrap();
+        fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
+        let selected = ControllerSelection {
+            workspace: Some("ws_b".into()),
+            url: Some("http://127.0.0.1:8791".into()),
+            server_id: Some("srv_b".into()),
+        };
+        for args in [
+            &["interface", "contract"][..],
+            &["status"][..],
+            &["agent", "admin", "startup", "show", "ag_fixture"][..],
+        ] {
+            assert_eq!(
+                run_json(&cli, &selected, args).await.unwrap()["selected"],
+                "srv_b"
+            );
+        }
+        // The Node installer receives exactly the same selection, inherited by
+        // its profile save/readback subprocesses; no process-global env mutation.
+        let mut installer = command(&cli);
+        selected.bind(&mut installer);
+        assert!(bounded_output(installer, None, 2)
+            .await
+            .unwrap()
+            .status
+            .success());
+        assert!(run_json(&cli, &ControllerSelection::default(), &["status"])
+            .await
+            .is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn installer_diagnostics_preserve_prose_but_bound_and_redact_untrusted_text() {
         let root = Path::new("/private/machine root");
@@ -772,7 +1073,7 @@ mod tests {
         fs::set_permissions(&cli, fs::Permissions::from_mode(0o700)).unwrap();
         let report = tokio::time::timeout(
             Duration::from_secs(4),
-            startup_references(&cli, "local", &root),
+            startup_references(&cli, &ControllerSelection::default(), "local", &root),
         )
         .await
         .unwrap();
@@ -849,6 +1150,21 @@ mod tests {
             let parsed =
                 crate::Args::try_parse_from(["treer-agent-server", "launcher", operation]).unwrap();
             assert!(matches!(parsed.command, Some(crate::Command::Launcher(_))));
+            let parsed = crate::Args::try_parse_from([
+                "treer-agent-server",
+                "launcher",
+                operation,
+                "--workspace",
+                "ws_fixture",
+                "--url",
+                "http://127.0.0.1:8791",
+            ])
+            .unwrap();
+            let Some(crate::Command::Launcher(args)) = parsed.command else {
+                panic!("launcher expected")
+            };
+            assert_eq!(args.workspace.as_deref(), Some("ws_fixture"));
+            assert_eq!(args.url.as_deref(), Some("http://127.0.0.1:8791"));
         }
         assert!(crate::Args::try_parse_from([
             "treer-agent-server",

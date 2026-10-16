@@ -971,6 +971,21 @@ treer-agent-server launcher update
 treer-agent-server launcher rollback
 ```
 
+On a machine with several local Controller enrollments, launcher commands fail
+with `launcher_controller_ambiguous` rather than selecting one. Pass
+`treer-agent-server launcher --workspace WORKSPACE_ID --url http://127.0.0.1:PORT status`
+(the URL is needed only if the workspace still matches multiple enrollments).
+Candidates list at most eight local server IDs, workspace IDs and listen addresses;
+credentials and machine roots are omitted. The selected Controller is bound to
+the compatibility probe, installer profile writes/readbacks and status queries.
+Managed or bound operator identities cannot override their workspace/URL bindings.
+Discovery failures, query/authentication failures (`launcher_controller_probe_failed`)
+and a missing/incompatible contract (`launcher_controller_unsupported`) are distinct;
+none authorizes installation against another Controller. Even read-only launcher
+status requires a successful query of the selected Controller. The standalone
+`treer` CLI already rejects ambiguous local discovery; its connection flags go
+before the business command (`treer --workspace WORKSPACE_ID status`).
+
 These local commands save/read back launch profiles but never create or restart
 Agents, the Host or Controller. Node.js 22+ and the selected harness executable
 must already be installed. Select a trusted absolute executable with `--node`
