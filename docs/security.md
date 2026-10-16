@@ -126,6 +126,9 @@ or configuration contents. Failed launch retains the newly saved specification.
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
   output, and file content.
+- Provider CLI installation runs only recipes embedded in the Core release,
+  never browser argv, user-editable tables or remote recipe URLs; see
+  [Provider CLI installation](#provider-cli-installation).
 - CLI file transfer uses separate `machine.file.read` and `machine.file.write`
   actions on every chunk and commit, with caller/path/generation-bound handles.
   Treer private state is hard-denied by reserved namespace, physical-parent/name
@@ -165,6 +168,66 @@ or configuration contents. Failed launch retains the newly saved specification.
   Startup management bodies and responses contain no credential field; known
   Treer workload/operator credential literals in new specifications are rejected. Audit events
   record actor/target IDs, never the command, arguments, or credentials.
+
+## Provider CLI installation
+
+Installing a provider CLI (Codex, Gemini; others are explicitly unsupported in
+the first table) executes third-party code from the npm registry as the machine
+account under a human's explicit confirmation. It is not a sandbox and does not
+pin transitive dependencies: npm's own registry integrity checks apply to them.
+What Core does promise:
+
+- Only a human workspace session with Policy `machine.exec` on that machine can
+  list, prepare, install, check or poll; App, service and machine credentials
+  are refused. Prepare and install both re-check membership and Policy.
+- The table is release bytes validated at Controller start (typed `npm-global`
+  package, exact version, SHA-512 integrity, allowlisted registry, no free
+  argv). The confirmation shows the exact plan that runs: `npm pack`, SHA-512
+  verification of the single tarball against the recipe, `npm install --global`
+  of that verified local tarball, prefix resolution and a version probe from
+  the installed prefix's `bin`. A different fresh expansion (for example a
+  moved npm) is refused as `provider_cli_plan_changed`; a table or Controller
+  change since confirmation is refused, never substituted.
+- npm runs from a Controller-owned `0700` job directory with a cleared
+  environment: the machine exec allowlist minus `npm_config_*`, `NODE_OPTIONS`,
+  `NODE_PATH`, proxy and TLS override variables, with `HOME` and temp inside
+  the job directory, empty private `--userconfig`/`--globalconfig`, an explicit
+  `--registry` and scope registry, `--ignore-scripts` on pack and (unless the
+  recipe carries a reviewed lifecycle entry) on install. The user's `~/.npmrc`
+  is never read, so a user-configured global prefix is ignored and the install
+  lands in npm's default prefix for that Node; enterprise proxies are out of
+  scope. Step 3 contacts the recipe's registry to resolve dependencies and
+  writes the global prefix. A non-writable global prefix fails visibly; Core
+  never elevates or edits PATH, so a successful install does not promise that
+  Agent creation finds the binary: the probe reports the absolute path inside
+  the prefix for a profile, or the user adds that `bin` directory to the
+  service environment themselves.
+- A lifecycle-enabled entry runs the npm lifecycle scripts of the whole
+  resolved dependency closure, not just the top-level package, whose tarball is
+  the only thing the SHA-512 integrity pins. Such an entry requires a review
+  covering that closure; the first table has none and Claude stays unsupported.
+  The packed tarball is verified and installed by the same account in the same
+  private directory; a same-account process replacing it between steps 2 and 3
+  is inside the trust domain Core already grants that account.
+- Confirmation tokens are 256-bit, stored hashed, expire after 120 seconds of
+  database time, are consumed once by `UPDATE … RETURNING`, and are bound to
+  workspace, machine, user, session, recipe triple, table hash, Controller build
+  and plan hash. Expired, consumed, foreign and mismatched tokens share one 409.
+  At most four live tokens and ten prepares per minute per user and machine.
+- One active installation per machine, enforced by a PostgreSQL partial unique
+  index, with a five-minute deadline. Provider CLI commands are excluded from
+  reconnect replay. Each step runs in its own Unix process group that is
+  SIGKILLed at the deadline; descendants that leave the group but still hold
+  the step's output pipes are detected and the operation ends `unknown`
+  (`cleanup_unconfirmed`). Descendants that both detach and close those pipes
+  are outside what Core can prove; `unknown` is never resolved by assumption,
+  only by the machine's own later report.
+- Output never enters Proxy storage, audit or logs. Results stay in the
+  Controller's private `0600` store for 24 hours (64 results; a full store
+  refuses new installations rather than evicting). Audit rows record actor,
+  machine, recipe triple, table hash, plan hash, status and exit code.
+- Windows entries are all unsupported in this iteration; nothing executes
+  there. Provider login is never performed or handled by Core.
 
 ## Machine connection ownership
 

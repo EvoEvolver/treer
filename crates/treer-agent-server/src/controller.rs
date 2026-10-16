@@ -173,7 +173,22 @@ pub struct ControllerConfig {
     pub startup_store_path: PathBuf,
     /// Controller-derived `agent-private` directory (below the Treer state dir).
     pub private_state_root: PathBuf,
+    /// Controller-owned `provider-cli` directory (job directories, results).
+    pub provider_cli_root: PathBuf,
     pub root: PathBuf,
+}
+
+/// Resolve a bare machine command against absolute PATH directories only;
+/// shared by machine exec-style features that must display what they run.
+pub(crate) fn resolve_machine_command(
+    command: &str,
+    environment: &BTreeMap<String, String>,
+) -> Result<String, ProtocolError> {
+    resolve_agent_command(command, environment)
+}
+
+pub(crate) fn build_commit() -> String {
+    treer_build_info::GIT_COMMIT.to_string()
 }
 
 struct ControllerInner {
@@ -195,6 +210,7 @@ struct ControllerInner {
     /// then unavailable for every Agent, but the Controller keeps running.
     private_state: Result<PrivateStateRoot, &'static str>,
     private_state_ledger: Mutex<QuotaLedger>,
+    provider_cli: crate::provider_cli::ProviderCliService,
     recovery_lock: tokio::sync::Mutex<()>,
     uploads: Mutex<HashMap<String, PendingUpload>>,
     file_transfers: crate::machine_file_transfer::Transfers,
@@ -323,6 +339,7 @@ impl ControllerRuntime {
                         Some(config.startup_store_path.clone()),
                         Some(config.interface_cache_path.clone()),
                         Some(config.private_state_root.clone()),
+                        Some(config.provider_cli_root.clone()),
                         treer_platform::config_directory(),
                     ]
                     .into_iter()
@@ -333,6 +350,10 @@ impl ControllerRuntime {
                         .ok()
                         .and_then(|value| value.parse().ok())
                         .unwrap_or_else(crate::machine_file_transfer::Transfers::default_limit),
+                ),
+                provider_cli: crate::provider_cli::ProviderCliService::new(
+                    config.provider_cli_root.clone(),
+                    &config.server_id,
                 ),
                 host,
                 workspace_id: config.workspace_id,
@@ -1733,6 +1754,23 @@ impl ControllerRuntime {
                 .map_err(|error| protocol_error("host_error", error))?;
         }
         Ok(info)
+    }
+
+    pub fn provider_cli(&self) -> &crate::provider_cli::ProviderCliService {
+        &self.inner.provider_cli
+    }
+
+    /// Capabilities this Controller advertises on registration: the static
+    /// list plus features whose embedded data validated on this machine.
+    pub fn advertised_capabilities(&self) -> Vec<String> {
+        let mut capabilities: Vec<String> = treer_protocol::CONTROLLER_CAPABILITIES
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect();
+        if self.inner.provider_cli.capability_available() {
+            capabilities.push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL.to_string());
+        }
+        capabilities
     }
 
     pub async fn exec_machine(

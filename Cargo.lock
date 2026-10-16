@@ -3714,9 +3714,11 @@ dependencies = [
 name = "treer-protocol"
 version = "0.1.14"
 dependencies = [
+ "base64",
  "chrono",
  "serde",
  "serde_json",
+ "sha2",
 ]
 
 [[package]]

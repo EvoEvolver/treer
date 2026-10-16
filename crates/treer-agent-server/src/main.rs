@@ -9,6 +9,7 @@ mod local_api;
 mod machine_file_transfer;
 mod network;
 mod private_state;
+mod provider_cli;
 mod proxy;
 mod release_update;
 mod service;
@@ -327,6 +328,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
             interface_cache_path: args.host_socket.with_extension("interfaces.json"),
             startup_store_path: service::startup_state_path(&server_id)?,
             private_state_root: service::agent_private_state_root()?,
+            provider_cli_root: service::provider_cli_root()?,
             root: root.clone(),
         },
     )

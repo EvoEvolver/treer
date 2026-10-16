@@ -2172,6 +2172,11 @@ pub fn agent_private_state_root() -> Result<PathBuf> {
     Ok(state_dir()?.join(crate::private_state::ROOT_DIRECTORY_NAME))
 }
 
+/// Controller-owned root for provider CLI jobs and results; see `provider_cli`.
+pub fn provider_cli_root() -> Result<PathBuf> {
+    Ok(state_dir()?.join(crate::provider_cli::ROOT_DIRECTORY_NAME))
+}
+
 #[cfg(unix)]
 fn runtime_dir() -> Result<PathBuf> {
     if let Some(path) = env::var_os("TREER_RUNTIME_DIR") {

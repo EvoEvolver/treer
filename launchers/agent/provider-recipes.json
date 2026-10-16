@@ -1,0 +1,112 @@
+{
+  "schema": "treer.provider-recipes/v1",
+  "schema_version": 1,
+  "recipes": [
+    {
+      "provider_id": "codex",
+      "recipe_id": "codex-npm-posix",
+      "recipe_version": 1,
+      "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64"],
+      "binary_names": ["codex"],
+      "supported": true,
+      "node_min": 22,
+      "install": {
+        "kind": "npm-global",
+        "package": "@openai/codex",
+        "version": "0.163.0",
+        "integrity": "sha512-HNd7vR9oTK6M2ikxFnvNDCdYUgAsyo9VVnd5KnEd2ON0GYI++7MiX9XNPUkhtdgGKFPsWS+CEppQ1UU63uVhUw==",
+        "registry": "https://registry.npmjs.org/",
+        "ignore_scripts": true
+      },
+      "check": {"executable": "codex", "args": ["--version"]},
+      "official_docs": "https://github.com/openai/codex",
+      "login_hint": "Run codex in your own terminal to sign in. Treer does not handle your provider credentials."
+    },
+    {
+      "provider_id": "codex",
+      "recipe_id": "codex-windows",
+      "recipe_version": 1,
+      "platforms": ["windows-x86_64"],
+      "binary_names": ["codex"],
+      "supported": false,
+      "unsupported_reason": "windows_expansion_unreviewed",
+      "official_docs": "https://github.com/openai/codex",
+      "login_hint": "Install Codex using its official instructions, then run codex in your own terminal to sign in."
+    },
+    {
+      "provider_id": "gemini",
+      "recipe_id": "gemini-npm-posix",
+      "recipe_version": 1,
+      "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64"],
+      "binary_names": ["gemini"],
+      "supported": true,
+      "node_min": 22,
+      "install": {
+        "kind": "npm-global",
+        "package": "@google/gemini-cli",
+        "version": "0.64.0",
+        "integrity": "sha512-FHrZ1NPf9QszyVMaa/BP3SsPy40ogBLnbZNWkv/PMi1Uz2zoDNMLGiBzBGmx4Bl7iLRq01K9PY/5kmloXFTpsA==",
+        "registry": "https://registry.npmjs.org/",
+        "ignore_scripts": true
+      },
+      "check": {"executable": "gemini", "args": ["--version"]},
+      "official_docs": "https://geminicli.com/docs/",
+      "login_hint": "Run gemini in your own terminal to sign in. Treer does not handle your provider credentials."
+    },
+    {
+      "provider_id": "gemini",
+      "recipe_id": "gemini-windows",
+      "recipe_version": 1,
+      "platforms": ["windows-x86_64"],
+      "binary_names": ["gemini"],
+      "supported": false,
+      "unsupported_reason": "windows_expansion_unreviewed",
+      "official_docs": "https://geminicli.com/docs/",
+      "login_hint": "Install Gemini CLI using its official instructions, then run gemini in your own terminal to sign in."
+    },
+    {
+      "provider_id": "claude",
+      "recipe_id": "claude-native-npm",
+      "recipe_version": 1,
+      "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64", "windows-x86_64"],
+      "binary_names": ["claude"],
+      "supported": false,
+      "unsupported_reason": "lifecycle_review_pending",
+      "official_docs": "https://code.claude.com/docs/en/setup",
+      "login_hint": "Install Claude Code using its official instructions, then run claude in your own terminal to sign in."
+    },
+    {
+      "provider_id": "opencode",
+      "recipe_id": "opencode-native-npm",
+      "recipe_version": 1,
+      "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64", "windows-x86_64"],
+      "binary_names": ["opencode"],
+      "supported": false,
+      "unsupported_reason": "lifecycle_npm_fallback_unreviewed",
+      "official_docs": "https://opencode.ai/docs/",
+      "login_hint": "Install OpenCode using its official instructions and configure your provider in your own terminal."
+    },
+    {
+      "provider_id": "cursor",
+      "recipe_id": "cursor-cli",
+      "recipe_version": 1,
+      "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64", "windows-x86_64"],
+      "binary_names": ["agent", "cursor-agent"],
+      "supported": false,
+      "unsupported_reason": "pinned_installer_unavailable",
+      "official_docs": "https://cursor.com/docs/cli/installation",
+      "login_hint": "Install Cursor CLI using its official instructions and sign in yourself. The legacy cursor-agent name does not change your existing profile."
+    },
+    {
+      "provider_id": "grok",
+      "recipe_id": "grok-cli",
+      "recipe_version": 1,
+      "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64", "windows-x86_64"],
+      "binary_names": ["grok"],
+      "supported": false,
+      "unsupported_reason": "official_installer_unverified",
+      "official_docs": "https://docs.x.ai/",
+      "login_hint": "No official Grok CLI installer has been verified for this recipe. Do not install a similarly named package based on this entry."
+    }
+  ]
+}

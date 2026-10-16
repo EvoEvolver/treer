@@ -183,6 +183,37 @@ pub fn file_is_close_on_exec(file: &std::fs::File) -> io::Result<bool> {
     Ok(rustix::io::fcntl_getfd(file)?.contains(rustix::io::FdFlags::CLOEXEC))
 }
 
+/// SIGKILL every member of a process group started with `process_group(0)`.
+/// `Ok(false)` means the group no longer exists.
+#[cfg(unix)]
+pub fn kill_process_group(pgid: u32) -> io::Result<bool> {
+    let pid = i32::try_from(pgid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid process group"))?;
+    match rustix::process::kill_process_group(pid, rustix::process::Signal::KILL) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Whether any member of a process group still exists (signal 0 probe).
+#[cfg(unix)]
+pub fn process_group_exists(pgid: u32) -> io::Result<bool> {
+    let pid = i32::try_from(pgid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "invalid process group"))?;
+    match rustix::process::test_kill_process_group(pid) {
+        Ok(()) => Ok(true),
+        Err(rustix::io::Errno::SRCH) => Ok(false),
+        // EPERM: a member exists but belongs to another user; still alive.
+        Err(rustix::io::Errno::PERM) => Ok(true),
+        Err(error) => Err(error.into()),
+    }
+}
+
 pub fn secure_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {

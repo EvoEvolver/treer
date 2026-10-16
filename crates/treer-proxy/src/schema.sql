@@ -835,3 +835,51 @@ CREATE TRIGGER public_tcp_provider_private BEFORE INSERT OR UPDATE OF enabled, s
 DROP TRIGGER IF EXISTS policy_provider_tcp_private ON workspace_policy_providers;
 CREATE TRIGGER policy_provider_tcp_private BEFORE INSERT OR UPDATE OF service_id ON workspace_policy_providers
     FOR EACH ROW EXECUTE FUNCTION enforce_private_policy_provider_tcp();
+
+-- Provider CLI installation (#123). Single-use confirmation tokens are stored
+-- hashed and bound to workspace, machine, user, session, exact recipe, table and
+-- Controller build. Operations hold scope and status only: output stays on the
+-- Controller. The partial unique index is the one-active-operation-per-machine
+-- rule shared by every Proxy replica.
+CREATE TABLE IF NOT EXISTS provider_cli_install_tokens (
+    token_hash TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    server_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    session_hash TEXT NOT NULL,
+    recipe_id TEXT NOT NULL,
+    recipe_version BIGINT NOT NULL,
+    recipe_hash TEXT NOT NULL,
+    table_hash TEXT NOT NULL,
+    controller_source_sha TEXT NOT NULL,
+    argv_hash TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS provider_cli_install_tokens_scope
+    ON provider_cli_install_tokens(workspace_id, server_id, user_id, created_at);
+
+CREATE TABLE IF NOT EXISTS provider_cli_operations (
+    operation_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    server_id TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    recipe_id TEXT NOT NULL,
+    recipe_version BIGINT NOT NULL,
+    recipe_hash TEXT NOT NULL,
+    table_hash TEXT NOT NULL,
+    controller_source_sha TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error_code TEXT,
+    exit_code INTEGER,
+    argv_hash TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    dispatched_at TIMESTAMPTZ,
+    reported_at TIMESTAMPTZ,
+    finished_at TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX IF NOT EXISTS provider_cli_operations_active_machine
+    ON provider_cli_operations(workspace_id, server_id) WHERE status IN ('queued', 'running');
+CREATE INDEX IF NOT EXISTS provider_cli_operations_creator
+    ON provider_cli_operations(workspace_id, server_id, created_by, created_at);

@@ -18,7 +18,7 @@ use treer_protocol::{
     AgentCommand, AgentServerMessage, AgentServerSnapshot, CommandEnvelope, CommandResult,
     NetworkBinaryFrame, ProtocolError, ProxyMessage, ServerInfo, ServerStatus, TerminalBinaryFrame,
     TerminalBinaryKind, TerminalCursor, ValidateAgentStartupRequest, ValidateAgentStartupResponse,
-    CONTROLLER_CAPABILITIES, PROTOCOL_MIN_VERSION, PROTOCOL_VERSION,
+    PROTOCOL_MIN_VERSION, PROTOCOL_VERSION,
 };
 use url::Url;
 
@@ -252,10 +252,7 @@ impl ProxyClient {
             &AgentServerMessage::Register {
                 protocol: PROTOCOL_VERSION,
                 supported_protocols: (PROTOCOL_MIN_VERSION..=PROTOCOL_VERSION).collect(),
-                capabilities: CONTROLLER_CAPABILITIES
-                    .iter()
-                    .map(|value| value.to_string())
-                    .collect(),
+                capabilities: self.runtime.advertised_capabilities(),
                 controller_instance_id: self.controller_instance_id.clone(),
                 server: self.advertised_server(),
             },
@@ -607,7 +604,10 @@ impl ProxyClient {
                             // prevents this socket from receiving their nested requests.
                             // Keep a bounded, connection-owned set: disconnect drops the
                             // futures and kill_on_drop terminates their child processes.
-                            if matches!(envelope.command, AgentCommand::Exec { .. }) {
+                            if matches!(
+                                envelope.command,
+                                AgentCommand::Exec { .. } | AgentCommand::ProviderCliCheck { .. }
+                            ) {
                                 if exec_ids.contains(&envelope.command_id) {
                                     continue;
                                 }
@@ -1012,6 +1012,36 @@ impl ProxyClient {
                 .await
                 .map(|response| CommandResult::success(command_id.clone(), response))
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::ProviderCliRecipes {} => self
+                .runtime
+                .provider_cli()
+                .recipes()
+                .map(|response| CommandResult::success(command_id.clone(), response))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::ProviderCliCheck { recipe } => self
+                .runtime
+                .provider_cli()
+                .check(&recipe)
+                .await
+                .map(|response| CommandResult::success(command_id.clone(), response))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::ProviderCliInstall {
+                operation_id,
+                recipe,
+                table_hash,
+                argv_hash,
+            } => self
+                .runtime
+                .provider_cli()
+                .install(&operation_id, &recipe, &table_hash, &argv_hash)
+                .map(|response| CommandResult::success(command_id.clone(), response))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::ProviderCliOperation { operation_id } => self
+                .runtime
+                .provider_cli()
+                .operation(&operation_id)
+                .map(|response| CommandResult::success(command_id.clone(), response))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::UploadBegin {
                 upload_id,
                 directory,
@@ -1400,6 +1430,7 @@ mod tests {
                 interface_cache_path: root.join("interface.json"),
                 startup_store_path: root.join("startup.json"),
                 private_state_root: root.join("agent-private"),
+                provider_cli_root: root.join("provider-cli"),
             },
         )
         .unwrap();
