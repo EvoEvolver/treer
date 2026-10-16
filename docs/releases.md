@@ -295,6 +295,26 @@ takes that commit explicitly (`--controller-commit`, the manifest's
 `machine_artifacts.source_commit`), and the receipt records it; for a fresh native
 build it stays the candidate commit.
 
+### Policy check audit scope
+
+The default-install check scans the Proxy responses, deployment logs and the
+workspace audit feed for the Policy admin token. The audit feed of the Canary
+workspace grows with every release (about 90,000 events at v0.1.14 plus a few
+trains), and scanning all of it took about 5 minutes per machine, growing each
+time, while the real work of the check takes about 10 seconds. Per release the
+check therefore runs with `--audit-scope run`: the same endpoint and the same
+assertions, limited to the events written after the run started, plus a sanity
+assertion that the run produced audit events (an empty window cannot pass).
+Two rules keep the history covered:
+
+- a `--audit-scope full` sweep (the whole history, the old behaviour) runs at
+  least daily and before any Production promotion or stable tag; a run-scoped
+  check refuses to start unless the last full sweep passed within 24 hours, and a
+  failed sweep blocks the next train and is reported on the pinned release queue;
+- every receipt records `audit_scope` (the starting sequence for a run scope),
+  `audit_new_actions`, `timings_seconds` and, for run-scoped receipts,
+  `last_full_sweep` (time and result).
+
 `python3 scripts/release-tickets.py --name <release> --parent <epic>
 --release-owner <id> --review ROLE=<id> --acceptance ROLE=<id>` prints the
 `issues create` commands in dependency order; add `--create` to create them. The
