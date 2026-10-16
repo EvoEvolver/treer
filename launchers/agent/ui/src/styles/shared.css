@@ -209,5 +209,6 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
   :root[data-look] .app .ph{min-height:48px}
   :root[data-look] .app button,:root[data-look] .app summary,
   :root[data-look] .app .field input,:root[data-look] .app .field select{min-width:44px;min-height:44px}
+  :root[data-look] .app button.model{align-items:center;justify-content:center}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}.spin{animation:none}.sk{animation:none}}
