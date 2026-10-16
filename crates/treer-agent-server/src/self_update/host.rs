@@ -1,14 +1,18 @@
 //! Read-only live Host observation for a transaction. PID/UID come from the same
 //! Unix socket used for Sync; no PID file, argv/environment, or PATH lookup.
 use anyhow::{bail, Result};
+use std::io::Write;
+use treer_host_protocol::{HostCommand, HostResponse};
 use treer_platform::process_image::ProcessImage;
 
 use super::{
     artifacts::Binary,
     hex,
     images::digest_file,
+    publication::FileStep,
     safety::{HostIdentity, HostSnapshot},
     selection::{Selected, SelectionLocks},
+    Journal, Phase,
 };
 use crate::host_client::{HostClient, HostEvents};
 
@@ -36,6 +40,96 @@ fn identity(image: &ProcessImage) -> Result<HostIdentity> {
 }
 
 impl Observation {
+    /// The detached activation coordinator must own both locks before calling.
+    /// Durable intent precedes the one request. ACK means accepted, never healthy.
+    /// A lost response or crash leaves intent behind: observe/reconcile that job,
+    /// do not automatically send another restart (even with the same operation ID).
+    pub async fn request_restart_once(
+        &self,
+        selected: &Selected,
+        locks: &SelectionLocks,
+        journal: &Journal,
+        revision: u64,
+    ) -> Result<()> {
+        let receipt = journal.read()?;
+        if receipt.revision != revision
+            || receipt.workspace_id != self.workspace
+            || receipt.server_id != self.server
+            || selected.workspace() != self.workspace
+            || selected.server_id() != self.server
+            || selected.host_socket() != self.socket
+        {
+            bail!("update_restart_binding_conflict");
+        }
+        let (marker, suffix, restoring) = match receipt.phase {
+            Phase::Activating => ("controller-restart-intent.json", "activate", false),
+            Phase::RollingBack => ("controller-rollback-intent.json", "rollback", true),
+            _ => bail!("update_restart_phase_conflict"),
+        };
+        match journal.directory.read_file(marker) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => bail!("update_restart_intent_exists_or_unavailable"),
+        }
+        for binary in [Binary::Controller, Binary::Cli] {
+            let step = receipt.publications.step(binary);
+            if !matches!(step, FileStep::Unchanged)
+                && step
+                    != if restoring {
+                        FileStep::Restored
+                    } else {
+                        FileStep::Installed
+                    }
+            {
+                bail!("update_restart_publication_incomplete");
+            }
+            let expected = if restoring {
+                receipt.publications.original_digest(binary)
+            } else {
+                match binary {
+                    Binary::Controller => &receipt.controller_sha256,
+                    Binary::Cli => &receipt.cli_sha256,
+                }
+            };
+            let file = locks
+                .directory(selected, binary)?
+                .read_file(binary.name())
+                .map_err(|_| anyhow::anyhow!("update_restart_image_unavailable"))?;
+            if digest_file(&file)? != expected {
+                bail!("update_restart_image_mismatch");
+            }
+        }
+        self.verify().await?;
+        let operation = format!("update-{}-{suffix}", receipt.job_id);
+        // EXCL also refuses an empty/partial previous intent. Neither recovery
+        // nor a later caller may remove this marker to blindly retry the request.
+        let mut intent = journal
+            .directory
+            .create_file(marker)
+            .map_err(|_| anyhow::anyhow!("update_restart_intent_exists_or_unavailable"))?;
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "job_id": receipt.job_id,
+            "revision": revision,
+            "workspace_id": receipt.workspace_id,
+            "server_id": receipt.server_id,
+            "operation_id": operation,
+        }))?;
+        intent.write_all(&bytes)?;
+        intent.sync_all()?;
+        drop(intent);
+        journal.directory.sync()?;
+        match self
+            .client
+            .request(HostCommand::RestartController, Some(operation))
+            .await
+        {
+            Ok(HostResponse::Ack) => Ok(()),
+            // Even a protocol/error response is conservatively ambiguous; a
+            // reply cannot prove that a restart was never scheduled.
+            _ => bail!("update_restart_outcome_unknown"),
+        }
+    }
+
     pub async fn capture(selected: &Selected) -> Result<Self> {
         Self::at(
             selected.host_socket(),
@@ -200,6 +294,20 @@ mod tests {
 
     #[tokio::test]
     async fn healthy_response_requires_the_selected_inode_running_as_a_host_child() {
+        activation_fixture(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn lost_restart_response_leaves_durable_intent_and_is_never_resent() {
+        activation_fixture(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn rollback_restart_has_a_separate_durable_operation_and_intent() {
+        activation_fixture(true, true).await;
+    }
+
+    async fn activation_fixture(acknowledge: bool, restoring: bool) {
         use super::super::{health::Monitor, safety::ControllerExpectation, selection::Inventory};
         use std::{
             io::Write,
@@ -276,16 +384,16 @@ mod tests {
         let (release, held) = tokio::sync::oneshot::channel::<()>();
         let host_server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            for _ in 0..2 {
+            for index in 0..4 {
                 let length = stream.read_u32().await.unwrap() as usize;
                 assert!(length <= MAX_HOST_FRAME_BYTES);
                 let mut bytes = vec![0; length];
                 stream.read_exact(&mut bytes).await.unwrap();
                 let request: HostRequest = decode_message(&bytes).unwrap();
-                assert!(matches!(request.command, HostCommand::Sync { .. }));
-                let frame = encode_message(&HostMessage::Response {
-                    request_id: request.request_id,
-                    response: Some(HostResponse::Synced {
+                let response = if index < 3 {
+                    assert!(matches!(request.command, HostCommand::Sync { .. }));
+                    assert!(request.operation_id.is_none());
+                    HostResponse::Synced {
                         host_epoch: "host".into(),
                         host_build: HostBuildInfo {
                             version: "0.1.14".into(),
@@ -293,7 +401,26 @@ mod tests {
                         },
                         processes: vec![],
                         replay: vec![],
-                    }),
+                    }
+                } else {
+                    assert!(matches!(request.command, HostCommand::RestartController));
+                    let operation = request.operation_id.unwrap();
+                    let id = operation
+                        .strip_prefix("update-")
+                        .unwrap()
+                        .strip_suffix(if restoring { "-rollback" } else { "-activate" })
+                        .unwrap();
+                    assert!(!uuid::Uuid::parse_str(id).unwrap().is_nil());
+                    if !acknowledge {
+                        // The Host received the mutation but the reply is lost.
+                        // Close this synthetic socket, not a real Host process.
+                        return;
+                    }
+                    HostResponse::Ack
+                };
+                let frame = encode_message(&HostMessage::Response {
+                    request_id: request.request_id,
+                    response: Some(response),
                     error: None,
                 })
                 .unwrap();
@@ -360,6 +487,114 @@ mod tests {
             "new"
         );
         http_server.await.unwrap();
+        let cli_digest = digest_file(&bin.read_file("treer").unwrap()).unwrap();
+        let now = chrono::Utc::now();
+        let receipt = super::super::Receipt {
+            schema_version: 1,
+            job_id: uuid::Uuid::new_v4(),
+            revision: 0,
+            workspace_id: selected.workspace().into(),
+            server_id: selected.server_id().into(),
+            release_sha: "c".repeat(40),
+            artifact_source_sha: "b".repeat(40),
+            controller_sha256: digest.clone(),
+            cli_sha256: cli_digest.clone(),
+            publications: super::super::publication::Publications::new(
+                digest.clone(),
+                cli_digest.clone(),
+                &digest,
+                &cli_digest,
+            ),
+            source: super::super::Source::Pin {
+                sums_sha256: "d".repeat(64),
+                allow_pinned: true,
+                allow_artifact_origin: false,
+                allow_same: true,
+                allow_downgrade: false,
+            },
+            phase: Phase::Preparing,
+            created_at: now,
+            updated_at: now,
+        };
+        let jobs = root.create_child("jobs").unwrap();
+        let mut incomplete = receipt.clone();
+        incomplete.job_id = uuid::Uuid::new_v4();
+        incomplete.publications = super::super::publication::Publications::new(
+            "0".repeat(64),
+            "1".repeat(64),
+            &digest,
+            &cli_digest,
+        );
+        let incomplete = Journal::create(&jobs, &incomplete).unwrap();
+        incomplete.advance(0, Phase::Prepared).unwrap();
+        incomplete.advance(1, Phase::Activating).unwrap();
+        assert_eq!(
+            observation
+                .request_restart_once(&selected, &locks, &incomplete, 2)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "update_restart_publication_incomplete"
+        );
+        let journal = Journal::create(&jobs, &receipt).unwrap();
+        journal.advance(0, Phase::Prepared).unwrap();
+        assert_eq!(
+            observation
+                .request_restart_once(&selected, &locks, &journal, 1)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "update_restart_phase_conflict"
+        );
+        journal.advance(1, Phase::Activating).unwrap();
+        assert_eq!(
+            observation
+                .request_restart_once(&selected, &locks, &journal, 1)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "update_restart_binding_conflict"
+        );
+        let revision = if restoring {
+            journal.advance(2, Phase::RollingBack).unwrap().revision
+        } else {
+            2
+        };
+        std::fs::write(f.0.join("bin/treer"), b"changed-test-cli").unwrap();
+        assert_eq!(
+            observation
+                .request_restart_once(&selected, &locks, &journal, revision)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "update_restart_image_mismatch"
+        );
+        std::fs::write(f.0.join("bin/treer"), b"unused-test-cli").unwrap();
+        let result = observation
+            .request_restart_once(&selected, &locks, &journal, revision)
+            .await;
+        if acknowledge {
+            result.unwrap();
+        } else {
+            assert_eq!(
+                result.unwrap_err().to_string(),
+                "update_restart_outcome_unknown"
+            );
+        }
+        // Reopening a job after acceptance must not request a second restart.
+        let reopened = Journal::open(&jobs, &receipt.job_id.to_string()).unwrap();
+        assert_eq!(
+            observation
+                .request_restart_once(&selected, &locks, &reopened, revision)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "update_restart_intent_exists_or_unavailable"
+        );
+        if !acknowledge {
+            host_server.await.unwrap();
+            return;
+        }
         // Same bytes + a new installed inode must not attest the old running
         // process as the successor, even if HTTP and source SHA would match.
         std::fs::copy(&controller, f.0.join("bin/next")).unwrap();

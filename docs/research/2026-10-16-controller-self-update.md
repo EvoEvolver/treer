@@ -162,6 +162,18 @@ Host executing the selected installed inode, in addition to its scoped new-epoch
 HTTP health and unchanged Host/workload/output checks. These observations do not
 attest every mapped code page or isolate a malicious same-account writer.
 
+The Unix restart primitive now requires the selected installation/enrollment
+locks, a matching job revision and scope, completed image publication (or
+completed restoration for rollback), independently checked installed digests,
+and an unchanged live Host/workload observation. It creates and syncs an
+exclusive private restart-intent file before the ordinary Host request. An ACK
+only means accepted; it is not proof of activation or health. A crash, lost
+reply, malformed response, or an existing/partial intent never triggers an
+automatic resend. Activation and rollback have separate job-bound operation
+IDs and intent files. Recovery must reconcile actual state before deciding any
+follow-up; the detached coordinator, lock handoff and recovery entry are still
+unimplemented, so this primitive is not a usable self-update command.
+
 After activator death, the next explicit `self-update --recover JOB_ID` reconciles
 journal, actual hashes and live process identities under the same locks. Never
 infer success from a PID or an old receipt alone; never restart the Host or replay
