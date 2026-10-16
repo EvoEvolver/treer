@@ -222,12 +222,21 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
     try {
       New-PrivateUpdateDirectory $directory
       $receipt=[IO.Path]::Combine($directory,'progress.json')
+      function ReceiptRules($File){
+        $security=[IO.File]::GetAccessControl($File)
+        $rules=@($security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object{
+          $_.IdentityReference.Value+':'+$_.AccessControlType+':'+$_.FileSystemRights+':'+$_.InheritanceFlags+':'+$_.PropagationFlags+':'+$_.IsInherited
+        }|Sort-Object)
+        return ([string]$security.AreAccessRulesProtected+':'+($rules -join ';'))
+      }
       Write-UpdateJson $receipt @{status='running'}
-      $acl=[IO.File]::GetAccessControl($receipt).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access)
+      $acl=ReceiptRules $receipt
       foreach($state in @('activating','complete')){
         Write-UpdateJson $receipt @{status=$state}
         if(([IO.File]::ReadAllText($receipt)|ConvertFrom-Json).status -cne $state){throw 'receipt_replacement_failed'}
-        if([IO.File]::GetAccessControl($receipt).GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::Access) -cne $acl){throw 'receipt_acl_changed'}
+        # File.Replace may set SE_DACL_AUTO_INHERITED; compare principals,
+        # rights, inheritance and protection, rather than SDDL spelling.
+        if((ReceiptRules $receipt) -cne $acl){throw 'receipt_acl_changed'}
       }
       if([IO.Directory]::GetFiles($directory,'*.tmp').Count -ne 0){throw 'receipt_temporary_leftover'}
     } finally { if([IO.Directory]::Exists($directory)){[IO.Directory]::Delete($directory,$true)} }
