@@ -2369,3 +2369,43 @@ for (const status of [403, 404, 409, 501, 503]) test(`reservation cleanup failur
   if (status === 404) await expect(confirmation.getByRole('alert')).toContainText('does not confirm deletion or allow another Create')
   expect(requests).toBe(1)
 })
+
+for (const width of [1280, 390]) for (const theme of ['light', 'dark']) test(`missing command uses structured metadata and explicit retry state (${width}, ${theme})`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 850 })
+  await page.addInitScript(value => localStorage.setItem('treer-theme', value), theme)
+  let creates = 0
+  await page.route('**/api/workspaces/ws-1/agents', route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    creates++
+    return route.fulfill({ status: 422, json: { error: { code: 'command_not_found', message: 'Raw PATH must never appear', details: {
+      command: 'claude', machine_id: 'srv-a', agent_id: 'ag_reserved', creation_state: creates === 1 ? 'identity_removed' : 'reserved_outcome_unknown',
+    } } } })
+  })
+  await page.goto('/')
+  await browseTreeOnMobile(page)
+  await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add agent', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Launch', exact: true }).click()
+  await page.getByRole('option', { name: 'Custom command', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Command', exact: true }).fill('claude')
+  await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Preserved Claude')
+  const submit = page.getByRole('button', { name: 'Create agent', exact: true })
+  await submit.click()
+  await expect(page.getByRole('alert')).toHaveText('claude is not installed on workstation.')
+  await expect(page.getByRole('status')).toContainText('The reserved identity was removed')
+  await expect(page.getByText('Raw PATH must never appear')).toHaveCount(0)
+  await expect(submit).toBeEnabled()
+  await expect(page.getByRole('button', { name: /^Install / })).toHaveCount(0)
+  expect(creates).toBe(1)
+  await page.screenshot({ path: info.outputPath(`missing-command-${width}-${theme}.png`) })
+  await submit.click()
+  await expect(submit).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Clean up reserved identity', exact: true })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Preserved Claude')
+  expect(creates).toBe(2)
+  const bounds = await page.getByRole('dialog').boundingBox()
+  expect(bounds).not.toBeNull()
+  expect(bounds!.y).toBeGreaterThanOrEqual(0)
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(850)
+  await page.screenshot({ path: info.outputPath(`missing-command-unknown-${width}-${theme}.png`) })
+})

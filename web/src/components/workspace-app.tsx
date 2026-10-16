@@ -586,8 +586,13 @@ function WorkspaceAppContent() {
       await refreshSnapshot()
       if (workspaceIdRef.current === creationWorkspaceId) showAgentTerminal(agentId)
     } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) {
-      setCreateAgentError(reason instanceof Error ? reason.message : t("app.create_failed"))
-      setCreationFailure(reason instanceof ApiError ? agentCreationFailure(reason.details, creationMachineId) : null)
+      const failure = reason instanceof ApiError ? agentCreationFailure(reason.details, creationMachineId) : null
+      setCreationFailure(failure)
+      setCreateAgentError(reason instanceof ApiError && reason.code === "command_not_found"
+        ? failure?.command
+          ? t("provider.command_missing", { command: failure.command, machine: machineName(snapshot?.servers.find((item) => item.server_id === creationMachineId), creationMachineId) })
+          : t("provider.command_missing_unknown")
+        : reason instanceof Error ? reason.message : t("app.create_failed"))
     } }
     finally { setCreatingAgent(false) }
   }

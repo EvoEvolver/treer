@@ -82,7 +82,7 @@ export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReserv
     <Dialog open={Boolean(deletingProfile)} onOpenChange={(open) => !open && setDeletingProfile(null)}><DialogContent><DialogHeader><DialogTitle>{t("dialogs.delete_launch_profile")}</DialogTitle><DialogDescription>{t("dialogs.delete_profile_confirm", { name: deletingProfile?.name ?? "" })}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeletingProfile(null)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={deleteLaunchProfile}>{t("dialogs.delete_profile")}</Button></DialogFooter></DialogContent></Dialog>
 
     <Dialog open={createAgentOpen} onOpenChange={setCreateAgentOpen}>
-      <DialogContent data-tour="create-agent-dialog">
+      <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto" data-tour="create-agent-dialog">
         <form onSubmit={createAgent} className="min-w-0 space-y-4">
           <DialogHeader>
             <DialogTitle>{t("dialogs.create_agent")}</DialogTitle>
@@ -113,6 +113,7 @@ export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReserv
           {agentProfileId === "manual" && <Field label={t("apps.command")}><Input aria-label={t("apps.command")} className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder={t("dialogs.path_to_your_launcher_option")} required /></Field>}
           {selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">{t("dialogs.runs_the_saved_command_on")}</span>}
           <Field label={t("dialogs.name")}><Input aria-label={t("dialogs.name")} value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
+          {creationFailure?.creation_state === "identity_removed" && <p role="status" className="text-sm">{t("provider.identity_removed")}</p>}
           {reservationCleaned && <p role="status" className="text-sm">{t("provider.cleaned")}</p>}
           {createAgentError && <p role="alert" className="break-words text-sm text-destructive">{createAgentError}</p>}
           {creationFailure && creationFailure.creation_state !== "identity_removed" && workspace && <AgentReservationRecovery key={`${workspace.workspace_id}/${creationFailure.agent_id}`} workspaceId={workspace.workspace_id} failure={creationFailure} onCleaned={onReservationCleaned} />}

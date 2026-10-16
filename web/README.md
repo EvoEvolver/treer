@@ -527,7 +527,11 @@ Creating from a folder in the Tree shows that folder’s full path and reserves 
 ### Reserved Agent identities
 
 Creation errors retain optional Core `code`/`details`; the Console never infers a
-provider or cleanup outcome from error text. If Core reports an unconfirmed or
+provider or cleanup outcome from error text. Structured `command_not_found`
+with a validated bare command and matching machine displays “command is not
+installed on machine”, never the raw PATH or argv. A proven removed identity
+allows manual submission after fixing the command; unconfirmed identities remain
+blocked. Part 1 does not install provider CLIs or display an install button. If Core reports an unconfirmed or
 failed reservation cleanup, creation remains blocked and the draft is preserved.
 The explicit **Clean up reserved identity** confirmation uses the human-session
 reservation cleanup endpoint, with existing `agent.delete` Policy; Core rechecks
