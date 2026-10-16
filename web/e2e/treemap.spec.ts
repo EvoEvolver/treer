@@ -261,9 +261,12 @@ test('single-child folder chains share one title row; every segment still drills
   await openOverviewMap(page)
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
   const segments = ['/Team', '/Team/Research', '/Team/Research/Experiments', '/Team/Research/Experiments/Lab']
-  const positions = []
-  for (const path of segments) positions.push((await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).boundingBox())!.y)
-  expect(new Set(positions).size).toBe(1)
+  const boxes = []
+  for (const path of segments) boxes.push((await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).boundingBox())!)
+  expect(new Set(boxes.map((box) => box.y)).size).toBe(1)
+  // Folder chains read as one compact breadcrumb rather than stretched columns.
+  expect(boxes.at(-1)!.x + boxes.at(-1)!.width - boxes[0].x).toBeLessThan(400)
+  expect(boxes[0].width).toBeLessThan(100)
   for (const [index, path] of segments.entries()) {
     await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).focus()
     await page.keyboard.press('Enter')
