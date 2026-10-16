@@ -13,10 +13,23 @@ Run the installation and one-time connect instructions it generates on the
 or localhost URL. On POSIX the installer has this shape:
 
 ```sh
-curl -fsSL 'https://proxy.example.test/install.sh' -o /private/treer-install.sh
-# Inspect the trusted installer, then execute it locally when authorized.
-sh /private/treer-install.sh
+(
+  set -eu
+  treer_install_dir=$(mktemp -d "${TMPDIR:-/tmp}/treer-install.XXXXXX")
+  chmod 700 "$treer_install_dir"
+  curl -fsSL 'https://proxy.example.test/install.sh' -o "$treer_install_dir/install.sh"
+  # Inspect the script; execute only when authorized.
+  sh "$treer_install_dir/install.sh"
+  rm -f "$treer_install_dir/install.sh"
+  rmdir "$treer_install_dir"
+)
 ```
+
+POSIX and Windows bootstrap installers check hashes from the same artifact
+source, not an independent signature. Confirm the HTTPS Proxy origin with the
+user; a matching hash does not establish that the source is trustworthy.
+Other `/private/...` paths in these references are placeholders: choose private,
+writable locations appropriate to the target OS.
 
 Choose a private OS account/root for this machine; install scripts and enrolled
 processes can use that account's permissions. Windows uses the Console's
@@ -122,9 +135,10 @@ on every workspace.
 ## Pitfalls
 
 - Reuse discovered paths/stable IDs, not a same-name Agent from another folder.
-- Use one build target directory per Agent/worktree (`CARGO_TARGET_DIR` can point
-  to that worktree's `target/`), check free disk before large builds, and list
-  owned cleanup candidates before deleting them.
+- Give each Agent its own `CARGO_TARGET_DIR`, reused across that Agent's
+  worktrees. Never share a target directory between concurrently building Agents.
+  Check free disk before large builds; list owned cleanup candidates before
+  deleting them.
 - Use random/free test ports and hermetic environments. Do not test using an
   inherited live workload credential, provider login or external mail delivery.
 - Never use broad process-name/pkill patterns. Stop only processes you own and

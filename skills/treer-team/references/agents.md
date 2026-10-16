@@ -49,8 +49,10 @@ a relative path such as `./treer-agent`.
 
 The shim pins Node and the local launcher; do not paste another machine's
 absolute launcher path into a profile. Native Windows `.exe` and supported
-standard npm `.cmd` provider shims are resolved without enabling arbitrary shell
-command execution. A nonstandard batch file may require a trusted JS or native
+standard npm `.cmd` provider shims are resolved by the **launcher** without
+enabling arbitrary shell command execution. This is not Controller command
+discovery: on Windows its bare executable lookup accepts `.exe`/`.com`, not an
+arbitrary `.cmd` as the Agent/profile command. A nonstandard batch file may require a trusted JS or native
 entry point instead. See the [launcher installation guide](../../../launchers/agent/README.md).
 
 ## Resume a native session, or start a new one
