@@ -298,7 +298,7 @@ export interface OrganizationAuditEvent {
 }
 
 export interface ApiErrorBody {
-  error?: { message?: string }
+  error?: { message?: string; code?: string; details?: unknown }
 }
 
 export interface AgentTrafficRecord extends Omit<MachineTrafficRecord, "source_type" | "destination_type" | "source_server_id" | "destination_server_id"> {
@@ -310,10 +310,14 @@ export interface AgentTrafficRecord extends Omit<MachineTrafficRecord, "source_t
 
 export class ApiError extends Error {
   status: number
+  code?: string
+  details?: unknown
 
-  constructor(message: string, status: number) {
+  constructor(message: string, status: number, code?: string, details?: unknown) {
     super(message)
     this.status = status
+    this.code = code
+    this.details = details
   }
 }
 
@@ -359,7 +363,7 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
         : `HTTP ${response.status}`
     throw new ApiError(fallback, response.status)
   }
-  if (!response.ok) throw new ApiError(body.error?.message ?? `HTTP ${response.status}`, response.status)
+  if (!response.ok) throw new ApiError(body.error?.message ?? `HTTP ${response.status}`, response.status, body.error?.code, body.error?.details)
   return body
 }
 
