@@ -15,6 +15,7 @@ const fixture = readFileSync(process.argv[2], "utf8").split("\n").flatMap(line =
   try { const value = JSON.parse(line); return value.fixture === "private_state_joint_fixture" ? [value] : []; } catch { return []; }
 })[0];
 assert.ok(fixture, "expected the synthetic Core joint fixture handshake");
+assert.match(fixture.url, /^http:\/\/127\.0\.0\.1:[1-9]\d{0,4}\/?$/, "fixture URL must be literal HTTP loopback with a port");
 assert.equal(fixture.agent_id, "ag_fixture");
 assert.equal(fixture.server_id, "srv_fixture");
 assert.equal(fixture.feature, "agent.private-state.v1");
