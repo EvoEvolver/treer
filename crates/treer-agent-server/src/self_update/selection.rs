@@ -543,6 +543,7 @@ pub(super) mod tests {
             Journal,
         };
         use std::{
+            os::unix::fs::PermissionsExt,
             process::{Command, Stdio},
             time::{Duration, Instant},
         };
@@ -577,14 +578,43 @@ pub(super) mod tests {
         let root = PrivateDirectory::open(&jobs.0).unwrap();
         let own = ProcessImage::capture(std::process::id()).unwrap();
         let digest = digest_file(own.executable()).unwrap();
+        // Synthetic installation only: make its old Controller a real native
+        // image, then exercise the production job-local copy in normal handoff.
+        std::fs::copy(
+            std::env::current_exe().unwrap(),
+            f.bin.join("treer-agent-server"),
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            f.bin.join("treer-agent-server"),
+            std::fs::Permissions::from_mode(0o700),
+        )
+        .unwrap();
         for mode in ["normal", "exit-before-ack", "wrong-job", "existing-record"] {
             let held = selected.lock().unwrap();
             let mut receipt = super::super::tests::receipt();
             receipt.workspace_id = "ws_a".into();
             receipt.server_id = "srv_a".into();
+            receipt.publications = super::super::publication::Publications::new(
+                digest.clone(),
+                "0".repeat(64),
+                &receipt.controller_sha256,
+                &receipt.cli_sha256,
+            );
             let journal = Journal::create(&root, &receipt).unwrap();
             let job = jobs.0.join(receipt.job_id.to_string());
+            let activator = if mode == "normal" {
+                Some(
+                    super::super::activator::ActivatorImage::prepare(&selected, &held, &journal)
+                        .unwrap(),
+                )
+            } else {
+                None
+            };
             Endpoint::mark_prepared(&journal, &job).unwrap();
+            if let Some(activator) = &activator {
+                activator.verify(&journal).unwrap();
+            }
             let prepared = journal.read().unwrap();
             if mode == "existing-record" {
                 journal
@@ -596,29 +626,37 @@ pub(super) mod tests {
             }
             let endpoint = Endpoint::bind(&journal, &job).unwrap();
             let mut child = Child(
-                Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "self_update::selection::tests::ownership_child",
-                        "--ignored",
-                    ])
-                    .env_clear()
-                    .env("TREER_TEST_CONFIG", f.path.join("config"))
-                    .env("TREER_TEST_JOBS", &jobs.0)
-                    .env("TREER_TEST_JOB", receipt.job_id.to_string())
-                    .env("TREER_TEST_PARENT", own.pid().to_string())
-                    .env("TREER_TEST_DIGEST", &digest)
-                    .env("TREER_TEST_MODE", mode)
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::inherit())
-                    .stderr(Stdio::inherit())
-                    .spawn()
-                    .unwrap(),
+                Command::new(if activator.is_some() {
+                    job.join("activator")
+                } else {
+                    std::env::current_exe().unwrap()
+                })
+                .args([
+                    "--exact",
+                    "self_update::selection::tests::ownership_child",
+                    "--ignored",
+                ])
+                .env_clear()
+                .env("TREER_TEST_CONFIG", f.path.join("config"))
+                .env("TREER_TEST_JOBS", &jobs.0)
+                .env("TREER_TEST_JOB", receipt.job_id.to_string())
+                .env("TREER_TEST_PARENT", own.pid().to_string())
+                .env("TREER_TEST_DIGEST", &digest)
+                .env("TREER_TEST_MODE", mode)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .spawn()
+                .unwrap(),
             );
             let image = ProcessImage::capture(child.0.id()).unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
             let peer: AuthenticatedPeer = loop {
-                if let Some(peer) = endpoint.accept(&image, own.executable(), &digest).unwrap() {
+                let verified = activator
+                    .as_ref()
+                    .map(|image| image.image())
+                    .unwrap_or(own.executable());
+                if let Some(peer) = endpoint.accept(&image, verified, &digest).unwrap() {
                     break peer;
                 }
                 assert!(Instant::now() < deadline);

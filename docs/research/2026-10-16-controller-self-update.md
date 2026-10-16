@@ -63,6 +63,9 @@ bad content never receives executable permissions. Before use, the retained
 image and its directory entry must still match in inode, digest and exact mode.
 The full job receipt must match, allowing only its single ordinary transition
 from Preparing to Prepared. A changed job/image or later phase is refused.
+The isolated ownership fixture launches this prepared native test image in its
+normal case, attests its running inode/digest through the connected peer, and
+checks exclusion survives release of the parent's original lock handles.
 This does not launch an activator or prove session detachment; wiring the
 synchronous internal worker entry and owned-child lifecycle remains pending.
 
