@@ -695,9 +695,11 @@ UI is served through the private Agent Interface tunnel. Selecting a launcher
 trusts that launcher and its selected harness with the Agent's authority; a
 private UI tunnel does not create an operating-system sandbox.
 
-Treer does not install provider CLIs, capture network traffic, manage OS DNS,
-create namespaces, or configure a sandbox. Profiles and external launchers own
-those choices. Ordinary internet traffic is outside Treer's authorization and
+Treer does not install software by default, capture network traffic, manage OS
+DNS, create namespaces, or configure a sandbox. The one exception is the
+explicitly confirmed, release-pinned
+[provider CLI installation](#provider-cli-installation). Profiles and external
+launchers own the remaining choices. Ordinary internet traffic is outside Treer's authorization and
 metering boundary.
 
 The thin CLI carries an Agent credential separately from the Controller's

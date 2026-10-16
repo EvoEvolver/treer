@@ -66,13 +66,17 @@ impl ProviderCliOperationRecord {
         (now - self.created_at).num_seconds() > PROVIDER_CLI_RETENTION_SECONDS
     }
 
-    /// A dispatched, unreported operation past the grace period is ambiguous.
+    /// A non-terminal operation whose Controller has been silent past the
+    /// grace period is ambiguous. Silence is measured from the last report,
+    /// else from dispatch, else from acceptance (an accepted but never
+    /// dispatched orphan expires too); nothing is assumed finished or dead.
     pub(crate) fn controller_silent_past_grace(&self, now: DateTime<Utc>) -> bool {
+        let baseline = self
+            .reported_at
+            .or(self.dispatched_at)
+            .unwrap_or(self.created_at);
         !self.status.is_terminal()
-            && self.reported_at.is_none()
-            && self.dispatched_at.is_some_and(|dispatched| {
-                (now - dispatched).num_seconds() > PROVIDER_CLI_CONTROLLER_GRACE_SECONDS
-            })
+            && (now - baseline).num_seconds() > PROVIDER_CLI_CONTROLLER_GRACE_SECONDS
     }
 }
 
@@ -81,11 +85,11 @@ pub(crate) fn sha256_hex(value: &str) -> String {
 }
 
 fn new_confirmation_token() -> String {
-    format!(
-        "{PROVIDER_CLI_TOKEN_PREFIX}{}{}",
-        Uuid::new_v4().simple(),
-        Uuid::new_v4().simple()
-    )
+    use rand::RngCore;
+    let mut bytes = [0_u8; 32];
+    rand::rngs::OsRng.fill_bytes(&mut bytes);
+    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    format!("{PROVIDER_CLI_TOKEN_PREFIX}{hex}")
 }
 
 fn token_shape_ok(token: &str) -> bool {

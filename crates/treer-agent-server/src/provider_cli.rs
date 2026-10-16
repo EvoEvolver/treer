@@ -49,6 +49,10 @@ const CHECKS_DIRECTORY: &str = "checks";
 const PACK_DIRECTORY: &str = "pack";
 const USER_CONFIG: &str = "npmrc";
 const GLOBAL_CONFIG: &str = "npmrc-global";
+const PROJECT_MANIFEST: &str = "package.json";
+/// Largest tarball the integrity step will hash; the registry is trusted but
+/// the read stays bounded.
+const MAX_TARBALL_BYTES: u64 = 256 * 1024 * 1024;
 /// How long readers may lag after the step's own process exited before the
 /// surviving pipe holder is treated as an unconfirmed descendant.
 const DESCENDANT_GRACE: Duration = Duration::from_secs(10);
@@ -624,7 +628,12 @@ impl ProviderCliService {
         let (table, platform) = self.table()?;
         let entry = Self::supported_entry(table, platform, reference)?;
         let npm = self.resolve_npm()?;
-        let job = self.job_directory(CHECKS_DIRECTORY, &entry.recipe.recipe_id);
+        // Checks have no token and may run concurrently: each gets its own
+        // directory so one cannot remove another's.
+        let job = self.job_directory(
+            CHECKS_DIRECTORY,
+            &format!("{}-{}", entry.recipe.recipe_id, Uuid::new_v4().simple()),
+        );
         let plan = expand_plan(entry, &npm, &job)?;
         let job_dir = JobDirectory::create(&job).map_err(|error| {
             warn!(%error, "provider CLI check directory unavailable");
@@ -1058,10 +1067,31 @@ fn verify_pack(pack_dir: &Path, expected: &str) -> bool {
     let [tarball] = files.as_slice() else {
         return false;
     };
-    let Ok(bytes) = fs::read(tarball) else {
+    let Ok(metadata) = fs::metadata(tarball) else {
         return false;
     };
-    Sha512::digest(&bytes).as_slice() == expected.as_slice()
+    if metadata.len() > MAX_TARBALL_BYTES {
+        return false;
+    }
+    let Ok(mut file) = fs::File::open(tarball) else {
+        return false;
+    };
+    let mut hasher = Sha512::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut remaining = MAX_TARBALL_BYTES;
+    loop {
+        let read = match io::Read::read(&mut file, &mut buffer) {
+            Ok(0) => break,
+            Ok(read) => read,
+            Err(_) => return false,
+        };
+        remaining = match remaining.checked_sub(read as u64) {
+            Some(remaining) => remaining,
+            None => return false,
+        };
+        hasher.update(&buffer[..read]);
+    }
+    hasher.finalize().as_slice() == expected.as_slice()
 }
 
 fn classify(
@@ -1125,7 +1155,14 @@ impl JobDirectory {
             fs::create_dir(path.join(sub))?;
             treer_platform::secure_directory(&path.join(sub))?;
         }
-        for file in [USER_CONFIG, GLOBAL_CONFIG] {
+        // npm walks up from cwd looking for a project (package.json or
+        // node_modules) and would read that project's .npmrc. A private
+        // package.json pins the local prefix to this directory, which has none.
+        for (file, contents) in [
+            (USER_CONFIG, &b""[..]),
+            (GLOBAL_CONFIG, &b""[..]),
+            (PROJECT_MANIFEST, &b"{\"private\":true}\n"[..]),
+        ] {
             let mut options = fs::OpenOptions::new();
             options.write(true).create_new(true);
             #[cfg(unix)]
@@ -1133,7 +1170,8 @@ impl JobDirectory {
                 use std::os::unix::fs::OpenOptionsExt;
                 options.mode(0o600);
             }
-            options.open(path.join(file))?;
+            let mut file_handle = options.open(path.join(file))?;
+            io::Write::write_all(&mut file_handle, contents)?;
             treer_platform::secure_file(&path.join(file))?;
         }
         Ok(Self {

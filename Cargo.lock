@@ -3737,6 +3737,7 @@ dependencies = [
  "hyper",
  "hyper-util",
  "percent-encoding",
+ "rand 0.8.7",
  "reqwest",
  "rmp-serde",
  "serde",

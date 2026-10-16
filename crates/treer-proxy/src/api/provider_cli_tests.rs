@@ -3,6 +3,7 @@
 //! consume-then-dispatch ordering, uniform refusals, creator-only polling,
 //! output-free audit rows and the never-replay rule.
 use super::*;
+use crate::auth::ProviderCliScope;
 use treer_protocol::{
     CommandResult, ProviderCliInstallAccepted, ProviderCliInstallRequest,
     ProviderCliOperationReport, ProviderCliOperationStatus, ProviderCliPlanStep,
@@ -599,6 +600,49 @@ async fn provider_cli_refuses_before_consuming_tokens_and_limits_prepares() {
     }
     assert_eq!(live_tokens().await, 4);
 
+    // Tokens are bound to workspace and machine at the store level too.
+    let scope = |workspace: &'static str, server: &'static str| ProviderCliScope {
+        workspace_id: workspace,
+        server_id: server,
+        user_id: "creator",
+        session_token: "session-one",
+    };
+    for (workspace, server) in [("other", MACHINE), (WORKSPACE, "machine-b")] {
+        let error = auth
+            .provider_cli_accept(&scope(workspace, server), &tokens[0])
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.code(),
+            "provider_cli_token_invalid",
+            "{workspace}/{server}"
+        );
+    }
+    assert_eq!(live_tokens().await, 4);
+
+    // Ten prepares per minute per user and machine, by database time.
+    sqlx::query("UPDATE provider_cli_install_tokens SET consumed_at=CURRENT_TIMESTAMP WHERE user_id='creator'")
+        .execute(&auth.pool()).await.unwrap();
+    for n in 0..6 {
+        sqlx::query("INSERT INTO provider_cli_install_tokens(token_hash, workspace_id, server_id, user_id, session_hash, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, expires_at, consumed_at) VALUES($1,$2,$3,'creator','s','codex-npm-posix',1,$4,$5,'c0ffee','h', CURRENT_TIMESTAMP + INTERVAL '2 minutes', CURRENT_TIMESTAMP)")
+            .bind(format!("filler-{n}")).bind(WORKSPACE).bind(MACHINE).bind(CODEX_HASH).bind(TABLE_HASH)
+            .execute(&auth.pool()).await.unwrap();
+    }
+    let error = prepare(creator.clone(), allow.clone(), codex_ref())
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (error.status, error.error.code.as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, "provider_cli_rate_limited")
+    );
+    sqlx::query("UPDATE provider_cli_install_tokens SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes', consumed_at = NULL WHERE user_id='creator' AND token_hash NOT LIKE 'filler-%'")
+        .execute(&auth.pool()).await.unwrap();
+    sqlx::query("DELETE FROM provider_cli_install_tokens WHERE token_hash LIKE 'filler-%'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(live_tokens().await, 4);
+
     // A busy machine is refused before consumption.
     sqlx::query("INSERT INTO provider_cli_operations(operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, status) VALUES('pco_busy', $1, $2, 'other', 'codex-npm-posix', 1, $3, $4, 'c0ffee', 'h', 'running')")
         .bind(WORKSPACE).bind(MACHINE).bind(CODEX_HASH).bind(TABLE_HASH)
@@ -759,13 +803,20 @@ async fn provider_cli_lost_dispatch_becomes_unknown_and_is_never_replayed() {
     .await
     .unwrap();
     assert_eq!(row, ("unknown".into(), Some("dispatch_unconfirmed".into())));
-    let replayed = tokio::time::timeout(Duration::from_millis(300), second_rx.recv()).await;
-    if let Ok(Some(SocketFrame::Text(text))) = replayed {
-        let message: ProxyMessage = serde_json::from_str(&text).unwrap();
-        assert!(
-            !matches!(message, ProxyMessage::Command { envelope } if matches!(envelope.command, AgentCommand::ProviderCliInstall { .. })),
-            "install must never be replayed to a replacement Controller"
-        );
+    // Drain everything the replacement receives for a fixed period: no frame
+    // may be an install dispatch.
+    let drain_until = tokio::time::Instant::now() + Duration::from_millis(500);
+    while let Ok(Some(frame)) = tokio::time::timeout_at(drain_until, second_rx.recv()).await {
+        if let SocketFrame::Text(text) = frame {
+            if let Ok(ProxyMessage::Command { envelope }) =
+                serde_json::from_str::<ProxyMessage>(&text)
+            {
+                assert!(
+                    !matches!(envelope.command, AgentCommand::ProviderCliInstall { .. }),
+                    "install must never be replayed to a replacement Controller"
+                );
+            }
+        }
     }
     let finished = audit_actions(&auth, "provider_cli.install.finished").await;
     assert_eq!(finished.len(), 1);
@@ -798,5 +849,191 @@ async fn provider_cli_lost_dispatch_becomes_unknown_and_is_never_replayed() {
             .await
             .len(),
         2
+    );
+}
+
+#[tokio::test]
+async fn provider_cli_concurrent_accepts_consume_exactly_one_token() {
+    let auth = seeded_auth().await;
+    let state = super::tests::state_with_managed_agent().await;
+    let (_, rx) = connect(&state, capability()).await;
+    controller(state.clone(), rx, |command, _| match command {
+        AgentCommand::ProviderCliRecipes {} => {
+            Ok(serde_json::to_value(recipes_response()).unwrap())
+        }
+        other => panic!("unexpected command {other:?}"),
+    });
+    let creator = session("creator", "session-one");
+    let mut tokens = Vec::new();
+    for _ in 0..2 {
+        tokens.push(
+            provider_cli_prepare(
+                State(state.clone()),
+                Extension(auth.clone()),
+                Extension(PolicyEngine::allow_all()),
+                Extension(creator.clone()),
+                Path((WORKSPACE.into(), MACHINE.into())),
+                Json(codex_ref()),
+            )
+            .await
+            .unwrap()
+            .0
+            .confirmation_token,
+        );
+    }
+    let scope = ProviderCliScope {
+        workspace_id: WORKSPACE,
+        server_id: MACHINE,
+        user_id: "creator",
+        session_token: "session-one",
+    };
+    // Both transactions pass the busy check before either commits; the partial
+    // unique index decides, and the loser's whole transaction rolls back.
+    let (first, second) = tokio::join!(
+        auth.provider_cli_accept(&scope, &tokens[0]),
+        auth.provider_cli_accept(&scope, &tokens[1])
+    );
+    let outcomes = [first, second];
+    assert_eq!(
+        outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+        1,
+        "{outcomes:?}"
+    );
+    let loser = outcomes
+        .iter()
+        .find_map(|outcome| outcome.as_ref().err())
+        .unwrap();
+    assert_eq!(loser.code(), "provider_cli_machine_busy");
+    let live: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_cli_install_tokens WHERE consumed_at IS NULL",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(live, 1, "the losing token stays usable");
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_cli_operations WHERE status IN ('queued','running')",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(active, 1);
+}
+
+/// A silent Controller or an accepted-but-undispatched orphan is `unknown`
+/// only past the grace period, measured from the last report (or dispatch, or
+/// acceptance). Time is moved in PostgreSQL rather than by waiting.
+#[tokio::test]
+async fn provider_cli_silence_past_grace_is_unknown_and_releases_the_machine() {
+    let auth = seeded_auth().await;
+    let state = super::tests::state_with_managed_agent().await;
+    let creator = session("creator", "session-one");
+    let insert = |id: &'static str,
+                  status: &'static str,
+                  created: &'static str,
+                  dispatched: Option<&'static str>,
+                  reported: Option<&'static str>| {
+        let auth = auth.clone();
+        async move {
+            sqlx::query(&format!("INSERT INTO provider_cli_operations(operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, status, created_at, dispatched_at, reported_at) VALUES($1,$2,$3,'creator','codex-npm-posix',1,$4,$5,'c0ffee','h',$6, CURRENT_TIMESTAMP - INTERVAL '{created}', {}, {})",
+                dispatched.map(|d| format!("CURRENT_TIMESTAMP - INTERVAL '{d}'")).unwrap_or("NULL".into()),
+                reported.map(|r| format!("CURRENT_TIMESTAMP - INTERVAL '{r}'")).unwrap_or("NULL".into())))
+                .bind(id).bind(WORKSPACE).bind(MACHINE).bind(CODEX_HASH).bind(TABLE_HASH).bind(status)
+                .execute(&auth.pool()).await.unwrap();
+        }
+    };
+    let poll = |id: &'static str| {
+        let (state, auth, creator) = (state.clone(), auth.clone(), creator.clone());
+        async move {
+            provider_cli_operation(
+                State(state),
+                Extension(auth),
+                Extension(PolicyEngine::allow_all()),
+                Extension(creator),
+                Path((WORKSPACE.into(), MACHINE.into(), id.into())),
+            )
+            .await
+            .unwrap()
+            .0
+        }
+    };
+    let status_of = |id: &'static str| {
+        let auth = auth.clone();
+        async move {
+            sqlx::query_as::<_, (String, Option<String>)>(
+                "SELECT status, error_code FROM provider_cli_operations WHERE operation_id=$1",
+            )
+            .bind(id)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap()
+        }
+    };
+    // Controller offline throughout. One active row at a time (unique index).
+    // ACK received eleven minutes ago, nothing since.
+    insert(
+        "pco_acked",
+        "running",
+        "12 minutes",
+        Some("11 minutes"),
+        Some("11 minutes"),
+    )
+    .await;
+    let response = poll("pco_acked").await;
+    assert_eq!(response.status, ProviderCliOperationStatus::Unknown);
+    assert_eq!(
+        response.error_code.as_deref(),
+        Some("controller_unreachable")
+    );
+    assert_eq!(
+        status_of("pco_acked").await,
+        ("unknown".into(), Some("controller_unreachable".into()))
+    );
+    // One progress report nine minutes ago: still inside the grace.
+    insert(
+        "pco_recent",
+        "running",
+        "30 minutes",
+        Some("29 minutes"),
+        Some("9 minutes"),
+    )
+    .await;
+    let response = poll("pco_recent").await;
+    assert_eq!(response.status, ProviderCliOperationStatus::Running);
+    assert_eq!(response.poll_after_ms, Some(1000));
+    assert_eq!(status_of("pco_recent").await.0, "running");
+    sqlx::query("UPDATE provider_cli_operations SET reported_at = CURRENT_TIMESTAMP - INTERVAL '11 minutes' WHERE operation_id='pco_recent'")
+        .execute(&auth.pool()).await.unwrap();
+    assert_eq!(
+        poll("pco_recent").await.status,
+        ProviderCliOperationStatus::Unknown
+    );
+    // Accepted but never dispatched (Proxy crashed before the frame): expires too.
+    insert("pco_orphan", "queued", "11 minutes", None, None).await;
+    let response = poll("pco_orphan").await;
+    assert_eq!(response.status, ProviderCliOperationStatus::Unknown);
+    assert_eq!(
+        response.error_code.as_deref(),
+        Some("controller_unreachable")
+    );
+    // A fresh orphan is not misjudged.
+    insert("pco_fresh", "queued", "1 minute", None, None).await;
+    assert_eq!(
+        poll("pco_fresh").await.status,
+        ProviderCliOperationStatus::Queued
+    );
+    // The machine slot is free again for every unknown row.
+    let active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_cli_operations WHERE status IN ('queued','running')",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(active, 1, "only the fresh queued row holds the slot");
+    assert_eq!(
+        audit_actions(&auth, "provider_cli.install.finished")
+            .await
+            .len(),
+        3
     );
 }

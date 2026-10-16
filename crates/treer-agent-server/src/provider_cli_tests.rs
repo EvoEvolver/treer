@@ -83,6 +83,8 @@ fn fixture(table: ValidatedProviderTable) -> Fixture {
         r#"#!/bin/sh
 dir=$(cd "$(dirname "$0")/.." && pwd)
 env > "$dir/log/env-$1"
+cat "$PWD/package.json" > "$dir/log/package-$1" 2>/dev/null
+ls -A "$PWD" > "$dir/log/cwd-$1"
 printf '%s\n' "$@" > "$dir/log/argv-$1"
 case "$1" in
   pack)
@@ -416,6 +418,26 @@ async fn install_runs_the_displayed_plan_privately_and_checks_from_the_prefix() 
             "{forbidden} leaked into step env:\n{env}"
         );
     }
+    // npm's project lookup is pinned to the private directory.
+    assert_eq!(
+        fixture.log("package-install").unwrap().trim(),
+        "{\"private\":true}"
+    );
+    let cwd_listing = fixture.log("cwd-install").unwrap();
+    for entry in [
+        "npmrc",
+        "npmrc-global",
+        "package.json",
+        "home",
+        "tmp",
+        "cache",
+        "pack",
+    ] {
+        assert!(
+            cwd_listing.lines().any(|line| line == entry),
+            "{entry} missing: {cwd_listing}"
+        );
+    }
     // The check ran the prefix's binary, not the decoy on PATH.
     assert!(!report.stdout.contains("decoy-on-path"));
     let record_plan = service
@@ -672,17 +694,16 @@ async fn failed_install_step_reports_exit_code_and_cleans_up() {
 #[cfg(unix)]
 #[tokio::test]
 async fn detached_descendant_holding_output_turns_operation_unknown() {
-    if std::process::Command::new("perl")
-        .arg("-MPOSIX")
-        .arg("-e")
-        .arg("1")
-        .output()
-        .map(|output| !output.status.success())
-        .unwrap_or(true)
-    {
-        eprintln!("perl with POSIX unavailable; skipping");
-        return;
-    }
+    assert!(
+        std::process::Command::new("perl")
+            .arg("-MPOSIX")
+            .arg("-e")
+            .arg("1")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false),
+        "this regression needs perl with POSIX to detach a descendant; do not skip it"
+    );
     let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
     fs::write(fixture.fixture.join("detach-install"), b"").unwrap();
     let service = fixture.service();
