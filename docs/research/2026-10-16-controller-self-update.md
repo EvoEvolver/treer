@@ -147,6 +147,25 @@ production dispatch must exit on bootstrap error and must complete this sequence
 before creating runtime threads or child processes; that dispatch is not wired
 yet, and no public self-update command is exposed.
 
+The worker resource resolver accepts only a canonical job UUID. It opens the
+existing private `self-update/jobs` directory below the local service state
+directory, requires a Prepared receipt, and resolves the selected enrollment
+from that receipt's workspace and server binding. It does not accept receipt
+paths, workspace overrides, executable paths or parent PIDs from argv. Inventory
+hostname discovery uses the OS API without launching a PATH helper. Resolution
+does not create directories, acquire replacement locks or mutate installed files.
+Shared-binary selection here is only resource discovery, not consent: the parent
+must have obtained consent during preparation, and execution still requires its
+authenticated full-receipt handoff and the same installation lock descriptions.
+The consuming synchronous entry verifies the running private image, session,
+parent and endpoint peer before taking ownership. Failures return a fixed
+bootstrap diagnostic; there is no ordinary Controller fallback or reconnect.
+Only the resulting owned capability exposes resources for async execution.
+Tests cover malformed/missing/unprepared jobs before inventory enumeration,
+workspace/server mismatch, aliased directories and a wrong running image without
+ownership creation or installed-file changes. This is not yet wired to main or
+parent spawning; launcher completion and worker-death recovery remain pending.
+
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
 modes/current bytes and executable stages before recording Activating or making
