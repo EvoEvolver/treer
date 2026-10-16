@@ -47,7 +47,7 @@ async function mockAdmin(page: Page, mode: "configured" | "unconfigured" = "conf
       }
       return ok(route, running)
     }
-    if (path === "/update/check" && method === "GET") {
+    if (path === "/update/check" && method === "POST") {
       return ok(route, {
         ...running,
         update_available: true,
@@ -72,7 +72,9 @@ test("admin panel shows control-plane updates when the sidecar is configured", a
   await expect(page.getByRole("heading", { name: "Platform overview" })).toBeVisible()
   await expect(page.getByRole("heading", { name: "Control plane" })).toBeVisible()
   await expect(page.getByText("Channel stable")).toBeVisible()
+  const checking = page.waitForRequest((request) => request.url().endsWith("/api/admin/update/check"))
   await page.getByRole("button", { name: "Check for updates" }).click()
+  expect((await checking).method()).toBe("POST")
   await expect(page.getByText("update available")).toBeVisible()
   await expect(page.getByRole("button", { name: "Apply update" })).toBeEnabled()
 })

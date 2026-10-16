@@ -223,7 +223,7 @@ export function ControlPlaneUpdate({ preview, onError }: { preview?: boolean; on
   async function checkForUpdates() {
     setBusy(true)
     try {
-      const next = await api<ControlPlaneUpdateStatus>("/api/admin/update/check")
+      const next = await api<ControlPlaneUpdateStatus>("/api/admin/update/check", { method: "POST", body: "{}" })
       setConfigured(true)
       setStatus(next)
     } catch (reason) {

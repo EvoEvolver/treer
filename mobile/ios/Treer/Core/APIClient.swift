@@ -80,7 +80,8 @@ final class APIClient {
             "/api/auth/request-password-reset",
             method: "POST",
             body: ["email": email],
-            authorized: false
+            authorized: false,
+            nativeAuth: true
         )
     }
 
@@ -89,7 +90,8 @@ final class APIClient {
             "/api/auth/reset-password",
             method: "POST",
             body: ["token": token, "password": password],
-            authorized: false
+            authorized: false,
+            nativeAuth: true
         )
     }
 
@@ -316,6 +318,8 @@ final class APIClient {
     ) async throws -> T {
         var request = URLRequest(url: url(path))
         request.httpMethod = method
+        // Native pre-auth is cookie-free; authenticated requests keep their normal path.
+        if nativeAuth && !authorized { request.httpShouldHandleCookies = false }
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         applyAuth(to: &request, nativeAuth: nativeAuth, authorized: authorized)
         if let body {

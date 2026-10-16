@@ -18,15 +18,29 @@ directory is gitignored; rebuild it before an iOS or Android build.
 
 ## Native client header
 
-Every login/register request:
+Login, registration and both password-reset requests send:
 
 ```
 X-Treer-Client: mobile_ios   # or mobile_android
 ```
 
-JSON body includes `device_id` (UUID) and `device_name`. Response JSON includes
+Login/register JSON body includes `device_id` (UUID) and `device_name`. Response JSON includes
 `token` only with that header. Subsequent REST and WebSocket use
 `Authorization: Bearer <token>`. Never put the token in a query string.
+
+Password-reset calls are pre-authenticated: they do not send a Bearer session.
+iOS disables automatic cookies for native pre-auth requests (including login
+and registration); Android uses the existing cookie-free OkHttp client. The
+native marker is not a bypass for cookie-authenticated operations or requests
+with browser Origin/Fetch Metadata. Both native clients currently use password
+authentication and do not navigate to provider OAuth-start GET routes.
+
+Run `node mobile/tests/native-auth.mjs` from the repository root for the isolated
+Foundation request regression (the real APIClient with only UIDevice stubbed,
+all traffic intercepted by URLProtocol). The Android JVM `NativeAuthTest` uses a
+loopback HTTP server on a random port, with synthetic data only; run it through
+`./gradlew testDebugUnitTest` from `mobile/android` on a configured
+JDK/Android SDK machine. Neither test uses real accounts or performs IdP login.
 
 ## API used by v1
 
