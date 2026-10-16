@@ -2307,3 +2307,105 @@ for (const mobile of [false, true]) {
     }
   })
 }
+
+for (const width of [1280, 390]) for (const state of ['cleanup_failed', 'reserved_outcome_unknown']) {
+  test(`reservation cleanup confirms, preserves draft and never auto-creates (${state}, ${width})`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 850 })
+    let creates = 0, cleanups = 0
+    await page.route('**/api/workspaces/ws-1/agents', route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      creates++
+      return route.fulfill({ status: 409, json: { error: { code: 'spawn_failed', message: 'Startup could not be confirmed', details: {
+        machine_id: 'srv-a', agent_id: 'ag_reserved', creation_state: state,
+      } } } })
+    })
+    await page.route('**/api/workspaces/ws-1/agent-reservations/ag_reserved/cleanup', route => {
+      cleanups++
+      expect(route.request().method()).toBe('POST')
+      expect(route.request().postDataJSON()).toEqual({})
+      return ok(route, { agent_id: 'ag_reserved', deleted: true, already_deleted: false })
+    })
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Add agent', exact: true }).click()
+    const create = page.getByRole('button', { name: 'Create terminal', exact: true })
+    await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Keep my draft')
+    await create.click()
+    await expect(create).toBeDisabled()
+    await expect(page.getByText('ag_reserved', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Clean up reserved identity', exact: true }).click()
+    const confirmation = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Clean up reserved identity', exact: true }) })
+    await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click()
+    expect(cleanups).toBe(0)
+    await page.getByRole('button', { name: 'Clean up reserved identity', exact: true }).click()
+    await page.screenshot({ path: info.outputPath(`reservation-${width}-${state}.png`) })
+    await confirmation.getByRole('button', { name: 'Confirm cleanup', exact: true }).click()
+    await expect(confirmation).toBeHidden()
+    await expect(create).toBeEnabled()
+    await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Keep my draft')
+    expect(cleanups).toBe(1)
+    expect(creates).toBe(1)
+    await expect(page.getByText(/Reservation removed/)).toBeVisible()
+  })
+}
+
+for (const status of [403, 404, 409, 501, 503]) test(`reservation cleanup failure ${status} keeps identity and creation blocked`, async ({ page }) => {
+  await page.route('**/api/workspaces/ws-1/agents', route => route.request().method() !== 'POST' ? route.fallback() : route.fulfill({ status: 409, json: { error: { message: 'Not confirmed', details: { machine_id: 'srv-a', agent_id: 'ag_reserved', creation_state: 'cleanup_failed' } } } }))
+  let requests = 0
+  await page.route('**/api/workspaces/ws-1/agent-reservations/ag_reserved/cleanup', route => { requests++; return route.fulfill({ status, json: { error: { code: status === 409 ? 'agent_reservation_observed' : 'cleanup_denied', message: 'Cleanup denied' } } }) })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add agent', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Keep refused cleanup draft')
+  await page.getByRole('button', { name: 'Create terminal', exact: true }).click()
+  await page.getByRole('button', { name: 'Clean up reserved identity', exact: true }).click()
+  const confirmation = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Clean up reserved identity', exact: true }) })
+  await confirmation.getByRole('button', { name: 'Confirm cleanup', exact: true }).click()
+  await expect(confirmation.getByRole('alert')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Create terminal', exact: true, includeHidden: true })).toBeDisabled()
+  await expect(page.getByRole('textbox', { name: 'Name', exact: true, includeHidden: true })).toHaveValue('Keep refused cleanup draft')
+  if (status === 409) await expect(confirmation.getByRole('alert')).toContainText('Core could not prove this workload is absent')
+  if (status === 404) await expect(confirmation.getByRole('alert')).toContainText('does not confirm deletion or allow another Create')
+  expect(requests).toBe(1)
+})
+
+for (const width of [1280, 390]) for (const theme of ['light', 'dark']) test(`missing command uses structured metadata and explicit retry state (${width}, ${theme})`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 850 })
+  await page.addInitScript(value => localStorage.setItem('treer-theme', value), theme)
+  let creates = 0
+  await page.route('**/api/workspaces/ws-1/agents', route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    creates++
+    return route.fulfill({ status: 422, json: { error: { code: 'command_not_found', message: 'Raw PATH must never appear', details: {
+      command: 'claude', machine_id: 'srv-a', agent_id: 'ag_reserved', creation_state: creates === 1 ? 'identity_removed' : 'reserved_outcome_unknown',
+    } } } })
+  })
+  await page.goto('/')
+  await browseTreeOnMobile(page)
+  await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add agent', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Launch', exact: true }).click()
+  await page.getByRole('option', { name: 'Custom command', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Command', exact: true }).fill('claude')
+  await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Preserved Claude')
+  const submit = page.getByRole('button', { name: 'Create agent', exact: true })
+  await submit.click()
+  await expect(page.getByRole('alert')).toHaveText('claude is not installed on workstation.')
+  await expect(page.getByRole('status')).toContainText('The reserved identity was removed')
+  await expect(page.getByText('Raw PATH must never appear')).toHaveCount(0)
+  await expect(submit).toBeEnabled()
+  await expect(page.getByRole('button', { name: /^Install / })).toHaveCount(0)
+  expect(creates).toBe(1)
+  await page.screenshot({ path: info.outputPath(`missing-command-${width}-${theme}.png`) })
+  await submit.click()
+  await expect(submit).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Clean up reserved identity', exact: true })).toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Preserved Claude')
+  expect(creates).toBe(2)
+  const bounds = await page.getByRole('dialog').boundingBox()
+  expect(bounds).not.toBeNull()
+  expect(bounds!.y).toBeGreaterThanOrEqual(0)
+  expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(850)
+  await page.screenshot({ path: info.outputPath(`missing-command-unknown-${width}-${theme}.png`) })
+})
