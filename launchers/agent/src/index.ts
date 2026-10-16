@@ -215,7 +215,8 @@ function broadcast() {
 runtime.on("state", broadcast);
 runtime.on("log", (message) => console.log(`[${runtime.harness.id}] ${message}`));
 
-const server = createServer(async (request, response) => {
+// Keep stalled uploads bounded (Node's defaults, explicit for this boundary).
+const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 }, async (request, response) => {
   const method = request.method ?? "GET";
   try {
     let url: URL;

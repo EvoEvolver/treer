@@ -18,6 +18,7 @@ export function Dock() {
   // Only the field's own focus expands the composer. The layout must not change between pointerdown and click, or a button
   // pressed while the field is focused would move away from under the pointer; `hold` keeps it expanded until the click ends.
   const [focused, setFocused] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const hold = useRef(false);
   const composer = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<PopName | null>(null);
@@ -46,7 +47,10 @@ export function Dock() {
   useEffect(() => {
     const element = dock.current;
     if (!element) return;
-    const observer = new ResizeObserver(() => document.documentElement.style.setProperty("--dock-h", `${element.offsetHeight}px`));
+    const observer = new ResizeObserver(() => {
+      document.documentElement.style.setProperty("--dock-h", `${element.offsetHeight}px`);
+      document.dispatchEvent(new Event("treer:dock-resize"));
+    });
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
@@ -131,9 +135,10 @@ export function Dock() {
           <GoalPop confirming={pendingClear !== null} onClose={() => closePop()} onEdit={() => { closePop(false); setEditor(true); }} onAskClear={() => setPendingClear({ prompt: null })}
             onKeep={() => setPendingClear(null)} onCleared={() => { if (pendingClear?.prompt) setText((current) => (current.trim() === pendingClear.prompt ? "" : current)); closePop(); }} />
         )}
-        <div className={expanded ? "composer exp" : "composer"} id="composer" ref={composer} onPointerDown={() => { hold.current = true; }} onClick={release}
-          onDragOver={event => { if (event.dataTransfer.types.includes("Files")) event.preventDefault(); }}
-          onDrop={event => { if (event.dataTransfer.files.length) { event.preventDefault(); if (!state.submitting) void images.add(Array.from(event.dataTransfer.files)); } }}
+        <div className={`composer${expanded ? " exp" : ""}${dragging ? " image-drop" : ""}`} id="composer" ref={composer} onPointerDown={() => { hold.current = true; }} onClick={release}
+          onDragOver={event => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setDragging(true); } }}
+          onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
+          onDrop={event => { setDragging(false); if (event.dataTransfer.files.length) { event.preventDefault(); if (!state.submitting) void images.add(Array.from(event.dataTransfer.files)); } }}
           onBlur={(event) => { if (!hold.current && !event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}>
           <Strip pop={pop} onToggle={toggle} onEditGoal={() => setEditor(true)} />
           {(images.images.length > 0 || images.busy) && <ImageDrafts images={images.images} busy={images.busy} disabled={state.submitting} fallback={!snapshot?.harness.capabilities.images} onRemove={id => void images.remove(id)} />}
@@ -156,6 +161,7 @@ export function Dock() {
             </div>
           </div>
           <p className="hint" id="hint">{hint}</p>
+          {snapshot?.attachmentsAvailable && images.images.length === 0 && <p className="hint">{t("images.limits")}</p>}
         </div>
       </div>
       <GoalEditor open={editor} onClose={() => setEditor(false)} onSaved={() => setEditor(false)} />

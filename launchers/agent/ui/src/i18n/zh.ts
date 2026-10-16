@@ -2,6 +2,7 @@ import type { MessageKey } from "./en";
 
 export const zh: Partial<Record<MessageKey, string>> = {
   "images.add": "添加图片",
+  "images.attached": "已添加的图片",
   "images.remove": "移除图片 {{number}}",
   "images.preview": "附件图片 {{number}}",
   "images.uploading": "正在上传图片…",

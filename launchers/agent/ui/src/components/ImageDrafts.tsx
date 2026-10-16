@@ -36,7 +36,7 @@ export function useImageDrafts(onError: (message: string) => void) {
 }
 
 export function ImageDrafts({ images, busy, disabled, fallback, onRemove }: { images: ImageAttachment[]; busy: boolean; disabled: boolean; fallback: boolean; onRemove(id: string): void }) {
-  return <section className="image-drafts" aria-label={t("images.add")}>
+  return <section className="image-drafts" aria-label={t("images.attached")}>
     <div className="image-list">{images.map((image, index) => <figure key={image.id}>
       <img src={safeImageUrl(imageUrl(image.id))} alt={t("images.preview", { number: index + 1 })} />
       <button type="button" disabled={disabled || busy} aria-label={t("images.remove", { number: index + 1 })} onClick={() => onRemove(image.id)}>×</button>

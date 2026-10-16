@@ -23,9 +23,19 @@ export async function testImagesUi(browser, base, screenshots, entry = "index.ht
       await expect(page.locator(".image-drafts img")).toHaveCount(1);
       await page.evaluate(() => {
         const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(window.imageBytes)], "drop.png", { type: "image/png" }));
+        document.querySelector("#composer").dispatchEvent(new DragEvent("dragover", { dataTransfer: transfer, bubbles: true, cancelable: true }));
+      });
+      await expect(page.locator("#composer")).toHaveClass(/image-drop/);
+      await page.evaluate(() => {
+        const transfer = new DataTransfer(); transfer.items.add(new File([new Uint8Array(window.imageBytes)], "drop.png", { type: "image/png" }));
         document.querySelector("#composer").dispatchEvent(new DragEvent("drop", { dataTransfer: transfer, bubbles: true, cancelable: true }));
       });
+      await expect(page.locator("#composer")).not.toHaveClass(/image-drop/);
       await expect(page.locator(".image-drafts img")).toHaveCount(2);
+      await expect.poll(() => page.evaluate(() => {
+        const last = document.querySelector(".chat > :last-child");
+        return !last || last.getBoundingClientRect().bottom <= document.querySelector("#dock").getBoundingClientRect().top;
+      })).toBe(true);
       await expect(page.locator(".image-drafts")).toContainText("including metadata");
       for (const image of await page.locator(".image-drafts img").all()) {
         assert.match(await image.getAttribute("src"), /^api\/attachments\/img_[a-f0-9]{32}$/);
@@ -44,9 +54,17 @@ export async function testImagesUi(browser, base, screenshots, entry = "index.ht
       await expect(message.locator("img")).toHaveCount(1);
       await page.reload();
       await expect(message.locator("img")).toHaveCount(1);
+      await expect.poll(() => message.locator("img").evaluate(node => node.complete && node.naturalWidth > 0)).toBe(true);
+      await expect(page.locator("#thread")).toHaveAttribute("data-view", "chat");
+      await page.evaluate(() => { const thread = document.querySelector("#thread"); thread.scrollTop = thread.scrollHeight; });
       assert.equal(await page.evaluate(() => window.imageXSS), undefined);
       assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
-      await page.screenshot({ path: join(screenshots, `images-sent-${width}.png`) });
+      await page.screenshot({ path: join(screenshots, `images-sent-${width}.png`), animations: "disabled" });
+      await page.goto(`${base}/${entry}?lang=en&theme=dark`);
+      await expect(page.locator("#thread")).toHaveAttribute("data-view", "chat");
+      await expect.poll(() => message.locator("img").evaluate(node => node.complete && node.naturalWidth > 0)).toBe(true);
+      await page.evaluate(() => { const thread = document.querySelector("#thread"); thread.scrollTop = thread.scrollHeight; });
+      await page.screenshot({ path: join(screenshots, `images-sent-dark-${width}.png`), animations: "disabled" });
       // Oversize files are rejected in the browser before upload; a spoofed MIME
       // is independently rejected by the server with a fixed error.
       await page.locator('input[type="file"]').setInputFiles({ name: "large.png", mimeType: "image/png", buffer: Buffer.alloc(10 * 1024 * 1024 + 1) });

@@ -1,6 +1,7 @@
 // English is the source of truth: every key lives here, and other locales may omit keys (they fall back to English).
 export const en = {
   "images.add": "Attach images",
+  "images.attached": "Attached images",
   "images.remove": "Remove image {{number}}",
   "images.preview": "Attached image {{number}}",
   "images.uploading": "Uploading images…",
