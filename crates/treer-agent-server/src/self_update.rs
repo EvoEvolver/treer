@@ -14,6 +14,7 @@ const RECEIPT_LIMIT: u64 = 64 * 1024;
 
 pub mod artifacts;
 pub mod images;
+pub mod probe;
 pub mod publication;
 pub mod safety;
 pub mod selection;

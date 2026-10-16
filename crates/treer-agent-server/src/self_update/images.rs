@@ -104,6 +104,10 @@ fn matches(source: &File, expected: &str) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn digest_file(source: &File) -> Result<String> {
+    copy(source, None)
+}
+
 /// Create a registered sibling stage and close its writable handle before any
 /// execution/publication. A failed attempt removes only its newly created name.
 fn create_stage(
