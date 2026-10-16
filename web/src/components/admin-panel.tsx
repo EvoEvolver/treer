@@ -1,23 +1,20 @@
-import { agentPath } from "@/lib/workload-path"
-import { EmptyState, Status } from "@/components/control-plane-ui"
+import { AdminTraffic } from "@/components/admin-traffic"
+import { EmptyState } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import { Textarea } from "@/components/ui/textarea"
-import { api, ApiError, type AdminDashboard, type AdminInvitation, type AdminMachine, type AdminOrganization, type AdminUser, type AdminUserDetail, type Agent, type ControlPlaneUpdateStatus, type PlatformAuditEvent } from "@/lib/api"
+import { api, ApiError, type AdminDashboard, type AdminInvitation, type ControlPlaneUpdateStatus } from "@/lib/api"
 import { clearAdminTour, firstRunTourMode, shouldAutoStartAdminTour, startAdminTour, stopFirstRunTour, type AdminTourHost } from "@/lib/first-run-tour"
-import { cn } from "@/lib/utils"
 import {
   Building2,
-  ChevronDown,
   Copy,
   Download,
   KeyRound,
   ListChecks,
   LogOut,
   RotateCw,
-  ScrollText,
   Server,
   ShieldCheck,
   TerminalSquare,
@@ -25,27 +22,27 @@ import {
 } from "lucide-react"
 import type * as React from "react"
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react"
-import { roleLabel, t, tnodes } from "@/i18n"
+import { t, tnodes } from "@/i18n"
 
 export const PREVIEW_ADMIN_INVITE = "https://treer.example/?invite=inv_preview"
 
 export const EMPTY_ADMIN_DASHBOARD: AdminDashboard = { user_count: 0, organization_count: 0, machine_count: 0, agent_count: 0 }
-
-export type AdminInventory = "users" | "machines" | "agents" | "organizations" | "invitations" | "activity" | null
 
 export function AdminPanel() {
   const preview = firstRunTourMode() === "preview"
   const [authenticated, setAuthenticated] = useState<boolean | undefined>(preview ? true : undefined)
   const [password, setPassword] = useState("")
   const [dashboard, setDashboard] = useState<AdminDashboard | null>(preview ? EMPTY_ADMIN_DASHBOARD : null)
-  const [inventory, setInventory] = useState<AdminInventory>(null)
+  const [invitationsOpen, setInvitationsOpen] = useState(false)
   const [inviteUrl, setInviteUrl] = useState("")
+  const [refreshRevision, setRefreshRevision] = useState(0)
   const [error, setError] = useState("")
   const [submitting, setSubmitting] = useState(false)
 
   const loadDashboard = useCallback(async () => {
     if (preview) return
-    setDashboard(await api<AdminDashboard>("/api/admin/dashboard"))
+    setDashboard(await api<AdminDashboard>("/api/admin/dashboard", { cache: "no-store" }))
+    setRefreshRevision((value) => value + 1)
   }, [preview])
 
   useEffect(() => {
@@ -82,7 +79,7 @@ export function AdminPanel() {
   async function logout() {
     if (preview) return
     await api("/api/admin/logout", { method: "POST", body: "{}" })
-    setAuthenticated(false); setDashboard(null); setInviteUrl(""); setInventory(null)
+    setAuthenticated(false); setDashboard(null); setInviteUrl(""); setInvitationsOpen(false)
   }
 
   const tourHostRef = useRef<AdminTourHost | null>(null)
@@ -118,225 +115,80 @@ export function AdminPanel() {
     <div className="mx-auto max-w-4xl px-5 py-10">
       <div className="mb-8 flex flex-col items-start gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div><h1 className="text-2xl font-semibold">{t("admin.platform_overview")}</h1><p className="mt-1 text-sm text-muted-foreground">{t("admin.current_resources_across_all_organizations")}</p></div>
-        <div className="flex gap-1"><Button size="sm" variant="outline" onClick={replayAdminTour}><ListChecks />{t("admin.replay_tour")}</Button><Button size="sm" onClick={loadDashboard} disabled={preview}><RotateCw />{t("admin.refresh")}</Button></div>
+        <div className="flex gap-1"><Button size="sm" variant="outline" onClick={replayAdminTour}><ListChecks />{t("admin.replay_tour")}</Button><Button size="sm" onClick={() => void loadDashboard().catch(() => setError(t("admin.unable_to_load_admin_panel")))} disabled={preview}><RotateCw />{t("admin.refresh")}</Button></div>
       </div>
       {error && <div className="mb-5 rounded border border-destructive/30 bg-destructive/5 px-3 py-2 text-sm text-destructive">{error}</div>}
-      <div className="grid grid-cols-3 border-y" data-tour="admin-overview">
-        <AdminCountCard label={t("admin.users")} icon={<Users className="size-3.5" />} value={dashboard?.user_count} active={inventory === "users"} onClick={() => setInventory(inventory === "users" ? null : "users")} />
-        <AdminCountCard label={t("wsettings.machines")} icon={<Server className="size-3.5" />} value={dashboard?.machine_count} active={inventory === "machines"} bordered onClick={() => setInventory(inventory === "machines" ? null : "machines")} />
-        <AdminCountCard label={t("admin.agents")} icon={<TerminalSquare className="size-3.5" />} value={dashboard?.agent_count} active={inventory === "agents"} onClick={() => setInventory(inventory === "agents" ? null : "agents")} />
+      <p className="mb-4 text-xs text-muted-foreground">{t("admin.privacy_summary")}</p>
+      <div role="group" aria-label={t("admin.resource_totals")} className="grid grid-cols-2 gap-x-6 border-y sm:grid-cols-4" data-tour="admin-overview">
+        <AdminCountCard label={t("admin.users")} icon={<Users className="size-3.5" />} value={dashboard?.user_count} />
+        <AdminCountCard label={t("admin.organizations")} icon={<Building2 className="size-3.5" />} value={dashboard?.organization_count} />
+        <AdminCountCard label={t("wsettings.machines")} icon={<Server className="size-3.5" />} value={dashboard?.machine_count} />
+        <AdminCountCard label={t("admin.agents")} icon={<TerminalSquare className="size-3.5" />} value={dashboard?.agent_count} />
       </div>
-      {inventory && <AdminInventoryPanel kind={inventory} preview={preview} onError={setError} onChanged={loadDashboard} />}
+      <AdminTraffic preview={preview} refreshRevision={refreshRevision} />
       <ControlPlaneUpdate preview={preview} onError={setError} />
       <section className="mt-12" data-tour="admin-invite">
         <h2 className="text-sm font-semibold">{t("admin.user_invitations")}</h2>
         <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
           <div><div className="text-sm font-medium">{t("admin.invite_a_new_user")}</div><div className="mt-1 text-xs text-muted-foreground">{t("admin.registration_creates_a_personal_organization")}</div></div>
           <div className="flex flex-wrap gap-2">
-            <Button size="sm" variant={inventory === "invitations" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "invitations" ? null : "invitations")}>{t("admin.pending_invitations")}</Button>
+            <Button size="sm" variant={invitationsOpen ? "secondary" : "outline"} aria-expanded={invitationsOpen} onClick={() => setInvitationsOpen(!invitationsOpen)}>{t("admin.pending_invitations")}</Button>
             <Button size="sm" onClick={createInvite}><KeyRound />{t("admin.create_invitation")}</Button>
           </div>
         </div>
       </section>
-      <section className="mt-12">
-        <h2 className="text-sm font-semibold">{t("admin.organizations")}</h2>
-        <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-          <div><div className="text-sm font-medium">{t("admin.all_organizations")}</div><div className="mt-1 text-xs text-muted-foreground">{t("admin.org_count", { count: dashboard?.organization_count ?? "—" })}</div></div>
-          <Button size="sm" variant={inventory === "organizations" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "organizations" ? null : "organizations")}><Building2 />{t("admin.view_organizations")}</Button>
-        </div>
-      </section>
-      <section className="mt-12">
-        <h2 className="text-sm font-semibold">{t("admin.admin_activity")}</h2>
-        <div className="mt-3 grid gap-4 border-y py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-          <div><div className="text-sm font-medium">{t("admin.recent_operator_actions")}</div><div className="mt-1 text-xs text-muted-foreground">{t("admin.password_resets_session_revokes_and")}</div></div>
-          <Button size="sm" variant={inventory === "activity" ? "secondary" : "outline"} onClick={() => setInventory(inventory === "activity" ? null : "activity")}><ScrollText />{t("admin.view_activity")}</Button>
-        </div>
-      </section>
+      {invitationsOpen && <AdminInvitations preview={preview} onError={setError} onChanged={loadDashboard} />}
     </div>
     <Dialog open={Boolean(inviteUrl)} onOpenChange={(open) => !open && setInviteUrl("")}><DialogContent data-tour="admin-invite-dialog"><DialogHeader><DialogTitle>{t("admin.user_invitation")}</DialogTitle><DialogDescription>{t("admin.this_one_time_registration_link")}</DialogDescription></DialogHeader><Textarea readOnly value={inviteUrl} className="min-h-24 font-mono text-xs" /><DialogFooter><Button variant="outline" onClick={() => setInviteUrl("")}>{t("org.close")}</Button><Button onClick={() => navigator.clipboard.writeText(inviteUrl)}><Copy />{t("dialogs.copy_link")}</Button></DialogFooter></DialogContent></Dialog>
   </main>
 }
 
-export function AdminCountCard({ label, icon, value, active, bordered, onClick }: { label: string; icon: React.ReactNode; value?: number; active: boolean; bordered?: boolean; onClick: () => void }) {
-  return <button type="button" onClick={onClick} className={cn("py-6 text-left transition-colors hover:bg-accent/40", bordered && "border-x px-6", !bordered && "px-0", active && "bg-accent/50")}>
+function AdminCountCard({ label, icon, value }: { label: string; icon: React.ReactNode; value?: number }) {
+  return <div className="py-5">
     <div className="flex items-center gap-2 text-xs text-muted-foreground">{icon}{label}</div>
-    <div className="mt-2 text-3xl font-semibold tabular-nums">{value ?? "-"}</div>
-  </button>
+    <div className="mt-2 text-3xl font-semibold tabular-nums">{value ?? "—"}</div>
+  </div>
 }
 
-export function AdminInventoryPanel({ kind, preview, onError, onChanged }: { kind: Exclude<AdminInventory, null>; preview: boolean; onError: (message: string) => void; onChanged: () => Promise<void> }) {
-  const [query, setQuery] = useState("")
-  const [users, setUsers] = useState<AdminUser[]>([])
-  const [machines, setMachines] = useState<AdminMachine[]>([])
-  const [agents, setAgents] = useState<Agent[]>([])
-  const [organizations, setOrganizations] = useState<AdminOrganization[]>([])
+function AdminInvitations({ preview, onError, onChanged }: { preview: boolean; onError: (message: string) => void; onChanged: () => Promise<void> }) {
   const [invitations, setInvitations] = useState<AdminInvitation[]>([])
-  const [events, setEvents] = useState<PlatformAuditEvent[]>([])
-  const [openMachine, setOpenMachine] = useState<string | null>(null)
-  const [machineDetail, setMachineDetail] = useState<AdminMachine | null>(null)
-  const [userDetail, setUserDetail] = useState<AdminUserDetail | null>(null)
-  const [resetUrl, setResetUrl] = useState("")
-  const [resetEmailed, setResetEmailed] = useState(false)
   const [loading, setLoading] = useState(false)
-
+  const [unsupported, setUnsupported] = useState(false)
   const load = useCallback(async () => {
     if (preview) return
     setLoading(true)
+    setUnsupported(false)
     try {
-      if (kind === "users") {
-        const data = await api<{ users: AdminUser[] }>(`/api/admin/users${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ""}`)
-        setUsers(data.users)
-      } else if (kind === "machines") {
-        setMachines((await api<{ machines: AdminMachine[] }>("/api/admin/machines")).machines)
-      } else if (kind === "agents") {
-        setAgents((await api<{ agents: Agent[] }>("/api/admin/agents")).agents)
-      } else if (kind === "organizations") {
-        setOrganizations((await api<{ organizations: AdminOrganization[] }>("/api/admin/organizations")).organizations)
-      } else if (kind === "invitations") {
-        setInvitations((await api<{ invitations: AdminInvitation[] }>("/api/admin/invitations")).invitations)
-      } else {
-        setEvents((await api<{ events: PlatformAuditEvent[] }>("/api/admin/activity")).events)
-      }
-    } catch (reason) {
-      onError(reason instanceof Error ? reason.message : t("admin.unable_to_load_admin_inventory"))
-    } finally {
-      setLoading(false)
-    }
-  }, [kind, preview, query, onError])
-
+      const data = await api<{ invitations: unknown }>("/api/admin/invitations", { cache: "no-store" })
+      if (!Array.isArray(data.invitations) || data.invitations.length > 100 || !data.invitations.every((row: unknown) => {
+        if (!row || typeof row !== "object") return false
+        const item = row as Record<string, unknown>
+        return typeof item.invitation_id === "string" && /^inv_[a-f0-9]{64}$/.test(item.invitation_id)
+          && typeof item.token_prefix === "string" && (item.token_prefix.length <= 8 || item.token_prefix === "[redacted]")
+          && typeof item.created_at === "string" && Number.isFinite(Date.parse(item.created_at))
+          && (item.used_at === null || (typeof item.used_at === "string" && Number.isFinite(Date.parse(item.used_at))))
+          && !("token" in item) && !("url" in item) && !("email" in item)
+      })) { setInvitations([]); setUnsupported(true); return }
+      setInvitations(data.invitations as AdminInvitation[])
+    } catch { setInvitations([]); onError(t("admin.unable_to_load_admin_inventory")) }
+    finally { setLoading(false) }
+  }, [preview, onError])
   useEffect(() => { void load() }, [load])
-
-  async function openUser(userId: string) {
-    try { setUserDetail((await api<{ user: AdminUserDetail }>(`/api/admin/users/${userId}`)).user) }
-    catch (reason) { onError(reason instanceof Error ? reason.message : t("admin.unable_to_load_user")) }
-  }
-
-  async function resetPassword(userId: string) {
+  async function revokeInvite(invitationId: string) {
     try {
-      const data = await api<{ url: string; emailed: boolean }>(`/api/admin/users/${userId}/password-reset`, { method: "POST", body: "{}" })
-      setResetUrl(data.url)
-      setResetEmailed(data.emailed)
-      await load()
-    } catch (reason) { onError(reason instanceof Error ? reason.message : t("admin.unable_to_issue_password_reset")) }
-  }
-
-  async function revokeSessions(userId: string) {
-    try {
-      await api(`/api/admin/users/${userId}/revoke-sessions`, { method: "POST", body: "{}" })
-      await load()
-    } catch (reason) { onError(reason instanceof Error ? reason.message : t("admin.unable_to_sign_the_user")) }
-  }
-
-  async function toggleMachine(serverId: string) {
-    if (openMachine === serverId) { setOpenMachine(null); setMachineDetail(null); return }
-    setOpenMachine(serverId)
-    try { setMachineDetail((await api<{ machine: AdminMachine }>(`/api/admin/machines/${serverId}`)).machine) }
-    catch (reason) { onError(reason instanceof Error ? reason.message : t("admin.unable_to_load_machine")) }
-  }
-
-  async function revokeInvite(token: string) {
-    try {
-      await api(`/api/admin/invitations/${encodeURIComponent(token)}`, { method: "DELETE" })
+      await api(`/api/admin/invitations/${encodeURIComponent(invitationId)}`, { method: "DELETE" })
       await load()
       await onChanged()
-    } catch (reason) { onError(reason instanceof Error ? reason.message : t("admin.unable_to_revoke_invitation")) }
+    } catch { onError(t("admin.unable_to_revoke_invitation")) }
   }
-
-  const title = kind === "users" ? t("admin.users") : kind === "machines" ? t("wsettings.machines") : kind === "agents" ? t("admin.agents") : kind === "organizations" ? t("admin.organizations") : kind === "invitations" ? t("admin.pending_invitations") : t("admin.admin_activity")
-
-  return <div className="border-b">
-    <div className="flex items-center justify-between gap-3 py-3">
-      <div className="text-sm font-medium">{title}</div>
-      {kind === "users" && <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={t("admin.search_name_or_email")} className="h-8 max-w-xs text-xs" />}
-    </div>
-    {loading && <div className="py-6 text-xs text-muted-foreground">{t("admin.loading")}</div>}
-    {!loading && kind === "users" && (users.length ? users.map((user) => (
-      <div key={user.user_id} className="grid gap-3 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-        <div className="min-w-0"><div className="truncate text-sm font-medium">{user.preferred_name}</div><div className="mt-0.5 truncate text-[11px] text-muted-foreground">{user.email}</div></div>
-        <div className="flex flex-wrap gap-1">
-          <Button size="sm" variant="outline" onClick={() => void openUser(user.user_id)}>{t("admin.details")}</Button>
-          <Button size="sm" variant="outline" onClick={() => void resetPassword(user.user_id)}>{t("admin.reset_password")}</Button>
-          <Button size="sm" variant="outline" onClick={() => void revokeSessions(user.user_id)}>{t("admin.sign_out_everywhere")}</Button>
-        </div>
-      </div>
-    )) : <EmptyState icon={<Users />} label={t("admin.no_users_match_this_search")} />)}
-    {!loading && kind === "machines" && (machines.length ? machines.map((machine) => (
-      <div key={machine.server_id} className="border-t">
-        <button type="button" className="flex w-full items-center gap-3 py-3 text-left" onClick={() => void toggleMachine(machine.server_id)}>
-          <ChevronDown className={cn("size-3.5 shrink-0 text-muted-foreground transition-transform", openMachine === machine.server_id && "rotate-180")} />
-          <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium">{machine.name}</span><span className="mt-0.5 block truncate text-[11px] text-muted-foreground">{machine.hostname || machine.server_id} · {machine.workspace_name}</span></span>
-          <Status value={machine.status} />
-        </button>
-        {openMachine === machine.server_id && <div className="pb-3 pl-7">
-          {(machineDetail?.agents ?? []).length ? machineDetail!.agents!.map((agent) => (
-            <div key={agent.agent_id} className="flex items-center justify-between gap-3 py-1.5 text-sm">
-              <span className="min-w-0 truncate">{agentPath(agent)}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
-              <Status value={agent.status} />
-            </div>
-          )) : <div className="py-2 text-[11px] text-muted-foreground">{t("admin.no_live_agents_on_this")}</div>}
-        </div>}
-      </div>
-    )) : <EmptyState icon={<Server />} label={t("admin.no_enrolled_machines")} />)}
-    {!loading && kind === "agents" && (agents.length ? Object.entries(agents.reduce<Record<string, Agent[]>>((groups, agent) => {
-      const key = agent.server_id
-      groups[key] = groups[key] ? [...groups[key], agent] : [agent]
-      return groups
-    }, {})).map(([serverId, group]) => (
-      <div key={serverId} className="border-t py-3">
-        <div className="text-[11px] text-muted-foreground">{serverId}</div>
-        {group.map((agent) => (
-          <div key={agent.agent_id} className="mt-1 flex items-center justify-between gap-3 text-sm">
-            <span className="truncate">{agentPath(agent)}<span className="ml-2 text-[11px] text-muted-foreground">{agent.kind}{agent.interface ? " · AIS" : ""}</span></span>
-            <Status value={agent.status} />
-          </div>
-        ))}
-      </div>
-    )) : <EmptyState icon={<TerminalSquare />} label={t("admin.no_live_agents")} />)}
-    {!loading && kind === "organizations" && (organizations.length ? organizations.map((organization) => (
-      <div key={organization.organization_id} className="grid gap-1 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-        <div><div className="text-sm font-medium">{organization.name}</div><div className="mt-0.5 text-[11px] text-muted-foreground">{organization.owner_email || "No owner"} · {organization.workspace_count} workspaces · {organization.machine_count} machines</div></div>
-      </div>
-    )) : <EmptyState icon={<Building2 />} label={t("admin.no_organizations")} />)}
-    {!loading && kind === "invitations" && (invitations.length ? invitations.map((invitation) => (
-      <div key={invitation.token} className="grid gap-3 border-t py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-        <div className="min-w-0 font-mono text-[11px] text-muted-foreground">{invitation.created_at}</div>
-        <div className="flex gap-1">
-          <Button size="sm" variant="outline" onClick={() => navigator.clipboard.writeText(invitation.url)}><Copy />{t("admin.copy")}</Button>
-          <Button size="sm" variant="outline" onClick={() => void revokeInvite(invitation.token)}>{t("admin.revoke")}</Button>
-        </div>
-      </div>
-    )) : <EmptyState icon={<KeyRound />} label={t("admin.no_pending_invitations")} />)}
-    {!loading && kind === "activity" && (events.length ? events.map((event) => (
-      <div key={event.event_id} className="border-t py-3 text-sm">
-        <div className="font-medium">{event.action}</div>
-        <div className="mt-0.5 text-[11px] text-muted-foreground">{event.occurred_at} · {event.resource_kind} {event.resource_name || event.resource_id}</div>
-      </div>
-    )) : <EmptyState icon={<ScrollText />} label={t("admin.no_admin_activity_yet")} />)}
-    <Dialog open={Boolean(userDetail)} onOpenChange={(open) => !open && setUserDetail(null)}>
-      <DialogContent className="max-w-lg">
-        <DialogHeader><DialogTitle>{userDetail?.preferred_name}</DialogTitle><DialogDescription>{userDetail?.email}</DialogDescription></DialogHeader>
-        {userDetail && <div className="space-y-3 text-sm">
-          <div className="text-xs text-muted-foreground">Verified {userDetail.email_verified ? "yes" : "no"} · OAuth {userDetail.oauth_providers.join(", ") || "none"}</div>
-          <div>
-            <div className="text-xs font-medium text-muted-foreground">{t("admin.organizations")}</div>
-            {userDetail.organizations.map((organization) => <div key={organization.organization_id}>{organization.name} · {roleLabel(organization.role)}</div>)}
-          </div>
-          <div>
-            <div className="text-xs font-medium text-muted-foreground">{t("org.workspaces")}</div>
-            {userDetail.workspaces.map((workspace) => <div key={workspace.workspace_id}>{workspace.name}</div>)}
-            {userDetail.workspaces.length === 0 && <div className="text-muted-foreground">{t("admin.none")}</div>}
-          </div>
-        </div>}
-      </DialogContent>
-    </Dialog>
-    <Dialog open={Boolean(resetUrl)} onOpenChange={(open) => !open && setResetUrl("")}>
-      <DialogContent>
-        <DialogHeader><DialogTitle>{t("admin.password_reset")}</DialogTitle><DialogDescription>{resetEmailed ? "A reset email was sent. The link also works if you copy it." : t("admin.email_sending_is_not_configured")}</DialogDescription></DialogHeader>
-        <Textarea readOnly value={resetUrl} className="min-h-24 font-mono text-xs" />
-        <DialogFooter><Button variant="outline" onClick={() => setResetUrl("")}>{t("org.close")}</Button><Button onClick={() => navigator.clipboard.writeText(resetUrl)}><Copy />{t("dialogs.copy_link")}</Button></DialogFooter>
-      </DialogContent>
-    </Dialog>
-  </div>
+  return <section className="border-b" aria-label={t("admin.pending_invitations")}>
+    {loading ? <p role="status" className="py-6 text-xs text-muted-foreground">{t("admin.loading")}</p>
+      : unsupported ? <p role="alert" className="py-4 text-xs text-muted-foreground">{t("admin.invitations_unsupported")}</p>
+      : invitations.length ? invitations.map((invitation) => <div key={invitation.invitation_id} className="flex flex-wrap items-center justify-between gap-3 border-t py-3">
+        <span className="min-w-0 text-[11px] text-muted-foreground"><span className="font-mono">{invitation.token_prefix}{invitation.token_prefix === "[redacted]" ? "" : "…"}</span> · {invitation.created_at}<span className="mt-1 block">{t(invitation.used_at ? "admin.invitation_used" : "admin.invitation_pending")}</span></span>
+        <Button size="sm" variant="outline" disabled={invitation.used_at !== null} onClick={() => void revokeInvite(invitation.invitation_id)}>{t("admin.revoke")}</Button>
+      </div>) : <EmptyState icon={<KeyRound />} label={t("admin.no_pending_invitations")} />}
+  </section>
 }
 
 export function ControlPlaneUpdate({ preview, onError }: { preview?: boolean; onError: (message: string) => void }) {

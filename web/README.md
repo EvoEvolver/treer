@@ -391,3 +391,37 @@ that the server does not implement. Reloading a pending in-memory confirmation
 requires reopening the invitation link. Invitation acceptance, invalid links,
 cancellation, legacy-server rejection, personal invitations, keyboard access and
 390px layouts are covered by hermetic Playwright mocks with synthetic tokens.
+
+## Platform administration privacy
+
+The `/admin` resource overview shows platform-wide user, organization, machine
+and Agent **counts only**. Cards do not expand and the console does not request
+user/member profiles, machine hostnames, Agent paths, organization details,
+password-reset links, session-revocation controls or per-resource activity.
+Platform invitation management and control-plane updates remain separate
+operator actions. Organization/workspace Audit remains scoped to its authorized
+members. This UI change alone does not restrict a previous Proxy's admin APIs;
+server-side access and retention guarantees require the corresponding Core
+change and deployment.
+
+Platform traffic uses `/api/admin/traffic?hours=6|24|168|720`, authenticated
+with the separate platform-admin cookie session. It charts the combined
+database-recorded usage of **all organizations**, using the same UTC hourly/daily
+windows and byte/frame semantics as workspace Audit. It requests no individual
+organization, machine, Agent or route inventories. The view refreshes every
+10 seconds while open; refreshes are not concurrent and stop on logout. Current
+hours/edge days are partial, database flushes can lag by about 10 seconds, and
+unrecorded windows are shown as zero without asserting that no traffic occurred.
+Direct traffic is machine-reported and does not contribute frame counts.
+An older Proxy shows an explicit unsupported notice; errors clear stale totals
+and offer retry, without displaying server response bodies or falling back to
+private inventories. No new dependencies or build changes are required.
+
+Invitation lists accept only the privacy-preserving summary contract: a
+non-bearer `invitation_id`, up to eight characters of `token_prefix` (or the fixed `[redacted]` placeholder
+for short/legacy tokens), creation
+time and used state (up to the latest 100 entries). Existing invitation URLs
+are not shown or copied; used invitations cannot be revoked. Revocation sends
+only the non-bearer handle. An older list schema is refused with an upgrade
+notice. Creating a new invitation still displays its link in a temporary dialog
+for distribution, without writing it to browser storage.
