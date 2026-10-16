@@ -10,6 +10,7 @@ import { hermeticEnv, localFetch } from "./hermetic.mjs";
 import { spawnProvider, stopProcessTree } from "../scripts/process.mjs";
 import { protectDirectory } from "../scripts/private-state.mjs";
 import { digest } from "../scripts/bundle-contract.mjs";
+import { controllerContractFixture } from "./controller-contract.mjs";
 
 const options = {};
 for (let i = 2; i < process.argv.length; i += 2) {
@@ -35,8 +36,7 @@ const cli = join(fixture, windows ? "fake-treer.exe" : "fake-treer");
 // rustc is a CI/build prerequisite; the installed runtime does not require it.
 execFileSync("rustc", [join(launcher, "tests/fake-treer.rs"), "-o", cli], { env: hermeticEnv(), stdio: "pipe" });
 const contract = JSON.parse(readFileSync(join(launcher, "interface-contract.json"), "utf8"));
-const controller = { git_commit: "a".repeat(40), protocol: contract.protocol, capabilities: contract.capabilities, features: contract.required_features,
-  minimum_launcher_security_epoch: contract.launcher_security_epoch, machine: { root: machine, server_id: "srv_smoke", workspace_id: "ws_smoke" } };
+const controller = controllerContractFixture(contract, { root: machine, server_id: "srv_smoke", workspace_id: "ws_smoke" });
 writeFileSync(join(fixture, "contract.json"), JSON.stringify(controller));
 const env = hermeticEnv({ HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, TEMP: temp, TMP: temp,
   XDG_CONFIG_HOME: home,
