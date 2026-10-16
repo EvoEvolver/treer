@@ -8,6 +8,15 @@ import { fileURLToPath } from "node:url";
 import { protectDirectory, syncDirectory } from "../launchers/agent/scripts/private-state.mjs";
 
 const execute = promisify(execFile);
+// Only repository-owned fixed diagnostics may leave subprocess output. Never
+// persist a stderr excerpt: it can contain startup credentials, paths or argv.
+export const diagnosticCodes = ["activation_requires_independent_local_terminal_outside_windows_job", "cannot_verify_update_process_lifetime", "update_worker_failed_inspect_receipt", "update_activation_failed_inspect_receipt", "worker_failed_before_activation", "controller_not_ready_before_update", "installed_and_running_controller_differ", "startup_store_missing", "staged_binary_mismatch", "local_identity_mismatch", "shared_binary_multi_workspace_refused", "require_local_detached_install", "require_default_local_config_directory", "invalid_binary_version", "version_timeout", "update_reparse_path_refused", "out_of_band_manifest_hash_mismatch", "controller_readiness_or_agent_preservation_failed", "restart_command_failed", "restart_command_timeout"];
+export function subprocessDiagnostic(error) {
+  const summary = value => ({ codes: diagnosticCodes.filter(code => new RegExp(`\\b${code}\\b`).test(String(value || ""))), bytes: Buffer.byteLength(String(value || "")), contentOmitted: true });
+  return { exitCode: Number.isInteger(error.code) ? error.code : null, timedOut: error.killed === true,
+    signal: ["SIGTERM", "SIGKILL", "SIGINT"].includes(error.signal) ? error.signal : null,
+    stdout: summary(error.stdout), stderr: summary(error.stderr) };
+}
 export const digest = bytes => createHash("sha256").update(bytes).digest("hex");
 export const plainEntry = path => path.replace(/^\\\\\?\\([A-Za-z]:\\)/, "$1");
 export function requirePhysical(path) {
@@ -54,8 +63,44 @@ export async function command(argv, env, timeout = 180000) {
     })).stdout.trim();
   } catch (error) {
     // Never persist arbitrary subprocess output, argv, config or provider logs.
-    throw new Error(`subprocess_failed:${error.killed ? "timeout" : Number.isInteger(error.code) ? error.code : "spawn"}`);
+    throw Object.assign(new Error(`subprocess_failed:${error.killed ? "timeout" : Number.isInteger(error.code) ? error.code : "spawn"}`), { subprocess: subprocessDiagnostic(error) });
   }
+}
+export function windowsWorkerScript(updater, stage, env) {
+  const literal = value => "'" + value.replaceAll("'", "''") + "'";
+  const variables = Object.entries(env).map(([key, value]) => `[Environment]::SetEnvironmentVariable(${literal(key)},${literal(value)},'Process')`).join(";");
+  return `$ErrorActionPreference='Stop';foreach($key in @([Environment]::GetEnvironmentVariables('Process').Keys)){[Environment]::SetEnvironmentVariable($key,$null,'Process')};${variables};` +
+    `[Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference','Bypass','Process');[Environment]::SetEnvironmentVariable('PSModulePath',[IO.Path]::Combine($PSHOME,'Modules'),'Process');` +
+    `$exitCode=0;$code=$null;try{& ${literal(updater)} -Action Worker -StageDirectory ${literal(stage)} *> $null}catch{$exitCode=1;if(@(${diagnosticCodes.map(literal).join(",")}) -ccontains $_.Exception.Message){$code=$_.Exception.Message}};` +
+    `$result=@{exitCode=$exitCode;stderr=@{codes=@($code|Where-Object{$null -ne $_});contentOmitted=$true}}|ConvertTo-Json -Depth 4;` +
+    `$file=${literal(join(stage, "worker-exit.json"))};$temp=$file+'.'+[Guid]::NewGuid().ToString('N')+'.tmp';[IO.File]::WriteAllText($temp,$result,[Text.UTF8Encoding]::new($false));[IO.File]::Move($temp,$file);exit $exitCode`;
+}
+export async function windowsWorker(updater, stage, env, timeout = 600000) {
+  // PS5.1 invocation via & does not consistently accept drive verbatim paths.
+  // This changes spelling only; the physical/private root was already checked.
+  updater = plainEntry(updater); stage = plainEntry(stage);
+  const shell = join(env.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe");
+  const quote = value => '"' + value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"';
+  const literal = value => "'" + value.replaceAll("'", "''") + "'";
+  const line = quote(shell) + " -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand " + Buffer.from(windowsWorkerScript(updater, stage, env), "utf16le").toString("base64");
+  // Node/libuv can put spawned children in a Job even if Node was launched by
+  // CIM. Launch the activation shell itself through CIM with explicit breakaway;
+  // keep Assert-UpdateOutsideJob as the final authority, never bypass it.
+  const script = `$ErrorActionPreference='Stop';$s=([wmiclass]'Win32_ProcessStartup').CreateInstance();$s.CreateFlags=16777216;$r=([wmiclass]'Win32_Process').Create(${literal(line)},${literal(stage)},$s);if($r.ReturnValue -ne 0){throw 'independent_worker_start_failed'};[Console]::Write($r.ProcessId)`;
+  const pid = Number(await command([shell, "-NoProfile", "-NonInteractive", "-EncodedCommand", Buffer.from(script, "utf16le").toString("base64")], env, 20000));
+  if (!Number.isInteger(pid) || pid <= 0) throw new Error("independent_worker_pid_missing");
+  save(join(stage, "worker-launch.json"), { pid });
+  const end = Date.now() + timeout, file = join(stage, "worker-exit.json");
+  while (Date.now() < end) {
+    if (existsSync(file)) {
+      const exit = JSON.parse(readFileSync(file, "utf8"));
+      const codes = (Array.isArray(exit.stderr?.codes) ? exit.stderr.codes : []).filter(code => diagnosticCodes.includes(code));
+      if (exit.exitCode !== 0) throw Object.assign(new Error("subprocess_failed:1"), { subprocess: { exitCode: 1, pid, stderr: { codes, contentOmitted: true } } });
+      return;
+    }
+    await new Promise(done => setTimeout(done, 250));
+  }
+  throw Object.assign(new Error("subprocess_failed:timeout"), { subprocess: { exitCode: null, timedOut: true, pid, stderr: { codes: [], contentOmitted: true } } });
 }
 export function parseSums(bytes) {
   const rows = {};
@@ -104,7 +149,7 @@ export async function smoke(target, cli, timeout, run = command, observe = () =>
   }
 }
 
-export async function worker(jobPath, { runCommand = command, fetchArtifact = download } = {}) {
+export async function worker(jobPath, { runCommand = command, fetchArtifact = download, runWindowsWorker = windowsWorker } = {}) {
   const job = JSON.parse(readFileSync(jobPath, "utf8")), target = job.target;
   const directory = dirname(requirePhysical(jobPath)), lock = join(directory, ".running");
   if (existsSync(join(directory, "result.json"))) throw new Error("job_already_finished");
@@ -147,7 +192,7 @@ export async function worker(jobPath, { runCommand = command, fetchArtifact = do
         "-StartupStore", target.startupStore, "-ArtifactBase", endpoint, "-TimeoutSeconds", "180",
         ...(target.acceptSharedBinaries === true ? ["-AcceptSharedBinaries"] : [])], undefined, 120000);
       for (const name of ["treer-agent-server", "treer"]) await run([...ps, "-Action", "Download", "-StageDirectory", stage, "-Binary", name], undefined, 120000);
-      await run([...ps, "-Action", "Worker", "-StageDirectory", stage], undefined, 600000);
+      await runWindowsWorker(updater, stage, env);
       const result = JSON.parse(readFileSync(join(stage, "result.json")));
       if (result.status !== "complete") throw new Error("core_update_incomplete");
       receipt.backup = result.backup;
@@ -172,6 +217,7 @@ export async function worker(jobPath, { runCommand = command, fetchArtifact = do
     receipt.smoke = await smoke(target, [target.cli], 90000, run, value => { receipt.smoke = value; progress(); }, smokeCwd);
     receipt.phase = "complete"; receipt.status = "complete";
   } catch (error) {
+    if (error.subprocess) receipt.subprocess = error.subprocess;
     for (const file of [join(directory, "core/result.json"), join(directory, "windows-stage/result.json")]) {
       if (!existsSync(file)) continue;
       try {

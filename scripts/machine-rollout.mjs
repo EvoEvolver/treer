@@ -2,7 +2,7 @@
 // Leader-operated rollout: planning is offline; --apply explicitly changes machines.
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync, mkdirSync, existsSync, mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { readFileSync, mkdirSync, existsSync, mkdtempSync, writeFileSync, rmSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve, win32, posix } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,7 +76,7 @@ async function upload(target, source, destination, treer) {
   }
 }
 export async function preflightTransfer(target, treer = "treer") {
-  const directory = mkdtempSync(join(tmpdir(), "treer-rollout-probe-")), file = join(directory, "probe"), name = "rollout-probe-" + randomUUID() + ".txt";
+  const directory = mkdtempSync(join(realpathSync.native(tmpdir()), "treer-rollout-probe-")), file = join(directory, "probe"), name = "rollout-probe-" + randomUUID() + ".txt";
   const bytes = Buffer.from("Treer rollout transfer probe\n");
   try {
     writeFileSync(file, bytes, { mode: 0o600 });

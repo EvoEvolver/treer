@@ -182,3 +182,35 @@ outside a Controller Job (via an owned CIM test runner); direct exec is bounded
 to 30 seconds. These tests must not activate a real enrollment. Compile/static
 checks and fake platform execution are not substitutes for native Windows
 PowerShell/CIM evidence or an operator-authorized real machine rollout.
+
+Probe uploads canonicalize the local temporary directory before creating their
+0600 source file. This supports macOS `/var` and `/tmp` aliases without relaxing
+the CLI's no-follow local-file boundary.
+
+On Windows the activation PowerShell process itself starts through CIM with
+`CREATE_BREAKAWAY_FROM_JOB`; a CIM-started Node process can still place its child
+processes in a Job. The updater's `Assert-UpdateOutsideJob` remains mandatory.
+The activation shell clears its environment and installs the same explicit OS
+allowlist as the worker. Its PID is persisted in `windows-stage/worker-launch.json`
+and its exit is atomically recorded in `worker-exit.json` in the private stage.
+The shell explicitly restores its process-scoped `Bypass` execution policy and
+system-only `$PSHOME/Modules` path after clearing the environment; it does not
+inherit caller module paths or alter persistent execution policy.
+Breakaway intentionally escapes Host/Controller process-tree cleanup so activation
+can survive a Controller restart. Use it only for a leader-authorized manual
+rollout of the uploaded, hash-verified repository updater, never for Agents or
+ordinary exec. It can leave an independent process after the caller exits;
+`worker-launch.json` retains the exact PID for operator inspection and, if needed,
+explicit termination after verifying its identity.
+If the activation poll times out, the independent process may still be running;
+inspect that exact PID and the receipts, never automatically launch it again.
+
+Failed commands add `subprocess` to `result.json`: exit code, timeout/signal and
+fixed repository-defined stdout/stderr error codes (plus byte counts when
+available). Arbitrary output, argv, configuration, paths and credentials are
+omitted. Unknown errors therefore remain explicitly undiagnosed; the receipt is
+not a raw subprocess log. The Windows shell records only allowlisted exception
+codes. `--resume` only polls the original job and cannot rerun a finished partial
+job. After an operator verifies no worker remains and inspects the transaction
+receipt, a corrected attempt uses a new job/receipt; never edit an old receipt
+to make it runnable or restore an older startup intent over current state.
