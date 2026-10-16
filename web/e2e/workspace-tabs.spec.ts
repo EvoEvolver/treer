@@ -530,7 +530,7 @@ test.describe('workload deep links and new-tab entry points', () => {
     if (mobile) { await page.getByRole('button', { name: /^More actions/ }).first().click() }
     else await page.getByRole('tab', { name: 'Tab /Alpha', exact: true }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    expect(new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
+    await expect.poll(() => new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
     expect(popup.url()).not.toMatch(/token|key|secret/i)
     await popup.close()
   })
@@ -556,7 +556,7 @@ test.describe('workload rows are real links: modifier-click and middle-click ope
       const click = (locator: import('@playwright/test').Locator) => how === 'ctrl' ? locator.click({ modifiers: ['ControlOrMeta'] }) : locator.click({ button: 'middle' })
       for (const target of [page.getByRole('link', { name: 'Open /Alpha', exact: true }), page.getByRole('tree').getByRole('link', { name: /^Alpha/ })]) {
         const [popup] = await Promise.all([context.waitForEvent('page'), click(target)])
-        expect(where(popup.url())).toBe(expected)
+        await expect.poll(() => where(popup.url())).toBe(expected)
         await popup.close()
         // The current page did not navigate in place.
         await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
@@ -580,7 +580,7 @@ test.describe('workload rows are real links: modifier-click and middle-click ope
     const block = page.getByRole('dialog').getByRole('link', { name: /Alpha/ }).first()
     await expect(block).toHaveAttribute('href', expected)
     const [popup] = await Promise.all([context.waitForEvent('page'), block.click({ modifiers: ['ControlOrMeta'] })])
-    expect(where(popup.url())).toBe(expected)
+    await expect.poll(() => where(popup.url())).toBe(expected)
     await popup.close()
     await expect(page.getByRole('dialog')).toBeVisible()
   })
@@ -652,7 +652,7 @@ test.describe('an App opens on its own ingress URL in a new browser tab', () => 
     await expect(page.getByRole('tab', { name: 'Tab /Archive', exact: true })).toHaveAttribute('aria-selected', 'true')
     await page.getByRole('tab', { name: 'Tab /Archive', exact: true }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    expect(popup.url()).toBe(own)
+    await expect.poll(() => popup.url()).toBe(own)
     // The new page gets no Referer and no opener from the Console.
     await expect.poll(() => referers.length).toBe(1)
     expect(referers[0]).toBeUndefined()
@@ -664,7 +664,7 @@ test.describe('an App opens on its own ingress URL in a new browser tab', () => 
     await withAppUrl(page, own)
     await page.getByRole('tree').getByRole('link', { name: /^Archive/ }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    expect(popup.url()).toBe(own)
+    await expect.poll(() => popup.url()).toBe(own)
     await popup.close()
   })
 
@@ -675,7 +675,7 @@ test.describe('an App opens on its own ingress URL in a new browser tab', () => 
     await open(page, 'Alpha')
     await page.getByRole('tab', { name: 'Tab /Alpha', exact: true }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    expect(new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
+    await expect.poll(() => new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
     await popup.close()
   })
 
@@ -687,7 +687,7 @@ test.describe('an App opens on its own ingress URL in a new browser tab', () => 
       await page.getByRole('link', { name: 'Open /Archive', exact: true }).click()
       await page.getByRole('tab', { name: 'Tab /Archive', exact: true }).click({ button: 'right' })
       const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-      expect(new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${deepLink}?focus=1`)
+      await expect.poll(() => new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${deepLink}?focus=1`)
       await popup.close()
     })
   }

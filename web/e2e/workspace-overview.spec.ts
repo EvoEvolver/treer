@@ -210,7 +210,7 @@ test.describe('Tree row context menu', () => {
     // Right-click does not select or open the workload.
     await expect(page.getByRole('tab', { name: 'Tab /Research/reviewer', exact: true })).toHaveCount(0)
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    expect(new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/reviewer-a?focus=1`)
+    await expect.poll(() => new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/reviewer-a?focus=1`)
     await popup.close()
   })
 
