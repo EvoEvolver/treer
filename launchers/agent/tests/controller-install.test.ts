@@ -7,6 +7,7 @@ import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { compatibility, digest } from "../scripts/bundle-contract.mjs";
 import { hermeticEnv } from "./hermetic.mjs";
+import { controllerContractFixture } from "./controller-contract.mjs";
 const launcher = resolve(import.meta.dirname, "..");
 const temp = () => realpathSync(mkdtempSync(join(tmpdir(), "controller-launcher-")));
 const prepared = temp();
@@ -29,8 +30,7 @@ function fixture(t: { after: (fn: () => void) => void }) {
   const root = temp(), machine = join(root, "machine"), bundle = join(root, "bundle"), treer = join(root, "treer");
   mkdirSync(machine); cpSync(prepared, bundle, { recursive: true }); writeFileSync(treer, mock, { mode: 0o700 });
   const contract = JSON.parse(readFileSync(join(bundle, "interface-contract.json"), "utf8"));
-  const controller = { git_commit: "a".repeat(40), protocol: contract.protocol, capabilities: contract.capabilities, features: contract.required_features, minimum_launcher_security_epoch: 1,
-    machine: { root: machine, name: "win_native", server_id: "srv_fixture", workspace_id: "ws_fixture" } };
+  const controller = controllerContractFixture(contract, { root: machine, name: "win_native", server_id: "srv_fixture", workspace_id: "ws_fixture" });
   writeFileSync(join(root, "controller.json"), JSON.stringify(controller));
   const request = { schema: "treer.launcher-install/v1", operation: "install", bundle_dir: bundle,
     version: `sha256-${digest(readFileSync(join(bundle, "bundle-manifest.json")))}`, source_commit: "a".repeat(40), root: machine, cwd: ".", agents: [], node: process.execPath, treer, controller, allow_network: false };
@@ -44,6 +44,15 @@ function revise(f: ReturnType<typeof fixture>) {
   const file = manifest.files.find((entry: any) => entry.path === "public/index.html"), bytes = readFileSync(path); file.size = bytes.length; file.sha256 = digest(bytes);
   writeFileSync(manifestPath, JSON.stringify(manifest)); f.request.version = `sha256-${digest(readFileSync(manifestPath))}`;
 }
+test("installer and native-smoke Controller fixtures advertise optional private-state without requiring it for text-only launchers", () => {
+  const contract = JSON.parse(readFileSync(join(launcher, "interface-contract.json"), "utf8"));
+  const controller = controllerContractFixture(contract, { root: prepared, server_id: "srv_fixture", workspace_id: "ws_fixture" });
+  assert.ok(controller.features.includes("agent.private-state.v1"));
+  assert.equal(new Set(controller.features).size, controller.features.length);
+  assert.equal(contract.required_features.includes("agent.private-state.v1"), false);
+  assert.equal(compatibility(contract, controller).status, "compatible");
+  assert.equal(compatibility(contract, { ...controller, features: contract.required_features }).status, "compatible");
+});
 test("portable install is offline, saves all six profiles, idempotently retains assets and rolls back", (t) => {
   const f = fixture(t), result = f.call();
   assert.equal(result.portable, true); assert.equal(result.profiles.length, 6);
