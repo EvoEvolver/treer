@@ -76,7 +76,6 @@ function WorkspaceAppContent() {
   const [loadedSnapshot, setSnapshot] = useState<Snapshot | null>(null)
   const snapshot = loadedSnapshot?.workspace.workspace_id === workspaceId ? loadedSnapshot : null
   const [uploadAgent, setUploadAgent] = useState<Agent | undefined>()
-  const [stoppingAgent, setStoppingAgent] = useState<{ workspaceId: string; agent: Agent } | null>(null)
   const uploadMachine = snapshot?.servers.find((machine) => machine.server_id === uploadAgent?.server_id)
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null)
   const [selectedMachineId, setSelectedMachineId] = useState<string | null>(null)
@@ -367,7 +366,6 @@ function WorkspaceAppContent() {
     setCtrlModifier(false)
     setUploadAgent(undefined)
     setUploadOpen(false)
-    setStoppingAgent(null)
   }, [workspaceId])
 
   useEffect(() => {
@@ -451,8 +449,6 @@ function WorkspaceAppContent() {
     if (action === "rename") openRename({ kind: "agent", id, name: agent.name })
     if (action === "upload") openUpload(agent)
     if (action === "reload") tabs.reload(id)
-    if (action === "stop") setStoppingAgent({ workspaceId, agent })
-    if (action === "delete") setDeleteTarget({ kind: "agent", id, name: agent.name })
     if (action === "fullscreen") { showAgentTerminal(id); openMobileTerminal() }
     if (action === "back") closeMobileSurface()
   }
@@ -959,12 +955,6 @@ function WorkspaceAppContent() {
     } catch (reason) { showError(reason) }
   }
 
-  async function stopAgent(agentId = selectedAgentId) {
-    if (!workspaceId || !agentId) return
-    try { await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/stop`, { method: "POST", body: "{}" }) }
-    catch (reason) { showError(reason) }
-  }
-
   const { members, groups, groupName, setGroupName, createGroup, deleteGroup, setGroupMember, updateMemberRole, removeMember } = useOrganizationMembers({
     preview, organizationId, organizationIdRef, mainView, showError,
   })
@@ -1076,7 +1066,6 @@ function WorkspaceAppContent() {
 
     <ErrorToast message={error} onDismiss={() => setError(null)} />
 
-    <Dialog open={Boolean(stoppingAgent)} onOpenChange={(open) => !open && setStoppingAgent(null)}><DialogContent><DialogHeader><DialogTitle>{t("tabs.stop_confirm", { path: stoppingAgent ? agentPath(stoppingAgent.agent, workloadTree) : "" })}</DialogTitle><DialogDescription>{t("tabs.stop_detail")}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setStoppingAgent(null)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={() => { if (stoppingAgent?.workspaceId === workspaceId) void stopAgent(stoppingAgent.agent.agent_id); setStoppingAgent(null) }}>{stoppingAgent && apps.some((app) => (app.runtime_agent_id ?? app.app_id) === stoppingAgent.agent.agent_id) ? t("tabs.stop_app") : t("app.stop_agent")}</Button></DialogFooter></DialogContent></Dialog>
     <WorkspaceDialogs state={dialogState}
       user={user}
       setUser={setUser}

@@ -10,7 +10,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { cn } from "@/lib/utils"
 import { statusLabel, t } from "@/i18n"
 
-export type TabAction = "newtab" | "logs" | "rename" | "upload" | "reload" | "stop" | "delete" | "fullscreen" | "back"
+export type TabAction = "newtab" | "logs" | "rename" | "upload" | "reload" | "fullscreen" | "back"
 export type TabActions = { app: boolean; logs: boolean; online: boolean; active: boolean; ui: boolean }
 export type TabLabel = { agent: Agent; path: string; machine: string; ui: boolean }
 export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobile, onOpen, onClose, actions, onAction, onCloseMany, onBrowseTree }: {
@@ -82,7 +82,7 @@ export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobi
     setMenu(null)
     // window.open needs the user gesture, so it runs now rather than after the animation frame.
     if (action === "newtab") { setSwitcher(false); onAction(id, action); return }
-    if (["rename", "upload", "stop", "delete", "fullscreen", "back"].includes(action)) setSwitcher(false)
+    if (["rename", "upload", "fullscreen", "back"].includes(action)) setSwitcher(false)
     actionFrame.current = requestAnimationFrame(() => { actionFrame.current = null; onAction(id, action) })
   }
   const menuOptions = menu && actions.get(menu.id)
@@ -95,9 +95,6 @@ export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobi
       <DropdownMenuItem onSelect={() => runAction(menu.id, "newtab")}>{t("app.open_in_new_tab")}</DropdownMenuItem>
       <DropdownMenuItem onSelect={() => runAction(menu.id, "reload")}>{menuOptions.ui ? t("app.reload_interface") : t("app.reconnect_terminal")}</DropdownMenuItem>
       {mobile && <><DropdownMenuItem onSelect={() => runAction(menu.id, "fullscreen")}>{menuOptions.ui ? t("app.open_full_screen_interface") : t("app.open_full_screen_terminal")}</DropdownMenuItem><DropdownMenuItem onSelect={() => runAction(menu.id, "back")}>{t("surface.back_to_workloads")}</DropdownMenuItem></>}
-      <DropdownMenuSeparator />
-      <DropdownMenuItem disabled={!menuOptions.active} onSelect={() => runAction(menu.id, "stop")}>{menuOptions.app ? t("tabs.stop_app") : t("app.stop_agent")}</DropdownMenuItem>
-      <DropdownMenuItem className="text-destructive focus:text-destructive" onSelect={() => runAction(menu.id, "delete")}>{menuOptions.app ? t("apps.delete_app") : t("app.delete_agent")}</DropdownMenuItem>
     </>}
     <DropdownMenuSeparator />
     <DropdownMenuItem disabled={menu?.id === OVERVIEW_TAB} onSelect={() => menu && onClose(menu.id)}>{t("tabs.close_page")}</DropdownMenuItem>

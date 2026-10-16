@@ -279,22 +279,16 @@ for (const theme of ['light', 'dark']) test(`tab context actions target backgrou
   await expect(page.getByRole('button', { name: 'Upload file', exact: true })).toHaveCount(0)
 })
 
-test('tab destructive actions require confirmation and target inactive stable IDs', async ({ page }) => {
+test('the tab menu has no Stop or Delete actions, so a stray click cannot stop or delete a workload', async ({ page }) => {
   await fixture(page); const calls: string[] = []
   await page.route('**/agents/*/stop', (route) => { calls.push(route.request().url()); return route.fulfill({ json: {} }) })
+  await page.route('**/agents/*', (route) => { if (route.request().method() === 'DELETE') calls.push(route.request().url()); return route.fallback() })
   await gotoWorkspace(page); await open(page, 'Terminal'); await open(page, 'Alpha')
-  await tabAction(page, 'Stop agent', '/Terminal')
-  await expect(page.getByRole('heading', { name: 'Stop /Terminal?' })).toBeVisible()
+  await page.getByRole('tab', { name: 'Tab /Terminal', exact: true }).click({ button: 'right' })
+  await expect(page.getByRole('menuitem', { name: 'Rename agent', exact: true })).toBeVisible()
+  for (const name of ['Stop agent', 'Delete agent', 'Stop App', 'Delete App']) await expect(page.getByRole('menuitem', { name, exact: true })).toHaveCount(0)
+  await expect(page.getByRole('menuitem', { name: /^(Stop|Delete)\b/ })).toHaveCount(0)
   expect(calls).toEqual([])
-  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
-  expect(calls).toEqual([])
-  await tabAction(page, 'Stop agent', '/Terminal')
-  await page.getByRole('dialog').getByRole('button', { name: 'Stop agent', exact: true }).click()
-  await expect.poll(() => calls.length).toBe(1)
-  expect(calls[0]).toContain('/agents/tab-0/stop')
-  await tabAction(page, 'Delete agent', '/Terminal')
-  await expect(page.getByRole('heading', { name: 'Delete agent', exact: true })).toBeVisible()
-  await expect(page.getByRole('dialog')).toContainText('Terminal')
 })
 
 test('tab upload pins the background target machine; offline upload disabled', async ({ page }) => {
@@ -373,15 +367,14 @@ test('tab rename targets the inactive page and preserves backend denial in dialo
   await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true, includeHidden: true })).toHaveAttribute('aria-selected', 'true')
 })
 
-test('tab context new actions and confirmation render in Chinese', async ({ page }) => {
+test('tab context new actions render in Chinese and omit stop and delete', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
   await fixture(page); await page.goto('/')
   await page.getByRole('link', { name: '打开 /Terminal', exact: true }).click()
   await page.getByRole('tab', { name: '标签页 /Terminal', exact: true }).click({ button: 'right' })
   await expect(page.getByRole('menuitem', { name: '关闭其他标签页', exact: true })).toBeVisible()
   await expect(page.getByRole('menuitem', { name: '关闭右侧标签页', exact: true })).toBeVisible()
-  await page.getByRole('menuitem', { name: '停止 Agent', exact: true }).click()
-  await expect(page.getByRole('heading', { name: '停止 /Terminal？', exact: true })).toBeVisible()
+  for (const name of ['停止 Agent', '删除 Agent']) await expect(page.getByRole('menuitem', { name, exact: true })).toHaveCount(0)
 })
 
 for (const mobile of [false, true]) for (const theme of ['light', 'dark']) test(`visible active tab menu trigger ${theme} ${mobile ? '390' : 'desktop'}`, async ({ page }, info) => {
@@ -394,8 +387,8 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) test(
   await expect(page.getByRole('button', { name: 'More actions for /Terminal', exact: true })).toHaveCount(0)
   await trigger.click()
   await expect(page.getByRole('menuitem', { name: 'Rename App', exact: true })).toBeVisible()
-  await expect(page.getByRole('menuitem', { name: 'Stop App', exact: true })).toBeVisible()
-  await expect(page.getByRole('menuitem', { name: 'Delete App', exact: true })).toBeVisible()
+  await expect(page.getByRole('menuitem', { name: 'Stop App', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('menuitem', { name: 'Delete App', exact: true })).toHaveCount(0)
   await expect(page.getByRole('menuitem', { name: 'Rename agent', exact: true })).toHaveCount(0)
   await page.screenshot({ path: info.outputPath(`tab-actions-p3-${theme}-${mobile ? '390' : 'desktop'}.png`) })
   await page.keyboard.press('Escape'); await expect(trigger).toBeFocused()
@@ -403,8 +396,8 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) test(
   await switchTab(page, 'Terminal', mobile)
   await page.getByRole('button', { name: 'More actions for /Terminal', exact: true }).click()
   await expect(page.getByRole('menuitem', { name: 'Rename agent', exact: true })).toBeVisible()
-  await expect(page.getByRole('menuitem', { name: 'Stop agent', exact: true })).toBeVisible()
-  await expect(page.getByRole('menuitem', { name: 'Delete agent', exact: true })).toBeVisible()
+  await expect(page.getByRole('menuitem', { name: 'Stop agent', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('menuitem', { name: 'Delete agent', exact: true })).toHaveCount(0)
 })
 
 test('Chinese App menu uses type-specific action labels', async ({ page }) => {
@@ -412,7 +405,8 @@ test('Chinese App menu uses type-specific action labels', async ({ page }) => {
   await fixture(page); await page.goto('/')
   await page.getByRole('link', { name: '打开 /Archive', exact: true }).click()
   await page.getByRole('button', { name: '/Archive 的更多操作', exact: true }).click()
-  for (const name of ['重命名 App', '停止 App', '删除 App']) await expect(page.getByRole('menuitem', { name, exact: true })).toBeVisible()
+  await expect(page.getByRole('menuitem', { name: '重命名 App', exact: true })).toBeVisible()
+  for (const name of ['停止 App', '删除 App']) await expect(page.getByRole('menuitem', { name, exact: true })).toHaveCount(0)
 })
 
 for (const theme of ['light', 'dark']) for (const surface of ['Terminal', 'Alpha']) {
