@@ -197,6 +197,10 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
     Mark 'shell_entered'
     . ${literal(join(import.meta.dirname, 'update-machine.ps1'))}
     Mark 'updater_loaded'
+    # Same fixed system-only module path as windowsWorkerScript. Without it,
+    # hosted PS5.1 can stall loading Utility for the first ConvertFrom-Json.
+    [Environment]::SetEnvironmentVariable('PSModulePath',[IO.Path]::Combine($PSHOME,'Modules'),'Process')
+    Mark 'system_modules_restored'
     $script:rows = '[{"agent_id":"ag_running","pid":123,"run_generation":7},{"agent_id":"ag_idle","run_generation":2}]' | ConvertFrom-Json
     Mark 'fixture_parsed'
     function Get-UpdateLocal($Config,$Route) { if($Route -ne '/api/local/agents'){throw 'wrong_route'}; return [PSCustomObject]@{agents=$script:rows} }
