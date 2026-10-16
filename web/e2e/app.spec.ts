@@ -1204,6 +1204,7 @@ test("organization actions open a settings page with inline management", async (
   await expect(page.getByText("Platform", { exact: true })).toBeVisible()
   await expect(page.getByRole("button", { name: "New organization" })).toBeVisible()
   await expect(page.getByRole("button", { name: "Open audit" })).toBeVisible()
+  await expect(page.getByRole("button", { name: "Invite member" }).locator("svg")).toHaveClass(/lucide-plus/)
 
   await expect(page.getByLabel("Organization name")).toBeEnabled()
   await page.getByRole("button", { name: "Select Demo workspace" }).click()
