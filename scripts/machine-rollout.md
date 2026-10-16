@@ -194,6 +194,13 @@ The native gate also writes the real progress receipt through running,
 activating and complete, checks its DACL survives replacement, and rejects
 temporary-file leftovers. Windows PowerShell 5.1 needs `[NullString]::Value`
 for File.Replace's optional backup path; `$null` becomes an invalid empty path.
+Depending on the parent DACL, Windows may merge an explicit duplicate of an
+inherited access rule during replacement. The gate tolerates only identical
+duplicates: principals, rights, allow/deny, propagation, protected status and
+the continued presence of inherited rules and the owner are still checked. Negative controls
+verify that new principals, masks, deny rules, propagation or lost inherited
+rules, ownership or protection changes fail comparison. Failure diagnostics use fixed codes and numeric rules
+with principals labeled current/system/other, never account names or SIDs.
 These regression fixtures do not replace disposable-enrollment acceptance:
 the real updater must finish activation and launcher smoke against an isolated
 Controller before retrying an existing user's machine after a newly found

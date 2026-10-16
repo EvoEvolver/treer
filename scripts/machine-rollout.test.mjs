@@ -221,13 +221,33 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
     $directory=[IO.Path]::Combine($env:TEMP,('r96-receipt-'+[Guid]::NewGuid().ToString('N')))
     try {
       New-PrivateUpdateDirectory $directory
+      $parentAcl=[IO.Directory]::GetAccessControl($directory)
+      $currentSid=[Security.Principal.WindowsIdentity]::GetCurrent().User
+      if(!$parentAcl.AreAccessRulesProtected){throw 'receipt_parent_not_private'}
+      foreach($rule in $parentAcl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
+        if($rule.IdentityReference.Value -notin @($currentSid.Value,'S-1-5-18') -or $rule.AccessControlType -ne 'Allow'){throw 'receipt_parent_not_private'}
+      }
       $receipt=[IO.Path]::Combine($directory,'progress.json')
-      function ReceiptRules($File){
-        $security=[IO.File]::GetAccessControl($File)
-        $rules=@($security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object{
-          $_.IdentityReference.Value+':'+$_.AccessControlType+':'+$_.FileSystemRights+':'+$_.InheritanceFlags+':'+$_.PropagationFlags+':'+$_.IsInherited
-        }|Sort-Object)
-        return ([string]$security.AreAccessRulesProtected+':'+($rules -join ';'))
+      function ReceiptAccessRules($Rules){
+        $groups=@{}
+        foreach($rule in $Rules){
+          $key=$rule.IdentityReference.Value+':'+$rule.AccessControlType+':'+$rule.FileSystemRights+':'+$rule.InheritanceFlags+':'+$rule.PropagationFlags
+          # ReplaceFile can add an explicit duplicate of an inherited ACE.
+          # Keep the inherited ACE requirement; suppress ONLY its identical
+          # explicit duplicate, not another principal, mask or propagation.
+          if(!$groups.ContainsKey($key) -or $rule.IsInherited){$groups[$key]=$rule.IsInherited}
+        }
+        return ((@($groups.Keys|Sort-Object|ForEach-Object{$_+':'+$groups[$_]}) -join ';'))
+      }
+      function ReceiptSecurity($Security){
+        return ($Security.GetOwner([Security.Principal.SecurityIdentifier]).Value+':'+[string]$Security.AreAccessRulesProtected+':'+(ReceiptAccessRules $Security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])))
+      }
+      function ReceiptRules($File){return (ReceiptSecurity ([IO.File]::GetAccessControl($File)))}
+      function AssertReceiptPrincipals($File){
+        $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        foreach($rule in [IO.File]::GetAccessControl($File).GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
+          if($rule.IdentityReference.Value -notin @($sid,'S-1-5-18') -or $rule.AccessControlType -ne 'Allow' -or [int]$rule.InheritanceFlags -ne 0 -or [int]$rule.PropagationFlags -ne 0){throw 'receipt_acl_changed'}
+        }
       }
       function ReceiptSummary($File){
         $security=[IO.File]::GetAccessControl($File)
@@ -240,12 +260,46 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
       }
       Write-UpdateJson $receipt @{status='running'}
       $acl=ReceiptRules $receipt
+      AssertReceiptPrincipals $receipt
       $aclSummary=ReceiptSummary $receipt
+      # Negative controls: normalization must still detect new principals,
+      # changed masks, deny rules, propagation and lost inherited rules.
+      $baselineRules=@([IO.File]::GetAccessControl($receipt).GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+      $baselineAccess=ReceiptAccessRules $baselineRules
+      $foreignSid=[Security.Principal.SecurityIdentifier]::new('S-1-1-0')
+      foreach($extra in @(
+        [Security.AccessControl.FileSystemAccessRule]::new($foreignSid,'Read','Allow'),
+        [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-545'),'Read','Allow'),
+        [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-11'),'Read','Allow'),
+        [Security.AccessControl.FileSystemAccessRule]::new([Security.Principal.SecurityIdentifier]::new('S-1-5-32-544'),'Read','Allow'),
+        [Security.AccessControl.FileSystemAccessRule]::new($currentSid,'Read','Allow'),
+        [Security.AccessControl.FileSystemAccessRule]::new($currentSid,'Read','Deny'),
+        [Security.AccessControl.FileSystemAccessRule]::new($currentSid,'FullControl','ContainerInherit','None','Allow'),
+        [Security.AccessControl.FileSystemAccessRule]::new($currentSid,'FullControl','ObjectInherit','InheritOnly','Allow')
+      )){if((ReceiptAccessRules ($baselineRules+@($extra))) -ceq $baselineAccess){throw 'receipt_acl_mutation_not_detected'}}
+      # Exercise both explicit-only and inherited+duplicate layouts even when
+      # the runner's TEMP happens to produce only one of them natively.
+      $inheritedSecurity=[Security.AccessControl.FileSecurity]::new()
+      $inheritedSecurity.SetSecurityDescriptorSddlForm(('D:(A;ID;FA;;;SY)(A;ID;FA;;;'+$currentSid.Value+')'))
+      $inheritedRules=@($inheritedSecurity.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier]))
+      $explicitRules=@($inheritedRules|ForEach-Object{[Security.AccessControl.FileSystemAccessRule]::new($_.IdentityReference,$_.FileSystemRights,$_.InheritanceFlags,$_.PropagationFlags,$_.AccessControlType)})
+      if((ReceiptAccessRules ($inheritedRules+$explicitRules)) -cne (ReceiptAccessRules $inheritedRules)){throw 'receipt_acl_equivalence_failed'}
+      if((ReceiptAccessRules ($explicitRules+$explicitRules)) -cne (ReceiptAccessRules $explicitRules)){throw 'receipt_acl_equivalence_failed'}
+      if((ReceiptAccessRules $explicitRules) -ceq (ReceiptAccessRules $inheritedRules)){throw 'receipt_acl_mutation_not_detected'}
+      $originalSecurity=[IO.File]::GetAccessControl($receipt)
+      foreach($mutation in @('protection','owner')){
+        $changed=[Security.AccessControl.FileSecurity]::new()
+        $changed.SetSecurityDescriptorBinaryForm($originalSecurity.GetSecurityDescriptorBinaryForm())
+        if($mutation -eq 'protection'){$changed.SetAccessRuleProtection(!$changed.AreAccessRulesProtected,$true)}
+        else{$changed.SetOwner($foreignSid)}
+        if((ReceiptSecurity $changed) -ceq $acl){throw 'receipt_acl_mutation_not_detected'}
+      }
       foreach($state in @('activating','complete')){
         Write-UpdateJson $receipt @{status=$state}
+        AssertReceiptPrincipals $receipt
         if(([IO.File]::ReadAllText($receipt)|ConvertFrom-Json).status -cne $state){throw 'receipt_replacement_failed'}
-        # File.Replace may set SE_DACL_AUTO_INHERITED; compare principals,
-        # rights, inheritance and protection, rather than SDDL spelling.
+        # Compare security attributes, allowing only duplicate ACE merging
+        # and SE_DACL_AUTO_INHERITED representation changes.
         if((ReceiptRules $receipt) -cne $acl){
           [Console]::WriteLine(('receipt_acl_before='+$aclSummary))
           [Console]::WriteLine(('receipt_acl_after='+(ReceiptSummary $receipt)))
@@ -254,7 +308,7 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
       }
       if([IO.Directory]::GetFiles($directory,'*.tmp').Count -ne 0){throw 'receipt_temporary_leftover'}
     } catch {
-      $code=if($_.Exception.Message -in @('receipt_replacement_failed','receipt_acl_changed','receipt_temporary_leftover','update_directory_exists')){$_.Exception.Message}else{'receipt_operation_failed'}
+      $code=if($_.Exception.Message -in @('receipt_replacement_failed','receipt_acl_changed','receipt_acl_mutation_not_detected','receipt_acl_equivalence_failed','receipt_parent_not_private','receipt_temporary_leftover','update_directory_exists')){$_.Exception.Message}else{'receipt_operation_failed'}
       [Console]::WriteLine(('inventory_failure='+$code));[Console]::Out.Flush();throw
     } finally { if([IO.Directory]::Exists($directory)){[IO.Directory]::Delete($directory,$true)} }
     Mark 'receipts_replaced'
@@ -269,7 +323,7 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
   } catch (error) {
     // Diagnostics only from this synthetic fixture, never arbitrary shell output.
     const phases = String(error.stdout || '').split(/\r?\n/).filter(line => /^inventory_phase=[a-z_]+ elapsed_ms=\d+$/.test(line));
-    const codes = String(error.stdout || '').split(/\r?\n/).filter(line => /^inventory_failure=(receipt_replacement_failed|receipt_acl_changed|receipt_temporary_leftover|update_directory_exists|receipt_operation_failed)$/.test(line));
+    const codes = String(error.stdout || '').split(/\r?\n/).filter(line => /^inventory_failure=(receipt_replacement_failed|receipt_acl_changed|receipt_acl_mutation_not_detected|receipt_acl_equivalence_failed|receipt_parent_not_private|receipt_temporary_leftover|update_directory_exists|receipt_operation_failed)$/.test(line));
     const acls = String(error.stdout || '').split(/\r?\n/).filter(line => line.length <= 2048 && /^receipt_acl_(before|after)=(True|False):((current|system|other):[01]:\d+:\d+:\d+:(True|False);?)*$/.test(line));
     throw new Error(`inventory shell ${error.code || 'failed'} after ${Date.now() - started}ms; phases: ${phases.join('; ') || 'none (before first script statement)'}; codes: ${codes.join('; ') || 'none'}; ACL: ${acls.join('; ') || 'none'}`);
   }
