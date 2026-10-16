@@ -33,6 +33,7 @@ matching the question; follow its source links for implementation detail.
 | [macOS container skill](../skills/treer-macos-container/SKILL.md) | Apple container machine Host setup on a Mac |
 | [Treer voice skill](../skills/treer-voice/SKILL.md) | Spoken assistant context used by the Proxy Voice LLM; not printed by `treer --skill` |
 | [Voice APIs](operator-guide.md#voice-apis-opt-in) | Opt-in Proxy ASR and spoken command; native clients retired |
+| [Treer UI skill](../skills/treer-ui/SKILL.md) | UI conventions and review checklist for the Console, launcher UI and App browser UIs; not printed by `treer --skill` |
 
 ## Active execution plans
 
