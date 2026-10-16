@@ -125,6 +125,14 @@ uses this bootstrap instead of an environment-supplied parent PID. It rejects
 changed schema, parent PID, creation, inode, full receipt, unknown fields,
 malformed and oversized records before socket traffic. Synchronous production
 dispatch and the complete activation/recovery engine remain pending.
+The production submitter must itself execute the selected installed old
+Controller; invocation from another inode, including a copied maintenance
+binary, intentionally fails this proof. A crash after saving the parent record
+but before spawning can leave that record without an ownership ACK. Recovery
+must treat it as uncertain evidence alongside `ownership.json`, recheck the
+recorded process creation identity, and never delete it or retry spawning merely
+because ownership is absent. Record presence alone proves neither a live worker
+nor permission to replay activation.
 
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
