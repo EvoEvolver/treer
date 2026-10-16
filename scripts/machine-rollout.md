@@ -197,14 +197,19 @@ for File.Replace's optional backup path; `$null` becomes an invalid empty path.
 Depending on the parent DACL, Windows may merge an explicit duplicate of an
 inherited access rule during replacement. The gate tolerates only identical
 duplicates: principals, rights, allow/deny, propagation, protected status and
-the continued presence of inherited rules and the owner are still checked. Negative controls
-verify that new principals, masks, deny rules, propagation or lost inherited
-rules, ownership or protection changes fail comparison. Failure diagnostics use fixed codes and numeric rules
-with principals labeled current/system/other, never account names or SIDs.
-These regression fixtures do not replace disposable-enrollment acceptance:
-the real updater must finish activation and launcher smoke against an isolated
-Controller before retrying an existing user's machine after a newly found
-transaction failure.
+the continued presence of inherited rules and the owner are still checked.
+Negative controls verify that new principals, masks, deny rules, propagation,
+lost inherited rules, ownership or protection changes fail comparison. Failure
+diagnostics use fixed codes and numeric rules with principals labeled
+current/system/other, never account names or SIDs.
+These regression fixtures do not replace authorized end-to-end acceptance:
+the real updater must finish activation and launcher smoke against a disposable
+Controller or an explicitly authorized test machine. Record the approved target
+and exact write paths before applying; retain each new job's backups and receipt.
+Provider CLIs are not sandboxed and may read/write their global configuration
+and logs. When authorization limits filesystem writes to Treer-owned paths, use
+a fake ACP provider located within the approved test directory for the smoke;
+ordinary Codex/Claude smoke does not guarantee that filesystem boundary.
 
 Probe uploads canonicalize the local temporary directory before creating their
 0600 source file. This supports macOS `/var` and `/tmp` aliases without relaxing
