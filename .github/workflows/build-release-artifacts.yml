@@ -72,6 +72,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build machine binaries
         run: cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
+      - name: Windows administrator requirement (standard user, disposable runner)
+        # Creates a temporary standard local user: the script itself refuses to run
+        # unless this is a GitHub-hosted runner. Never enable it on self-hosted machines.
+        timeout-minutes: 10
+        env:
+          TREER_DISPOSABLE_RUNNER: '1'
+        run: |
+          ./scripts/windows-standard-user-check.ps1 -InstallScript ./scripts/install.ps1 -AgentServer ./target/release/treer-agent-server.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Test real Controller and CLI
         run: |
           cargo build --locked -p treer-agent-host -p treer-agent-server
