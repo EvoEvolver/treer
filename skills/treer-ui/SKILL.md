@@ -12,6 +12,11 @@ Checklist ordering is adapted in our own words from the priority idea in
 [ui-ux-pro-max-skill](https://github.com/nextlevelbuilder/ui-ux-pro-max-skill)
 (MIT); no text or data is copied.
 
+Several rules name Console (`web/`) implementations (`workloadLinkProps`,
+`menuItems`, `appOwnUrl`, `en.ts`/`zh.ts`, the singlefile build). The launcher UI
+and App UIs follow the same intent with their own equivalent components, build
+and i18n; do not apply the Console mechanics mechanically.
+
 Work through the sections in order. An earlier failure outranks a later polish.
 
 ## 1. Accessibility (blocks handoff)
@@ -31,7 +36,7 @@ Work through the sections in order. An earlier failure outranks a later polish.
   neighbours so a thumb cannot hit both.
 - Anything that navigates is a real `<a href>` (stable-ID deep link) so
   ctrl/cmd/middle click and "copy link" work; a plain left click may still open
-  in place. Use `workloadLinkProps`, do not hand-roll `onClick` navigation.
+  in place. In the Console use `workloadLinkProps`; do not hand-roll `onClick` navigation.
 - Nothing essential is hover-only; hover reveals duplicate a visible or
   keyboard path.
 - An App row, block or menu item that opens in a new tab uses the App's own
@@ -50,7 +55,7 @@ Work through the sections in order. An earlier failure outranks a later polish.
 
 ## 4. Performance
 
-- Singlefile build stays one `dist/index.html`; no new runtime dependency, CDN,
+- Console: the singlefile build stays one `dist/index.html`; no new runtime dependency, CDN,
   web font or remote asset. App UIs use app-relative assets only
   (`apps/GUIDELINES.md`). Check the `dist/index.html` size when adding code.
 - Avoid layout shift: reserve space for loading content and skeleton or hold the
@@ -96,7 +101,7 @@ Work through the sections in order. An earlier failure outranks a later polish.
 
 ## Internationalization (every user-visible string)
 
-- Add keys to `en.ts` and `zh.ts` and call `t()` in render code; never evaluate
+- Console: add keys to `en.ts` and `zh.ts` and call `t()` in render code; never evaluate
   `t()` at module load. Use `tnodes`, `statusLabel`, `roleLabel`, `intlLocale()`.
 - Terms follow the launcher UI (工作中, 空闲, 已阻塞, Agent, 工作区). App UIs
   (Issues, Telegram, email) are not in the Console dictionary: follow their own
