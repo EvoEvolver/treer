@@ -95,6 +95,7 @@ pub struct Transfers {
     protected: Vec<PathBuf>,
     limit: u64,
     recovered: std::sync::atomic::AtomicBool,
+    recovery_write_failed: std::sync::atomic::AtomicBool,
     recovery_lease: Mutex<Option<std::fs::File>>,
     generation: std::sync::atomic::AtomicU64,
     #[cfg(any(unix, windows))]
@@ -114,6 +115,7 @@ impl Transfers {
             protected,
             limit: configured_limit.clamp(1, MACHINE_TRANSFER_HARD_LIMIT),
             recovered: std::sync::atomic::AtomicBool::new(false),
+            recovery_write_failed: std::sync::atomic::AtomicBool::new(false),
             recovery_lease: Mutex::new(None),
             generation: std::sync::atomic::AtomicU64::new(0),
             #[cfg(any(unix, windows))]
@@ -202,6 +204,15 @@ impl Transfers {
                 "Controller connection changed; start a new transfer",
             ));
         }
+        if self
+            .recovery_write_failed
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(failure(
+                "state_error",
+                "transfer recovery cleanup is unconfirmed; replace the Controller before retrying",
+            ));
+        }
         self.recover_staging()?;
         match &request {
             Request::PutBegin { path, .. } | Request::GetBegin { path, .. } => {
@@ -259,9 +270,7 @@ impl Transfers {
                         // The write-ahead intent is necessary for a crash during
                         // stage, but a rejected stage must not leave a stale intent.
                         // Retain the intent if safe cleanup cannot be confirmed.
-                        root.cleanup_staging(&path, &format!(".treer-transfer-{id}"))
-                            .map_err(io_failure)?;
-                        self.persist_pending(&pending)?;
+                        self.remove_failed_stage_intent(&root, &pending, &path, &id)?;
                         return Err(io_failure(error));
                     }
                 };
@@ -641,6 +650,26 @@ impl Transfers {
         )
     }
 
+    fn remove_failed_stage_intent(
+        &self,
+        root: &treer_platform::machine_file::Root,
+        pending: &HashMap<String, Pending>,
+        path: &str,
+        id: &str,
+    ) -> Result<(), ProtocolError> {
+        let result = root
+            .cleanup_staging(path, &format!(".treer-transfer-{id}"))
+            .map_err(io_failure)
+            .and_then(|()| self.persist_pending(pending));
+        if result.is_err() {
+            // No later request may overwrite an intent missing from `pending`.
+            // Keep the journal and exclusive lease until this instance exits.
+            self.recovery_write_failed
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
+    }
+
     fn write_journal(
         &self,
         journal: &treer_platform::machine_file::Root,
@@ -937,6 +966,51 @@ mod tests {
             .is_err());
         assert_eq!(f.visible_files(), 0);
         assert!(f.transfers.pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn failed_stage_intent_cleanup_blocks_later_journal_overwrites() {
+        for fail_journal_write in [false, true] {
+            let f = Fixture::new(64);
+            f.transfers.recover_staging().unwrap();
+            let id = format!("xfer_{}", uuid::Uuid::new_v4().simple());
+            let root = f.transfers.open_root().unwrap();
+            let pending = f.transfers.pending.lock().unwrap();
+            f.transfers.record_staging(&pending, "result", &id).unwrap();
+            let journal_path = f.root.join(".treer/file-transfers/pending.json");
+            if fail_journal_write {
+                std::fs::remove_file(&journal_path).unwrap();
+                std::fs::create_dir(&journal_path).unwrap();
+            } else {
+                std::fs::create_dir(f.root.join(format!(".treer-transfer-{id}"))).unwrap();
+            }
+            assert!(f
+                .transfers
+                .remove_failed_stage_intent(&root, &pending, "result", &id)
+                .is_err());
+            drop(pending);
+            // Even reconnect/clear must not allow overwriting an unresolved intent.
+            f.transfers.clear();
+            assert_eq!(
+                f.execute(Request::PutBegin {
+                    path: "result".into(),
+                    overwrite: false,
+                    mode: 0o600,
+                    size: Some(1),
+                    limit: 64,
+                })
+                .unwrap_err()
+                .code,
+                "state_error"
+            );
+            if !fail_journal_write {
+                let retained: Vec<(String, String)> =
+                    serde_json::from_slice(&std::fs::read(journal_path).unwrap()).unwrap();
+                assert_eq!(retained, vec![("result".into(), id)]);
+            } else {
+                assert!(journal_path.is_dir());
+            }
+        }
     }
 
     #[test]

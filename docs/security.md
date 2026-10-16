@@ -141,6 +141,9 @@ or configuration contents. Failed launch retains the newly saved specification.
   The current normalization/case rule also applies to old records: a newly
   reserved Unicode alias may leave old staging untouched rather than risk
   deleting private state.
+  If stage-failure cleanup or its journal rewrite cannot be confirmed, that
+  Controller instance rejects further transfers until replaced; later requests
+  cannot overwrite the unresolved intent from its in-memory registry.
   Temporary files remain private until digest
   verification; no-replace publication is atomic and overwrite is explicit.
   Portable paths reject Windows drive/UNC/device/ADS/short-name aliases too.
