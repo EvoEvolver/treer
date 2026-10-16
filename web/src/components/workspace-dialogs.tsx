@@ -113,9 +113,9 @@ export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReserv
           {agentProfileId === "manual" && <Field label={t("apps.command")}><Input aria-label={t("apps.command")} className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder={t("dialogs.path_to_your_launcher_option")} required /></Field>}
           {selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">{t("dialogs.runs_the_saved_command_on")}</span>}
           <Field label={t("dialogs.name")}><Input aria-label={t("dialogs.name")} value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
-          {creationFailure?.creation_state === "identity_removed" && <p role="status" className="text-sm">{t("provider.identity_removed")}</p>}
           {reservationCleaned && <p role="status" className="text-sm">{t("provider.cleaned")}</p>}
           {createAgentError && <p role="alert" className="break-words text-sm text-destructive">{createAgentError}</p>}
+          {creationFailure?.creation_state === "identity_removed" && <p role="status" className="text-sm">{t("provider.identity_removed")}</p>}
           {creationFailure && creationFailure.creation_state !== "identity_removed" && workspace && <AgentReservationRecovery key={`${workspace.workspace_id}/${creationFailure.agent_id}`} workspaceId={workspace.workspace_id} failure={creationFailure} onCleaned={onReservationCleaned} />}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>{t("common.cancel")}</Button>

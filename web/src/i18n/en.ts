@@ -749,7 +749,7 @@ export const en = {
   "provider.cleanup_not_found": "This reservation is not available for cleanup by your account. It may already be confirmed or come from an older control plane. Inspect the normal workload state; this response does not confirm deletion or allow another Create.",
   "provider.command_missing": "{command} is not installed on {machine}.",
   "provider.command_missing_unknown": "The required executable is not installed on the selected machine.",
-  "provider.identity_removed": "The reserved identity was removed. Your draft is preserved; resolve the missing command and explicitly submit again. No installation was performed.",
+  "provider.identity_removed": "The reserved identity was removed. Your draft is preserved; resolve the missing command and explicitly submit again.",
 } as const
 
 export type MessageKey = keyof typeof en
