@@ -13,6 +13,9 @@ const turns = [0, 1].map((n) => ({
     { id: `a-${n}`, type: "agentMessage", text: `recalled ${n}` },
   ],
 }));
+if (process.env.FAKE_CODEX_IMAGES) {
+  try { turns.push(...JSON.parse(readFileSync(join(process.cwd(), ".fake-image-turns.json"), "utf8"))); } catch { /* new sealed image fixture */ }
+}
 let threadId = `new-${process.pid}`;
 // A turn cut off by a restart is left "inProgress" in the persisted history.
 if (process.env.FAKE_CODEX_STALE) turns[0].status = "inProgress";
@@ -94,6 +97,11 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     continue;
   }
   console.log(JSON.stringify({ id: request.id, result }));
+  if (request.method === "turn/start" && process.env.FAKE_CODEX_IMAGES) {
+    const turn = { id: "turn-new", status: "completed", items: [{ id: "image-user", type: "userMessage", content: request.params.input }] };
+    writeFileSync(join(process.cwd(), ".fake-image-turns.json"), JSON.stringify([turn]));
+    console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn } }));
+  }
   if (request.method === "thread/goal/set" || request.method === "thread/goal/clear") console.log(JSON.stringify({ method: goal ? "thread/goal/updated" : "thread/goal/cleared", params: { threadId, goal } }));
   if (request.method === "turn/start" && goal && !process.env.FAKE_CODEX_GOAL_ACTIVE) {
     goal = { ...goal, status: "complete", tokensUsed: 42, timeUsedSeconds: 2 };

@@ -1,6 +1,6 @@
 import { createReadStream, existsSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { createServer, type ServerResponse } from "node:http";
-import { extname, join, normalize, resolve, sep } from "node:path";
+import { extname, isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { WebSocketServer, type WebSocket } from "ws";
@@ -23,6 +23,8 @@ import { HttpInputError, readJson } from "./http-input.js";
 import { GoalNotifications } from "./goal-notify.js";
 import { GoalExitRequests } from "./goal-exit.js";
 import { GoalEdits } from "./goal-edits.js";
+import { AttachmentStore } from "./attachments.js";
+import { AttachmentError } from "./image-format.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -62,12 +64,26 @@ function createRuntime(): HarnessRuntime {
 }
 
 const runtime = createRuntime();
+// Awaiting the Core-managed directory is intentional: old Controllers keep
+// text prompts working, but cannot silently put private images in the checkout.
+const privateStateRoot = process.env.TREER_AGENT_PRIVATE_STATE_DIR;
+let attachments: AttachmentStore | undefined;
+if (privateStateRoot) {
+  const inside = relative(realpathSync.native(cwd), realpathSync.native(privateStateRoot));
+  if (!isAbsolute(privateStateRoot) || !inside || !isAbsolute(inside) && inside !== ".." && !inside.startsWith(`..${sep}`)) throw new Error("Agent private state must be outside the working directory");
+  attachments = new AttachmentStore(join(privateStateRoot, "images"));
+}
+if (attachments) setInterval(() => {
+  try { attachments!.sweep(); }
+  catch { runtime.emit("log", "Attachment draft cleanup failed; private storage requires inspection"); }
+}, 60_000).unref();
 const sockets = new Set<{ socket: WebSocket; historyLimit: number }>();
 if (agentId && !/^[A-Za-z0-9_-]+$/.test(agentId)) throw new Error("Invalid TREER_AGENT_ID for queue storage");
 const prompts = new PromptQueue(runtime, broadcast, {
   file: join(realpathSync.native(cwd), ".treer", "agents", agentId || "standalone", "queue.json"),
   limit: Number(setting("QUEUE_LIMIT") ?? "256"),
   notify: notifySubmission,
+  attachments,
 });
 
 function mime(file: string) {
@@ -122,6 +138,14 @@ function historyLimitFrom(body: Record<string, unknown>) {
 
 function statePayload(historyLimit = initialHistoryLimit) {
   const snapshot = runtime.snapshot(historyLimit);
+  if (snapshot.thread) snapshot.thread = { ...snapshot.thread, turns: snapshot.thread.turns.map(turn => ({ ...turn, items: turn.items.map(item => {
+    const { attachmentDigests, ...visible } = item;
+    if (!attachments) return { ...visible, attachments: [] };
+    const candidates = [...attachments.metadataFor(item.attachments?.map(image => image.id) ?? [], snapshot.thread!.id), ...attachments.metadataForDigests(attachmentDigests ?? [], snapshot.thread!.id)];
+    const images = [...new Map(candidates.map(image => [image.id, image])).values()];
+    if (images.length && JSON.stringify(attachments.history(snapshot.thread!.id, item.id)) !== JSON.stringify(images)) attachments.bind(snapshot.thread!.id, item.id, images.map(image => image.id));
+    return { ...visible, attachments: images.length ? images : attachments.history(snapshot.thread!.id, item.id) };
+  }) })) };
   return {
     ready: snapshot.ready,
     runtime: {
@@ -142,11 +166,12 @@ function statePayload(historyLimit = initialHistoryLimit) {
     goal: snapshot.goal,
     goalDelivery: goalEdits.state,
     history: { limit: historyLimit },
+    attachmentsAvailable: Boolean(attachments),
   };
 }
 
 function transcriptPayload(url: URL) {
-  const turns = runtime.snapshot().thread?.turns ?? [];
+  const turns = statePayload(10_000).thread?.turns ?? [];
   const pageRaw = url.searchParams.get("page") ?? url.searchParams.get("cursor") ?? "0";
   const limitRaw = url.searchParams.get("limit") ?? "1";
   const page = Math.max(0, Number.parseInt(pageRaw, 10) || 0);
@@ -167,6 +192,7 @@ function transcriptPayload(url: URL) {
         kind: item.kind,
         role: item.kind === "userMessage" ? "user" : item.kind === "agentMessage" ? "assistant" : null,
         content: item.text,
+        attachments: item.attachments,
         created_at: turn.startedAt,
       })),
     ),
@@ -174,6 +200,9 @@ function transcriptPayload(url: URL) {
 }
 
 function broadcast() {
+  // Persist transcript bindings even without a connected browser, before a
+  // process restart loses the adapters' transient user-item metadata.
+  if (attachments) statePayload(10_000);
   for (const client of sockets) {
     try {
       client.socket.send(JSON.stringify({ type: "state", ...statePayload(client.historyLimit) }));
@@ -197,6 +226,24 @@ const server = createServer(async (request, response) => {
     guardInterfaceRequest(request.headers, agentId, interfaceInstanceId, typeof address === "object" && address ? address.port : port);
     const queueRoute = path === "/v1/prompts" || path === "/v1/queue" || path.startsWith("/v1/queue/") || path.startsWith("/v1/submissions/");
     const attested = queueRoute ? verifyInterfaceCaller(request.headers, agentId, interfaceInstanceId) : false;
+    if (path === "/api/attachments" || path.startsWith("/api/attachments/")) {
+      if (!attachments) throw new AttachmentError("attachment_private_root_required", 503);
+      const session = runtime.snapshot().thread?.id;
+      if (!session) throw new AttachmentError("attachment_session_required", 409);
+      if (path === "/api/attachments" && method === "POST") {
+        const header = request.headers["content-length"];
+        if (header !== undefined && !/^\d+$/.test(header)) throw new AttachmentError("attachment_invalid_length");
+        send(response, 201, { attachment: await attachments.upload(request, session, header === undefined ? undefined : Number(header)) }); return;
+      }
+      const id = path.slice("/api/attachments/".length);
+      if (method === "GET") {
+        const { metadata, bytes } = attachments.read(id, session);
+        response.writeHead(200, { "content-type": metadata.mime, "content-length": bytes.length, "x-content-type-options": "nosniff", "content-security-policy": "default-src 'none'; sandbox", "cache-control": "private, no-store" });
+        response.end(bytes); return;
+      }
+      if (method === "DELETE") { attachments.discard(id, session); send(response, 200, { removed: true }); return; }
+      send(response, 405, { error: "method_not_allowed" }); return;
+    }
     if (path === "/api/session/export" && method === "GET") {
       // A restrictive Host/Origin heuristic, not client authentication: same-
       // origin browser GETs can omit Origin, and native clients can forge Host.
@@ -261,14 +308,14 @@ const server = createServer(async (request, response) => {
       const body = await readJson(request);
       const operationId = typeof body.operation_id === "string" ? body.operation_id.trim() : "";
       const text = typeof body.text === "string" ? body.text.trim() : "";
-      if (!operationId || !text) {
+      if (!operationId || !text && !(Array.isArray(body.attachment_ids) && body.attachment_ids.length)) {
         send(response, 400, { error: "operation_id and text are required" });
         return;
       }
       // "mode": "prompt" is the Core compatibility field. Never reinterpret it.
       if (!attested && (body.sender != null || body.notify != null)) throw new QueueError("Sender and notifications require an authenticated managed Controller request", 403);
       const metadata = submissionOptions(body.sender, body.notify);
-      const submission = await prompts.submit(text, promptMode(body.delivery, "queue"), { operationId, ...metadata });
+      const submission = await prompts.submit(text, promptMode(body.delivery, "queue"), { operationId, ...metadata, attachmentIds: body.attachment_ids as string[] | undefined });
       send(response, 202, { accepted: true, operation_id: operationId, ...(submission.duplicate ? { duplicate: true } : {}), submission });
       return;
     }
@@ -361,11 +408,11 @@ const server = createServer(async (request, response) => {
     if (path === "/api/prompt" && method === "POST") {
       const body = await readJson(request);
       const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
-      if (!prompt) {
+      if (!prompt && !(Array.isArray(body.attachment_ids) && body.attachment_ids.length)) {
         send(response, 400, { error: "prompt is required" });
         return;
       }
-      const submission = await prompts.submit(prompt, promptMode(body.mode));
+      const submission = await prompts.submit(prompt, promptMode(body.mode), { attachmentIds: body.attachment_ids as string[] | undefined });
       send(response, 200, { ...statePayload(historyLimitFrom(body)), submission });
       return;
     }
@@ -397,7 +444,7 @@ const server = createServer(async (request, response) => {
   } catch (error) {
     // Never log parser exceptions (which can quote the request body).
     console.error(`Agent UI request failed: ${error instanceof Error ? error.name : "Error"}`);
-    send(response, error instanceof HttpInputError || error instanceof GoalError || error instanceof QueueError ? error.status : error instanceof InvalidPromptMode ? 400 : error instanceof SessionTransferError ? error.code === "unsupported" ? 501 : error.code === "not_ready" ? 409 : error.code === "too_large" ? 413 : 400 : 500, { error: error instanceof Error ? error.message : "Request failed" });
+    send(response, error instanceof AttachmentError || error instanceof HttpInputError || error instanceof GoalError || error instanceof QueueError ? error.status : error instanceof InvalidPromptMode ? 400 : error instanceof SessionTransferError ? error.code === "unsupported" ? 501 : error.code === "not_ready" ? 409 : error.code === "too_large" ? 413 : 400 : 500, { error: error instanceof Error ? error.message : "Request failed" });
   }
 });
 

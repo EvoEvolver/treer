@@ -3,6 +3,7 @@ import { chmodSync, closeSync, constants, existsSync, fsyncSync, lstatSync, mkdi
 import { dirname, join, resolve, sep, parse, relative } from "node:path";
 import { syncDirectory, protectDirectory } from "../scripts/private-state.mjs";
 import { completionKey, submissionOptions, messageCheckpoints, type SubmissionRecord } from "./prompt-submission.js";
+import { ATTACHMENT_ID, IMAGE_COUNT_LIMIT } from "./image-format.js";
 
 /** Small bounded journal; a commit completes before HTTP accepts a submission. */
 export class QueueStore {
@@ -33,6 +34,7 @@ export class QueueStore {
     for (const record of journal.records as SubmissionRecord[]) {
       if (!record?.submission || typeof record.submission.id !== "string" || typeof record.operationId !== "string" || typeof record.text !== "string" || !record.receipt || !["queued", "running", "done", "failed", "interrupted"].includes(record.submission.state) || ids.has(record.submission.id) || operations.has(record.operationId)) throw new Error("Invalid queue journal entry; refusing to discard pending work");
       const submission = record.submission, notification = record.notification;
+      if (record.attachmentIds !== undefined && (!Array.isArray(record.attachmentIds) || !record.attachmentIds.length || record.attachmentIds.length > IMAGE_COUNT_LIMIT || record.attachmentIds.some(id => typeof id !== "string" || !ATTACHMENT_ID.test(id)) || new Set(record.attachmentIds).size !== record.attachmentIds.length || typeof record.attachmentSession !== "string" || !record.attachmentSession || record.attachmentSession.length > 256)) throw new Error("Invalid queue attachment metadata");
       if (!/^[a-f0-9]{64}$/.test(record.fingerprint) || !["steer", "queue"].includes(record.delivery) || !Number.isFinite(Date.parse(submission.created_at)) || typeof submission.text_preview !== "string" || Buffer.byteLength(submission.text_preview) > 1024 || Buffer.byteLength(record.text) > 65536 || !(submission.turn_id === null || typeof submission.turn_id === "string") || !(submission.error === null || typeof submission.error === "string") || !(submission.assistant_preview === null || typeof submission.assistant_preview === "string" && Buffer.byteLength(submission.assistant_preview) <= 4096) || record.receipt.id !== submission.id || !["queued", "sent", "steered"].includes(record.receipt.disposition)) throw new Error("Invalid queue journal metadata");
       submissionOptions(submission.sender, record.notify);
       if (record.turnScope !== undefined && (typeof record.turnScope !== "string" || !/^[a-f0-9-]{36}$/.test(record.turnScope))) throw new Error("Invalid queue turn scope");

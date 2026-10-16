@@ -2,8 +2,10 @@
 // does not rely on is optional or omitted. Optional fields added for the UI (usage, endedAt, parentId) may be absent.
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "ultra";
+export interface ImageAttachment { id: string; mime: "image/png" | "image/jpeg" | "image/webp" | "image/gif"; size: number }
 
 export interface HistoryItem {
+  attachments?: ImageAttachment[];
   id: string;
   kind: "userMessage" | "agentMessage" | "reasoning" | "commandExecution" | "fileChange" | "plan" | "toolCall" | "other";
   text: string;
@@ -95,13 +97,14 @@ export interface GoalInput { objective?: string; status?: "active" | "paused"; t
 export interface HarnessInfo {
   id: string;
   name: string;
-  capabilities: { steer: boolean; backgroundTasks: boolean; goal: { pause: boolean; budget: boolean } | null };
+  capabilities: { images?: boolean; steer: boolean; backgroundTasks: boolean; goal: { pause: boolean; budget: boolean } | null };
 }
 
 export type RuntimeState = "starting" | "working" | "blocked" | "idle";
 
 /** The body of GET api/state and of every WebSocket `state` frame (the frame adds `type`). */
 export interface Snapshot {
+  attachmentsAvailable?: boolean;
   type?: "state";
   ready: boolean;
   runtime: { state: RuntimeState; error: string | null };

@@ -6,6 +6,7 @@ import {
   type ReasoningEffort,
   type TurnDto,
 } from "../model.js";
+import { basename } from "node:path";
 
 export { mapPlanSteps, mapReasoningEffort };
 export type { HistoryItem, ModelOption, ReasoningEffort, TurnDto };
@@ -14,7 +15,7 @@ export interface CodexItem {
   type?: string;
   id?: string;
   text?: string;
-  content?: Array<{ type?: string; text?: string }>;
+  content?: Array<{ type?: string; text?: string; path?: string }>;
   summary?: string[];
   command?: string;
   aggregatedOutput?: string | null;
@@ -72,8 +73,18 @@ export function mapItem(item: CodexItem, turnId: string, order: number): History
   const text = itemText(item);
   const base = { id, transcriptOrder: order, sourceTurnId: turnId };
   switch (type) {
-    case "userMessage":
-      return { ...base, kind: "userMessage", text };
+    case "userMessage": {
+      // Only opaque IDs are forwarded. The AIS checks its private registry and
+      // session ownership before showing any corresponding attachment.
+      const attachments = (item.content ?? []).flatMap(entry => {
+        if (entry.type !== "localImage" || typeof entry.path !== "string") return [];
+        const match = /^(img_[a-f0-9]{32})\.(png|jpg|gif|webp)$/.exec(basename(entry.path));
+        if (!match) return [];
+        const mime = `image/${match[2] === "jpg" ? "jpeg" : match[2]}` as "image/png" | "image/jpeg" | "image/gif" | "image/webp";
+        return [{ id: match[1], mime, size: 0 }];
+      });
+      return { ...base, kind: "userMessage", text, ...(attachments.length ? { attachments } : {}) };
+    }
     case "agentMessage":
     case "text":
       return { ...base, kind: "agentMessage", text };

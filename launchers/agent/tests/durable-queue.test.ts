@@ -6,7 +6,7 @@ import { mkdtemp, readFile, lstat, realpath, rm, symlink, writeFile } from "node
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { HarnessRuntime, ThreadState } from "../src/runtime.js";
+import type { HarnessImage, HarnessRuntime, ThreadState } from "../src/runtime.js";
 import { PromptQueue } from "../src/prompt-queue.js";
 import { QueueStore } from "../src/queue-store.js";
 import { completionKey, preview, submissionOptions, type SubmissionRecord } from "../src/prompt-submission.js";
@@ -15,10 +15,12 @@ import { sendNotification, submissionNotification } from "../src/prompt-notify.j
 class Fake extends EventEmitter {
   harness = { id: "fake", name: "Fake", capabilities: { steer: true, backgroundTasks: false, goal: null } };
   calls: string[] = [];
+  images: HarnessImage[][] = [];
   thread = { status: "idle", activeTurnId: null, turns: [], lastError: null } as unknown as ThreadState;
   snapshot() { return { ready: true, thread: this.thread, models: [], backgroundTasks: [], goal: null }; }
-  async prompt(text: string) {
+  async prompt(text: string, images: HarnessImage[] = []) {
     this.calls.push(text);
+    this.images.push(images);
     if (this.thread.status !== "running") {
       const id = `turn-${this.calls.length}`;
       this.thread.activeTurnId = id;
@@ -33,6 +35,47 @@ class Fake extends EventEmitter {
     this.emit("state");
   }
 }
+test("image IDs persist across restart, dedupe with the prompt and resolve only in their session", async t => {
+  const { file } = await fixture(t), runtime = new Fake();
+  runtime.thread.id = "image-session";
+  runtime.thread.status = "running";
+  const id = `img_${"b".repeat(32)}`;
+  const image: HarnessImage = { id, mime: "image/png", size: 10, path: "/private/image.png", data: "secret-base64" };
+  let retained = false;
+  const attachments = {
+    resolve: (ids: string[], session: string) => { assert.deepEqual(ids, [id]); assert.equal(session, "image-session"); return [image]; },
+    retain: () => { retained = true; },
+  };
+  const queue = new PromptQueue(asRuntime(runtime), () => {}, { file, attachments });
+  const receipt = await queue.submit("", "queue", { operationId: "images-once", attachmentIds: [id] });
+  assert.equal(retained, true);
+  assert.equal(runtime.calls.length, 0);
+  const journal = await readFile(file, "utf8");
+  assert.equal(journal.includes(image.path), false); assert.equal(journal.includes(image.data), false);
+  assert.equal((await queue.submit("", "queue", { operationId: "images-once", attachmentIds: [id] })).duplicate, true);
+  await assert.rejects(queue.submit("", "queue", { operationId: "images-once", attachmentIds: [`img_${"c".repeat(32)}`] }), /different submission/);
+  queue.close();
+  const recoveredRuntime = new Fake(); recoveredRuntime.thread.id = "image-session";
+  const recovered = new PromptQueue(asRuntime(recoveredRuntime), () => {}, { file, attachments });
+  t.after(async () => recovered.close());
+  recoveredRuntime.emit("state"); await tick();
+  assert.deepEqual(recoveredRuntime.images, [[image]]);
+  assert.equal(recovered.submission(receipt.id)!.state, "running");
+  recoveredRuntime.finish(); await tick();
+  assert.equal(recovered.submission(receipt.id)!.state, "done");
+});
+
+test("a queued image cannot dispatch after the native session changes", async t => {
+  const { file } = await fixture(t), runtime = new Fake();
+  runtime.thread.id = "first"; runtime.thread.status = "running";
+  const id = `img_${"b".repeat(32)}`;
+  const queue = new PromptQueue(asRuntime(runtime), () => {}, { file, attachments: { resolve: () => [], retain: () => {} } });
+  t.after(async () => queue.close());
+  const receipt = await queue.submit("look", "queue", { attachmentIds: [id] });
+  runtime.thread.id = "other"; runtime.thread.status = "idle"; runtime.emit("state"); await tick();
+  assert.equal(runtime.calls.length, 0);
+  assert.equal(queue.submission(receipt.id)!.state, "failed");
+});
 const source = { agent_id: "ag_sender", path: "/team/sender", name: "sender" };
 const tick = () => new Promise((done) => setImmediate(done));
 const asRuntime = (runtime: Fake) => runtime as unknown as HarnessRuntime;

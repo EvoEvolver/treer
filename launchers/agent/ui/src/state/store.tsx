@@ -75,7 +75,7 @@ export function reducer(state: State, action: Action): State {
 interface Store { state: State; dispatch: Dispatch<Action>; actions: Actions }
 export interface Actions {
   retry(): void;
-  prompt(text: string, mode: PromptMode): Promise<boolean>;
+  prompt(text: string, mode: PromptMode, attachmentIds?: string[]): Promise<boolean>;
   interrupt(): Promise<void>;
   /** Resolves true when a wider history window arrived. */
   loadOlder(): Promise<boolean>;
@@ -145,7 +145,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const actions = useMemo<Actions>(() => ({
     retry: () => reconnect.current(),
-    async prompt(text, mode) {
+    async prompt(text, mode, attachmentIds = []) {
       const snapshot = stateRef.current.snapshot;
       if (!snapshot?.ready || stateRef.current.submitting) return false;
       dispatch({ type: "submitting", value: true });
@@ -154,7 +154,7 @@ export function StoreProvider({ children }: { children: ReactNode }) {
       try {
         const running = snapshot.thread?.status === "running";
         const downgrade = mode === "steer" && running && !snapshot.harness.capabilities.steer;
-        const next = await request<Snapshot>("api/prompt", { method: "POST", body: JSON.stringify({ prompt: text, mode: downgrade ? "queue" : mode, history_limit: historyLimit(stateRef.current) }) });
+        const next = await request<Snapshot>("api/prompt", { method: "POST", body: JSON.stringify({ prompt: text, attachment_ids: attachmentIds, mode: downgrade ? "queue" : mode, history_limit: historyLimit(stateRef.current) }) });
         dispatch({ type: "snapshot", snapshot: next, source: "http" });
         if (downgrade || next.submission?.downgraded) dispatch({ type: "notice", message: t("composer.downgraded") });
         return true;

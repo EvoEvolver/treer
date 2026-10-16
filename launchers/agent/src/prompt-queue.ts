@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
-import type { HarnessRuntime } from "./runtime.js";
+import type { HarnessImage, HarnessRuntime } from "./runtime.js";
+import { ATTACHMENT_ID, IMAGE_COUNT_LIMIT } from "./image-format.js";
 import type { QueuedPrompt } from "./model.js";
 import { QueueStore } from "./queue-store.js";
 import { completionKey, fingerprint, preview, QueueError, submissionOptions, messageCheckpoints, MAX_COMPLETION_SUBMISSIONS, type Outcome, type PromptNotify, type PromptSender, type SubmissionRecord } from "./prompt-submission.js";
@@ -8,12 +9,13 @@ import { mergeMessagePrompts } from "./message-prompt.js";
 export type PromptMode = "steer" | "queue";
 export class InvalidPromptMode extends Error {}
 interface QueueOptions {
+  attachments?: { resolve(ids: string[], session: string): HarnessImage[]; retain(ids: string[], session: string): void };
   file?: string;
   limit?: number;
   notify?: (record: SubmissionRecord) => Promise<void>;
   retryMs?: number;
 }
-interface SubmitOptions { operationId?: string; sender?: PromptSender | null; notify?: PromptNotify | null; sourceMessage?: { messageId: string; deliveryId: string }; sourceMessages?: { messageId: string; deliveryId: string }[]; coalesceMessages?: boolean }
+interface SubmitOptions { attachmentIds?: string[]; operationId?: string; sender?: PromptSender | null; notify?: PromptNotify | null; sourceMessage?: { messageId: string; deliveryId: string }; sourceMessages?: { messageId: string; deliveryId: string }[]; coalesceMessages?: boolean }
 
 /** One server-owned journal and turn correlator, shared by every harness. */
 export class PromptQueue {
@@ -77,11 +79,13 @@ export class PromptQueue {
   }
 
   async submit(text: string, mode: PromptMode = "steer", options: SubmitOptions = {}) {
-    if (!text.trim() || Buffer.byteLength(text) > 65536) throw new QueueError("Prompt must contain text and fit within 64 KiB");
+    const attachmentIds = options.attachmentIds ?? [];
+    if (!Array.isArray(attachmentIds) || attachmentIds.length > IMAGE_COUNT_LIMIT || attachmentIds.some(id => typeof id !== "string" || !ATTACHMENT_ID.test(id)) || new Set(attachmentIds).size !== attachmentIds.length) throw new QueueError("Invalid attachment IDs");
+    if (!text.trim() && !attachmentIds.length || Buffer.byteLength(text) > 65536) throw new QueueError("Prompt must contain text or images and fit within 64 KiB");
     const operationId = options.operationId ?? randomUUID();
     if (!operationId || operationId.length > 1024) throw new QueueError("Invalid operation_id");
     const metadata = submissionOptions(options.sender, options.notify);
-    const hash = fingerprint(text, mode, metadata.sender, metadata.notify);
+    const hash = fingerprint(text, mode, metadata.sender, metadata.notify, attachmentIds);
     const existing = this.records.find((record) => record.operationId === operationId);
     if (existing) {
       if (existing.fingerprint !== hash) throw new QueueError("operation_id was already used for a different submission", 409);
@@ -89,8 +93,13 @@ export class PromptQueue {
     }
     if (!this.runtime.snapshot().ready) throw new QueueError("Harness is not ready", 503);
     if (this.closed) throw new QueueError("Prompt queue is closed after shutdown or a journal failure", 503);
+    const attachmentSession = this.runtime.snapshot().thread?.id;
+    if (attachmentIds.length) {
+      if (!this.options.attachments || !attachmentSession) throw new QueueError("Image attachments are unavailable", 503);
+      this.options.attachments.resolve(attachmentIds, attachmentSession);
+    }
     const last = this.records.filter((record) => ["queued", "running"].includes(record.submission.state)).at(-1);
-    if (options.coalesceMessages && mode === "queue" && options.sourceMessage && metadata.sender === null && !metadata.notify?.on.length && last?.submission.state === "queued" && last.sourceMessage && last.delivery === "queue" && !last.submission.sender && !last.notify?.on.length) {
+    if (!attachmentIds.length && !last?.attachmentIds?.length && options.coalesceMessages && mode === "queue" && options.sourceMessage && metadata.sender === null && !metadata.notify?.on.length && last?.submission.state === "queued" && last.sourceMessage && last.delivery === "queue" && !last.submission.sender && !last.notify?.on.length) {
       const checkpoints = [options.sourceMessage, ...(options.sourceMessages ?? [])];
       const merged = mergeMessagePrompts(last.text, messageCheckpoints(last).map((message) => message.messageId), text, checkpoints.map((message) => message.messageId));
       if (merged) {
@@ -113,10 +122,14 @@ export class PromptQueue {
     const record: SubmissionRecord = {
       submission: { id, sender: metadata.sender, created_at: new Date().toISOString(), position: null, text_preview: preview(text, 1024), state: steering ? "running" : "queued", turn_id: steering ? this.runtime.snapshot().thread?.activeTurnId ?? null : null, assistant_preview: null, error: null },
       operationId, fingerprint: hash, text, delivery, notify: metadata.notify, turnScope: this.turnScope,
+      ...(attachmentIds.length ? { attachmentIds: [...attachmentIds], attachmentSession } : {}),
       receipt: { id, disposition: steering ? "steered" : busy || this.entries.length ? "queued" : "sent", position: null }, notification: null,
       ...(options.sourceMessage ? { sourceMessage: { ...options.sourceMessage, ackPending: true } } : {}),
       ...(options.sourceMessages ? { sourceMessages: options.sourceMessages.map((message) => ({ ...message, ackPending: true })) } : {}),
     };
+    // Retain first: a crash can leave an unreferenced retained image, but can
+    // never leave a durable queued prompt whose draft expires before dispatch.
+    if (attachmentIds.length) this.options.attachments!.retain(attachmentIds, attachmentSession!);
     this.records.push(record);
     this.persist(); record.receipt.position = record.receipt.disposition === "queued" ? record.submission.position : null; this.persist();
     this.changed();
@@ -146,7 +159,9 @@ export class PromptQueue {
     const sender = record.submission.sender;
     const prefix = sender && !record.sourceMessage ? `[来自 ${sender.path}，排队于 ${record.submission.created_at}]\n` : "";
     try {
-      await this.runtime.prompt(prefix + record.text);
+      const images = record.attachmentIds?.length ? this.options.attachments?.resolve(record.attachmentIds, record.attachmentSession!) : undefined;
+      if (record.attachmentIds?.length && (!images || this.runtime.snapshot().thread?.id !== record.attachmentSession)) throw new QueueError("Attachment session is unavailable", 409);
+      await this.runtime.prompt(prefix + record.text, images);
       const thread = this.runtime.snapshot(10_000).thread;
       const latest = thread?.turns?.at(-1)?.id;
       record.submission.turn_id ??= thread?.activeTurnId ?? (latest && latest !== record.priorTurnId ? latest : null);

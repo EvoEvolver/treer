@@ -8,6 +8,7 @@ import { mapPlanSteps, mapReasoningEffort, type HistoryItem, type ModelOption, t
 import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
 import { unifiedDiff } from "./diff.js";
+import { imageDigest } from "./image-history.js";
 
 // Adapter for any Agent Client Protocol (ACP) agent: claude-agent-acp, Gemini,
 // Grok, Cursor, OpenCode, ... The agent runs its own tools; this client only
@@ -182,6 +183,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
     const capabilities = initialized.agentCapabilities && typeof initialized.agentCapabilities === "object"
       ? initialized.agentCapabilities as Json
       : {};
+    this.harness.capabilities.images = (capabilities.promptCapabilities as Json | undefined)?.image === true;
 
     let session: Json;
     if (sessionId) {
@@ -227,10 +229,10 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
     this.emit("state");
   }
 
-  async prompt(input: string) {
+  async prompt(input: string, images: import("../runtime.js").HarnessImage[] = []) {
     if (!this.client || !this.thread || !this.sessionId) throw new Error(`${this.harness.name} is not ready`);
     const turn: TurnDto = { id: `turn-${++this.liveTurns}`, startedAt: new Date().toISOString(), status: "inProgress", error: null, items: [] };
-    turn.items.push({ id: `${turn.id}:user`, kind: "userMessage", text: input, transcriptOrder: 0, sourceTurnId: turn.id });
+    turn.items.push({ id: `${turn.id}:user`, kind: "userMessage", text: input, attachments: images.map(({ id, mime, size }) => ({ id, mime, size })), transcriptOrder: 0, sourceTurnId: turn.id });
     this.turns.push(turn);
     this.runningPrompts += 1;
     this.setRunning(turn.id);
@@ -239,7 +241,7 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
     // accept a prompt sent while another turn runs.
     this.client.request<Json>("session/prompt", {
       sessionId: this.sessionId,
-      prompt: [{ type: "text", text: input }],
+      prompt: [...(input ? [{ type: "text", text: input }] : []), ...(this.harness.capabilities.images ? images.map((image) => ({ type: "image", mimeType: image.mime, data: image.data })) : images.map((image) => ({ type: "text", text: `Image attachment (native image input unavailable): ${image.path}` })))],
     }, PROMPT_TIMEOUT_MS).then((result) => {
       turn.status = result.stopReason === "cancelled" ? "interrupted" : "completed";
       if (result.stopReason === "refusal") turn.error = `${this.harness.name} refused the request`;
@@ -342,8 +344,11 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
   }
 
   private appendChunk(kind: "userMessage" | "agentMessage" | "reasoning", update: Json) {
-    const chunk = contentText(update.content);
-    if (!chunk) return;
+    let chunk = contentText(update.content);
+    const digest = kind === "userMessage" ? imageDigest(update.content) : undefined;
+    const fallback = kind === "userMessage" ? /^Image attachment \(native image input unavailable\): .*[/\\](img_[a-f0-9]{32})\.(png|jpg|gif|webp)$/.exec(chunk) : null;
+    if (fallback) chunk = ""; // Native fallback paths must not enter browser history.
+    if (!chunk && !digest && !fallback) return;
     const messageId = text(update.messageId);
     if (kind === "userMessage") {
       if (!this.replaying) return; // live prompts are recorded by prompt()
@@ -351,9 +356,13 @@ export class AcpRuntime extends EventEmitter implements HarnessRuntime {
       const lastItem = last?.items.at(-1);
       if (last && lastItem?.kind === "userMessage" && messageId && lastItem.id === messageId) {
         lastItem.text += chunk;
+        if (digest) lastItem.attachmentDigests = [...(lastItem.attachmentDigests ?? []), digest];
+        if (fallback) lastItem.attachments = [...(lastItem.attachments ?? []), { id: fallback[1], mime: `image/${fallback[2] === "jpg" ? "jpeg" : fallback[2]}` as "image/png", size: 0 }];
       } else {
         const turn: TurnDto = { id: `history-${++this.replayTurns}`, startedAt: null, status: "completed", error: null, items: [] };
-        turn.items.push({ id: messageId || `${turn.id}:user`, kind, text: chunk, transcriptOrder: 0, sourceTurnId: turn.id });
+        turn.items.push({ id: messageId || `${turn.id}:user`, kind, text: chunk, transcriptOrder: 0, sourceTurnId: turn.id,
+          ...(digest ? { attachmentDigests: [digest] } : {}),
+          ...(fallback ? { attachments: [{ id: fallback[1], mime: `image/${fallback[2] === "jpg" ? "jpeg" : fallback[2]}` as "image/png", size: 0 }] } : {}) });
         this.turns.push(turn);
       }
       return;

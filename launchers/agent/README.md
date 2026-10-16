@@ -541,6 +541,31 @@ On narrow layouts (640px or less) and devices with coarse pointers, buttons,
 task disclosures and form controls have at least 44px touch targets. Desktop
 mouse layouts retain compact controls; inline prose links retain text sizing.
 
+**Image attachments.** Paste an image (Cmd/Ctrl+V or the browser's mobile paste
+menu), drop files onto the composer, or use **Attach images**. PNG, JPEG, WebP
+and GIF are supported, up to 8 images per prompt, 10 MiB per file and 24 MiB
+combined. Preview and remove drafts before sending; images can be sent without
+text. Images, including EXIF/location metadata, are sent to the selected model
+provider. Native protocol support does not guarantee the selected model has
+vision. Codex receives local-image inputs; Claude receives base64 image blocks;
+ACP receives image blocks only when its initialize response advertises
+`agentCapabilities.promptCapabilities.image=true`. Otherwise the UI explicitly
+warns that private local paths are sent as text and the model may not see images.
+
+The guarded `POST api/attachments` streams binary bytes into the Controller's
+trusted per-Agent private directory outside the working directory; it ignores
+client filenames/MIME and validates raster containers. It returns public metadata
+`{attachment:{id,mime,size}}`. `POST api/prompt` and `POST v1/prompts` accept
+optional `attachment_ids`; clients cannot supply paths or URLs. Same-origin
+`GET api/attachments/<id>` and draft-only `DELETE` use the existing interface
+guards and current native session ownership. Thumbnail responses use `nosniff`,
+private/no-store caching and a restrictive sandbox CSP. No filenames or image
+bytes are written into the metadata/queue journals. Retained images survive
+launcher restarts; unsubmitted drafts expire after one hour and the per-Agent
+store is capped at 256 MiB. Missing Controller private-state support disables
+attachments rather than writing to the checkout. Controller deletion/global
+quota integration is required before releasing this feature.
+
 **Files and policy.** Four flat files: `index.html`, `boot.js` (runs in `<head>`, no flash
 of the wrong look or theme), `ui.js` (React, marked and DOMPurify, bundled) and `ui.css`
 (all looks). They are committed because the bootstrap installer checks out git without

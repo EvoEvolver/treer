@@ -211,4 +211,5 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
   :root[data-look] .app .field input,:root[data-look] .app .field select{min-width:44px;min-height:44px}
   :root[data-look] .app button.model{align-items:center;justify-content:center}
 }
+.image-drafts{padding:8px 12px}.image-drafts p{font-size:12px;margin:6px 0;overflow-wrap:anywhere}.image-list{display:flex;flex-wrap:wrap;gap:8px;max-width:100%}.image-list figure{position:relative;margin:0}.image-list img{display:block;width:88px;height:88px;object-fit:contain;border:1px solid var(--line);border-radius:6px}.image-list figure button{position:absolute;right:0;top:0;min-width:28px;min-height:28px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--fg);cursor:pointer}.sent-images{margin-top:8px}.sent-images img{width:120px;height:120px}.image-add{flex-shrink:0}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}.spin{animation:none}.sk{animation:none}}
