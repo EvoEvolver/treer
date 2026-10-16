@@ -185,6 +185,19 @@ failed live observation: it must enter rollback, not `core_healthy` or `complete
 This is a required integration test, not coverage supplied by the current
 request-only fixture.
 
+The private pre-update Host baseline is now an exclusive 0600 job file, bounded
+to 8 MiB and bound to the job/workspace/server and expected artifact identities.
+It retains only Host creation/image identity, build/epoch, workload stable IDs,
+PIDs/generations/status/stream counters and output hash witnesses, plus the
+independently observed previous Controller epoch. It contains no cwd, command,
+environment, workload credential or raw output. A partial/existing file is not
+overwritten. Recovery loads and validates this original baseline, connects to
+the selected Host with same-socket OS peer attestation, and verifies a cursor
+Sync against the saved observations. It never substitutes a freshly captured
+inventory. Missing, malformed, aliased, cross-job or changed evidence fails
+closed. The restart primitive additionally requires its in-memory observation
+to match this saved original; persisting a baseline is required before mutation.
+
 After activator death, the next explicit `self-update --recover JOB_ID` reconciles
 journal, actual hashes and live process identities under the same locks. Never
 infer success from a PID or an old receipt alone; never restart the Host or replay

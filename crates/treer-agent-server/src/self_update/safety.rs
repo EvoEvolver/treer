@@ -2,20 +2,23 @@
 //! PID/HTTP-200 check. A caller must collect the OS identity and image digests
 //! from checked handles, not trust a Controller's self-reported image hash.
 use std::collections::{BTreeMap, BTreeSet};
+use std::io::{Read, Write};
 
 use anyhow::{bail, Result};
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use treer_host_protocol::{HostBuildInfo, HostOutputReplay, HostResponse, OutputCursor};
 
-use super::{hex, identifier};
+use super::{hex, identifier, Journal, Phase, Receipt};
 
 const HEALTH_LIMIT: usize = 64 * 1024;
 const INVENTORY_LIMIT: usize = 4096;
+const BASELINE_LIMIT: u64 = 8 * 1024 * 1024;
 
 /// Private transaction observation; contains neither a path nor credentials.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct HostIdentity {
     pub pid: u32,
     pub creation_identity: String,
@@ -40,7 +43,7 @@ fn label(value: &str, limit: usize) -> bool {
 
 /// Only these non-secret metadata fields are retained. No Debug or generic JSON
 /// error is returned: Host metadata also contains workload credentials.
-#[derive(Deserialize, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
 struct Metadata {
     agent_id: String,
     run_generation: u64, // Required: do not silently adopt a legacy default zero.
@@ -49,11 +52,15 @@ struct Metadata {
     kind: String,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct Witness {
     revision: u64,
     sha256: String,
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 struct Workload {
     pid: Option<u32>,
     running: bool,
@@ -67,11 +74,53 @@ struct Workload {
 }
 
 /// Kept privately by the transaction, never serialized into its public receipt.
+#[derive(PartialEq, Eq)]
 pub struct HostSnapshot {
     identity: HostIdentity,
     epoch: String,
     build: HostBuildInfo,
     workloads: BTreeMap<String, Workload>,
+}
+
+// Private format only. Use a list rather than a deserialized map so duplicate
+// process IDs cannot silently overwrite part of the pre-update inventory.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredBaseline {
+    schema_version: u32,
+    binding: Binding,
+    previous_controller_epoch: String,
+    identity: HostIdentity,
+    epoch: String,
+    build_version: String,
+    build_git_commit: String,
+    workloads: Vec<(String, Workload)>,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct Binding {
+    job_id: uuid::Uuid,
+    workspace_id: String,
+    server_id: String,
+    release_sha: String,
+    artifact_source_sha: String,
+    controller_sha256: String,
+    cli_sha256: String,
+}
+
+impl From<&Receipt> for Binding {
+    fn from(receipt: &Receipt) -> Self {
+        Self {
+            job_id: receipt.job_id,
+            workspace_id: receipt.workspace_id.clone(),
+            server_id: receipt.server_id.clone(),
+            release_sha: receipt.release_sha.clone(),
+            artifact_source_sha: receipt.artifact_source_sha.clone(),
+            controller_sha256: receipt.controller_sha256.clone(),
+            cli_sha256: receipt.cli_sha256.clone(),
+        }
+    }
 }
 
 fn replays(items: &[HostOutputReplay]) -> Result<BTreeMap<&str, &HostOutputReplay>> {
@@ -106,6 +155,126 @@ fn replays(items: &[HostOutputReplay]) -> Result<BTreeMap<&str, &HostOutputRepla
 }
 
 impl HostSnapshot {
+    fn validate_baseline(&self, workspace: &str, server: &str) -> Result<()> {
+        self.identity.validate()?;
+        if !identifier(workspace, "ws_")
+            || !identifier(server, "srv_")
+            || !label(&self.epoch, 128)
+            || !label(&self.build.version, 128)
+            || !hex(&self.build.git_commit, 40)
+            || self.workloads.len() > INVENTORY_LIMIT
+        {
+            bail!("invalid_update_baseline");
+        }
+        for (id, workload) in &self.workloads {
+            if !identifier(id, "ag_")
+                || workload.metadata.agent_id != *id
+                || workload.metadata.workspace_id != workspace
+                || workload.metadata.server_id != server
+                || workload.metadata.run_generation == 0
+                || !label(&workload.metadata.kind, 64)
+                || !label(&workload.stream_epoch, 128)
+                || workload.pid == Some(0)
+                || (workload.running && workload.pid.is_none())
+                || workload.witness.as_ref().is_some_and(|witness| {
+                    !hex(&witness.sha256, 64)
+                        || witness.revision.checked_add(1) != Some(workload.next_revision)
+                })
+            {
+                bail!("invalid_update_baseline");
+            }
+        }
+        Ok(())
+    }
+
+    /// Persist the ORIGINAL observation, never an after-update replacement.
+    /// Caller supplies the independently observed old Controller epoch. This
+    /// private file contains only metadata and output hashes, no raw replay,
+    /// cwd/argv/environment or workload credentials. No overwrite/retry API.
+    pub(super) fn persist(
+        &self,
+        journal: &Journal,
+        revision: u64,
+        previous_controller_epoch: &str,
+    ) -> Result<()> {
+        let receipt = journal.read()?;
+        if receipt.revision != revision
+            || receipt.phase != Phase::Preparing
+            || !label(previous_controller_epoch, 128)
+        {
+            bail!("update_baseline_phase_conflict");
+        }
+        self.validate_baseline(&receipt.workspace_id, &receipt.server_id)?;
+        let bytes = serde_json::to_vec(&serde_json::json!({
+            "schema_version": 1,
+            "binding": Binding::from(&receipt),
+            "previous_controller_epoch": previous_controller_epoch,
+            "identity": self.identity,
+            "epoch": self.epoch,
+            "build_version": self.build.version,
+            "build_git_commit": self.build.git_commit,
+            "workloads": self.workloads.iter().collect::<Vec<_>>(),
+        }))?;
+        if bytes.len() as u64 > BASELINE_LIMIT {
+            bail!("update_baseline_too_large");
+        }
+        let mut file = journal
+            .directory
+            .create_file("host-baseline.json")
+            .map_err(|_| anyhow::anyhow!("update_baseline_exists_or_unsafe"))?;
+        file.write_all(&bytes)
+            .map_err(|_| anyhow::anyhow!("update_baseline_write_failed"))?;
+        file.sync_all()
+            .map_err(|_| anyhow::anyhow!("update_baseline_write_failed"))?;
+        drop(file);
+        journal
+            .directory
+            .sync()
+            .map_err(|_| anyhow::anyhow!("update_baseline_write_failed"))?;
+        Ok(())
+    }
+
+    pub(super) fn load(journal: &Journal) -> Result<(Self, String)> {
+        let receipt = journal.read()?;
+        let file = journal
+            .directory
+            .read_file("host-baseline.json")
+            .map_err(|_| anyhow::anyhow!("update_baseline_missing_or_unsafe"))?;
+        let mut bytes = Vec::new();
+        file.take(BASELINE_LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| anyhow::anyhow!("update_baseline_read_failed"))?;
+        if bytes.len() as u64 > BASELINE_LIMIT {
+            bail!("update_baseline_too_large");
+        }
+        let stored: StoredBaseline = serde_json::from_slice(&bytes)
+            .map_err(|_| anyhow::anyhow!("invalid_update_baseline"))?;
+        if stored.schema_version != 1
+            || stored.binding != Binding::from(&receipt)
+            || !label(&stored.previous_controller_epoch, 128)
+            || stored.workloads.len() > INVENTORY_LIMIT
+        {
+            bail!("update_baseline_binding_mismatch");
+        }
+        let mut workloads = BTreeMap::new();
+        for (id, workload) in stored.workloads {
+            if workloads.insert(id, workload).is_some() {
+                bail!("invalid_update_baseline");
+            }
+        }
+        let snapshot = Self {
+            identity: stored.identity,
+            epoch: stored.epoch,
+            build: HostBuildInfo {
+                version: stored.build_version,
+                git_commit: stored.build_git_commit,
+            },
+            workloads,
+        };
+        snapshot.validate_baseline(&receipt.workspace_id, &receipt.server_id)?;
+        Ok((snapshot, stored.previous_controller_epoch))
+    }
+
     /// Capture a full initial sync (no cursors). The Host creates process-list
     /// and replay observations separately, so output counters may advance
     /// between them; never require an artificial simultaneous snapshot.
@@ -357,6 +526,174 @@ mod tests {
     use super::*;
     use serde_json::json;
     use treer_host_protocol::{HostOutputChunk, HostProcessInfo};
+
+    struct PrivateFixture(std::path::PathBuf);
+    impl Drop for PrivateFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+    fn journal() -> (PrivateFixture, Journal) {
+        use std::os::unix::fs::DirBuilderExt;
+        let root = std::env::temp_dir()
+            .canonicalize()
+            .unwrap()
+            .join(format!("tu-baseline-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let jobs = treer_platform::private_directory::PrivateDirectory::open(&root).unwrap();
+        let now = Utc::now();
+        let receipt = Receipt {
+            schema_version: 1,
+            job_id: uuid::Uuid::new_v4(),
+            revision: 0,
+            workspace_id: "ws_fixture".into(),
+            server_id: "srv_fixture".into(),
+            release_sha: "a".repeat(40),
+            artifact_source_sha: "b".repeat(40),
+            controller_sha256: "c".repeat(64),
+            cli_sha256: "d".repeat(64),
+            publications: super::super::publication::Publications::new(
+                "e".repeat(64),
+                "f".repeat(64),
+                &"c".repeat(64),
+                &"d".repeat(64),
+            ),
+            source: super::super::Source::Pin {
+                sums_sha256: "e".repeat(64),
+                allow_pinned: true,
+                allow_artifact_origin: false,
+                allow_same: true,
+                allow_downgrade: false,
+            },
+            phase: Phase::Preparing,
+            created_at: now,
+            updated_at: now,
+        };
+        (
+            PrivateFixture(root),
+            Journal::create(&jobs, &receipt).unwrap(),
+        )
+    }
+
+    #[test]
+    fn original_baseline_round_trips_privately_without_credentials_paths_or_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_fixture, journal) = journal();
+        let response = sync();
+        capture(&response)
+            .persist(&journal, 0, "old-controller")
+            .unwrap();
+        let file = journal.directory.read_file("host-baseline.json").unwrap();
+        assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
+        let mut bytes = String::new();
+        file.take(BASELINE_LIMIT)
+            .read_to_string(&mut bytes)
+            .unwrap();
+        for forbidden in [
+            "synthetic-secret",
+            "synthetic-private-path",
+            "synthetic-output",
+            "workload_credential",
+            "cwd",
+        ] {
+            assert!(!bytes.contains(forbidden));
+        }
+        journal.advance(0, Phase::Prepared).unwrap();
+        journal.advance(1, Phase::Activating).unwrap();
+        let (saved, epoch) = HostSnapshot::load(&journal).unwrap();
+        assert_eq!(epoch, "old-controller");
+        saved.verify(&response, &identity()).unwrap();
+        let mut after = response.clone();
+        inventory(&mut after).0[0].pid = Some(9999);
+        assert!(saved.verify(&after, &identity()).is_err());
+        assert!(capture(&response)
+            .persist(&journal, 2, "new-controller")
+            .is_err());
+    }
+
+    #[test]
+    fn stored_baseline_rejects_duplicates_corruption_cross_job_and_invalid_witnesses() {
+        let (fixture, journal) = journal();
+        capture(&sync())
+            .persist(&journal, 0, "old-controller")
+            .unwrap();
+        let path = fixture
+            .0
+            .join(journal.id.to_string())
+            .join("host-baseline.json");
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        for case in [
+            "job",
+            "workspace",
+            "source",
+            "host",
+            "unknown",
+            "duplicate",
+            "generation",
+            "scope",
+            "pid",
+            "witness",
+            "stream",
+            "epoch",
+        ] {
+            let mut value = original.clone();
+            match case {
+                "job" => value["binding"]["job_id"] = uuid::Uuid::new_v4().to_string().into(),
+                "workspace" => value["binding"]["workspace_id"] = "ws_other".into(),
+                "source" => value["binding"]["controller_sha256"] = "0".repeat(64).into(),
+                "host" => value["identity"]["pid"] = 0.into(),
+                "unknown" => value["unexpected"] = true.into(),
+                "duplicate" => {
+                    let item = value["workloads"][0].clone();
+                    value["workloads"].as_array_mut().unwrap().push(item);
+                }
+                "generation" => value["workloads"][0][1]["metadata"]["run_generation"] = 0.into(),
+                "scope" => value["workloads"][0][1]["metadata"]["server_id"] = "srv_other".into(),
+                "pid" => value["workloads"][0][1]["pid"] = serde_json::Value::Null,
+                "witness" => value["workloads"][0][1]["witness"]["revision"] = u64::MAX.into(),
+                "stream" => value["workloads"][0][1]["stream_epoch"] = "".into(),
+                "epoch" => value["previous_controller_epoch"] = "\nsynthetic-secret".into(),
+                _ => unreachable!(),
+            }
+            std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
+            let error = HostSnapshot::load(&journal).err().unwrap().to_string();
+            assert!(!error.contains("synthetic-secret"));
+        }
+        std::fs::write(&path, b"{").unwrap();
+        assert!(HostSnapshot::load(&journal).is_err());
+    }
+
+    #[test]
+    fn missing_partial_oversize_and_aliased_baselines_are_not_recaptured_or_overwritten() {
+        use std::os::unix::fs::symlink;
+        let (fixture, journal) = journal();
+        assert!(HostSnapshot::load(&journal).is_err());
+        let path = fixture
+            .0
+            .join(journal.id.to_string())
+            .join("host-baseline.json");
+        let file = journal.directory.create_file("host-baseline.json").unwrap();
+        assert!(capture(&sync())
+            .persist(&journal, 0, "old-controller")
+            .is_err());
+        assert_eq!(file.metadata().unwrap().len(), 0);
+        file.set_len(BASELINE_LIMIT + 1).unwrap();
+        assert_eq!(
+            HostSnapshot::load(&journal).err().unwrap().to_string(),
+            "update_baseline_too_large"
+        );
+        drop(file);
+        std::fs::remove_file(&path).unwrap();
+        symlink("receipt.json", &path).unwrap();
+        assert!(HostSnapshot::load(&journal).is_err());
+        assert!(capture(&sync())
+            .persist(&journal, 0, "old-controller")
+            .is_err());
+    }
 
     fn identity() -> HostIdentity {
         HostIdentity {

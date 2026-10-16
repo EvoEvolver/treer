@@ -40,6 +40,78 @@ fn identity(image: &ProcessImage) -> Result<HostIdentity> {
 }
 
 impl Observation {
+    /// The coordinator must hold both locks and independently establish the old
+    /// Controller epoch before saving this original pre-publication observation.
+    pub async fn save_initial(
+        &self,
+        selected: &Selected,
+        locks: &SelectionLocks,
+        journal: &Journal,
+        revision: u64,
+        previous_controller_epoch: &str,
+    ) -> Result<()> {
+        let receipt = journal.read()?;
+        if receipt.workspace_id != self.workspace
+            || receipt.server_id != self.server
+            || selected.workspace() != self.workspace
+            || selected.server_id() != self.server
+            || selected.host_socket() != self.socket
+        {
+            bail!("update_baseline_binding_mismatch");
+        }
+        for binary in [Binary::Controller, Binary::Cli] {
+            locks.directory(selected, binary)?;
+        }
+        self.verify().await?;
+        self.snapshot
+            .persist(journal, revision, previous_controller_epoch)
+    }
+
+    /// Reconnect only to prove the SAME saved pre-update Host and inventory.
+    /// Never call capture() here: doing so would bless changes made while the
+    /// activator was dead as the new baseline. A missing/invalid file is fatal.
+    pub async fn recover(
+        selected: &Selected,
+        locks: &SelectionLocks,
+        journal: &Journal,
+    ) -> Result<(Self, String)> {
+        let receipt = journal.read()?;
+        if receipt.workspace_id != selected.workspace() || receipt.server_id != selected.server_id()
+        {
+            bail!("update_baseline_binding_mismatch");
+        }
+        for binary in [Binary::Controller, Binary::Cli] {
+            locks.directory(selected, binary)?;
+        }
+        let (snapshot, previous_epoch) = HostSnapshot::load(journal)?;
+        let (client, events, image) =
+            HostClient::connect_for_update(selected.host_socket()).await?;
+        let current = identity(&image)?;
+        let response = client
+            .sync(snapshot.cursors())
+            .await
+            .map_err(|_| anyhow::anyhow!("update_host_sync_failed"))?;
+        image
+            .verify_current()
+            .map_err(|_| anyhow::anyhow!("update_host_identity_changed"))?;
+        snapshot.verify(&response, &current)?;
+        if *events.disconnected.borrow() {
+            bail!("update_host_disconnected");
+        }
+        Ok((
+            Self {
+                client,
+                events,
+                image,
+                snapshot,
+                workspace: selected.workspace().to_owned(),
+                server: selected.server_id().to_owned(),
+                socket: selected.host_socket().to_path_buf(),
+            },
+            previous_epoch,
+        ))
+    }
+
     /// The detached activation coordinator must own both locks before calling.
     /// Durable intent precedes the one request. ACK means accepted, never healthy.
     /// A lost response or crash leaves intent behind: observe/reconcile that job,
@@ -97,6 +169,10 @@ impl Observation {
             if digest_file(&file)? != expected {
                 bail!("update_restart_image_mismatch");
             }
+        }
+        let (original, _) = HostSnapshot::load(journal)?;
+        if original != self.snapshot {
+            bail!("update_original_baseline_mismatch");
         }
         self.verify().await?;
         let operation = format!("update-{}-{suffix}", receipt.job_id);
@@ -383,49 +459,58 @@ mod tests {
         let locks = selected.lock().unwrap();
         let (release, held) = tokio::sync::oneshot::channel::<()>();
         let host_server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            for index in 0..4 {
-                let length = stream.read_u32().await.unwrap() as usize;
-                assert!(length <= MAX_HOST_FRAME_BYTES);
-                let mut bytes = vec![0; length];
-                stream.read_exact(&mut bytes).await.unwrap();
-                let request: HostRequest = decode_message(&bytes).unwrap();
-                let response = if index < 3 {
-                    assert!(matches!(request.command, HostCommand::Sync { .. }));
-                    assert!(request.operation_id.is_none());
-                    HostResponse::Synced {
-                        host_epoch: "host".into(),
-                        host_build: HostBuildInfo {
-                            version: "0.1.14".into(),
-                            git_commit: "a".repeat(40),
-                        },
-                        processes: vec![],
-                        replay: vec![],
-                    }
-                } else {
-                    assert!(matches!(request.command, HostCommand::RestartController));
-                    let operation = request.operation_id.unwrap();
-                    let id = operation
-                        .strip_prefix("update-")
-                        .unwrap()
-                        .strip_suffix(if restoring { "-rollback" } else { "-activate" })
-                        .unwrap();
-                    assert!(!uuid::Uuid::parse_str(id).unwrap().is_nil());
-                    if !acknowledge {
-                        // The Host received the mutation but the reply is lost.
-                        // Close this synthetic socket, not a real Host process.
-                        return;
-                    }
-                    HostResponse::Ack
-                };
-                let frame = encode_message(&HostMessage::Response {
-                    request_id: request.request_id,
-                    response: Some(response),
-                    error: None,
-                })
-                .unwrap();
-                stream.write_u32(frame.len() as u32).await.unwrap();
-                stream.write_all(&frame).await.unwrap();
+            let mut held_streams = Vec::new();
+            for connection in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                for index in 0..if connection == 0 { 5 } else { 1 } {
+                    let length = stream.read_u32().await.unwrap() as usize;
+                    assert!(length <= MAX_HOST_FRAME_BYTES);
+                    let mut bytes = vec![0; length];
+                    stream.read_exact(&mut bytes).await.unwrap();
+                    let request: HostRequest = decode_message(&bytes).unwrap();
+                    let response = if connection != 0 || index < 4 {
+                        assert!(matches!(request.command, HostCommand::Sync { .. }));
+                        assert!(request.operation_id.is_none());
+                        HostResponse::Synced {
+                            host_epoch: if connection == 2 {
+                                "changed-host"
+                            } else {
+                                "host"
+                            }
+                            .into(),
+                            host_build: HostBuildInfo {
+                                version: "0.1.14".into(),
+                                git_commit: "a".repeat(40),
+                            },
+                            processes: vec![],
+                            replay: vec![],
+                        }
+                    } else {
+                        assert!(matches!(request.command, HostCommand::RestartController));
+                        let operation = request.operation_id.unwrap();
+                        let id = operation
+                            .strip_prefix("update-")
+                            .unwrap()
+                            .strip_suffix(if restoring { "-rollback" } else { "-activate" })
+                            .unwrap();
+                        assert!(!uuid::Uuid::parse_str(id).unwrap().is_nil());
+                        if !acknowledge {
+                            // The Host received the mutation but the reply is lost.
+                            // Close this synthetic socket, not a real Host process.
+                            return;
+                        }
+                        HostResponse::Ack
+                    };
+                    let frame = encode_message(&HostMessage::Response {
+                        request_id: request.request_id,
+                        response: Some(response),
+                        error: None,
+                    })
+                    .unwrap();
+                    stream.write_u32(frame.len() as u32).await.unwrap();
+                    stream.write_all(&frame).await.unwrap();
+                }
+                held_streams.push(stream);
             }
             let _ = held.await;
         });
@@ -537,6 +622,23 @@ mod tests {
             "update_restart_publication_incomplete"
         );
         let journal = Journal::create(&jobs, &receipt).unwrap();
+        let mut missing_receipt = receipt.clone();
+        missing_receipt.job_id = uuid::Uuid::new_v4();
+        let missing = Journal::create(&jobs, &missing_receipt).unwrap();
+        missing.advance(0, Phase::Prepared).unwrap();
+        missing.advance(1, Phase::Activating).unwrap();
+        assert_eq!(
+            observation
+                .request_restart_once(&selected, &locks, &missing, 2)
+                .await
+                .unwrap_err()
+                .to_string(),
+            "update_baseline_missing_or_unsafe"
+        );
+        observation
+            .save_initial(&selected, &locks, &journal, 0, "old")
+            .await
+            .unwrap();
         journal.advance(0, Phase::Prepared).unwrap();
         assert_eq!(
             observation
@@ -595,6 +697,19 @@ mod tests {
             host_server.await.unwrap();
             return;
         }
+        let (recovered, previous_epoch) = Observation::recover(&selected, &locks, &reopened)
+            .await
+            .unwrap();
+        assert_eq!(previous_epoch, "old");
+        assert_eq!(recovered.image.pid(), observation.image.pid());
+        assert_eq!(
+            Observation::recover(&selected, &locks, &reopened)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "update_host_changed"
+        );
         // Same bytes + a new installed inode must not attest the old running
         // process as the successor, even if HTTP and source SHA would match.
         std::fs::copy(&controller, f.0.join("bin/next")).unwrap();
