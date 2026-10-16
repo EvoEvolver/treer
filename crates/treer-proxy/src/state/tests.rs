@@ -1,6 +1,118 @@
 use super::*;
 
 #[tokio::test]
+async fn durable_creation_guard_rejects_deleted_dispatch_forward_and_replay() {
+    let auth = crate::auth::AuthStore::for_test("test").await;
+    auth.seed_test_workspace("alpha").await;
+    let state = AppState::durable(
+        EventBus::in_process(),
+        ClusterBus::standalone("creation-fence-test".into()),
+        TrafficRecorder::default(),
+        auth.pool(),
+    );
+    let create = || AgentCommand::Create {
+        agent_id: "agent-reserved".into(),
+        workload_credential: "fixture-only".into(),
+        request: serde_json::from_value(serde_json::json!({
+            "kind":"command", "name":"reserved", "cwd":".", "args":["fixture"]
+        }))
+        .unwrap(),
+    };
+    let (tx, mut first_rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            Uuid::new_v4(),
+            "first".into(),
+            vec![treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let waiting = tokio::spawn({
+        let state = state.clone();
+        let command = create();
+        async move { state.send_command("alpha", "server", command).await }
+    });
+    // Prove it was already queued and sent before adding the durable tombstone.
+    assert!(matches!(
+        serde_json::from_str::<ProxyMessage>(&expect_text(first_rx.recv().await.unwrap())).unwrap(),
+        ProxyMessage::Command { .. }
+    ));
+    auth.delete_agent("alpha", "agent-reserved").await.unwrap();
+    let replacement_id = Uuid::new_v4();
+    let (tx, mut replacement_rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            replacement_id,
+            "replacement".into(),
+            vec![treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    // Registration alone does not replay: the replacement first publishes its
+    // initial inventory, exactly as a real Controller handshake does.
+    state
+        .apply_snapshot(
+            replacement_id,
+            AgentServerSnapshot {
+                server: test_server(),
+                agents: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        waiting.await.unwrap().unwrap_err().code,
+        "agent_identity_denied"
+    );
+    assert!(
+        replacement_rx.try_recv().is_err(),
+        "tombstoned Create must not be replayed"
+    );
+    assert!(state.inner.pending.lock().await.is_empty());
+    assert_eq!(
+        state
+            .send_command("alpha", "server", create())
+            .await
+            .unwrap_err()
+            .code,
+        "agent_identity_denied"
+    );
+    assert_eq!(
+        state
+            .handle_cluster_command(
+                "alpha",
+                "server",
+                replacement_id,
+                "forwarded-create".into(),
+                create()
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "agent_identity_denied"
+    );
+    assert!(
+        replacement_rx.try_recv().is_err(),
+        "neither local nor cluster-owner dispatch may send revoked Create"
+    );
+    // PG outages fail closed; do not trust an empty/stale in-memory projection.
+    auth.pool().close().await;
+    assert_eq!(
+        state
+            .send_command("alpha", "server", create())
+            .await
+            .unwrap_err()
+            .code,
+        "identity_check_unavailable"
+    );
+    assert!(replacement_rx.try_recv().is_err());
+}
+
+#[tokio::test]
 async fn interleaved_exec_and_startup_results_use_command_ids_not_arrival_order() {
     let state = AppState::new();
     let connection_id = Uuid::new_v4();

@@ -299,7 +299,7 @@ async fn main() -> anyhow::Result<()> {
     messages.spawn_outbox_dispatcher(event_bus.clone());
     let traffic = TrafficRecorder::new(auth.pool());
     traffic.spawn_flush_task();
-    let state = AppState::with_backplanes_and_traffic(event_bus, cluster.clone(), traffic.clone());
+    let state = AppState::durable(event_bus, cluster.clone(), traffic.clone(), auth.pool());
     for workspace in auth
         .all_workspaces()
         .await

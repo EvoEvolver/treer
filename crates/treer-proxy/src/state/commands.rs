@@ -1,6 +1,50 @@
 use super::*;
 
 impl AppState {
+    /// Defence in depth against replay on a replacement Controller. A deletion
+    /// can race this read, so the Controller's durable denial fence remains the
+    /// authority for in-flight commands. Never use a cached PG result here.
+    async fn require_creation_not_deleted(
+        &self,
+        workspace_id: &str,
+        agent_id: Option<&str>,
+    ) -> Result<(), ProtocolError> {
+        let Some(agent_id) = agent_id else {
+            return Ok(());
+        };
+        let deleted = if let Some(pool) = &self.inner.tombstone_pool {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM deleted_agents WHERE workspace_id=$1 AND agent_id=$2)",
+            )
+            .bind(workspace_id)
+            .bind(agent_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|_| {
+                ProtocolError::new(
+                    "identity_check_unavailable",
+                    "Agent identity could not be checked",
+                )
+            })?
+        } else {
+            // In-memory-only constructor is cfg(test); production cannot enter
+            // this branch and database errors never fall back to projections.
+            self.inner
+                .workspaces
+                .read()
+                .await
+                .get(workspace_id)
+                .is_some_and(|workspace| workspace.deleted_agents.contains(agent_id))
+        };
+        if deleted {
+            return Err(ProtocolError::new(
+                "agent_identity_denied",
+                "Agent identity was permanently denied",
+            ));
+        }
+        Ok(())
+    }
+
     pub async fn send_command(
         &self,
         workspace_id: &str,
@@ -71,6 +115,16 @@ impl AppState {
         }
         let outgoing = outgoing.0;
 
+        let creation_agent_id = match &command {
+            AgentCommand::Create { agent_id, .. }
+            | AgentCommand::EnsureLifecycle { agent_id, .. }
+            | AgentCommand::AppEnsureLifecycle { agent_id, .. } => Some(agent_id.clone()),
+            _ => None,
+        };
+        // All local sends, including cluster-owner forwarding, converge here.
+        self.require_creation_not_deleted(workspace_id, creation_agent_id.as_deref())
+            .await?;
+
         let envelope = CommandEnvelope {
             command_id: command_id.clone(),
             workspace_id: workspace_id.to_string(),
@@ -87,6 +141,7 @@ impl AppState {
                 server: key,
                 encoded: encoded.clone(),
                 required_capability,
+                creation_agent_id,
                 result: result_tx,
             },
         );
@@ -206,9 +261,15 @@ impl AppState {
                 })
                 .collect::<Vec<_>>();
             let commands = pending
-                .values()
-                .filter(|pending| pending.server == key)
-                .map(|pending| pending.encoded.clone())
+                .iter()
+                .filter(|(_, pending)| pending.server == key)
+                .map(|(id, pending)| {
+                    (
+                        id.clone(),
+                        pending.encoded.clone(),
+                        pending.creation_agent_id.clone(),
+                    )
+                })
                 .collect::<Vec<_>>();
             (commands, rejected)
         };
@@ -226,7 +287,18 @@ impl AppState {
                 .result
                 .send(CommandResult::failure(command_id, error));
         }
-        for command in commands {
+        for (command_id, command, creation_agent_id) in commands {
+            if let Err(error) = self
+                .require_creation_not_deleted(workspace_id, creation_agent_id.as_deref())
+                .await
+            {
+                if let Some(pending) = self.inner.pending.lock().await.remove(&command_id) {
+                    let _ = pending
+                        .result
+                        .send(CommandResult::failure(command_id, error));
+                }
+                continue;
+            }
             let _ = outgoing.send(SocketFrame::Text(command));
         }
     }

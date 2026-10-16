@@ -1,10 +1,12 @@
 use super::*;
 
 impl AppState {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::with_event_bus(EventBus::in_process())
     }
 
+    #[cfg(test)]
     pub fn with_event_bus(event_bus: EventBus) -> Self {
         Self::with_backplanes(
             event_bus,
@@ -12,14 +14,34 @@ impl AppState {
         )
     }
 
+    #[cfg(test)]
     pub fn with_backplanes(event_bus: EventBus, cluster: ClusterBus) -> Self {
         Self::with_backplanes_and_traffic(event_bus, cluster, TrafficRecorder::default())
     }
 
+    #[cfg(test)]
     pub fn with_backplanes_and_traffic(
         event_bus: EventBus,
         cluster: ClusterBus,
         traffic: TrafficRecorder,
+    ) -> Self {
+        Self::build(event_bus, cluster, traffic, None)
+    }
+
+    pub fn durable(
+        event_bus: EventBus,
+        cluster: ClusterBus,
+        traffic: TrafficRecorder,
+        pool: sqlx::PgPool,
+    ) -> Self {
+        Self::build(event_bus, cluster, traffic, Some(pool))
+    }
+
+    fn build(
+        event_bus: EventBus,
+        cluster: ClusterBus,
+        traffic: TrafficRecorder,
+        tombstone_pool: Option<sqlx::PgPool>,
     ) -> Self {
         let (events, _) = broadcast::channel(512);
         Self {
@@ -35,6 +57,7 @@ impl AppState {
                 event_bus,
                 cluster,
                 traffic,
+                tombstone_pool,
             }),
         }
     }

@@ -58,6 +58,9 @@ struct Inner {
     event_bus: EventBus,
     cluster: ClusterBus,
     traffic: TrafficRecorder,
+    // Production construction always supplies the shared PostgreSQL store.
+    // Only explicitly in-memory test fixtures omit it.
+    tombstone_pool: Option<sqlx::PgPool>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -78,6 +81,7 @@ struct PendingCommand {
     server: ServerKey,
     encoded: String,
     required_capability: Option<&'static str>,
+    creation_agent_id: Option<String>,
     result: oneshot::Sender<CommandResult>,
 }
 
@@ -157,6 +161,7 @@ fn send_terminal_to_browser(outgoing: &mpsc::Sender<SocketFrame>, message: &Term
     }
 }
 
+#[cfg(test)]
 impl Default for AppState {
     fn default() -> Self {
         Self::new()

@@ -527,6 +527,14 @@ Placement does not change the process `cwd`.
 
 Agent creation failures carry optional `error.details` with a bounded bare
 `command`, the selected `machine_id`, reserved `agent_id` and `creation_state`.
+
+Production Proxy command dispatch checks PostgreSQL `deleted_agents` before
+sending Create/ensure commands, including cluster-owner forwarding and pending
+replay after a replacement Controller's initial snapshot. Database failure
+rejects dispatch; no cached projection substitutes for this check. A pending
+command rejected during replay is completed with an error and removed. This is
+defence in depth: deletion can race a send-time read, so reservation cleanup must
+first persist the Controller's denied-ID fence before committing revocation.
 Only a Controller `command_not_found` proof for that same Agent, issued before
 startup persistence or Host dispatch and returned directly to that creation
 command, permits Proxy compensation (an event-stream field is not proof): credential
