@@ -90,6 +90,7 @@ struct StoredBaseline {
     schema_version: u32,
     binding: Binding,
     previous_controller_epoch: String,
+    previous_controller_source_sha: String,
     identity: HostIdentity,
     epoch: String,
     build_version: String,
@@ -107,6 +108,7 @@ struct Binding {
     artifact_source_sha: String,
     controller_sha256: String,
     cli_sha256: String,
+    original_controller_sha256: String,
 }
 
 impl From<&Receipt> for Binding {
@@ -119,6 +121,10 @@ impl From<&Receipt> for Binding {
             artifact_source_sha: receipt.artifact_source_sha.clone(),
             controller_sha256: receipt.controller_sha256.clone(),
             cli_sha256: receipt.cli_sha256.clone(),
+            original_controller_sha256: receipt
+                .publications
+                .original_digest(super::artifacts::Binary::Controller)
+                .to_owned(),
         }
     }
 }
@@ -188,7 +194,7 @@ impl HostSnapshot {
     }
 
     /// Persist the ORIGINAL observation, never an after-update replacement.
-    /// Caller supplies the independently observed old Controller epoch. This
+    /// Caller supplies the independently observed old Controller epoch/build. This
     /// private file contains only metadata and output hashes, no raw replay,
     /// cwd/argv/environment or workload credentials. No overwrite/retry API.
     pub(super) fn persist(
@@ -196,19 +202,22 @@ impl HostSnapshot {
         journal: &Journal,
         revision: u64,
         previous_controller_epoch: &str,
+        previous_controller_source_sha: &str,
     ) -> Result<()> {
         let receipt = journal.read()?;
         if receipt.revision != revision
             || receipt.phase != Phase::Preparing
             || !label(previous_controller_epoch, 128)
+            || !hex(previous_controller_source_sha, 40)
         {
             bail!("update_baseline_phase_conflict");
         }
         self.validate_baseline(&receipt.workspace_id, &receipt.server_id)?;
         let bytes = serde_json::to_vec(&serde_json::json!({
-            "schema_version": 1,
+            "schema_version": 2,
             "binding": Binding::from(&receipt),
             "previous_controller_epoch": previous_controller_epoch,
+            "previous_controller_source_sha": previous_controller_source_sha,
             "identity": self.identity,
             "epoch": self.epoch,
             "build_version": self.build.version,
@@ -234,7 +243,7 @@ impl HostSnapshot {
         Ok(())
     }
 
-    pub(super) fn load(journal: &Journal) -> Result<(Self, String)> {
+    pub(super) fn load(journal: &Journal) -> Result<(Self, String, String)> {
         let receipt = journal.read()?;
         let file = journal
             .directory
@@ -249,9 +258,10 @@ impl HostSnapshot {
         }
         let stored: StoredBaseline = serde_json::from_slice(&bytes)
             .map_err(|_| anyhow::anyhow!("invalid_update_baseline"))?;
-        if stored.schema_version != 1
+        if stored.schema_version != 2
             || stored.binding != Binding::from(&receipt)
             || !label(&stored.previous_controller_epoch, 128)
+            || !hex(&stored.previous_controller_source_sha, 40)
             || stored.workloads.len() > INVENTORY_LIMIT
         {
             bail!("update_baseline_binding_mismatch");
@@ -272,7 +282,11 @@ impl HostSnapshot {
             workloads,
         };
         snapshot.validate_baseline(&receipt.workspace_id, &receipt.server_id)?;
-        Ok((snapshot, stored.previous_controller_epoch))
+        Ok((
+            snapshot,
+            stored.previous_controller_epoch,
+            stored.previous_controller_source_sha,
+        ))
     }
 
     /// Capture a full initial sync (no cursors). The Host creates process-list
@@ -497,7 +511,7 @@ pub(super) fn initial_controller_epoch(
     document: &[u8],
     workspace: &str,
     server: &str,
-) -> Result<String> {
+) -> Result<(String, String)> {
     if document.len() > HEALTH_LIMIT {
         bail!("update_health_too_large");
     }
@@ -513,7 +527,7 @@ pub(super) fn initial_controller_epoch(
     {
         bail!("update_controller_health_mismatch");
     }
-    Ok(health.controller_epoch)
+    Ok((health.controller_epoch, health.controller_build.git_commit))
 }
 
 impl ControllerExpectation {
@@ -565,7 +579,10 @@ mod tests {
                 "srv_fixture",
             )
         };
-        assert_eq!(check(&base).unwrap(), "observed-old");
+        assert_eq!(
+            check(&base).unwrap(),
+            ("observed-old".into(), "a".repeat(40))
+        );
         for (field, value) in [
             ("service", json!("other")),
             ("workspace_id", json!("ws_other")),
@@ -646,7 +663,7 @@ mod tests {
         let (_fixture, journal) = journal();
         let response = sync();
         capture(&response)
-            .persist(&journal, 0, "old-controller")
+            .persist(&journal, 0, "old-controller", &"a".repeat(40))
             .unwrap();
         let file = journal.directory.read_file("host-baseline.json").unwrap();
         assert_eq!(file.metadata().unwrap().permissions().mode() & 0o777, 0o600);
@@ -665,14 +682,15 @@ mod tests {
         }
         journal.prepare_fixture().unwrap();
         journal.advance(1, Phase::Activating).unwrap();
-        let (saved, epoch) = HostSnapshot::load(&journal).unwrap();
+        let (saved, epoch, source_sha) = HostSnapshot::load(&journal).unwrap();
         assert_eq!(epoch, "old-controller");
+        assert_eq!(source_sha, "a".repeat(40));
         saved.verify(&response, &identity()).unwrap();
         let mut after = response.clone();
         inventory(&mut after).0[0].pid = Some(9999);
         assert!(saved.verify(&after, &identity()).is_err());
         assert!(capture(&response)
-            .persist(&journal, 2, "new-controller")
+            .persist(&journal, 2, "new-controller", &"b".repeat(40))
             .is_err());
     }
 
@@ -680,7 +698,7 @@ mod tests {
     fn stored_baseline_rejects_duplicates_corruption_cross_job_and_invalid_witnesses() {
         let (fixture, journal) = journal();
         capture(&sync())
-            .persist(&journal, 0, "old-controller")
+            .persist(&journal, 0, "old-controller", &"a".repeat(40))
             .unwrap();
         let path = fixture
             .0
@@ -701,6 +719,10 @@ mod tests {
             "witness",
             "stream",
             "epoch",
+            "old-source",
+            "missing-old-source",
+            "old-digest",
+            "old-schema",
         ] {
             let mut value = original.clone();
             match case {
@@ -719,6 +741,19 @@ mod tests {
                 "witness" => value["workloads"][0][1]["witness"]["revision"] = u64::MAX.into(),
                 "stream" => value["workloads"][0][1]["stream_epoch"] = "".into(),
                 "epoch" => value["previous_controller_epoch"] = "\nsynthetic-secret".into(),
+                "old-source" => {
+                    value["previous_controller_source_sha"] = "bad\nsynthetic-secret".into()
+                }
+                "missing-old-source" => {
+                    value
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("previous_controller_source_sha");
+                }
+                "old-digest" => {
+                    value["binding"]["original_controller_sha256"] = "0".repeat(64).into()
+                }
+                "old-schema" => value["schema_version"] = 1.into(),
                 _ => unreachable!(),
             }
             std::fs::write(&path, serde_json::to_vec(&value).unwrap()).unwrap();
@@ -727,6 +762,27 @@ mod tests {
         }
         std::fs::write(&path, b"{").unwrap();
         assert!(HostSnapshot::load(&journal).is_err());
+    }
+
+    #[test]
+    fn invalid_old_build_does_not_create_a_baseline() {
+        let (_fixture, journal) = journal();
+        for source_sha in [
+            "",
+            "bad",
+            &"a".repeat(39),
+            &"a".repeat(41),
+            "bad\nsynthetic-secret",
+        ] {
+            assert_eq!(
+                capture(&sync())
+                    .persist(&journal, 0, "old-controller", source_sha)
+                    .unwrap_err()
+                    .to_string(),
+                "update_baseline_phase_conflict"
+            );
+            assert!(journal.directory.read_file("host-baseline.json").is_err());
+        }
     }
 
     #[test]
@@ -740,7 +796,7 @@ mod tests {
             .join("host-baseline.json");
         let file = journal.directory.create_file("host-baseline.json").unwrap();
         assert!(capture(&sync())
-            .persist(&journal, 0, "old-controller")
+            .persist(&journal, 0, "old-controller", &"a".repeat(40))
             .is_err());
         assert_eq!(file.metadata().unwrap().len(), 0);
         file.set_len(BASELINE_LIMIT + 1).unwrap();
@@ -753,7 +809,7 @@ mod tests {
         symlink("receipt.json", &path).unwrap();
         assert!(HostSnapshot::load(&journal).is_err());
         assert!(capture(&sync())
-            .persist(&journal, 0, "old-controller")
+            .persist(&journal, 0, "old-controller", &"a".repeat(40))
             .is_err());
     }
 

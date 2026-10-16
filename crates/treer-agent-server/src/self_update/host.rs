@@ -65,8 +65,12 @@ impl Observation {
         self.verify().await?;
         let current = journal.read()?;
         let previous_controller_epoch = initial.validate(&current)?;
-        self.snapshot
-            .persist(journal, revision, previous_controller_epoch)
+        self.snapshot.persist(
+            journal,
+            revision,
+            previous_controller_epoch,
+            initial.source_sha(),
+        )
     }
 
     /// Reconnect only to prove the SAME saved pre-update Host and inventory.
@@ -85,7 +89,7 @@ impl Observation {
         for binary in [Binary::Controller, Binary::Cli] {
             locks.directory(selected, binary)?;
         }
-        let (snapshot, previous_epoch) = HostSnapshot::load(journal)?;
+        let (snapshot, previous_epoch, _) = HostSnapshot::load(journal)?;
         let (client, events, image) =
             HostClient::connect_for_update(selected.host_socket()).await?;
         let current = identity(&image)?;
@@ -172,7 +176,7 @@ impl Observation {
                 bail!("update_restart_image_mismatch");
             }
         }
-        let (original, _) = HostSnapshot::load(journal)?;
+        let (original, _, _) = HostSnapshot::load(journal)?;
         if original != self.snapshot {
             bail!("update_original_baseline_mismatch");
         }
@@ -727,6 +731,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(previous_epoch, "observed-old");
+        let (_, _, previous_source_sha) = HostSnapshot::load(&reopened).unwrap();
+        assert_eq!(previous_source_sha, "b".repeat(40));
         assert_eq!(recovered.image.pid(), observation.image.pid());
         assert_eq!(
             Observation::recover(&selected, &locks, &reopened)

@@ -438,7 +438,16 @@ server, nonempty bounded epoch/build, source-SHA syntax and Proxy connectivity.
 It rechecks the Host, live process and installed image, then binds the observation
 to the job and original image digest. Saving rechecks this process on both sides
 of Host Sync. Recovery tests require the exact HTTP-observed old epoch, distinct
-from a caller default. An old build string is an observed claim, not signed
+from a caller default. The private baseline format is now schema 2: it retains
+that original source SHA alongside the epoch and binds the original Controller
+digest as well as the replacement digests. Missing/malformed old build evidence,
+schema 1, or an altered original digest is rejected; this unshipped private
+format has no migration/default that could invent rollback evidence. A later
+rollback health check must use this saved old source SHA and original digest,
+never the replacement source SHA or a newly captured post-failure baseline.
+This increment records the evidence only; old-Controller rollback activation
+and its terminal health transition remain unfinished.
+An old build string is an observed claim, not signed
 release provenance. The detached coordinator and end-to-end activation gate
 remain outstanding.
 

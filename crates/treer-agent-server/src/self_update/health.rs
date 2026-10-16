@@ -29,11 +29,16 @@ pub struct InitialController {
     server: String,
     digest: String,
     epoch: String,
+    source_sha: String,
     process: treer_platform::process_image::ProcessImage,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 impl InitialController {
+    pub(super) fn source_sha(&self) -> &str {
+        &self.source_sha
+    }
+
     pub(super) fn validate(&self, receipt: &super::Receipt) -> Result<&str> {
         if self.job != receipt.job_id
             || self.workspace != receipt.workspace_id
@@ -77,7 +82,7 @@ impl Monitor {
             .to_owned();
         let process = host.controller_image(selected, locks, &digest)?;
         let document = self.document(selected.health_address()?).await?;
-        let epoch = super::safety::initial_controller_epoch(
+        let (epoch, source_sha) = super::safety::initial_controller_epoch(
             &document,
             selected.workspace(),
             selected.server_id(),
@@ -89,6 +94,7 @@ impl Monitor {
             server: receipt.server_id.clone(),
             digest,
             epoch,
+            source_sha,
             process,
         };
         initial.validate(&journal.read()?)?;
