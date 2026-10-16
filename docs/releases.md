@@ -473,6 +473,23 @@ branch.
 - Roll back the Proxy to its prior Railway deployment. Database contraction is
   a separate release and is never part of an automatic code rollback.
 
+## GitHub Release assets and artifact hashes
+
+A version tag `vX.Y.Z` runs `Build release artifacts` again for the tagged
+commit and the GitHub Release attaches those artifacts. Compare them with the
+Canary manifest (`machine_artifacts.files`) before uploading. For v0.1.14 the
+four Unix platforms were byte-identical to the Canary-tested build, while the
+`windows-x86_64` files had the same sizes and build metadata but different bytes:
+Windows PE output embeds build-specific data (the linker timestamp and debug
+identifier), so two runs of the same commit do not match. The Windows launcher/UI
+acceptance job passes on every native run, and the Canary machines are Linux, so
+no Canary evidence is lost, but the Windows hashes of a GitHub Release are those
+of the tag run, not of the Canary manifest. Record that in the release notes
+instead of presenting the manifest hash as the published one; do not edit
+artifacts or re-sign them to force equality. Reproducible Windows builds (pinned
+timestamp and a stripped debug identifier) are possible future work and would
+change the binaries, so they need their own gated release.
+
 ## GHCR images for self-host
 
 After Canary passes, tag the same commit `vX.Y.Z` matching `Cargo.toml` and
