@@ -6,7 +6,7 @@ const nameOrder = (left: Agent, right: Agent) => left.name.localeCompare(right.n
 const updated = (agent: Agent) => Date.parse(agent.updated_at ?? "") || 0
 const recentOrder = (left: Agent, right: Agent) => updated(right) - updated(left) || nameOrder(left, right)
 
-// Match mobile/ios/Treer/Core/Attention.swift. Unknown legacy statuses are
+// Unknown legacy statuses are
 // neutral; stopped workloads remain discoverable in the inactive list.
 export function attentionGroups(agents: Agent[], machines: Machine[]) {
   const inventory = new Map(machines.map((machine) => [machine.server_id, machine]))

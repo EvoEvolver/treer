@@ -40,14 +40,15 @@ environment as it is.
 A saved launch can be restored after machine restart with `treer-agent-server restore --workspace WORKSPACE_ID`. Treer preserves intended-running Agents and Managed Apps; explicitly stopped workloads stay stopped. It does not restore in-memory Agent conversations.
 
 Treer does not ship another Agent runtime. It coordinates the tools and
-environments you already use through the browser and CLI. Native iOS and Android
-clients are developed in [`mobile`](mobile/).
+environments you already use through the browser and CLI, including a responsive
+mobile browser interface. Native iOS/Android clients have been retired; optional
+[Voice APIs](docs/operator-guide.md#voice-apis-opt-in) remain in Core.
 
 ## How it works
 
 ```mermaid
 flowchart LR
-    Human["Human<br/>Web · CLI · mobile"] <--> Proxy
+    Human["Human<br/>Web · CLI"] <--> Proxy
     BrowserApps["Browser Apps<br/>Mail · custom UI"] <--> Proxy
     Proxy["Treer Proxy<br/>identity · policy · routing · messages"]
 

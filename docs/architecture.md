@@ -5,7 +5,7 @@ Treer separates durable coordination from machine-local process ownership.
 ```mermaid
 flowchart LR
     Web[Browser control plane] --> Proxy[Proxy]
-    Phone[iOS / Android] -->|PCM ASR + utterance text| Proxy
+    VoiceClient[Optional Voice API client] -->|PCM ASR + utterance text| Proxy
     Proxy --> DB[(PostgreSQL)]
     Proxy <--> NATS[(NATS)]
     Proxy --> VoiceLLM[Voice LLM upstream]
@@ -1003,13 +1003,11 @@ Responses or Chat Completions upstream. The model receives
 [the voice skill](../skills/treer-voice/SKILL.md) and a compact roster, then
 calls a `treer` tool. The Proxy executes allowed CLI-equivalent commands
 (`status`, `whoami`, `machine list`, `agent ls|show|prompt|read`) in-process
-as the signed-in user and returns a speakable reply. The native app reads that
-reply with system TTS on the media stream. Conversation mode runs an
-on-device speech gate (adaptive energy, zero-crossing rate, and a 360ms
-minimum speech window) and only opens the ASR stream after speech is
-confirmed, so noise and coughs do not spend ASR tokens. Vendor ASR and LLM keys stay in
-Proxy environment variables. This is not the later confirm-card Voice Live
-protocol, and the phone does not run the Treer CLI.
+as the signed-in user and returns a speakable reply. Clients own recording,
+speech gating and presentation; the repository no longer ships native iOS/Android
+clients. Vendor ASR and LLM keys stay in Proxy environment variables. See
+[Voice configuration](operator-guide.md#voice-apis-opt-in). This is not the later
+confirm-card Voice Live protocol, and clients do not run the Treer CLI for it.
 
 Workspace access is either `organization` or `restricted`. The former admits
 every current organization member; the latter admits only direct user grants,

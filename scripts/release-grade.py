@@ -17,7 +17,7 @@ RULES = [
     ("neutral", ("/.gitattributes", "/.gitignore")),
     ("docs", ("docs/", "/AGENTS.md", "/README.md", "/PLAN.md", "/LICENSE")),
     ("apps", ("apps/",)),
-    ("web", ("web/", "mobile/")),
+    ("web", ("web/",)),
     ("launcher", ("launchers/",)),
     ("pipeline", ("scripts/canary-", "scripts/release-canary.sh", "scripts/deploy-canary.sh",
                   "scripts/test-canary.sh", "scripts/promote-production.sh",

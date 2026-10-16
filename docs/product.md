@@ -25,10 +25,9 @@ In concrete terms:
 3. Workspace members can upload a bounded file into an enrolled machine root,
    run a short non-interactive command, save reusable command-based launch profiles, and use
    them to create, observe, prompt, and stop Agents through the web application,
-   CLI, or native iOS/Android clients. The browser still includes a full-screen
-   mobile terminal with touch controls and a full-screen Agent UI iframe. The
-   native apps use a fleet Home, an AIS WebView for thread UI, and an optional
-   native TUI overlay.
+   CLI. The browser includes a full-screen mobile terminal with touch controls
+   and a full-screen Agent UI iframe. Native iOS/Android clients are retired;
+   responsive browser functionality remains available.
 4. Managed Agents and humans exchange durable Core Messages with explicit
    acknowledgement and an ordered context DAG. Mail and Telegram are
    replaceable workspace Apps over public contracts rather than privileged

@@ -1,5 +1,9 @@
 # Treer 手机 App 产品方案：界面、功能与远期纯语音编排
 
+Historical note (2026-10-16, #100): native clients and transparent-network probes
+were retired. Paths and reproduction commands below describe the reviewed revision,
+not the current tree. [Pinned source before removal](https://github.com/EvoEvolver/treer/blob/2bb65dbe323457e8be6779c36d7469885e2433d5/mobile/README.md).
+
 | 字段 | 值 |
 | --- | --- |
 | 状态 | Draft |

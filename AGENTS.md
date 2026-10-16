@@ -40,7 +40,7 @@ second manual.
 | Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
 | Install a git recipe with an installer Agent | [skills/treer-install/SKILL.md](skills/treer-install/SKILL.md) |
 | Put a Treer Host in an Apple container machine | [skills/treer-macos-container/SKILL.md](skills/treer-macos-container/SKILL.md) |
-| Change Voice ASR or spoken command | [docs/mobile.md](docs/mobile.md), [skills/treer-voice/SKILL.md](skills/treer-voice/SKILL.md) |
+| Change Voice ASR or spoken command | [the operator guide](docs/operator-guide.md#voice-apis-opt-in), [skills/treer-voice/SKILL.md](skills/treer-voice/SKILL.md) |
 
 ## Source map
 

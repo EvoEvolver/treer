@@ -47,8 +47,8 @@ terminal after layout commits. Separator colors use theme tokens.
 Below 768px the separator and arrow are hidden, desktop collapse is ignored,
 and the existing mobile layout stays intact.
 Managed App/Agent Interface embeds retain the same surrounding console sidebar.
-Native iOS/Android screens and their separate Agent WebViews do not render this
-sidebar; no native source or embedded Agent-owned interface is changed.
+Native iOS/Android clients are retired. Agent-owned embedded interfaces remain
+separate from this responsive browser sidebar.
 
 **Edit startup command** reads the current argv and saves it through one restart
 operation. The editor scrolls on short mobile screens and preserves input after
@@ -60,7 +60,7 @@ requires the forthcoming App update API.
 Workspaces open at **Overview** without attaching a PTY. The main view preserves
 folder hierarchy and persisted sibling order; it never regroups Agents into flat
 attention lists. Status badges and subtree counts overlay the Tree. Attention
-rules follow iOS: blocked/failed Agents and nonterminal Agents on offline/missing
+rules retain the original fleet semantics: blocked/failed Agents and nonterminal Agents on offline/missing
 machines need attention; online starting/working Agents are working; online
 idle/unknown Agents are idle. Apps remain visible but do not count as Agents in
 these filters. Legacy unknown statuses are neutral; `stopped` is terminal.

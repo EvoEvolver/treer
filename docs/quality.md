@@ -308,7 +308,6 @@ outside the initial implementation.
 | Browser workflow | Typecheck/build, CORS/return-path checks, desktop and mobile validation |
 | Agent Interface adapter | Adapter unit tests plus `just ais-e2e` when a live Treer and vendor binary are available |
 | Voice ASR or command | Proxy `voice` / `voice_llm` tests plus authenticated `/voice/command` route tests; optional `TREER_VOICE_LLM_LIVE_TEST=1` against a configured upstream |
-| Native iOS/Android fleet | `just mobile-ios-ci`, `just mobile-android-ci`, Android `CreateFlowTest`, iOS `CreateFlowTests` / `TreerUITests`; live AOSP + iOS simulator login/create-machine/create-agent/prompt when a Proxy and Host are available |
 | Documentation | `node scripts/check-docs.mjs` |
 | Release publishing | `just machine-artifacts-test`, `node --test scripts/release-r2.test.mjs`; hosted downloads must match all twelve binaries without redirects; isolated R2 verification when publishing signed manifests |
 | Installed Controller updates | Node/Rust signature compatibility, tampered/missing metadata, trusted-key binding, channel/manifest/path binding, duplicate/missing artifacts, size limits, binary SHA256 failures before execution, and existing staging/recovery tests |
@@ -317,9 +316,10 @@ outside the initial implementation.
 Documentation describes the current source, not future intent. Dated research
 is historical and does not override implementation, protocol types, or tests.
 
-Retired transparent-network labs under `scripts/network-lab/` and dated research
-are historical fixtures, not supported acceptance gates. The native macOS helper
-and its build gate have been removed.
+Retired [transparent-network lab fixtures](https://github.com/EvoEvolver/treer/blob/2bb65dbe323457e8be6779c36d7469885e2433d5/scripts/network-lab/README.md)
+remain in Git history, not in supported acceptance gates. The native macOS helper
+and its build gate have been removed. Native iOS/Android clients and their build
+recipes were retired on 2026-10-16; browser narrow-screen tests remain required.
 
 Current focused transport and recovery checks:
 

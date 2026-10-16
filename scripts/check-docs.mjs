@@ -14,7 +14,6 @@ const requiredFiles = [
   "docs/quality.md",
   "docs/releases.md",
   "docs/canary.md",
-  "docs/mobile.md",
   "docs/research/2026-08-18-project-review.md",
   "apps/README.md",
   "apps/GUIDELINES.md",
@@ -71,7 +70,7 @@ requireText("apps/README.md", "gits/README.md");
 requireText("docs/README.md", "../apps/gits/README.md");
 requireText("docs/README.md", "../deploy/README.md");
 requireText("docs/README.md", "../skills/treer-voice/SKILL.md");
-requireText("docs/README.md", "mobile.md");
+requireText("docs/README.md", "operator-guide.md#voice-apis-opt-in");
 requireText(
   "crates/treer-agent-server/src/cli_command.rs",
   'include_str!("../../../skills/treer/SKILL.md")',
