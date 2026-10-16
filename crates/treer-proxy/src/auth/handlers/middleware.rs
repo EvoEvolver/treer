@@ -4,6 +4,17 @@ pub(crate) async fn require_user(
     mut request: Request,
     next: Next,
 ) -> Response {
+    // Match authenticate_request's selection exactly: malformed Authorization
+    // falls back to the cookie; an invalid selected Bearer fails authentication
+    // rather than falling back. Admin authentication below is cookie-only.
+    if !auth.disabled
+        && bearer_token(request.headers()).is_none()
+        && browser_request_needs_origin(&request)
+    {
+        if let Err(error) = require_cookie_request_origin(&auth, &request) {
+            return error.into_response();
+        }
+    }
     match authenticate_request(&auth, request.headers()).await {
         Ok(session) => {
             request.extensions_mut().insert(session);
@@ -36,6 +47,11 @@ pub(crate) async fn require_admin(
     mut request: Request,
     next: Next,
 ) -> Response {
+    if !auth.disabled && browser_request_needs_origin(&request) {
+        if let Err(error) = require_console_origin(&auth, request.headers()) {
+            return error.into_response();
+        }
+    }
     if auth.disabled {
         request.extensions_mut().insert(AdminSession {
             token: "local-admin".to_string(),

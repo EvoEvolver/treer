@@ -2460,6 +2460,7 @@ async fn admin_cookie(app: Router) -> (Router, HeaderValue) {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/admin/login")
+                .header(header::ORIGIN, "https://app.treer.example")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(r#"{"password":"admin-password"}"#))
                 .expect("login request"),
@@ -2475,6 +2476,155 @@ async fn admin_cookie(app: Router) -> (Router, HeaderValue) {
         .expect("cookie text");
     let token = set_cookie.split(';').next().expect("cookie pair");
     (app, HeaderValue::from_str(token).expect("cookie header"))
+}
+
+#[tokio::test]
+async fn registered_cookie_routes_reject_browser_writes_before_handlers() {
+    super::route_catalog::take_paths();
+    let app = admin_router(crate::updater::UpdaterClient::disabled()).await;
+    let paths = super::route_catalog::take_paths();
+    assert!(paths.len() > 100, "enumerate the actual complete router");
+    // Prevent a future raw registration from silently escaping this inventory.
+    for source in [
+        include_str!("routes.rs"),
+        include_str!("../admin.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap(),
+    ] {
+        assert!(
+            !source.contains(".route("),
+            "use registered_route for Core routes"
+        );
+    }
+    for (path, origin_class) in paths {
+        // Explicit exceptions, with the authentication boundary that replaces
+        // browser-cookie authority. Unknown new routes must be classified.
+        let exception = if path.starts_with("/agent/") {
+            Some("machine/Agent credentials; no browser session selection")
+        } else if path == "/api/machines/enroll" {
+            Some("single-use enrollment credential")
+        } else if path.starts_with("/.treer/identity/")
+            || path.starts_with("/.treer/apps/identity/")
+        {
+            Some("verifies an explicit signed token, never a browser session")
+        } else if path == "/api/apps/oauth/authorize" || path == "/.treer/ingress/authorize" {
+            Some("top-level navigation; fixed ingress, audience-bound single-use expiring code")
+        } else if path == "/api/apps/oauth/token" {
+            Some("single-use authorization code plus S256 verifier")
+        } else if path.starts_with("/api/apps/") {
+            Some("service-audience App identity or attested Provider runtime; no cookie fallback")
+        } else if path.ends_with("/callback") && path.starts_with("/api/auth/oauth/") {
+            Some("external OAuth callback: single-use state and browser cookie binding")
+        } else if matches!(
+            path.as_str(),
+            "/install.sh" | "/install.ps1" | "/api/health" | "/.well-known/jwks.json"
+        ) || path.starts_with("/artifacts/")
+        {
+            Some("public read-only resource")
+        } else {
+            None
+        };
+        if exception.is_some() {
+            continue;
+        }
+        assert!(
+            path.starts_with("/api/workspaces")
+                || path.starts_with("/api/organizations")
+                || path.starts_with("/api/auth/")
+                || path.starts_with("/api/admin/")
+                || path.starts_with("/api/invitations/"),
+            "unclassified route {path}"
+        );
+        let concrete = path
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "fixture"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&concrete)
+                    .header(header::ORIGIN, "https://proxy.treer.example")
+                    .header(header::COOKIE, "treer_session=synthetic-user")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        match origin_class {
+            crate::auth::CookieOriginClass::Embedded => assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path}: Proxy origin must reach authentication, not CSRF denial"
+            ),
+            crate::auth::CookieOriginClass::Console => assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "{path}: Proxy origin must not grant Core management authority"
+            ),
+        }
+        for method in ["POST", "PUT", "PATCH", "DELETE"] {
+            for origin in [None, Some("null"), Some("https://evil.example.test")] {
+                let mut request = Request::builder()
+                    .method(method)
+                    .uri(&concrete)
+                    .header(
+                        header::COOKIE,
+                        "treer_session=synthetic-user; treer_admin_session=synthetic-admin",
+                    )
+                    .header(header::CONTENT_TYPE, "text/plain");
+                if let Some(origin) = origin {
+                    request = request.header(header::ORIGIN, origin);
+                }
+                let response = app
+                    .clone()
+                    .oneshot(request.body(Body::from("untrusted-body")).unwrap())
+                    .await
+                    .unwrap();
+                assert!(
+                    matches!(
+                        response.status(),
+                        StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED
+                    ),
+                    "{method} {path}: {}",
+                    response.status()
+                );
+            }
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(&concrete)
+                        .header(header::ORIGIN, "https://app.treer.example")
+                        .header("sec-fetch-site", "cross-site")
+                        .header(header::CONTENT_TYPE, "text/plain")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "cross-site {method} {path}: {}",
+                response.status()
+            );
+        }
+    }
 }
 
 async fn spawn_updater_sidecar() -> Url {
@@ -2609,6 +2759,7 @@ async fn workspace_deletion_route_requires_auth_and_deletes_the_workspace() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/auth/register")
+                .header(header::ORIGIN, "https://app.treer.example")
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&json!({
@@ -2659,6 +2810,7 @@ async fn workspace_deletion_route_requires_auth_and_deletes_the_workspace() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/workspaces")
+                .header(header::ORIGIN, "https://app.treer.example")
                 .header(header::CONTENT_TYPE, "application/json")
                 .header(header::COOKIE, &cookie)
                 .body(Body::from(
@@ -2688,6 +2840,7 @@ async fn workspace_deletion_route_requires_auth_and_deletes_the_workspace() {
             Request::builder()
                 .method(Method::DELETE)
                 .uri(format!("/api/workspaces/{workspace_id}"))
+                .header(header::ORIGIN, "https://app.treer.example")
                 .body(Body::empty())
                 .expect("unauthenticated delete"),
         )
@@ -2701,6 +2854,7 @@ async fn workspace_deletion_route_requires_auth_and_deletes_the_workspace() {
             Request::builder()
                 .method(Method::DELETE)
                 .uri(format!("/api/workspaces/{workspace_id}"))
+                .header(header::ORIGIN, "https://app.treer.example")
                 .header(header::COOKIE, &cookie)
                 .body(Body::empty())
                 .expect("authenticated delete"),
@@ -2743,6 +2897,7 @@ async fn workspace_deletion_route_requires_auth_and_deletes_the_workspace() {
                 .method(Method::DELETE)
                 .uri(format!("/api/workspaces/{workspace_id}"))
                 .header(header::COOKIE, &cookie)
+                .header(header::ORIGIN, "https://app.treer.example")
                 .body(Body::empty())
                 .expect("repeat delete"),
         )
@@ -3548,6 +3703,7 @@ async fn admin_update_forwards_to_the_sidecar() {
             Request::builder()
                 .method(Method::POST)
                 .uri("/api/admin/update")
+                .header(header::ORIGIN, "https://app.treer.example")
                 .header(header::COOKIE, cookie)
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from("{}"))

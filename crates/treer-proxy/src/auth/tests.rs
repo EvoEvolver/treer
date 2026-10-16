@@ -195,6 +195,24 @@ async fn app_oauth_codes_require_pkce_and_are_single_use() {
     assert!(store
         .consume_app_oauth_code(
             &code,
+            "other-service",
+            "https://mail.example/api/auth/callback",
+            &verifier,
+        )
+        .await
+        .is_err());
+    assert!(store
+        .consume_app_oauth_code(
+            &code,
+            "service-mail",
+            "https://evil.example/api/auth/callback",
+            &verifier,
+        )
+        .await
+        .is_err());
+    assert!(store
+        .consume_app_oauth_code(
+            &code,
             "service-mail",
             "https://mail.example/api/auth/callback",
             &"x".repeat(64),
