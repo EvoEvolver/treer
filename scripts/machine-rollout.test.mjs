@@ -78,7 +78,7 @@ test("smoke checks AIS idle, deletes only returned ID even when it exits, and do
 test("worker enforces pinned sums, core-before-launcher ordering, partial receipt, bound CLI and cleanup", async () => {
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "treer-rollout-worker-"))), original = { ...process.env };
   try {
-    for (const mode of ["mismatch", "complete", "partial", "core_unconfirmed", "environment_missing"]) {
+    for (const mode of ["mismatch", "complete", "partial", "core_unconfirmed", "core_diagnostic", "environment_missing"]) {
       const jobDir = join(directory, mode); mkdirSync(jobDir);
       const current = { ...target, platform, home: directory, controller: join(directory, "controller"), cli: join(directory, "cli"), node: realpathSync.native(process.execPath),
         python: join(directory, "python"), config: join(directory, "config.json"), startupStore: join(directory, "startup.json") };
@@ -94,6 +94,7 @@ test("worker enforces pinned sums, core-before-launcher ordering, partial receip
         assert.equal(env.TREER_WORKLOAD_CREDENTIAL, undefined); assert.equal(env.HTTP_PROXY, undefined);
         if (argv.includes("--worker")) {
           if (mode === "core_unconfirmed") throw new Error("subprocess_failed:timeout");
+          if (mode === "core_diagnostic") throw Object.assign(new Error("subprocess_failed:1"), { subprocess: subprocessDiagnostic({code:1,stderr:'startup_store_missing\nsynthetic-not-for-logs'}) });
           assert.equal(existsSync(join(jobDir, "result.json")), false, "core completion must not become overall completion");
           writeFileSync(join(jobDir, "core/result.json"), JSON.stringify({ status: "complete", backup: "private-backup" })); return "";
         }
@@ -102,6 +103,7 @@ test("worker enforces pinned sums, core-before-launcher ordering, partial receip
           if (action === "Prepare") mkdirSync(stage);
           if (action === "Worker") {
             if (mode === "core_unconfirmed") throw new Error("subprocess_failed:timeout");
+            if (mode === "core_diagnostic") throw Object.assign(new Error("subprocess_failed:1"), { subprocess: subprocessDiagnostic({code:1,stderr:'startup_store_missing\nsynthetic-not-for-logs'}) });
             assert.equal(existsSync(join(jobDir, "result.json")), false);
             writeFileSync(join(stage, "result.json"), JSON.stringify({ status: "complete", backup: "private-backup" }));
           }
@@ -120,7 +122,10 @@ test("worker enforces pinned sums, core-before-launcher ordering, partial receip
         runWindowsWorker: (updater, stage, env) => runCommand([updater, "-Action", "Worker", "-StageDirectory", stage], env) });
       assert.equal(result.hostChanged, false); assert.equal(existsSync(join(jobDir, ".running")), false);
       if (["mismatch", "environment_missing"].includes(mode)) { assert.equal(result.status, "failed"); assert.equal(calls.length, 0); }
-      else if (mode === "core_unconfirmed") { assert.equal(result.status, "partial"); assert.equal(result.coreStatus, "unconfirmed"); assert.equal(calls.some(argv => argv.includes("launcher")), false); }
+      else if (["core_unconfirmed", "core_diagnostic"].includes(mode)) {
+        assert.equal(result.status, "partial"); assert.equal(result.coreStatus, "unconfirmed"); assert.equal(calls.some(argv => argv.includes("launcher")), false);
+        if (mode === "core_diagnostic") { const persisted = JSON.parse(readFileSync(join(jobDir,'result.json'))); assert.equal(persisted.subprocess.exitCode,1); assert.deepEqual(persisted.subprocess.stderr.codes,['startup_store_missing']); }
+      }
       else {
         assert.equal(result.status, mode);
         if (process.platform === "win32") { assert.ok(calls[0].includes("Prepare")); assert.ok(calls[3].includes("Worker")); assert.ok(calls[4].includes("launcher")); }
@@ -196,7 +201,8 @@ test("native Windows activation shell is outside Jobs and writes bounded exit di
     const target = { platform: 'windows-x86_64', node: process.execPath, controller: join(directory,'controller.exe') };
     const env = cleanEnvironment(target); env.TEMP = directory; env.TMP = directory;
     process.env.TREER_WORKLOAD_CREDENTIAL = 'synthetic-not-forwarded';
-    await windowsWorker(fixture, directory, env, 20000);
+    try { await windowsWorker(fixture, directory, env, 20000); }
+    catch (error) { throw new Error(JSON.stringify(error.subprocess)); }
     assert.ok(existsSync(join(directory, 'guard.json'))); assert.equal(JSON.parse(readFileSync(join(directory,'worker-exit.json'))).exitCode,0);
     rmSync(join(directory,'worker-exit.json'));
     writeFileSync(fixture, `param($Action,$StageDirectory)\nthrow 'startup_store_missing'`);

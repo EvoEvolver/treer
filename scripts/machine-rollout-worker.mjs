@@ -70,11 +70,15 @@ export function windowsWorkerScript(updater, stage, env) {
   const literal = value => "'" + value.replaceAll("'", "''") + "'";
   const variables = Object.entries(env).map(([key, value]) => `[Environment]::SetEnvironmentVariable(${literal(key)},${literal(value)},'Process')`).join(";");
   return `$ErrorActionPreference='Stop';foreach($key in @([Environment]::GetEnvironmentVariables('Process').Keys)){[Environment]::SetEnvironmentVariable($key,$null,'Process')};${variables};` +
+    `[Environment]::SetEnvironmentVariable('PSExecutionPolicyPreference','Bypass','Process');[Environment]::SetEnvironmentVariable('PSModulePath',[IO.Path]::Combine($PSHOME,'Modules'),'Process');` +
     `$exitCode=0;$code=$null;try{& ${literal(updater)} -Action Worker -StageDirectory ${literal(stage)} *> $null}catch{$exitCode=1;if(@(${diagnosticCodes.map(literal).join(",")}) -ccontains $_.Exception.Message){$code=$_.Exception.Message}};` +
     `$result=@{exitCode=$exitCode;stderr=@{codes=@($code|Where-Object{$null -ne $_});contentOmitted=$true}}|ConvertTo-Json -Depth 4;` +
     `$file=${literal(join(stage, "worker-exit.json"))};$temp=$file+'.'+[Guid]::NewGuid().ToString('N')+'.tmp';[IO.File]::WriteAllText($temp,$result,[Text.UTF8Encoding]::new($false));[IO.File]::Move($temp,$file);exit $exitCode`;
 }
 export async function windowsWorker(updater, stage, env, timeout = 600000) {
+  // PS5.1 invocation via & does not consistently accept drive verbatim paths.
+  // This changes spelling only; the physical/private root was already checked.
+  updater = plainEntry(updater); stage = plainEntry(stage);
   const shell = join(env.SystemRoot, "System32/WindowsPowerShell/v1.0/powershell.exe");
   const quote = value => '"' + value.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1') + '"';
   const literal = value => "'" + value.replaceAll("'", "''") + "'";

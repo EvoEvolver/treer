@@ -192,6 +192,9 @@ On Windows the activation PowerShell process itself starts through CIM with
 processes in a Job. The updater's `Assert-UpdateOutsideJob` remains mandatory.
 The activation shell clears its environment and installs the same explicit OS
 allowlist as the worker. Its PID is persisted in `windows-stage/worker-launch.json`
+The shell explicitly restores its process-scoped `Bypass` execution policy and
+system-only `$PSHOME/Modules` path after clearing the environment; it does not
+inherit caller module paths or alter persistent execution policy.
 and its exit is atomically recorded in `worker-exit.json` in the private stage.
 If the activation poll times out, the independent process may still be running;
 inspect that exact PID and the receipts, never automatically launch it again.
