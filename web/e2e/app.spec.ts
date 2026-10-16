@@ -393,7 +393,7 @@ test.describe('resizable tree sidebar', () => {
     await page.goto('/')
     await browseTreeOnMobile(page)
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '272')
-    await page.getByRole('button', { name: /^api-server / }).click()
+    await page.getByRole('link', { name: /^api-server / }).click()
     await expect.poll(() => initialColumns).toBeGreaterThan(0)
     await drag(page, 96)
     await expect(separator(page)).toHaveAttribute('aria-valuenow', '368')
@@ -777,9 +777,9 @@ test("opens app, shows org, workspace, Apps and agents", async ({ page }) => {
   await expect(page.getByRole("tree", { name: "Workspace workloads" })).toBeVisible()
   await expect(page.locator("aside [role=tab]")).toHaveCount(0)
   await expect(page.getByRole("treeitem", { name: "Soul Archive", exact: true })).toHaveCount(1)
-  await expect(page.getByRole("button", { name: /^api-server / })).toBeVisible()
-  await expect(page.getByRole("button", { name: /^worker / })).toBeVisible()
-  await expect(page.getByRole("button", { name: /^app:Soul Archive / })).toHaveCount(0)
+  await expect(page.getByRole("link", { name: /^api-server / })).toBeVisible()
+  await expect(page.getByRole("link", { name: /^worker / })).toBeVisible()
+  await expect(page.getByRole("link", { name: /^app:Soul Archive / })).toHaveCount(0)
 })
 
 test("mixed workloads use common lifecycle endpoints and logs", async ({ page }) => {
@@ -802,14 +802,14 @@ test("Tree and map distinguish App identity from a command runtime kind", async 
   await page.route("**/api/workspaces/ws-1/snapshot", (route) => ok(route, { ...snapshot, agents: [agentA, agentB, { ...appRuntimeAgent, kind: "command" }] }))
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await expect(page.getByRole("button", { name: /^api-server agent ·/ })).toBeVisible()
-  await expect(page.getByRole("button", { name: /^worker agent ·/ })).toBeVisible()
-  await expect(page.getByRole("button", { name: /^Soul Archive app ·/ })).toBeVisible()
+  await expect(page.getByRole("link", { name: /^api-server agent ·/ })).toBeVisible()
+  await expect(page.getByRole("link", { name: /^worker agent ·/ })).toBeVisible()
+  await expect(page.getByRole("link", { name: /^Soul Archive app ·/ })).toBeVisible()
   await openOverviewMap(page)
-  const app = page.getByRole("dialog").getByRole("button", { name: /^Open \/Soul Archive · app ·/ })
+  const app = page.getByRole("dialog").getByRole("link", { name: /^Open \/Soul Archive · app ·/ })
   await expect(app).toBeVisible()
   await expect(app).toHaveAttribute("title", / · app ·/)
-  await expect(page.getByRole("dialog").getByRole("button", { name: /^Open \/api-server · agent ·/ })).toBeVisible()
+  await expect(page.getByRole("dialog").getByRole("link", { name: /^Open \/api-server · agent ·/ })).toBeVisible()
 })
 
 test("folder loading failure keeps workloads usable and supports retry", async ({ page }) => {
@@ -1098,7 +1098,7 @@ test("workload folders remain workspace scoped and mobile navigation returns to 
   await page.getByRole("combobox", { name: "Organization" }).click()
   await page.getByRole("option", { name: "Acme", exact: true }).click()
   await expect(page.getByRole("treeitem", { name: "Private organization", exact: true })).toBeVisible()
-  await page.getByRole("treeitem", { name: "Soul Archive", exact: true }).getByRole("button", { name: /^Soul Archive / }).click()
+  await page.getByRole("treeitem", { name: "Soul Archive", exact: true }).getByRole("link", { name: /^Soul Archive / }).click()
   await expect(page.getByRole('button', { name: /^Page .*; long-press for actions$/ })).toBeVisible()
   await backToWorkloads(page)
   await expect(page.getByRole("tree", { name: "Workspace workloads" })).toBeVisible()
@@ -1148,14 +1148,14 @@ test("late snapshots from the previous workspace cannot replace the current inve
   await page.waitForTimeout(100)
   await expect(page.getByRole("treeitem")).toHaveCount(0)
   await expect(workstationRow(page)).toHaveCount(0)
-  await expect(page.getByRole("button", { name: /^api-server / })).toHaveCount(0)
+  await expect(page.getByRole("link", { name: /^api-server / })).toHaveCount(0)
 })
 
 test("agent list row menu can rename and delete", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
   await agentsTab(page).click()
-  const row = page.getByRole("button", { name: /^api-server / })
+  const row = page.getByRole("link", { name: /^api-server / })
   await row.hover()
   await page.getByRole("button", { name: "Actions for api-server" }).click()
   await expect(page.getByRole("menuitem", { name: "Rename" })).toBeVisible()
@@ -1414,7 +1414,7 @@ test("agent toolbar uploads a file to its machine", async ({ page }) => {
 
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: /^api-server / }).click()
+  await page.getByRole("link", { name: /^api-server / }).click()
   await tabAction(page, 'Upload file')
   const dialog = page.getByRole("dialog")
   await expect(dialog.getByRole("heading", { name: "Upload file" })).toBeVisible()
@@ -1441,7 +1441,7 @@ test("mobile upload dialog fits the viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: /^api-server / }).click()
+  await page.getByRole("link", { name: /^api-server / }).click()
   await tabAction(page, 'Upload file')
 
   await expect(page.getByRole("dialog").getByRole("heading", { name: "Upload file" })).toBeVisible()
@@ -1551,7 +1551,7 @@ test("terminal drains a burst of small output frames without stalling", async ({
 
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: /^api-server / }).click()
+  await page.getByRole("link", { name: /^api-server / }).click()
 
   await expect(page.locator(".xterm-rows")).toContainText(`burst-frame-${frameCount}`, { timeout: 2_000 })
   await expect.poll(() => acknowledgedBytes).toBe(outputBytes)
@@ -1564,7 +1564,7 @@ for (const mobile of [false, true]) {
     async function open(page: Page) {
       await page.goto('/')
       await browseTreeOnMobile(page)
-      await page.getByRole('button', { name: /^api-server / }).click()
+      await page.getByRole('link', { name: /^api-server / }).click()
       await expect(page.locator('.xterm')).toBeVisible()
     }
     test('split replay is silent, queued live queries respond, and typed input is unchanged', async ({ page }) => {
@@ -1632,7 +1632,7 @@ for (const mobile of [false, true]) {
       expect(input).toEqual([])
       await page.reload()
       await browseTreeOnMobile(page)
-      await page.getByRole('button', { name: /^api-server / }).click()
+      await page.getByRole('link', { name: /^api-server / }).click()
       await expect.poll(() => connections).toBe(3)
       await expect.poll(() => ack).toBe(3 * Buffer.byteLength(first + last))
       expect(input).toEqual([])
@@ -1667,7 +1667,7 @@ test("terminal uses a browser-safe close code when output backlog exceeds its li
 
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: /^api-server / }).click()
+  await page.getByRole("link", { name: /^api-server / }).click()
 
   await expect.poll(() => page.evaluate(() => (window as unknown as { __terminalCloseCodes: number[] }).__terminalCloseCodes)).toContain(4001)
   expect(pageErrors).toEqual([])
@@ -1930,7 +1930,7 @@ for (const mobile of [false, true]) {
       await expect(first).toHaveAttribute("title", "/research/reviewer")
       await expect(second).toHaveAttribute("title", "/delivery/reviewer")
       for (const [row, path] of [[first, "/research/reviewer"], [second, "/delivery/reviewer"]] as const) {
-        await row.getByRole("button").first().click()
+        await row.getByRole("link").first().click()
         await expect(row).toHaveAttribute("aria-selected", "true")
         if (mobile) {
           await expect(page.getByRole("tabpanel").locator(`span[title="${path}"]`)).toBeVisible()
