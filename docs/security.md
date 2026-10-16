@@ -324,12 +324,21 @@ protected DACL whose entries are all non-inherited plain allow entries for
 the token user or LocalSystem; plain deny entries are parsed and rejected, and
 unsupported ACE types (object, callback, audit, unknown) are never parsed
 beyond their header and fail closed. Failures log a categorical report (owner class,
-control flags, ACE type/inherited/principal class) without SIDs or paths. The
-Windows DACL verification was exercised on a hosted windows-2022 runner (an
-elevated account whose token owner is the Administrators group), where the
-earlier owner-only rule failed and the token-bound rule passed. Not yet
-exercised: a non-administrator user account, the win_native acceptance
-machine, and the reparse-point and free-space paths beyond compilation.
+control flags, ACE type/inherited/principal class) without SIDs or paths.
+Treer on Windows assumes an Administrators-group account: the Controller
+classifies its own token (elevation type and BUILTIN\Administrators
+membership, never names, paths or environment; a classification error counts
+as non-administrator) and, for a standard account, reports the fixed code
+`windows_requires_administrator` for private state (variable omitted,
+reservations refused, status API) instead of a DACL verdict; the owner and ACE
+rules are never relaxed for such accounts. On a hosted windows-2022 runner (an
+elevated account whose token owner is the Administrators group) the earlier
+owner-equals-user rule failed and a version accepting the fixed owner set
+{user, SYSTEM, Administrators} passed (run 38962540814); the current
+token-bound rule awaits its own run on that runner. Not exercised: a
+non-administrator account (unsupported by product rule), the win_native
+acceptance machine, and the reparse-point and free-space paths beyond
+compilation.
 The private state quota is cooperative
 admission control for launchers that reserve before writing; same-account code
 can bypass it, after which the Controller only refuses further reservations.

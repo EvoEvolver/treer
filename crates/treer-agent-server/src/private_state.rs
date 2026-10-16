@@ -62,6 +62,39 @@ fn unavailable(path: &Path, error: io::Error) -> ProtocolError {
     )
 }
 
+/// Fixed code for the Windows product rule: private state is only served to
+/// an Administrators-group account; a standard account gets this code instead
+/// of a misleading DACL verdict.
+pub const WINDOWS_REQUIRES_ADMINISTRATOR: &str = "windows_requires_administrator";
+
+/// Windows: whether this process runs under an Administrators-group token.
+/// Decided from the token alone (never from names, paths or environment) and
+/// cached for the process lifetime; a classification error counts as not an
+/// administrator (fail closed). Always true elsewhere.
+fn windows_account_is_administrator() -> bool {
+    #[cfg(windows)]
+    {
+        static ADMINISTRATOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ADMINISTRATOR.get_or_init(|| match treer_platform::account_class() {
+            Ok(treer_platform::WindowsAccountClass::Standard) => false,
+            Ok(_) => true,
+            Err(error) => {
+                warn!(%error, "Windows account classification failed; treating as non-administrator");
+                false
+            }
+        })
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+fn requires_administrator() -> ProtocolError {
+    ProtocolError::new(
+        WINDOWS_REQUIRES_ADMINISTRATOR,
+        "Treer on Windows requires an account in the Administrators group; private state is unavailable",
+    )
+}
+
 fn unsafe_directory(path: &Path, reason: &str) -> ProtocolError {
     warn!(path = %path.display(), reason, "Agent private state directory failed its safety check");
     ProtocolError::new(
@@ -288,6 +321,9 @@ fn verify_ancestors(root: &Path) -> Result<(), ProtocolError> {
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), ProtocolError> {
+    if !windows_account_is_administrator() {
+        return Err(requires_administrator());
+    }
     match fs::symlink_metadata(path) {
         Ok(metadata) => verify_private_directory(path, &metadata),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -326,6 +362,9 @@ fn is_reparse_point(metadata: &fs::Metadata) -> bool {
 }
 
 fn verify_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), ProtocolError> {
+    if !windows_account_is_administrator() {
+        return Err(requires_administrator());
+    }
     if metadata.file_type().is_symlink() {
         return Err(unsafe_directory(path, "symlink"));
     }
