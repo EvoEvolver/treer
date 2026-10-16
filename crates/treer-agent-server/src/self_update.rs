@@ -13,6 +13,10 @@ use uuid::Uuid;
 const RECEIPT_LIMIT: u64 = 64 * 1024;
 
 pub mod artifacts;
+pub mod publication;
+pub mod safety;
+
+use publication::{FileStep, Publications};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +95,7 @@ pub struct Receipt {
     pub artifact_source_sha: String,
     pub controller_sha256: String,
     pub cli_sha256: String,
+    pub publications: Publications,
     pub source: Source,
     pub phase: Phase,
     pub created_at: DateTime<Utc>,
@@ -113,6 +118,21 @@ fn identifier(value: &str, prefix: &str) -> bool {
 }
 
 impl Receipt {
+    pub fn reconcile_file(
+        &self,
+        binary: artifacts::Binary,
+        actual_sha256: Option<&str>,
+    ) -> publication::Reconcile {
+        if self.validate().is_err() {
+            return publication::Reconcile::Conflict;
+        }
+        let target = match binary {
+            artifacts::Binary::Controller => &self.controller_sha256,
+            artifacts::Binary::Cli => &self.cli_sha256,
+        };
+        self.publications.reconcile(binary, target, actual_sha256)
+    }
+
     pub fn validate(&self) -> Result<()> {
         if self.schema_version != 1
             || self.job_id.is_nil()
@@ -127,6 +147,7 @@ impl Receipt {
         {
             bail!("invalid_update_receipt");
         }
+        self.publications.validate(self)?;
         match &self.source {
             Source::Signed {
                 key_id,
@@ -218,6 +239,10 @@ impl Journal {
     }
 
     fn write(&self, receipt: &Receipt) -> Result<()> {
+        receipt.validate()?;
+        if receipt.job_id != self.id {
+            bail!("update_job_mismatch");
+        }
         let bytes = serde_json::to_vec(receipt)?;
         if bytes.len() as u64 > RECEIPT_LIMIT {
             bail!("update_receipt_too_large");
@@ -252,6 +277,32 @@ impl Journal {
             .checked_add(1)
             .ok_or_else(|| anyhow::anyhow!("update_revision_exhausted"))?;
         receipt.phase = phase;
+        receipt.updated_at = Utc::now().max(receipt.updated_at);
+        self.write(&receipt)?;
+        Ok(receipt)
+    }
+
+    /// Persist an individual replacement intent/completion BEFORE/AFTER its OS
+    /// rename respectively. The same installation/enrollment locks are required.
+    /// Recovery reconciles actual image digests, never infers a completed rename
+    /// from an intent or launches a process while publication is ambiguous.
+    pub fn record_file(
+        &self,
+        expected_revision: u64,
+        binary: artifacts::Binary,
+        step: FileStep,
+    ) -> Result<Receipt> {
+        let mut receipt = self.read()?;
+        if receipt.revision != expected_revision {
+            bail!("update_revision_or_phase_conflict");
+        }
+        receipt
+            .publications
+            .transition(binary, receipt.phase, step)?;
+        receipt.revision = receipt
+            .revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("update_revision_exhausted"))?;
         receipt.updated_at = Utc::now().max(receipt.updated_at);
         self.write(&receipt)?;
         Ok(receipt)
@@ -294,6 +345,12 @@ mod tests {
             artifact_source_sha: "b".repeat(40),
             controller_sha256: "c".repeat(64),
             cli_sha256: "d".repeat(64),
+            publications: Publications::new(
+                "f".repeat(64),
+                "0".repeat(64),
+                &"c".repeat(64),
+                &"d".repeat(64),
+            ),
             source: Source::Pin {
                 sums_sha256: "e".repeat(64),
                 allow_pinned: true,
@@ -407,5 +464,162 @@ mod tests {
             journal.read().unwrap_err().to_string(),
             "update_job_mismatch"
         );
+    }
+
+    #[test]
+    fn durable_per_file_intents_reconcile_crashes_before_and_after_atomic_renames() {
+        use artifacts::Binary;
+        use publication::{FileStep, Reconcile};
+        use sha2::{Digest, Sha256};
+        let hash = |bytes: &[u8]| format!("{:x}", Sha256::digest(bytes));
+        let (fixture, root) = Fixture::new();
+        let mut initial = receipt();
+        initial.controller_sha256 = hash(b"new-controller");
+        initial.cli_sha256 = hash(b"new-cli");
+        initial.publications = Publications::new(
+            hash(b"old-controller"),
+            hash(b"old-cli"),
+            &initial.controller_sha256,
+            &initial.cli_sha256,
+        );
+        for (name, bytes) in [
+            ("installed", b"old-controller".as_slice()),
+            ("stage", b"new-controller"),
+            ("backup", b"old-controller"),
+        ] {
+            let mut file = root.create_file(name).unwrap();
+            file.write_all(bytes).unwrap();
+            file.sync_all().unwrap();
+        }
+        let journal = Journal::create(&root, &initial).unwrap();
+        journal.advance(0, Phase::Prepared).unwrap();
+        journal.advance(1, Phase::Activating).unwrap();
+        let observed = || hash(&std::fs::read(fixture.0.join("installed")).unwrap());
+        assert_eq!(
+            journal
+                .read()
+                .unwrap()
+                .reconcile_file(Binary::Controller, Some(&observed())),
+            Reconcile::NoMutation
+        );
+        assert!(journal
+            .record_file(2, Binary::Controller, FileStep::Installed)
+            .is_err());
+        journal
+            .record_file(2, Binary::Controller, FileStep::InstallIntent)
+            .unwrap();
+        drop(journal);
+        let journal = Journal::open(&root, &initial.job_id.to_string()).unwrap();
+        assert_eq!(
+            journal
+                .read()
+                .unwrap()
+                .reconcile_file(Binary::Controller, Some(&observed())),
+            Reconcile::InstallVerified
+        );
+        // Simulate a crash after the actual Unix atomic rename, before the
+        // completion receipt. The fixture is private, never an installed binary.
+        std::fs::rename(fixture.0.join("stage"), fixture.0.join("installed")).unwrap();
+        drop(journal);
+        let journal = Journal::open(&root, &initial.job_id.to_string()).unwrap();
+        assert_eq!(
+            journal
+                .read()
+                .unwrap()
+                .reconcile_file(Binary::Controller, Some(&observed())),
+            Reconcile::RecordInstalled
+        );
+        journal
+            .record_file(3, Binary::Controller, FileStep::Installed)
+            .unwrap();
+        assert!(journal
+            .record_file(3, Binary::Controller, FileStep::Installed)
+            .is_err());
+        assert!(
+            journal.advance(4, Phase::CoreHealthy).is_err(),
+            "CLI was not installed"
+        );
+        assert_eq!(
+            journal.read().unwrap().revision,
+            4,
+            "failed validation must preserve the old receipt"
+        );
+        journal.advance(4, Phase::RollingBack).unwrap();
+        journal
+            .record_file(5, Binary::Controller, FileStep::RestoreIntent)
+            .unwrap();
+        assert_eq!(
+            journal
+                .read()
+                .unwrap()
+                .reconcile_file(Binary::Controller, Some(&observed())),
+            Reconcile::RestoreVerified
+        );
+        std::fs::rename(fixture.0.join("backup"), fixture.0.join("installed")).unwrap();
+        drop(journal);
+        let journal = Journal::open(&root, &initial.job_id.to_string()).unwrap();
+        assert_eq!(
+            journal
+                .read()
+                .unwrap()
+                .reconcile_file(Binary::Controller, Some(&observed())),
+            Reconcile::RecordRestored
+        );
+        journal
+            .record_file(6, Binary::Controller, FileStep::Restored)
+            .unwrap();
+        let restored = journal.advance(7, Phase::RolledBack).unwrap();
+        assert_eq!(
+            restored.reconcile_file(Binary::Controller, Some(&observed())),
+            Reconcile::NoMutation
+        );
+        assert!(journal
+            .record_file(8, Binary::Controller, FileStep::InstallIntent)
+            .is_err());
+        assert!(journal.advance(8, Phase::Activating).is_err());
+    }
+
+    #[test]
+    fn missing_unknown_and_same_image_publications_cannot_guess_a_rename_result() {
+        use artifacts::Binary;
+        use publication::{FileStep, Reconcile};
+        let mut r = receipt();
+        assert_eq!(
+            r.reconcile_file(Binary::Controller, None),
+            Reconcile::Conflict
+        );
+        assert_eq!(
+            r.reconcile_file(Binary::Controller, Some(&"e".repeat(64))),
+            Reconcile::Conflict
+        );
+        assert_eq!(
+            r.reconcile_file(Binary::Controller, Some(&r.controller_sha256)),
+            Reconcile::Conflict
+        );
+        r.publications = Publications::new(
+            r.controller_sha256.clone(),
+            r.cli_sha256.clone(),
+            &r.controller_sha256,
+            &r.cli_sha256,
+        );
+        r.validate().unwrap();
+        assert_eq!(r.publications.step(Binary::Controller), FileStep::Unchanged);
+        assert_eq!(
+            r.reconcile_file(Binary::Controller, Some(&r.controller_sha256)),
+            Reconcile::NoMutation
+        );
+        let (_fixture, root) = Fixture::new();
+        let journal = Journal::create(&root, &r).unwrap();
+        journal.advance(0, Phase::Prepared).unwrap();
+        journal.advance(1, Phase::Activating).unwrap();
+        assert!(journal
+            .record_file(2, Binary::Controller, FileStep::InstallIntent)
+            .is_err());
+        journal.advance(2, Phase::CoreHealthy).unwrap();
+        journal.advance(3, Phase::LauncherInstalling).unwrap();
+        journal.advance(4, Phase::Complete).unwrap();
+        assert!(journal
+            .record_file(5, Binary::Controller, FileStep::RestoreIntent)
+            .is_err());
     }
 }
