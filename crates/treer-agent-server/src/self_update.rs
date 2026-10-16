@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 const RECEIPT_LIMIT: u64 = 64 * 1024;
 
+pub mod activator;
 pub mod artifacts;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod handoff;

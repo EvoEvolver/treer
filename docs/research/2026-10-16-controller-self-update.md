@@ -52,6 +52,20 @@ timeouts/body sizes, and production HTTPS. Loopback HTTP is fixture-only.
 
 ## Transaction and Windows handoff
 
+The activator image preparation primitive now copies the selected installed
+Controller under the selection locks into an exclusive job-private `activator`
+file. It hashes the bytes actually copied against the journal's original
+Controller digest, syncs them before setting mode 0500, closes the writable
+handle, and retains the reopened inode for later process attestation. It never
+uses PATH, `current_exe`, or downloaded replacement bytes for this old-version
+worker. Existing or failed partial copies are retained, not adopted or replaced;
+bad content never receives executable permissions. Before use, the retained
+image and its directory entry must still match in inode, digest and exact mode.
+The full job receipt must match, allowing only its single ordinary transition
+from Preparing to Prepared. A changed job/image or later phase is refused.
+This does not launch an activator or prove session detachment; wiring the
+synchronous internal worker entry and owned-child lifecycle remains pending.
+
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
 child receives references to the same open file descriptions, so closing the
