@@ -4,8 +4,27 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { createServer } from "node:http";
 import { hermeticEnv } from "./hermetic.mjs";
 import { launcherReady } from "./launcher-ready.js";
+
+test("readiness deadline aborts a listening health endpoint that never responds", { timeout: 3000 }, async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "launcher-ready-stalled-"));
+  const server = createServer(() => { /* Deliberately never send headers or a body. */ });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    assert.ok(address && typeof address !== "string");
+    const file = join(cwd, "port");
+    await writeFile(file, String(address.port));
+    const alive = { exitCode: null, signalCode: null } as ReturnType<typeof spawn>;
+    await assert.rejects(launcherReady(alive, file, 100), /readiness timed out/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    await rm(cwd, { recursive: true, force: true });
+  }
+});
 
 test("readiness never returns an empty/invalid address when startup misses its deadline", async () => {
   const cwd = await mkdtemp(join(tmpdir(), "launcher-ready-"));
