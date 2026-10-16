@@ -1099,6 +1099,14 @@ npm --prefix launchers/agent ci
 npm --prefix launchers/agent run check
 npm --prefix launchers/agent test
 # Unit tests use fake Codex, ACP, and native Claude processes.
+# Optional joint image lifecycle check: start Core's ignored
+# private_state_joint_fixture test with a private Cargo target, ephemeral port,
+# TREER_PRIVATE_STATE_FIXTURE_SECONDS=90 and DELETE_AFTER=60 (full variable name:
+# TREER_PRIVATE_STATE_FIXTURE_DELETE_AFTER). Save its stdout to a mode-0600 log;
+# it contains only a synthetic test workload credential. In a second terminal:
+node launchers/agent/tests/private-state-controller.mjs /absolute/path/to/fixture.log
+# This starts/stops only its own fake-Codex launcher processes; Core's fixture
+# performs the scheduled confirmed-delete purge. Never use a real enrollment.
 # Optional embedded-binary integration: sealed fake enrolled CLI, no credentials
 # or Agent creation/restarts. Requires a Controller built with the portable payload.
 node launchers/agent/tests/core-installer.mjs /absolute/path/to/treer-agent-server
