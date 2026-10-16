@@ -17,7 +17,9 @@ use super::{
 
 mod ownership;
 pub mod parent;
+mod worker;
 pub use ownership::{AcceptedOwnership, OwnedActivation};
+pub use worker::WorkerBootstrap;
 
 /// Only this module can construct proof of the endpoint preflight. Keep the
 /// complete checked receipt so another job/revision cannot consume the proof.

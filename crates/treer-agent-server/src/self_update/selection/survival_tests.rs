@@ -2,7 +2,7 @@
 use super::*;
 use crate::self_update::{
     activator::{ActivatorImage, RunningActivator},
-    handoff::{AuthenticatedPeer, Endpoint},
+    handoff::{Endpoint, WorkerBootstrap},
     images::digest_file,
     publication::Publications,
     Journal,
@@ -274,23 +274,10 @@ fn worker() {
     }
     std::fs::write(&path, original).unwrap();
     std::fs::write(job.join("bootstrapped"), b"ready").unwrap();
-    let parent = crate::self_update::handoff::parent::load(&journal, &selected).unwrap();
-    let digest = journal
-        .read()
-        .unwrap()
-        .publications
-        .original_digest(Binary::Controller)
-        .to_owned();
-    let peer = AuthenticatedPeer::authenticate(
-        journal.directory.connect_handoff(&job).unwrap(),
-        &parent,
-        parent.executable(),
-        &digest,
-    )
-    .unwrap();
+    let bootstrap = WorkerBootstrap::connect(&running, &journal, &selected, &job).unwrap();
     std::fs::write(job.join("worker-authed"), b"ready").unwrap();
     wait_for(|| job.join("parent-authed").exists());
-    let owned = peer.take_ownership(&journal, &selected).unwrap();
+    let owned = bootstrap.take_ownership(&journal, &selected).unwrap();
     std::fs::write(job.join("ready"), b"ready").unwrap();
     wait_for(|| {
         if job.join("release").exists() {

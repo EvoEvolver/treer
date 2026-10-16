@@ -134,6 +134,19 @@ recorded process creation identity, and never delete it or retry spawning merely
 because ownership is absent. Record presence alone proves neither a live worker
 nor permission to replay activation.
 
+`WorkerBootstrap` now combines the pre-runtime worker sequence: revalidate the
+running private activator, load and attest the OS parent, connect once to the
+fixed endpoint, authenticate that exact peer and recheck the complete Prepared
+receipt. Construction sends no bytes. Its consuming ownership method closes the
+stream on every error, including uncertain ACKs, and returns the existing sealed
+lock-owning activation value only after durable handoff. No parent PID, image or
+socket is supplied by the caller. The isolated parent-exit fixture uses this
+production bootstrap; it still uses fixture barriers around expensive debug
+image hashing, separate from the three-second framed exchange budget. The
+production dispatch must exit on bootstrap error and must complete this sequence
+before creating runtime threads or child processes; that dispatch is not wired
+yet, and no public self-update command is exposed.
+
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
 child receives references to the same open file descriptions, so closing the
