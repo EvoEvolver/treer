@@ -25,6 +25,7 @@ import { GoalExitRequests } from "./goal-exit.js";
 import { GoalEdits } from "./goal-edits.js";
 import { AttachmentStore } from "./attachments.js";
 import { AttachmentError } from "./image-format.js";
+import { PrivateStateClient, type PrivateStateStatus } from "./private-state.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -68,10 +69,18 @@ const runtime = createRuntime();
 // text prompts working, but cannot silently put private images in the checkout.
 const privateStateRoot = process.env.TREER_AGENT_PRIVATE_STATE_DIR;
 let attachments: AttachmentStore | undefined;
-if (privateStateRoot) {
-  const inside = relative(realpathSync.native(cwd), realpathSync.native(privateStateRoot));
-  if (!isAbsolute(privateStateRoot) || !inside || !isAbsolute(inside) && inside !== ".." && !inside.startsWith(`..${sep}`)) throw new Error("Agent private state must be outside the working directory");
-  attachments = new AttachmentStore(join(privateStateRoot, "images"));
+let attachmentStorageStatus: PrivateStateStatus = "agent_private_state_unavailable";
+try {
+  const quota = new PrivateStateClient(process.env.TREER_AGENT_SERVER_URL || "", agentId, process.env.TREER_WORKLOAD_CREDENTIAL || "");
+  attachmentStorageStatus = await quota.status();
+  if (privateStateRoot && attachmentStorageStatus === "available") {
+    const inside = relative(realpathSync.native(cwd), realpathSync.native(privateStateRoot));
+    if (!isAbsolute(privateStateRoot) || !inside || !isAbsolute(inside) && inside !== ".." && !inside.startsWith(`..${sep}`)) throw new AttachmentError("agent_private_state_inside_cwd", 503);
+    attachments = new AttachmentStore(join(privateStateRoot, "images"), undefined, undefined, quota);
+  } else if (!privateStateRoot && attachmentStorageStatus === "available") attachmentStorageStatus = "agent_private_state_unavailable";
+} catch (error) {
+  // Image storage failures must never prevent text-only Agent recovery.
+  attachmentStorageStatus = error instanceof AttachmentError && error.code === "agent_private_state_inside_cwd" ? "agent_private_state_inside_cwd" : "agent_private_state_unavailable";
 }
 if (attachments) setInterval(() => {
   try { attachments!.sweep(); }
@@ -167,6 +176,7 @@ function statePayload(historyLimit = initialHistoryLimit) {
     goalDelivery: goalEdits.state,
     history: { limit: historyLimit },
     attachmentsAvailable: Boolean(attachments),
+    attachmentStorageStatus,
   };
 }
 

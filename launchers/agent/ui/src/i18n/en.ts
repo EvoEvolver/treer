@@ -2,6 +2,9 @@
 export const en = {
   "images.add": "Attach images",
   "images.attached": "Attached images",
+  "images.storageInside": "Image uploads disabled: private storage is inside the working directory.",
+  "images.storageUnsafe": "Image uploads disabled: private storage needs its permissions repaired.",
+  "images.storageUnavailable": "Image uploads unavailable: this Controller has no usable private attachment storage.",
   "images.remove": "Remove image {{number}}",
   "images.preview": "Attached image {{number}}",
   "images.uploading": "Uploading images…",

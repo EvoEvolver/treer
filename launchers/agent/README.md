@@ -566,8 +566,28 @@ private/no-store caching and a restrictive sandbox CSP. No filenames or image
 bytes are written into the metadata/queue journals. Retained images survive
 launcher restarts; unsubmitted drafts expire after one hour and the per-Agent
 store is capped at 256 MiB. Missing Controller private-state support disables
-attachments rather than writing to the checkout. Controller deletion/global
-quota integration is required before releasing this feature.
+attachments rather than writing to the checkout; the UI explains an unavailable,
+unsafe or inside-working-directory state without exposing a filesystem path.
+The Controller advertises `agent.private-state.v1` as an interface-contract
+feature, separately from AIS registration capabilities. The launcher authenticates
+to its bound loopback Controller using its workload identity, checks
+`GET /api/private-state`, then reserves quota before streaming upload bytes.
+File and journal are durable before commit. Commit failure, expiration or a
+network timeout rolls back this upload's file and journal entry; it never implies
+success. Failed releases get a bounded retry and fixed-code log; Controller TTL
+and disk recount provide conservative recovery.
+
+Core measures the **whole Agent private directory**, including metadata and
+temporary files: 256 MiB per Agent, 4 GiB per machine, with a 1 GiB free-space
+floor. Removing drafts is reflected by the next Controller recount. A Controller
+restart preserves files and recounts usage but invalidates outstanding quota
+reservations. Stop/restart/update retain private state; confirmed permanent Agent
+deletion removes all its private state after the Host has stopped its process.
+Offline deletion catches up through tombstone validation; old Proxies without
+that contract leave directories for manual cleanup. These are cooperative quotas
+and same-account filesystem permissions, **not isolation between processes of
+the same OS user**. Core implementation and end-to-end lifecycle validation are
+still required before releasing this candidate.
 
 **Files and policy.** Four flat files: `index.html`, `boot.js` (runs in `<head>`, no flash
 of the wrong look or theme), `ui.js` (React, marked and DOMPurify, bundled) and `ui.css`

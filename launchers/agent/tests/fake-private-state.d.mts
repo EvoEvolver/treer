@@ -1,0 +1,2 @@
+export interface FakePrivateStateOptions { status?: string; reserveError?: string; commitError?: string; hangCommit?: boolean; onCommit?: () => void }
+export function fakePrivateState(agent: string, credential?: string, options?: FakePrivateStateOptions): Promise<{ url: string; events: {method: string; path: string}[]; reservations: Set<string>; options: FakePrivateStateOptions; close(): Promise<void> }>;

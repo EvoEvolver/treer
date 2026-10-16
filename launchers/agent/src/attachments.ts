@@ -7,6 +7,7 @@ import { protectDirectory, syncDirectory } from "../scripts/private-state.mjs";
 import { ATTACHMENT_ID, AttachmentError, IMAGE_COUNT_LIMIT, IMAGE_FILE_LIMIT, IMAGE_PROMPT_LIMIT, imageFormat } from "./image-format.js";
 import type { ImageAttachment } from "./model.js";
 import type { HarnessImage } from "./runtime.js";
+import type { AttachmentAdmission } from "./private-state.js";
 
 interface Entry extends ImageAttachment { session: string; extension: string; digest: string; createdAt: number; retained: boolean }
 interface Journal { version: 1; entries: Entry[]; bindings: Record<string, string[]> }
@@ -24,7 +25,7 @@ export class AttachmentStore {
   private activeUploads = new Set<string>();
   private readonly root: string;
   private readonly journal: string;
-  constructor(root: string, readonly quota = AGENT_QUOTA, private readonly now = Date.now) {
+  constructor(root: string, readonly quota = AGENT_QUOTA, private readonly now = Date.now, private readonly admission?: AttachmentAdmission) {
     if (!isAbsolute(root)) throw new AttachmentError("attachment_private_root_required", 503);
     const resolved = resolve(root);
     let ancestor = parse(resolved).root;
@@ -108,8 +109,14 @@ export class AttachmentStore {
     this.reserved += reservation;
     const id = `img_${randomBytes(16).toString("hex")}`, temporary = join(this.root, `.${id}.tmp`);
     this.activeUploads.add(`.${id}.tmp`);
-    let destination: string | undefined, fd: Awaited<ReturnType<typeof open>> | undefined;
+    let destination: string | undefined, fd: Awaited<ReturnType<typeof open>> | undefined, quotaId: string | undefined;
+    const onStreamError = () => { /* The upload catches aborted streams below, including during quota admission. */ };
+    stream.on("error", onStreamError);
     try {
+      // Reserve before accepting bytes; journal overhead is checked by Core's
+      // authoritative whole-directory measurement at commit.
+      quotaId = await this.admission?.reserve(reservation);
+      if (stream.destroyed || stream.readableAborted) throw new AttachmentError("attachment_truncated");
       fd = await open(temporary, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW, 0o600);
       let size = 0;
       for await (const chunk of stream.iterator({ destroyOnReturn: false })) {
@@ -128,9 +135,14 @@ export class AttachmentStore {
       renameSync(temporary, destination); syncDirectory(this.root);
       this.entries.set(id, entry);
       try { this.save(); } catch (error) { this.entries.delete(id); throw error; }
+      if (quotaId) await this.admission!.commit(quotaId);
+      quotaId = undefined;
       destination = undefined;
       return this.metadata(entry);
     } catch (error) {
+      if (this.entries.delete(id)) {
+        try { this.save(); } catch { throw new AttachmentError("attachment_storage_failed", 503); }
+      }
       if (error instanceof AttachmentError) throw error;
       if (stream.readableAborted) throw new AttachmentError("attachment_truncated");
       // I/O errors can contain local paths; expose only a fixed code.
@@ -139,8 +151,22 @@ export class AttachmentStore {
       this.reserved -= reservation;
       this.activeUploads.delete(`.${id}.tmp`);
       await fd?.close().catch(() => {});
-      if (existsSync(temporary)) unlinkSync(temporary);
-      if (destination && existsSync(destination)) unlinkSync(destination);
+      let cleanupFailed = false;
+      try {
+        if (existsSync(temporary)) unlinkSync(temporary);
+        if (destination && existsSync(destination)) unlinkSync(destination);
+      } catch { cleanupFailed = true; }
+      if (quotaId) {
+        // A failed/unknown commit is never success. Rollback above precedes
+        // release so Core's recount observes cleanup. TTL is the final fallback.
+        let released = false;
+        for (let attempt = 0; attempt < 2 && !released; attempt++) {
+          try { await this.admission!.release(quotaId); released = true; } catch { /* bounded retry; no credentials/path in logs */ }
+        }
+        if (!released) console.error("Attachment quota release failed; Controller expiry/recount required");
+      }
+      stream.off("error", onStreamError);
+      if (cleanupFailed) throw new AttachmentError("attachment_storage_failed", 503);
     }
   }
   read(id: string, session: string): { metadata: ImageAttachment; bytes: Buffer } {

@@ -9,6 +9,7 @@ import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 import { testRuntimeControlsUi } from "./browser-controls-ui.mjs";
 import { testImagesUi } from "./browser-images-ui.mjs";
 import { testMobileComposer } from "./browser-mobile-composer.mjs";
+import { fakePrivateState } from "./fake-private-state.mjs";
 
 // The React UI (public/ui.html) against the real launcher server and a fake Codex: no inference, no Treer mutations.
 // Usage: node tests/browser-ui.mjs [--page index.html]
@@ -21,6 +22,7 @@ const servers = [];
 async function startServer(name, extra, harness = "codex") {
   const cwd = await mkdtemp(join(tmpdir(), `ui-browser-${name}-`));
   const privateRoot = await realpath(await mkdtemp(join(tmpdir(), `ui-images-${name}-`)));
+  const controller = await fakePrivateState("ag_browser_ui");
   await mkdir(join(cwd, "src/deep"), { recursive: true });
   await mkdir(join(cwd, "empty"));
   await writeFile(join(cwd, "src/greeting.ts"), "export const greeting = 'Hello, Treer';\n// <script>window.fileXSS = true</script>\n");
@@ -29,7 +31,7 @@ async function startServer(name, extra, harness = "codex") {
   await writeFile(join(cwd, "special # 100%.txt"), "literal percent and hash filename\n");
   await writeFile(join(cwd, "large.txt"), "x".repeat(65537));
   // The unique marker identifies exactly the processes this test started; they are stopped through their own handles only.
-  const common = { UI_DEV_FIXTURE: randomUUID(), TREER_AGENT_PRIVATE_STATE_DIR: privateRoot, TREER_AGENT_ID: "ag_browser_ui", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0" };
+  const common = { UI_DEV_FIXTURE: randomUUID(), TREER_AGENT_PRIVATE_STATE_DIR: privateRoot, TREER_AGENT_ID: "ag_browser_ui", TREER_AGENT_SERVER_URL: controller.url, TREER_WORKLOAD_CREDENTIAL: "fixture-only", AGENT_UI_MESSAGE_WATCH: "0", AGENT_UI_INSTANCE_ID: "browser-ui", CODEX_UI_PUBLIC_DIR: join(app, "public"), CODEX_UI_PORT: "0" };
   const env = hermeticEnv(harness === "claude"
     ? { ...common, AGENT_UI_HARNESS: "claude", AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: join(cwd, "port"), AGENT_UI_PUBLIC_DIR: join(app, "public"), CLAUDE_BIN: join(app, "tests/fake-claude.mjs"), ...extra }
     : { ...common, CODEX_UI_CWD: cwd, CODEX_UI_PORT_FILE: join(cwd, "port"), CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", ...extra });
@@ -37,7 +39,7 @@ async function startServer(name, extra, harness = "codex") {
   let logs = "";
   server.stderr.on("data", (chunk) => { logs += chunk; });
   server.stdout.on("data", (chunk) => { logs += chunk; });
-  servers.push({ server, cwd, privateRoot });
+  servers.push({ server, cwd, privateRoot, controller });
   let base;
   for (let attempt = 0; attempt < 100; attempt++) {
     if (server.exitCode !== null) throw new Error(logs);
@@ -637,10 +639,11 @@ try {
   console.log(`React UI browser checks passed. Screenshots: ${screenshots}`);
 } finally {
   await browser?.close();
-  for (const { server, cwd, privateRoot } of servers) {
+  for (const { server, cwd, privateRoot, controller } of servers) {
     const exited = server.exitCode === null ? new Promise((resolve) => server.once("exit", resolve)) : Promise.resolve();
     server.kill("SIGTERM");
     await exited;
+    await controller.close();
     await rm(cwd, { recursive: true, force: true });
     await rm(privateRoot, { recursive: true, force: true });
   }

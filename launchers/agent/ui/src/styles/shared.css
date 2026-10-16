@@ -222,6 +222,7 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
   :root[data-look] .app .send .send-t::after{content:none}
 }
 .composer.image-drop{outline:2px dashed var(--accent);outline-offset:3px;background:var(--accent-soft)}
+:root[data-look] .app .image-storage-status{display:block}
 :root[data-look] .app .msg.user.image-only::before{content:none}
 .image-list figure button{display:grid;place-items:start end;padding:0;border:0;background:transparent;font-size:22px;line-height:24px;isolation:isolate}
 .image-list figure button::before{content:"";position:absolute;inset:0 0 auto auto;width:24px;height:24px;border-radius:5px;border:1px solid var(--line);background:var(--panel);z-index:-1}
