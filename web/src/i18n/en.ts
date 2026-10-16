@@ -383,6 +383,8 @@ export const en = {
   "admin.admin_password": "Admin password",
   "admin.tour_preview_admin_panel_no": "Tour preview · admin panel, no server writes",
   "admin.user_workspace": "User workspace",
+  "admin.privacy_summary": "Only platform-wide totals are shown. User, organization, machine and Agent details are not requested or displayed.",
+  "admin.resource_totals": "Platform resource totals",
   "admin.platform_overview": "Platform overview",
   "admin.current_resources_across_all_organizations": "Current resources across all organizations.",
   "admin.replay_tour": "Replay tour",

@@ -32,14 +32,6 @@ const running = {
   job: null,
 }
 
-const user = {
-  user_id: "usr_ada",
-  email: "ada@example.com",
-  preferred_name: "Ada",
-  email_verified: false,
-  created_at: "2026-08-25T00:00:00Z",
-}
-
 async function mockAdmin(page: Page, mode: "configured" | "unconfigured" = "configured") {
   await page.route("**/api/admin/**", async (route: Route) => {
     const url = new URL(route.request().url())
@@ -67,58 +59,9 @@ async function mockAdmin(page: Page, mode: "configured" | "unconfigured" = "conf
     if (path === "/update" && method === "POST") {
       return ok(route, { ...running, job: { id: "job1", state: "running", error: null } }, 202)
     }
-    if (path === "/users" && method === "GET") return ok(route, { users: [user] })
-    if (path === "/users/usr_ada" && method === "GET") {
-      return ok(route, {
-        user: {
-          ...user,
-          password_login: true,
-          oauth_providers: [],
-          organizations: [{ organization_id: "org_1", name: "Ada Personal", role: "owner" }],
-          workspaces: [{ workspace_id: "ws_1", name: "lab", organization_id: "org_1" }],
-        },
-      })
-    }
-    if (path === "/users/usr_ada/password-reset" && method === "POST") {
-      return ok(route, { url: "https://app.example/?reset=pwd_test.secret", emailed: false })
-    }
-    if (path === "/machines" && method === "GET") {
-      return ok(route, {
-        machines: [{
-          server_id: "srv_1",
-          name: "builder",
-          hostname: "builder.lan",
-          workspace_id: "ws_1",
-          workspace_name: "lab",
-          created_at: "2026-08-25T00:00:00Z",
-          enrolled_by: "usr_ada",
-          status: "online",
-        }],
-      })
-    }
-    if (path === "/machines/srv_1" && method === "GET") {
-      return ok(route, {
-        machine: {
-          server_id: "srv_1",
-          name: "builder",
-          hostname: "builder.lan",
-          workspace_id: "ws_1",
-          workspace_name: "lab",
-          created_at: "2026-08-25T00:00:00Z",
-          enrolled_by: "usr_ada",
-          status: "online",
-          agents: [{
-            agent_id: "ag_1",
-            server_id: "srv_1",
-            name: "reviewer",
-            path: "/research/reviewer",
-            kind: "codex",
-            status: "idle",
-            interface: { protocol: "treer.agent-interface/v1", instance_id: "codex_1", port: 1, capabilities: ["prompt.submit"], registered_at: "2026-08-25T00:00:00Z" },
-          }],
-        },
-      })
-    }
+    if (path === "/invitations" && method === "GET") return ok(route, { invitations: [{ token: "inv_test", created_at: "2026-10-15T00:00:00Z", url: "https://treer.example/?invite=inv_test" }] })
+    if (path === "/invitations" && method === "POST") return ok(route, { url: "https://treer.example/?invite=inv_new" })
+    if (path === "/invitations/inv_test" && method === "DELETE") return ok(route, {})
     return ok(route, { error: { message: "not found" } }, 404)
   })
 }
@@ -142,20 +85,37 @@ test("admin panel explains when control-plane updates are not configured", async
   await expect(page.getByRole("button", { name: "Apply update" })).toHaveCount(0)
 })
 
-test("admin cards expand user and machine inventories", async ({ page }) => {
+for (const theme of ["light", "dark"] as const) for (const width of [1360, 390]) {
+  test(`admin shows only aggregate resource counts ${theme} ${width}`, async ({ page }, info) => {
+    const requested: string[] = []
+    page.on("request", (request) => { if (request.url().includes("/api/admin/")) requested.push(new URL(request.url()).pathname) })
+    await mockAdmin(page)
+    await page.setViewportSize({ width, height: 844 })
+    await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
+    await page.goto("/admin")
+    await page.evaluate((value) => document.documentElement.classList.toggle('dark', value === 'dark'), theme)
+    const totals = page.getByRole("group", { name: "Platform resource totals" })
+    await expect(totals).toBeVisible()
+    for (const label of ['Users', 'Organizations', 'Machines', 'Agents']) await expect(totals.getByText(label, { exact: true })).toBeVisible()
+    await expect(totals.getByText('1', { exact: true })).toHaveCount(4)
+    await expect(totals.getByRole('button')).toHaveCount(0)
+    for (const name of ['View organizations', 'View activity', 'Reset password', 'Sign out everywhere', 'Details']) await expect(page.getByRole('button', { name, exact: true })).toHaveCount(0)
+    const beforeRefresh = requested.filter((path) => path === '/api/admin/dashboard').length
+    await page.getByRole('button', { name: 'Refresh', exact: true }).click()
+    await expect.poll(() => requested.filter((path) => path === '/api/admin/dashboard').length).toBeGreaterThan(beforeRefresh)
+    expect(requested.some((path) => /^\/api\/admin\/(users|machines|agents|organizations|activity)(?:\/|$)/.test(path))).toBe(false)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: info.outputPath(`admin-private-${theme}-${width}.png`) })
+  })
+}
+
+test('admin keeps platform invitation management separate from private inventories', async ({ page }) => {
   await mockAdmin(page)
-  await page.goto("/admin")
-  await expect(page.getByRole("heading", { name: "Platform overview" })).toBeVisible()
-  await page.getByRole("button", { name: /Users/ }).click()
-  await expect(page.getByText("Ada", { exact: true })).toBeVisible()
-  await expect(page.getByText("ada@example.com")).toBeVisible()
-  await page.getByRole("button", { name: "Reset password" }).click()
-  await expect(page.getByRole("heading", { name: "Password reset" })).toBeVisible()
-  await expect(page.getByText("pwd_test.secret")).toBeVisible()
-  await page.getByRole("button", { name: "Close", exact: true }).first().click()
-  await page.getByRole("button", { name: /Machines/ }).click()
-  await expect(page.getByText("builder.lan")).toBeVisible()
-  await page.getByRole("button", { name: /builder/ }).click()
-  await expect(page.getByText("/research/reviewer")).toBeVisible()
-  await expect(page.getByText("codex")).toBeVisible()
+  await page.goto('/admin')
+  await page.getByRole('button', { name: 'Create invitation', exact: true }).click()
+  await expect(page.getByRole('dialog')).toBeVisible()
+  await expect(page.getByRole('textbox')).toHaveValue('https://treer.example/?invite=inv_new')
+  await page.getByRole('button', { name: 'Close', exact: true }).first().click()
+  await page.getByRole('button', { name: 'Pending invitations', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Pending invitations' }).getByRole('button', { name: 'Revoke' })).toBeVisible()
 })

@@ -384,6 +384,8 @@ export const zh: Messages = {
   "admin.admin_password": "管理员密码",
   "admin.tour_preview_admin_panel_no": "导览预览 · 管理面板,不会写入服务器",
   "admin.user_workspace": "用户工作区",
+  "admin.privacy_summary": "仅展示平台汇总数量，不读取或展示用户、组织、机器和 Agent 明细。",
+  "admin.resource_totals": "平台资源总数",
   "admin.platform_overview": "平台总览",
   "admin.current_resources_across_all_organizations": "所有组织的当前资源。",
   "admin.replay_tour": "重新查看导览",

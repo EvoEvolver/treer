@@ -385,3 +385,15 @@ that the server does not implement. Reloading a pending in-memory confirmation
 requires reopening the invitation link. Invitation acceptance, invalid links,
 cancellation, legacy-server rejection, personal invitations, keyboard access and
 390px layouts are covered by hermetic Playwright mocks with synthetic tokens.
+
+## Platform administration privacy
+
+The `/admin` resource overview shows platform-wide user, organization, machine
+and Agent **counts only**. Cards do not expand and the console does not request
+user/member profiles, machine hostnames, Agent paths, organization details,
+password-reset links, session-revocation controls or per-resource activity.
+Platform invitation management and control-plane updates remain separate
+operator actions. Organization/workspace Audit remains scoped to its authorized
+members. This UI change alone does not restrict a previous Proxy's admin APIs;
+server-side access and retention guarantees require the corresponding Core
+change and deployment.
