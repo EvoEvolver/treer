@@ -88,6 +88,35 @@ npm-prefix writes and lifecycle execution where enabled. A non-writable prefix
 fails visibly; never retry with elevation or change PATH/system configuration.
 Installation can replace an existing global package; it never restarts Agents.
 
+### Lifecycle source inspection
+
+Read the exact-version registry tarball members `package/install.cjs` (Claude)
+and `package/postinstall.mjs` (OpenCode) as text, without extracting to an
+installation or executing them. This inspection is not a transitive dependency
+audit or a signature/integrity verification of an installed package.
+
+- Claude's script selects a version-pinned native optional dependency, then
+  hardlinks or copies its binary to `bin/claude.exe` inside the wrapper package.
+  It probes `sysctl` on an x64 macOS process to detect Rosetta, using PATH, with
+  no timeout. Missing optional packages can leave a nonworking placeholder and
+  still exit successfully in this published version. Core's bounded descendant
+  cleanup and independent version check are required; npm exit zero alone is
+  never proof of success. Enabling this lifecycle needs explicit security
+  approval and must be disclosed in the confirmation.
+- OpenCode's script probes local CPU/libc state, invokes PATH-resolved `sysctl`
+  or `ldd`, and on Windows probes multiple PATH-resolved PowerShell executables.
+  It copies and executes the selected optional binary for a version check. If
+  resolution fails it launches another PATH-resolved `npm install` in a temporary
+  prefix, without forwarding the recipe's registry restriction. This fallback
+  violates the proposed reviewed expansion boundary. Keep OpenCode unsupported
+  in the first table unless a separately reviewed, deterministic installation
+  strategy avoids that lifecycle; do not enable it merely because npm is an
+  official installation method.
+
+Codex and Gemini having no top-level scripts does not prove their dependency
+trees have none. `--ignore-scripts` applies to the whole npm operation; whether
+the resulting provider works must be checked separately in sealed fixtures.
+
 ## Launcher provider-missing handoff
 
 Core's outer-executable `command_not_found` does not cover an already-running
