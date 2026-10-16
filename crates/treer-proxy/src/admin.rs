@@ -168,7 +168,7 @@ async fn list_invitations(
 ) -> Result<Json<Value>, AuthFailure> {
     let rows = sqlx::query(
         "SELECT 'inv_' || encode(sha256(convert_to('treer.admin-invitation/v1:' || token, 'UTF8')), 'hex') AS invitation_id, \
-         CASE WHEN token ~ '^[A-Za-z0-9_-]{32,}$' THEN left(token, 8) ELSE '[redacted]' END AS token_prefix, \
+         CASE WHEN token ~ '^[A-Za-z0-9_-]{32,}$' THEN left(token, 6) ELSE '[redacted]' END AS token_prefix, \
          created_at, used_at FROM invitations WHERE kind = 'personal' \
          ORDER BY created_at DESC, token DESC LIMIT 100",
     )
@@ -610,7 +610,7 @@ mod tests {
                 .iter()
                 .find(|v| v["invitation_id"] == invitation_id(&pending))
                 .unwrap()["token_prefix"],
-            &pending[..8]
+            &pending[..6]
         );
         assert_eq!(
             records

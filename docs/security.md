@@ -585,7 +585,7 @@ host operators. Internal audit records and their existing retention remain;
 the platform activity feed is no longer exposed through the admin API.
 Admin aggregate, invitation and retired-detail responses set `Cache-Control:
 no-store`. Registration invitation lists expose only the latest 100 non-bearer
-handles, at most eight safe prefix characters, creation time and used time;
+handles, at most six safe prefix characters, creation time and used time;
 short/nonstandard legacy tokens show `[redacted]`. Handles are domain-separated
 SHA-256 hashes of the bearer, not registration credentials, and DELETE requires
 the administrator cookie plus the handle. Full tokens/URLs are returned only
