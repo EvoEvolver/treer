@@ -139,6 +139,26 @@ the recovery lock. Refuse incompatible persisted-schema changes before activatio
 unless forward/backward compatibility is proven. Launcher failure does not
 blindly restore a stale startup backup over legitimate concurrent edits.
 
+P1 implementation constraint: the existing startup store has only an in-process
+mutex, not a global store revision or a writer-shared OS lock. The first backup
+primitive therefore only captures private original bytes and compares their
+hash/revision projection; it provides **no restore write API**. An updater-only
+lock or a preceding hash comparison is not a CAS against a live Controller.
+Any eventual restore must exclude all store writers (including cached state
+which a live Controller could later flush), or fail explicitly without writing.
+
+Unix live observations bind the UID/PID to the same socket used for Host Sync.
+Linux uses boot ID/start ticks and the opened `/proc/PID/exe` inode. On macOS,
+`proc_pidpath` alone is insufficient: after replacement its saved name can open
+the new disk file while the old process remains running. Compare the first
+file-backed executable region's kernel vnode identity, creation time, and checked
+opened file; bounded libproc reads fail closed for unsupported layouts/protected
+processes or an unavailable original image. Never repair this by trusting the
+replacement filename. A Controller successor must be a direct child of the same
+Host executing the selected installed inode, in addition to its scoped new-epoch
+HTTP health and unchanged Host/workload/output checks. These observations do not
+attest every mapped code page or isolate a malicious same-account writer.
+
 After activator death, the next explicit `self-update --recover JOB_ID` reconciles
 journal, actual hashes and live process identities under the same locks. Never
 infer success from a PID or an old receipt alone; never restart the Host or replay

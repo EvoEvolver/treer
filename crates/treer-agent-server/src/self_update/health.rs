@@ -93,6 +93,29 @@ impl Monitor {
             .map_err(|_| anyhow::anyhow!("unsafe_update_health_image"))?;
         expected.verify(&document, &digest_file(&image)?)
     }
+
+    /// Compose HTTP and installed-file checks with the Host-owned live image
+    /// and unchanged Host/workload observation. Still read-only: the transaction
+    /// engine owns journal changes, restart requests, rollback and launcher work.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub async fn observe_live(
+        &self,
+        selected: &Selected,
+        locks: &SelectionLocks,
+        expected: &ControllerExpectation,
+        host: &super::host::Observation,
+    ) -> Result<String> {
+        let process = host.controller_image(selected, locks, &expected.executable_sha256)?;
+        let epoch = self.observe(selected, locks, expected).await?;
+        process
+            .verify_current()
+            .map_err(|_| anyhow::anyhow!("update_controller_identity_changed"))?;
+        host.verify().await?;
+        process
+            .verify_current()
+            .map_err(|_| anyhow::anyhow!("update_controller_identity_changed"))?;
+        Ok(epoch)
+    }
 }
 
 #[cfg(test)]

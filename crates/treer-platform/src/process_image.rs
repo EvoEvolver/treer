@@ -16,11 +16,18 @@ fn invalid() -> io::Error {
     )
 }
 
+#[derive(PartialEq, Eq)]
+struct Identity {
+    creation: String,
+    parent: u32,
+}
+
 /// Keeps an opened image inode, not a pathname which can later be replaced.
 /// Intentionally no Debug/Serialize: process paths never enter diagnostics.
 pub struct ProcessImage {
     pid: u32,
     creation: String,
+    parent: u32,
     image: File,
     device: u64,
     inode: u64,
@@ -43,6 +50,7 @@ impl ProcessImage {
         let (creation, image, after) = {
             let creation = macos::creation(pid)?;
             let path = macos::image_path(pid)?;
+            let mapped_identity = macos::mapped_image_identity(pid, &path)?;
             let parent = path.parent().ok_or_else(invalid)?;
             let directory = super::private_directory::open_physical_directory(parent)?;
             let image: File = rustix::fs::openat(
@@ -55,7 +63,11 @@ impl ProcessImage {
                 rustix::fs::Mode::empty(),
             )?
             .into();
-            if macos::image_path(pid)? != path {
+            let metadata = image.metadata()?;
+            if macos::image_path(pid)? != path
+                || (metadata.dev(), metadata.ino()) != mapped_identity
+                || macos::mapped_image_identity(pid, &path)? != mapped_identity
+            {
                 return Err(invalid());
             }
             (creation, image, macos::creation(pid)?)
@@ -73,7 +85,8 @@ impl ProcessImage {
         }
         Ok(Self {
             pid,
-            creation,
+            creation: creation.creation,
+            parent: creation.parent,
             image,
             device: metadata.dev(),
             inode: metadata.ino(),
@@ -88,6 +101,29 @@ impl ProcessImage {
     }
     pub fn executable(&self) -> &File {
         &self.image
+    }
+
+    /// Enumerate only this parent's direct children, not unrelated same-user
+    /// processes. Recheck PPID on each captured candidate because process lists
+    /// can race exit/reparenting. Exited/exec-racing candidates are not adopted.
+    pub fn children(&self) -> io::Result<Vec<Self>> {
+        self.verify_current()?;
+        #[cfg(target_os = "macos")]
+        let pids = macos::children(self.pid)?;
+        #[cfg(target_os = "linux")]
+        let pids = linux::children(self.pid)?;
+        let children = pids
+            .into_iter()
+            .filter_map(|pid| Self::capture(pid).ok())
+            .filter(|image| image.parent == self.pid)
+            .collect();
+        self.verify_current()?;
+        Ok(children)
+    }
+
+    pub fn matches_file(&self, file: &File) -> io::Result<bool> {
+        let metadata = file.metadata()?;
+        Ok(metadata.is_file() && metadata.dev() == self.device && metadata.ino() == self.inode)
     }
 
     /// Re-observe after hashing/other async work. A live PID alone is not enough:
@@ -142,6 +178,12 @@ mod tests {
                 return Err(invalid());
             }
             let before = ProcessImage::capture(child.id())?;
+            let parent = ProcessImage::capture(std::process::id())?;
+            if !parent.children()?.iter().any(|image| {
+                image.pid() == child.id() && image.creation_identity() == before.creation_identity()
+            }) {
+                return Err(invalid());
+            }
             child.stdin.take().unwrap().write_all(b"continue\n")?;
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
             let after = loop {
