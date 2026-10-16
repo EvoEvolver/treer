@@ -342,7 +342,14 @@ fn verify_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), 
         // the protected DACL may only allow the current user and SYSTEM.
         match treer_platform::private_path_is_secure(path) {
             Ok(true) => {}
-            Ok(false) => return Err(unsafe_directory(path, "insecure_dacl")),
+            Ok(false) => {
+                // SIDs, control flags and masks only: enough to diagnose a
+                // foreign owner or inherited entry without exposing content.
+                let report = treer_platform::private_path_security_report(path)
+                    .unwrap_or_else(|error| format!("report unavailable: {error}"));
+                warn!(path = %path.display(), %report, "Agent private state directory DACL is not private");
+                return Err(unsafe_directory(path, "insecure_dacl"));
+            }
             Err(error) => return Err(unavailable(path, error)),
         }
     }
@@ -1112,18 +1119,44 @@ mod tests {
                 .expect("run icacls");
             assert!(status.success(), "icacls grant failed");
         }
+        fn report(path: &Path) -> String {
+            treer_platform::private_path_security_report(path)
+                .unwrap_or_else(|error| format!("report unavailable: {error}"))
+        }
         let fixture = Fixture::new();
         let root = fixture.0.join("agent-private");
-        let state = PrivateStateRoot::open(&root, "srv_a").unwrap();
+        // Baseline: secure_directory must produce the protected private DACL
+        // on this machine; on failure print what the system actually reports.
+        treer_platform::secure_directory(&root).unwrap();
+        assert!(
+            treer_platform::private_path_is_secure(&root).unwrap(),
+            "fresh private root is not accepted: {} (fixture {})",
+            report(&root),
+            report(&fixture.0)
+        );
+        let state = PrivateStateRoot::open(&root, "srv_a").unwrap_or_else(|error| {
+            panic!(
+                "{}: root {} / server {}",
+                error.code,
+                report(&root),
+                report(&root.join("srv_a"))
+            )
+        });
         let agent = state.prepare("ag_1").unwrap();
-        // Baseline: secure_directory produced the protected private DACL.
-        assert!(treer_platform::private_path_is_secure(&agent).unwrap());
-        assert!(treer_platform::private_path_is_secure(&root).unwrap());
+        assert!(
+            treer_platform::private_path_is_secure(&agent).unwrap(),
+            "{}",
+            report(&agent)
+        );
         // A pre-existing directory with a wide DACL is never adopted.
         let wide = root.join("srv_a").join("ag_wide");
         fs::create_dir(&wide).unwrap();
         grant_everyone(&wide);
-        assert!(!treer_platform::private_path_is_secure(&wide).unwrap());
+        assert!(
+            !treer_platform::private_path_is_secure(&wide).unwrap(),
+            "{}",
+            report(&wide)
+        );
         assert_eq!(
             state.prepare("ag_wide").unwrap_err().code,
             "agent_private_state_unsafe"
@@ -1131,7 +1164,11 @@ mod tests {
         // Loosening after creation fails the next verification of a
         // directory that passed before.
         grant_everyone(&agent);
-        assert!(!treer_platform::private_path_is_secure(&agent).unwrap());
+        assert!(
+            !treer_platform::private_path_is_secure(&agent).unwrap(),
+            "{}",
+            report(&agent)
+        );
         assert_eq!(
             state.verify_existing("ag_1").unwrap_err().code,
             "agent_private_state_unsafe"

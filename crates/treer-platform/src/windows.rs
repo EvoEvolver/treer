@@ -181,15 +181,16 @@ pub fn secure_path(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Whether `path` carries the private descriptor `secure_path` writes: owned by
-/// the current user, a present and protected DACL whose entries all allow only
-/// the current user or SYSTEM (no inherited or foreign principals, no deny
-/// entries). Reads the live security descriptor, so later loosening is seen.
-pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
-    // ACE type values are fixed by the Win32 ABI (ACCESS_ALLOWED_ACE_TYPE = 0).
-    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+/// Owner and discretionary ACL of a file object as the system reports them.
+struct SecurityReport {
+    owner: String,
+    control: u16,
+    /// (type, flags, access mask, SID) per ACE, in ACL order.
+    aces: Vec<(u8, u8, u32, String)>,
+}
+
+fn read_security(path: &Path) -> io::Result<SecurityReport> {
     let name = wide(path.as_os_str());
-    let current = current_user_sid()?;
     unsafe {
         let mut owner = ptr::null_mut();
         let mut dacl = ptr::null_mut();
@@ -215,46 +216,101 @@ pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
             &mut control,
             &mut revision,
         ))?;
-        if owner.is_null() || dacl.is_null() {
-            return Ok(false);
-        }
-        if sid_string(owner)? != current {
-            return Ok(false);
-        }
-        if control & SE_DACL_PRESENT == 0 || control & SE_DACL_PROTECTED == 0 {
-            return Ok(false);
-        }
-        let mut size = ACL_SIZE_INFORMATION {
-            AceCount: 0,
-            AclBytesInUse: 0,
-            AclBytesFree: 0,
+        let owner = if owner.is_null() {
+            String::from("<none>")
+        } else {
+            sid_string(owner)?
         };
-        checked(GetAclInformation(
-            dacl,
-            (&mut size as *mut ACL_SIZE_INFORMATION).cast(),
-            mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
-            AclSizeInformation,
-        ))?;
-        if size.AceCount == 0 {
+        let mut aces = Vec::new();
+        if !dacl.is_null() {
+            let mut size = ACL_SIZE_INFORMATION {
+                AceCount: 0,
+                AclBytesInUse: 0,
+                AclBytesFree: 0,
+            };
+            checked(GetAclInformation(
+                dacl,
+                (&mut size as *mut ACL_SIZE_INFORMATION).cast(),
+                mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            ))?;
+            for index in 0..size.AceCount {
+                let mut ace = ptr::null_mut();
+                checked(GetAce(dacl, index, &mut ace))?;
+                let header = &*ace.cast::<ACE_HEADER>();
+                // Every ACE type shares the header; the mask/SID layout read
+                // here is that of ACCESS_ALLOWED/DENIED ACEs, which is all a
+                // private directory may legitimately carry.
+                let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                let sid = sid_string(ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
+                aces.push((header.AceType, header.AceFlags, allowed.Mask, sid));
+            }
+        }
+        Ok(SecurityReport {
+            owner,
+            control,
+            aces,
+        })
+    }
+}
+
+/// Well-known principals a private Treer directory may name besides the
+/// current user: LocalSystem and the Administrators group (the default owner
+/// of objects created by an elevated administrator; administrators can take
+/// ownership of any object regardless, so this grants nothing new).
+const SYSTEM_SID: &str = "S-1-5-18";
+const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+
+/// Whether `path` carries the private descriptor `secure_path` writes: owned by
+/// the current user (or SYSTEM / the Administrators group), a present and
+/// protected DACL whose entries all allow only the current user or SYSTEM (no
+/// inherited or foreign principals, no deny entries). Reads the live security
+/// descriptor, so later loosening is seen.
+pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
+    // ACE type values are fixed by the Win32 ABI (ACCESS_ALLOWED_ACE_TYPE = 0).
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    let current = current_user_sid()?;
+    let report = read_security(path)?;
+    if report.owner != current && report.owner != SYSTEM_SID && report.owner != ADMINISTRATORS_SID {
+        return Ok(false);
+    }
+    if report.control & SE_DACL_PRESENT == 0 || report.control & SE_DACL_PROTECTED == 0 {
+        return Ok(false);
+    }
+    if report.aces.is_empty() {
+        return Ok(false);
+    }
+    for (ace_type, flags, _mask, sid) in &report.aces {
+        if *ace_type != ACCESS_ALLOWED_ACE_TYPE || flags & INHERITED_ACE as u8 != 0 {
             return Ok(false);
         }
-        for index in 0..size.AceCount {
-            let mut ace = ptr::null_mut();
-            checked(GetAce(dacl, index, &mut ace))?;
-            let header = &*ace.cast::<ACE_HEADER>();
-            if header.AceType != ACCESS_ALLOWED_ACE_TYPE
-                || header.AceFlags & INHERITED_ACE as u8 != 0
-            {
-                return Ok(false);
-            }
-            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-            let sid = sid_string(ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
-            if sid != current && sid != "S-1-5-18" {
-                return Ok(false);
-            }
+        if sid != &current && sid != SYSTEM_SID {
+            return Ok(false);
         }
     }
     Ok(true)
+}
+
+/// Human-readable owner/control/ACE listing for diagnostics (SIDs, flags and
+/// masks only; no path content or credentials).
+pub fn private_path_security_report(path: &Path) -> io::Result<String> {
+    let current = current_user_sid()?;
+    let report = read_security(path)?;
+    let mut text = format!(
+        "owner={} current_user={} control=0x{:04x} dacl_present={} dacl_protected={} aces={}",
+        report.owner,
+        current,
+        report.control,
+        report.control & SE_DACL_PRESENT != 0,
+        report.control & SE_DACL_PROTECTED != 0,
+        report.aces.len()
+    );
+    for (ace_type, flags, mask, sid) in &report.aces {
+        text.push_str(&format!(
+            " [type={ace_type} flags=0x{flags:02x} mask=0x{mask:08x} sid={sid}]"
+        ));
+    }
+    Ok(text)
 }
 
 unsafe fn sid_string(sid: PSID) -> io::Result<String> {

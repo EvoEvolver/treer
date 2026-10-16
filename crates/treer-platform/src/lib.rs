@@ -138,6 +138,13 @@ pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
     windows::private_path_is_secure(path)
 }
 
+/// Windows only: diagnostic listing of a path's owner, control flags and ACEs
+/// (SIDs/flags/masks only), for logs and native test failures.
+#[cfg(windows)]
+pub fn private_path_security_report(path: &Path) -> io::Result<String> {
+    windows::private_path_security_report(path)
+}
+
 /// Available bytes on the volume holding `path`, for quota admission.
 pub fn available_disk_bytes(path: &Path) -> io::Result<u64> {
     #[cfg(unix)]
