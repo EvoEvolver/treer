@@ -10,7 +10,7 @@ test('provider installer binds poll results and never infers successful installa
     const valid = { ...expected, status: 'succeeded', step: 5, elapsed_ms: 500, exit_code: 0, timed_out: false, stdout: '<script>alert(1)</script>', stderr: '', truncated: false }
     const invalid = [
       { machine_id: 'other' }, { operation_id: 'other' }, { recipe_id: 'other' }, { recipe_version: 2 }, { recipe_hash: 'b'.repeat(64) },
-      { status: 'invented' }, { status: 'running' }, { step: 3 }, { exit_code: 1 }, { timed_out: true }, { elapsed_ms: -1 },
+      { status: 'invented' }, { status: 'running' }, { step: 6 }, { exit_code: 1 }, { timed_out: true }, { elapsed_ms: -1 },
       { stdout: 'x'.repeat(32769) }, { error_code: 'Bearer secret' }, { steps: [{ step: 1, exit_code: 0, stdout: '', stderr: '', truncated: false, duration_ms: -1 }] },
     ]
     const recipe = { supported: true, binary_names: ['codex'], recipe_id: 'codex' }

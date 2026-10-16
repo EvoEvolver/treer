@@ -2409,3 +2409,266 @@ for (const width of [1280, 390]) for (const theme of ['light', 'dark']) test(`mi
   expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(850)
   await page.screenshot({ path: info.outputPath(`missing-command-unknown-${width}-${theme}.png`) })
 })
+
+// #123: a sealed, stateful provider API. No package manager or real install is
+// executed; confirmation tokens below are synthetic fixture data only.
+const providerRecipe = {
+  provider_id: 'codex', recipe_id: 'codex-posix', recipe_version: 1, recipe_hash: 'a'.repeat(64), platform: 'linux-x86_64', binary_names: ['codex'], supported: true,
+  official_docs: 'https://example.com/official', login_hint: 'Run codex explicitly to log in. Treer never handles provider credentials.', node_min: 22,
+  lifecycle_scripts: { enabled: false }, package: { name: '@openai/codex', version: '1.2.3', integrity: 'sha512-fixture-only', registry: 'https://registry.npmjs.org/' },
+  plan: [
+    { step: 1, kind: 'command', purpose: 'pack', executable: '/opt/node/bin/npm', args: ['pack', '@openai/codex@1.2.3', '--userconfig=/private/jobs/codex/npmrc'] },
+    { step: 2, kind: 'verify', purpose: 'integrity', algorithm: 'sha512', expected: 'sha512-fixture-only' },
+    { step: 3, kind: 'command', purpose: 'install', executable: '/opt/node/bin/npm', args: ['install', '--global', '/private/jobs/codex/pack/package.tgz', '--ignore-scripts'] },
+    { step: 4, kind: 'command', purpose: 'prefix', executable: '/opt/node/bin/npm', args: ['prefix', '--global', '--userconfig=/private/jobs/codex/npmrc'] },
+    { step: 5, kind: 'resolve', purpose: 'check', rule: '<npm prefix --global>/bin/codex --version', binary: 'codex', args: ['--version'], prefix_from_step: 4 },
+  ],
+}
+async function mockProviderApi(page: Page, options: { capability?: boolean; status?: string; prepareStatus?: number; oldMachine?: boolean; installStatus?: number; abortInstall?: boolean } = {}) {
+  const requests: { path: string; body: unknown }[] = []
+  let polls = 0
+  await page.route('**/api/auth/config', route => ok(route, { capabilities: options.capability === false ? [] : ['machine.provider-cli-install.v1'] }))
+  await page.route('**/api/workspaces/ws-1/machines/*/provider-clis/**', async route => {
+    const path = new URL(route.request().url()).pathname
+    if (route.request().method() === 'POST') requests.push({ path, body: route.request().postDataJSON() })
+    if (options.oldMachine) return route.fulfill({ status: 501, json: { error: { code: 'provider_cli_unsupported', message: 'Old Controller' } } })
+    if (path.endsWith('/recipes')) return ok(route, { schema_version: 1, machine_id: 'srv-a', platform: providerRecipe.platform, controller_source_sha: 'f'.repeat(40), table_hash: 'b'.repeat(64), recipes: [providerRecipe, {
+      provider_id: 'claude', recipe_id: 'claude-posix', recipe_version: 1, recipe_hash: 'c'.repeat(64), platform: providerRecipe.platform, binary_names: ['claude'], supported: false,
+      official_docs: 'https://example.com/official', login_hint: 'Manual login', unsupported_reason: 'lifecycle_review_pending',
+    }] })
+    if (path.endsWith('/prepare')) {
+      if (options.prepareStatus) return route.fulfill({ status: options.prepareStatus, json: { error: { message: 'Do not echo a raw server secret' } } })
+      return ok(route, { confirmation_token: 'fixture-confirmation-token', expires_at: new Date(Date.now() + 120000).toISOString(), machine_id: 'srv-a', table_hash: 'b'.repeat(64), recipe: providerRecipe })
+    }
+    if (path.endsWith('/install')) {
+      if (options.abortInstall) return route.abort('connectionreset')
+      if (options.installStatus) return route.fulfill({ status: options.installStatus, json: { error: { message: 'Do not echo a raw server secret' } } })
+      return ok(route, { operation_id: 'op-fixture', machine_id: 'srv-a', status: options.status === 'unknown' ? 'unknown' : 'running', poll_after_ms: 1000 })
+    }
+    if (path.includes('/operations/')) {
+      polls++
+      const status = options.status ?? 'succeeded'
+      return ok(route, { operation_id: 'op-fixture', machine_id: 'srv-a', recipe_id: providerRecipe.recipe_id, recipe_version: 1, recipe_hash: providerRecipe.recipe_hash,
+        status, step: status === 'running' ? 3 : 5, elapsed_ms: 1000, exit_code: status === 'succeeded' ? 0 : status === 'failed' ? 7 : null, timed_out: status === 'timed_out',
+        stdout: status === 'running' ? '' : '<img src=x onerror="window.providerXss=1"> fixture output', stderr: '', truncated: status === 'failed' })
+    }
+    if (path.endsWith('/check')) return ok(route, { installed: true, found_in_prefix: true, version: 'codex 1.2.3', executable: '/opt/global/bin/codex', exit_code: 0, timed_out: false, stdout: 'codex 1.2.3', stderr: '', truncated: false })
+    return route.fulfill({ status: 404 })
+  })
+  return { requests, polls: () => polls }
+}
+async function openProviderMachine(page: Page) {
+  await page.goto('/')
+  await browseTreeOnMobile(page)
+  await openWorkspaceSettings(page)
+  await workstationRow(page).click()
+}
+for (const width of [1280, 390]) for (const theme of ['light', 'dark']) test(`provider installer explicit plan cancel success and text output (${width}, ${theme})`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 })
+  await page.addInitScript(value => localStorage.setItem('treer-theme', value), theme)
+  const backend = await mockProviderApi(page)
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByText('Installation scripts have not been approved', { exact: false })).toBeVisible()
+  await expect(dialog.getByRole('button', { name: 'Install claude', exact: true })).toHaveCount(0)
+  await dialog.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect(dialog.getByRole('list', { name: 'Execution plan' })).toBeVisible()
+  await expect(dialog.getByText('sha512: sha512-fixture-only', { exact: true })).toBeVisible()
+  await expect(dialog.getByText('<npm prefix --global>/bin/codex --version', { exact: true })).toBeVisible()
+  await page.screenshot({ path: info.outputPath(`provider-plan-${width}-${theme}.png`) })
+  await dialog.getByRole('button', { name: 'Confirm and install', exact: true }).scrollIntoViewIfNeeded()
+  await page.screenshot({ path: info.outputPath(`provider-confirm-${width}-${theme}.png`) })
+  await dialog.getByRole('button', { name: 'Cancel', exact: true }).click()
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+  await dialog.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(dialog.getByRole('status')).toContainText('The version probe in the npm global prefix passed.')
+  await expect(dialog.getByText('<img src=x onerror="window.providerXss=1"> fixture output', { exact: true })).toBeVisible()
+  expect(await page.evaluate(() => (window as unknown as Record<string, unknown>).providerXss)).toBeUndefined()
+  await dialog.getByRole('button', { name: 'Check installed version' }).click()
+  await expect(dialog.getByText('/opt/global/bin/codex', { exact: true })).toBeVisible()
+  await expect(dialog.getByText(/This does not prove the CLI is on the Controller PATH/).first()).toBeVisible()
+  expect(backend.requests.filter(item => item.path.endsWith('/install')).map(item => item.body)).toEqual([{ confirmation_token: 'fixture-confirmation-token' }])
+  expect(backend.requests.filter(item => item.path.endsWith('/prepare'))[0].body).toEqual({ recipe_id: providerRecipe.recipe_id, recipe_version: 1, recipe_hash: providerRecipe.recipe_hash })
+  expect(backend.requests.filter(item => item.path.endsWith('/check'))[0].body).toEqual({ recipe_id: providerRecipe.recipe_id, recipe_version: 1, recipe_hash: providerRecipe.recipe_hash })
+  expect(await page.evaluate(() => JSON.stringify(localStorage).includes('fixture-confirmation-token') || location.href.includes('fixture-confirmation-token'))).toBe(false)
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: info.outputPath(`provider-result-${width}-${theme}.png`) })
+})
+for (const status of ['failed', 'timed_out', 'unknown']) test(`provider installer ${status} does not replay installation`, async ({ page }) => {
+  const backend = await mockProviderApi(page, { status })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(dialog.getByRole('button', { name: 'Check installed version' })).toBeVisible()
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(1)
+  await expect(dialog.getByRole('button', { name: 'Confirm and install' })).toHaveCount(0)
+  if (status === 'unknown') expect(backend.polls()).toBe(0)
+})
+for (const prepareStatus of [403, 409, 429, 501]) test(`provider installer prepare refusal ${prepareStatus} stays explicit`, async ({ page }) => {
+  const backend = await mockProviderApi(page, { prepareStatus })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect(dialog.getByRole('alert')).toBeVisible()
+  await expect(dialog.getByText('Do not echo a raw server secret')).toHaveCount(0)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})
+for (const options of [{ capability: false }, { oldMachine: true }]) test(`provider installer unavailable hides entry (${JSON.stringify(options)})`, async ({ page }) => {
+  await mockProviderApi(page, options)
+  await openProviderMachine(page)
+  await expect(page.getByRole('heading', { name: 'workstation' })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Install agent CLIs', exact: true })).toHaveCount(0)
+})
+test('provider installer transport failure cannot resend token', async ({ page }) => {
+  const backend = await mockProviderApi(page, { abortInstall: true })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(dialog.getByRole('status')).toContainText('Installation outcome is unknown')
+  await expect(dialog.getByRole('button', { name: 'Confirm and install' })).toHaveCount(0)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(1)
+})
+test('provider installer only offers a proven missing CLI and preserves creation draft', async ({ page }) => {
+  const backend = await mockProviderApi(page)
+  let creates = 0
+  await page.route('**/api/workspaces/ws-1/agents', route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    creates++
+    return route.fulfill({ status: 422, json: { error: { code: 'command_not_found', message: 'Missing executable', details: {
+      command: 'codex', machine_id: 'srv-a', agent_id: 'ag-reserved', creation_state: 'identity_removed',
+    } } } })
+  })
+  await page.goto('/')
+  await browseTreeOnMobile(page)
+  await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add agent', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Launch', exact: true }).click()
+  await page.getByRole('option', { name: 'Custom command', exact: true }).click()
+  await page.getByRole('textbox', { name: 'Command', exact: true }).fill('codex')
+  await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Retained install draft')
+  await page.getByRole('button', { name: 'Create agent', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  const installer = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Install agent CLIs', exact: true }) })
+  await installer.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(installer.getByRole('status')).toContainText('The version probe')
+  await installer.getByRole('button', { name: 'Close', exact: true }).first().click()
+  await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Retained install draft')
+  expect(creates).toBe(1)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(1)
+})
+
+test('provider installer closing pauses polls and reopening resumes without another install', async ({ page }) => {
+  const backend = await mockProviderApi(page, { status: 'running' })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect.poll(backend.polls).toBeGreaterThanOrEqual(1)
+  await dialog.getByRole('button', { name: 'Close', exact: true }).first().click()
+  const stopped = backend.polls()
+  // Wait longer than the one-second poll interval to prove observation stops.
+  await page.waitForTimeout(1200)
+  expect(backend.polls()).toBe(stopped)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await expect.poll(backend.polls).toBeGreaterThan(stopped)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(1)
+})
+test('provider installer unknown status refresh is read-only', async ({ page }) => {
+  const backend = await mockProviderApi(page, { status: 'unknown' })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await dialog.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await dialog.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(dialog.getByRole('button', { name: 'Refresh operation status' })).toBeVisible()
+  expect(backend.polls()).toBe(0)
+  await dialog.getByRole('button', { name: 'Refresh operation status' }).click()
+  await expect.poll(backend.polls).toBe(1)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(1)
+})
+for (const state of ['reserved_outcome_unknown', 'cleanup_failed', 'identity_removed-other-code', 'identity_removed-unknown-command']) test(`provider installer failure gating ${state}`, async ({ page }) => {
+  await mockProviderApi(page)
+  await page.route('**/api/workspaces/ws-1/agents', route => {
+    if (route.request().method() !== 'POST') return route.fallback()
+    return route.fulfill({ status: 422, json: { error: { code: state === 'identity_removed-other-code' ? 'spawn_failed' : 'command_not_found', message: 'Fixed failure', details: {
+      command: state === 'identity_removed-unknown-command' ? 'unreviewed-tool' : 'codex', machine_id: 'srv-a', agent_id: 'ag-reserved', creation_state: state.startsWith('identity_removed') ? 'identity_removed' : state,
+    } } } })
+  })
+  await page.goto('/')
+  await browseTreeOnMobile(page)
+  await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add agent', exact: true }).click()
+  await page.getByRole('button', { name: 'Create terminal', exact: true }).click()
+  await expect(page.getByRole('alert')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Install codex', exact: true })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
+})
+test('provider installer discards a late preparation after close', async ({ page }) => {
+  const backend = await mockProviderApi(page)
+  let release: (() => void) | undefined
+  let started = false
+  await page.route('**/provider-clis/prepare', async route => {
+    started = true
+    await new Promise<void>(resolve => { release = resolve })
+    return ok(route, { confirmation_token: 'late-fixture-token', expires_at: new Date(Date.now() + 120000).toISOString(), machine_id: 'srv-a', table_hash: 'b'.repeat(64), recipe: providerRecipe })
+  })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect.poll(() => started).toBe(true)
+  await page.getByRole('dialog').getByRole('button', { name: 'Close', exact: true }).first().click()
+  release!()
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Install codex', exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})
+test('provider installer confirmation is localized and keyboard reachable at 390px', async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 900 })
+  await mockProviderApi(page)
+  await openProviderMachine(page)
+  await page.evaluate(async () => {
+    // @ts-expect-error Vite module served in browser.
+    const { setLocale } = await import('/src/i18n/index.ts'); setLocale('zh')
+  })
+  const trigger = page.getByRole('button', { name: '安装 Agent CLI', exact: true })
+  await trigger.focus(); await page.keyboard.press('Enter')
+  await page.getByRole('button', { name: '安装 codex', exact: true }).focus(); await page.keyboard.press('Enter')
+  await expect(page.getByRole('heading', { name: '确认安装 codex', exact: true })).toBeFocused()
+  await expect(page.getByRole('list', { name: '执行计划' })).toBeVisible()
+  await page.screenshot({ path: info.outputPath('provider-plan-390-zh.png') })
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('dialog')).toHaveCount(0)
+  await expect(trigger).toBeFocused()
+})
+
+test('provider installer expired confirmation cannot dispatch', async ({ page }) => {
+  await page.clock.install()
+  const backend = await mockProviderApi(page)
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  const confirm = page.getByRole('button', { name: 'Confirm and install', exact: true })
+  await expect(confirm).toBeEnabled()
+  await page.clock.fastForward(121000)
+  await expect(confirm).toBeDisabled()
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})
+test('provider installer rejects a mismatched prepared machine', async ({ page }) => {
+  const backend = await mockProviderApi(page)
+  await page.route('**/provider-clis/prepare', route => ok(route, { confirmation_token: 'foreign-fixture-token', expires_at: new Date(Date.now() + 120000).toISOString(), machine_id: 'srv-b', table_hash: 'b'.repeat(64), recipe: providerRecipe }))
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect(page.getByRole('dialog').getByRole('alert')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})

@@ -540,3 +540,41 @@ Old or offline Controllers and observed workloads fail visibly without claiming
 cleanup. Successful cleanup enables an explicit new submission; it never creates
 an Agent automatically. This requires the Core reservation-cleanup capability;
 the Web UI alone does not provide it.
+
+### Provider CLI installation (capability-gated)
+
+The machine overview's **Install agent CLIs** entry uses the human-session
+`machine.provider-cli-install.v1` routes. Old Proxies/Controllers hide the entry;
+there is no generic-exec fallback. A structured `command_not_found` creation
+failure offers the same flow only for a unique, supported server-declared bare
+binary, on the selected machine, with the reserved identity proven removed.
+Unconfirmed reservations retain the explicit cleanup flow and block creation.
+
+Choosing a provider fetches a fresh, 120-second confirmation. The dialog displays
+Core's complete ordered plan, integrity digest, target machine/platform and
+network/global-prefix effects. The browser sends recipe ID/version/hash to
+prepare/check and only the in-memory confirmation token to install. Cancellation
+or closing discards the token; neither tokens nor output enter browser storage,
+URLs or logs. Output is React text, never HTML or terminal input. Polling is
+read-only, once per second while viewed, and stops at terminal/unknown outcomes.
+Closing does not cancel the server job; reopening resumes observation of its
+in-memory operation ID. An explicit status refresh can resolve an unknown result;
+installation requests are never automatically replayed. Page reload/navigation
+loses that local operation reference, so inspect the machine before another
+installation. No browser operation-history endpoint is provided in this version.
+
+Success means the version probe in npm's global prefix passed. It does **not**
+prove that directory is on the Controller PATH. Check the installed version to
+obtain the absolute executable for a profile, or have the operator configure the
+service environment; Treer does not silently edit PATH or elevate permissions.
+Login remains manual. The creation draft stays intact and Create requires another
+explicit submission. Treer ignores npm user configuration and uses npm's default
+prefix; a non-writable prefix fails visibly. The top-level tarball is pinned and
+integrity-checked, but transitive dependencies are not locked. Any enabled npm
+lifecycle scripts run across the resolved dependency closure, not just the
+top-level package. Initial release data supports Codex/Gemini on POSIX; Claude,
+OpenCode, Cursor, Grok and Windows stay unavailable until their separate review.
+
+Browser acceptance uses fake API responses only. Real package functionality must
+be verified separately in the sealed environment selected by release/security;
+Web tests never install packages on a live machine.

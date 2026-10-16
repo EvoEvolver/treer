@@ -94,6 +94,7 @@ function WorkspaceAppContent() {
   const ctrlArmedRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
   const [reservationCleaned, setReservationCleaned] = useState(false)
+  const [creationCommandMissing, setCreationCommandMissing] = useState(false)
   const [creationFailure, setCreationFailure] = useState<AgentCreationFailure | null>(null)
   const dialogState = useWorkspaceDialogState()
   const {
@@ -588,6 +589,7 @@ function WorkspaceAppContent() {
     } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) {
       const failure = reason instanceof ApiError ? agentCreationFailure(reason.details, creationMachineId) : null
       setCreationFailure(failure)
+      setCreationCommandMissing(reason instanceof ApiError && reason.code === "command_not_found")
       setCreateAgentError(reason instanceof ApiError && reason.code === "command_not_found"
         ? failure?.command
           ? t("provider.command_missing", { command: failure.command, machine: machineName(snapshot?.servers.find((item) => item.server_id === creationMachineId), creationMachineId) })
@@ -599,6 +601,7 @@ function WorkspaceAppContent() {
 
   function openCreateAgent(reset = true, folder: NewAgentFolder | null = null) {
     setCreateAgentError("")
+    setCreationCommandMissing(false)
     if (creatingAgent) return
     if (reset || !createAgentOpenRef.current) {
       setAgentFolder(folder)
@@ -1092,6 +1095,7 @@ function WorkspaceAppContent() {
 
     <WorkspaceDialogs state={dialogState}
       creationFailure={creationFailure}
+      creationCommandMissing={creationCommandMissing}
       reservationCleaned={reservationCleaned}
       onReservationCleaned={() => { setCreationFailure(null); setCreateAgentError(""); setReservationCleaned(true) }}
       user={user}
