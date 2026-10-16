@@ -757,14 +757,33 @@ an exactly matching scheme/host/port and service audience, and a single-use code
 bound to the full redirect and challenge with a five-minute TTL. Apps validate
 returned state. Ingress codes separately bind to the enabled hostname/ingress
 and current membership, are single-use with a five-minute TTL, and accept only
-local return paths. They currently have no initiating-browser/PKCE binding;
-do not describe the ingress flow as providing that guarantee. A member can
-currently induce another browser to redeem the member's code, causing login
-identity confusion; a separate nonce-cookie handshake is needed to close this
-existing login-CSRF window.
+local return paths. They additionally require the initiating browser's verifier
+cookie as described below.
 
 These checks do not apply to arbitrary App ingress traffic: each App remains
 responsible for its own browser CSRF protection as described above.
+Workspace ingress login codes are bound to a browser handshake. The ingress
+hostname generates a random verifier with at least 256 bits of entropy; only
+its SHA-256 challenge travels to the Proxy authorization endpoint and is stored
+with the five-minute, single-use code. Callback redemption requires the matching
+verifier cookie, consumes the code atomically (including missing/wrong verifier
+failures), and clears that flow cookie. HTTPS uses a host-only `__Host-` cookie
+with `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`, preventing sibling
+ingress domains from planting a Domain cookie with a known verifier. The prefix
+requires `Path=/`; handshake cookies are stripped before forwarding to Apps.
+Up to eight concurrent browser flows per hostname are retained; additional
+flows evict the oldest browser-supplied flow cookies. Expired or evicted flows
+require starting login again. HTTP development uses an unprefixed cookie and
+does not provide transport secrecy or protection against sibling-domain cookie
+planting. These checks do not isolate compromised same-origin App code.
+
+Bound codes use a separate PostgreSQL table from legacy unbound codes. Mixed
+old/new Proxies fail login closed rather than accepting an unbound code; pending
+logins can require restarting after an upgrade. Existing ingress sessions and
+service-token clients remain compatible. Authorization and callback navigation
+reject contradictory Fetch Metadata when present; this is additional defense,
+not a substitute for the verifier. Code-bearing redirects and callbacks use
+`Cache-Control: no-store` and `Referrer-Policy: no-referrer`.
 
 
 Self-hosted Compose gives the updater sidecar the host Docker socket and a

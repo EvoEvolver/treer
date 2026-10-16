@@ -5,6 +5,7 @@ pub(in crate::api) struct IngressAuthorizeQuery {
     hostname: String,
     #[serde(default = "default_ingress_return_path")]
     return_path: String,
+    browser_nonce_hash: String,
 }
 
 pub(in crate::api) fn default_ingress_return_path() -> String {
@@ -18,6 +19,9 @@ pub(in crate::api) async fn authorize_service_ingress(
     Query(query): Query<IngressAuthorizeQuery>,
 ) -> Result<Response, ApiFailure> {
     auth::require_authorization_navigation(&headers)?;
+    if !auth::valid_ingress_nonce(&query.browser_nonce_hash) {
+        return Err(auth::invalid_ingress_authorization().into());
+    }
     let request_host = request_hostname(&headers)?;
     let proxy_host = config
         .proxy_public_url
@@ -52,7 +56,8 @@ pub(in crate::api) async fn authorize_service_ingress(
             authorize_url
                 .query_pairs_mut()
                 .append_pair("hostname", &resolved.ingress.hostname)
-                .append_pair("return_path", &query.return_path);
+                .append_pair("return_path", &query.return_path)
+                .append_pair("browser_nonce_hash", &query.browser_nonce_hash);
             let mut login_url = config.app_public_url.clone();
             login_url.set_query(None);
             login_url
@@ -62,13 +67,29 @@ pub(in crate::api) async fn authorize_service_ingress(
         }
     };
     let code = auth
-        .create_ingress_auth_code(&resolved.ingress, &session.user_id, &query.return_path)
+        .create_ingress_auth_code(
+            &resolved.ingress,
+            &session.user_id,
+            &query.return_path,
+            &query.browser_nonce_hash,
+        )
         .await?;
     let mut callback = config.url_for_hostname(&resolved.ingress.hostname)?;
     callback.set_path("/.treer/callback");
     callback.set_query(None);
-    callback.query_pairs_mut().append_pair("code", &code);
-    Ok(Redirect::to(callback.as_str()).into_response())
+    callback
+        .query_pairs_mut()
+        .append_pair("code", &code)
+        .append_pair("browser_nonce_hash", &query.browser_nonce_hash);
+    let mut response = Redirect::to(callback.as_str()).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    Ok(response)
 }
 
 pub(in crate::api) async fn proxy_service_ingress(
@@ -88,7 +109,15 @@ pub(in crate::api) async fn proxy_service_ingress(
         .filter(|resolved| resolved.ingress.enabled)
         .ok_or_else(|| ApiFailure::not_found("ingress_not_found", "service ingress not found"))?;
     if request.uri().path() == "/.treer/callback" {
-        return complete_ingress_authorization(&auth, &config, &hostname, request.uri()).await;
+        require_ingress_navigation(request.headers())?;
+        return complete_ingress_authorization(
+            &auth,
+            &config,
+            &hostname,
+            request.uri(),
+            request.headers(),
+        )
+        .await;
     }
     if request.uri().path().starts_with("/.treer/") {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
@@ -117,7 +146,13 @@ pub(in crate::api) async fn proxy_service_ingress(
                 None => None,
             };
             let Some(user_id) = user_id else {
-                return redirect_to_ingress_authorization(&config, &hostname, request.uri());
+                require_ingress_navigation(request.headers())?;
+                return redirect_to_ingress_authorization(
+                    &config,
+                    &hostname,
+                    request.uri(),
+                    request.headers(),
+                );
             };
             identity_token = Some(
                 issue_browser_app_identity(
@@ -161,20 +196,97 @@ pub(in crate::api) async fn complete_ingress_authorization(
     config: &IngressConfig,
     hostname: &str,
     uri: &Uri,
+    headers: &HeaderMap,
 ) -> Result<Response, ApiFailure> {
-    let code = uri
-        .query()
-        .and_then(|query| {
-            url::form_urlencoded::parse(query.as_bytes())
-                .find_map(|(key, value)| (key == "code").then(|| value.into_owned()))
-        })
-        .ok_or_else(|| {
-            ApiFailure::bad_request(
-                "invalid_ingress_authorization",
-                "authorization code missing",
-            )
-        })?;
-    let authorization = auth.consume_ingress_auth_code(hostname, &code).await?;
+    let pairs: Vec<_> = url::form_urlencoded::parse(uri.query().unwrap_or("").as_bytes()).collect();
+    let single = |name: &str| {
+        let mut values = pairs.iter().filter(|(key, _)| key == name);
+        let value = values.next()?.1.as_ref();
+        values.next().is_none().then_some(value)
+    };
+    let code = single("code").ok_or_else(auth::invalid_ingress_authorization)?;
+    let challenge = single("browser_nonce_hash").filter(|value| auth::valid_ingress_nonce(value));
+    let nonce_cookie = challenge.map(|hash| ingress_nonce_cookie_name(config, hash));
+    let nonce = nonce_cookie
+        .as_ref()
+        .and_then(|name| single_cookie_value(headers, name));
+    let result = auth
+        .consume_ingress_auth_code(hostname, code, nonce.as_deref())
+        .await;
+    let mut response = match result {
+        Ok(authorization) => ingress_authorized_response(config, authorization)?,
+        Err(error) => error.into_response(),
+    };
+    if let Some(name) = nonce_cookie {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&format!(
+                "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
+                ingress_secure_cookie(config)
+            ))
+            .unwrap(),
+        );
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    Ok(response)
+}
+
+fn ingress_secure_cookie(config: &IngressConfig) -> &'static str {
+    if config
+        .public_url
+        .as_ref()
+        .is_some_and(|url| url.scheme() == "https")
+    {
+        "; Secure"
+    } else {
+        ""
+    }
+}
+
+fn ingress_nonce_cookie_name(config: &IngressConfig, challenge: &str) -> String {
+    // __Host prevents a sibling ingress setting a Domain cookie with a known
+    // verifier. It requires Path=/; strip the nonce before forwarding to Apps.
+    let prefix = if ingress_secure_cookie(config).is_empty() {
+        "treer_ingress_nonce_"
+    } else {
+        "__Host-treer_ingress_nonce_"
+    };
+    format!("{prefix}{challenge}")
+}
+
+fn single_cookie_value(headers: &HeaderMap, name: &str) -> Option<String> {
+    let mut result = None;
+    for header in headers.get_all(header::COOKIE) {
+        for item in header.to_str().ok()?.split(';') {
+            let Some((key, value)) = item.trim().split_once('=') else {
+                continue;
+            };
+            if key == name {
+                if result.is_some() {
+                    return None;
+                }
+                result = Some(value.to_owned());
+            }
+        }
+    }
+    result
+}
+
+fn require_ingress_navigation(headers: &HeaderMap) -> Result<(), ApiFailure> {
+    auth::require_authorization_navigation(headers)
+        .map_err(|_| auth::invalid_ingress_authorization().into())
+}
+
+fn ingress_authorized_response(
+    config: &IngressConfig,
+    authorization: auth::ConsumedIngressAuthorization,
+) -> Result<Response, ApiFailure> {
     let secure = if config
         .public_url
         .as_ref()
@@ -204,14 +316,69 @@ pub(in crate::api) fn redirect_to_ingress_authorization(
     config: &IngressConfig,
     hostname: &str,
     uri: &Uri,
+    headers: &HeaderMap,
 ) -> Result<Response, ApiFailure> {
+    // Three OS-random UUIDs supply >256 bits of entropy; hash to a fixed,
+    // header-safe 256-bit verifier rather than relying on UUID formatting bits.
+    let nonce = auth::ingress_nonce_hash(&format!(
+        "{}{}{}",
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple(),
+        Uuid::new_v4().simple()
+    ));
+    let challenge = auth::ingress_nonce_hash(&nonce);
     let mut url = config.proxy_public_url.clone();
     url.set_path("/.treer/ingress/authorize");
     url.set_query(None);
     url.query_pairs_mut()
         .append_pair("hostname", hostname)
-        .append_pair("return_path", &uri.to_string());
-    Ok(Redirect::to(url.as_str()).into_response())
+        .append_pair("return_path", &uri.to_string())
+        .append_pair("browser_nonce_hash", &challenge);
+    let mut response = Redirect::to(url.as_str()).into_response();
+    response.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&format!(
+            "{}={nonce}; Path=/; HttpOnly; SameSite=Lax; Max-Age=300{}",
+            ingress_nonce_cookie_name(config, &challenge),
+            ingress_secure_cookie(config)
+        ))
+        .unwrap(),
+    );
+    // Browser cookie order is creation order for equal paths. Retain at most
+    // seven prior flows plus the new one; duplicate/forged names grant nothing.
+    let prefix = ingress_nonce_cookie_name(config, "");
+    let mut names = Vec::new();
+    for cookie in headers.get_all(header::COOKIE) {
+        for item in cookie.to_str().unwrap_or("").split(';') {
+            if let Some((name, _)) = item.trim().split_once('=') {
+                if name
+                    .strip_prefix(&prefix)
+                    .is_some_and(auth::valid_ingress_nonce)
+                    && !names.contains(&name)
+                {
+                    names.push(name);
+                }
+            }
+        }
+    }
+    for name in names.iter().take(names.len().saturating_sub(7)) {
+        response.headers_mut().append(
+            header::SET_COOKIE,
+            HeaderValue::from_str(&format!(
+                "{name}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0{}",
+                ingress_secure_cookie(config)
+            ))
+            .unwrap(),
+        );
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response.headers_mut().insert(
+        header::REFERRER_POLICY,
+        HeaderValue::from_static("no-referrer"),
+    );
+    Ok(response)
 }
 
 pub(in crate::api) fn request_hostname(headers: &HeaderMap) -> Result<String, ApiFailure> {
@@ -260,4 +427,99 @@ pub(in crate::api) fn cookie_value(headers: &HeaderMap, name: &str) -> Option<St
         .split(';')
         .filter_map(|item| item.trim().split_once('='))
         .find_map(|(key, value)| (key == name).then(|| value.to_string()))
+}
+
+#[cfg(test)]
+mod browser_binding_tests {
+    use super::*;
+
+    #[test]
+    fn nonce_cookies_and_fetch_metadata_reject_ambiguity() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("nonce=one; unrelated=kept"),
+        );
+        assert_eq!(
+            single_cookie_value(&headers, "nonce").as_deref(),
+            Some("one")
+        );
+        headers.append(header::COOKIE, HeaderValue::from_static("nonce=two"));
+        assert_eq!(single_cookie_value(&headers, "nonce"), None);
+        for (name, value) in [("sec-fetch-mode", "cors"), ("sec-fetch-dest", "image")] {
+            let mut headers = HeaderMap::new();
+            headers.insert(name, HeaderValue::from_static(value));
+            assert!(require_ingress_navigation(&headers).is_err());
+        }
+        let mut headers = HeaderMap::new();
+        headers.append("sec-fetch-mode", HeaderValue::from_static("navigate"));
+        headers.append("sec-fetch-mode", HeaderValue::from_static("navigate"));
+        assert!(require_ingress_navigation(&headers).is_err());
+    }
+
+    #[test]
+    fn browser_flows_are_host_prefixed_bounded_and_not_forwarded() {
+        let config = IngressConfig::new(
+            Some(Url::parse("https://apps.example.test").unwrap()),
+            &Url::parse("https://proxy.example.test").unwrap(),
+            &Url::parse("https://console.example.test").unwrap(),
+        )
+        .unwrap();
+        let cookies = (0..10)
+            .map(|i| {
+                format!(
+                    "{}={}",
+                    ingress_nonce_cookie_name(&config, &format!("{i:064x}")),
+                    "a".repeat(64)
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_str(&cookies.join("; ")).unwrap(),
+        );
+        let response = redirect_to_ingress_authorization(
+            &config,
+            "svc.apps.example.test",
+            &"/".parse().unwrap(),
+            &headers,
+        )
+        .unwrap();
+        let emitted = response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|h| h.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            emitted.len(),
+            4,
+            "one new flow and three oldest flows evicted"
+        );
+        for cookie in emitted {
+            assert!(cookie.starts_with("__Host-treer_ingress_nonce_"));
+            assert!(cookie.contains("; Path=/; HttpOnly; SameSite=Lax;"));
+            assert!(cookie.ends_with("; Secure"));
+            assert!(
+                !cookie.contains("Domain="),
+                "__Host with Domain must be rejected by browsers"
+            );
+        }
+        let forwarded = format!(
+            "{}; treer_ingress_nonce_untrusted=private; app_owned=retained",
+            cookies.join("; ")
+        );
+        headers.insert(header::COOKIE, HeaderValue::from_str(&forwarded).unwrap());
+        sanitize_ingress_request_headers(
+            &mut headers,
+            false,
+            "svc.apps.example.test",
+            "https",
+            config.ingress_cookie_name(),
+            None,
+        )
+        .unwrap();
+        assert_eq!(headers[header::COOKIE], "app_owned=retained");
+    }
 }

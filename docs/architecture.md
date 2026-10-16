@@ -208,6 +208,14 @@ Managed Agents can request a 60-second workload token for a registered service.
 Apps may validate tokens through `/.treer/apps/identity/verify`; verification
 also checks current service existence and, for humans, current membership.
 
+Workspace ingress login uses an App-host browser verifier cookie and a SHA-256
+challenge bound to a five-minute single-use code. Redemption is an atomic
+PostgreSQL update and requires the verifier; each tab has an independent flow.
+The host-prefixed HTTPS cookie is removed before forwarding to App code. A
+separate bound-code table ensures old/new Proxy mixtures reject incompatible
+login flows instead of accepting legacy unbound codes; ingress sessions remain
+shared and compatible across Proxies.
+
 Workspace ingress authenticates human ingress sessions and the Managed App UI
 route authenticates platform human sessions. Both sign fresh 60-second human
 `AppIdentityClaims` scoped to the resolved service and inject

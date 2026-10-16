@@ -245,6 +245,15 @@ Update preflight and application each have a 35-second command-response timeout;
 the App lifecycle lock remains held during those requests. A timeout after saving
 does not prove that the Controller did not apply the new specification.
 
+Workspace ingress browser login requires cookies on the App hostname. On
+HTTPS, the gateway uses short-lived host-only handshake cookies and clears them
+after callback; it retains up to eight concurrent flows per hostname. If a
+callback is expired, evicted, replayed, or arrives without its browser cookie,
+start login again from the App URL. During mixed old/new Proxy rollout, new
+logins fail closed until the pool supports browser-bound codes; existing ingress
+sessions are unchanged. HTTP development does not provide the HTTPS cookie
+planting protection described in the security model.
+
 When wildcard ingress is configured, every Managed App receives a stable
 `public_url` on its own origin. It requires Workspace authentication by default;
 an Agent can explicitly pass `--public` at creation time to allow anonymous

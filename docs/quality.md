@@ -59,6 +59,17 @@ The Host answers the initial cursor inheritance query required by portable-pty
 so child output can begin. The runtime tests cover split query bytes and the
 native Windows test covers argv, environment, input, resize, and process stop.
 
+Ingress browser binding has PostgreSQL regressions for browser-verifier
+redemption, independent parallel flows, missing/wrong verifiers, atomic replay
+fencing, expiry, hostname binding, and mixed-version code-table rejection.
+`node crates/treer-proxy/tests/ingress-cookie-browser.mjs` additionally uses the
+Web Playwright installation and Chromium to verify that a synthetic sibling
+HTTPS host cannot plant or overwrite an `__Host-` verifier cookie. All browser
+requests are locally fulfilled; no real Proxy, IdP, session or DNS is contacted.
+This browser check covers cookie-prefix enforcement, not a deployed login flow
+or other browser engines. Install the Web development dependencies first (a
+worktree may use `NODE_PATH` pointing to an existing repository Web installation).
+
 ### Service environment and recovery validation
 
 The macOS [multi-workspace fixture](research/fixtures/multi-workspace-per-machine.mjs)

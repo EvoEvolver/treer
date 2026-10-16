@@ -130,6 +130,233 @@ async fn oauth_navigation_exception_is_bound_to_ingress_pkce_audience_and_single
     assert_eq!(members_after, members_before);
 }
 
+#[tokio::test]
+async fn ingress_browser_binding_rejects_code_delivery_to_another_browser() {
+    let (auth, _, app, _, _, _) = fixture().await;
+    let ingress = auth
+        .ensure_app_ingress(&app, "alice", "apps.treer.example", None)
+        .await
+        .unwrap();
+    let config = IngressConfig::new(
+        Some(Url::parse("https://apps.treer.example/").unwrap()),
+        &Url::parse("https://proxy.treer.example/").unwrap(),
+        &Url::parse("https://app.treer.example/").unwrap(),
+    )
+    .unwrap();
+    let mut flows = Vec::new();
+    for _ in 0..3 {
+        let response = redirect_to_ingress_authorization(
+            &config,
+            &ingress.hostname,
+            &"/issues?mine=1".parse().unwrap(),
+            &HeaderMap::new(),
+        )
+        .unwrap();
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(response.headers()[header::REFERRER_POLICY], "no-referrer");
+        let cookie = response.headers()[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.starts_with("__Host-treer_ingress_nonce_"));
+        assert!(cookie.contains("; Path=/; HttpOnly; SameSite=Lax; Max-Age=300; Secure"));
+        assert!(!cookie.contains("Domain="));
+        let cookie_pair = cookie.split(';').next().unwrap().to_string();
+        let nonce = cookie_pair.split_once('=').unwrap().1;
+        let location = Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        assert!(!location.as_str().contains(nonce));
+        let challenge = location
+            .query_pairs()
+            .find(|(k, _)| k == "browser_nonce_hash")
+            .unwrap()
+            .1
+            .into_owned();
+        assert_eq!(challenge, auth::ingress_nonce_hash(nonce));
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("proxy.treer.example"),
+        );
+        let login = authorize_service_ingress(Extension(auth.clone()), Extension(config.clone()), headers.clone(),
+            Query(serde_json::from_value(json!({"hostname":ingress.hostname,"return_path":"/issues?mine=1","browser_nonce_hash":challenge})).unwrap())).await.unwrap();
+        let login_url = Url::parse(login.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        let return_to = login_url
+            .query_pairs()
+            .find(|(k, _)| k == "return_to")
+            .unwrap()
+            .1
+            .into_owned();
+        assert!(
+            return_to.contains(&challenge),
+            "login bounce preserves browser challenge"
+        );
+        headers.insert(
+            header::COOKIE,
+            HeaderValue::from_static("treer_session=login"),
+        );
+        headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
+        headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
+        let authorized = authorize_service_ingress(Extension(auth.clone()), Extension(config.clone()), headers,
+            Query(serde_json::from_value(json!({"hostname":ingress.hostname,"return_path":"/issues?mine=1","browser_nonce_hash":challenge})).unwrap())).await.unwrap();
+        let callback =
+            Url::parse(authorized.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+        let uri = format!("{}?{}", callback.path(), callback.query().unwrap())
+            .parse::<Uri>()
+            .unwrap();
+        flows.push((cookie_pair, uri));
+    }
+    assert_ne!(
+        flows[0].0, flows[1].0,
+        "parallel tabs have independent cookies"
+    );
+    // Alice's valid code delivered into a second member's browser (no matching
+    // App-domain verifier cookie) must not create any ingress session.
+    let before: i64 = sqlx::query_scalar("SELECT count(*) FROM ingress_sessions")
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap();
+    let denied = complete_ingress_authorization(
+        &auth,
+        &config,
+        &ingress.hostname,
+        &flows[0].1,
+        &HeaderMap::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(denied.status(), StatusCode::UNAUTHORIZED);
+    assert!(denied.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .contains("Max-Age=0"));
+    assert_eq!(
+        before,
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingress_sessions")
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap()
+    );
+    let mut both_tabs = HeaderMap::new();
+    both_tabs.insert(
+        header::COOKIE,
+        HeaderValue::from_str(&format!("{}; {}", flows[1].0, flows[2].0)).unwrap(),
+    );
+    for (_, uri) in &flows {
+        let response =
+            complete_ingress_authorization(&auth, &config, &ingress.hostname, uri, &both_tabs)
+                .await
+                .unwrap();
+        if uri == &flows[0].1 {
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "invalid delivery consumes code"
+            );
+        } else {
+            assert_eq!(response.status(), StatusCode::SEE_OTHER);
+            assert_eq!(response.headers()[header::LOCATION], "/issues?mine=1");
+            assert_eq!(
+                response
+                    .headers()
+                    .get_all(header::SET_COOKIE)
+                    .iter()
+                    .count(),
+                2
+            );
+            let session = response.headers()[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .split_once('=')
+                .unwrap()
+                .1;
+            assert_eq!(
+                auth.authenticate_ingress_session(&ingress.hostname, session)
+                    .await
+                    .unwrap()
+                    .as_deref(),
+                Some("alice")
+            );
+            assert_eq!(
+                complete_ingress_authorization(&auth, &config, &ingress.hostname, uri, &both_tabs)
+                    .await
+                    .unwrap()
+                    .status(),
+                StatusCode::UNAUTHORIZED,
+                "callback refresh cannot replay"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn ingress_browser_codes_expiry_host_replay_and_old_proxy_fail_closed() {
+    let (auth, _, app, _, _, _) = fixture().await;
+    let ingress = auth
+        .ensure_app_ingress(&app, "alice", "apps.treer.example", None)
+        .await
+        .unwrap();
+    let nonce = "a".repeat(64);
+    let hash = auth::ingress_nonce_hash(&nonce);
+    let create = || auth.create_ingress_auth_code(&ingress, "alice", "/", &hash);
+    for supplied in [None, Some("b".repeat(64)), Some(hash.clone())] {
+        let code = create().await.unwrap();
+        assert!(auth
+            .consume_ingress_auth_code(&ingress.hostname, &code, supplied.as_deref())
+            .await
+            .is_err());
+        assert!(auth
+            .consume_ingress_auth_code(&ingress.hostname, &code, Some(&nonce))
+            .await
+            .is_err());
+    }
+    let code = create().await.unwrap();
+    assert!(auth
+        .consume_ingress_auth_code("other.apps.treer.example", &code, Some(&nonce))
+        .await
+        .is_err());
+    let (one, two) = tokio::join!(
+        auth.consume_ingress_auth_code(&ingress.hostname, &code, Some(&nonce)),
+        auth.consume_ingress_auth_code(&ingress.hostname, &code, Some(&nonce))
+    );
+    assert_ne!(
+        one.is_ok(),
+        two.is_ok(),
+        "atomic code consumption fences concurrent redemption"
+    );
+    let code = create().await.unwrap();
+    sqlx::query("UPDATE ingress_browser_auth_codes SET expires_at=$2 WHERE code=$1")
+        .bind(&code)
+        .bind((Utc::now() - chrono::Duration::seconds(1)).to_rfc3339())
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    assert!(auth
+        .consume_ingress_auth_code(&ingress.hostname, &code, Some(&nonce))
+        .await
+        .is_err());
+    let code = create().await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingress_auth_codes WHERE code=$1")
+            .bind(&code)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap(),
+        0,
+        "old Proxy cannot redeem bound codes using its legacy table"
+    );
+    sqlx::query("INSERT INTO ingress_auth_codes(code,ingress_id,user_id,return_path,expires_at) VALUES('iac_old',$1,'alice','/',$2)").bind(&ingress.ingress_id).bind((Utc::now()+chrono::Duration::minutes(5)).to_rfc3339()).execute(&auth.pool()).await.unwrap();
+    assert!(
+        auth.consume_ingress_auth_code(&ingress.hostname, "iac_old", Some(&nonce))
+            .await
+            .is_err(),
+        "new Proxy never accepts old unbound codes"
+    );
+    assert!(auth
+        .create_ingress_auth_code(&ingress, "alice", "/", "invalid")
+        .await
+        .is_err());
+}
+
 async fn fixture() -> (
     AuthStore,
     IdentityIssuer,

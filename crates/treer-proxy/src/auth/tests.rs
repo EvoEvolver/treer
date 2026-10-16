@@ -2251,11 +2251,16 @@ async fn service_ingress_and_human_authorization_are_durable_and_scoped() {
     );
 
     let code = store
-        .create_ingress_auth_code(&ingress, &owner.user_id, "/issues?mine=1")
+        .create_ingress_auth_code(
+            &ingress,
+            &owner.user_id,
+            "/issues?mine=1",
+            &ingress_nonce_hash(&"a".repeat(64)),
+        )
         .await
         .expect("create authorization code");
     let authorization = store
-        .consume_ingress_auth_code(&ingress.hostname, &code)
+        .consume_ingress_auth_code(&ingress.hostname, &code, Some(&"a".repeat(64)))
         .await
         .expect("consume authorization code");
     assert_eq!(authorization.return_path, "/issues?mine=1");
@@ -2268,7 +2273,7 @@ async fn service_ingress_and_human_authorization_are_durable_and_scoped() {
         Some(owner.user_id.as_str())
     );
     assert!(store
-        .consume_ingress_auth_code(&ingress.hostname, &code)
+        .consume_ingress_auth_code(&ingress.hostname, &code, Some(&"a".repeat(64)))
         .await
         .is_err());
 

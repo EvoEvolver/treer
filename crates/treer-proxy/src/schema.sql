@@ -564,6 +564,17 @@ CREATE TABLE IF NOT EXISTS ingress_auth_codes (
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 
+-- Separate from legacy unbound codes: mixed-version Proxies fail closed.
+CREATE TABLE IF NOT EXISTS ingress_browser_auth_codes (
+    code TEXT PRIMARY KEY,
+    ingress_id TEXT NOT NULL REFERENCES service_ingresses(ingress_id) ON DELETE CASCADE,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    return_path TEXT NOT NULL,
+    browser_nonce_hash TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    used_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS ingress_sessions (
     token TEXT PRIMARY KEY,
     ingress_id TEXT NOT NULL,
