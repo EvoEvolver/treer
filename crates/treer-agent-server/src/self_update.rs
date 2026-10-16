@@ -18,6 +18,7 @@ pub mod probe;
 pub mod publication;
 pub mod safety;
 pub mod selection;
+pub mod startup_backup;
 
 use publication::{FileStep, Publications};
 
