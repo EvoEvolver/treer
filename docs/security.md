@@ -696,7 +696,12 @@ that is not a reason to exempt human browser requests from validation.
 
 With authentication enabled, Core cookie-authenticated POST/PUT/PATCH/DELETE
 requests and WebSocket upgrades require exactly one `Origin` equal to the
-configured Console origin. Missing, `null`, duplicate and foreign origins are
+configured Console origin. Only the registered App UI, Agent interface UI and
+virtual-host HTTP proxy tunnel routes additionally accept the configured Proxy
+origin, because their embedded pages issue relative requests from that origin.
+Classification uses Axum's matched route template, never a user-supplied prefix;
+Proxy origin alone cannot authorize ordinary Core management API writes.
+Missing, `null`, duplicate and foreign origins are
 rejected with `403 csrf_denied`; Fetch Metadata, when present, must not contradict
 that origin (`Sec-Fetch-Site` must be `same-origin` or `same-site`). A same-site
 subdomain is not a trusted origin. CORS and SameSite cookies alone are not this

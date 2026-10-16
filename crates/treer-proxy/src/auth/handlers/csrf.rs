@@ -6,12 +6,61 @@ pub(crate) fn require_console_origin(
     auth: &AuthStore,
     headers: &HeaderMap,
 ) -> Result<(), AuthFailure> {
-    validate_browser_origin(headers, &auth.app_public_url.origin().ascii_serialization())
+    validate_browser_origin(
+        headers,
+        &[&auth.app_public_url.origin().ascii_serialization()],
+    )
 }
 
-fn validate_browser_origin(headers: &HeaderMap, expected: &str) -> Result<(), AuthFailure> {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CookieOriginClass {
+    Console,
+    Embedded,
+}
+
+// Classify Axum's registered template, never a client-supplied path prefix.
+// Missing route metadata defaults to the narrower Console-only authority.
+pub(crate) fn cookie_origin_class(template: &str) -> CookieOriginClass {
+    match template {
+        "/api/workspaces/{workspace_id}/apps/{app_id}/ui/"
+        | "/api/workspaces/{workspace_id}/apps/{app_id}/ui/{*path}"
+        | "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui"
+        | "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/"
+        | "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/{*path}"
+        | "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy"
+        | "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/"
+        | "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/{*path}" => {
+            CookieOriginClass::Embedded
+        }
+        _ => CookieOriginClass::Console,
+    }
+}
+
+pub(crate) fn require_cookie_request_origin(
+    auth: &AuthStore,
+    request: &Request,
+) -> Result<(), AuthFailure> {
+    let class = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|path| cookie_origin_class(path.as_str()))
+        .unwrap_or(CookieOriginClass::Console);
+    let console = auth.app_public_url.origin().ascii_serialization();
+    let proxy = auth.proxy_public_url.origin().ascii_serialization();
+    match class {
+        CookieOriginClass::Console => validate_browser_origin(request.headers(), &[&console]),
+        CookieOriginClass::Embedded => {
+            validate_browser_origin(request.headers(), &[&console, &proxy])
+        }
+    }
+}
+
+fn validate_browser_origin(headers: &HeaderMap, expected: &[&str]) -> Result<(), AuthFailure> {
     if headers.get_all(header::ORIGIN).iter().count() != 1
-        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(expected)
+        || !headers
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|origin| expected.contains(&origin))
         || headers.get_all("sec-fetch-site").iter().count() > 1
         || headers
             .get("sec-fetch-site")
@@ -119,6 +168,76 @@ mod tests {
         }
         headers.append(NATIVE_CLIENT_HEADER, HeaderValue::from_static("mobile_ios"));
         assert!(!native_preauth(&headers));
+    }
+
+    #[tokio::test]
+    async fn proxy_origin_is_authorized_only_for_registered_embedded_routes() {
+        let auth = AuthStore::for_test("admin-password").await;
+        let (invite, _) = auth.create_personal_invitation().await.unwrap();
+        let user = auth
+            .register(Some(&invite), "embed@example.test", "Embed", "password123")
+            .await
+            .unwrap();
+        let mut app = Router::new();
+        for template in [
+            "/api/workspaces/{workspace_id}/apps/{app_id}/ui/",
+            "/api/workspaces/{workspace_id}/apps/{app_id}/ui/{*path}",
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui",
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/",
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/{*path}",
+            "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy",
+            "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/",
+            "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/{*path}",
+            "/api/workspaces/{workspace_id}/machines/{machine_id}/exec",
+        ] {
+            app = app.route(template, any(|| async { StatusCode::NO_CONTENT }));
+        }
+        let app = app.layer(middleware::from_fn_with_state(auth, require_user));
+        let cookie = format!("{SESSION_COOKIE}={}", user.token);
+        for path in [
+            "/api/workspaces/ws/apps/app/ui/",
+            "/api/workspaces/ws/apps/app/ui/api/write",
+            "/api/workspaces/ws/agents/agent/interface/ui",
+            "/api/workspaces/ws/agents/agent/interface/ui/",
+            "/api/workspaces/ws/agents/agent/interface/ui/api/prompt",
+            "/api/workspaces/ws/virtual-hosts/demo/proxy",
+            "/api/workspaces/ws/virtual-hosts/demo/proxy/",
+            "/api/workspaces/ws/virtual-hosts/demo/proxy/api/write",
+            "/api/workspaces/ws/machines/machine/exec",
+        ] {
+            for origin in [
+                "https://app.treer.example",
+                "https://proxy.treer.example",
+                "https://evil.example",
+            ] {
+                for upgrade in [false, true] {
+                    let mut request = Request::builder()
+                        .method(if upgrade { "GET" } else { "POST" })
+                        .uri(path)
+                        .header(header::COOKIE, &cookie)
+                        .header(header::ORIGIN, origin);
+                    if upgrade {
+                        request = request.header(header::UPGRADE, "websocket");
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(request.body(Body::empty()).unwrap())
+                        .await
+                        .unwrap();
+                    let allowed = origin == "https://app.treer.example"
+                        || (origin == "https://proxy.treer.example" && !path.ends_with("/exec"));
+                    assert_eq!(
+                        response.status(),
+                        if allowed {
+                            StatusCode::NO_CONTENT
+                        } else {
+                            StatusCode::FORBIDDEN
+                        },
+                        "{path} {origin} upgrade={upgrade}"
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -315,24 +434,24 @@ mod tests {
             if let Some(origin) = origin {
                 headers.insert(header::ORIGIN, HeaderValue::from_static(origin));
             }
-            assert!(validate_browser_origin(&headers, EXPECTED).is_err());
+            assert!(validate_browser_origin(&headers, &[EXPECTED]).is_err());
         }
         let mut headers = HeaderMap::new();
         headers.insert(header::ORIGIN, HeaderValue::from_static(EXPECTED));
-        assert!(validate_browser_origin(&headers, EXPECTED).is_ok());
+        assert!(validate_browser_origin(&headers, &[EXPECTED]).is_ok());
         for site in ["same-origin", "same-site"] {
             headers.insert("sec-fetch-site", HeaderValue::from_static(site));
-            assert!(validate_browser_origin(&headers, EXPECTED).is_ok());
+            assert!(validate_browser_origin(&headers, &[EXPECTED]).is_ok());
         }
         for site in ["cross-site", "none", "invalid"] {
             headers.insert("sec-fetch-site", HeaderValue::from_static(site));
-            assert!(validate_browser_origin(&headers, EXPECTED).is_err());
+            assert!(validate_browser_origin(&headers, &[EXPECTED]).is_err());
         }
         headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
         headers.append("sec-fetch-site", HeaderValue::from_static("same-origin"));
-        assert!(validate_browser_origin(&headers, EXPECTED).is_err());
+        assert!(validate_browser_origin(&headers, &[EXPECTED]).is_err());
         headers.remove("sec-fetch-site");
         headers.append(header::ORIGIN, HeaderValue::from_static(EXPECTED));
-        assert!(validate_browser_origin(&headers, EXPECTED).is_err());
+        assert!(validate_browser_origin(&headers, &[EXPECTED]).is_err());
     }
 }

@@ -2497,7 +2497,7 @@ async fn registered_cookie_routes_reject_browser_writes_before_handlers() {
             "use registered_route for Core routes"
         );
     }
-    for path in paths {
+    for (path, origin_class) in paths {
         // Explicit exceptions, with the authentication boundary that replaces
         // browser-cookie authority. Unknown new routes must be classified.
         let exception = if path.starts_with("/agent/") {
@@ -2547,6 +2547,33 @@ async fn registered_cookie_routes_reject_browser_writes_before_handlers() {
             })
             .collect::<Vec<_>>()
             .join("/");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(&concrete)
+                    .header(header::ORIGIN, "https://proxy.treer.example")
+                    .header(header::COOKIE, "treer_session=synthetic-user")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        match origin_class {
+            crate::auth::CookieOriginClass::Embedded => assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "{path}: Proxy origin must reach authentication, not CSRF denial"
+            ),
+            crate::auth::CookieOriginClass::Console => assert!(
+                matches!(
+                    response.status(),
+                    StatusCode::FORBIDDEN | StatusCode::METHOD_NOT_ALLOWED
+                ),
+                "{path}: Proxy origin must not grant Core management authority"
+            ),
+        }
         for method in ["POST", "PUT", "PATCH", "DELETE"] {
             for origin in [None, Some("null"), Some("https://evil.example.test")] {
                 let mut request = Request::builder()

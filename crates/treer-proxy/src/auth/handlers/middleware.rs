@@ -11,7 +11,7 @@ pub(crate) async fn require_user(
         && bearer_token(request.headers()).is_none()
         && browser_request_needs_origin(&request)
     {
-        if let Err(error) = require_console_origin(&auth, request.headers()) {
+        if let Err(error) = require_cookie_request_origin(&auth, &request) {
             return error.into_response();
         }
     }
