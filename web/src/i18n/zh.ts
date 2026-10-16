@@ -746,5 +746,6 @@ export const zh: Messages = {
   "provider.cleanup_unavailable": "此控制平面或 Controller 不支持预留身份清理。身份仍被预留。",
   "provider.cleanup_observed": "Core 无法证明此工作负载不存在，已保留身份。请检查状态后使用正常生命周期操作。",
   "provider.cleanup_unconfirmed": "无法确认清理成功。身份仍被预留。",
+  "provider.cleanup_not_found": "你的账号无法清理此预留身份。它可能已确认启动，或由旧版控制平面创建。请检查正常工作负载状态；此响应不代表删除成功，也不能据此再次创建。",
 
 }

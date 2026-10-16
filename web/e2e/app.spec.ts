@@ -2350,7 +2350,7 @@ for (const width of [1280, 390]) for (const state of ['cleanup_failed', 'reserve
   })
 }
 
-for (const status of [403, 409, 501, 503]) test(`reservation cleanup failure ${status} keeps identity and creation blocked`, async ({ page }) => {
+for (const status of [403, 404, 409, 501, 503]) test(`reservation cleanup failure ${status} keeps identity and creation blocked`, async ({ page }) => {
   await page.route('**/api/workspaces/ws-1/agents', route => route.request().method() !== 'POST' ? route.fallback() : route.fulfill({ status: 409, json: { error: { message: 'Not confirmed', details: { machine_id: 'srv-a', agent_id: 'ag_reserved', creation_state: 'cleanup_failed' } } } }))
   let requests = 0
   await page.route('**/api/workspaces/ws-1/agent-reservations/ag_reserved/cleanup', route => { requests++; return route.fulfill({ status, json: { error: { code: status === 409 ? 'agent_reservation_observed' : 'cleanup_denied', message: 'Cleanup denied' } } }) })
@@ -2366,5 +2366,6 @@ for (const status of [403, 409, 501, 503]) test(`reservation cleanup failure ${s
   await expect(page.getByRole('button', { name: 'Create terminal', exact: true, includeHidden: true })).toBeDisabled()
   await expect(page.getByRole('textbox', { name: 'Name', exact: true, includeHidden: true })).toHaveValue('Keep refused cleanup draft')
   if (status === 409) await expect(confirmation.getByRole('alert')).toContainText('Core could not prove this workload is absent')
+  if (status === 404) await expect(confirmation.getByRole('alert')).toContainText('does not confirm deletion or allow another Create')
   expect(requests).toBe(1)
 })

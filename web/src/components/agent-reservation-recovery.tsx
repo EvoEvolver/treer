@@ -24,7 +24,8 @@ export function AgentReservationRecovery({ workspaceId, failure, onCleaned }: { 
     } catch (reason) {
       if (!live.current) return
       const key = reason instanceof ApiError && reason.status === 501 ? "provider.cleanup_unavailable"
-        : reason instanceof ApiError && reason.status === 409 ? "provider.cleanup_observed" : null
+        : reason instanceof ApiError && reason.status === 409 ? "provider.cleanup_observed"
+        : reason instanceof ApiError && reason.status === 404 ? "provider.cleanup_not_found" : null
       setError(key ? t(key) : reason instanceof Error ? reason.message : t("provider.cleanup_unconfirmed"))
     } finally { if (live.current) setBusy(false) }
   }
