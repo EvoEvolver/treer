@@ -174,6 +174,17 @@ IDs and intent files. Recovery must reconcile actual state before deciding any
 follow-up; the detached coordinator, lock handoff and recovery entry are still
 unimplemented, so this primitive is not a usable self-update command.
 
+A crash after durable intent but before transmission is deliberately ambiguous;
+do not delete the marker or infer that the request was never sent. Recovery may
+accept activation only through `observe_live`: the expected installed and running
+Controller image, a new scoped epoch, the same parent Host, and unchanged
+workloads/output must all be proven. Otherwise retain the evidence and choose a
+separately journaled rollback or explicit manual abandonment, never automatic
+restart replay. The activator acceptance tests must include an ACK followed by
+failed live observation: it must enter rollback, not `core_healthy` or `complete`.
+This is a required integration test, not coverage supplied by the current
+request-only fixture.
+
 After activator death, the next explicit `self-update --recover JOB_ID` reconciles
 journal, actual hashes and live process identities under the same locks. Never
 infer success from a PID or an old receipt alone; never restart the Host or replay
