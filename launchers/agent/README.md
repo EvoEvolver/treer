@@ -552,6 +552,13 @@ long output opens in a dialog. Earlier history loads through "Load earlier messa
 without losing the reader's place; scrolling up shows "Jump to latest" instead of
 pulling the page.
 
+File links in messages open the read-only file browser and immediately preview the
+file (the Preview tab on phones). Workspace-relative paths, absolute paths inside
+the working directory, local `file:` links, and `:line[:column]` / `#Lline` references
+are supported; line references select the file, without moving to a specific line.
+Missing or outside-workspace files show a local preview error under the existing
+file API's guards. External HTTP(S) and mail links retain safe new-tab behavior.
+
 **Composer.** Enter sends when idle and steers the current run when busy; Tab queues
 a non-empty draft; Shift+Enter adds a newline. While running, separate **Steer** and
 **Queue** buttons support touch. Harnesses without steering queue messages and show a

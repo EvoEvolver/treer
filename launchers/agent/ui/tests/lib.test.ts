@@ -3,13 +3,32 @@ import { test } from "node:test";
 import { toBlocks } from "../src/lib/blocks";
 import { parseDiff } from "../src/lib/diff";
 import { activityStats, compact, duration, plural, toolState } from "../src/lib/format";
-import { safeImageUrl, safeUrl } from "../src/lib/url";
+import { safeImageUrl, safeUrl, workspaceFilePath } from "../src/lib/url";
 import { reducer, shareTurns, type State } from "../src/state/store";
 import { t } from "../src/i18n";
 import { exportName, toMarkdown } from "../src/lib/export";
 import type { HistoryItem, Snapshot, TurnDto } from "../src/types";
 
 const item = (id: string, kind: HistoryItem["kind"], extra: Partial<HistoryItem> = {}): HistoryItem => ({ id, kind, text: id, ...extra });
+
+test("workspace file links map relative, absolute and line references to the existing preview API", () => {
+  for (const reference of ["src/a.ts", "./src/a.ts", "src/a.ts:12", "src/a.ts:12:3", "src/a.ts#L12", "/work/project/src/a.ts", "file:///work/project/src/a.ts#L12"]) {
+    assert.equal(workspaceFilePath(reference, "/work/project"), "src/a.ts", reference);
+  }
+  assert.equal(workspaceFilePath("special%20%23%20100%25.txt", "/work/project"), "special # 100%.txt");
+  for (const reference of ["C:\\Work\\Project\\src\\a.ts:12", "c:/work/project/src/a.ts#L12", "file:///C:/Work/Project/src/a.ts#L12"]) {
+    assert.equal(workspaceFilePath(reference, "\\\\?\\C:\\Work\\Project"), "src/a.ts", reference);
+  }
+});
+
+test("file-link presentation never makes an outside path appear inside or accepts a remote scheme", () => {
+  assert.equal(workspaceFilePath("/work/project-other/a.ts", "/work/project"), "/work/project-other/a.ts");
+  assert.equal(workspaceFilePath("C:/outside/a.ts", "C:/work/project"), "C:/outside/a.ts");
+  assert.equal(workspaceFilePath("../outside.txt", "/work/project"), "../outside.txt", "the server rejects traversal rather than the UI silently normalizing it");
+  for (const reference of ["https://example.test/a", "mailto:a@example.test", "javascript:x", "javascript%3Ax", "data:text/html,x", "//evil.test/x", "file://evil.test/x", "#heading", "?query", "a%00.txt", "a\u0001.txt", "\\\\evil.test\\x", "%2F%2Fevil.test/x"]) {
+    assert.equal(workspaceFilePath(reference, "/work/project"), undefined, reference);
+  }
+});
 
 test("safeUrl keeps http(s), mailto and relative references only", () => {
   for (const ok of ["https://example.test/a?b=1", "http://example.test", "mailto:a@example.test", "docs/readme.md", "#section", "?x=1"]) assert.equal(safeUrl(ok), ok, ok);

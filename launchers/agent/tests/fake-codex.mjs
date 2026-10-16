@@ -2,6 +2,7 @@
 import readline from "node:readline";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 const goalFile = join(process.cwd(), ".fake-codex-goal.json");
 let goal = null;
 try { goal = JSON.parse(readFileSync(goalFile, "utf8")); } catch { /* no goal */ }
@@ -34,6 +35,15 @@ if (process.env.FAKE_CODEX_RICH) {
     { id: "cmd-2", type: "commandExecution", command: "node --test tests/durable-queue.test.ts", aggregatedOutput: "not ok 1 - fixture path", status: "failed" },
     { id: "rich-1", type: "agentMessage", text: "## Result\n\nSee [the docs](https://example.test/docs) and [bad](javascript:window.xss=3), [ftp](ftp://example.test/x), [tel](tel:123), [slash](/\\\\evil.test/x).<form><input name=\"x\"><button>go</button></form>\n\n<img src=x onerror=\"window.xss=1\">\n\n<svg onload=\"window.xss=2\"></svg><script>window.xss=4</script>\n\n![remote](https://example.test/x.png)\n\n- one\n- two\n\n```ts\nconst a = 1;\n```\n\n| a | b |\n| - | - |\n| 1 | 2 |\n\n![pixel](data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==)" },
   );
+}
+if (process.env.FAKE_CODEX_FILE_LINKS) {
+  turns[1].items.push({ id: "file-links", type: "agentMessage", text: [
+    "[Nested source](src/deep/inner.txt#L1)",
+    `[Absolute readme](<${process.cwd()}/README.md:2>)`,
+    `[Local file URL](${pathToFileURL(join(process.cwd(), "special # 100%.txt")).href})`,
+    "[Missing file](missing.txt)",
+    "[Outside file](../escape.txt)",
+  ].join("\n\n") });
 }
 if (process.env.FAKE_CODEX_MANY) {
   const many = Array.from({ length: Number(process.env.FAKE_CODEX_MANY) }, (_, n) => ({ id: `old-${n}`, status: "completed", items: [
