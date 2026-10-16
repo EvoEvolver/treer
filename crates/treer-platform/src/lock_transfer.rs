@@ -27,6 +27,16 @@ fn invalid() -> io::Error {
     )
 }
 
+/// A peer-authenticated handoff socket must not survive exec into an unrelated
+/// child. This does not prevent fork inheritance: the activator coordinator
+/// must close the channel before spawning any further process.
+pub fn require_cloexec_socket(stream: &UnixStream) -> io::Result<()> {
+    if !rustix::io::fcntl_getfd(stream)?.contains(rustix::io::FdFlags::CLOEXEC) {
+        return Err(invalid());
+    }
+    Ok(())
+}
+
 /// Match the received reference against a checked stable lock file, then ensure
 /// this same open description holds LOCK_EX. It cannot steal a competing lock.
 pub fn adopt(file: File, expected: &File) -> io::Result<File> {
@@ -211,6 +221,10 @@ mod tests {
         let (_fixture, directory) = Fixture::new();
         let original = directory.lock("held").unwrap();
         let (sender, mut receiver) = UnixStream::pair().unwrap();
+        require_cloexec_socket(&sender).unwrap();
+        rustix::io::fcntl_setfd(&sender, rustix::io::FdFlags::empty()).unwrap();
+        assert!(require_cloexec_socket(&sender).is_err());
+        rustix::io::fcntl_setfd(&sender, rustix::io::FdFlags::CLOEXEC).unwrap();
         rustix::io::fcntl_setfd(&original, rustix::io::FdFlags::empty()).unwrap();
         assert!(send(&sender, &[&original]).is_err());
         rustix::io::fcntl_setfd(&original, rustix::io::FdFlags::CLOEXEC).unwrap();

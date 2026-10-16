@@ -2,16 +2,77 @@
 //! second probe connection. This is only the process-proof layer: the activator
 //! coordinator must still create a private endpoint, bind the job, and persist
 //! ownership ACK before the sender releases its locks or reports acceptance.
-use std::{fs::File, os::unix::net::UnixStream};
+use std::{fs::File, os::unix::net::UnixStream, path::Path};
 
 use anyhow::{bail, Result};
+use treer_platform::private_directory::PrivateListener;
 use treer_platform::process_image::ProcessImage;
 
 use super::{
     hex,
     images::digest_file,
     selection::{Selected, SelectionLocks},
+    Journal, Phase, Receipt,
 };
+
+/// Exclusive private endpoint bound to one already-prepared journal revision.
+/// This does not launch a child, transfer locks or persist an ownership ACK.
+pub struct Endpoint<'a> {
+    listener: PrivateListener,
+    journal: &'a Journal,
+    receipt: Receipt,
+}
+
+impl<'a> Endpoint<'a> {
+    pub fn bind(journal: &'a Journal, job_directory: &Path) -> Result<Self> {
+        let receipt = journal.read()?;
+        if receipt.phase != Phase::Prepared {
+            bail!("update_handoff_phase_conflict");
+        }
+        let listener = journal
+            .directory
+            .bind_handoff(job_directory)
+            .map_err(|_| anyhow::anyhow!("update_handoff_endpoint_unavailable"))?;
+        let result = Self {
+            listener,
+            journal,
+            receipt,
+        };
+        result.verify()?;
+        Ok(result)
+    }
+
+    fn verify(&self) -> Result<()> {
+        if self.journal.read()? != self.receipt {
+            bail!("update_handoff_job_changed");
+        }
+        Ok(())
+    }
+
+    /// No waiting/retry hidden here. The future owned-child coordinator must
+    /// enforce its deadline and abort before acceptance when the child dies.
+    pub fn accept(
+        &self,
+        child: &ProcessImage,
+        verified_image: &File,
+        digest: &str,
+    ) -> Result<Option<AuthenticatedPeer>> {
+        self.verify()?;
+        let stream = match self.listener.accept() {
+            Ok(stream) => stream,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return Ok(None),
+            Err(_) => bail!("update_handoff_endpoint_unavailable"),
+        };
+        let peer = AuthenticatedPeer::authenticate(stream, child, verified_image, digest)?;
+        self.verify()?;
+        Ok(Some(peer))
+    }
+}
+
+fn require_cloexec(stream: &UnixStream) -> Result<()> {
+    treer_platform::lock_transfer::require_cloexec_socket(stream)
+        .map_err(|_| anyhow::anyhow!("update_handoff_inheritable_socket"))
+}
 
 fn peer(stream: &UnixStream) -> Result<(u32, u32)> {
     #[cfg(target_os = "linux")]
@@ -53,6 +114,7 @@ impl AuthenticatedPeer {
         verified_image: &File,
         expected_digest: &str,
     ) -> Result<Self> {
+        require_cloexec(&stream)?;
         if !hex(expected_digest, 64) {
             bail!("invalid_update_handoff_image");
         }
@@ -84,6 +146,7 @@ impl AuthenticatedPeer {
     }
 
     fn verify(&self) -> Result<()> {
+        require_cloexec(&self.stream)?;
         let (pid, uid) = peer(&self.stream)?;
         if pid != self.image.pid() || uid != nix::unistd::geteuid().as_raw() {
             bail!("update_handoff_peer_mismatch");

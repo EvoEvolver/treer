@@ -74,9 +74,21 @@ and digest, and rechecks that process before and after sending/receiving locks.
 The wrapper exposes no raw socket accessor. Same UID or same binary alone is
 insufficient; another PID, an equal-content different inode, a wrong digest or
 an exited process is rejected. Sender descriptors must already be CLOEXEC.
-This is not yet the job-bound handshake: private endpoint creation, owned child
-launch/detachment, durable ownership ACK and parent-release coordination remain
-to be wired and tested. The wrapper is not a same-account sandbox.
+The endpoint is now exclusively created as `handoff.sock` under the retained
+0700 prepared-job directory, checking the pathname still names that directory
+and the socket inode has not changed. It never replaces or unlinks an existing
+entry, including on drop; stale endpoints require explicit recovery. An overly
+long Unix socket pathname fails closed, with no public temporary-path fallback.
+Acceptance checks the exact prepared receipt (including job and revision) before
+and after authenticating the connected child. Accepted sockets are blocking with
+three-second I/O bounds; listener and authenticated sockets require CLOEXEC.
+The parent directory supplies privacy, not the socket file's umask-derived mode.
+Pathname checks do not provide atomic bind-at semantics against another process
+of the same OS account. This wrapper is not a same-account sandbox.
+This is still not the complete job-bound ownership handshake: owned child launch/
+detachment, durable ownership ACK and parent-release coordination remain to be
+wired and tested. The activator must close the handoff socket before any further
+fork/exec: CLOEXEC alone cannot prevent another child inheriting it on fork.
 Immediate lock-release proofs run in isolated test subprocesses: CLOEXEC closes
 descriptors on exec, not fork, so an unrelated parallel test's fork/exec window
 can transiently retain another lock reference. The tests remove that unrelated

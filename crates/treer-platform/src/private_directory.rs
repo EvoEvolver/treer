@@ -5,7 +5,9 @@
 use std::{
     fs::File,
     io,
-    path::{Component, Path},
+    os::unix::net::{UnixListener, UnixStream},
+    path::{Component, Path, PathBuf},
+    time::Duration,
 };
 
 use rustix::fs::{self as sys, AtFlags, FileType, Mode, OFlags};
@@ -70,6 +72,33 @@ impl PrivateDirectory {
     /// This never chmods a pre-existing directory or creates missing ancestors.
     pub fn open(path: &Path) -> io::Result<Self> {
         Self::from_handle(open_physical_directory(path)?)
+    }
+
+    fn matches_path(&self, path: &Path) -> io::Result<()> {
+        let reopened = Self::open(path)?;
+        let expected = sys::fstat(&self.file)?;
+        let actual = sys::fstat(&reopened.file)?;
+        if (expected.st_dev, expected.st_ino) != (actual.st_dev, actual.st_ino) {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
+    /// A fixed, exclusive endpoint under this exact retained private directory.
+    /// The pathname is only a locator: it must reopen to this directory inode.
+    /// No stale socket is unlinked or replaced, even on a failed bind/check.
+    pub fn bind_handoff(&self, path: &Path) -> io::Result<PrivateListener> {
+        self.matches_path(path)?;
+        let listener = UnixListener::bind(path.join("handoff.sock"))?;
+        listener.set_nonblocking(true)?;
+        let result = PrivateListener {
+            directory: Self::from_handle(self.file.try_clone()?)?,
+            path: path.to_path_buf(),
+            listener,
+            identity: socket_identity(self)?,
+        };
+        result.verify()?;
+        Ok(result)
     }
 
     pub fn open_child(&self, child: &str) -> io::Result<Self> {
@@ -163,6 +192,57 @@ impl PrivateDirectory {
     }
 }
 
+fn socket_identity(directory: &PrivateDirectory) -> io::Result<(sys::Dev, u64)> {
+    let stat = sys::statat(&directory.file, "handoff.sock", AtFlags::SYMLINK_NOFOLLOW)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::Socket
+        || stat.st_uid != rustix::process::geteuid().as_raw()
+        || stat.st_nlink != 1
+    {
+        return Err(denied());
+    }
+    Ok((stat.st_dev, stat.st_ino))
+}
+
+/// Listener for one private update job. No raw listener/FD accessor and no
+/// Debug/Serialize: endpoint paths must not appear in receipts or diagnostics.
+/// A closed/crashed endpoint remains on disk for explicit job recovery; Drop
+/// never unlinks a pathname that a same-account process could have replaced.
+pub struct PrivateListener {
+    directory: PrivateDirectory,
+    path: PathBuf,
+    listener: UnixListener,
+    identity: (sys::Dev, u64),
+}
+
+impl PrivateListener {
+    fn verify(&self) -> io::Result<()> {
+        self.directory.matches_path(&self.path)?;
+        if socket_identity(&self.directory)? != self.identity
+            || !rustix::io::fcntl_getfd(&self.listener)?.contains(rustix::io::FdFlags::CLOEXEC)
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
+    /// Nonblocking accept: the coordinator supplies its overall deadline. The
+    /// connected stream is blocking, bounded, CLOEXEC, and still unauthenticated.
+    /// Authenticate its exact owned peer before transferring any lock or ACK.
+    pub fn accept(&self) -> io::Result<UnixStream> {
+        self.verify()?;
+        let (stream, _) = self.listener.accept()?;
+        // Darwin may inherit O_NONBLOCK from its listening socket.
+        stream.set_nonblocking(false)?;
+        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
+        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
+        if !rustix::io::fcntl_getfd(&stream)?.contains(rustix::io::FdFlags::CLOEXEC) {
+            return Err(denied());
+        }
+        self.verify()?;
+        Ok(stream)
+    }
+}
+
 pub(super) fn open_physical_directory(path: &Path) -> io::Result<File> {
     if !path.is_absolute() {
         return Err(denied());
@@ -206,7 +286,7 @@ mod tests {
             use std::sync::atomic::{AtomicU64, Ordering};
             static NEXT: AtomicU64 = AtomicU64::new(0);
             let path = std::env::temp_dir().canonicalize().unwrap().join(format!(
-                "treer-private-directory-{}-{}",
+                "tp-{}-{}",
                 std::process::id(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ));
@@ -222,6 +302,83 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
+    }
+
+    #[test]
+    fn handoff_is_exclusive_private_bounded_and_close_on_exec() {
+        let f = Fixture::new();
+        let root = PrivateDirectory::open(&f.0).unwrap();
+        let listener = root.bind_handoff(&f.0).unwrap();
+        assert!(root.bind_handoff(&f.0).is_err());
+        assert_eq!(
+            listener.accept().err().unwrap().kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let mut client = UnixStream::connect(f.0.join("handoff.sock")).unwrap();
+        client.write_all(b"complete frame").unwrap();
+        let mut accepted = listener.accept().unwrap();
+        assert!(rustix::io::fcntl_getfd(&accepted)
+            .unwrap()
+            .contains(rustix::io::FdFlags::CLOEXEC));
+        assert_eq!(
+            accepted.read_timeout().unwrap(),
+            Some(Duration::from_secs(3))
+        );
+        assert_eq!(
+            accepted.write_timeout().unwrap(),
+            Some(Duration::from_secs(3))
+        );
+        let mut bytes = [0; 14];
+        accepted.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, b"complete frame");
+        drop(listener);
+        assert!(f.0.join("handoff.sock").exists());
+        assert!(root.bind_handoff(&f.0).is_err());
+    }
+
+    #[test]
+    fn handoff_rejects_locator_aliases_and_replaced_socket_without_unlinking() {
+        let f = Fixture::new();
+        let root = PrivateDirectory::open(&f.0).unwrap();
+        let other = root.create_child("other").unwrap();
+        assert!(other.bind_handoff(&f.0).is_err());
+        assert!(!f.0.join("handoff.sock").exists());
+        symlink(&f.0, f.0.join("alias")).unwrap();
+        assert!(root.bind_handoff(&f.0.join("alias")).is_err());
+        let listener = root.bind_handoff(&f.0).unwrap();
+        std::fs::rename(f.0.join("handoff.sock"), f.0.join("original.sock")).unwrap();
+        let replacement = UnixListener::bind(f.0.join("handoff.sock")).unwrap();
+        assert_eq!(
+            listener.accept().err().unwrap().kind(),
+            io::ErrorKind::PermissionDenied
+        );
+        drop(listener);
+        assert!(f.0.join("handoff.sock").exists());
+        drop(replacement);
+    }
+
+    #[test]
+    fn handoff_rejects_replaced_directory_and_preserves_existing_entries() {
+        let f = Fixture::new();
+        let root = PrivateDirectory::open(&f.0).unwrap();
+        let job = root.create_child("job").unwrap();
+        let listener = job.bind_handoff(&f.0.join("job")).unwrap();
+        std::fs::rename(f.0.join("job"), f.0.join("moved")).unwrap();
+        root.create_child("job")
+            .unwrap()
+            .create_file("handoff.sock")
+            .unwrap()
+            .write_all(b"keep")
+            .unwrap();
+        assert!(listener.accept().is_err());
+        drop(listener);
+        assert!(job.bind_handoff(&f.0.join("job")).is_err());
+        let new_job = root.open_child("job").unwrap();
+        assert!(new_job.bind_handoff(&f.0.join("job")).is_err());
+        assert_eq!(
+            std::fs::read(f.0.join("job/handoff.sock")).unwrap(),
+            b"keep"
+        );
     }
 
     #[test]

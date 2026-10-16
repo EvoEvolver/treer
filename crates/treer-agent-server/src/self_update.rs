@@ -374,6 +374,83 @@ mod tests {
     }
 
     #[test]
+    fn handoff_endpoint_binds_prepared_job_and_rejects_revision_change() {
+        // AF_UNIX sockaddr paths are bounded; use a short, private test root.
+        let path = std::fs::canonicalize("/tmp")
+            .unwrap()
+            .join(format!("th-{}", Uuid::new_v4().simple()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let fixture = Fixture(path);
+        let root = PrivateDirectory::open(&fixture.0).unwrap();
+        let r = receipt();
+        let journal = Journal::create(&root, &r).unwrap();
+        let job = fixture.0.join(r.job_id.to_string());
+        assert!(handoff::Endpoint::bind(&journal, &job).is_err());
+        journal.advance(0, Phase::Prepared).unwrap();
+        assert!(handoff::Endpoint::bind(&journal, &fixture.0).is_err());
+        assert!(!fixture.0.join("handoff.sock").exists());
+        let endpoint = handoff::Endpoint::bind(&journal, &job).unwrap();
+        let image =
+            treer_platform::process_image::ProcessImage::capture(std::process::id()).unwrap();
+        let digest = images::digest_file(image.executable()).unwrap();
+        assert!(endpoint
+            .accept(&image, image.executable(), &digest)
+            .unwrap()
+            .is_none());
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let mut child = Child(
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "self_update::handoff::tests::peer_child",
+                    "--ignored",
+                ])
+                .env_clear()
+                .env("TREER_TEST_HANDOFF_SOCKET", job.join("handoff.sock"))
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let child_image =
+            treer_platform::process_image::ProcessImage::capture(child.0.id()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let authenticated = loop {
+            if let Some(peer) = endpoint
+                .accept(&child_image, child_image.executable(), &digest)
+                .unwrap()
+            {
+                break peer;
+            }
+            assert!(child.0.try_wait().unwrap().is_none());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "owned child did not connect"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        drop(child.0.stdin.take());
+        assert!(child.0.wait().unwrap().success());
+        drop(authenticated);
+        journal.advance(1, Phase::Activating).unwrap();
+        let error = endpoint
+            .accept(&image, image.executable(), &digest)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "update_handoff_job_changed");
+    }
+
+    #[test]
     fn persistent_phases_reject_stale_revision_and_terminal_replay() {
         let (_f, root) = Fixture::new();
         let original = receipt();
