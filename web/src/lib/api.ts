@@ -226,9 +226,10 @@ export interface ControlPlaneUpdateStatus {
 }
 
 export interface AdminInvitation {
-  token: string
+  invitation_id: string
+  token_prefix: string
   created_at: string
-  url: string
+  used_at: string | null
 }
 
 export interface VirtualNetworkHost {

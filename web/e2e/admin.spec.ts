@@ -59,9 +59,9 @@ async function mockAdmin(page: Page, mode: "configured" | "unconfigured" = "conf
     if (path === "/update" && method === "POST") {
       return ok(route, { ...running, job: { id: "job1", state: "running", error: null } }, 202)
     }
-    if (path === "/invitations" && method === "GET") return ok(route, { invitations: [{ token: "inv_test", created_at: "2026-10-15T00:00:00Z", url: "https://treer.example/?invite=inv_test" }] })
+    if (path === "/invitations" && method === "GET") return ok(route, { invitations: [{ invitation_id: "inv_" + "a".repeat(64), token_prefix: "inv_demo", created_at: "2026-10-15T00:00:00Z", used_at: null }] })
     if (path === "/invitations" && method === "POST") return ok(route, { url: "https://treer.example/?invite=inv_new" })
-    if (path === "/invitations/inv_test" && method === "DELETE") return ok(route, {})
+    if (path === "/invitations/inv_" + "a".repeat(64) && method === "DELETE") return ok(route, {})
     return ok(route, { error: { message: "not found" } }, 404)
   })
 }
@@ -116,6 +116,43 @@ test('admin keeps platform invitation management separate from private inventori
   await expect(page.getByRole('dialog')).toBeVisible()
   await expect(page.getByRole('textbox')).toHaveValue('https://treer.example/?invite=inv_new')
   await page.getByRole('button', { name: 'Close', exact: true }).first().click()
-  await page.getByRole('button', { name: 'Pending invitations', exact: true }).click()
-  await expect(page.getByRole('region', { name: 'Pending invitations' }).getByRole('button', { name: 'Revoke' })).toBeVisible()
+  await page.getByRole('button', { name: 'Registration invitations', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Registration invitations' }).getByRole('button', { name: 'Revoke' })).toBeVisible()
+})
+
+
+test('invitation summaries show prefixes and used state, revoke by non-bearer handle', async ({ page }) => {
+  await mockAdmin(page)
+  const id = 'inv_' + 'b'.repeat(64)
+  const usedId = 'inv_' + 'c'.repeat(64)
+  let pending = true
+  const revoked: string[] = []
+  await page.route('**/api/admin/invitations**', async (route) => {
+    if (route.request().method() === 'DELETE') { revoked.push(new URL(route.request().url()).pathname); pending = false; return ok(route, {}) }
+    return ok(route, { invitations: [
+      ...(pending ? [{ invitation_id: id, token_prefix: 'inv_demo', created_at: '2026-10-15T00:00:00Z', used_at: null }] : []),
+      { invitation_id: usedId, token_prefix: 'inv_used', created_at: '2026-10-14T00:00:00Z', used_at: '2026-10-15T01:00:00Z' },
+    ] })
+  })
+  await page.goto('/admin')
+  await page.getByRole('button', { name: 'Registration invitations', exact: true }).click()
+  const section = page.getByRole('region', { name: 'Registration invitations' })
+  await expect(section.getByText('inv_demo…', { exact: true })).toBeVisible()
+  await expect(section.getByText('Used', { exact: true })).toBeVisible()
+  await expect(section.getByRole('button', { name: 'Copy', exact: true })).toHaveCount(0)
+  await expect(section.getByRole('button', { name: 'Revoke' }).nth(1)).toBeDisabled()
+  await section.getByRole('button', { name: 'Revoke' }).first().click()
+  await expect(section.getByText('inv_demo…', { exact: true })).toHaveCount(0)
+  expect(revoked).toEqual([`/api/admin/invitations/${id}`])
+})
+
+test('legacy invitation list is refused without rendering bearer links or offering copy/revoke', async ({ page }) => {
+  await mockAdmin(page)
+  await page.route('**/api/admin/invitations', (route) => ok(route, { invitations: [{ token: 'inv_sensitive_secret', created_at: '2026-10-15T00:00:00Z', url: 'https://treer.example/?invite=inv_sensitive_secret' }] }))
+  await page.goto('/admin')
+  await page.getByRole('button', { name: 'Registration invitations', exact: true }).click()
+  const section = page.getByRole('region', { name: 'Registration invitations' })
+  await expect(section.getByRole('alert')).toContainText('does not support private invitation summaries')
+  await expect(page.getByText(/inv_sensitive_secret/)).toHaveCount(0)
+  await expect(section.getByRole('button')).toHaveCount(0)
 })
