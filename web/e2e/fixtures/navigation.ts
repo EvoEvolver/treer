@@ -4,12 +4,19 @@ import type { Page } from '@playwright/test'
 // Trusted settings links and tour previews retain their direct destinations.
 export async function browseTreeOnMobile(page: Page) {
   if ((page.viewportSize()?.width ?? 1280) >= 768 || new URL(page.url()).hash === "#policy-provider") return
+  // CSS changes immediately on resize, while matchMedia/React may still render
+  // the desktop sidebar. Wait for the React-only mobile button to be mounted;
+  // includeHidden also covers an already-open Tree that hides the main pane.
+  await page.getByRole('button', { name: 'Browse tree', exact: true, includeHidden: true }).waitFor({ state: 'attached' })
   const destination = page.getByRole('button', { name: 'Browse tree', exact: true })
     .or(page.locator('#tree-sidebar:visible'))
     .or(page.getByRole('button', { name: 'Back', exact: true }))
   await destination.first().waitFor({ state: 'visible' })
   const browse = page.getByRole('button', { name: 'Browse tree', exact: true })
-  if (await browse.isVisible()) await browse.click()
+  if (await browse.isVisible()) {
+    await browse.click()
+    await page.locator('#tree-sidebar').waitFor({ state: 'visible' })
+  }
 }
 
 // The map belongs to Overview, independently of the mobile Tree's visibility.
