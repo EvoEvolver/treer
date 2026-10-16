@@ -146,8 +146,38 @@ errors as missing; do not automatically install, log in, retry or change profile
 Core/Web must confirm the DTO consumer and readiness behavior before this
 startup-lifecycle change is implemented.
 
-Next: Core/security confirm table shape and Windows expansion; inspect required
-postinstall sources without executing them; commit table/validator/hash fixtures
-and payload inclusion; review; add the independently reviewed missing-state
-lifecycle change and sealed fake-provider tests. Full gates use
+Next: review the first table/validator/hash fixtures and payload inclusion;
+verify the real packages in the release/security-selected sealed environment;
+add the independently reviewed missing-state lifecycle change and fake-provider
+tests once its consumer contract is confirmed. Full gates use
 `just agent-launcher-test` through the machine-wide gate lock.
+
+## First data table and remaining verification
+
+Core contract v2 (2283/2284/2286) and security design review 2287 settle the
+`platforms` array shape. The first table declares Codex and Gemini on four POSIX
+platforms with scripts disabled. Claude, OpenCode, Cursor, Grok and Windows
+remain explicitly unsupported. `scripts/provider-recipes.mjs` validates release
+data before bundle preparation; Core must independently validate its embedded
+bytes, not trust the launcher validator. `tests/provider-recipe-hashes.json`
+provides the exact table hash and canonical recipe hashes for Core's tests.
+Both recipe data and review evidence enter the payload hash manifest; only
+recipe bytes need embedding in Core. This data change enables no installer by
+itself. Sealed real-provider installation/functionality evidence is still
+required before the installation feature can ship.
+
+The isolated npm operation deliberately ignores the user's npm configuration,
+including any user-selected prefix. A default prefix that is not writable fails
+without elevation. A successful version check in that prefix does not prove
+the Controller can find the provider through its service PATH; the final UI
+must explain any manual environment/profile step without promising immediate
+Agent creation or silently changing PATH. Lifecycle consent, when eventually
+enabled, covers scripts in the resolved dependency closure, not just the top
+package. Current review records do not approve that closure for Claude.
+
+POSIX process-group cleanup cannot guarantee cleanup of descendants which
+detach into a different session/group. It is not a sandbox. A same-account
+actor replacing verified tarballs inside the private operation directory is
+within the user's existing trust domain; this feature does not isolate hostile
+code already running as that user. Windows execution is not implemented or
+claimed verified in the first iteration.

@@ -5,8 +5,10 @@ import { createHash } from "node:crypto";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildUi } from "./ui-build.mjs";
+import { providerRecipes } from "./provider-recipes.mjs";
 
 const source = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+providerRecipes(readFileSync(join(source, "provider-recipes.json")));
 const options = {};
 for (let i = 2; i < process.argv.length; i += 2) {
   if (!["--output", "--source-commit"].includes(process.argv[i]) || !process.argv[i + 1]) throw new Error("Usage: prepare-bundle.mjs --output ABSOLUTE_DIR --source-commit FULL_SHA");
@@ -23,7 +25,7 @@ for (const [name, bytes] of await buildUi(source)) {
 }
 // UI build tooling needs esbuild/typescript and never runs inside an installation.
 const uiTooling = /[\\/]scripts[\\/](?:ui-build|build-ui|check-ui|check-ui-source)(?:\.d)?\.m?[jt]s$/;
-for (const name of ["public", "scripts", "profiles.json", "interface-contract.json"]) cpSync(join(source, name), join(output, name), { recursive: true, dereference: false, filter: (path) => !uiTooling.test(path) });
+for (const name of ["public", "scripts", "profiles.json", "interface-contract.json", "provider-recipes.json", "provider-review.json"]) cpSync(join(source, name), join(output, name), { recursive: true, dereference: false, filter: (path) => !uiTooling.test(path) });
 await build({ entryPoints: [join(source, "src/index.ts")], outfile: join(output, "runtime.mjs"), bundle: true,
   platform: "node", format: "esm", target: "node22", minify: false,
   external: ["bufferutil", "utf-8-validate"], define: { "process.env.WS_NO_BUFFER_UTIL": '"1"', "process.env.WS_NO_UTF_8_VALIDATE": '"1"' },
