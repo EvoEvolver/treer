@@ -18,7 +18,7 @@ PEOPLE = [{'kind':'agent','id':'ag_a','name':'Builder','path':'/engineering/back
           {'kind':'human','id':'usr_a','name':'Alice','role':'member'},
           {'kind':'human','id':'usr_admin','name':'Admin','role':'admin'},
           {'kind':'agent','id':'ag_c','name':'Reviewer','path':'/design/Reviewer'},
-          {'kind':'agent','id':'ag_no_path','name':'Unplaced'}]
+          {'kind':'agent','id':'ag_no_path','name':'Unplaced','path':None}]
 TOKENS = {'agent-a':PEOPLE[0], 'agent-b':PEOPLE[1], 'human':PEOPLE[2], 'admin':PEOPLE[3]}
 
 
@@ -54,7 +54,7 @@ class Proxy(BaseHTTPRequestHandler):
                 claims = verify_human_token(data.get('token', ''), data.get('audience'))
             result = {'active':bool(claims), 'claims':claims}
         elif parsed.path == '/api/apps/svc_issues/directory':
-            if principal or token == 'removed-agent': result = {'principals':PEOPLE}
+            if principal or token == 'removed-agent': result = {'principals':PEOPLE,'capabilities':['app.directory-paths.v1']}
             else: status, result = 401, {'error':{'code':'app_authentication_required'}}
         elif parsed.path == '/api/apps/svc_issues/messages':
             if not principal: status,result=401,{'error':{'code':'app_authentication_required'}}

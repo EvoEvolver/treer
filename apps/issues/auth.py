@@ -25,6 +25,11 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
+class Directory(list):
+    """The principals Core shows this caller, plus the Proxy's `capabilities` (a Proxy that predates a capability omits it)."""
+    capabilities = frozenset()
+
+
 class Auth:
     def __init__(self, store, proxy_url, service_id, workspace_id, public_url):
         self.store = store
@@ -117,7 +122,11 @@ class Auth:
         return f'{url.scheme}://{url.netloc}'
 
     def directory(self, token):
-        return self.request('GET', f'/api/apps/{self.service_id}/directory', token)['principals']
+        answer = self.request('GET', f'/api/apps/{self.service_id}/directory', token)
+        result = Directory(answer['principals'])
+        capabilities = answer.get('capabilities')
+        result.capabilities = frozenset(c for c in capabilities if isinstance(c, str)) if isinstance(capabilities, list) else frozenset()
+        return result
 
     def start(self):
         state, verifier, browser = secrets.token_urlsafe(32), secrets.token_urlsafe(48), secrets.token_urlsafe(32)

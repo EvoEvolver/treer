@@ -104,9 +104,11 @@ export function App() {
   useEffect(() => { void run(async () => {
     const identity = await api<{ principal: Principal }>("v1/me");
     setMe(identity.principal);
-    setPeople((await api<{ principals: Principal[] }>("v1/directory")).principals);
+    const directory = await api<{ principals: Principal[]; paths?: string }>("v1/directory");
+    setPeople(directory.principals);
     setReady(true);
-    notify("Workspace collaboration · Core Message notifications are best effort; check activity for delivery status.");
+    notify("Workspace collaboration · Core Message notifications are best effort; check activity for delivery status."
+      + (directory.paths === "supported" ? "" : " This Treer Proxy does not report Agent tree paths yet; Agents are shown by stable ID."));
   }); }, []);
   useEffect(() => { if (ready) void run(() => load(true)); }, [ready, filters]);
   useEffect(() => {

@@ -202,6 +202,11 @@ accept what the real parser or Controller refuses. Contract tests cannot see
 Controller-side semantics (for example, `--external-source-file` must be `-`);
 keep such rules in the fake as well.
 
+A canonical Agent `path` from Core's directory is for display and location only;
+an App never authorizes from it. Authorization is evaluated by Core on stable IDs,
+and `path: null` means unplaced or not visible to the caller (show the stable ID;
+never rebuild a path from the App identity's own tree view or by resolving).
+
 Keep the App's README focused on deployment, configuration, state, backup, and
 operator concerns. Put the concise runtime manual in the content served from
 `/`, and keep both documents synchronized with executable behavior and tests.
