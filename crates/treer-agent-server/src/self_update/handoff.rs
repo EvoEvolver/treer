@@ -15,6 +15,18 @@ use super::{
     Journal, Phase, Receipt,
 };
 
+/// Only this module can construct proof of the endpoint preflight. Keep the
+/// complete checked receipt so another job/revision cannot consume the proof.
+pub(super) struct Preparation {
+    receipt: Receipt,
+}
+
+impl Preparation {
+    pub(super) fn receipt(&self) -> &Receipt {
+        &self.receipt
+    }
+}
+
 /// Exclusive private endpoint bound to one already-prepared journal revision.
 /// This does not launch a child, transfer locks or persist an ownership ACK.
 pub struct Endpoint<'a> {
@@ -36,7 +48,7 @@ impl<'a> Endpoint<'a> {
             .directory
             .preflight_handoff(job_directory)
             .map_err(|_| anyhow::anyhow!("update_handoff_endpoint_unavailable"))?;
-        journal.advance(receipt.revision, Phase::Prepared)
+        journal.prepare(Preparation { receipt })
     }
 
     pub fn bind(journal: &'a Journal, job_directory: &Path) -> Result<Self> {

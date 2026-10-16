@@ -404,7 +404,7 @@ mod tests {
         format!("{:x}", Sha256::digest(bytes))
     }
     fn activate(j: &Journal) -> Receipt {
-        let r = j.advance(0, Phase::Prepared).unwrap();
+        let r = j.prepare_fixture().unwrap();
         j.advance(r.revision, Phase::Activating).unwrap()
     }
 

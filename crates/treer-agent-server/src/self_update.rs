@@ -276,7 +276,30 @@ impl Journal {
 
     /// The caller must hold installation then enrollment advisory locks. This
     /// expected revision check detects stale state; it is not a replacement lock.
+    /// Prepared is deliberately unavailable here: use Endpoint::mark_prepared.
     pub fn advance(&self, expected_revision: u64, phase: Phase) -> Result<Receipt> {
+        if phase == Phase::Prepared {
+            bail!("update_handoff_preflight_required");
+        }
+        self.advance_inner(expected_revision, phase)
+    }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn prepare(&self, proof: handoff::Preparation) -> Result<Receipt> {
+        if self.read()? != *proof.receipt() {
+            bail!("update_handoff_job_changed");
+        }
+        self.advance_inner(proof.receipt().revision, Phase::Prepared)
+    }
+
+    /// Journal-only fixtures intentionally do not create a live IPC endpoint.
+    /// This escape hatch is absent from production builds.
+    #[cfg(test)]
+    fn prepare_fixture(&self) -> Result<Receipt> {
+        self.advance_inner(0, Phase::Prepared)
+    }
+
+    fn advance_inner(&self, expected_revision: u64, phase: Phase) -> Result<Receipt> {
         let mut receipt = self.read()?;
         if receipt.revision != expected_revision || !receipt.phase.permits(phase) {
             bail!("update_revision_or_phase_conflict");
@@ -505,7 +528,12 @@ mod tests {
         let journal = Journal::create(&root, &original).unwrap();
         assert!(Journal::create(&root, &original).is_err());
         assert!(journal.advance(0, Phase::Complete).is_err());
-        journal.advance(0, Phase::Prepared).unwrap();
+        assert_eq!(
+            journal.advance(0, Phase::Prepared).unwrap_err().to_string(),
+            "update_handoff_preflight_required"
+        );
+        assert_eq!(journal.read().unwrap(), original);
+        journal.prepare_fixture().unwrap();
         assert!(journal.advance(0, Phase::Activating).is_err());
         drop(journal);
         let recovered = Journal::open(&root, &original.job_id.to_string()).unwrap();
@@ -626,7 +654,7 @@ mod tests {
             file.sync_all().unwrap();
         }
         let journal = Journal::create(&root, &initial).unwrap();
-        journal.advance(0, Phase::Prepared).unwrap();
+        journal.prepare_fixture().unwrap();
         journal.advance(1, Phase::Activating).unwrap();
         let observed = || hash(&std::fs::read(fixture.0.join("installed")).unwrap());
         assert_eq!(
@@ -744,7 +772,7 @@ mod tests {
         );
         let (_fixture, root) = Fixture::new();
         let journal = Journal::create(&root, &r).unwrap();
-        journal.advance(0, Phase::Prepared).unwrap();
+        journal.prepare_fixture().unwrap();
         journal.advance(1, Phase::Activating).unwrap();
         assert!(journal
             .record_file(2, Binary::Controller, FileStep::InstallIntent)

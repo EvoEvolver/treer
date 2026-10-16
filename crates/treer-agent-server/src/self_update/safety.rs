@@ -663,7 +663,7 @@ mod tests {
         ] {
             assert!(!bytes.contains(forbidden));
         }
-        journal.advance(0, Phase::Prepared).unwrap();
+        journal.prepare_fixture().unwrap();
         journal.advance(1, Phase::Activating).unwrap();
         let (saved, epoch) = HostSnapshot::load(&journal).unwrap();
         assert_eq!(epoch, "old-controller");

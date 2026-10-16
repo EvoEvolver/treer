@@ -93,6 +93,10 @@ The preparation coordinator must use `Endpoint::mark_prepared`: it validates the
 host's Unix socket address length and the private locator before writing Prepared,
 returning the fixed `update_handoff_endpoint_unavailable` code on failure without
 creating a socket. Binding repeats the check; preflight does not reserve a name.
+The ordinary journal `advance` rejects Prepared. Only the endpoint module can
+construct the preflight proof consumed by the journal; the complete receipt must
+still match when that proof is consumed. Journal-only tests have a separate
+fixture helper that is absent from production builds.
 The handoff deliberately fails loud on any authentication/endpoint/journal error:
 the endpoint latches aborted and refuses further accepts. The future coordinator
 must record the fixed error while retaining the parent's locks; it must not retry

@@ -614,7 +614,7 @@ mod tests {
             &cli_digest,
         );
         let incomplete = Journal::create(&jobs, &incomplete).unwrap();
-        incomplete.advance(0, Phase::Prepared).unwrap();
+        incomplete.prepare_fixture().unwrap();
         incomplete.advance(1, Phase::Activating).unwrap();
         assert_eq!(
             observation
@@ -628,7 +628,7 @@ mod tests {
         let mut missing_receipt = receipt.clone();
         missing_receipt.job_id = uuid::Uuid::new_v4();
         let missing = Journal::create(&jobs, &missing_receipt).unwrap();
-        missing.advance(0, Phase::Prepared).unwrap();
+        missing.prepare_fixture().unwrap();
         missing.advance(1, Phase::Activating).unwrap();
         assert_eq!(
             observation
@@ -660,7 +660,7 @@ mod tests {
             .await
             .unwrap();
         http_server.await.unwrap();
-        journal.advance(0, Phase::Prepared).unwrap();
+        journal.prepare_fixture().unwrap();
         assert!(Monitor::new()
             .unwrap()
             .observe_initial(&selected, &locks, &journal, &observation)
