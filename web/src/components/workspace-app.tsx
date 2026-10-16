@@ -253,7 +253,7 @@ function WorkspaceAppContent() {
     if (!inventoryReady || !routeMatchesWorkspace || preview || deepLinkWorkspace.current !== workspaceId) return
     if (selectedWorkloadId !== routeWorkloadId) replaceWorkloadRoute(selectedWorkloadId)
   }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute])
-  const workloadHref = (id: string) => workloadPath(organizationId, workspaceId, id, true)
+  const workloadHref = (id: string) => workloadPath(organizationId, workspaceId, id)
   const focusedId = focusMode && selectedWorkloadId ? selectedWorkloadId : null
   const tabLabels = new Map<string, TabLabel>(workloads.map((agent) => {
     const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === agent.agent_id)

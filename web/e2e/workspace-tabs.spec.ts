@@ -34,7 +34,7 @@ async function gotoWorkspace(page: Page) {
   await page.goto('/')
   // Auth renders the tab bar before workspace discovery. Discovery changes its
   // scope/key and closes a transient mobile switcher; wait for real inventory.
-  await expect(page.getByRole('button', { name: 'Open /Terminal', exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Open /Terminal', exact: true })).toBeVisible()
 }
 async function switchTab(page: Page, name: string, mobile = false) {
   if (mobile) {
@@ -44,7 +44,7 @@ async function switchTab(page: Page, name: string, mobile = false) {
 }
 async function open(page: Page, name: string, mobile = false) {
   await switchTab(page, 'Overview', mobile)
-  await page.getByRole('button', { name: `Open /${name}`, exact: true }).click()
+  await page.getByRole('link', { name: `Open /${name}`, exact: true }).click()
 }
 for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
   test(`tabs retain iframe drafts, scroll and terminal connection ${theme} ${mobile ? '390' : 'desktop'}`, async ({ page }, info) => {
@@ -251,7 +251,7 @@ test('mobile switcher recovers after delayed initial workspace discovery', async
   await page.getByRole('button', { name: /^Show all tabs/ }).click()
   await expect(page.getByRole('dialog', { name: /^Open tabs/ })).toBeVisible()
   release()
-  await expect(page.getByRole('button', { name: 'Open /Terminal', exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Open /Terminal', exact: true })).toBeVisible()
   await expect(page.getByRole('dialog', { name: /^Open tabs/ })).toHaveCount(0)
   await open(page, 'Terminal', true)
   await expect(page.locator('.xterm')).toBeVisible()
@@ -305,9 +305,9 @@ test('tab upload pins the background target machine; offline upload disabled', a
     { agent_id: 'one', name: 'One', kind: 'command', server_id: 'local', status: 'working' },
     { agent_id: 'two', name: 'Two', kind: 'command', server_id: 'remote', status: 'idle' },
   ] } }))
-  await page.goto('/'); await expect(page.getByRole('button', { name: 'Open /One', exact: true })).toBeVisible()
-  await page.getByRole('button', { name: 'Open /One', exact: true }).click()
-  await switchTab(page, 'Overview'); await page.getByRole('button', { name: 'Open /Two', exact: true }).click()
+  await page.goto('/'); await expect(page.getByRole('link', { name: 'Open /One', exact: true })).toBeVisible()
+  await page.getByRole('link', { name: 'Open /One', exact: true }).click()
+  await switchTab(page, 'Overview'); await page.getByRole('link', { name: 'Open /Two', exact: true }).click()
   await openTabMenu(page, '/Two'); await expect(page.getByRole('menuitem', { name: 'Upload file' })).toBeDisabled(); await page.keyboard.press('Escape')
   await tabAction(page, 'Upload file', '/One')
   await expect(page.getByRole('dialog')).toContainText('Upload to workstation.')
@@ -376,7 +376,7 @@ test('tab rename targets the inactive page and preserves backend denial in dialo
 test('tab context new actions and confirmation render in Chinese', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
   await fixture(page); await page.goto('/')
-  await page.getByRole('button', { name: '打开 /Terminal', exact: true }).click()
+  await page.getByRole('link', { name: '打开 /Terminal', exact: true }).click()
   await page.getByRole('tab', { name: '标签页 /Terminal', exact: true }).click({ button: 'right' })
   await expect(page.getByRole('menuitem', { name: '关闭其他标签页', exact: true })).toBeVisible()
   await expect(page.getByRole('menuitem', { name: '关闭右侧标签页', exact: true })).toBeVisible()
@@ -410,7 +410,7 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) test(
 test('Chinese App menu uses type-specific action labels', async ({ page }) => {
   await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
   await fixture(page); await page.goto('/')
-  await page.getByRole('button', { name: '打开 /Archive', exact: true }).click()
+  await page.getByRole('link', { name: '打开 /Archive', exact: true }).click()
   await page.getByRole('button', { name: '/Archive 的更多操作', exact: true }).click()
   for (const name of ['重命名 App', '停止 App', '删除 App']) await expect(page.getByRole('menuitem', { name, exact: true })).toBeVisible()
 })
@@ -494,7 +494,7 @@ test.describe('workload deep links and new-tab entry points', () => {
       await page.goto(url)
       await expect(page.getByRole('alert').filter({ hasText: 'not found, or you do not have access' })).toBeVisible()
       // The accessible workspace was not substituted: no overview of it, no workload, URL untouched.
-      await expect(page.getByRole('button', { name: 'Open /Alpha', exact: true })).toHaveCount(0)
+      await expect(page.getByRole('link', { name: 'Open /Alpha', exact: true })).toHaveCount(0)
       await expect(page.getByRole('tree').getByRole('treeitem')).toHaveCount(0)
       await expect(page.locator('iframe,.xterm')).toHaveCount(0)
       await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveCount(0)
@@ -545,22 +545,22 @@ test.describe('workload deep links and new-tab entry points', () => {
     await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
     await page.setViewportSize({ width: 1360, height: 900 })
     await fixture(page); await page.goto('/')
-    await page.getByRole('button', { name: '打开 /Alpha', exact: true }).click()
+    await page.getByRole('link', { name: '打开 /Alpha', exact: true }).click()
     await page.getByRole('tab', { name: '标签页 /Alpha', exact: true }).click({ button: 'right' })
     await expect(page.getByRole('menuitem', { name: '在新浏览器标签页中打开' })).toBeVisible()
   })
 })
 
-test.describe('ctrl/cmd-click and middle-click open a workload in a new browser tab', () => {
-  const expected = `${workspaceUrl}/workloads/tab-1?focus=1`
+test.describe('workload rows are real links: modifier-click and middle-click open a new browser tab natively', () => {
+  const expected = `${workspaceUrl}/workloads/tab-1`
   const where = (url: string) => new URL(url).pathname + new URL(url).search
   for (const how of ['ctrl', 'middle'] as const) {
-    test(`overview rows and tree rows (${how})`, async ({ page, context }) => {
+    test(`overview rows and tree rows have the deep-link href and open natively (${how})`, async ({ page, context }) => {
       await page.setViewportSize({ width: 1360, height: 900 })
       await fixture(page)
       await gotoWorkspace(page)
       const click = (locator: import('@playwright/test').Locator) => how === 'ctrl' ? locator.click({ modifiers: ['ControlOrMeta'] }) : locator.click({ button: 'middle' })
-      for (const target of [page.getByRole('button', { name: 'Open /Alpha', exact: true }), page.getByRole('tree').getByRole('button', { name: /^Alpha/ })]) {
+      for (const target of [page.getByRole('link', { name: 'Open /Alpha', exact: true }), page.getByRole('tree').getByRole('link', { name: /^Alpha/ })]) {
         const [popup] = await Promise.all([context.waitForEvent('page'), click(target)])
         expect(where(popup.url())).toBe(expected)
         await popup.close()
@@ -574,19 +574,61 @@ test.describe('ctrl/cmd-click and middle-click open a workload in a new browser 
     await page.setViewportSize({ width: 1360, height: 900 })
     await fixture(page)
     await gotoWorkspace(page)
-    await page.getByRole('button', { name: 'Open /Alpha', exact: true }).click()
+    await page.getByRole('link', { name: 'Open /Alpha', exact: true }).click()
     await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
   })
 
-  test('map blocks open a new browser tab on ctrl-click and keep the map open', async ({ page, context }) => {
+  test('map blocks are links; ctrl-click opens a new browser tab and keeps the map open', async ({ page, context }) => {
     await page.setViewportSize({ width: 1360, height: 900 })
     await fixture(page)
     await gotoWorkspace(page)
     await page.getByRole('button', { name: 'Expand tree map' }).click()
-    const block = page.getByRole('dialog').getByRole('button', { name: /Alpha/ }).first()
+    const block = page.getByRole('dialog').getByRole('link', { name: /Alpha/ }).first()
+    await expect(block).toHaveAttribute('href', expected)
     const [popup] = await Promise.all([context.waitForEvent('page'), block.click({ modifiers: ['ControlOrMeta'] })])
     expect(where(popup.url())).toBe(expected)
     await popup.close()
     await expect(page.getByRole('dialog')).toBeVisible()
+  })
+})
+
+test.describe('workload links: semantics and keyboard', () => {
+  test('rows are links with no nested interactive elements, and Enter and Space open in place', async ({ page }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await gotoWorkspace(page)
+    const overviewLink = page.getByRole('link', { name: 'Open /Alpha', exact: true })
+    const treeLink = page.getByRole('tree').getByRole('link', { name: /^Alpha/ })
+    for (const link of [overviewLink, treeLink]) {
+      await expect(link).toHaveAttribute('href', `${workspaceUrl}/workloads/tab-1`)
+      await expect(link.locator('a,button,input,select,textarea,[tabindex],[role=button],[role=link]')).toHaveCount(0)
+    }
+    // The row's own actions button is a sibling of the link, not inside it.
+    await expect(page.getByRole('tree').getByRole('button', { name: 'Actions for Alpha' })).toBeVisible()
+    await overviewLink.focus()
+    await page.keyboard.press('Enter')
+    await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await switchTab(page, 'Overview')
+    await treeLink.focus()
+    const scrollBefore = await page.evaluate(() => window.scrollY)
+    await page.keyboard.press('Space')
+    await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+    expect(await page.evaluate(() => window.scrollY)).toBe(scrollBefore)
+  })
+
+  test('a plain click opens in place without a page load or new window', async ({ page, context }) => {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await gotoWorkspace(page)
+    let pages = context.pages().length
+    let loads = 0
+    page.on('framenavigated', (frame) => { if (frame === page.mainFrame()) loads += 1 })
+    const before = loads
+    await page.getByRole('tree').getByRole('link', { name: /^Alpha/ }).click()
+    await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toHaveAttribute('aria-selected', 'true')
+    expect(context.pages().length).toBe(pages)
+    // History navigation events from the in-app URL update are allowed; a document load is not.
+    expect(await page.evaluate(() => performance.getEntriesByType('navigation').length)).toBe(1)
+    expect(loads - before).toBeLessThanOrEqual(1)
   })
 })

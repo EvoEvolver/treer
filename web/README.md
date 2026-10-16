@@ -492,7 +492,11 @@ workload (replace, no history entry), so it can be copied, reloaded and shared; 
 new page is the same Console origin with the same session. The iframe sandbox and CSRF rules are unchanged.
 
 `?focus=1` is focus mode: only that workload fills the window, with a narrow bar to open the full Console. Plain
-links open the full Console; only **Open in new browser tab** (tab menu, and the phone menu) and ctrl/cmd-click or
-middle-click on a Tree row, Overview row or map block add `focus=1` and open with `window.open(..., "noopener")`.
-Plain clicks still open in place.
+links open the full Console. **Open in new browser tab** (tab menu, and the phone menu) opens the focus-mode URL with
+`window.open(..., "noopener")`.
+
+Tree rows, Overview rows and map blocks are real links (`<a href>` to the deep link). A plain left click opens the
+workload in place; ctrl/cmd/shift-click, middle-click and the browser's own "Open in new tab" and "Copy link address"
+use the href natively, so they open the full Console on that workload. A link is never nested inside another
+interactive element (a row's actions button is a sibling), and Space activates it like a button.
 

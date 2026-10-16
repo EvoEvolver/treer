@@ -7,7 +7,7 @@ import { agentPath, folderPath, workloadKind } from "@/lib/workload-path"
 import { squarify, type MapRect } from "@/lib/treemap-layout"
 import "./workload-treemap.css"
 import { statusLabel, t } from "@/i18n"
-import { newTabProps } from "@/lib/new-tab"
+import { workloadLinkProps } from "@/lib/workload-link"
 
 type Branch = { id: string; label: string; path: string; agent?: Agent; children: Branch[]; count: number; nodes: number; parent?: Branch }
 
@@ -47,7 +47,7 @@ function forest(tree: WorkloadTreeState, agents: Agent[]) {
 }
 
 export default function WorkloadTreeMap({ tree, agents, machines, selectedId, onOpen, workloadHref }: {
-  tree: WorkloadTreeState; agents: Agent[]; machines: Machine[]; selectedId: string | null; onOpen: (id: string) => void; workloadHref?: (id: string) => string
+  tree: WorkloadTreeState; agents: Agent[]; machines: Machine[]; selectedId: string | null; onOpen: (id: string) => void; workloadHref: (id: string) => string
 }) {
   const { roots, folders } = useMemo(() => forest(tree, agents), [tree, agents])
   const [folderId, setFolderId] = useState<string | null>(null)
@@ -121,7 +121,7 @@ export default function WorkloadTreeMap({ tree, agents, machines, selectedId, on
           {named && <span className="block truncate text-[10px] text-muted-foreground">{statusLabel(status)}</span>}
         </>
         const className = `treemap-agent absolute overflow-hidden rounded-md border bg-card text-left ${named ? "p-2" : initial ? "p-0.5" : "p-0"} ${hit ? "flex flex-col justify-start hover:border-primary focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring" : "flex items-center justify-center"}`
-        return hit ? <button key={item.id} data-map-id={item.id} style={style} className={className} title={info} aria-describedby={detail === info ? "treemap-detail" : undefined} aria-label={t("treemap.open_agent", { description: info })} aria-current={item.id === selectedId ? "true" : undefined} {...events} {...newTabProps(workloadHref?.(item.id), () => onOpen(item.id))}>{contents}</button>
+        return hit ? <a key={item.id} data-map-id={item.id} style={style} className={className} title={info} aria-describedby={detail === info ? "treemap-detail" : undefined} aria-label={t("treemap.open_agent", { description: info })} aria-current={item.id === selectedId ? "true" : undefined} {...events} {...workloadLinkProps(workloadHref(item.id), () => onOpen(item.id))}>{contents}</a>
           : <div key={item.id} data-map-id={item.id} style={style} className={className} role="img" aria-label={info} title={info} aria-describedby={detail === info ? "treemap-detail" : undefined} {...events}>{contents}</div>
       }
       // A folder-only, single-child chain reserves one title bar, not one

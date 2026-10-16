@@ -239,7 +239,7 @@ for (const mobile of [false, true]) {
       await expect(frame).toHaveCount(0)
       if (mobile) {
         await backToWorkloads(page)
-        await page.getByRole('button', { name: /^Late App app / }).click()
+        await page.getByRole('link', { name: /^Late App app / }).click()
         await expect(page.locator('.xterm')).toBeVisible()
         await tabAction(page, 'Show App')
       } else await tabAction(page, 'Show App')
@@ -324,7 +324,7 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await mockApp(page, "running", runtimeId)
     await page.goto("/")
     await browseTreeOnMobile(page)
-    await page.getByRole("button", { name: /^Soul Archive / }).click()
+    await page.getByRole("link", { name: /^Soul Archive / }).click()
     const frame = page.locator("iframe[title='/Soul Archive interface']")
     await expect(frame).toBeVisible()
     await expect(frame).toHaveAttribute("src", /\/apps\/app-1\/ui\/\?theme=light&lang=en$/)
@@ -344,7 +344,7 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await page.getByRole("menuitem", { name: "Logs", exact: true }).click()
     await expect(frame).toBeHidden()
     await expect(page.locator(".xterm")).toBeVisible()
-    await page.getByRole("button", { name: /^Soul Archive / }).click()
+    await page.getByRole("link", { name: /^Soul Archive / }).click()
     await expect(page.locator(".xterm")).toBeVisible() // Selecting the same tab preserves its Logs choice.
     await tabAction(page, 'Show App')
     await expect(frame).toBeVisible()
@@ -356,7 +356,7 @@ test("mobile: selecting an App opens its human interface and closes back to work
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: /^Soul Archive / }).click()
+  await page.getByRole("link", { name: /^Soul Archive / }).click()
   await expect(page.frameLocator("iframe[title='/Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
   await backToWorkloads(page)
   await expect(page.locator("aside")).toBeVisible()
@@ -369,7 +369,7 @@ test("a stopped App shows its state without fetching the human interface", async
   page.on("request", (request) => { if (request.url().includes("/apps/app-1/ui/")) appRequests++ })
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: /^Soul Archive / }).click()
+  await page.getByRole("link", { name: /^Soul Archive / }).click()
   await expect(page.getByText("App is not running")).toBeVisible()
   await expect(page.locator("iframe")).toHaveCount(0)
   expect(appRequests).toBe(0)
@@ -381,7 +381,7 @@ test("a running App whose runtime exited shows its state without fetching the hu
   page.on("request", (request) => { if (request.url().includes("/apps/app-1/ui/")) appRequests++ })
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: /^Soul Archive / }).click()
+  await page.getByRole("link", { name: /^Soul Archive / }).click()
   await expect(page.getByText("App is not running")).toBeVisible()
   await expect(page.locator("iframe")).toHaveCount(0)
   expect(appRequests).toBe(0)
@@ -393,7 +393,7 @@ test("an App on an offline machine shows recovery and lets mobile users return",
   await page.setViewportSize({ width: 390, height: 844 })
   await page.goto("/")
   await browseTreeOnMobile(page)
-  await page.getByRole("button", { name: /^Soul Archive / }).click()
+  await page.getByRole("link", { name: /^Soul Archive / }).click()
   await expect(page.getByText("Machine is offline")).toBeVisible()
   await expect(page.locator("iframe")).toHaveCount(0)
   await backToWorkloads(page)
@@ -406,7 +406,7 @@ test("selecting an agent with an embedded UI shows the iframe instead of the ter
   await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Click the agent that has a UI
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
 
   // The terminal pane (xterm host) must NOT be rendered
   await expect(page.locator(".xterm")).toBeHidden()
@@ -432,7 +432,7 @@ test('tree resizing protects embedded iframe events and matches dark theme', asy
   await page.addInitScript(() => localStorage.setItem('treer-theme', 'dark'))
   await page.goto('/')
   await browseTreeOnMobile(page)
-  await page.getByRole('button', { name: /^dashboard / }).click()
+  await page.getByRole('link', { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
   const bar = page.getByRole('separator', { name: 'Resize tree sidebar' })
@@ -465,7 +465,7 @@ test("selecting an embedded UI agent on an offline machine does not load the ifr
   await page.goto("/")
   await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
   await expect(page.getByText("Machine is offline")).toBeVisible()
   await expect(page.locator("iframe[title='/dashboard interface']")).toBeHidden()
   await expect(page.getByText("offline").first()).toBeVisible()
@@ -481,7 +481,7 @@ test("selecting a plain terminal agent shows the terminal pane, not an iframe", 
   await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Click the plain agent without an Interface UI.
-  await page.getByRole("button", { name: /^plain-tty / }).click()
+  await page.getByRole("link", { name: /^plain-tty / }).click()
 
   // No iframe should be rendered and the terminal pane is shown instead
   await expect(page.locator("iframe[title='plain-tty interface']")).toBeHidden()
@@ -502,7 +502,7 @@ test('embedded UI logs use the shared replay-safe terminal', async ({ page }) =>
   })
   await page.goto('/')
   await browseTreeOnMobile(page)
-  await page.getByRole('button', { name: /^Soul Archive / }).click()
+  await page.getByRole('link', { name: /^Soul Archive / }).click()
   await expect(page.locator("iframe[title='/Soul Archive interface']")).toBeVisible()
   await tabAction(page, 'Show logs')
   await expect(page.locator('.xterm')).toBeVisible()
@@ -518,11 +518,11 @@ test("reload button label changes when an agent has an embedded UI", async ({ pa
   await page.locator("aside").getByText("Tree", { exact: true }).click()
 
   // Plain agent: Reconnect terminal
-  await page.getByRole("button", { name: /^plain-tty / }).click()
+  await page.getByRole("link", { name: /^plain-tty / }).click()
   { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Reconnect terminal', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
 
   // Agent with UI: label switches to Reload interface
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
   { await openTabMenu(page); await expect(page.getByRole('menuitem', { name: 'Reload interface', exact: true })).toBeVisible(); await page.keyboard.press('Escape') }
 })
 
@@ -535,7 +535,7 @@ test("mobile: selecting an embedded UI agent opens a full-screen iframe", async 
   await expect(page.locator("aside")).toBeVisible()
   await expect(page.locator("iframe[title='/dashboard interface']")).toBeHidden()
 
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
   await expect(page.getByRole('button', { name: /^Page .*; long-press for actions$/ })).toBeVisible()
@@ -550,7 +550,7 @@ test("reload button triggers an iframe reload (key changes)", async ({ page }) =
   await page.goto("/")
   await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
 
   // Track how many times the iframe's URL is fetched
   let uiProxyHits = 0
@@ -574,7 +574,7 @@ test("embedded UI iframe follows the control-plane light and dark theme", async 
   await page.goto("/")
   await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
 
   const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
@@ -598,7 +598,7 @@ test("a new interface registered_at remounts the iframe", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toBeVisible()
 
@@ -649,7 +649,7 @@ test("embedded UI receives the console look and browser language", async ({ page
   await page.goto("/")
   await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
   const frame = page.locator("iframe[title='/dashboard interface']")
   await expect(frame).toHaveAttribute("src", /[?&]look=c(?:&|$)/)
   await expect(frame).toHaveAttribute("src", /[?&]lang=en(?:&|$)/)
@@ -669,7 +669,7 @@ test("an unknown stored look is not forwarded", async ({ page }) => {
   await page.goto("/")
   await browseTreeOnMobile(page)
   await page.locator("aside").getByText("Tree", { exact: true }).click()
-  await page.getByRole("button", { name: /^dashboard / }).click()
+  await page.getByRole("link", { name: /^dashboard / }).click()
   const src = await page.locator("iframe[title='/dashboard interface']").getAttribute("src")
   expect(new URL(src!, "http://x").searchParams.has("look")).toBe(false)
 })
