@@ -688,6 +688,55 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_rejected_reserved_path_poisoning_survives_controller_recreation() {
+        // Diagnostic evidence only: this asserts the existing bug, not desired
+        // behavior. Invert the final assertion when implementing the fix.
+        let mut f = Fixture::new(64);
+        let path = ".treer/machine-rollouts/fixture/scripts/worker.js";
+        let error = f
+            .transfers
+            .execute(
+                f.actor.clone(),
+                path,
+                Request::PutBegin {
+                    path: path.into(),
+                    overwrite: false,
+                    mode: 0o600,
+                    size: Some(1),
+                    limit: 64,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "machine_file_denied");
+        let records: Vec<(String, String)> = serde_json::from_slice(
+            &std::fs::read(f.root.join(".treer/file-transfers/pending.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            records.len(),
+            1,
+            "denied destination was journaled before validation"
+        );
+        assert_eq!(records[0].0, path);
+        let next = Transfers::new(f.root.clone(), "ws_fixture".into(), vec![], 64);
+        drop(std::mem::replace(&mut f.transfers, next));
+        let error = f
+            .execute(Request::PutBegin {
+                path: "result".into(),
+                overwrite: false,
+                mode: 0o600,
+                size: Some(1),
+                limit: 64,
+            })
+            .unwrap_err();
+        assert_eq!(
+            error.code, "machine_file_denied",
+            "recovery rejects prior reserved path before validating the new ordinary path"
+        );
+        assert!(!f.root.join("result").exists());
+    }
+
+    #[test]
     fn put_get_round_trip_checks_hash_and_never_overwrites_implicitly() {
         let f = Fixture::new(MACHINE_TRANSFER_DEFAULT_LIMIT);
         let bytes = b"\0binary\xff\n";
