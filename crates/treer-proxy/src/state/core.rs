@@ -227,26 +227,7 @@ impl AppState {
             .sum()
     }
 
-    pub async fn live_servers(&self) -> Vec<ServerInfo> {
-        let workspaces = self.inner.workspaces.read().await;
-        let mut servers: Vec<_> = workspaces
-            .values()
-            .flat_map(|workspace| workspace.servers.values().cloned())
-            .collect();
-        servers.sort_by(|left, right| left.server_id.cmp(&right.server_id));
-        servers
-    }
-
-    pub async fn live_agents(&self) -> Vec<AgentInfo> {
-        let workspaces = self.inner.workspaces.read().await;
-        let mut agents: Vec<_> = workspaces
-            .values()
-            .flat_map(|workspace| workspace.agents.values().cloned())
-            .collect();
-        agents.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
-        agents
-    }
-
+    #[cfg(test)]
     pub async fn live_server(&self, server_id: &str) -> Option<ServerInfo> {
         let workspaces = self.inner.workspaces.read().await;
         workspaces
@@ -262,18 +243,6 @@ impl AppState {
             .expect("workspace")
             .agents
             .insert(agent.agent_id.clone(), agent);
-    }
-
-    pub async fn live_agents_on_server(&self, server_id: &str) -> Vec<AgentInfo> {
-        let workspaces = self.inner.workspaces.read().await;
-        let mut agents: Vec<_> = workspaces
-            .values()
-            .flat_map(|workspace| workspace.agents.values())
-            .filter(|agent| agent.server_id == server_id)
-            .cloned()
-            .collect();
-        agents.sort_by(|left, right| left.agent_id.cmp(&right.agent_id));
-        agents
     }
 
     #[cfg(test)]

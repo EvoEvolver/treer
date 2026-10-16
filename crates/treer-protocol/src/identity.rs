@@ -1,5 +1,14 @@
 use super::*;
 
+/// Administrative projection; neither field can be used as an invitation bearer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlatformInvitationRecord {
+    pub invitation_id: String,
+    pub token_prefix: String,
+    pub created_at: String,
+    pub used_at: Option<String>,
+}
+
 pub const ORGANIZATION_INVITATION_CAPABILITY: &str = "organization.invitation-accept.v1";
 
 #[cfg(test)]

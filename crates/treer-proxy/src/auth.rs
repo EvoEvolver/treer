@@ -621,21 +621,6 @@ impl AuthStore {
         &self.app_public_url
     }
 
-    pub(crate) fn has_email_sender(&self) -> bool {
-        self.email_sender.is_some()
-    }
-
-    pub(crate) fn spawn_password_reset_email(&self, recipient: String, url: Url) {
-        let Some(sender) = self.email_sender.clone() else {
-            return;
-        };
-        tokio::spawn(async move {
-            if let Err(error) = sender.send_password_reset(&recipient, &url).await {
-                tracing::error!(%error, "failed to send admin-issued password reset email");
-            }
-        });
-    }
-
     pub(crate) async fn record_workspace_audit(
         &self,
         event: NewWorkspaceAuditEvent<'_>,

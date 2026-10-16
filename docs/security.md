@@ -570,6 +570,28 @@ is restricted or audited.
 
 ## Credentials
 
+Platform administration exposes aggregate statistics, not tenant inventories.
+Removed `/api/admin/users`, `/machines`, `/agents`, `/organizations`, `/activity`
+and their former nested/mutation routes return a uniform `410 admin_details_removed`
+after administrator authentication, without testing whether an ID exists.
+`GET /api/admin/traffic` requires the existing admin cookie (ordinary human,
+operator, workload and App tokens do not substitute for it); the explicit
+loopback-only `--disable-auth` development mode retains its documented bypass.
+It aggregates persisted hourly usage across workspaces by traffic class, omitting
+all identity and routing fields. Statistical aggregation is not differential
+privacy: sparse traffic/counts and comparison across time may permit inference.
+This is an HTTP/API data-minimization boundary, not protection from database or
+host operators. Internal audit records and their existing retention remain;
+the platform activity feed is no longer exposed through the admin API.
+Admin aggregate, invitation and retired-detail responses set `Cache-Control:
+no-store`. Registration invitation lists expose only the latest 100 non-bearer
+handles, at most six safe prefix characters, creation time and used time;
+short/nonstandard legacy tokens show `[redacted]`. Handles are domain-separated
+SHA-256 hashes of the bearer, not registration credentials, and DELETE requires
+the administrator cookie plus the handle. Full tokens/URLs are returned only
+in the successful create response; new invitation audit events store the handle,
+not the bearer. Existing stored audit records are not rewritten by this change.
+
 | Credential | Scope and limit |
 | --- | --- |
 | Enrollment key | One workspace, ten minutes, single use |
@@ -579,7 +601,7 @@ is restricted or audited.
 | Workload identity token | One Agent/machine/service audience for 60 seconds |
 | Human App token | One user/workspace/service audience; 12 hours via OAuth, 60 seconds via authenticated browser forwarding; verification rechecks membership and service |
 | Human user session | Cookie `treer_session` for browsers; native iOS/Android also receive the same token in JSON when `X-Treer-Client` is exactly `mobile`, `mobile_ios`, or `mobile_android`. `Authorization: Bearer` is accepted on every user route. The header is not CORS-allowed. Do not put the token in query strings |
-| Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts; can list emails and issue password-reset links |
+| Platform admin session | Cookie scoped to `/api/admin`; separate from user accounts; aggregate counts/traffic, platform invitations and image updates; no user/machine/Agent/organization inventories or activity detail |
 | Updater token | Shared Bearer secret between Proxy and the Compose updater sidecar; never exposed to browsers |
 | Mail cookie | Local opaque handle to an App token; compromise of Mail state grants that token until expiry |
 | Voice ASR vendor key | Proxy process only (`TREER_VOICE_ASR_API_KEY` / `DASHSCOPE_API_KEY`); never the iOS/Android app |

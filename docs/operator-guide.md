@@ -719,17 +719,37 @@ provider login remain the user's responsibility.
 
 The platform administrator is not a Treer user and does not belong to an
 organization. Open `/admin` and use the password supplied in `ADMIN_PASSWORD`
-to access the separate admin dashboard. It reports platform-wide user, machine,
-and Agent totals. Click a count to expand that inventory: users can be searched,
-issued a one-time password-reset link, and signed out of every session; machines
-list enrolled hosts and expand to their live Agents. The same page still creates
-single-use user invitations and can list pending invites, organizations, and
-recent admin activity. On a self-hosted Compose stack it also checks and applies
+to access the separate admin dashboard. It reports platform-wide user,
+organization, machine and Agent counts plus aggregate traffic. Inventories,
+user password resets/session revocation, and platform activity details are not
+available through the admin API; old routes return `410 admin_details_removed`.
+The page still creates single-use user invitations and lists their redacted state.
+On a self-hosted Compose stack it also checks and applies
 GHCR image updates for Proxy, App, and the updater sidecar. Workspace Settings
 does not include that control. A user who
 registers from an administrator invitation receives an organization named
 `<preferred name> Personal` and owns it. Treer does not seed an initial
 organization or workspace.
+
+`GET /api/admin/traffic?hours=6|24|168|720` (default 24) accepts only the platform
+admin cookie. It returns `{hours, traffic:[{window_start, traffic_class,
+payload_bytes, payload_frames, billable_bytes}]}` for all workspaces combined,
+without identity or route details. Time windows include the current hourly bucket;
+absent buckets mean zero recorded traffic. The response uses persisted shared
+PostgreSQL totals, including legacy machine metering, and does not add the
+mirrored Agent counters a second time. Recent local counters normally appear
+after the 10-second flush; failures/backlogs can extend that delay. All Proxies
+query the same database view rather than adding instance-local pending usage.
+Normal workspace-authorized audit and traffic APIs are unchanged.
+
+`GET /api/admin/invitations` returns the latest 100 personal registration
+invitations as `{invitations:[{invitation_id,token_prefix,created_at,used_at}]}`.
+`used_at: null` means pending. `invitation_id` is a non-bearer stable handle;
+use `DELETE /api/admin/invitations/INVITATION_ID` to revoke a pending invitation.
+Used, missing and old full-token DELETE URLs return the same 404. The list never
+returns full tokens, links, recipient emails or names. Save the link returned
+by POST creation when it is displayed; it cannot be read back from the list.
+Admin statistics and invitation responses use `Cache-Control: no-store`.
 
 Organization owners and administrators can create member invitations from
 **Members**. Preview the named organization and explicitly choose **Join**.

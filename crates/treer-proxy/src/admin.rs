@@ -1,58 +1,130 @@
-use std::collections::HashMap;
-
 use axum::extract::{Extension, Path, Query, State};
-use axum::routing::{delete, get, post};
+use axum::routing::{any, delete, get};
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use crate::audit::{self, NewPlatformAuditEvent};
 use crate::auth::{AuthFailure, AuthStore};
 use crate::state::AppState;
 
-#[derive(Debug, Deserialize)]
-pub struct AdminListQuery {
-    q: Option<String>,
-    limit: Option<u16>,
-}
-
 pub fn routes() -> Router<AppState> {
-    Router::new()
+    let mut router = Router::new()
         .route("/api/admin/dashboard", get(dashboard))
-        .route("/api/admin/users", get(list_users))
-        .route("/api/admin/users/{user_id}", get(get_user))
-        .route(
-            "/api/admin/users/{user_id}/password-reset",
-            post(reset_user_password),
-        )
-        .route(
-            "/api/admin/users/{user_id}/revoke-sessions",
-            post(revoke_user_sessions),
-        )
-        .route("/api/admin/machines", get(list_machines))
-        .route("/api/admin/machines/{server_id}", get(get_machine))
-        .route("/api/admin/agents", get(list_agents))
-        .route("/api/admin/organizations", get(list_organizations))
+        .route("/api/admin/traffic", get(platform_traffic))
         .route(
             "/api/admin/invitations",
             get(list_invitations).post(create_invitation),
         )
-        .route("/api/admin/invitations/{token}", delete(revoke_invitation))
-        .route("/api/admin/activity", get(list_activity))
+        .route(
+            "/api/admin/invitations/{invitation_id}",
+            delete(revoke_invitation),
+        );
+    // Tombstones also cover old mutation URLs and prevent ingress fallback from
+    // interpreting removed admin routes as a service request. Never inspect IDs.
+    for resource in ["users", "machines", "agents", "organizations", "activity"] {
+        let path = format!("/api/admin/{resource}");
+        router = router
+            .route(&path, any(details_removed))
+            .route(&format!("{path}/{{*rest}}"), any(details_removed));
+    }
+    router.layer(axum::middleware::map_response(
+        |mut response: axum::response::Response| async move {
+            response.headers_mut().insert(
+                axum::http::header::CACHE_CONTROL,
+                axum::http::HeaderValue::from_static("no-store"),
+            );
+            response
+        },
+    ))
 }
 
-fn page_limit(limit: Option<u16>) -> i64 {
-    i64::from(limit.unwrap_or(50).clamp(1, 100))
+fn invitation_id(token: &str) -> String {
+    format!(
+        "inv_{:x}",
+        Sha256::digest(format!("treer.admin-invitation/v1:{token}"))
+    )
 }
 
-fn search_pattern(query: Option<&str>) -> Option<String> {
-    let trimmed = query.map(str::trim).filter(|value| !value.is_empty())?;
-    let escaped = trimmed
-        .replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_");
-    Some(format!("%{escaped}%"))
+async fn details_removed() -> (axum::http::StatusCode, Json<Value>) {
+    (
+        axum::http::StatusCode::GONE,
+        Json(
+            json!({"error":{"code":"admin_details_removed","message":"Platform administration exposes aggregate statistics only"}}),
+        ),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlatformTrafficQuery {
+    #[serde(default = "default_hours", deserialize_with = "traffic_hours")]
+    hours: u16,
+}
+
+fn default_hours() -> u16 {
+    24
+}
+
+fn traffic_hours<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u16, D::Error> {
+    let hours = u16::deserialize(deserializer)?;
+    if matches!(hours, 6 | 24 | 168 | 720) {
+        Ok(hours)
+    } else {
+        Err(serde::de::Error::custom("hours must be 6, 24, 168 or 720"))
+    }
+}
+
+async fn platform_traffic(
+    Extension(auth): Extension<AuthStore>,
+    Query(query): Query<PlatformTrafficQuery>,
+) -> Result<Json<Value>, AuthFailure> {
+    // Only persisted machine-level metering: all Proxies see shared PG totals.
+    // Agent-level metering mirrors these bytes and must not be added again.
+    let now = chrono::Utc::now().timestamp();
+    let cutoff = now.div_euclid(3600) * 3600 - i64::from(query.hours - 1) * 3600;
+    let rows = sqlx::query(
+        "SELECT window_start, traffic_class, \
+         CAST(SUM(payload_bytes) AS BIGINT) AS payload_bytes, \
+         CAST(SUM(payload_frames) AS BIGINT) AS payload_frames, \
+         CAST(SUM(billable_bytes) AS BIGINT) AS billable_bytes FROM (\
+           SELECT window_start, traffic_class, payload_bytes, payload_frames, billable_bytes \
+           FROM traffic_usage_hourly WHERE window_start >= $1 AND window_start <= $2 \
+           UNION ALL \
+           SELECT window_start, 'virtual_network', payload_bytes, payload_frames, payload_bytes \
+           FROM machine_traffic_hourly WHERE window_start >= $1 AND window_start <= $2\
+         ) AS usage GROUP BY window_start, traffic_class \
+         ORDER BY window_start DESC, traffic_class",
+    )
+    .bind(cutoff)
+    .bind(now)
+    .fetch_all(&auth.pool())
+    .await
+    .map_err(AuthFailure::database)?;
+    let traffic = rows
+        .into_iter()
+        .map(
+            |row| -> Result<treer_protocol::PlatformTrafficRecord, AuthFailure> {
+                let timestamp: i64 = row.get("window_start");
+                let window_start =
+                    chrono::DateTime::from_timestamp(timestamp, 0).ok_or_else(|| {
+                        AuthFailure::database(sqlx::Error::Protocol(
+                            "invalid traffic timestamp".into(),
+                        ))
+                    })?;
+                Ok(treer_protocol::PlatformTrafficRecord {
+                    window_start,
+                    traffic_class: row.get("traffic_class"),
+                    payload_bytes: row.get::<i64, _>("payload_bytes") as u64,
+                    payload_frames: row.get::<i64, _>("payload_frames") as u64,
+                    billable_bytes: row.get::<i64, _>("billable_bytes") as u64,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Json(json!({"hours":query.hours,"traffic":traffic})))
 }
 
 async fn record(
@@ -91,322 +163,25 @@ async fn dashboard(
     })))
 }
 
-async fn list_users(
-    Extension(auth): Extension<AuthStore>,
-    Query(query): Query<AdminListQuery>,
-) -> Result<Json<Value>, AuthFailure> {
-    let limit = page_limit(query.limit);
-    let pattern = search_pattern(query.q.as_deref());
-    let rows = sqlx::query(
-        "SELECT id, email, preferred_name, email_verified, created_at \
-         FROM users \
-         WHERE $1::TEXT IS NULL \
-            OR email ILIKE $1 ESCAPE '\\' \
-            OR preferred_name ILIKE $1 ESCAPE '\\' \
-         ORDER BY created_at DESC, id DESC \
-         LIMIT $2",
-    )
-    .bind(pattern)
-    .bind(limit)
-    .fetch_all(&auth.pool())
-    .await
-    .map_err(AuthFailure::database)?;
-    let users: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "user_id": row.get::<String, _>("id"),
-                "email": row.get::<String, _>("email"),
-                "preferred_name": row.get::<String, _>("preferred_name"),
-                "email_verified": row.get::<bool, _>("email_verified"),
-                "created_at": row.get::<String, _>("created_at"),
-            })
-        })
-        .collect();
-    Ok(Json(json!({ "users": users })))
-}
-
-async fn get_user(
-    Extension(auth): Extension<AuthStore>,
-    Path(user_id): Path<String>,
-) -> Result<Json<Value>, AuthFailure> {
-    let user = sqlx::query(
-        "SELECT id, email, preferred_name, email_verified, created_at FROM users WHERE id = $1",
-    )
-    .bind(&user_id)
-    .fetch_optional(&auth.pool())
-    .await
-    .map_err(AuthFailure::database)?
-    .ok_or_else(|| AuthFailure::not_found("user_not_found", "user does not exist"))?;
-    let organizations = sqlx::query(
-        "SELECT o.organization_id, o.name, m.role \
-         FROM organization_members m \
-         JOIN organizations o ON o.organization_id = m.organization_id \
-         WHERE m.user_id = $1 \
-         ORDER BY lower(o.name)",
-    )
-    .bind(&user_id)
-    .fetch_all(&auth.pool())
-    .await
-    .map_err(AuthFailure::database)?;
-    let workspaces = sqlx::query(
-        "SELECT w.workspace_id, w.name, w.organization_id \
-         FROM workspaces w \
-         JOIN organization_members m ON m.organization_id = w.organization_id \
-         WHERE m.user_id = $1 AND w.deleted_at IS NULL \
-         ORDER BY lower(w.name)",
-    )
-    .bind(&user_id)
-    .fetch_all(&auth.pool())
-    .await
-    .map_err(AuthFailure::database)?;
-    let oauth_providers = sqlx::query_scalar::<_, String>(
-        "SELECT provider FROM oauth_identities WHERE user_id = $1 ORDER BY provider",
-    )
-    .bind(&user_id)
-    .fetch_all(&auth.pool())
-    .await
-    .map_err(AuthFailure::database)?;
-    Ok(Json(json!({
-        "user": {
-            "user_id": user.get::<String, _>("id"),
-            "email": user.get::<String, _>("email"),
-            "preferred_name": user.get::<String, _>("preferred_name"),
-            "email_verified": user.get::<bool, _>("email_verified"),
-            "created_at": user.get::<String, _>("created_at"),
-            "password_login": true,
-            "oauth_providers": oauth_providers,
-            "organizations": organizations.into_iter().map(|row| json!({
-                "organization_id": row.get::<String, _>("organization_id"),
-                "name": row.get::<String, _>("name"),
-                "role": row.get::<String, _>("role"),
-            })).collect::<Vec<_>>(),
-            "workspaces": workspaces.into_iter().map(|row| json!({
-                "workspace_id": row.get::<String, _>("workspace_id"),
-                "name": row.get::<String, _>("name"),
-                "organization_id": row.get::<String, _>("organization_id"),
-            })).collect::<Vec<_>>(),
-        }
-    })))
-}
-
-async fn reset_user_password(
-    Extension(auth): Extension<AuthStore>,
-    Path(user_id): Path<String>,
-) -> Result<Json<Value>, AuthFailure> {
-    let user = sqlx::query("SELECT id, email, preferred_name FROM users WHERE id = $1")
-        .bind(&user_id)
-        .fetch_optional(&auth.pool())
-        .await
-        .map_err(AuthFailure::database)?
-        .ok_or_else(|| AuthFailure::not_found("user_not_found", "user does not exist"))?;
-    let email: String = user.get("email");
-    let name: String = user.get("preferred_name");
-    let pending = auth.create_password_reset(&email).await?.ok_or_else(|| {
-        AuthFailure::too_many_requests(
-            "password_reset_rate_limited",
-            "a password reset was already issued recently",
-        )
-    })?;
-    let emailed = auth.has_email_sender();
-    if emailed {
-        auth.spawn_password_reset_email(pending.recipient.clone(), pending.url.clone());
-    }
-    record(
-        &auth,
-        "user.password_reset_issued",
-        "user",
-        &user_id,
-        Some(&name),
-        json!({ "email": email, "emailed": emailed }),
-    )
-    .await;
-    Ok(Json(json!({
-        "url": pending.url.as_str(),
-        "emailed": emailed,
-    })))
-}
-
-async fn revoke_user_sessions(
-    Extension(auth): Extension<AuthStore>,
-    Path(user_id): Path<String>,
-) -> Result<Json<Value>, AuthFailure> {
-    let name = sqlx::query_scalar::<_, String>("SELECT preferred_name FROM users WHERE id = $1")
-        .bind(&user_id)
-        .fetch_optional(&auth.pool())
-        .await
-        .map_err(AuthFailure::database)?
-        .ok_or_else(|| AuthFailure::not_found("user_not_found", "user does not exist"))?;
-    let result = sqlx::query("DELETE FROM sessions WHERE user_id = $1")
-        .bind(&user_id)
-        .execute(&auth.pool())
-        .await
-        .map_err(AuthFailure::database)?;
-    record(
-        &auth,
-        "user.sessions_revoked",
-        "user",
-        &user_id,
-        Some(&name),
-        json!({ "revoked": result.rows_affected() }),
-    )
-    .await;
-    Ok(Json(
-        json!({ "ok": true, "revoked": result.rows_affected() }),
-    ))
-}
-
-async fn list_machines(
-    Extension(auth): Extension<AuthStore>,
-    State(state): State<AppState>,
-) -> Result<Json<Value>, AuthFailure> {
-    let live: HashMap<_, _> = state
-        .live_servers()
-        .await
-        .into_iter()
-        .map(|server| (server.server_id.clone(), server))
-        .collect();
-    let rows = sqlx::query(
-        "SELECT m.server_id, m.workspace_id, m.created_at, m.enrolled_by, \
-                w.name AS workspace_name, n.name AS machine_name \
-         FROM machines m \
-         JOIN workspaces w ON w.workspace_id = m.workspace_id \
-         LEFT JOIN machine_names n ON n.server_id = m.server_id \
-         WHERE m.revoked_at IS NULL AND w.deleted_at IS NULL \
-         ORDER BY coalesce(n.name, m.server_id), m.server_id",
-    )
-    .fetch_all(&auth.pool())
-    .await
-    .map_err(AuthFailure::database)?;
-    let machines: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            let server_id: String = row.get("server_id");
-            let live = live.get(&server_id);
-            json!({
-                "server_id": server_id,
-                "name": live.map(|server| server.name.clone()).filter(|name| !name.is_empty())
-                    .or_else(|| row.get::<Option<String>, _>("machine_name"))
-                    .unwrap_or_else(|| row.get::<String, _>("server_id")),
-                "hostname": live.map(|server| server.hostname.clone()).unwrap_or_default(),
-                "workspace_id": row.get::<String, _>("workspace_id"),
-                "workspace_name": row.get::<String, _>("workspace_name"),
-                "created_at": row.get::<String, _>("created_at"),
-                "enrolled_by": row.get::<String, _>("enrolled_by"),
-                "status": if live.is_some() { "online" } else { "offline" },
-                "last_seen_at": live.map(|server| server.last_seen_at.to_rfc3339()),
-                "root": live.map(|server| server.root.clone()),
-            })
-        })
-        .collect();
-    Ok(Json(json!({ "machines": machines })))
-}
-
-async fn get_machine(
-    Extension(auth): Extension<AuthStore>,
-    State(state): State<AppState>,
-    Path(server_id): Path<String>,
-) -> Result<Json<Value>, AuthFailure> {
-    let row = sqlx::query(
-        "SELECT m.server_id, m.workspace_id, m.created_at, m.enrolled_by, \
-                w.name AS workspace_name, n.name AS machine_name \
-         FROM machines m \
-         JOIN workspaces w ON w.workspace_id = m.workspace_id \
-         LEFT JOIN machine_names n ON n.server_id = m.server_id \
-         WHERE m.server_id = $1 AND m.revoked_at IS NULL AND w.deleted_at IS NULL",
-    )
-    .bind(&server_id)
-    .fetch_optional(&auth.pool())
-    .await
-    .map_err(AuthFailure::database)?
-    .ok_or_else(|| AuthFailure::not_found("machine_not_found", "machine does not exist"))?;
-    let live = state.live_server(&server_id).await;
-    let agents = state.live_agents_on_server(&server_id).await;
-    Ok(Json(json!({
-        "machine": {
-            "server_id": server_id,
-            "name": live.as_ref().map(|server| server.name.clone()).filter(|name| !name.is_empty())
-                .or_else(|| row.get::<Option<String>, _>("machine_name"))
-                .unwrap_or_else(|| row.get::<String, _>("server_id")),
-            "hostname": live.as_ref().map(|server| server.hostname.clone()).unwrap_or_default(),
-            "workspace_id": row.get::<String, _>("workspace_id"),
-            "workspace_name": row.get::<String, _>("workspace_name"),
-            "created_at": row.get::<String, _>("created_at"),
-            "enrolled_by": row.get::<String, _>("enrolled_by"),
-            "status": if live.is_some() { "online" } else { "offline" },
-            "last_seen_at": live.as_ref().map(|server| server.last_seen_at.to_rfc3339()),
-            "root": live.as_ref().map(|server| server.root.clone()),
-            "agents": agents,
-        }
-    })))
-}
-
-async fn list_agents(State(state): State<AppState>) -> Json<Value> {
-    Json(json!({ "agents": state.live_agents().await }))
-}
-
-async fn list_organizations(
-    Extension(auth): Extension<AuthStore>,
-) -> Result<Json<Value>, AuthFailure> {
-    let rows = sqlx::query(
-        "SELECT o.organization_id, o.name, o.created_at, \
-                u.id AS owner_id, u.preferred_name AS owner_name, u.email AS owner_email, \
-                (SELECT COUNT(*) FROM workspaces w \
-                    WHERE w.organization_id = o.organization_id AND w.deleted_at IS NULL) AS workspace_count, \
-                (SELECT COUNT(*) FROM machines m \
-                    JOIN workspaces w ON w.workspace_id = m.workspace_id \
-                    WHERE w.organization_id = o.organization_id AND w.deleted_at IS NULL \
-                    AND m.revoked_at IS NULL) AS machine_count \
-         FROM organizations o \
-         LEFT JOIN organization_members om ON om.organization_id = o.organization_id AND om.role = 'owner' \
-         LEFT JOIN users u ON u.id = om.user_id \
-         ORDER BY lower(o.name)",
-    )
-    .fetch_all(&auth.pool())
-    .await
-    .map_err(AuthFailure::database)?;
-    let organizations: Vec<Value> = rows
-        .into_iter()
-        .map(|row| {
-            json!({
-                "organization_id": row.get::<String, _>("organization_id"),
-                "name": row.get::<String, _>("name"),
-                "created_at": row.get::<String, _>("created_at"),
-                "owner_id": row.get::<Option<String>, _>("owner_id"),
-                "owner_name": row.get::<Option<String>, _>("owner_name"),
-                "owner_email": row.get::<Option<String>, _>("owner_email"),
-                "workspace_count": row.get::<i64, _>("workspace_count"),
-                "machine_count": row.get::<i64, _>("machine_count"),
-            })
-        })
-        .collect();
-    Ok(Json(json!({ "organizations": organizations })))
-}
-
 async fn list_invitations(
     Extension(auth): Extension<AuthStore>,
 ) -> Result<Json<Value>, AuthFailure> {
     let rows = sqlx::query(
-        "SELECT token, created_at FROM invitations \
-         WHERE kind = 'personal' AND used_at IS NULL \
-         ORDER BY created_at DESC",
+        "SELECT 'inv_' || encode(sha256(convert_to('treer.admin-invitation/v1:' || token, 'UTF8')), 'hex') AS invitation_id, \
+         CASE WHEN token ~ '^[A-Za-z0-9_-]{32,}$' THEN left(token, 6) ELSE '[redacted]' END AS token_prefix, \
+         created_at, used_at FROM invitations WHERE kind = 'personal' \
+         ORDER BY created_at DESC, token DESC LIMIT 100",
     )
     .fetch_all(&auth.pool())
     .await
     .map_err(AuthFailure::database)?;
-    let invitations: Vec<Value> = rows
+    let invitations: Vec<treer_protocol::PlatformInvitationRecord> = rows
         .into_iter()
-        .map(|row| {
-            let token: String = row.get("token");
-            let mut url = auth.app_public_url().clone();
-            url.set_path("/");
-            url.set_query(None);
-            url.query_pairs_mut().append_pair("invite", &token);
-            json!({
-                "token": token,
-                "created_at": row.get::<String, _>("created_at"),
-                "url": url.as_str(),
-            })
+        .map(|row| treer_protocol::PlatformInvitationRecord {
+            invitation_id: row.get("invitation_id"),
+            token_prefix: row.get("token_prefix"),
+            created_at: row.get("created_at"),
+            used_at: row.get("used_at"),
         })
         .collect();
     Ok(Json(json!({ "invitations": invitations })))
@@ -420,7 +195,7 @@ async fn create_invitation(
         &auth,
         "invitation.created",
         "invitation",
-        &token,
+        &invitation_id(&token),
         None,
         json!({ "kind": "personal" }),
     )
@@ -430,26 +205,34 @@ async fn create_invitation(
 
 async fn revoke_invitation(
     Extension(auth): Extension<AuthStore>,
-    Path(token): Path<String>,
+    Path(invitation_id): Path<String>,
 ) -> Result<Json<Value>, AuthFailure> {
+    let not_found =
+        || AuthFailure::not_found("invitation_not_found", "pending invitation does not exist");
+    if !invitation_id.strip_prefix("inv_").is_some_and(|digest| {
+        digest.len() == 64
+            && digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    }) {
+        return Err(not_found());
+    }
     let result = sqlx::query(
-        "DELETE FROM invitations WHERE token = $1 AND kind = 'personal' AND used_at IS NULL",
+        "DELETE FROM invitations WHERE kind = 'personal' AND used_at IS NULL \
+         AND 'inv_' || encode(sha256(convert_to('treer.admin-invitation/v1:' || token, 'UTF8')), 'hex') = $1",
     )
-    .bind(&token)
+    .bind(&invitation_id)
     .execute(&auth.pool())
     .await
     .map_err(AuthFailure::database)?;
     if result.rows_affected() == 0 {
-        return Err(AuthFailure::not_found(
-            "invitation_not_found",
-            "pending invitation does not exist",
-        ));
+        return Err(not_found());
     }
     record(
         &auth,
         "invitation.revoked",
         "invitation",
-        &token,
+        &invitation_id,
         None,
         json!({}),
     )
@@ -457,26 +240,276 @@ async fn revoke_invitation(
     Ok(Json(json!({ "ok": true })))
 }
 
-async fn list_activity(
-    Extension(auth): Extension<AuthStore>,
-    Query(query): Query<AdminListQuery>,
-) -> Result<Json<Value>, AuthFailure> {
-    let events = audit::list_platform(&auth.pool(), page_limit(query.limit))
-        .await
-        .map_err(AuthFailure::database)?;
-    Ok(Json(json!({ "events": events })))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
-    use tokio::sync::mpsc;
-    use treer_protocol::{AgentInfo, AgentStatus, ServerInfo, ServerStatus};
-    use uuid::Uuid;
-
     use crate::auth::AuthStore;
     use crate::state::AppState;
+    use axum::{
+        body::{to_bytes, Body},
+        http::{Request, StatusCode},
+        middleware,
+    };
+    use chrono::Utc;
+    use tower::ServiceExt;
+
+    fn test_router(store: &AuthStore) -> Router {
+        routes()
+            .route_layer(middleware::from_fn_with_state(
+                store.clone(),
+                crate::auth::require_admin,
+            ))
+            .route(
+                "/api/admin/login",
+                axum::routing::post(crate::auth::admin_login),
+            )
+            .layer(Extension(store.clone()))
+            .with_state(AppState::new())
+    }
+
+    async fn admin_cookie(app: &Router) -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/login")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"password":"admin-password"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        response.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned()
+    }
+
+    #[tokio::test]
+    async fn aggregate_traffic_requires_admin_cookie_and_rejects_identity_filters() {
+        let store = AuthStore::for_test("admin-password").await;
+        let app = test_router(&store);
+        for (header, value) in [
+            ("authorization", "Bearer synthetic-user-or-oauth-token"),
+            ("cookie", "treer_session=synthetic-user-token"),
+            ("x-treer-operator-credential", "synthetic-operator-token"),
+            ("x-treer-workload-credential", "synthetic-workload-token"),
+            ("cookie", "treer_admin_session=invalid-session"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/admin/traffic")
+                        .header(header, value)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let cookie = admin_cookie(&app).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/traffic")
+                    .header(
+                        "authorization",
+                        format!("Bearer {}", cookie.split_once('=').unwrap().1),
+                    )
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "even a valid admin session must use the cookie transport"
+        );
+        for hours in ["6", "24", "168", "720"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/admin/traffic?hours={hours}"))
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+        for query in [
+            "hours=0",
+            "hours=1",
+            "hours=721",
+            "hours=-1",
+            "hours=x",
+            "hours=6&workspace_id=secret",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/api/admin/traffic?{query}"))
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[tokio::test]
+    async fn removed_admin_details_and_mutations_never_expose_resource_existence() {
+        let store = AuthStore::for_test("admin-password").await;
+        insert_user(&store, "usr_private", "private@example.test", "Private").await;
+        let app = test_router(&store);
+        let cookie = admin_cookie(&app).await;
+        let mut expected = None;
+        for path in [
+            "users",
+            "users/usr_private",
+            "users/missing",
+            "users/usr_private/password-reset",
+            "users/usr_private/revoke-sessions",
+            "machines",
+            "machines/srv_private",
+            "agents",
+            "organizations",
+            "activity",
+        ] {
+            for method in ["GET", "POST", "DELETE"] {
+                let response = app
+                    .clone()
+                    .oneshot(
+                        Request::builder()
+                            .method(method)
+                            .uri(format!("/api/admin/{path}"))
+                            .header("cookie", &cookie)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::GONE);
+                let body = to_bytes(response.into_body(), 4096).await.unwrap();
+                if let Some(expected) = &expected {
+                    assert_eq!(&body, expected);
+                } else {
+                    expected = Some(body);
+                }
+            }
+        }
+        let resets: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM password_reset_tokens")
+            .fetch_one(&store.pool())
+            .await
+            .unwrap();
+        assert_eq!(resets, 0);
+    }
+
+    #[tokio::test]
+    async fn platform_traffic_sums_workspaces_and_legacy_rows_without_agent_double_counting() {
+        let store = AuthStore::for_test("admin-password").await;
+        for ws in ["ws-a", "ws-b"] {
+            store.seed_test_workspace(ws).await;
+        }
+        let now = Utc::now().timestamp();
+        let hour = now.div_euclid(3600) * 3600;
+        for (ws, bytes, timestamp, class) in [
+            ("ws-a", 10i64, hour, "virtual_network"),
+            ("ws-b", 20, hour, "virtual_network"),
+            ("ws-b", 7, hour, "service_ingress"),
+            ("ws-a", 100, hour - 6 * 3600, "service_ingress"),
+            ("ws-a", 1000, hour + 3600, "service_ingress"),
+        ] {
+            sqlx::query("INSERT INTO traffic_usage_hourly(workspace_id,window_start,traffic_class,source_type,source_id,destination_type,destination_id,payload_bytes,payload_frames,billable_bytes,meter_version,updated_at) VALUES($1,$2,$3,'machine','srv_private','client','private-client',$4,1,$4,1,'test')")
+                .bind(ws).bind(timestamp).bind(class).bind(bytes).execute(&store.pool()).await.unwrap();
+        }
+        sqlx::query("INSERT INTO machine_traffic_hourly(workspace_id,window_start,source_server_id,destination_server_id,payload_bytes,payload_frames,updated_at) VALUES('ws-a',$1,'legacy-private','private-dest',5,2,'test')").bind(hour).execute(&store.pool()).await.unwrap();
+        // Mirrored Agent metering is deliberately excluded from platform totals.
+        sqlx::query("INSERT INTO agent_traffic_usage_hourly(workspace_id,window_start,traffic_class,source_type,source_id,destination_type,destination_id,payload_bytes,payload_frames,billable_bytes,meter_version,updated_at) VALUES('ws-a',$1,'virtual_network','agent','ag_private','agent','ag_dest',9999,1,9999,1,'test')").bind(hour).execute(&store.pool()).await.unwrap();
+        let Json(body) = platform_traffic(
+            Extension(store.clone()),
+            Query(PlatformTrafficQuery { hours: 6 }),
+        )
+        .await
+        .unwrap();
+        let records = body["traffic"].as_array().unwrap();
+        assert_eq!(records.len(), 2);
+        let network = records
+            .iter()
+            .find(|v| v["traffic_class"] == "virtual_network")
+            .unwrap();
+        assert_eq!(network["payload_bytes"], 35);
+        assert_eq!(network["billable_bytes"], 35);
+        assert_eq!(network["payload_frames"], 4);
+        assert_eq!(
+            records
+                .iter()
+                .find(|v| v["traffic_class"] == "service_ingress")
+                .unwrap()["payload_bytes"],
+            7
+        );
+        for record in records {
+            let keys: std::collections::BTreeSet<_> = record
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                [
+                    "window_start",
+                    "traffic_class",
+                    "payload_bytes",
+                    "payload_frames",
+                    "billable_bytes"
+                ]
+                .into_iter()
+                .collect()
+            );
+            let decoded: treer_protocol::PlatformTrafficRecord =
+                serde_json::from_value(record.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), *record);
+        }
+        let encoded = body.to_string();
+        for fragment in ["ws-a", "ws-b", "private", "ag_dest"] {
+            assert!(!encoded.contains(fragment));
+        }
+        // Independent Proxy state objects use the same persisted database view.
+        let app_a = test_router(&store);
+        let app_b = test_router(&store);
+        let cookie = admin_cookie(&app_a).await;
+        let mut responses = Vec::new();
+        for app in [app_a, app_b] {
+            let response = app
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/admin/traffic?hours=6")
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            responses.push(to_bytes(response.into_body(), 65536).await.unwrap());
+        }
+        assert_eq!(responses[0], responses[1]);
+    }
 
     async fn insert_user(store: &AuthStore, id: &str, email: &str, name: &str) {
         sqlx::query(
@@ -490,53 +523,6 @@ mod tests {
         .execute(&store.pool())
         .await
         .expect("insert user");
-    }
-
-    fn test_server(server_id: &str, workspace_id: &str) -> ServerInfo {
-        let now = Utc::now();
-        ServerInfo {
-            server_id: server_id.to_string(),
-            workspace_id: workspace_id.to_string(),
-            name: "live-host".to_string(),
-            hostname: "live-host.example".to_string(),
-            root: "/tmp".to_string(),
-            controller_build: treer_protocol::BuildInfo {
-                version: "0.1.2".to_string(),
-                git_commit: "controller".to_string(),
-            },
-            host_build: treer_protocol::BuildInfo {
-                version: "0.1.2".to_string(),
-                git_commit: "host".to_string(),
-            },
-            supervision: None,
-            labels: Default::default(),
-            available_agents: None,
-            status: ServerStatus::Online,
-            connected_at: now,
-            last_seen_at: now,
-        }
-    }
-
-    fn test_agent(agent_id: &str, server_id: &str, workspace_id: &str) -> AgentInfo {
-        let now = Utc::now();
-        AgentInfo {
-            path: None,
-            run_generation: 0,
-            agent_id: agent_id.to_string(),
-            workspace_id: workspace_id.to_string(),
-            server_id: server_id.to_string(),
-            kind: "command".to_string(),
-            name: "reviewer".to_string(),
-            cwd: ".".to_string(),
-            status: AgentStatus::Idle,
-            pid: None,
-            started_at: now,
-            updated_at: now,
-            exited_at: None,
-            exit_code: None,
-            output_revision: 0,
-            interface: None,
-        }
     }
 
     #[tokio::test]
@@ -555,112 +541,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn users_can_be_searched_and_reset() {
-        let store = AuthStore::for_test("admin-password").await;
-        insert_user(&store, "usr_ada", "ada@example.com", "Ada").await;
-        insert_user(&store, "usr_bob", "bob@example.com", "Bob").await;
-        let Json(listed) = list_users(
-            Extension(store.clone()),
-            Query(AdminListQuery {
-                q: Some("ada".to_string()),
-                limit: None,
-            }),
-        )
-        .await
-        .expect("list users");
-        let users = listed["users"].as_array().expect("users");
-        assert_eq!(users.len(), 1);
-        assert_eq!(users[0]["email"], "ada@example.com");
-
-        let Json(reset) =
-            reset_user_password(Extension(store.clone()), Path("usr_ada".to_string()))
-                .await
-                .expect("issue reset");
-        assert!(reset["url"].as_str().unwrap().contains("reset="));
-        assert_eq!(reset["emailed"], false);
-
-        let again = reset_user_password(Extension(store.clone()), Path("usr_ada".to_string()))
-            .await
-            .expect_err("rate limited");
-        assert_eq!(again.into_parts().1.code, "password_reset_rate_limited");
-    }
-
-    #[tokio::test]
-    async fn sessions_can_be_revoked() {
-        let store = AuthStore::for_test("admin-password").await;
-        insert_user(&store, "usr_ada", "ada@example.com", "Ada").await;
-        sqlx::query(
-            "INSERT INTO sessions(token, user_id, created_at, expires_at) VALUES($1, $2, $3, $4)",
-        )
-        .bind("sess_1")
-        .bind("usr_ada")
-        .bind(Utc::now().to_rfc3339())
-        .bind((Utc::now() + chrono::Duration::hours(1)).to_rfc3339())
-        .execute(&store.pool())
-        .await
-        .expect("insert session");
-        let Json(body) =
-            revoke_user_sessions(Extension(store.clone()), Path("usr_ada".to_string()))
-                .await
-                .expect("revoke");
-        assert_eq!(body["revoked"], 1);
-        let remaining: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM sessions WHERE user_id = 'usr_ada'")
-                .fetch_one(&store.pool())
-                .await
-                .expect("count sessions");
-        assert_eq!(remaining, 0);
-    }
-
-    #[tokio::test]
-    async fn machines_join_enrollment_with_live_agents() {
-        let store = AuthStore::for_test("admin-password").await;
-        store.seed_test_workspace("ws-a").await;
-        let enrollment = store
-            .create_machine_enrollment("ws-a", "admin")
-            .await
-            .expect("enroll");
-        let claimed = store
-            .claim_machine_enrollment(&enrollment)
-            .await
-            .expect("claim");
-        store
-            .set_machine_name("ws-a", &claimed.server_id, "builder")
-            .await
-            .expect("name");
-
-        let state = AppState::new();
-        let Json(offline) = list_machines(Extension(store.clone()), State(state.clone()))
-            .await
-            .expect("offline list");
-        assert_eq!(offline["machines"][0]["status"], "offline");
-        assert_eq!(offline["machines"][0]["name"], "builder");
-
-        let (tx, _rx) = mpsc::unbounded_channel();
-        let mut server = test_server(&claimed.server_id, "ws-a");
-        server.name = "builder".to_string();
-        state
-            .register_server(server, Uuid::new_v4(), tx)
-            .await
-            .expect("online");
-        state
-            .test_insert_agent(test_agent("ag_1", &claimed.server_id, "ws-a"))
-            .await;
-
-        let Json(online) = get_machine(
-            Extension(store),
-            State(state.clone()),
-            Path(claimed.server_id.clone()),
-        )
-        .await
-        .expect("machine");
-        assert_eq!(online["machine"]["status"], "online");
-        assert_eq!(online["machine"]["agents"][0]["name"], "reviewer");
-        let Json(agents) = list_agents(State(state)).await;
-        assert_eq!(agents["agents"].as_array().unwrap().len(), 1);
-    }
-
-    #[tokio::test]
     async fn personal_invitations_can_be_listed_and_revoked() {
         let store = AuthStore::for_test("admin-password").await;
         let (token, _) = store.create_personal_invitation().await.expect("invite");
@@ -668,10 +548,174 @@ mod tests {
             .await
             .expect("list");
         assert_eq!(listed["invitations"].as_array().unwrap().len(), 1);
-        let Json(_) = revoke_invitation(Extension(store.clone()), Path(token))
+        let Json(_) = revoke_invitation(Extension(store.clone()), Path(invitation_id(&token)))
             .await
             .expect("revoke");
         let Json(empty) = list_invitations(Extension(store)).await.expect("empty");
         assert!(empty["invitations"].as_array().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn invitation_listing_redacts_bearers_and_revoke_uses_only_admin_handle() {
+        let store = AuthStore::for_test("admin-password").await;
+        let (pending, _) = store.create_personal_invitation().await.unwrap();
+        let (used, _) = store.create_personal_invitation().await.unwrap();
+        sqlx::query("UPDATE invitations SET used_at='used-time' WHERE token=$1")
+            .bind(&used)
+            .execute(&store.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO invitations(token,created_at,created_by,kind) VALUES('short','test','platform-admin','personal')").execute(&store.pool()).await.unwrap();
+        let app = test_router(&store);
+        let cookie = admin_cookie(&app).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/admin/invitations")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let bytes = to_bytes(response.into_body(), 65536).await.unwrap();
+        let text = std::str::from_utf8(&bytes).unwrap();
+        for secret in [&pending, &used, "short"] {
+            assert!(!text.contains(secret));
+        }
+        let body: Value = serde_json::from_slice(&bytes).unwrap();
+        let records = body["invitations"].as_array().unwrap();
+        assert_eq!(records.len(), 3);
+        for record in records {
+            let keys: std::collections::BTreeSet<_> = record
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert_eq!(
+                keys,
+                ["invitation_id", "token_prefix", "created_at", "used_at"]
+                    .into_iter()
+                    .collect()
+            );
+            let decoded: treer_protocol::PlatformInvitationRecord =
+                serde_json::from_value(record.clone()).unwrap();
+            assert_eq!(serde_json::to_value(decoded).unwrap(), *record);
+        }
+        assert_eq!(
+            records
+                .iter()
+                .find(|v| v["invitation_id"] == invitation_id(&pending))
+                .unwrap()["token_prefix"],
+            &pending[..6]
+        );
+        assert_eq!(
+            records
+                .iter()
+                .find(|v| v["invitation_id"] == invitation_id(&used))
+                .unwrap()["used_at"],
+            "used-time"
+        );
+        assert_eq!(
+            records
+                .iter()
+                .find(|v| v["invitation_id"] == invitation_id("short"))
+                .unwrap()["token_prefix"],
+            "[redacted]"
+        );
+        // A non-bearer handle cannot be consumed by the registration API.
+        let exists: bool =
+            sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM invitations WHERE token=$1)")
+                .bind(invitation_id(&pending))
+                .fetch_one(&store.pool())
+                .await
+                .unwrap();
+        assert!(!exists);
+        for (id, expected) in [
+            (pending.clone(), StatusCode::NOT_FOUND),
+            (invitation_id(&used), StatusCode::NOT_FOUND),
+            (invitation_id("missing"), StatusCode::NOT_FOUND),
+            (invitation_id(&pending), StatusCode::OK),
+            (invitation_id(&pending), StatusCode::NOT_FOUND),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("DELETE")
+                        .uri(format!("/api/admin/invitations/{id}"))
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
+        let audits: Vec<String> = sqlx::query_scalar(
+            "SELECT resource_id FROM platform_audit_events WHERE resource_kind='invitation'",
+        )
+        .fetch_all(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(audits, vec![invitation_id(&pending)]);
+    }
+
+    #[tokio::test]
+    async fn invitation_creation_returns_link_once_and_listing_is_bounded() {
+        let store = AuthStore::for_test("admin-password").await;
+        let app = test_router(&store);
+        let cookie = admin_cookie(&app).await;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/admin/invitations")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["cache-control"], "no-store");
+        let created: Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), 65536).await.unwrap()).unwrap();
+        let token = created["token"].as_str().unwrap();
+        assert!(created["url"].as_str().unwrap().contains(token));
+        let resource: String = sqlx::query_scalar(
+            "SELECT resource_id FROM platform_audit_events WHERE action='invitation.created'",
+        )
+        .fetch_one(&store.pool())
+        .await
+        .unwrap();
+        assert_eq!(resource, invitation_id(token));
+        sqlx::query("INSERT INTO invitations(token,created_at,created_by,kind) SELECT 'inv_' || lpad(n::text,32,'0'),'test','platform-admin','personal' FROM generate_series(1,110) AS n").execute(&store.pool()).await.unwrap();
+        let Json(listed) = list_invitations(Extension(store.clone())).await.unwrap();
+        assert_eq!(listed["invitations"].as_array().unwrap().len(), 100);
+        assert!(!listed.to_string().contains(token));
+        for path in [
+            "/api/admin/traffic",
+            "/api/admin/dashboard",
+            "/api/admin/users",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(path)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.headers()["cache-control"], "no-store");
+        }
     }
 }
