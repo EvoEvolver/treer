@@ -528,7 +528,8 @@ Placement does not change the process `cwd`.
 Agent creation failures carry optional `error.details` with a bounded bare
 `command`, the selected `machine_id`, reserved `agent_id` and `creation_state`.
 Only a Controller `command_not_found` proof for that same Agent, issued before
-startup persistence or Host dispatch, permits Proxy compensation: credential
+startup persistence or Host dispatch and returned directly to that creation
+command, permits Proxy compensation (an event-stream field is not proof): credential
 revocation and removal of the reserved name make the placement inactive and the
 name reusable (`identity_removed`). Revoked credential/placement tombstones may
 remain for reconciliation. Timeout, disconnect, legacy errors without this

@@ -13,6 +13,163 @@ use treer_protocol::{
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
 #[tokio::test]
+async fn agent_create_pre_dispatch_denial_and_offline_preserve_their_errors() {
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    let request = || CreateAgentRequest {
+        folder_id: None,
+        server_id: Some("machine-a".into()),
+        kind: "command".into(),
+        name: "not-reserved".into(),
+        cwd: ".".into(),
+        args: vec!["claude".into()],
+        cols: 80,
+        rows: 24,
+        publish_ports: vec![],
+        recipe: None,
+    };
+    let policy = PolicyEngine::new(
+        crate::policy::PolicyDecision::Deny(crate::policy::PolicyDenial::new(
+            "policy_denied",
+            "blocked by fixture",
+        )),
+        vec![],
+    );
+    let subject = PolicySubject::Agent {
+        server_id: "machine-a".into(),
+        agent_id: "agent-a".into(),
+    };
+    let error = execute_agent_create(
+        &state,
+        &auth,
+        &policy,
+        None,
+        Some(&subject),
+        "default",
+        request(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "policy_denied");
+    assert_eq!(error.error.message, "blocked by fixture");
+    assert!(error.error.details.is_none());
+
+    let server = state.resolve_server("default", "machine-a").await.unwrap();
+    let id = Uuid::new_v4();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    state.register_server(server, id, tx).await.unwrap();
+    state.disconnect_server("default", "machine-a", id).await;
+    let error = execute_agent_create(
+        &state,
+        &auth,
+        &PolicyEngine::allow_all(),
+        None,
+        None,
+        "default",
+        request(),
+        None,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error.error.code, "server_offline");
+    assert!(error.error.details.is_none());
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_names WHERE name='not-reserved'")
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap();
+    assert_eq!(count, 0);
+}
+
+#[tokio::test]
+async fn agent_create_transport_failure_keeps_reservation_and_binds_error_scope() {
+    use treer_protocol::AgentCreationFailureState;
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let server = state_with_managed_agent()
+        .await
+        .resolve_server("default", "machine-a")
+        .await
+        .unwrap();
+    let state = AppState::new();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            server,
+            Uuid::new_v4(),
+            "test-controller".into(),
+            vec![treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT.into()],
+            tx,
+        )
+        .await
+        .unwrap();
+    let task = tokio::spawn({
+        let state = state.clone();
+        let auth = auth.clone();
+        async move {
+            execute_agent_create(
+                &state,
+                &auth,
+                &PolicyEngine::allow_all(),
+                None,
+                None,
+                "default",
+                CreateAgentRequest {
+                    folder_id: None,
+                    server_id: Some("machine-a".into()),
+                    kind: "command".into(),
+                    name: "transport-failure".into(),
+                    cwd: ".".into(),
+                    args: vec!["claude".into()],
+                    cols: 80,
+                    rows: 24,
+                    publish_ports: vec![],
+                    recipe: None,
+                },
+                None,
+            )
+            .await
+        }
+    });
+    let check = next_lifecycle_command(&mut rx).await;
+    assert!(matches!(
+        check.command,
+        AgentCommand::CreationPlacementCheck {}
+    ));
+    // Close the transport before acknowledging preflight. The subsequent Create
+    // send deterministically fails, without relying on a sleep or timeout.
+    drop(rx);
+    state
+        .complete_command(CommandResult::success(
+            check.command_id,
+            json!({"supported":true}),
+        ))
+        .await;
+    let error = task.await.unwrap().unwrap_err().error;
+    assert_eq!(error.code, "server_offline");
+    let details = error.details.unwrap();
+    assert_eq!(details.machine_id.as_deref(), Some("machine-a"));
+    assert_eq!(
+        details.creation_state,
+        AgentCreationFailureState::ReservedOutcomeUnknown
+    );
+    assert!(details.command.is_none());
+    let id = details.agent_id.unwrap();
+    let active: bool =
+        sqlx::query_scalar("SELECT revoked_at IS NULL FROM agent_credentials WHERE agent_id=$1")
+            .bind(id)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap();
+    assert!(
+        active,
+        "transport codes alone cannot prove an unstarted workload"
+    );
+}
+
+#[tokio::test]
 async fn agent_create_missing_command_only_cleans_a_proven_unstarted_reservation() {
     use treer_protocol::{AgentCreationErrorDetails, AgentCreationFailureState};
     for (proof, mismatched_id, cleanup_fails, legacy) in [
@@ -152,6 +309,9 @@ async fn agent_create_missing_command_only_cleans_a_proven_unstarted_reservation
         let visible_placement: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workload_placements p JOIN agent_credentials c USING(agent_id) WHERE p.agent_id=$1 AND c.revoked_at IS NULL")
             .bind(&agent_id).fetch_one(&auth.pool()).await.unwrap();
         assert_eq!(visible_placement, if removed { 0 } else { 1 });
+        let services: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM machine_services WHERE workspace_id='default' AND target_agent_id=$1")
+            .bind(&agent_id).fetch_one(&auth.pool()).await.unwrap();
+        assert_eq!(services, 0, "failed creation leaves no target services");
         let audit: serde_json::Value = sqlx::query_scalar("SELECT payload FROM organization_audit_events WHERE workspace_id='default' AND resource_id=$1 AND action='agent.create.failed'")
             .bind(&agent_id).fetch_one(&auth.pool()).await.unwrap();
         assert_eq!(audit["server_id"], "machine-a");
