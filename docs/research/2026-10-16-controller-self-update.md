@@ -88,9 +88,17 @@ uses this sequence before connecting; an identical executable at another inode
 is rejected before changing session or connecting, leaving the parent's locks
 and journal untouched. A different enrollment is rejected as well. This is an
 internal bootstrap primitive, not yet a production worker dispatch path.
-This is not proof of survival after parent exit or escape from a cgroup/service
-manager's termination scope. Wiring the synchronous internal worker entry,
-null/private bounded stdio and the complete owned-child lifecycle remain pending.
+An additional isolated acceptance fixture now executes the private native image
+with all three stdio descriptors pointing to `/dev/null`, completes the durable
+handoff, and exits the submitting process without running its destructors. After
+reaping that parent, the outer observer verifies the worker's creation identity,
+running inode and private session, exclusion of both shared-install workspaces,
+and a new child-side proof/lock probe. Explicit release then terminates the worker
+and makes the locks available; the full Prepared receipt remains unchanged.
+This proves survival of an ordinary Unix parent exit in that fixture, not escape
+from a cgroup/service manager's termination scope. Wiring the synchronous
+production worker entry, stdio and the complete owned-child lifecycle remain
+pending, as do activation and rollback acceptance under service managers.
 
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the

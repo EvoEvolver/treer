@@ -430,6 +430,10 @@ impl SelectionLocks {
 }
 
 #[cfg(test)]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod survival_tests;
+
+#[cfg(test)]
 pub(super) mod tests {
     use super::*;
     use std::{
