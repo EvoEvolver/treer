@@ -129,6 +129,14 @@ then closes it and verifies validation succeeds. Isolated subprocess tests cover
 both umask 022 and 077 without changing the Rust test runner's process-wide umask;
 installation preserves restrictive user permissions rather than forcing 0755.
 
+Unix cold-activation tests create stale Host sockets in an isolated child and
+wait for its exit before probing. Dropping a listener in a parallel test runner
+is insufficient: a concurrent fork can retain its close-on-exec descriptor until
+exec, temporarily making the socket appear live. A duplicate-descriptor test
+reproduces that distinction; cold activation still asserts no hot-restart call.
+The explicit-port conflict/retry test is similarly isolated so inherited TCP
+listeners cannot keep its released port busy during the retry assertion.
+
 The shared `treer-platform` environment filter is used by nohup, foreground and
 Windows detached launchers, daemon entry points (including launchd/systemd),
 Host-spawned Controllers on crash/hot update, and PTY workload inheritance.

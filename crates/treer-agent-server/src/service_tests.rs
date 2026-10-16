@@ -5,6 +5,25 @@ use serde_json::json;
 
 #[tokio::test]
 async fn explicit_listen_conflict_fails_before_enrollment_and_allows_retry() {
+    // A parallel test can fork while this listener is open and retain the
+    // descriptor until exec, invalidating the retry-after-close assertion.
+    // Run only this test in the child, which never spawns another process.
+    const CHILD: &str = "TREER_TEST_ISOLATED_LISTEN_CONFLICT";
+    if env::var_os(CHILD).is_none() {
+        let output = Command::new(env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "service::tests::explicit_listen_conflict_fails_before_enrollment_and_allows_retry",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "isolated port test failed: {output:?}"
+        );
+        return;
+    }
     let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let address = listener.local_addr().unwrap();
     let error = resolve_listen("ws_fixture", Some(address))
@@ -917,12 +936,59 @@ impl Drop for ActivationFixture {
 }
 
 #[cfg(unix)]
+#[test]
+fn isolated_stale_activation_socket_child() {
+    let Some(socket) = env::var_os("TREER_TEST_STALE_ACTIVATION_SOCKET") else {
+        return;
+    };
+    drop(std::os::unix::net::UnixListener::bind(socket).unwrap());
+}
+
+#[cfg(unix)]
+fn create_stale_activation_socket(socket: &Path) {
+    // CLOEXEC still permits concurrent forks to inherit a listener until exec.
+    // Create it only in an isolated child: waiting for exit proves no descriptor
+    // remains, including when unrelated tests spawn subprocesses concurrently.
+    let output = Command::new(env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "service::tests::isolated_stale_activation_socket_child",
+        ])
+        .env("TREER_TEST_STALE_ACTIVATION_SOCKET", socket)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stale socket helper failed: {output:?}"
+    );
+    assert!(socket.exists(), "the stale socket path must remain");
+    assert!(!host_is_running(socket));
+}
+
+#[cfg(unix)]
+#[test]
+fn closing_listener_does_not_stop_an_inherited_descriptor() {
+    let directory =
+        PathBuf::from("/tmp").join(format!("treer-stale-socket-{}", Uuid::new_v4().simple()));
+    fs::create_dir(&directory).unwrap();
+    let socket = directory.join("host.sock");
+    let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+    // Model the extra reference held between another thread's fork and exec,
+    // without scheduling races or spawning an actual child.
+    let inherited = listener.try_clone().unwrap();
+    drop(listener);
+    assert!(host_is_running(&socket));
+    drop(inherited);
+    fs::remove_dir_all(directory).unwrap();
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn service_canary_cold_activation_skips_restart_for_missing_and_stale_sockets() {
     for stale in [false, true] {
         let fixture = ActivationFixture::new().await;
         if stale {
-            drop(std::os::unix::net::UnixListener::bind(&fixture.config.host_socket).unwrap());
+            create_stale_activation_socket(&fixture.config.host_socket);
         }
         let activation = activate_registered_service(&fixture.paths, &fixture.config)
             .await
