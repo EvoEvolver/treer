@@ -70,8 +70,14 @@ file upload, and audit.
 `web/src/components/`; shared presentation helpers and preview fixtures live in
 `web/src/lib/control-plane.ts`. Workspace state and its existing hooks stay
 together in `components/workspace-app.tsx`.
-`/admin` is the platform-administrator inventory: user, machine, and Agent
-counts expand into lists, password-reset links, and live Agents per machine. The sidebar
+`/admin` is the platform-administrator aggregate view: user, organization,
+machine and Agent counts plus hourly traffic grouped only by traffic class.
+`GET /api/admin/traffic` queries shared PostgreSQL metering across all workspaces;
+it excludes Agent mirrors and instance-local unflushed counters, and returns
+no tenant, user, machine, Agent or routing identifiers. Former inventory,
+password-reset/session-revocation and platform activity routes are tombstoned
+with a uniform authenticated 410 response. Platform invitations and image
+updates retain their separate admin-cookie authorization. The sidebar
 user menu opens a floating Settings overlay: Account edits preferred name and
 email through `PATCH /api/auth/profile`; General stores Light/Dark appearance in
 `localStorage` (`treer-theme`). Language is English or Simplified Chinese: the
