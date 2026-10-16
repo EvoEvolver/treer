@@ -1898,6 +1898,9 @@ for compatibility and atomic creation decisions.
 
 ### Machine updates with a reviewed Canary artifact set
 
+For a full-SHA, `canary_passed` machine train including launcher installation and
+an isolated smoke Agent, use the [manual rollout coordinator](../scripts/machine-rollout.md).
+
 `scripts/update-machine.py` automates the manual machine update workflow on Unix
 machines with Python 3.11+, `nohup`, and an installed Controller. It is separate
 from the signed release-channel updater above: the manual workflow pins binary

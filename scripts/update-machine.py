@@ -245,7 +245,12 @@ def transaction(job, config):
     health = wait_ready(config_path, config["timeout"])
     before = inventory(config_path)
     endpoint = f"{config['proxy'].rstrip('/')}/artifacts/{config['platform']}/"
-    published = manifest(fetch(endpoint + "SHA256SUMS", limit=8192))
+    sums = fetch(endpoint + "SHA256SUMS", limit=8192)
+    published = manifest(sums)
+    if config.get("expected_sums") and hashlib.sha256(sums).hexdigest() != config["expected_sums"]:
+        raise RuntimeError("SHA256SUMS differs from the canary_passed release receipt")
+    if config.get("expected_files") and published != config["expected_files"]:
+        raise RuntimeError("artifact checksums differ from the canary_passed release receipt")
     stage = job / "stage"
     stage.mkdir(exist_ok=True)
     if config.get("artifacts"):
@@ -268,17 +273,30 @@ def transaction(job, config):
         destination.chmod(0o755)
         staged_versions[name] = version(destination, home)
     candidate = source_commit(staged_versions[names[0]])
+    if config.get("expected_commit") and not config["expected_commit"].startswith(candidate):
+        raise RuntimeError("staged source commit differs from the pinned release")
     if any(source_commit(v) != candidate for v in staged_versions.values()):
         raise RuntimeError("staged binaries have different source commits")
     # Prevent a deployment race from mixing two published sets.
     if manifest(fetch(endpoint + "SHA256SUMS", limit=8192)) != published:
         raise RuntimeError("Canary changed while staging; retry from the new manifest")
-    old_versions = {name: version(bindir / name, home) for name in names}
+    destinations = {name: bindir / name for name in names}
+    if config.get("cli_path"):
+        destinations["treer"] = Path(config["cli_path"])
+    old_versions = {name: version(destinations[name], home) for name in names}
     backup = home / ".local/share/treer-backups" / (
         source_commit(old_versions[names[0]]) + "-" + time.strftime("%Y%m%dT%H%M%S") + "-" + job.name[-8:])
     backup.mkdir(parents=True, mode=0o700)
     for name in names:
-        shutil.copy2(bindir / name, backup / name)
+        shutil.copy2(destinations[name], backup / name)
+    if not config["host"] and (bindir / "treer-agent-host").is_file():
+        shutil.copy2(bindir / "treer-agent-host", backup / "treer-agent-host")
+    if config.get("startup_store"):
+        startup = Path(config["startup_store"])
+        if startup.is_symlink() or not startup.is_file():
+            raise RuntimeError("startup store must be an existing regular file")
+        shutil.copy2(startup, backup / "agent-startup.json")
+        (backup / "agent-startup.json").chmod(0o600)
     write_json(backup / "receipt.json", {"workspace": service["workspace"], "versions": old_versions,
                                        "agents": before, "host_changed": config["host"]})
     changed = []
@@ -306,17 +324,17 @@ def transaction(job, config):
         # A new path-aware CLI must never precede its capable Controller.
         if "agent.path-targets.v1" not in ready.get("cli_capabilities", []):
             raise RuntimeError("new Controller does not advertise path-target capability")
-        replace_file(stage / "treer", bindir / "treer")
+        replace_file(stage / "treer", destinations["treer"])
         changed.append("treer")
         wait_agents(config_path, before, config["timeout"], config["host"])
         for name in names:
-            if digest(bindir / name) != published[name] or version(bindir / name, home) != staged_versions[name]:
+            if digest(destinations[name]) != published[name] or version(destinations[name], home) != staged_versions[name]:
                 raise RuntimeError("installed binary verification failed")
     except Exception as error:
         rollback_error = None
         try:
             for name in reversed(changed):
-                replace_file(backup / name, bindir / name)
+                replace_file(backup / name, destinations[name])
             if activation_attempted:
                 epoch = None
                 try:
