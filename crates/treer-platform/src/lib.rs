@@ -145,6 +145,12 @@ pub fn private_path_security_report(path: &Path) -> io::Result<String> {
     windows::private_path_security_report(path)
 }
 
+/// Windows only, test support: apply an SDDL DACL to a path.
+#[cfg(windows)]
+pub fn apply_sddl_dacl(path: &Path, sddl: &str) -> io::Result<()> {
+    windows::apply_sddl_dacl(path, sddl)
+}
+
 /// Available bytes on the volume holding `path`, for quota admission.
 pub fn available_disk_bytes(path: &Path) -> io::Result<u64> {
     #[cfg(unix)]

@@ -347,7 +347,7 @@ fn verify_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), 
                 // foreign owner or inherited entry without exposing content.
                 let report = treer_platform::private_path_security_report(path)
                     .unwrap_or_else(|error| format!("report unavailable: {error}"));
-                warn!(path = %path.display(), %report, "Agent private state directory DACL is not private");
+                warn!(%report, "Agent private state directory DACL is not private");
                 return Err(unsafe_directory(path, "insecure_dacl"));
             }
             Err(error) => return Err(unavailable(path, error)),
@@ -1218,5 +1218,24 @@ mod tests {
         );
         // Everything else below the root stays usable.
         assert!(state.prepare("ag_2").is_ok());
+        // An ACE of a type the verifier does not understand (here a callback
+        // ACE) is recorded by header only and fails closed, even when the
+        // principal would otherwise be acceptable.
+        let callback = state.prepare("ag_callback").unwrap();
+        treer_platform::apply_sddl_dacl(
+            &callback,
+            "D:P(A;;GA;;;SY)(XA;;GA;;;SY;(Member_of {SID(BA)}))",
+        )
+        .unwrap();
+        let report = report(&callback);
+        assert!(report.contains("unsupported"), "{report}");
+        assert!(
+            !treer_platform::private_path_is_secure(&callback).unwrap(),
+            "{report}"
+        );
+        assert_eq!(
+            state.verify_existing("ag_callback").unwrap_err().code,
+            "agent_private_state_unsafe"
+        );
     }
 }
