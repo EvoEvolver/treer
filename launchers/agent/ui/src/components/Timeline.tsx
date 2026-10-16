@@ -9,17 +9,21 @@ import { Diff } from "./Diff";
 import { useDialogs } from "./Dialogs";
 import { Icon } from "./Icon";
 import { Markdown } from "./Markdown";
+import { imageUrl } from "../api";
+import { safeImageUrl } from "../lib/url";
 
 const FROM = /^\[来自 ([^\r\n]+)，排队于 ([^\r\n]+)\]\n/;
 
 function Message({ item }: { item: HistoryItem }) {
-  if (!item.text) return null;
+  if (!item.text && !item.attachments?.length) return null;
   if (item.kind === "userMessage") {
     const origin = FROM.exec(item.text);
+    const bodyText = origin ? item.text.slice(origin[0].length) : item.text;
     return (
-      <article className="msg user">
+      <article className={`msg user${bodyText.trim() ? "" : " image-only"}`}>
         <div className="who">{origin ? t("message.from", { name: origin[1] ?? "" }) : t("message.you")}</div>
-        <Markdown className="body" text={origin ? item.text.slice(origin[0].length) : item.text} />
+        {!!bodyText.trim() && <Markdown className="body" text={bodyText} />}
+        {!!item.attachments?.length && <div className="image-list sent-images">{item.attachments.map((image, index) => <img key={image.id} src={safeImageUrl(imageUrl(image.id))} alt={t("images.preview", { number: index + 1 })} loading="lazy" />)}</div>}
       </article>
     );
   }

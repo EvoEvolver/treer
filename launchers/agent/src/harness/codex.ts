@@ -5,7 +5,7 @@ import { readGoalState, writeGoalState } from "../goal-storage.js";
 import { randomUUID } from "node:crypto";
 
 import { JsonRpcClient } from "../jsonrpc.js";
-import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
+import { withHistoryLimit, type HarnessImage, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
 import type { Goal, GoalUpdate } from "../model.js";
 import { GoalError, mapGoal, GoalGuard } from "../goals.js";
@@ -34,7 +34,7 @@ interface LiveItem {
 }
 
 export class CodexRuntime extends EventEmitter implements HarnessRuntime {
-  readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { steer: true, backgroundTasks: false, goal: { pause: true, budget: true }, sessionTransfer: { export: true, import: true } } };
+  readonly harness: HarnessInfo = { id: "codex", name: "Codex", capabilities: { images: true, steer: true, backgroundTasks: false, goal: { pause: true, budget: true }, sessionTransfer: { export: true, import: true } } };
   private goal: Goal | null = null;
   private goalExitRecord: Goal | null = null;
   private pendingGoalExit: Goal | null = null;
@@ -188,17 +188,17 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     this.emit("state");
   }
 
-  async prompt(text: string) {
+  async prompt(text: string, images: HarnessImage[] = []) {
     if (!this.client || !this.thread) {
       throw new Error("Codex is not ready");
     }
     const command = /^\/goal(?:\s+([\s\S]*))?$/.exec(text.trim());
-    if (command) {
+    if (command && !images.length) {
       if (command[1]?.trim() === "clear") await this.clearGoal();
       else if (command[1]?.trim()) await this.updateGoal({ objective: command[1].trim() });
       return;
     }
-    const input = [{ type: "text", text, text_elements: [] }];
+    const input = [...(text ? [{ type: "text", text, text_elements: [] }] : []), ...images.map((image) => ({ type: "localImage", path: image.path }))];
     if (this.thread.status === "running" && this.thread.activeTurnId) {
       const steer = (expectedTurnId: string) => this.client!.request<{ turnId: string }>(
         "turn/steer",

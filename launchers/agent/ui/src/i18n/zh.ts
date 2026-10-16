@@ -1,6 +1,18 @@
 import type { MessageKey } from "./en";
 
 export const zh: Partial<Record<MessageKey, string>> = {
+  "images.add": "添加图片",
+  "images.attached": "已添加的图片",
+  "images.storageInside": "图片上传已禁用：私有存储位于工作目录内。",
+  "images.storageUnsafe": "图片上传已禁用：需要修复私有存储权限。",
+  "images.storageUnavailable": "图片上传不可用：此 Controller 没有可用的私有附件存储。",
+  "images.remove": "移除图片 {{number}}",
+  "images.preview": "附件图片 {{number}}",
+  "images.uploading": "正在上传图片…",
+  "images.limits": "最多 8 张 PNG、JPEG、WebP 或 GIF 图片；每张 10 MiB，总计 24 MiB。",
+  "images.invalid": "仅支持 PNG、JPEG、WebP 或 GIF 图片。",
+  "images.privacy": "图片（包括位置等元数据）会发送给所选模型提供方。",
+  "images.fallback": "此 Agent 未声明原生图片能力，将收到本机私有文件路径；模型可能无法看到图片。",
   "status.starting": "启动中",
   "status.working": "工作中",
   "status.blocked": "已阻塞",

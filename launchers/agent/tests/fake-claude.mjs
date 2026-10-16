@@ -52,7 +52,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     continue;
   }
   if (input.type !== "user") continue;
-  const value = input.message.content[0].text;
+  const value = input.message.content.find(block => block.type === "text")?.text || "";
   if (value === "fixture:reject-goal" && stepGoalHook) { stepGoalHook(); continue; }
   system("init", { model: currentModel });
   system("session_state_changed", { state: "running" });

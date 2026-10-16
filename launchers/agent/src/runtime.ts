@@ -1,6 +1,6 @@
 import type { EventEmitter } from "node:events";
 
-import type { BackgroundTask, Goal, GoalUpdate, ModelOption, ReasoningEffort, TurnDto } from "./model.js";
+import type { BackgroundTask, Goal, GoalUpdate, ImageAttachment, ModelOption, ReasoningEffort, TurnDto } from "./model.js";
 import type { ImportedSession, SessionBundle, SessionImportOptions } from "./session-transfer.js";
 
 // The adapter boundary. The server, AIS endpoints, file browser, persistence and
@@ -14,6 +14,8 @@ export interface HarnessInfo {
   /** Name shown to people, e.g. "Codex" or "Claude". */
   name: string;
   capabilities: {
+    /** Native protocol images, not a promise about the selected model's vision. */
+    images?: boolean;
     steer: boolean;
     backgroundTasks: boolean;
     goal: { pause: boolean; budget: boolean } | null;
@@ -54,7 +56,7 @@ export interface HarnessRuntime extends EventEmitter {
   start(): Promise<void>;
   stop(): Promise<void>;
   /** Sends a prompt; while a turn runs, the harness steers or queues it. */
-  prompt(text: string): Promise<void>;
+  prompt(text: string, images?: HarnessImage[]): Promise<void>;
   interrupt(): Promise<void>;
   updateSettings(input: { model?: string; reasoningEffort?: string | null }): Promise<void>;
   updateGoal?(input: GoalUpdate): Promise<void>;
@@ -65,6 +67,9 @@ export interface HarnessRuntime extends EventEmitter {
   importSession?(bundle: SessionBundle, options: SessionImportOptions): Promise<ImportedSession>;
   snapshot(historyLimit?: number): RuntimeSnapshot;
 }
+
+/** Server-resolved immutable image; HTTP clients can supply only its opaque ID. */
+export interface HarnessImage extends ImageAttachment { path: string; data: string }
 
 /** Returns the thread with only its most recent `historyLimit` items. */
 export function withHistoryLimit(thread: ThreadState, turns: TurnDto[], historyLimit: number): ThreadState {

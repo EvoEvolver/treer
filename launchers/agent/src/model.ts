@@ -1,6 +1,13 @@
 // Harness-neutral history and settings shared by the server, frontend contract,
 // and every harness adapter.
 
+/** Public metadata only; bytes and local paths never enter browser snapshots. */
+export interface ImageAttachment {
+  id: string;
+  mime: "image/png" | "image/jpeg" | "image/webp" | "image/gif";
+  size: number;
+}
+
 export interface BackgroundTask {
   id: string;
   kind: "shell" | "agent" | "monitor" | "other";
@@ -51,6 +58,9 @@ export interface GoalUpdate {
 
 export interface HistoryItem {
   id: string;
+  /** Adapter-only reconciliation keys; the server removes these from snapshots. */
+  attachmentDigests?: string[];
+  attachments?: ImageAttachment[];
   kind:
     | "userMessage"
     | "agentMessage"

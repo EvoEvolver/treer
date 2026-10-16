@@ -1,5 +1,17 @@
 // English is the source of truth: every key lives here, and other locales may omit keys (they fall back to English).
 export const en = {
+  "images.add": "Attach images",
+  "images.attached": "Attached images",
+  "images.storageInside": "Image uploads disabled: private storage is inside the working directory.",
+  "images.storageUnsafe": "Image uploads disabled: private storage needs its permissions repaired.",
+  "images.storageUnavailable": "Image uploads unavailable: this Controller has no usable private attachment storage.",
+  "images.remove": "Remove image {{number}}",
+  "images.preview": "Attached image {{number}}",
+  "images.uploading": "Uploading images…",
+  "images.limits": "Up to 8 PNG, JPEG, WebP or GIF images; 10 MiB each, 24 MiB total.",
+  "images.invalid": "Choose PNG, JPEG, WebP or GIF images only.",
+  "images.privacy": "Images, including metadata such as location, are sent to your selected model provider.",
+  "images.fallback": "This agent does not advertise native images. It receives private local file paths instead; the model may not see the images.",
   "app.name": "Agent",
   "status.starting": "Starting",
   "status.working": "Working",

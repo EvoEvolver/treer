@@ -540,6 +540,54 @@ this document; the server contract is unchanged.
 On narrow layouts (640px or less) and devices with coarse pointers, buttons,
 task disclosures and form controls have at least 44px touch targets. Desktop
 mouse layouts retain compact controls; inline prose links retain text sizing.
+Below 768px, the composer input occupies its own full-width row above the
+44px button row. Keyboard-shortcut hints are hidden on these narrow layouts;
+attachment limits and privacy notices remain available.
+
+**Image attachments.** Paste an image (Cmd/Ctrl+V or the browser's mobile paste
+menu), drop files onto the composer, or use **Attach images**. PNG, JPEG, WebP
+and GIF are supported, up to 8 images per prompt, 10 MiB per file and 24 MiB
+combined. Preview and remove drafts before sending; images can be sent without
+text. Images, including EXIF/location metadata, are sent to the selected model
+provider. Native protocol support does not guarantee the selected model has
+vision. Codex receives local-image inputs; Claude receives base64 image blocks;
+ACP receives image blocks only when its initialize response advertises
+`agentCapabilities.promptCapabilities.image=true`. Otherwise the UI explicitly
+warns that private local paths are sent as text and the model may not see images.
+
+The guarded `POST api/attachments` streams binary bytes into the Controller's
+trusted per-Agent private directory outside the working directory; it ignores
+client filenames/MIME and validates raster containers. It returns public metadata
+`{attachment:{id,mime,size}}`. `POST api/prompt` and `POST v1/prompts` accept
+optional `attachment_ids`; clients cannot supply paths or URLs. Same-origin
+`GET api/attachments/<id>` and draft-only `DELETE` use the existing interface
+guards and current native session ownership. Thumbnail responses use `nosniff`,
+private/no-store caching and a restrictive sandbox CSP. No filenames or image
+bytes are written into the metadata/queue journals. Retained images survive
+launcher restarts; unsubmitted drafts expire after one hour and the per-Agent
+store is capped at 256 MiB. Missing Controller private-state support disables
+attachments rather than writing to the checkout; the UI explains an unavailable,
+unsafe or inside-working-directory state without exposing a filesystem path.
+The Controller advertises `agent.private-state.v1` as an interface-contract
+feature, separately from AIS registration capabilities. The launcher authenticates
+to its bound loopback Controller using its workload identity, checks
+`GET /api/private-state`, then reserves quota before streaming upload bytes.
+File and journal are durable before commit. Commit failure, expiration or a
+network timeout rolls back this upload's file and journal entry; it never implies
+success. Failed releases get a bounded retry and fixed-code log; Controller TTL
+and disk recount provide conservative recovery.
+
+Core measures the **whole Agent private directory**, including metadata and
+temporary files: 256 MiB per Agent, 4 GiB per machine, with a 1 GiB free-space
+floor. Removing drafts is reflected by the next Controller recount. A Controller
+restart preserves files and recounts usage but invalidates outstanding quota
+reservations. Stop/restart/update retain private state; confirmed permanent Agent
+deletion removes all its private state after the Host has stopped its process.
+Offline deletion catches up through tombstone validation; old Proxies without
+that contract leave directories for manual cleanup. These are cooperative quotas
+and same-account filesystem permissions, **not isolation between processes of
+the same OS user**. Core implementation and end-to-end lifecycle validation are
+still required before releasing this candidate.
 
 **Files and policy.** Four flat files: `index.html`, `boot.js` (runs in `<head>`, no flash
 of the wrong look or theme), `ui.js` (React, marked and DOMPurify, bundled) and `ui.css`
@@ -1051,6 +1099,14 @@ npm --prefix launchers/agent ci
 npm --prefix launchers/agent run check
 npm --prefix launchers/agent test
 # Unit tests use fake Codex, ACP, and native Claude processes.
+# Optional joint image lifecycle check: start Core's ignored
+# private_state_joint_fixture test with a private Cargo target, ephemeral port,
+# TREER_PRIVATE_STATE_FIXTURE_SECONDS=90 and DELETE_AFTER=60 (full variable name:
+# TREER_PRIVATE_STATE_FIXTURE_DELETE_AFTER). Save its stdout to a mode-0600 log;
+# it contains only a synthetic test workload credential. In a second terminal:
+node launchers/agent/tests/private-state-controller.mjs /absolute/path/to/fixture.log
+# This starts/stops only its own fake-Codex launcher processes; Core's fixture
+# performs the scheduled confirmed-delete purge. Never use a real enrollment.
 # Optional embedded-binary integration: sealed fake enrolled CLI, no credentials
 # or Agent creation/restarts. Requires a Controller built with the portable payload.
 node launchers/agent/tests/core-installer.mjs /absolute/path/to/treer-agent-server

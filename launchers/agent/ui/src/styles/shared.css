@@ -211,4 +211,19 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
   :root[data-look] .app .field input,:root[data-look] .app .field select{min-width:44px;min-height:44px}
   :root[data-look] .app button.model{align-items:center;justify-content:center}
 }
+.image-drafts{padding:8px 12px}.image-drafts p{font-size:12px;margin:6px 0;overflow-wrap:anywhere}.image-list{display:flex;flex-wrap:wrap;gap:8px;max-width:100%}.image-list figure{position:relative;margin:0}.image-list img{display:block;width:88px;height:88px;object-fit:contain;border:1px solid var(--line);border-radius:6px}.image-list figure button{position:absolute;right:0;top:0;min-width:28px;min-height:28px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--fg);cursor:pointer}.sent-images{margin-top:8px}.sent-images img{width:120px;height:120px}.image-add{flex-shrink:0}
+@media (max-width:767px){
+  :root[data-look] .app #box.box{grid-template-columns:minmax(0,1fr)}
+  :root[data-look] .app .box textarea{grid-column:1;grid-row:1;font-size:16px}
+  :root[data-look] .app .prompt-glyph{display:none}
+  :root[data-look] .app .box .ctl{grid-column:1;grid-row:2;flex-wrap:wrap;padding-top:8px}
+  :root[data-look] .app .ctl button,:root[data-look] .app .strip button{min-width:44px;min-height:44px}
+  :root[data-look] .app .composer #hint.shortcut-hint{display:none}
+  :root[data-look] .app .send .send-t::after{content:none}
+}
+.composer.image-drop{outline:2px dashed var(--accent);outline-offset:3px;background:var(--accent-soft)}
+:root[data-look] .app .image-storage-status{display:block}
+:root[data-look] .app .msg.user.image-only::before{content:none}
+.image-list figure button{display:grid;place-items:start end;padding:0;border:0;background:transparent;font-size:22px;line-height:24px;isolation:isolate}
+.image-list figure button::before{content:"";position:absolute;inset:0 0 auto auto;width:24px;height:24px;border-radius:5px;border:1px solid var(--line);background:var(--panel);z-index:-1}
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important;scroll-behavior:auto!important}.spin{animation:none}.sk{animation:none}}

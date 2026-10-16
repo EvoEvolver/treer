@@ -20,3 +20,15 @@ export function openSocket(): WebSocket {
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return new WebSocket(url);
 }
+
+export async function uploadImage(file: File) {
+  const response = await fetchRaw("api/attachments", { method: "POST", headers: { "content-type": "application/octet-stream" }, body: file });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(payload.error?.message || payload.error || `HTTP ${response.status}`);
+  return payload.attachment as import("./types").ImageAttachment;
+}
+
+export function imageUrl(id: string) {
+  if (!/^img_[a-f0-9]{32}$/.test(id)) return "";
+  return `api/attachments/${id}`;
+}

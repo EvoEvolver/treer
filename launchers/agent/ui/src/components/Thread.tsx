@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import { t, type MessageKey } from "../i18n";
 import { useAppearance } from "../appearance";
 import { useStore } from "../state/store";
@@ -34,6 +34,17 @@ export function Thread() {
     stuck.current = distance < STICK;
     setAway(!stuck.current);
     if (stuck.current) setFresh(false);
+  }, []);
+
+  useEffect(() => {
+    const resized = () => {
+      const element = ref.current;
+      // Preserve a reader's position in older history, but keep the newest
+      // message above the floating dock when its attachment tray grows.
+      if (element && stuck.current) element.scrollTop = element.scrollHeight;
+    };
+    document.addEventListener("treer:dock-resize", resized);
+    return () => document.removeEventListener("treer:dock-resize", resized);
   }, []);
 
   // After every update: keep the anchor when earlier history was prepended, follow the bottom when stuck, otherwise flag news.

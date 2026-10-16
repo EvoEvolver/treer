@@ -27,6 +27,8 @@ export interface CompletionBatch {
   error: string | null;
 }
 export interface SubmissionRecord {
+  attachmentIds?: string[];
+  attachmentSession?: string;
   submission: Submission;
   operationId: string;
   fingerprint: string;
@@ -73,6 +75,6 @@ export function submissionOptions(sender: unknown, notify: unknown): { sender: P
   }
   return { sender: source, notify: notification };
 }
-export function fingerprint(text: string, delivery: string, sender: PromptSender | null, notify: PromptNotify | null) {
-  return createHash("sha256").update(JSON.stringify({ text, delivery, sender, notify })).digest("hex");
+export function fingerprint(text: string, delivery: string, sender: PromptSender | null, notify: PromptNotify | null, attachmentIds: string[] = []) {
+  return createHash("sha256").update(JSON.stringify({ text, delivery, sender, notify, ...(attachmentIds.length ? { attachmentIds } : {}) })).digest("hex");
 }

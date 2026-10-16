@@ -1,6 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { spawnProvider, stopProcessTree } from "../../scripts/process.mjs";
 import { randomUUID } from "node:crypto";
+import { imageDigest } from "./image-history.js";
 import { EventEmitter } from "node:events";
 import { createReadStream } from "node:fs";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
@@ -10,7 +11,7 @@ import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { mapPlanSteps, mapReasoningEffort, type BackgroundTask, type Goal, type GoalUpdate, type HistoryItem, type ModelOption, type TurnDto } from "../model.js";
 import { GoalError, GoalGuard } from "../goals.js";
-import { withHistoryLimit, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
+import { withHistoryLimit, type HarnessImage, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
 import { unifiedDiff } from "./diff.js";
 import { SessionTransferError, type SessionBundle, type SessionImportOptions } from "../session-transfer.js";
@@ -61,7 +62,7 @@ export function mapClaudeBlock(block: RecordValue, id: string, cwd: string): His
 }
 
 export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
-  readonly harness: HarnessInfo = { id: "claude", name: "Claude", capabilities: { steer: true, backgroundTasks: true, goal: { pause: false, budget: true }, sessionTransfer: { export: true, import: true } } };
+  readonly harness: HarnessInfo = { id: "claude", name: "Claude", capabilities: { images: true, steer: true, backgroundTasks: true, goal: { pause: false, budget: true }, sessionTransfer: { export: true, import: true } } };
   private goal: Goal | null = null;
   private goalKey = "";
   private nativeGoalCleared = false;
@@ -245,20 +246,22 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     }
   }
 
-  async prompt(value: string, internalGoal = false) {
-    if (!internalGoal && /^\/goal\s+clear\s*$/.test(value)) { await this.clearGoal(); return; }
+  async prompt(value: string, imagesOrInternal: HarnessImage[] | boolean = []) {
+    const internalGoal = imagesOrInternal === true;
+    const images = Array.isArray(imagesOrInternal) ? imagesOrInternal : [];
+    if (!internalGoal && !images.length && /^\/goal\s+clear\s*$/.test(value)) { await this.clearGoal(); return; }
     // Keep a prompt submitted during a setting change: send it after the
     // native acknowledgement, even if the change was rejected (old settings).
     await this.settingsChange.catch(() => {});
     if (!this.ready || !this.thread) throw new Error("Claude is not ready");
     if (this.thread.status !== "running") this.beginTurn();
     const id = randomUUID();
-    this.turn().items.push({ id, kind: "userMessage", text: value });
+    this.turn().items.push({ id, kind: "userMessage", text: value, attachments: images.map(({ id, mime, size }) => ({ id, mime, size })) });
     this.pendingUsers.push({ id, text: value });
     this.thread.status = "running";
     this.thread.lastError = null;
     this.publish();
-    await this.send({ type: "user", uuid: id, message: { role: "user", content: [{ type: "text", text: value }] } });
+    await this.send({ type: "user", uuid: id, message: { role: "user", content: [...(value ? [{ type: "text", text: value }] : []), ...images.map((image) => ({ type: "image", source: { type: "base64", media_type: image.mime, data: image.data } }))] } });
   }
 
   async interrupt() {
@@ -566,7 +569,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
       if (typeof pending === "number" && pending >= 0) this.pendingUsers.splice(pending, 1);
       else {
         if (historical || this.thread?.status !== "running") this.beginTurn(text(event.timestamp) || undefined, historical);
-        this.put({ id: text(event.uuid) || randomUUID(), kind: "userMessage", text: value });
+        this.put({ id: text(event.uuid) || randomUUID(), kind: "userMessage", text: value, attachmentDigests: blocks.flatMap(block => { const digest = imageDigest(block); return digest ? [digest] : []; }) });
       }
     }
     for (const [index, block] of blocks.entries()) {

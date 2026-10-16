@@ -38,6 +38,10 @@ function replay(sessionId) {
   update(sessionId, { sessionUpdate: "user_message_chunk", messageId: "u2", content: { type: "text", text: "list files" } });
   update(sessionId, { sessionUpdate: "tool_call", toolCallId: "t-old", title: "ls", kind: "execute", status: "completed",
     rawInput: { command: "ls" }, content: [{ type: "content", content: { type: "text", text: "a.txt" } }] });
+  if (process.env.FAKE_ACP_REPLAY_IMAGE) {
+    update(sessionId, { sessionUpdate: "user_message_chunk", messageId: "image-history", content: { type: "text", text: "saved image" } });
+    update(sessionId, { sessionUpdate: "user_message_chunk", messageId: "image-history", content: process.env.FAKE_ACP_REPLAY_IMAGE === "native" ? { type: "image", mimeType: "image/png", data: "YWJj" } : { type: "text", text: `Image attachment (native image input unavailable): /private/images/img_${"a".repeat(32)}.png` } });
+  }
 }
 
 async function handle(message) {
@@ -46,7 +50,7 @@ async function handle(message) {
   switch (method) {
     case "initialize":
       return write({ id, result: { protocolVersion: 1, agentInfo: { name: "fake-acp", title: "Fake Agent" },
-        agentCapabilities: { loadSession: process.env.FAKE_ACP_NO_LOAD !== "1" } } });
+        agentCapabilities: { loadSession: process.env.FAKE_ACP_NO_LOAD !== "1", promptCapabilities: { image: process.env.FAKE_ACP_IMAGES === "1" } } } });
     case "session/new":
       return write({ id, result: { sessionId: "sess-new", configOptions: configOptions() } });
     case "session/load":

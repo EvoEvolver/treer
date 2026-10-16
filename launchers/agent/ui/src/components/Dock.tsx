@@ -6,15 +6,19 @@ import { Icon } from "./Icon";
 import { GoalPop, ModelPop, PlanPop, QueuePop } from "./Pops";
 import { currentGoal } from "../lib/goal";
 import { latestPlan, Strip, type PopName } from "./Strip";
+import { ImageDrafts, useImageDrafts } from "./ImageDrafts";
 
 /** The composer: one real textarea (compact when idle, expanded when focused or multi-line), the status strip, and one popover at a time. */
 export function Dock() {
   const { state, actions, dispatch } = useStore();
   const { snapshot } = state;
   const [text, setText] = useState("");
+  const images = useImageDrafts(message => dispatch({ type: "error", message }));
+  const picker = useRef<HTMLInputElement>(null);
   // Only the field's own focus expands the composer. The layout must not change between pointerdown and click, or a button
   // pressed while the field is focused would move away from under the pointer; `hold` keeps it expanded until the click ends.
   const [focused, setFocused] = useState(false);
+  const [dragging, setDragging] = useState(false);
   const hold = useRef(false);
   const composer = useRef<HTMLDivElement>(null);
   const [pop, setPop] = useState<PopName | null>(null);
@@ -27,7 +31,7 @@ export function Dock() {
   const canSteer = Boolean(snapshot?.harness.capabilities.steer);
   const name = snapshot?.harness.name || t("app.name");
   const expanded = focused || text.includes("\n") || text.length > 70;
-  const canSend = Boolean(snapshot?.ready) && !state.submitting && text.trim().length > 0;
+  const canSend = Boolean(snapshot?.ready) && !state.submitting && !images.busy && (text.trim().length > 0 || images.images.length > 0);
   const thread = snapshot?.thread;
   const models = snapshot?.modelOptions ?? [];
   const effort = thread?.reasoningEffort ?? "";
@@ -43,7 +47,10 @@ export function Dock() {
   useEffect(() => {
     const element = dock.current;
     if (!element) return;
-    const observer = new ResizeObserver(() => document.documentElement.style.setProperty("--dock-h", `${element.offsetHeight}px`));
+    const observer = new ResizeObserver(() => {
+      document.documentElement.style.setProperty("--dock-h", `${element.offsetHeight}px`);
+      document.dispatchEvent(new Event("treer:dock-resize"));
+    });
     observer.observe(element);
     return () => observer.disconnect();
   }, []);
@@ -103,14 +110,15 @@ export function Dock() {
   }
   async function submit(mode: "steer" | "queue") {
     const prompt = text.trim();
-    if (!prompt || !canSend) return;
-    if (await goalCommand(prompt)) return;
+    if (!canSend) return;
+    if (!images.images.length && await goalCommand(prompt)) return;
     // Clear the draft only if the reader has not typed something new while the request was in flight.
-    if (await actions.prompt(prompt, mode)) setText((current) => (current.trim() === prompt ? "" : current));
+    const ids = images.images.map(image => image.id);
+    if (await actions.prompt(prompt, mode, ids)) { images.sent(ids); setText((current) => (current.trim() === prompt ? "" : current)); }
   }
   function onKeyDown(event: KeyboardEvent<HTMLTextAreaElement>) {
     if (event.nativeEvent.isComposing) return;
-    if (event.key === "Tab" && !event.shiftKey && text.trim()) { event.preventDefault(); void submit("queue"); }
+    if (event.key === "Tab" && !event.shiftKey && (text.trim() || images.images.length)) { event.preventDefault(); void submit("queue"); }
     else if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void submit("steer"); }
   }
   const sendLabel = running ? (canSteer ? t("composer.steer") : t("composer.queue")) : t("composer.send");
@@ -127,14 +135,21 @@ export function Dock() {
           <GoalPop confirming={pendingClear !== null} onClose={() => closePop()} onEdit={() => { closePop(false); setEditor(true); }} onAskClear={() => setPendingClear({ prompt: null })}
             onKeep={() => setPendingClear(null)} onCleared={() => { if (pendingClear?.prompt) setText((current) => (current.trim() === pendingClear.prompt ? "" : current)); closePop(); }} />
         )}
-        <div className={expanded ? "composer exp" : "composer"} id="composer" ref={composer} onPointerDown={() => { hold.current = true; }} onClick={release}
+        <div className={`composer${expanded ? " exp" : ""}${dragging ? " image-drop" : ""}`} id="composer" ref={composer} onPointerDown={() => { hold.current = true; }} onClick={release}
+          onDragOver={event => { if (event.dataTransfer.types.includes("Files")) { event.preventDefault(); setDragging(true); } }}
+          onDragLeave={event => { if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragging(false); }}
+          onDrop={event => { setDragging(false); if (event.dataTransfer.files.length) { event.preventDefault(); if (!state.submitting) void images.add(Array.from(event.dataTransfer.files)); } }}
           onBlur={(event) => { if (!hold.current && !event.currentTarget.contains(event.relatedTarget)) setFocused(false); }}>
           <Strip pop={pop} onToggle={toggle} onEditGoal={() => setEditor(true)} />
+          {(images.images.length > 0 || images.busy) && <ImageDrafts images={images.images} busy={images.busy} disabled={state.submitting} fallback={!snapshot?.harness.capabilities.images} onRemove={id => void images.remove(id)} />}
           <div className={expanded ? "box exp" : "box"} id="box">
             <span className="prompt-glyph" aria-hidden="true">❯</span>
             <textarea id="ta" ref={area} rows={1} value={text} placeholder={t("composer.placeholder", { name })} aria-label={t("composer.placeholder", { name })} aria-describedby="hint"
+              onPaste={event => { const files = Array.from(event.clipboardData.files); if (files.length) { event.preventDefault(); if (!state.submitting) void images.add(files); } }}
               onChange={(event) => setText(event.target.value)} onKeyDown={onKeyDown} onFocus={() => setFocused(true)} />
             <div className="ctl">
+              <input ref={picker} type="file" className="sr-only" tabIndex={-1} aria-hidden="true" accept="image/png,image/jpeg,image/webp,image/gif" multiple onChange={event => { if (!state.submitting) void images.add(Array.from(event.currentTarget.files ?? [])); event.currentTarget.value = ""; }} />
+              <button type="button" className="btn image-add" disabled={!snapshot?.ready || snapshot.attachmentsAvailable === false || state.submitting || images.busy} aria-label={t("images.add")} title={t("images.limits")} onClick={() => picker.current?.click()}>＋</button>
               {thread && (models.length > 0
                 ? <button type="button" className="model" aria-haspopup="dialog" aria-expanded={pop === "model"} aria-controls="pop-model" aria-label={t("model.chip", { model: modelName, effort: effort || t("model.default") })} onClick={(event) => toggle("model", event.currentTarget)}><span>{modelName}</span>{effort && <small>{effort}</small>}</button>
                 : thread.model && <span className="model static"><span>{thread.model}</span>{effort && <small>{effort}</small>}</span>)}
@@ -145,7 +160,9 @@ export function Dock() {
               <button type="button" className="stopb" aria-label={t("composer.stop")} title={t("composer.stop")} disabled={!running} onClick={() => void actions.interrupt()}><Icon name="stop" /></button>
             </div>
           </div>
-          <p className="hint" id="hint">{hint}</p>
+          <p className="hint shortcut-hint" id="hint">{hint}</p>
+          {snapshot?.attachmentsAvailable === false && <p className="hint image-storage-status" role="status">{t(snapshot.attachmentStorageStatus === "agent_private_state_inside_cwd" ? "images.storageInside" : snapshot.attachmentStorageStatus === "agent_private_state_unsafe" ? "images.storageUnsafe" : "images.storageUnavailable")}</p>}
+          {snapshot?.attachmentsAvailable && images.images.length === 0 && <p className="hint">{t("images.limits")}</p>}
         </div>
       </div>
       <GoalEditor open={editor} onClose={() => setEditor(false)} onSaved={() => setEditor(false)} />
