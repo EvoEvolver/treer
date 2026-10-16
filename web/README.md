@@ -412,7 +412,8 @@ and offer retry, without displaying server response bodies or falling back to
 private inventories. No new dependencies or build changes are required.
 
 Invitation lists accept only the privacy-preserving summary contract: a
-non-bearer `invitation_id`, up to eight characters of `token_prefix`, creation
+non-bearer `invitation_id`, up to eight characters of `token_prefix` (or the fixed `[redacted]` placeholder
+for short/legacy tokens), creation
 time and used state (up to the latest 100 entries). Existing invitation URLs
 are not shown or copied; used invitations cannot be revoked. Revocation sends
 only the non-bearer handle. An older list schema is refused with an upgrade

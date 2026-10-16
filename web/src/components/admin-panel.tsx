@@ -164,7 +164,7 @@ function AdminInvitations({ preview, onError, onChanged }: { preview: boolean; o
         if (!row || typeof row !== "object") return false
         const item = row as Record<string, unknown>
         return typeof item.invitation_id === "string" && /^inv_[a-f0-9]{64}$/.test(item.invitation_id)
-          && typeof item.token_prefix === "string" && item.token_prefix.length <= 8
+          && typeof item.token_prefix === "string" && (item.token_prefix.length <= 8 || item.token_prefix === "[redacted]")
           && typeof item.created_at === "string" && Number.isFinite(Date.parse(item.created_at))
           && (item.used_at === null || (typeof item.used_at === "string" && Number.isFinite(Date.parse(item.used_at))))
           && !("token" in item) && !("url" in item) && !("email" in item)
@@ -185,7 +185,7 @@ function AdminInvitations({ preview, onError, onChanged }: { preview: boolean; o
     {loading ? <p role="status" className="py-6 text-xs text-muted-foreground">{t("admin.loading")}</p>
       : unsupported ? <p role="alert" className="py-4 text-xs text-muted-foreground">{t("admin.invitations_unsupported")}</p>
       : invitations.length ? invitations.map((invitation) => <div key={invitation.invitation_id} className="flex flex-wrap items-center justify-between gap-3 border-t py-3">
-        <span className="min-w-0 text-[11px] text-muted-foreground"><span className="font-mono">{invitation.token_prefix}…</span> · {invitation.created_at}<span className="mt-1 block">{t(invitation.used_at ? "admin.invitation_used" : "admin.invitation_pending")}</span></span>
+        <span className="min-w-0 text-[11px] text-muted-foreground"><span className="font-mono">{invitation.token_prefix}{invitation.token_prefix === "[redacted]" ? "" : "…"}</span> · {invitation.created_at}<span className="mt-1 block">{t(invitation.used_at ? "admin.invitation_used" : "admin.invitation_pending")}</span></span>
         <Button size="sm" variant="outline" disabled={invitation.used_at !== null} onClick={() => void revokeInvite(invitation.invitation_id)}>{t("admin.revoke")}</Button>
       </div>) : <EmptyState icon={<KeyRound />} label={t("admin.no_pending_invitations")} />}
   </section>

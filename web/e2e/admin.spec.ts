@@ -121,7 +121,7 @@ test('admin keeps platform invitation management separate from private inventori
 })
 
 
-test('invitation summaries show prefixes and used state, revoke by non-bearer handle', async ({ page }) => {
+test('invitation summaries show prefixes and used state, revoke by non-bearer handle', async ({ page }, info) => {
   await mockAdmin(page)
   const id = 'inv_' + 'b'.repeat(64)
   const usedId = 'inv_' + 'c'.repeat(64)
@@ -132,6 +132,7 @@ test('invitation summaries show prefixes and used state, revoke by non-bearer ha
     return ok(route, { invitations: [
       ...(pending ? [{ invitation_id: id, token_prefix: 'inv_demo', created_at: '2026-10-15T00:00:00Z', used_at: null }] : []),
       { invitation_id: usedId, token_prefix: 'inv_used', created_at: '2026-10-14T00:00:00Z', used_at: '2026-10-15T01:00:00Z' },
+      { invitation_id: 'inv_' + 'd'.repeat(64), token_prefix: '[redacted]', created_at: '2026-10-13T00:00:00Z', used_at: null },
     ] })
   })
   await page.goto('/admin')
@@ -139,8 +140,11 @@ test('invitation summaries show prefixes and used state, revoke by non-bearer ha
   const section = page.getByRole('region', { name: 'Registration invitations' })
   await expect(section.getByText('inv_demo…', { exact: true })).toBeVisible()
   await expect(section.getByText('Used', { exact: true })).toBeVisible()
+  await expect(section.getByText('[redacted]', { exact: true })).toBeVisible()
+  await expect(section.getByRole('alert')).toHaveCount(0)
   await expect(section.getByRole('button', { name: 'Copy', exact: true })).toHaveCount(0)
   await expect(section.getByRole('button', { name: 'Revoke' }).nth(1)).toBeDisabled()
+  await page.screenshot({ path: info.outputPath('admin-invitation-summaries.png'), fullPage: true })
   await section.getByRole('button', { name: 'Revoke' }).first().click()
   await expect(section.getByText('inv_demo…', { exact: true })).toHaveCount(0)
   expect(revoked).toEqual([`/api/admin/invitations/${id}`])
