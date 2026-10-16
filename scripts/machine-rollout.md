@@ -183,6 +183,13 @@ to 30 seconds. These tests must not activate a real enrollment. Compile/static
 checks and fake platform execution are not substitutes for native Windows
 PowerShell/CIM evidence or an operator-authorized real machine rollout.
 
+The Windows native gate calls the real updater inventory helper with Controller
+responses that omit optional `pid`, as well as explicit null and running PIDs.
+No-process agents remain in the preservation snapshot; Agent removal, PID or
+run-generation changes still fail preservation. Required identity fields remain
+strict. This covers a pre-activation failure hidden by transaction mocks that
+previously replaced the inventory helper with a constant.
+
 Probe uploads canonicalize the local temporary directory before creating their
 0600 source file. This supports macOS `/var` and `/tmp` aliases without relaxing
 the CLI's no-follow local-file boundary.

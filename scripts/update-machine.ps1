@@ -172,7 +172,13 @@ function Get-UpdateLocal($Config, $Route) {
 }
 function Get-UpdateAgents($Config) {
     $rows = (Get-UpdateLocal $Config '/api/local/agents').agents
-    return (@($rows | ForEach-Object { $_.agent_id + ':' + $_.pid + ':' + $_.run_generation } | Sort-Object) -join "`n")
+    return (@($rows | ForEach-Object {
+        # Controller omits optional pid for agents without a process. Keep these
+        # rows in the snapshot; missing and explicit null both mean no process.
+        $pidProperty = $_.PSObject.Properties['pid']
+        $agentPid = if ($null -ne $pidProperty) { $pidProperty.Value } else { $null }
+        $_.agent_id + ':' + $agentPid + ':' + $_.run_generation
+    } | Sort-Object) -join "`n")
 }
 function Test-UpdateCommit($Expected, $Reported) {
     return ($Expected -match '^[0-9a-f]{7,40}$' -and $Reported -match '^[0-9a-f]{7,40}$' -and

@@ -190,6 +190,31 @@ test("subprocess failure retains exit and fixed stderr codes without arbitrary o
     assert.equal(JSON.stringify(error.subprocess).includes('synthetic-secret'), false); return true;
   });
 });
+test("native Windows real updater inventory accepts omitted pid without weakening preservation", { skip: process.platform !== 'win32' }, () => {
+  const literal = value => "'" + value.replaceAll("'", "''") + "'";
+  const script = `. ${literal(join(import.meta.dirname, 'update-machine.ps1'))}
+    $script:rows = '[{"agent_id":"ag_running","pid":123,"run_generation":7},{"agent_id":"ag_idle","run_generation":2}]' | ConvertFrom-Json
+    function Get-UpdateLocal($Config,$Route) { if($Route -ne '/api/local/agents'){throw 'wrong_route'}; return [PSCustomObject]@{agents=$script:rows} }
+    $before=Get-UpdateAgents $null
+    if($before -cne "ag_idle::2\nag_running:123:7"){throw 'missing_pid_snapshot'}
+    $script:rows = '[{"agent_id":"ag_idle","pid":null,"run_generation":2},{"agent_id":"ag_running","pid":123,"run_generation":7}]' | ConvertFrom-Json
+    if((Get-UpdateAgents $null) -cne $before){throw 'null_pid_or_order_changed_snapshot'}
+    foreach($json in @(
+      '[{"agent_id":"ag_idle","pid":456,"run_generation":2},{"agent_id":"ag_running","pid":123,"run_generation":7}]',
+      '[{"agent_id":"ag_idle","run_generation":3},{"agent_id":"ag_running","pid":123,"run_generation":7}]',
+      '[{"agent_id":"ag_idle","run_generation":2},{"agent_id":"ag_running","pid":124,"run_generation":7}]',
+      '[{"agent_id":"ag_running","pid":123,"run_generation":7}]'
+    )){$script:rows=$json|ConvertFrom-Json;if((Get-UpdateAgents $null) -ceq $before){throw 'agent_change_not_detected'}}
+    foreach($json in @('[{"run_generation":2}]','[{"agent_id":"ag_idle"}]')){
+      $script:rows=$json|ConvertFrom-Json;$failed=$false;try{$null=Get-UpdateAgents $null}catch{$failed=$true};if(!$failed){throw 'required_identity_not_checked'}
+    }
+    Write-Output 'real-inventory-optional-pid-passed'`;
+  const shell = join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+  const output = execFileSync(shell, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], {
+    encoding: 'utf8', timeout: 20000, env: cleanEnvironment({ platform: 'windows-x86_64', node: process.execPath, controller: process.execPath })
+  });
+  assert.match(output, /real-inventory-optional-pid-passed/);
+});
 test("native Windows activation shell is outside Jobs and writes bounded exit diagnostics", { skip: process.platform !== 'win32' }, async () => {
   const directory = realpathSync.native(mkdtempSync(join(tmpdir(), 'r96-life-'))), original = { ...process.env };
   const literal = value => "'" + value.replaceAll("'", "''") + "'";
