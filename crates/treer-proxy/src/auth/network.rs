@@ -962,26 +962,37 @@ impl AuthStore {
         ingress: &ServiceIngress,
         user_id: &str,
         return_path: &str,
+        browser_nonce_hash: &str,
     ) -> Result<String, AuthFailure> {
+        if !valid_ingress_nonce(browser_nonce_hash) {
+            return Err(invalid_ingress_authorization());
+        }
         self.require_workspace_member(&ingress.workspace_id, user_id)
             .await?;
         let return_path = validate_ingress_return_path(return_path)?;
-        let code = format!("iac_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let code = format!(
+            "iac_v2_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
         let now = Utc::now();
-        sqlx::query("DELETE FROM ingress_auth_codes WHERE expires_at <= $1 OR used_at IS NOT NULL")
-            .bind(now.to_rfc3339())
-            .execute(&self.pool)
-            .await
-            .map_err(AuthFailure::database)?;
         sqlx::query(
-            "INSERT INTO ingress_auth_codes(code, ingress_id, user_id, return_path, expires_at) \
-             VALUES($1, $2, $3, $4, $5)",
+            "DELETE FROM ingress_browser_auth_codes WHERE expires_at <= $1 OR used_at IS NOT NULL",
+        )
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO ingress_browser_auth_codes(code, ingress_id, user_id, return_path, expires_at, browser_nonce_hash) \
+             VALUES($1, $2, $3, $4, $5, $6)",
         )
         .bind(&code)
         .bind(&ingress.ingress_id)
         .bind(user_id)
         .bind(return_path)
         .bind((now + Duration::minutes(INGRESS_AUTH_CODE_TTL_MINUTES)).to_rfc3339())
+        .bind(browser_nonce_hash)
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
@@ -992,13 +1003,15 @@ impl AuthStore {
         &self,
         hostname: &str,
         code: &str,
+        browser_nonce: Option<&str>,
     ) -> Result<ConsumedIngressAuthorization, AuthFailure> {
         let now = Utc::now();
         let row = sqlx::query(
-            "SELECT c.ingress_id, c.user_id, c.return_path, i.workspace_id \
-             FROM ingress_auth_codes c JOIN service_ingresses i ON i.ingress_id = c.ingress_id \
+            "UPDATE ingress_browser_auth_codes c SET used_at = $3 \
+             FROM service_ingresses i \
              WHERE c.code = $1 AND lower(i.hostname) = lower($2) AND i.enabled = TRUE \
-             AND c.used_at IS NULL AND c.expires_at > $3",
+             AND i.ingress_id = c.ingress_id AND c.used_at IS NULL AND c.expires_at > $3 \
+             RETURNING c.ingress_id, c.user_id, c.return_path, c.browser_nonce_hash, i.workspace_id",
         )
         .bind(code)
         .bind(hostname)
@@ -1007,21 +1020,25 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?
         .ok_or_else(invalid_ingress_authorization)?;
+        // Consume before checking the verifier: a delivered invalid callback
+        // cannot leave a usable code behind. Atomic UPDATE also fences replay.
+        let expected: String = row.get("browser_nonce_hash");
+        if !browser_nonce
+            .filter(|nonce| valid_ingress_nonce(nonce))
+            .is_some_and(|nonce| {
+                bool::from(
+                    ingress_nonce_hash(nonce)
+                        .as_bytes()
+                        .ct_eq(expected.as_bytes()),
+                )
+            })
+        {
+            return Err(invalid_ingress_authorization());
+        }
         let workspace_id: String = row.get("workspace_id");
         let user_id: String = row.get("user_id");
         self.require_workspace_member(&workspace_id, &user_id)
             .await?;
-        let result = sqlx::query(
-            "UPDATE ingress_auth_codes SET used_at = $1 WHERE code = $2 AND used_at IS NULL",
-        )
-        .bind(now.to_rfc3339())
-        .bind(code)
-        .execute(&self.pool)
-        .await
-        .map_err(AuthFailure::database)?;
-        if result.rows_affected() != 1 {
-            return Err(invalid_ingress_authorization());
-        }
         let session_token = format!("ias_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         sqlx::query("DELETE FROM ingress_sessions WHERE expires_at <= $1")
             .bind(now.to_rfc3339())

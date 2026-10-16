@@ -292,6 +292,17 @@ pub(crate) fn invalid_ingress_authorization() -> AuthFailure {
     )
 }
 
+pub(crate) fn valid_ingress_nonce(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+}
+
+pub(crate) fn ingress_nonce_hash(nonce: &str) -> String {
+    format!("{:x}", Sha256::digest(nonce.as_bytes()))
+}
+
 pub(crate) fn invalid_app_oauth_code() -> AuthFailure {
     AuthFailure::unauthorized(
         "invalid_app_oauth_code",

@@ -300,6 +300,8 @@ pub(in crate::api) fn sanitize_ingress_request_headers(
             .filter(|item| {
                 item.split_once('=').is_none_or(|(name, _)| {
                     name != ingress_cookie_name
+                        && !name.starts_with("__Host-treer_ingress_nonce_")
+                        && !name.starts_with("treer_ingress_nonce_")
                         && name != auth::SESSION_COOKIE
                         && name != auth::ADMIN_SESSION_COOKIE
                 })
