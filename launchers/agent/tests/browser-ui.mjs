@@ -8,6 +8,7 @@ import { chromium, expect } from "@playwright/test";
 import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
 import { testRuntimeControlsUi } from "./browser-controls-ui.mjs";
 import { testImagesUi } from "./browser-images-ui.mjs";
+import { testMobileComposer } from "./browser-mobile-composer.mjs";
 
 // The React UI (public/ui.html) against the real launcher server and a fake Codex: no inference, no Treer mutations.
 // Usage: node tests/browser-ui.mjs [--page index.html]
@@ -632,6 +633,7 @@ try {
   await testRuntimeControlsUi(browser, screenshots, page_);
   const imageBase = await startServer("images", { FAKE_CODEX_IMAGES: "1" });
   await testImagesUi(browser, imageBase, screenshots, page_);
+  await testMobileComposer(browser, imageBase, screenshots, page_);
   console.log(`React UI browser checks passed. Screenshots: ${screenshots}`);
 } finally {
   await browser?.close();

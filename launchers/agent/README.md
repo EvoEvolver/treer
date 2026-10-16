@@ -540,6 +540,9 @@ this document; the server contract is unchanged.
 On narrow layouts (640px or less) and devices with coarse pointers, buttons,
 task disclosures and form controls have at least 44px touch targets. Desktop
 mouse layouts retain compact controls; inline prose links retain text sizing.
+Below 768px, the composer input occupies its own full-width row above the
+44px button row. Keyboard-shortcut hints are hidden on these narrow layouts;
+attachment limits and privacy notices remain available.
 
 **Image attachments.** Paste an image (Cmd/Ctrl+V or the browser's mobile paste
 menu), drop files onto the composer, or use **Attach images**. PNG, JPEG, WebP

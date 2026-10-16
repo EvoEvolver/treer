@@ -160,7 +160,7 @@ export function Dock() {
               <button type="button" className="stopb" aria-label={t("composer.stop")} title={t("composer.stop")} disabled={!running} onClick={() => void actions.interrupt()}><Icon name="stop" /></button>
             </div>
           </div>
-          <p className="hint" id="hint">{hint}</p>
+          <p className="hint shortcut-hint" id="hint">{hint}</p>
           {snapshot?.attachmentsAvailable && images.images.length === 0 && <p className="hint">{t("images.limits")}</p>}
         </div>
       </div>
