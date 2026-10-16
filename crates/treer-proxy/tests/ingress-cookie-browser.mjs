@@ -32,6 +32,7 @@ try {
   assert.equal(cookies[0].httpOnly, true)
   assert.equal(cookies[0].secure, true)
   assert.equal(cookies[0].sameSite, 'Lax')
+  await page.goto('https://victim.apps.example.test/.treer/callback')
   assert.equal(await page.evaluate(() => document.cookie.includes('__Host-treer_ingress_nonce_')), false)
   console.log('Chromium host-only ingress verifier / cookie-tossing checks passed (synthetic hosts only)')
 } finally { await browser.close() }

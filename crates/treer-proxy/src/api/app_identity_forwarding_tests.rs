@@ -357,6 +357,72 @@ async fn ingress_browser_codes_expiry_host_replay_and_old_proxy_fail_closed() {
         .is_err());
 }
 
+#[tokio::test]
+async fn ingress_callback_rejects_duplicate_or_unprefixed_verifier_cookies() {
+    let (auth, _, app, _, _, _) = fixture().await;
+    let ingress = auth
+        .ensure_app_ingress(&app, "alice", "apps.treer.example", None)
+        .await
+        .unwrap();
+    let config = IngressConfig::new(
+        Some(Url::parse("https://apps.treer.example/").unwrap()),
+        &Url::parse("https://proxy.treer.example/").unwrap(),
+        &Url::parse("https://app.treer.example/").unwrap(),
+    )
+    .unwrap();
+    let nonce = "a".repeat(64);
+    let hash = auth::ingress_nonce_hash(&nonce);
+    for cookie in [
+        format!("treer_ingress_nonce_{hash}={nonce}"),
+        format!(
+            "__Host-treer_ingress_nonce_{hash}={nonce}; __Host-treer_ingress_nonce_{hash}={nonce}"
+        ),
+        format!("__Host-treer_ingress_nonce_{hash}={}", "b".repeat(64)),
+    ] {
+        let code = auth
+            .create_ingress_auth_code(&ingress, "alice", "/", &hash)
+            .await
+            .unwrap();
+        let uri: Uri = format!("/.treer/callback?code={code}&browser_nonce_hash={hash}")
+            .parse()
+            .unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(header::COOKIE, HeaderValue::from_str(&cookie).unwrap());
+        let response =
+            complete_ingress_authorization(&auth, &config, &ingress.hostname, &uri, &headers)
+                .await
+                .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert!(auth
+            .consume_ingress_auth_code(&ingress.hostname, &code, Some(&nonce))
+            .await
+            .is_err());
+    }
+    for query in [
+        "code=one&code=two",
+        "code=one&browser_nonce_hash=one&browser_nonce_hash=two",
+    ] {
+        let uri: Uri = format!("/.treer/callback?{query}").parse().unwrap();
+        let response = complete_ingress_authorization(
+            &auth,
+            &config,
+            &ingress.hostname,
+            &uri,
+            &HeaderMap::new(),
+        )
+        .await
+        .unwrap_or_else(IntoResponse::into_response);
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    }
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM ingress_sessions")
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap(),
+        0
+    );
+}
+
 async fn fixture() -> (
     AuthStore,
     IdentityIssuer,
