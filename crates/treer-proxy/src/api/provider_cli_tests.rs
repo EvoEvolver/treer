@@ -888,9 +888,10 @@ async fn provider_cli_concurrent_accepts_consume_exactly_one_token() {
         session_token: "session-one",
     };
     // Deterministic race: an uncommitted competing insert is invisible to the
-    // busy check (READ COMMITTED) but blocks the unique index, so the accept
-    // passes the busy branch, waits, then loses on the index after the
-    // competitor commits; its whole transaction rolls back and the token stays.
+    // busy check (READ COMMITTED) but blocks the unique index. PostgreSQL's
+    // pg_blocking_pids proves the accept is waiting on that insert before the
+    // competitor commits; then the accept loses on the index, its whole
+    // transaction rolls back and the token stays usable.
     let mut competitor = auth.pool().begin().await.unwrap();
     sqlx::query("INSERT INTO provider_cli_operations(operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, status) VALUES('pco_competitor', $1, $2, 'other', 'codex-npm-posix', 1, $3, $4, 'c0ffee', 'h', 'queued')")
         .bind(WORKSPACE).bind(MACHINE).bind(CODEX_HASH).bind(TABLE_HASH)
@@ -907,11 +908,43 @@ async fn provider_cli_concurrent_accepts_consume_exactly_one_token() {
             auth.provider_cli_accept(&scope, &token).await
         }
     });
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert!(
-        !racing.is_finished(),
-        "the accept must be blocked on the unique index, not refused early"
-    );
+    // Deterministic evidence: PostgreSQL reports the accept's backend blocked
+    // on its INSERT by the competitor's backend, so the busy SELECT was passed
+    // and the unique index is what decides.
+    let competitor_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+        .fetch_one(&mut *competitor)
+        .await
+        .unwrap();
+    // The test pool has two connections and both are busy (competitor, accept):
+    // probe server state over a dedicated connection. pg_stat_activity is
+    // cluster-wide, so the isolated schema does not matter here.
+    let database_url = std::env::var("TREER_TEST_DATABASE_URL")
+        .unwrap_or_else(|_| "postgres://treer:treer@127.0.0.1:55432/treer_test".to_string());
+    let mut probe = <sqlx::PgConnection as sqlx::Connection>::connect(&database_url)
+        .await
+        .unwrap();
+    let blocked_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let blocked: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM pg_stat_activity WHERE $1 = ANY(pg_blocking_pids(pid)) AND query ILIKE 'INSERT INTO provider_cli_operations%'",
+        )
+        .bind(competitor_pid)
+        .fetch_one(&mut probe)
+        .await
+        .unwrap();
+        if blocked == 1 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < blocked_deadline,
+            "the accept never blocked on the competitor's uncommitted insert"
+        );
+        assert!(
+            !racing.is_finished(),
+            "the accept must not finish before the competitor commits"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     competitor.commit().await.unwrap();
     let loser = racing.await.unwrap().unwrap_err();
     assert_eq!(loser.code(), "provider_cli_machine_busy");
