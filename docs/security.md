@@ -133,6 +133,11 @@ or configuration contents. Failed launch retains the newly saved specification.
   of Policy. Commit refreshes these checks after atomic Core file replacements.
   Reserved Core names conservatively fold Unicode normalization and case; if a
   Core directory is absent, its first missing component is reserved too.
+  Upload destinations are validated before recording a durable staging intent,
+  then checked again when staging. Recovery discards legacy intents only when
+  a syntactically valid path matches the shared reserved namespace rule, without
+  reading or deleting anything at that path. Its warning contains only a fixed
+  code and count. Other corrupt metadata or unsafe cleanup remains fail-closed.
   Temporary files remain private until digest
   verification; no-replace publication is atomic and overwrite is explicit.
   Portable paths reject Windows drive/UNC/device/ADS/short-name aliases too.

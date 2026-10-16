@@ -242,6 +242,9 @@ impl Transfers {
                     ));
                 }
                 let root = self.open_root()?;
+                // Reject unsafe destinations before persisting a recovery intent.
+                // stage repeats validation to retain its own filesystem boundary.
+                root.validate_target(&path).map_err(io_failure)?;
                 if root.available_bytes().map_err(io_failure)? < size.unwrap_or(limit) {
                     return Err(failure(
                         "machine_file_no_space",
@@ -250,9 +253,18 @@ impl Transfers {
                 }
                 let id = format!("xfer_{}", uuid::Uuid::new_v4().simple());
                 self.record_staging(&pending, &path, &id)?;
-                let staged = root
-                    .stage(&path, &format!(".treer-transfer-{id}"), mode)
-                    .map_err(io_failure)?;
+                let staged = match root.stage(&path, &format!(".treer-transfer-{id}"), mode) {
+                    Ok(staged) => staged,
+                    Err(error) => {
+                        // The write-ahead intent is necessary for a crash during
+                        // stage, but a rejected stage must not leave a stale intent.
+                        // Retain the intent if safe cleanup cannot be confirmed.
+                        root.cleanup_staging(&path, &format!(".treer-transfer-{id}"))
+                            .map_err(io_failure)?;
+                        self.persist_pending(&pending)?;
+                        return Err(io_failure(error));
+                    }
+                };
                 // No destination bytes are visible before a verified finish.
                 let now = Instant::now();
                 pending.insert(
@@ -561,6 +573,7 @@ impl Transfers {
         if records.len() > MACHINE_TRANSFER_MAX_ACTIVE + 1 {
             return Err(failure("state_error", "too many transfer recovery records"));
         }
+        let mut discarded = 0usize;
         for (path, id) in records {
             if id.len() != 37
                 || !id.starts_with("xfer_")
@@ -571,10 +584,23 @@ impl Transfers {
                     "invalid transfer recovery identifier",
                 ));
             }
+            if treer_platform::machine_file::is_reserved_namespace(&path).map_err(io_failure)? {
+                // Older Controllers journaled these before stage rejected them.
+                // They cannot own a valid staging file. Never stat/delete here.
+                discarded += 1;
+                continue;
+            }
             root.cleanup_staging(&path, &format!(".treer-transfer-{id}"))
                 .map_err(io_failure)?;
         }
         self.write_journal(&journal, &[])?;
+        if discarded != 0 {
+            tracing::warn!(
+                code = "machine_transfer_reserved_intents_discarded",
+                count = discarded,
+                "discarded rejected transfer recovery intents"
+            );
+        }
         *self
             .recovery_lease
             .lock()
@@ -596,6 +622,18 @@ impl Transfers {
             .map(|(id, entry)| (entry.path.clone(), id.clone()))
             .collect();
         records.push((path.to_owned(), id.to_owned()));
+        self.write_journal(
+            &self.open_root()?.transfer_journal().map_err(io_failure)?,
+            &records,
+        )
+    }
+
+    fn persist_pending(&self, pending: &HashMap<String, Pending>) -> Result<(), ProtocolError> {
+        let records: Vec<_> = pending
+            .iter()
+            .filter(|(_, entry)| matches!(&entry.direction, Direction::Put { .. }))
+            .map(|(id, entry)| (entry.path.clone(), id.clone()))
+            .collect();
         self.write_journal(
             &self.open_root()?.transfer_journal().map_err(io_failure)?,
             &records,
@@ -688,9 +726,7 @@ mod tests {
     }
 
     #[test]
-    fn diagnostic_rejected_reserved_path_poisoning_survives_controller_recreation() {
-        // Diagnostic evidence only: this asserts the existing bug, not desired
-        // behavior. Invert the final assertion when implementing the fix.
+    fn rejected_reserved_path_does_not_poison_controller_recovery() {
         let mut f = Fixture::new(64);
         let path = ".treer/machine-rollouts/fixture/scripts/worker.js";
         let error = f
@@ -712,14 +748,154 @@ mod tests {
             &std::fs::read(f.root.join(".treer/file-transfers/pending.json")).unwrap(),
         )
         .unwrap();
-        assert_eq!(
-            records.len(),
-            1,
-            "denied destination was journaled before validation"
+        assert!(
+            records.is_empty(),
+            "denied destination must not be journaled"
         );
-        assert_eq!(records[0].0, path);
         let next = Transfers::new(f.root.clone(), "ws_fixture".into(), vec![], 64);
         drop(std::mem::replace(&mut f.transfers, next));
+        f.execute(Request::PutBegin {
+            path: "result".into(),
+            overwrite: false,
+            mode: 0o600,
+            size: Some(1),
+            limit: 64,
+        })
+        .unwrap();
+        assert!(!f.root.join("result").exists());
+    }
+
+    #[test]
+    fn legacy_reserved_intents_are_discarded_without_touching_paths_or_valid_staging() {
+        let f = Fixture::new(64);
+        let id = format!("xfer_{}", uuid::Uuid::new_v4().simple());
+        let reserved_id = format!("xfer_{}", uuid::Uuid::new_v4().simple());
+        let private = f.root.join(".treer/kept");
+        std::fs::create_dir_all(&private).unwrap();
+        let sentinel = private.join(format!(".treer-transfer-{reserved_id}"));
+        std::fs::write(&sentinel, b"private state").unwrap();
+        let ordinary_staging = f.root.join(format!(".treer-transfer-{id}"));
+        std::fs::write(&ordinary_staging, b"partial").unwrap();
+        let root = f.transfers.open_root().unwrap();
+        let journal = root.transfer_journal().unwrap();
+        f.transfers
+            .write_journal(
+                &journal,
+                &[
+                    (".treer/kept/file".into(), reserved_id),
+                    ("result".into(), id),
+                    (
+                        "missing/.treer-transfer-private/file".into(),
+                        format!("xfer_{}", uuid::Uuid::new_v4().simple()),
+                    ),
+                ],
+            )
+            .unwrap();
+        f.begin(false);
+        assert!(!ordinary_staging.exists(), "valid staging was recovered");
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"private state");
+        let records: Vec<(String, String)> = serde_json::from_slice(
+            &std::fs::read(f.root.join(".treer/file-transfers/pending.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(records.len(), 1, "only the new valid intent remains");
+        assert_eq!(records[0].0, "result");
+    }
+
+    #[test]
+    fn stage_failure_removes_its_intent_and_preserves_other_active_puts() {
+        let f = Fixture::new(64);
+        let active = f.begin(false);
+        let error = f
+            .transfers
+            .execute(
+                f.actor.clone(),
+                "other",
+                Request::PutBegin {
+                    path: "other".into(),
+                    overwrite: false,
+                    mode: 0o777,
+                    size: Some(1),
+                    limit: 64,
+                },
+            )
+            .unwrap_err();
+        assert_eq!(error.code, "invalid_machine_path");
+        let records: Vec<(String, String)> = serde_json::from_slice(
+            &std::fs::read(f.root.join(".treer/file-transfers/pending.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(records, vec![("result".into(), active.clone())]);
+        f.chunk(&active, b"ok").unwrap();
+        f.finish(&active, b"ok").unwrap();
+    }
+
+    #[test]
+    fn rollout_destination_is_allowed_but_reserved_destination_stays_denied() {
+        let f = Fixture::new(64);
+        let path = "treer-rollouts/fixture-uuid/scripts/worker.mjs";
+        std::fs::create_dir_all(f.root.join("treer-rollouts/fixture-uuid/scripts")).unwrap();
+        let result = f
+            .transfers
+            .execute(
+                f.actor.clone(),
+                path,
+                Request::PutBegin {
+                    path: path.into(),
+                    overwrite: false,
+                    mode: 0o600,
+                    size: Some(1),
+                    limit: 64,
+                },
+            )
+            .unwrap();
+        assert!(result["id"].is_string());
+    }
+
+    #[test]
+    fn malformed_legacy_reserved_intents_still_fail_closed() {
+        for (path, id, code) in [
+            (".treer/file", "bad-id".into(), "state_error"),
+            (
+                "../.treer/file",
+                format!("xfer_{}", uuid::Uuid::new_v4().simple()),
+                "invalid_machine_path",
+            ),
+        ] {
+            let f = Fixture::new(64);
+            let journal = f.transfers.open_root().unwrap().transfer_journal().unwrap();
+            let records = vec![(path.into(), id)];
+            f.transfers.write_journal(&journal, &records).unwrap();
+            assert_eq!(
+                f.execute(Request::PutBegin {
+                    path: "result".into(),
+                    overwrite: false,
+                    mode: 0o600,
+                    size: Some(1),
+                    limit: 64
+                })
+                .unwrap_err()
+                .code,
+                code
+            );
+            let retained: Vec<(String, String)> = serde_json::from_slice(
+                &std::fs::read(f.root.join(".treer/file-transfers/pending.json")).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(retained, records);
+        }
+    }
+
+    #[test]
+    fn recovery_cleanup_failure_retains_journal_and_does_not_bypass_path_guards() {
+        let f = Fixture::new(64);
+        let id = format!("xfer_{}", uuid::Uuid::new_v4().simple());
+        // A staging name occupied by a directory is not ours to delete.
+        let unexpected = f.root.join(format!(".treer-transfer-{id}"));
+        std::fs::create_dir(&unexpected).unwrap();
+        let journal = f.transfers.open_root().unwrap().transfer_journal().unwrap();
+        let records = vec![("result".into(), id)];
+        f.transfers.write_journal(&journal, &records).unwrap();
         let error = f
             .execute(Request::PutBegin {
                 path: "result".into(),
@@ -729,11 +905,37 @@ mod tests {
                 limit: 64,
             })
             .unwrap_err();
-        assert_eq!(
-            error.code, "machine_file_denied",
-            "recovery rejects prior reserved path before validating the new ordinary path"
-        );
-        assert!(!f.root.join("result").exists());
+        assert_eq!(error.code, "machine_file_denied");
+        assert!(!f
+            .transfers
+            .recovered
+            .load(std::sync::atomic::Ordering::Acquire));
+        assert!(unexpected.is_dir());
+        let retained: Vec<(String, String)> = serde_json::from_slice(
+            &std::fs::read(f.root.join(".treer/file-transfers/pending.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(retained, records);
+    }
+
+    #[test]
+    fn failed_write_ahead_journal_does_not_create_staging() {
+        let f = Fixture::new(64);
+        f.transfers.recover_staging().unwrap();
+        let path = f.root.join(".treer/file-transfers/pending.json");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(f
+            .execute(Request::PutBegin {
+                path: "result".into(),
+                overwrite: false,
+                mode: 0o600,
+                size: Some(1),
+                limit: 64,
+            })
+            .is_err());
+        assert_eq!(f.visible_files(), 0);
+        assert!(f.transfers.pending.lock().unwrap().is_empty());
     }
 
     #[test]

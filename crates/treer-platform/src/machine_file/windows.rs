@@ -190,10 +190,7 @@ impl Root {
     }
     fn parent(&self, path: &str) -> io::Result<(PathBuf, Vec<File>)> {
         let parts = validate_relative_path(path)?;
-        if parts.iter().any(|part| {
-            part.eq_ignore_ascii_case(".treer")
-                || part.to_ascii_lowercase().starts_with(".treer-transfer-")
-        }) {
+        if is_reserved_namespace(path)? {
             return Err(denied());
         }
         let mut guards = self

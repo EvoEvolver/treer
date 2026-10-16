@@ -6,6 +6,15 @@ use unicode_normalization::UnicodeNormalization;
 fn reserved_name(value: &str) -> String {
     value.nfc().flat_map(char::to_uppercase).collect()
 }
+
+/// Classify only the portable reserved namespace, without touching the path.
+/// Invalid wire paths remain errors, including when reading recovery metadata.
+pub fn is_reserved_namespace(path: &str) -> io::Result<bool> {
+    Ok(validate_relative_path(path)?.iter().any(|part| {
+        let name = reserved_name(part);
+        name == ".TREER" || name.starts_with(".TREER-TRANSFER-")
+    }))
+}
 // Reserve the first missing Core component at an existing physical parent.
 // Conservatively fold reserved names only; ordinary Linux paths remain distinct.
 fn reserved_parent(path: &std::path::Path) -> io::Result<(File, String)> {
@@ -304,10 +313,7 @@ mod unix {
             let parts = validate_relative_path(path)?;
             // Reserve the namespace even before .treer exists. Physical identity
             // checks below also cover case-insensitive aliases of existing state.
-            if parts.iter().any(|part| {
-                part.eq_ignore_ascii_case(".treer")
-                    || part.to_ascii_lowercase().starts_with(".treer-transfer-")
-            }) {
+            if is_reserved_namespace(path)? {
                 return Err(protected());
             }
             let mut directory = self.file.try_clone()?;
@@ -560,6 +566,28 @@ mod tests {
         );
         assert!(validate_mode(0o600).is_ok());
         assert!(validate_mode(0o4755).is_err());
+    }
+
+    #[test]
+    fn reserved_namespace_classification_is_portable_and_syntax_checked() {
+        for path in [
+            ".treer/file",
+            "a/.TrEeR/file",
+            "missing/.TREER-TRANSFER-x/file",
+        ] {
+            assert!(is_reserved_namespace(path).unwrap());
+        }
+        for path in ["treer-rollouts/id/scripts/worker.mjs", ".treer-other/file"] {
+            assert!(!is_reserved_namespace(path).unwrap());
+        }
+        for path in [
+            "../.treer/file",
+            ".treer\\file",
+            ".treer/file:stream",
+            "/.treer/file",
+        ] {
+            assert!(is_reserved_namespace(path).is_err());
+        }
     }
 
     #[cfg(unix)]
