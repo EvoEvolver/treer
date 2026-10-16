@@ -53,6 +53,23 @@ export function workspacePath(organizationId: string | null, workspaceId: string
     : organizationPath
 }
 
+// A workload is an Agent or an App's runtime Agent, addressed by its stable ID (never by path).
+export const WORKLOAD_ID_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/
+
+export function workloadPath(organizationId: string | null, workspaceId: string | null, workloadId: string | null, focus = false) {
+  const base = workspacePath(organizationId, workspaceId)
+  if (!organizationId || !workspaceId || !workloadId || !WORKLOAD_ID_PATTERN.test(workloadId)) return base
+  return `${base}/workloads/${encodeURIComponent(workloadId)}${focus ? "?focus=1" : ""}`
+}
+
+// True when the URL names a workload target at all, valid or not.
+export const isWorkloadDeepLink = (pathname: string) => /\/workloads(\/|$)/.test(pathname)
+
+export function workloadIdFromSplat(splat: string | undefined): string | null {
+  const match = /^workloads\/([a-zA-Z0-9_-]{1,128})\/?$/.exec(splat ?? "")
+  return match ? match[1] : null
+}
+
 export function defaultAgentName(kind: string) {
   const now = new Date()
   const month = String(now.getMonth() + 1).padStart(2, "0")

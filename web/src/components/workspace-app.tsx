@@ -1,4 +1,5 @@
 import { WorkloadSurface } from "@/components/workload-surface"
+import { WorkloadFocusBar } from "@/components/workload-focus-bar"
 import { WorkspaceTabBar, type TabLabel, type TabAction, type TabActions } from "@/components/workspace-tab-bar"
 import { OVERVIEW_TAB, useWorkspaceTabs } from "@/components/use-workspace-tabs"
 import { workspaceWorkloads } from "@/lib/workspace-workloads"
@@ -29,7 +30,7 @@ import { WorkspaceDialogs } from "@/components/workspace-dialogs"
 import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
 import { ApiError,api,machineName,proxyUrl,type Agent,type AgentLaunchProfile,type AppDeployment,type MachineFileUpload,type Organization,type Snapshot,type User,type WorkloadTreeState,type Workspace } from "@/lib/api"
 import { formatCommandLine,parseCommandLine } from "@/lib/command-line"
-import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,activeStatuses,arrayBufferToBase64,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,formatBytes,initials,machineOnline,replaceWorkspace } from "@/lib/control-plane"
+import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,activeStatuses,arrayBufferToBase64,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,formatBytes,initials,machineOnline,replaceWorkspace ,workloadPath,isWorkloadDeepLink } from "@/lib/control-plane"
 import { clearFirstRunTour,firstRunTourMode,shouldAutoStartFirstRunTour,startFirstRunTour,stopFirstRunTour,type FirstRunTourHost } from "@/lib/first-run-tour"
 import { readTheme,subscribeTheme,type Theme } from "@/lib/theme"
 import { cn } from "@/lib/utils"
@@ -44,7 +45,7 @@ RotateCw
 } from "lucide-react"
 import { FormEvent,useCallback,useEffect,useMemo,useRef,useState } from "react"
 import { useLocation,useParams } from "react-router"
-import { roleLabel, t } from "@/i18n"
+import { roleLabel, statusLabel, t } from "@/i18n"
 
 export function WorkspaceApp() {
   const route = useParams<{ organizationId?: string; workspaceId?: string }>()
@@ -56,7 +57,7 @@ export function WorkspaceApp() {
 }
 
 function WorkspaceAppContent() {
-  const { route, location, routeSelectionRef, routingRef, replaceWorkspaceRoute } = useWorkspaceRoute()
+  const { route, location, routeSelectionRef, routingRef, replaceWorkspaceRoute, replaceWorkloadRoute, routeWorkloadId, focusMode } = useWorkspaceRoute()
   const [pendingInvite, setPendingInvite] = useState<InvitationIntent | null>(() => {
     const token = new URLSearchParams(window.location.search).get("invite")
     return token === null ? null : { token }
@@ -161,8 +162,11 @@ function WorkspaceAppContent() {
     if (requirePreferred && !data.organizations.some((item) => item.organization_id === preferred)) throw new Error(t("invite.switch_failed"))
     setOrganizations(data.organizations)
     const routeSelection = routeSelectionRef.current
-    if (routingRef.current.hash === "#policy-provider" && routeSelection.organizationId && !data.organizations.some((item) => item.organization_id === routeSelection.organizationId)) {
-      throw new Error(t("app.policy_settings_target_is_unavailable"))
+    // An explicit target (trusted Policy link or workload deep link) that is unavailable is reported, never replaced
+    // by the default organization, workspace or workload.
+    if (routeSelection.organizationId && !data.organizations.some((item) => item.organization_id === routeSelection.organizationId)) {
+      if (routingRef.current.hash === "#policy-provider") throw new Error(t("app.policy_settings_target_is_unavailable"))
+      if (isWorkloadDeepLink(routingRef.current.pathname)) throw new Error(t("app.workload_not_found"))
     }
     const selected = preferred && data.organizations.some((item) => item.organization_id === preferred)
       ? preferred
@@ -188,8 +192,9 @@ function WorkspaceAppContent() {
     if (organizationIdRef.current !== organizationId) return
     setWorkspaces(data.workspaces)
     const routeSelection = routeSelectionRef.current
-    if (routingRef.current.hash === "#policy-provider" && routeSelection.workspaceId && !data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)) {
-      throw new Error(t("app.policy_settings_target_is_unavailable"))
+    if (routeSelection.workspaceId && !data.workspaces.some((item) => item.workspace_id === routeSelection.workspaceId)) {
+      if (routingRef.current.hash === "#policy-provider") throw new Error(t("app.policy_settings_target_is_unavailable"))
+      if (isWorkloadDeepLink(routingRef.current.pathname)) throw new Error(t("app.workload_not_found"))
     }
     const selected = routeSelection.organizationId === organizationId
       && routeSelection.workspaceId
@@ -218,6 +223,38 @@ function WorkspaceAppContent() {
 
   const workloads = useMemo(() => workspaceWorkloads(snapshot?.agents ?? [], apps), [snapshot?.agents, apps])
   const tabs = useWorkspaceTabs(user?.user_id, workspaceId, isMobile, workloads.map((agent) => agent.agent_id), Boolean(snapshot) && !appsLoading, preview)
+  // Deep link: the /workloads/:id present when a workspace first becomes ready selects that workload; an unknown
+  // or inaccessible ID is reported and never replaced by another workload. After that the URL only follows the
+  // selection, so our own URL updates are never mistaken for a new link.
+  const deepLinkWorkspace = useRef<string | null>(null)
+  const firstPathname = useRef(location.pathname)
+  const inventoryReady = Boolean(snapshot) && !appsLoading
+  const routeMatchesWorkspace = Boolean(workspaceId) && route.workspaceId === workspaceId
+  useEffect(() => {
+    if (!inventoryReady || !routeMatchesWorkspace || !workspaceId || deepLinkWorkspace.current === workspaceId) return
+    deepLinkWorkspace.current = workspaceId
+    if (!routeWorkloadId) {
+      // A /workloads segment that is not a valid ID (malformed) is an explicit target too: report it. The URL may
+      // already have been canonicalized, so the first URL of the page load decides.
+      const requested = isWorkloadDeepLink(firstPathname.current)
+      firstPathname.current = ""
+      if (requested) setError(t("app.workload_not_found"))
+      return
+    }
+    firstPathname.current = ""
+    if (workloads.some((agent) => agent.agent_id === routeWorkloadId)) showAgentTerminal(routeWorkloadId)
+    else { setError(t("app.workload_not_found")); replaceWorkloadRoute(null) }
+    // showAgentTerminal is recreated every render; the workspace marker makes this run once per workspace.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routeWorkloadId, inventoryReady, routeMatchesWorkspace, workspaceId, workloads])
+  // The address bar follows the selection so the URL can be copied, shared or reloaded.
+  const selectedWorkloadId = mainView === "terminal" ? selectedAgentId : null
+  useEffect(() => {
+    if (!inventoryReady || !routeMatchesWorkspace || preview || deepLinkWorkspace.current !== workspaceId) return
+    if (selectedWorkloadId !== routeWorkloadId) replaceWorkloadRoute(selectedWorkloadId)
+  }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute])
+  const workloadHref = (id: string) => workloadPath(organizationId, workspaceId, id, true)
+  const focusedId = focusMode && selectedWorkloadId ? selectedWorkloadId : null
   const tabLabels = new Map<string, TabLabel>(workloads.map((agent) => {
     const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === agent.agent_id)
     const machine = snapshot?.servers.find((entry) => entry.server_id === agent.server_id)
@@ -408,6 +445,8 @@ function WorkspaceAppContent() {
   function tabAction(id: string, action: TabAction) {
     const agent = tabLabels.get(id)?.agent
     if (!agent || !workspaceId) return
+    // Same origin, same session, no token in the URL. noopener keeps the new page from reaching this one.
+    if (action === "newtab") { window.open(workloadPath(organizationId, workspaceId, id, true), "_blank", "noopener"); return }
     if (action === "logs") setShowWorkloadLogs(!tabActions.get(id)?.logs, id)
     if (action === "rename") openRename({ kind: "agent", id, name: agent.name })
     if (action === "upload") openUpload(agent)
@@ -983,8 +1022,8 @@ function WorkspaceAppContent() {
   if (!user) return <AuthScreen onAuthenticated={setUser} />
 
   return <TooltipProvider delayDuration={350}>
-      <main style={treeWidth.style} className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[var(--tree-width)_var(--tree-divider)_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto")}>
-        <aside id="tree-sidebar" className={cn("flex min-h-0 min-w-0 flex-col border-b bg-sidebar md:border-b-0", mobileSidebarHidden && "hidden md:flex", treeWidth.collapsed && "md:invisible md:overflow-hidden")}>
+      <main style={treeWidth.style} className={cn("grid h-dvh min-h-0 bg-background md:grid-cols-[var(--tree-width)_var(--tree-divider)_minmax(0,1fr)] md:grid-rows-1 md:overflow-hidden", treeWidth.dragging && "select-none cursor-col-resize", mobileTerminalIdle || mobileSidebarHidden ? "grid-rows-1 overflow-hidden" : "grid-rows-[374px_minmax(620px,1fr)] overflow-auto", focusedId && "grid-cols-1 grid-rows-1 overflow-hidden md:grid-cols-1")}>
+        <aside id="tree-sidebar" className={cn("flex min-h-0 min-w-0 flex-col border-b bg-sidebar md:border-b-0", mobileSidebarHidden && "hidden md:flex", treeWidth.collapsed && "md:invisible md:overflow-hidden", focusedId && "hidden md:hidden")}>
         {preview && <div className="treer-tour-banner"><span>{t("app.tour_preview_empty_first_run")}</span></div>}
         <div className="grid min-h-[58px] grid-cols-[32px_minmax(0,1fr)_32px] items-center gap-2 px-3 py-2">
           <div className="grid size-8 place-items-center rounded-[5px] bg-[#e8deee] text-[10px] font-bold text-[#694a73]">{initials(organization?.name ?? "Treer")}</div>
@@ -999,14 +1038,14 @@ function WorkspaceAppContent() {
           <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn(mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
         <button type="button" aria-label={t("app.workspace_overview")} onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />{t("app.overview")}</button>
-        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
+        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <UserMenu user={user} badge={initials(user.preferred_name)} role={roleLabel(currentRole)} preview={preview} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
       </aside>
-      <TreeResizer settings={treeWidth} />
+      {!focusedId && <TreeResizer settings={treeWidth} />}
 
       <section className={cn("min-h-0 min-w-0 flex-col", treeWidth.dragging && "pointer-events-none", mobileTerminalIdle ? "hidden md:flex" : "flex")}>
-        <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} />
+        {focusedId ? <WorkloadFocusBar path={tabLabels.get(focusedId)?.path ?? focusedId} status={tabLabels.get(focusedId)?.agent.status ? statusLabel(tabLabels.get(focusedId)!.agent.status) : undefined} consoleHref={workloadPath(organizationId, workspaceId, focusedId)} onOpenConsole={() => routingRef.current.navigate({ pathname: location.pathname, search: "", hash: location.hash })} /> : <WorkspaceTabBar key={`${user.user_id}:${workspaceId}`} tabs={tabs.tabs} labels={tabLabels} activeId={mainView === "overview" ? OVERVIEW_TAB : mainView === "terminal" ? selectedAgentId : null} limit={tabs.limit} liveCount={tabs.liveCount} mobile={isMobile} onOpen={selectTab} onClose={closeTab} actions={tabActions} onAction={tabAction} onCloseMany={closeTabs} onBrowseTree={browseMobileTree} />}
         <p role="status" className="sr-only">{tabNotice}</p>
         {mainView !== "terminal" && <header className="flex h-12 shrink-0 min-w-0 items-center justify-between gap-4 border-b px-3 sm:px-5">
 
@@ -1017,7 +1056,7 @@ function WorkspaceAppContent() {
         </header>}
         <div className={cn("relative min-h-0 flex-1", mainView !== "overview" && mainView !== "terminal" && "hidden")}>
           <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? t("app.overview") : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">
-            <WorkspaceOverview key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} onOpen={showAgentTerminal} onNewAgent={openCreateAgentOrMachineSetup} onWorkspaceSettings={openWorkspaceSettings} />
+            <WorkspaceOverview key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} workloadHref={workloadHref} onOpen={showAgentTerminal} onNewAgent={openCreateAgentOrMachineSetup} onWorkspaceSettings={openWorkspaceSettings} />
           </div>
           {workspaceId && tabs.tabs.map((tab) => {
             const label = tabLabels.get(tab.id)

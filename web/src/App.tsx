@@ -8,7 +8,8 @@ export default function App() {
   useLocale()
   return <Routes>
     <Route path="/admin" element={<AdminPanel />} />
-    <Route path="/orgs/:organizationId/workspaces/:workspaceId" element={<WorkspaceApp />} />
+    {/* The splat carries an optional /workloads/:id; one route keeps WorkspaceApp mounted while the URL follows the selection. */}
+    <Route path="/orgs/:organizationId/workspaces/:workspaceId/*" element={<WorkspaceApp />} />
     <Route path="/orgs/:organizationId" element={<WorkspaceApp />} />
     <Route path="*" element={<WorkspaceApp />} />
   </Routes>

@@ -11,6 +11,7 @@ import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } f
 import TreeMap from "@/components/workload-treemap"
 import { cn } from "@/lib/utils"
 import { statusLabel, t } from "@/i18n"
+import { newTabProps } from "@/lib/new-tab"
 
 const filters = [
   { key: "attention" as const, labelKey: "overview.f_attention" as const, color: "text-status-attention" },
@@ -18,9 +19,9 @@ const filters = [
   { key: "idle" as const, labelKey: "overview.f_idle" as const, color: "text-muted-foreground" },
 ]
 
-export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loading, onOpen, onNewAgent, onWorkspaceSettings }: {
+export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loading, onOpen, workloadHref, onNewAgent, onWorkspaceSettings }: {
   workspace?: Workspace; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; tree: WorkloadTreeState; loading: boolean
-  onOpen: (id: string) => void; onNewAgent: () => void; onWorkspaceSettings: () => void
+  onOpen: (id: string) => void; workloadHref?: (id: string) => string; onNewAgent: () => void; onWorkspaceSettings: () => void
 }) {
   const [mapOpen, setMapOpen] = useState(false)
   const isOpeningAgent = useRef(false)
@@ -56,7 +57,7 @@ export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loa
           const agent = node.agent, machine = inventory.get(agent.server_id), needsAttention = attention.has(agent.agent_id), isWorking = working.has(agent.agent_id)
           const status = machine?.status === "online" || ["blocked", "failed", "exited", "stopped"].includes(agent.status) ? agent.status : "machine offline"
           const statusText = status === "machine offline" ? t("overview.machine_offline") : statusLabel(status)
-          return <li key={key} style={indent}><button type="button" onClick={() => onOpen(agent.agent_id)} aria-label={t("overview.open", { path: node.path })} title={t("overview.row_title", { path: node.path, kind: t(`kind.${workloadKind(agent)}`), machine: machineName(machine, agent.server_id), status: statusText })} className={cn("flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", needsAttention && "bg-destructive/[0.07]")}>
+          return <li key={key} style={indent}><button type="button" {...newTabProps(workloadHref?.(agent.agent_id), () => onOpen(agent.agent_id))} aria-label={t("overview.open", { path: node.path })} title={t("overview.row_title", { path: node.path, kind: t(`kind.${workloadKind(agent)}`), machine: machineName(machine, agent.server_id), status: statusText })} className={cn("flex min-h-11 w-full min-w-0 items-center gap-2 rounded-md px-2 py-2 text-left outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", needsAttention && "bg-destructive/[0.07]")}>
             <span className="w-3.5 shrink-0" aria-hidden="true" /><WorkloadIcon kind={agent.kind} className="size-4 shrink-0 text-muted-foreground" />
             <span className="min-w-0 flex-1 sm:flex sm:items-center sm:gap-3"><span className="block truncate text-xs font-medium">{node.name}</span><span className="mt-1 block truncate text-[10px] text-muted-foreground sm:mt-0 sm:text-xs">{t(`kind.${workloadKind(agent)}`)} · {machineName(machine, agent.server_id)}</span></span>
             <span className={cn("max-w-[112px] shrink-0 rounded border px-1.5 py-1 text-[10px]", needsAttention ? "border-destructive/40 text-status-attention" : isWorking ? "border-primary/40 text-status-working" : "text-muted-foreground")}>{statusText}</span>
@@ -67,7 +68,7 @@ export function WorkspaceOverview({ workspace, agents, apps, machines, tree, loa
   </div>
     <Dialog open={mapOpen} onOpenChange={setMapOpen}><DialogContent className="flex h-[min(820px,calc(100dvh-2rem))] w-[calc(100%-1rem)] max-w-6xl flex-col gap-0 overflow-hidden p-0 sm:w-[calc(100%-3rem)]" onCloseAutoFocus={(event) => { event.preventDefault(); if (!isOpeningAgent.current) mapTrigger.current?.focus(); isOpeningAgent.current = false }}>
       <DialogHeader className="shrink-0 border-b px-5 py-4 pr-12"><DialogTitle>{t("overview.workspace_map")}</DialogTitle><DialogDescription className="text-xs">{t("overview.explore_folders_and_open_agents")}</DialogDescription></DialogHeader>
-      {mapOpen && <TreeMap tree={tree} agents={workloads} machines={machines} selectedId={null} onOpen={(id) => { isOpeningAgent.current = true; onOpen(id); setMapOpen(false) }} />}
+      {mapOpen && <TreeMap tree={tree} agents={workloads} machines={machines} selectedId={null} workloadHref={workloadHref} onOpen={(id) => { isOpeningAgent.current = true; onOpen(id); setMapOpen(false) }} />}
     </DialogContent></Dialog>
   </div>
 }

@@ -738,4 +738,8 @@ export const zh: Messages = {
   "invite.sign_in_detail": "继续登录或创建账号以加入此组织。使用此邀请创建账号时会同时加入该组织。",
   "invite.preview_detail": "正在检查组织信息，由你决定是否加入。",
   "invite.join": "加入组织",
+
+  "app.open_full_console": "打开完整控制台",
+  "app.workload_not_found": "找不到此工作负载,或你没有访问权限。",
+  "app.open_in_new_tab": "在新浏览器标签页中打开",
 }

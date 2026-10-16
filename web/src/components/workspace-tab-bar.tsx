@@ -10,7 +10,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { cn } from "@/lib/utils"
 import { statusLabel, t } from "@/i18n"
 
-export type TabAction = "logs" | "rename" | "upload" | "reload" | "stop" | "delete" | "fullscreen" | "back"
+export type TabAction = "newtab" | "logs" | "rename" | "upload" | "reload" | "stop" | "delete" | "fullscreen" | "back"
 export type TabActions = { app: boolean; logs: boolean; online: boolean; active: boolean; ui: boolean }
 export type TabLabel = { agent: Agent; path: string; machine: string; ui: boolean }
 export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobile, onOpen, onClose, actions, onAction, onCloseMany, onBrowseTree }: {
@@ -80,6 +80,8 @@ export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobi
     // Let the menu/switcher FocusScope unmount before opening a dialog. Otherwise
     // its close autofocus can steal focus from (and dismiss) the new dialog.
     setMenu(null)
+    // window.open needs the user gesture, so it runs now rather than after the animation frame.
+    if (action === "newtab") { setSwitcher(false); onAction(id, action); return }
     if (["rename", "upload", "stop", "delete", "fullscreen", "back"].includes(action)) setSwitcher(false)
     actionFrame.current = requestAnimationFrame(() => { actionFrame.current = null; onAction(id, action) })
   }
@@ -90,6 +92,7 @@ export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobi
       {menuOptions.app && <DropdownMenuItem onSelect={() => runAction(menu.id, "logs")}>{menuOptions.logs ? t("surface.show_app") : t("surface.show_logs")}</DropdownMenuItem>}
       <DropdownMenuItem onSelect={() => runAction(menu.id, "rename")}>{menuOptions.app ? t("tabs.rename_app") : t("app.rename_agent")}</DropdownMenuItem>
       <DropdownMenuItem disabled={!menuOptions.online} onSelect={() => runAction(menu.id, "upload")}>{t("surface.upload_file")}</DropdownMenuItem>
+      <DropdownMenuItem onSelect={() => runAction(menu.id, "newtab")}>{t("app.open_in_new_tab")}</DropdownMenuItem>
       <DropdownMenuItem onSelect={() => runAction(menu.id, "reload")}>{menuOptions.ui ? t("app.reload_interface") : t("app.reconnect_terminal")}</DropdownMenuItem>
       {mobile && <><DropdownMenuItem onSelect={() => runAction(menu.id, "fullscreen")}>{menuOptions.ui ? t("app.open_full_screen_interface") : t("app.open_full_screen_terminal")}</DropdownMenuItem><DropdownMenuItem onSelect={() => runAction(menu.id, "back")}>{t("surface.back_to_workloads")}</DropdownMenuItem></>}
       <DropdownMenuSeparator />

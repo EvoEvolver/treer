@@ -737,6 +737,10 @@ export const en = {
   "invite.sign_in_detail": "Continue to sign in or create an account to join this organization. Creating an account with this invitation joins the organization.",
   "invite.preview_detail": "Checking the organization before you choose whether to join.",
   "invite.join": "Join organization",
+
+  "app.open_full_console": "Open full Console",
+  "app.workload_not_found": "This workload was not found, or you do not have access to it.",
+  "app.open_in_new_tab": "Open in new browser tab",
 } as const
 
 export type MessageKey = keyof typeof en
