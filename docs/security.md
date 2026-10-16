@@ -421,6 +421,27 @@ and transport protection for external backends. Treer does not guarantee global
 login throttling, workload quotas, bounded WebSocket backlogs, complete audit
 delivery, or protection against backend administrators modifying audit records.
 
+Workspace audit (`workspace.audit.v1`) is a sensitive read, not an ordinary
+monitor/allow-default operation. Only current workspace owners (including
+organization managers) have baseline access. Other members, Agents and machine
+identities require an explicit matching `workspace.audit.read` allow rule in
+enforce mode; action-default allow and monitor rules cannot grant access. Enforced
+deny can restrict an owner too; organization audit access remains unchanged.
+Service-audience App tokens are authorized as their represented caller and bound
+to the token audience's workspace, never as a privileged App deputy. A workspace
+owner grant does not grant access to another restricted workspace in the org.
+
+Workspace audit responses use exact workspace scoping and no-store, discard
+stored actor/resource display names and correlation IDs, and project payloads
+through per-action scalar allowlists. Paths, hashes, commands, argv, environment,
+configuration, prompt/message bodies and unknown payload keys are not returned
+by this endpoint. Stable actor/resource IDs and event types remain metadata; this
+does not make the underlying database or existing organization audit view secret
+free. No unattributed history is reconstructed. Reading audit is not itself
+audited. Runtime audit delivery can fail after a successful mutation, deleted
+workspace FKs become NULL, and database/Host operators can modify stored events:
+this is neither complete, tamperproof nor non-repudiable auditing.
+
 Proxy help hides configured administrator-password and NATS-URL environment
 values, alongside existing secret arguments. This is diagnostic hygiene, not a
 general guarantee of log redaction: arbitrary command/environment values and

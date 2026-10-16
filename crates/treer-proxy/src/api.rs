@@ -71,6 +71,7 @@ use crate::voice_llm::{self, VoiceCommandError, VoiceLlmConfig};
 mod policy_diagnostics;
 use policy_diagnostics::*;
 mod policy_publish_authority;
+mod workspace_audit;
 use policy_publish_authority::*;
 
 const TERMINAL_FLOW_WINDOW_BYTES: usize = 256 * 1024;

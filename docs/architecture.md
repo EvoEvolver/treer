@@ -919,6 +919,46 @@ and machine rename and delete operations append runtime
 audit events after the Controller result; an audit write failure is logged
 without turning a completed runtime mutation into a retryable API failure.
 
+Workspace audit reads use `GET /api/workspaces/{workspace_id}/audit-events`
+and capability `workspace.audit.v1` in `/api/auth/config`. They query the same
+`organization_audit_events` table, with an exact workspace and organization join;
+organization-wide NULL-workspace events never enter this feed. The existing
+organization audit endpoint and its projection are unchanged. Previously stored
+events with a workspace ID are readable; unattributed history is not backfilled
+or guessed. Workspace deletion sets the audit FK to NULL, so that history remains
+in the organization view but loses reliable workspace attribution.
+
+The shared response is `{events, next_cursor}`. `before` is a positive, exclusive
+sequence cursor within the requested workspace; events sort by descending
+sequence. `limit` defaults to 50 and clamps to 1..100. `next_cursor` is the last
+returned sequence only when another matching row exists, otherwise NULL. Optional
+`since` (inclusive) and `until` (exclusive) are RFC3339 instants; when both are
+present they must be ordered and at most 366 days apart. `actor_id`, `action`, and
+`resource_kind` are exact matches (1..128 ASCII letters, digits, dot, underscore
+or hyphen). Unknown parameters are rejected. Responses, including authentication
+and query errors, use `Cache-Control: no-store`.
+
+`workspace.audit.read`, on resource kind `workspace` and its stable ID, has an
+owner-role baseline. Organization owners/admins and direct/group workspace owners
+qualify; the current model has no separate workspace-admin role. Enforced deny
+can restrict an owner. Other workspace members and authenticated machine/Agent
+subjects need a **matched allow rule in enforce mode**; neither monitor mode nor
+an action-default allow grants this sensitive read. Machine/Agent requests use
+`/agent/workspaces/{workspace_id}/audit-events` and their existing authenticated
+workspace binding. `/api/apps/{service_id}/audit-events` accepts service-audience
+identity tokens and evaluates the represented human/Agent, not the App's own
+authority. Its verified audience fixes the workspace. It is not an App-runtime
+credential shortcut. User membership is rechecked from the database on each read.
+
+The workspace projection drops stored display names, correlation IDs and unknown
+payload fields. Known lifecycle/startup events may expose only machine ID and
+numeric startup revision; machine exec may expose numeric exit/timeout metadata
+and booleans. File paths, hashes, content, argv, environment and configuration
+payloads are excluded. Audit reads do not append events to their own feed. This
+is a partial activity record: tree, service/virtual-host/ingress and enrollment
+changes and ordinary prompt/message operations do not yet have universal audit
+writes; bodies must never be added as a way to fill those coverage gaps.
+
 Hold-to-talk audio stays on the Proxy only long enough to forward 16 kHz PCM16
 to the configured ASR vendor. After a transcript is available, `POST
 /api/workspaces/{workspace_id}/voice/command` sends that text to an OpenAI
