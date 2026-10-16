@@ -37,6 +37,9 @@ pub struct AuditMaintenance {
     pub rows_per_day: Option<Vec<AuditDailyRows>>,
     #[serde(default)]
     pub statistics_truncated: bool,
+    /// Present only with statistics; scoped indicator of retention backlog.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_expired_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

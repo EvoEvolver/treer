@@ -813,23 +813,32 @@ On `audit.maintenance.v1` Proxies, both audit views add `maintenance` with
 has deleted anything in that scope). This is not a completeness guarantee or the
 time of the oldest event. Add `include_statistics=true` for a fixed recent 30-day
 UTC `rows_per_day` list (`day`, `action`, `rows`), `statistics_since` and
-`statistics_truncated` (at 4096 groups), independent of feed filters. Check the
+`statistics_truncated` (at 4096 groups), independent of feed filters. Scoped
+`oldest_expired_at` is null when no expired rows remain; otherwise it indicates
+cleanup backlog. Check the
 capability before using the new query against old Proxies. Statistics require
 the same authorization as audit reads and can fail rather than run longer than
 their two-second database statement budget.
 
 Retention starts at 180 days for every organization audit kind, including
 security-sensitive events. Set Proxy `--audit-retention-days DAYS` or
-`TREER_AUDIT_RETENTION_DAYS` (1..3650) to explicitly update the shared database
+`TREER_AUDIT_RETENTION_DAYS` (30..3650) to explicitly update the shared database
 setting. Omission preserves the existing setting; keep explicit settings equal
-across replicas. Cleanup deletes at most 256 expired rows per minute per worker;
-backlogs can exceed the configured age. Deletion is irreversible without an
+across replicas: the last explicit configuration wins. A configuration change
+records old/new days in platform audit; startup logs effective days and source.
+Idle checks run each minute; cleanup commits 256-row batches for up to one second
+or 64 batches per cycle, then resumes next second while backlogged. Backlogs can
+still exceed the configured age. Deletion begins at the first worker tick after
+startup: set a longer lifetime before deploying if needed. There is no forever
+setting or built-in export. Deletion is irreversible without an
 independent backup; increasing retention does not move deletion watermarks back.
 This setting does not clean backups, platform audit or Policy decision logs.
 
 Accepted prompt auditing uses a shared 4096-entry PostgreSQL outbox and a fixed
 batch worker. Admission still waits for durable storage (up to one second), and
 failed audit admission never turns an accepted prompt into a retryable failure.
+The global settings lock serializes admission and drain; no tenant fairness
+quota prevents one workspace from filling this audit queue for others.
 Monitor body-free `audit_queue_overflow`, `audit_enqueue_unconfirmed`,
 `audit_drain_failed`, `audit_cleanup_failed` and shutdown-flush warnings. Database
 operators can inspect `pending`, `queue_capacity` and `overflow_total` in

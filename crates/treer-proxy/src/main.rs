@@ -112,7 +112,7 @@ struct Args {
     allow_unauthenticated_listen: bool,
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     database_url: String,
-    #[arg(long, env = "TREER_AUDIT_RETENTION_DAYS", value_parser = clap::value_parser!(u16).range(1..=3650), help = "Explicitly set shared audit retention in days; omitted preserves database setting (initially 180)")]
+    #[arg(long, env = "TREER_AUDIT_RETENTION_DAYS", value_parser = clap::value_parser!(u16).range(30..=3650), help = "Explicitly set shared audit retention in days; omitted preserves database setting (initially 180)")]
     audit_retention_days: Option<u16>,
     #[arg(
         long,

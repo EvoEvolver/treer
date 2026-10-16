@@ -466,7 +466,11 @@ outbox. Worker insertion/removal is atomic and deduplicated by event ID. Workspa
 metadata/statistics use the same sensitive-read authorization and exact tenant
 scope as their audit feed; global queue counters are operator/database metadata.
 All organization audit kinds, including authentication, membership and policy,
-expire under the same configurable default 180-day policy. Scoped deletion
+expire under the same configurable default 180-day policy. Retention
+configuration has a 30-day minimum; changes emit a platform event and numeric
+startup log. Capacity is shared without per-tenant fairness: a tenant can cause
+counted prompt-audit drops in another tenant, while accepted prompts themselves
+and transactional security-kind writes are unaffected. Scoped deletion
 watermarks describe removed history, not completeness. Database/Host operators
 can change retention and stored events; retention is not an immutable compliance
 archive, and does not expire independent backups, platform audit or Policy logs.

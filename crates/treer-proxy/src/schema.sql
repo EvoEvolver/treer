@@ -212,7 +212,7 @@ CREATE INDEX IF NOT EXISTS organization_audit_events_correlation
 -- Shared across replicas. Omitted startup configuration preserves these values.
 CREATE TABLE IF NOT EXISTS audit_maintenance_settings (
     singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
-    retention_days INTEGER NOT NULL DEFAULT 180 CHECK(retention_days BETWEEN 1 AND 3650),
+    retention_days INTEGER NOT NULL DEFAULT 180 CHECK(retention_days BETWEEN 30 AND 3650),
     queue_capacity INTEGER NOT NULL DEFAULT 4096 CHECK(queue_capacity BETWEEN 1 AND 65536),
     pending INTEGER NOT NULL DEFAULT 0 CHECK(pending >= 0),
     overflow_total BIGINT NOT NULL DEFAULT 0 CHECK(overflow_total >= 0)

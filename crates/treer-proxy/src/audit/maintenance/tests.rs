@@ -141,6 +141,57 @@ async fn retention_is_batched_uniform_and_metadata_is_tenant_scoped() {
 }
 
 #[tokio::test]
+async fn one_cleanup_cycle_catches_up_multiple_batches_and_configuration_is_audited() {
+    let auth = fixture().await;
+    let pool = auth.pool();
+    sqlx::query("INSERT INTO organization_audit_events(event_id,organization_id,workspace_id,occurred_at,actor_kind,source,action,outcome,resource_kind,resource_id) \
+        SELECT 'backlog_'||i,'org_audit','audit',(CURRENT_TIMESTAMP-INTERVAL '181 days')::TEXT,'system','test','policy.publish','succeeded','workspace','audit' FROM generate_series(1,700) AS i")
+        .execute(&pool).await.unwrap();
+    assert!(metadata(&pool, None, Some("audit"), true)
+        .await
+        .unwrap()
+        .oldest_expired_at
+        .is_some());
+    // Test catch-up semantics, not local database speed under the full parallel
+    // suite. Production always supplies a one-second budget; batch cap stays 64.
+    assert!(!cleanup_with_budget(&pool, Duration::from_secs(60))
+        .await
+        .unwrap());
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM organization_audit_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        0
+    );
+    assert!(metadata(&pool, None, Some("audit"), true)
+        .await
+        .unwrap()
+        .oldest_expired_at
+        .is_none());
+    assert!(configure(&pool, Some(1)).await.is_err());
+    assert_eq!(
+        metadata(&pool, None, Some("audit"), false)
+            .await
+            .unwrap()
+            .retention_days,
+        180
+    );
+    configure(&pool, Some(30)).await.unwrap();
+    configure(&pool, None).await.unwrap();
+    let payloads: Vec<Value> = sqlx::query_scalar(
+        "SELECT payload FROM platform_audit_events WHERE action='audit.retention.configure'",
+    )
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        payloads,
+        vec![serde_json::json!({"previous_days":180,"retention_days":30})]
+    );
+}
+
+#[tokio::test]
 async fn failed_insert_does_not_consume_capacity_and_failed_drain_keeps_durable_entry() {
     let auth = fixture().await;
     let pool = auth.pool();

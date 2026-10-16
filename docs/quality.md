@@ -59,7 +59,10 @@ durable overflow accounting, capacity release on organization cascade, captured
 actor attribution, replay/deduplication, multi-worker drain, shutdown flush,
 failed-write recovery, 256-row retention batches, uniform sensitive/high-volume
 kind expiry and scoped metadata/statistics. Retention watermarks never move
-backward when the age increases. The prompt writer latency test prints 100 paired
+backward when the age increases. Cleanup cycles also cover catching up more
+than two batches, scoped oldest-expired
+indicators, rejection of a one-day configuration and atomic platform config audit.
+The prompt writer latency test prints 100 paired
 local-PostgreSQL direct-write/enqueue p50/p95 samples; it makes no flaky timing
 assertion and does not establish production latency or throughput. Queue capacity
 and batch size bound resources, not audit completeness or maximum cleanup lag.

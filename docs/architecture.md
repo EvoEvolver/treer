@@ -1003,12 +1003,18 @@ are not retried or failed because auditing failed. One worker per Proxy drains
 up to 256 entries each second; audit insertion, event-ID deduplication and outbox
 deletion commit together. Actor attribution never depends on the worker's task
 local state. After HTTP graceful shutdown drains requests, the worker has ten
-seconds to flush; remaining committed entries replay after restart.
+seconds to flush; remaining committed entries replay after restart. The settings
+row is a global serialization point: contention can exhaust the one-second
+admission budget. Capacity has no tenant fairness quota; one workspace can fill
+it and cause counted prompt-audit drops for others. This does not drop prompts
+or transactional security-kind audit writes.
 
 Every organization audit kind has the same maximum age, initially 180 days.
-`--audit-retention-days` / `TREER_AUDIT_RETENTION_DAYS` (1..3650) explicitly changes
+`--audit-retention-days` / `TREER_AUDIT_RETENTION_DAYS` (30..3650) explicitly changes
 the shared database setting; omission preserves it. Workers use database time
-and bounded 256-row cleanup batches every minute. Retention configuration is
+and bounded 256-row cleanup batches. Idle checks run every minute; each cleanup
+cycle catches up for up to one second/64 batches, then resumes next second if
+backlogged. Retention configuration is
 read from PostgreSQL, not a NATS cache. Deletion records monotonic scoped
 `maintenance.deleted_through` watermarks; these do not establish completeness.
 Increasing retention cannot recover deleted history, and cleanup may lag the
@@ -1019,10 +1025,15 @@ audit reads expose retention metadata; `include_statistics=true` additionally
 returns recent 30-day UTC rows/day/action, independent of pagination filters,
 with `statistics_since` and an explicit `statistics_truncated` flag at 4096
 groups. Workspace statistics never include organization-only/other-workspace
-events or the global overflow count. No new read privilege is introduced.
+events or the global overflow count. With statistics, scoped `oldest_expired_at`
+indicates a retention backlog. Statistical scans have a two-second statement
+budget, but no result cache or per-user rate limit. No new read privilege is introduced.
 The additive schema supports older Proxies writing directly; old-only rollback
 pauses draining and cleanup until an updated worker returns. Operators must use
-consistent explicit retention settings across replicas and budget stored audit,
+consistent explicit retention settings across replicas (the last explicit
+configuration wins). Configuration changes produce a platform audit row and
+typed old/new/source startup log; no keep-forever setting or export is provided.
+Operators must budget stored audit,
 outbox, indexes, WAL and backups separately.
 Legacy/local-auth enrollments without a durable workspace retain their existing
 behavior and have no organization audit attribution; no organization is invented.

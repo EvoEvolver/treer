@@ -93,12 +93,34 @@ pub(crate) async fn drain_batch(pool: &PgPool) -> Result<u64, sqlx::Error> {
 }
 
 pub(crate) async fn configure(pool: &PgPool, days: Option<u16>) -> Result<(), sqlx::Error> {
-    if let Some(days) = days {
+    let mut tx = pool.begin().await?;
+    let old: i32 = sqlx::query_scalar(
+        "SELECT retention_days FROM audit_maintenance_settings WHERE singleton FOR UPDATE",
+    )
+    .fetch_one(&mut *tx)
+    .await?;
+    let effective = days.map(i32::from).unwrap_or(old);
+    if effective != old {
         sqlx::query("UPDATE audit_maintenance_settings SET retention_days=$1 WHERE singleton")
-            .bind(i32::from(days))
-            .execute(pool)
+            .bind(effective)
+            .execute(&mut *tx)
             .await?;
+        sqlx::query("INSERT INTO platform_audit_events(event_id,occurred_at,action,resource_kind,resource_id,payload) VALUES($1,$2,'audit.retention.configure','proxy','audit-retention',$3)")
+            .bind(format!("aud_{}",Uuid::new_v4().simple())).bind(Utc::now().to_rfc3339())
+            .bind(serde_json::json!({"previous_days":old,"retention_days":effective}))
+            .execute(&mut *tx).await?;
     }
+    tx.commit().await?;
+    tracing::info!(
+        previous_days = old,
+        retention_days = effective,
+        source = if days.is_some() {
+            "explicit"
+        } else {
+            "database"
+        },
+        "shared audit retention effective; deletion is irreversible"
+    );
     Ok(())
 }
 
@@ -150,6 +172,15 @@ pub(crate) async fn metadata(
     if let Some(rows) = &mut rows_per_day {
         rows.truncate(4096);
     }
+    let oldest_expired_at = if statistics {
+        sqlx::query_scalar::<_,Option<i64>>("SELECT (extract(epoch FROM MIN(occurred_at::TIMESTAMPTZ))*1000000)::BIGINT \
+            FROM organization_audit_events WHERE organization_id=$1 \
+            AND ($2::TEXT IS NULL OR COALESCE(workspace_id,workspace_origin_id)=$2) \
+            AND occurred_at::TIMESTAMPTZ < CURRENT_TIMESTAMP-(SELECT retention_days FROM audit_maintenance_settings WHERE singleton)*INTERVAL '1 day'")
+            .bind(&org).bind(workspace).fetch_one(&mut *tx).await?.map(timestamp).transpose()?
+    } else {
+        None
+    };
     tx.commit().await?;
     Ok(treer_protocol::AuditMaintenance {
         retention_days: days,
@@ -157,6 +188,7 @@ pub(crate) async fn metadata(
         statistics_since: statistics.then_some(since),
         rows_per_day,
         statistics_truncated,
+        oldest_expired_at,
     })
 }
 
@@ -202,20 +234,49 @@ pub(crate) struct Worker {
     task: JoinHandle<()>,
 }
 
+/// Catch up without an unbounded transaction or starving prompt drains. Budget
+/// exhaustion schedules another cycle on the next one-second worker tick.
+async fn cleanup_cycle(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    cleanup_with_budget(pool, Duration::from_secs(1)).await
+}
+
+async fn cleanup_with_budget(pool: &PgPool, budget: Duration) -> Result<bool, sqlx::Error> {
+    let deadline = tokio::time::Instant::now() + budget;
+    for _ in 0..64 {
+        match tokio::time::timeout_at(deadline, cleanup_batch(pool)).await {
+            Ok(Ok(rows)) if rows < BATCH as u64 => return Ok(false),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => return Err(error),
+            Err(_) => return Ok(true),
+        }
+    }
+    Ok(true)
+}
+
 impl Worker {
     pub(crate) fn start(pool: PgPool) -> Self {
         let (stop, mut stopped) = oneshot::channel();
         let task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
-            let mut cleanup = tokio::time::interval(Duration::from_secs(60));
+            let mut cleanup_due = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     _ = &mut stopped => break,
-                    _ = tick.tick() => if drain_batch(&pool).await.is_err() {
-                        tracing::warn!(code="audit_drain_failed", "audit outbox drain failed; entries retained");
-                    },
-                    _ = cleanup.tick() => if cleanup_batch(&pool).await.is_err() {
-                        tracing::warn!(code="audit_cleanup_failed", "audit retention batch failed");
+                    _ = tick.tick() => {
+                        if drain_batch(&pool).await.is_err() {
+                            tracing::warn!(code="audit_drain_failed", "audit outbox drain failed; entries retained");
+                        }
+                        if tokio::time::Instant::now() >= cleanup_due {
+                            let delay = match cleanup_cycle(&pool).await {
+                                Ok(false) => 60,
+                                Ok(true) => 1,
+                                Err(_) => {
+                                    tracing::warn!(code="audit_cleanup_failed", "audit retention batch failed");
+                                    1
+                                }
+                            };
+                            cleanup_due=tokio::time::Instant::now()+Duration::from_secs(delay);
+                        }
                     },
                 }
             }
