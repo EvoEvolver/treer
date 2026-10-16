@@ -686,7 +686,6 @@ export const zh: Messages = {
   "overview.add_your_first_agent_to": "添加你的第一个 Agent 即可开始工作。",
   "overview.connect_a_machine_then_add": "先连接一台机器,再添加你的第一个 Agent。",
   "overview.no_agents_match_this_filter": "没有符合此筛选的 Agent。",
-  "overview.no_workloads_in_this_workspace": "此工作区没有工作负载。",
   "tree.unable_to_update_workload_tree": "无法更新工作负载树",
   "tree.clipboard_unavailable": "剪贴板不可用",
   "tree.unable_to_copy_automatically_select": "无法自动复制。请选中下方的路径并手动复制。",

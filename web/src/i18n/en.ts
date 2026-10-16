@@ -685,7 +685,6 @@ export const en = {
   "overview.add_your_first_agent_to": "Add your first agent to start working.",
   "overview.connect_a_machine_then_add": "Connect a machine, then add your first agent.",
   "overview.no_agents_match_this_filter": "No agents match this filter.",
-  "overview.no_workloads_in_this_workspace": "No workloads in this workspace.",
   "tree.unable_to_update_workload_tree": "Unable to update workload tree",
   "tree.clipboard_unavailable": "Clipboard unavailable",
   "tree.unable_to_copy_automatically_select": "Unable to copy automatically. Select and copy the path below.",
