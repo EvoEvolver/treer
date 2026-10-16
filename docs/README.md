@@ -27,6 +27,7 @@ matching the question; follow its source links for implementation detail.
 | [Root README](../README.md) | Product overview, core philosophy, capabilities, and the shortest hosted start |
 | [Operator guide](operator-guide.md) | Local development, enrollment, auth, networking, messaging, and command examples |
 | [Self-hosted Compose](../deploy/README.md) | GHCR images, updater sidecar, and `/admin` control-plane updates |
+| [Treer team setup skill](../skills/treer-team/SKILL.md) | Existing Agent/App integration, presets and new-machine setup |
 | [Treer agent skill](../skills/treer/SKILL.md) | Runtime CLI contract exposed to managed coding agents |
 | [Treer install skill](../skills/treer-install/SKILL.md) | Recipe-install contract prompted when creating an installer with a git URL |
 | [macOS container skill](../skills/treer-macos-container/SKILL.md) | Apple container machine Host setup on a Mac |
