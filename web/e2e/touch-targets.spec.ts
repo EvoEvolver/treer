@@ -13,9 +13,12 @@ async function open(page: Page, width: number) {
   await browseTreeOnMobile(page)
 }
 async function size(locator: ReturnType<Page['locator']>) {
-  const box = await locator.boundingBox()
-  expect(box).not.toBeNull()
-  return box!
+  await expect(locator).toBeVisible()
+  return locator.evaluate((element) => { const rect = element.getBoundingClientRect(); return { width: rect.width, height: rect.height } })
+}
+// The app re-renders when the snapshot arrives, so poll until the control settles at its final size.
+async function expectTouch(locator: ReturnType<Page['locator']>, axes: ('width' | 'height')[] = ['width', 'height']) {
+  for (const axis of axes) await expect.poll(async () => (await size(locator))[axis], { message: String(locator) }).toBeGreaterThanOrEqual(43.5)
 }
 
 for (const theme of ['light', 'dark']) test(`Tree sidebar controls and menu rows are at least 44px on a 390px phone (${theme})`, async ({ page }, info) => {
@@ -31,13 +34,37 @@ for (const theme of ['light', 'dark']) test(`Tree sidebar controls and menu rows
     sidebar.getByRole('combobox', { name: 'Organization', exact: true }),
     sidebar.getByRole('combobox', { name: 'Workspace', exact: true }),
   ]
-  for (const control of controls) { const box = await size(control); expect(box.width, await control.getAttribute('aria-label')).toBeGreaterThanOrEqual(44 - 0.5); expect(box.height).toBeGreaterThanOrEqual(44 - 0.5) }
+  for (const control of controls) await expectTouch(control)
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
   await sidebar.getByRole('button', { name: 'Actions for Product', exact: true }).click()
   const items = page.getByRole('menuitem')
   await expect(items.first()).toBeVisible()
-  for (const item of await items.all()) expect((await size(item)).height).toBeGreaterThanOrEqual(44 - 0.5)
+  for (const item of await items.all()) await expectTouch(item, ['height'])
   await page.screenshot({ path: info.outputPath(`tree-touch-${theme}-390.png`) })
+})
+
+for (const theme of ['light', 'dark']) test(`Overview and the phone top bar controls are at least 44px at 390px (${theme})`, async ({ page }, info) => {
+  await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
+  await page.setViewportSize({ width: 390, height: 844 })
+  await mockTreeMapApi(page)
+  await page.route('**/groups', (route) => route.fulfill({ json: { groups: [] } }))
+  await page.route('**/policy-provider', (route) => route.fulfill({ status: 404, json: {} }))
+  await page.routeWebSocket(/\/events$/, () => {})
+  await page.goto('/')
+  await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
+  const controls = [
+    page.getByRole('button', { name: 'Browse tree', exact: true }),
+    page.getByRole('button', { name: /^Page /, }),
+    page.getByRole('button', { name: /^More actions for/ }),
+    page.getByRole('button', { name: /^Show all tabs/ }),
+    page.getByRole('button', { name: 'Expand tree map', exact: true }),
+    page.getByRole('button', { name: 'Add agent', exact: true }),
+    page.getByRole('button', { name: /^Filter /, }).first(),
+  ]
+  for (const control of controls) await expectTouch(control)
+  for (const chip of await page.getByRole('group', { name: 'Attention filters' }).getByRole('button').all()) await expectTouch(chip, ['height'])
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  await page.screenshot({ path: info.outputPath(`overview-touch-${theme}-390.png`) })
 })
 
 test('desktop keeps the compact Tree controls', async ({ page }) => {
