@@ -501,7 +501,21 @@ impl ControllerRuntime {
             ));
         }
         let mut env = self.process_environment(Some((&agent_id, &workload_credential)));
-        let command = resolve_agent_command(&launch.command, &env)?;
+        let command = resolve_agent_command(&launch.command, &env).map_err(|mut error| {
+            if error.code == "command_not_found"
+                && self.inner.startup_store.get(&agent_id).is_none()
+                && self.get(&agent_id).is_err()
+            {
+                error.message = "Required executable is not installed on this machine".into();
+                error.details = Some(Box::new(treer_protocol::AgentCreationErrorDetails {
+                    command: treer_protocol::agent_install_command_name(&launch.command),
+                    machine_id: None,
+                    agent_id: Some(agent_id.clone()),
+                    creation_state: treer_protocol::AgentCreationFailureState::NotStarted,
+                }));
+            }
+            error
+        })?;
         // Persist the resolved launch, rather than a mutable profile reference,
         // before asking the Host to start the workload.
         if self.inner.startup_store.get(&agent_id).is_none() {

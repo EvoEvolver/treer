@@ -147,6 +147,43 @@ pub struct ProtocolError {
     pub hint: Option<Vec<String>>,
     pub code: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<Box<AgentCreationErrorDetails>>,
+}
+
+/// Only bounded display identifiers, never argv, PATH, cwd or credentials.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentCreationErrorDetails {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    pub creation_state: AgentCreationFailureState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentCreationFailureState {
+    /// Controller proves resolution failed before startup persistence/Host spawn.
+    NotStarted,
+    IdentityRemoved,
+    ReservedOutcomeUnknown,
+    CleanupFailed,
+}
+
+/// The UI may match this identifier against a vetted provider table. Absolute
+/// paths and arbitrary diagnostic strings must never become install recipes.
+pub fn agent_install_command_name(command: &str) -> Option<String> {
+    (!command.is_empty()
+        && command.len() <= 128
+        && command
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        && !matches!(command, "." | "..")
+        && !command.ends_with('.'))
+    .then(|| command.to_owned())
 }
 
 impl ProtocolError {
@@ -155,6 +192,7 @@ impl ProtocolError {
             hint: None,
             code: code.into(),
             message: message.into(),
+            details: None,
         }
     }
 }

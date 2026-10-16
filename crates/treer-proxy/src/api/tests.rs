@@ -13,6 +13,177 @@ use treer_protocol::{
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
 #[tokio::test]
+async fn agent_create_missing_command_only_cleans_a_proven_unstarted_reservation() {
+    use treer_protocol::{AgentCreationErrorDetails, AgentCreationFailureState};
+    for (proof, mismatched_id, cleanup_fails, legacy) in [
+        (true, false, false, false),
+        (false, false, false, false),
+        (false, false, false, true),
+        (true, true, false, false),
+        (true, false, true, false),
+    ] {
+        let auth = AuthStore::for_test("test").await;
+        auth.seed_test_workspace("default").await;
+        if cleanup_fails {
+            sqlx::raw_sql("CREATE FUNCTION fail_cleanup() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic cleanup failure'; END $$; CREATE TRIGGER cleanup_failure BEFORE INSERT ON deleted_agents FOR EACH ROW EXECUTE FUNCTION fail_cleanup();")
+                .execute(&auth.pool()).await.unwrap();
+        }
+        let server = state_with_managed_agent()
+            .await
+            .resolve_server("default", "machine-a")
+            .await
+            .unwrap();
+        let state = AppState::new();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server_instance_with_capabilities(
+                server,
+                Uuid::new_v4(),
+                "test-controller".into(),
+                vec![treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT.into()],
+                tx,
+            )
+            .await
+            .unwrap();
+        let task = tokio::spawn({
+            let auth = auth.clone();
+            let state = state.clone();
+            async move {
+                execute_agent_create(
+                    &state,
+                    &auth,
+                    &PolicyEngine::allow_all(),
+                    None,
+                    None,
+                    "default",
+                    CreateAgentRequest {
+                        folder_id: None,
+                        server_id: Some("machine-a".into()),
+                        kind: "command".into(),
+                        name: "missing-provider".into(),
+                        cwd: ".".into(),
+                        args: vec!["claude".into()],
+                        cols: 80,
+                        rows: 24,
+                        publish_ports: vec![],
+                        recipe: None,
+                    },
+                    None,
+                )
+                .await
+            }
+        });
+        let check = next_lifecycle_command(&mut rx).await;
+        assert!(matches!(
+            check.command,
+            AgentCommand::CreationPlacementCheck {}
+        ));
+        state
+            .complete_command(CommandResult::success(
+                check.command_id,
+                json!({"supported":true}),
+            ))
+            .await;
+        let create = next_lifecycle_command(&mut rx).await;
+        let AgentCommand::Create { agent_id, .. } = create.command else {
+            panic!("expected create")
+        };
+        let mut failure = ProtocolError::new(
+            if proof || legacy {
+                "command_not_found"
+            } else {
+                "command_timeout"
+            },
+            "PATH /private/synthetic secret-argument",
+        );
+        if proof {
+            failure.details = Some(Box::new(AgentCreationErrorDetails {
+                command: Some("claude".into()),
+                machine_id: Some("untrusted-target".into()),
+                agent_id: Some(if mismatched_id {
+                    "other-agent".into()
+                } else {
+                    agent_id.clone()
+                }),
+                creation_state: AgentCreationFailureState::NotStarted,
+            }));
+        }
+        state
+            .complete_command(CommandResult::failure(create.command_id, failure))
+            .await;
+        let error = task.await.unwrap().unwrap_err();
+        let removed = proof && !mismatched_id && !cleanup_fails;
+        let details = error.error.details.as_ref().unwrap();
+        assert_eq!(details.machine_id.as_deref(), Some("machine-a"));
+        assert_eq!(details.agent_id.as_deref(), Some(agent_id.as_str()));
+        assert_eq!(
+            details.creation_state,
+            if removed {
+                AgentCreationFailureState::IdentityRemoved
+            } else if cleanup_fails {
+                AgentCreationFailureState::CleanupFailed
+            } else {
+                AgentCreationFailureState::ReservedOutcomeUnknown
+            }
+        );
+        let serialized = serde_json::to_string(&error.error).unwrap();
+        for secret in [
+            "PATH",
+            "/private/synthetic",
+            "secret-argument",
+            "untrusted-target",
+        ] {
+            assert!(!serialized.contains(secret));
+        }
+        let revoked: bool = sqlx::query_scalar(
+            "SELECT revoked_at IS NOT NULL FROM agent_credentials WHERE agent_id=$1",
+        )
+        .bind(&agent_id)
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap();
+        assert_eq!(revoked, removed);
+        let names: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_names WHERE agent_id=$1")
+            .bind(&agent_id)
+            .fetch_one(&auth.pool())
+            .await
+            .unwrap();
+        assert_eq!(names, if removed { 0 } else { 1 });
+        let visible_placement: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM workload_placements p JOIN agent_credentials c USING(agent_id) WHERE p.agent_id=$1 AND c.revoked_at IS NULL")
+            .bind(&agent_id).fetch_one(&auth.pool()).await.unwrap();
+        assert_eq!(visible_placement, if removed { 0 } else { 1 });
+        let audit: serde_json::Value = sqlx::query_scalar("SELECT payload FROM organization_audit_events WHERE workspace_id='default' AND resource_id=$1 AND action='agent.create.failed'")
+            .bind(&agent_id).fetch_one(&auth.pool()).await.unwrap();
+        assert_eq!(audit["server_id"], "machine-a");
+        assert_eq!(audit["code"], error.error.code);
+        assert_eq!(
+            audit["creation_state"],
+            serde_json::to_value(details.creation_state).unwrap()
+        );
+        assert_eq!(
+            audit.as_object().unwrap().len(),
+            3,
+            "audit contains only scoped metadata"
+        );
+        if removed {
+            auth.create_named_agent_credential(
+                "default",
+                "machine-a",
+                "ag_retry",
+                "missing-provider",
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            rx.try_recv().is_err(),
+            "no retry/stop/install command is dispatched"
+        );
+    }
+}
+
+#[tokio::test]
 async fn app_directory_and_resolution_do_not_enumerate_path_denied_agents() {
     let auth = AuthStore::for_test("test").await;
     auth.seed_test_workspace("default").await;

@@ -417,6 +417,43 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
     )
     .unwrap();
     let credential = new_workload_credential();
+    let missing = runtime
+        .create(
+            "missing-create",
+            "missing-id".into(),
+            credential.clone(),
+            CreateAgentRequest {
+                folder_id: None,
+                server_id: None,
+                kind: "command".into(),
+                name: "missing".into(),
+                cwd: "repo".into(),
+                args: vec![format!("missing-cli-{}", Uuid::new_v4().simple())],
+                cols: 80,
+                rows: 24,
+                publish_ports: vec![],
+                recipe: None,
+            },
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code, "command_not_found");
+    let details = missing.details.as_ref().unwrap();
+    assert_eq!(
+        details.creation_state,
+        treer_protocol::AgentCreationFailureState::NotStarted
+    );
+    assert_eq!(details.agent_id.as_deref(), Some("missing-id"));
+    assert!(details
+        .command
+        .as_deref()
+        .unwrap()
+        .starts_with("missing-cli-"));
+    assert!(runtime.inner.startup_store.get("missing-id").is_none());
+    assert!(spawns.lock().unwrap().is_empty());
+    let serialized = serde_json::to_string(&missing).unwrap();
+    assert!(!serialized.contains(&root.to_string_lossy().to_string()));
+    assert!(!serialized.contains(&credential));
     let original = runtime
         .create(
             "create",

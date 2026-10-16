@@ -525,6 +525,20 @@ an undisclosed random credential hash; activation uses the existing missing-loca
 credential rotation path. Existing nodes are not backfilled or relocated.
 Placement does not change the process `cwd`.
 
+Agent creation failures carry optional `error.details` with a bounded bare
+`command`, the selected `machine_id`, reserved `agent_id` and `creation_state`.
+Only a Controller `command_not_found` proof for that same Agent, issued before
+startup persistence or Host dispatch, permits Proxy compensation: credential
+revocation and removal of the reserved name make the placement inactive and the
+name reusable (`identity_removed`). Revoked credential/placement tombstones may
+remain for reconciliation. Timeout, disconnect, legacy errors without this
+proof, or mismatched identity keep the reservation (`reserved_outcome_unknown`);
+failed compensation reports `cleanup_failed`. Clients must not automatically
+repeat creation in either case. The Proxy replaces raw spawn diagnostics with
+fixed text and records the failed creation without PATH, argv or output. A
+missing provider inside an already running launcher is a separate launcher
+status, not inferred from terminal output. This error contract installs nothing.
+
 `workload.create-placement.v1` is advertised by Proxy health and Controllers.
 The thin CLI gates creation/profile launch before forwarding argv. Controller
 creation routes check Proxy health and use new `/agents/placed`, `/apps/placed`

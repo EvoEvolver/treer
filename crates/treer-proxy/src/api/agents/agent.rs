@@ -376,7 +376,7 @@ pub(crate) async fn execute_agent_create(
             },
         )
         .await?;
-    let mut data = state
+    let data = state
         .send_command(
             workspace_id,
             &server_id,
@@ -386,11 +386,60 @@ pub(crate) async fn execute_agent_create(
                 request,
             },
         )
-        .await.map_err(|mut error| {
-            error.message = format!("{}; Agent identity {} was reserved before dispatch; inspect it before retrying creation", error.message, agent_id);
-            error.hint = Some(vec![agent_id.clone()]);
-            ApiFailure::from(error)
-        })?;
+        .await;
+    let mut data = match data {
+        Ok(data) => data,
+        Err(mut error) => {
+            use treer_protocol::{AgentCreationErrorDetails, AgentCreationFailureState};
+            let not_started = error.code == "command_not_found"
+                && error.details.as_ref().is_some_and(|details| {
+                    details.creation_state == AgentCreationFailureState::NotStarted
+                        && details.agent_id.as_deref() == Some(agent_id.as_str())
+                });
+            let command = error
+                .details
+                .as_ref()
+                .and_then(|details| details.command.as_deref())
+                .and_then(treer_protocol::agent_install_command_name);
+            let creation_state = if not_started {
+                match auth.delete_agent(workspace_id, &agent_id).await {
+                    Ok(()) => AgentCreationFailureState::IdentityRemoved,
+                    Err(_) => AgentCreationFailureState::CleanupFailed,
+                }
+            } else {
+                AgentCreationFailureState::ReservedOutcomeUnknown
+            };
+            // Never forward a Host/runtime message containing PATH/argv. Keep
+            // transport/policy codes, but report the reservation state explicitly.
+            error.message = if error.code == "command_not_found" {
+                "Required executable is not installed on this machine"
+            } else {
+                "Agent creation failed; its startup outcome could not be confirmed"
+            }
+            .into();
+            error.details = Some(Box::new(AgentCreationErrorDetails {
+                command,
+                machine_id: Some(server_id.clone()),
+                agent_id: Some(agent_id.clone()),
+                creation_state,
+            }));
+            let (actor_kind, actor_id) = control_audit_actor(session, subject);
+            if auth.record_workspace_audit(NewWorkspaceAuditEvent {
+                workspace_id,
+                actor_kind,
+                actor_id,
+                action: "agent.create.failed",
+                resource_kind: "agent",
+                resource_id: &agent_id,
+                resource_name: Some(&agent_name),
+                payload: json!({"server_id":server_id,"code":error.code,"creation_state":creation_state}),
+            }).await.is_err() {
+                tracing::warn!("failed to record Agent creation failure audit event");
+            }
+            error.hint = Some(vec![agent_id]);
+            return Err(ApiFailure::from(error));
+        }
+    };
     let tree = auth.workload_tree(workspace_id).await?;
     data["path"] = json!(tree.workload_path(&agent_id, &agent_name)?);
     let (actor_kind, actor_id) = control_audit_actor(session, subject);
