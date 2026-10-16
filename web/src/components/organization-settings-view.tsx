@@ -10,7 +10,6 @@ import {
   ScrollText,
   ShieldCheck,
   Trash2,
-  UserRound,
   Users
 } from "lucide-react"
 import { FormEvent } from "react"
@@ -74,7 +73,7 @@ export function OrganizationSettingsView({ organization, name, workspaces, selec
 
     <section className="border-b py-6">
       <div className="grid gap-5 xl:grid-cols-[220px_minmax(0,1fr)]">
-        <div><div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">{t("org.members")}</h2>{canManage && <IconButton label={t("org.invite_member")} onClick={onInvite}><UserRound /></IconButton>}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("org.people_with_organization_access")}</p></div>
+        <div><div className="flex items-center justify-between gap-3"><h2 className="text-sm font-semibold">{t("org.members")}</h2>{canManage && <IconButton label={t("org.invite_member")} onClick={onInvite}><Plus /></IconButton>}</div><p className="mt-1 text-xs leading-5 text-muted-foreground">{t("org.people_with_organization_access")}</p></div>
         <div className="border-y">
           {members.map((member) => <div key={member.user_id} className="grid min-h-14 grid-cols-[minmax(0,1fr)_110px_auto] items-center gap-3 border-b py-2 last:border-b-0"><span className="min-w-0"><span className="block truncate text-xs font-medium">{member.preferred_name}</span><span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{member.email}</span></span>{currentRole === "owner" && member.role !== "owner" ? <Select value={member.role} onValueChange={(value: Member["role"]) => onMemberRoleChange(member.user_id, value)}><SelectTrigger className="h-8 text-xs"><SelectValue /></SelectTrigger><SelectContent><SelectItem value="member">{t("org.member")}</SelectItem><SelectItem value="admin">{t("org.admin")}</SelectItem></SelectContent></Select> : <span className="text-xs capitalize text-muted-foreground">{roleLabel(member.role)}</span>}{canManage && member.role !== "owner" ? <IconButton label={t("org.remove_member", { name: member.preferred_name })} className="text-destructive hover:text-destructive" onClick={() => onRemoveMember(member.user_id)}><Trash2 /></IconButton> : <span />}</div>)}
           {!members.length && <EmptyState icon={<Users />} label={t("org.no_members")} />}
