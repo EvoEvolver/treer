@@ -4,6 +4,8 @@ use sqlx::{PgPool, Postgres, Row, Transaction};
 use treer_protocol::{OrganizationAuditEvent, WorkspaceAuditEventsPage, WorkspaceAuditEventsQuery};
 use uuid::Uuid;
 
+pub(crate) mod maintenance;
+
 #[cfg(test)]
 mod mutation_tests;
 
@@ -239,6 +241,9 @@ pub(crate) async fn list_workspace(
     Ok(WorkspaceAuditEventsPage {
         events,
         next_cursor,
+        maintenance: Some(
+            maintenance::metadata(pool, None, Some(workspace_id), query.include_statistics).await?,
+        ),
     })
 }
 

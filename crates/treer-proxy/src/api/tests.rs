@@ -438,6 +438,14 @@ async fn prompt_queue_attests_sender_and_checks_cancel_ownership() {
         ))
         .await;
     assert!(pending.await.unwrap().is_ok());
+    // Accepted prompts commit their audit to the durable outbox first. Drain
+    // independently of the request scope and still require its original actor.
+    assert_eq!(
+        crate::audit::maintenance::drain_batch(&auth.pool())
+            .await
+            .unwrap(),
+        1
+    );
     let audit_rows = crate::audit::list(&auth.pool(), "org_default", None, None, 100)
         .await
         .unwrap();

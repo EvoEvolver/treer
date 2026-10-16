@@ -492,6 +492,8 @@ pub struct AuditEventsQuery {
     before: Option<i64>,
     #[serde(default = "default_audit_limit")]
     limit: u16,
+    #[serde(default)]
+    include_statistics: bool,
 }
 
 const fn default_audit_limit() -> u16 {

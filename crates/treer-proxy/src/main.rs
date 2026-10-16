@@ -112,6 +112,8 @@ struct Args {
     allow_unauthenticated_listen: bool,
     #[arg(long, env = "DATABASE_URL", hide_env_values = true)]
     database_url: String,
+    #[arg(long, env = "TREER_AUDIT_RETENTION_DAYS", value_parser = clap::value_parser!(u16).range(1..=3650), help = "Explicitly set shared audit retention in days; omitted preserves database setting (initially 180)")]
+    audit_retention_days: Option<u16>,
     #[arg(
         long,
         help = "Operator recovery: clear all sign-in attempt counters in the database, then exit"
@@ -251,6 +253,9 @@ async fn main() -> anyhow::Result<()> {
     )
     .await
     .context("failed to connect to PostgreSQL")?;
+    audit::maintenance::configure(&auth.pool(), args.audit_retention_days)
+        .await
+        .context("failed to configure audit retention")?;
     if let Some(base_domain) = ingress.base_domain_if_configured() {
         let created = auth
             .ensure_managed_app_ingresses("system", base_domain)
@@ -334,6 +339,7 @@ async fn main() -> anyhow::Result<()> {
     if voice.llm.enabled() {
         info!(config = ?voice.llm, "voice command LLM is enabled");
     }
+    let audit_worker = audit::maintenance::Worker::start(auth.pool());
     let app = api::router(
         state,
         bootstrap,
@@ -365,6 +371,7 @@ async fn main() -> anyhow::Result<()> {
     })
     .await
     .context("proxy server failed");
+    audit_worker.shutdown().await;
     traffic
         .flush_pending()
         .await
