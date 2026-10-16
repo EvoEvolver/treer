@@ -24,6 +24,7 @@ mod path_tests;
 
 pub const ACTION_NETWORK_CONNECT: &str = "network.connect";
 pub const ACTION_AGENT_DISCOVER: &str = "agent.discover";
+pub const ACTION_WORKSPACE_AUDIT_READ: &str = "workspace.audit.read";
 pub const ACTION_AGENT_METADATA_READ: &str = "agent.metadata.read";
 pub const ACTION_AGENT_OUTPUT_READ: &str = "agent.output.read";
 pub const ACTION_AGENT_PROMPT: &str = "agent.prompt";
@@ -72,6 +73,7 @@ pub const ACTION_MESSAGE_ACK: &str = "message.ack";
 pub const ACTION_MESSAGE_IMPORT: &str = "message.import";
 pub const RESOURCE_NETWORK_ENDPOINT: &str = "network.endpoint";
 pub const RESOURCE_AGENT: &str = "agent";
+pub const RESOURCE_WORKSPACE: &str = "workspace";
 pub const RESOURCE_AGENT_TREE: &str = "agent.tree";
 pub const RESOURCE_AGENT_LAUNCH_PROFILE: &str = "agent.launch_profile";
 pub const RESOURCE_MACHINE: &str = "machine";
@@ -442,6 +444,39 @@ impl PolicyEngine {
             }
         }
         self.default_decision.clone().into_result()
+    }
+
+    /// Sensitive reads have a role baseline, not the permissive Core fallback.
+    /// Only a matched, enforced allow rule can expand that baseline. Monitor
+    /// decisions and action defaults cannot grant access to a non-owner.
+    pub async fn authorize_sensitive_read(
+        &self,
+        request: &PolicyRequest,
+        role_allowed: bool,
+    ) -> Result<(), ProtocolError> {
+        let request = self.enrich(request).await?;
+        for evaluator in self.evaluators.iter() {
+            if let Some(explanation) = evaluator.explain(&request).await? {
+                self.check_tree_revision(&request).await?;
+                self.record(&request, &explanation).await;
+                let explicitly_allowed = explanation.mode == PolicyMode::Enforce
+                    && explanation.matched_rule_id.is_some()
+                    && explanation.effective_decision == PolicyEffect::Allow;
+                explanation.into_decision().into_result()?;
+                return sensitive_read_baseline(role_allowed || explicitly_allowed);
+            }
+            match evaluator.evaluate(&request).await? {
+                PolicyEvaluation::Abstain => {}
+                PolicyEvaluation::Decide(decision) => {
+                    self.check_tree_revision(&request).await?;
+                    decision.into_result()?;
+                    return sensitive_read_baseline(role_allowed);
+                }
+            }
+        }
+        self.default_decision.clone().into_result()?;
+        self.check_tree_revision(&request).await?;
+        sensitive_read_baseline(role_allowed)
     }
 
     pub async fn authorize_batch(
@@ -1306,6 +1341,17 @@ fn resource_principal(resource: &PolicyResource) -> Option<(PolicyPrincipalKind,
             _ => None,
         },
         _ => None,
+    }
+}
+
+fn sensitive_read_baseline(allowed: bool) -> Result<(), ProtocolError> {
+    if allowed {
+        Ok(())
+    } else {
+        Err(ProtocolError::new(
+            "policy_denied",
+            "workspace audit requires an owner or an explicit enforced allow rule",
+        ))
     }
 }
 

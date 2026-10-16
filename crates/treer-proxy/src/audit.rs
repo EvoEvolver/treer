@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::{PgPool, Postgres, Row, Transaction};
-use treer_protocol::OrganizationAuditEvent;
+use treer_protocol::{OrganizationAuditEvent, WorkspaceAuditEventsPage, WorkspaceAuditEventsQuery};
 use uuid::Uuid;
 
 pub(crate) struct NewAuditEvent<'a> {
@@ -77,6 +77,12 @@ pub(crate) async fn list(
     .bind(limit)
     .fetch_all(pool)
     .await?;
+    decode_events(rows)
+}
+
+fn decode_events(
+    rows: Vec<sqlx::postgres::PgRow>,
+) -> Result<Vec<OrganizationAuditEvent>, sqlx::Error> {
     rows.into_iter()
         .map(|row| {
             let occurred_at = row
@@ -103,6 +109,113 @@ pub(crate) async fn list(
             })
         })
         .collect()
+}
+
+/// Deliberately separate from the organization view: NULL workspace events
+/// belong to the organization, never to an arbitrary workspace.
+pub(crate) async fn list_workspace(
+    pool: &PgPool,
+    workspace_id: &str,
+    query: &WorkspaceAuditEventsQuery,
+) -> Result<WorkspaceAuditEventsPage, sqlx::Error> {
+    let limit = i64::from(query.limit.unwrap_or(50).clamp(1, 100));
+    let rows = sqlx::query(
+        "SELECT e.sequence, left(e.event_id,128) AS event_id, \
+         left(e.organization_id,128) AS organization_id, left(e.workspace_id,128) AS workspace_id, e.occurred_at, \
+         left(e.actor_kind,32) AS actor_kind, left(e.actor_id,128) AS actor_id, NULL::TEXT AS actor_name, \
+         left(e.source,32) AS source, left(e.action,128) AS action, left(e.outcome,32) AS outcome, \
+         left(e.resource_kind,64) AS resource_kind, left(e.resource_id,256) AS resource_id, \
+         NULL::TEXT AS resource_name, NULL::TEXT AS correlation_id, \
+         COALESCE((SELECT jsonb_object_agg(k, e.payload->k) \
+           FROM unnest(ARRAY['server_id','startup_revision','exit_code','timed_out','truncated','timeout_ms']) AS k \
+           WHERE (jsonb_typeof(e.payload->k) IN ('number','boolean','null') AND octet_length((e.payload->k)::TEXT) <= 64) \
+           OR (k = 'server_id' AND jsonb_typeof(e.payload->k) = 'string' AND octet_length((e.payload->k)::TEXT) <= 130)), \
+           '{}'::JSONB) AS payload \
+         FROM organization_audit_events e JOIN workspaces w \
+         ON w.workspace_id = e.workspace_id AND w.organization_id = e.organization_id \
+         WHERE w.workspace_id = $1 AND w.deleted_at IS NULL \
+         AND ($2::BIGINT IS NULL OR e.sequence < $2) \
+         AND ($3::TEXT IS NULL OR e.occurred_at::TIMESTAMPTZ >= $3::TIMESTAMPTZ) \
+         AND ($4::TEXT IS NULL OR e.occurred_at::TIMESTAMPTZ < $4::TIMESTAMPTZ) \
+         AND ($5::TEXT IS NULL OR e.actor_id = $5) \
+         AND ($6::TEXT IS NULL OR e.action = $6) \
+         AND ($7::TEXT IS NULL OR e.resource_kind = $7) \
+         ORDER BY e.sequence DESC LIMIT $8",
+    )
+    .bind(workspace_id)
+    .bind(query.before)
+    .bind(query.since.map(|v| v.to_rfc3339()))
+    .bind(query.until.map(|v| v.to_rfc3339()))
+    .bind(&query.actor_id)
+    .bind(&query.action)
+    .bind(&query.resource_kind)
+    .bind(limit + 1)
+    .fetch_all(pool)
+    .await?;
+    let mut events = decode_events(rows)?;
+    let has_more = events.len() > limit as usize;
+    events.truncate(limit as usize);
+    let next_cursor = has_more.then(|| events.last().expect("positive page limit").sequence);
+    for event in &mut events {
+        // Stored display names and arbitrary payloads are not trusted schema.
+        // The org endpoint intentionally retains its existing projection.
+        event.actor_name = None;
+        event.resource_name = None;
+        event.correlation_id = None;
+        event.payload = workspace_payload(&event.action, &event.payload);
+    }
+    Ok(WorkspaceAuditEventsPage {
+        events,
+        next_cursor,
+    })
+}
+
+fn workspace_payload(action: &str, payload: &Value) -> Value {
+    // Per-action allowlists fail closed for new events. Never project file
+    // paths/hashes, command arguments, configuration, bodies or unknown fields.
+    let fields: &[&str] = match action {
+        "agent.create"
+        | "agent.rename"
+        | "agent.delete"
+        | "agent.start"
+        | "agent.stop"
+        | "agent.restart"
+        | "agent.abort"
+        | "agent.startup.set"
+        | "agent.startup.clear"
+        | "agent.startup.manage"
+        | "agent.startup.restart"
+        | "app.create"
+        | "app.start"
+        | "app.stop"
+        | "app.restart"
+        | "app.delete"
+        | "app.update"
+        | "app.startup.update" => &["server_id", "startup_revision"],
+        "machine.exec" => &["exit_code", "timed_out", "truncated", "timeout_ms"],
+        "workspace.audit.read" => &[],
+        _ => &[],
+    };
+    let mut result = serde_json::Map::new();
+    for key in fields {
+        if let Some(value) = payload.get(key) {
+            // Strings only for stable machine IDs; no arbitrary nested text.
+            let safe = if *key == "server_id" {
+                value.as_str().is_some_and(|id| {
+                    id.len() <= 128
+                        && id
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+                })
+            } else {
+                value.is_boolean() || value.is_number() || value.is_null()
+            };
+            if safe {
+                result.insert((*key).to_string(), value.clone());
+            }
+        }
+    }
+    Value::Object(result)
 }
 
 pub(crate) struct NewPlatformAuditEvent<'a> {

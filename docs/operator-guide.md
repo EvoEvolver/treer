@@ -771,6 +771,34 @@ after the 10-second flush; failures/backlogs can extend that delay. All Proxies
 query the same database view rather than adding instance-local pending usage.
 Normal workspace-authorized audit and traffic APIs are unchanged.
 
+### Workspace audit events
+
+On Proxies advertising `workspace.audit.v1` in `/api/auth/config`, read
+`GET /api/workspaces/WORKSPACE_ID/audit-events` with your user session. The
+response is `{events, next_cursor}` in descending sequence order. Use
+`?limit=50&before=SEQUENCE` for the next page; stop when `next_cursor` is null.
+Optional exact-match filters are `actor_id`, `action` and `resource_kind`.
+`since` includes the RFC3339 instant and `until` excludes it; paired bounds may
+span at most 366 days. Limits clamp to 1..100. Unknown parameters are errors.
+
+Current workspace owners, including organization owners/admins, can read by
+default. An enforced deny can restrict them. To grant another workspace member
+or Agent access, use an explicit allow rule for `workspace.audit.read` on the
+workspace resource ID in **enforce** mode; monitor and default allow do not grant
+audit access. Agent/machine clients use the authenticated `/agent/workspaces/ID/`
+variant. Apps use `/api/apps/SERVICE_ID/audit-events` with a service-audience
+human/Agent token, evaluated as that caller; an App's own runtime credential is
+not sufficient. A 403 means denied; old Proxy 404/405 means unsupported. Do not
+silently fall back to an organization feed and filter it in the client.
+
+The workspace feed excludes organization-only events and sensitive payloads,
+including file paths/hashes, argv, environment and configuration. Actor IDs are
+stable references; stored display names are omitted. Coverage is partial and
+best effort for several runtime mutations. Existing attributed history is shown,
+but missing history is not backfilled and deleted-workspace events lose their FK
+attribution. Audit reads themselves are not recorded. The organization view
+retains its original permissions and output.
+
 `GET /api/admin/invitations` returns the latest 100 personal registration
 invitations as `{invitations:[{invitation_id,token_prefix,created_at,used_at}]}`.
 `used_at: null` means pending. `invitation_id` is a non-bearer stable handle;

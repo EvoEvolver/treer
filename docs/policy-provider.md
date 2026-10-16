@@ -5,6 +5,31 @@ keeping authentication, workspace scoping, machine-to-Agent binding, Provider
 binding, and recovery paths in the Proxy. The first wire contract is
 `treer.policy-provider/v1`.
 
+`workspace.audit.read` is a sensitive-read action on resource kind `workspace`
+and its stable ID. It has a role baseline outside the permissive monitor/default
+allow: current workspace owners (including org owners/admins) qualify, other
+members and machine/Agent identities do not. Only a **matched allow rule in
+enforce mode** can expand that baseline; action defaults and monitor rules
+cannot. Enforced deny can restrict an owner. Human membership and authenticated
+workspace binding still apply, so rules cannot grant cross-workspace access.
+For example, an enforce bundle rule may grant an existing member:
+
+```json
+{
+  "id": "workspace-audit-reader",
+  "priority": 0,
+  "effect": "allow",
+  "subjects": [{"kind": "human", "id": "usr_READER"}],
+  "actions": ["workspace.audit.read"],
+  "resources": [{"kind": "workspace", "id": "ws_TARGET"}]
+}
+```
+
+Policy explanation describes rule evaluation; the audit endpoint also enforces
+its role/membership baseline. An ordinary monitor/default-allow explanation is
+not evidence that a non-owner can read audit. App service-audience tokens use the
+represented caller's identity, never the App runtime's authority.
+
 ## Selection And Transport
 
 App identity directory capability `app.directory-paths.v1` returns current

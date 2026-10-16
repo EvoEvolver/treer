@@ -756,6 +756,7 @@ pub fn router(
         .registered_route("/agent/connect", get(agent_socket::upgrade))
         .merge(agent_control)
         .merge(app_messages)
+        .merge(workspace_audit::routes(auth_store.clone()))
         .merge(authenticated)
         .merge(admin)
         .layer(middleware::from_fn_with_state(

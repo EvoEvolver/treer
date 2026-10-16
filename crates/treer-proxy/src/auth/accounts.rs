@@ -950,7 +950,7 @@ impl AuthStore {
             "github": self.oauth.github.is_some(),
             "google": self.oauth.google.is_some(),
             "invitation_required": self.oauth.invitation_required,
-            "capabilities": [treer_protocol::ORGANIZATION_INVITATION_CAPABILITY],
+            "capabilities": [treer_protocol::ORGANIZATION_INVITATION_CAPABILITY, treer_protocol::WORKSPACE_AUDIT_CAPABILITY],
         })
     }
 

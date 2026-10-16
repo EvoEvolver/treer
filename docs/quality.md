@@ -40,6 +40,15 @@ touches Proxy persistence, authentication, membership, Policy, or Core Message.
 Do not start a database solely to satisfy a routine handoff; state which checks
 were run and whether database-backed coverage was omitted.
 
+Workspace audit PostgreSQL tests cover strict workspace scoping (excluding
+organization-only events), pagination/filter validation, no-store including
+errors, payload redaction and preservation of the old organization projection.
+The permission matrix covers owner/org admin, direct workspace owner, member,
+Agent/machine/service subjects, explicit enforce grants, monitor/default-allow
+refusal and enforced owner denial; App tokens are audience/caller bound. These
+tests do not imply complete event coverage, immutable audit storage, auditing of
+audit reads or reconstruction of unattributed/deleted-workspace history.
+
 Windows native artifact builds exercise ConPTY without an attached browser.
 The Host answers the initial cursor inheritance query required by portable-pty
 so child output can begin. The runtime tests cover split query bytes and the
