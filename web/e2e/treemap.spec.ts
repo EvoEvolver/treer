@@ -50,7 +50,7 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await expect(dialog.getByRole('button', { name: /^Open \/Research\/Experiments\/prototype · agent · workstation · idle$/ })).toBeVisible()
     await dialog.getByRole('button', { name: 'Back to parent folder' }).click()
     await dialog.getByRole('button', { name: 'Workspace', exact: true }).click()
-    await dialog.getByRole('button', { name: 'Explore folder /Ideas', exact: true }).click()
+    await dialog.getByRole('combobox', { name: 'Go to', exact: true }).selectOption('empty')
     await expect(dialog.getByText('This folder is empty', { exact: true })).toBeVisible()
     await dialog.getByRole('button', { name: 'Workspace', exact: true }).click()
     await dialog.getByRole('button', { name: 'Explore folder /Product', exact: true }).click()
@@ -74,7 +74,7 @@ test('map renders hostile names as text and stays usable after folder removal', 
   await browseTreeOnMobile(page)
   await openOverviewMap(page)
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
-  await dialog.getByRole('button', { name: 'Explore folder /<img src=x onerror=alert(1)>', exact: true }).click()
+  await dialog.getByRole('combobox', { name: 'Go to', exact: true }).selectOption('hostile')
   expect(await dialog.locator('img').count()).toBe(0)
   current = { folders: [], placements: [] }
   await page.evaluate(() => dispatchEvent(new Event('focus')))
@@ -125,65 +125,153 @@ test('loading folders disables only Add folder; an empty workspace disables both
   await expect(page.getByRole('button', { name: 'Expand tree map', exact: true })).toBeDisabled()
 })
 
+async function noMapOverflow(page: import('@playwright/test').Page) {
+  const dialog = page.getByRole('dialog', { name: 'Workspace map' })
+  await expect.poll(() => dialog.evaluate((el) => {
+    const box = el.getBoundingClientRect()
+    return box.left >= 0 && box.right <= innerWidth && box.top >= 0 && box.bottom <= innerHeight
+      && [el, ...el.querySelectorAll<HTMLElement>('*')].every((child) => {
+        const css = getComputedStyle(child)
+        return !['auto', 'scroll'].includes(css.overflowX) && !['auto', 'scroll'].includes(css.overflowY)
+      })
+  })).toBe(true)
+  const canvas = dialog.getByRole('group', { name: 'Workspace treemap' })
+  await expect.poll(() => canvas.evaluate((el) => el.scrollWidth <= el.clientWidth + 1 && el.scrollHeight <= el.clientHeight + 1)).toBe(true)
+  for (const box of await canvas.locator('button').all()) {
+    const rect = (await box.boundingBox())!
+    expect(rect.width).toBeGreaterThanOrEqual(44)
+    expect(rect.height).toBeGreaterThanOrEqual(44)
+  }
+  expect(await canvas.locator('.treemap-dot').evaluateAll((dots) => dots.every((dot) => {
+    const marker = dot.getBoundingClientRect(), block = dot.closest('[data-map-id]')!.getBoundingClientRect()
+    return !marker.width || !marker.height || (marker.left >= block.left - 0.5 && marker.right <= block.right + 0.5 && marker.top >= block.top - 0.5 && marker.bottom <= block.bottom + 0.5)
+  }))).toBe(true)
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+}
+
 for (const sample of ["small", "medium", "large"] as const) for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
-  test(`nested map ${sample} ${mobile ? '390px' : 'desktop'} ${theme}: compact identity and budgeted previews`, async ({ page }, testInfo) => {
+  test(`fixed map ${sample} ${mobile ? '390px' : 'desktop'} ${theme}: fits, scales and opens by ID`, async ({ page }, testInfo) => {
     await page.setViewportSize(mobile ? { width: 390, height: 844 } : { width: 1360, height: 960 })
-    const large = sample === "large"
-    await mockDeepTreeMapApi(page, large ? true : sample === "medium" ? "medium" : false)
+    await mockDeepTreeMapApi(page, sample === "large" ? true : sample === "medium" ? "medium" : false)
     await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
     await page.goto('/')
     await browseTreeOnMobile(page)
-    const appRow = page.getByRole('treeitem', { name: 'dashboard', exact: true })
-    await expect(appRow.locator('[data-workload-icon="app"]')).toBeVisible()
+    await expect(page.getByRole('treeitem', { name: 'dashboard', exact: true }).locator('[data-workload-icon="app"]')).toBeVisible()
     await openOverviewMap(page)
     const dialog = page.getByRole('dialog', { name: 'Workspace map' })
-    const deepAgent = dialog.getByRole('button', { name: /^Open \/Team\/Research\/Experiments\/Lab\/agent-01 · agent/ })
-    await expect(dialog.locator('[data-workload-icon="app"]')).toBeVisible()
-    if (large) {
-      await expect(deepAgent).toHaveCount(0)
-      await expect(dialog.getByRole('button', { name: 'View contents of /Team', exact: true })).toContainText('80 agents')
-      const folder = dialog.getByRole('region', { name: 'Folder /Team', exact: true })
-      await expect(folder).toContainText('offline 7')
-      await expect(folder.getByLabel('Preview of /Team', { exact: true })).toContainText('agent-01')
-      expect((await folder.boundingBox())!.height).toBeLessThan(220)
-    } else {
-      // Four folder levels automatically expand; no drilling required.
-      await expect(deepAgent).toBeVisible()
-      await expect(deepAgent.locator('[data-workload-icon="agent"]')).toBeVisible()
-      const name = await deepAgent.locator('span.truncate').first().boundingBox()
-      const status = await deepAgent.getByText('working', { exact: true }).boundingBox()
-      expect(status!.y - name!.y).toBeLessThan(52)
-      await expect(deepAgent).toHaveCSS('height', '72px')
-      await expect(deepAgent).toHaveAttribute('title', /\/Team\/Research\/Experiments\/Lab\/agent-01/)
+    await expect(dialog.locator('[data-map-id="level-0"]')).toBeVisible()
+    await noMapOverflow(page)
+    await expect(dialog.getByRole('group', { name: 'Status legend', exact: true })).toBeVisible()
+    if (sample === 'small') {
+      const agent = dialog.locator('[data-map-id="deep-0"]')
+      const block = (await agent.boundingBox())!, label = (await agent.locator('span').first().boundingBox())!
+      expect(label.y - block.y).toBeLessThan(20)
     }
-    expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    await page.screenshot({ path: testInfo.outputPath(`nested-${sample}-${theme}-${mobile ? '390' : 'desktop'}.png`) })
-    if (large) {
-      for (const path of ['/Team', '/Team/Research', '/Team/Research/Experiments', '/Team/Research/Experiments/Lab']) {
-        await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).click()
-      }
-      await expect(deepAgent).toBeVisible()
-      await expect(dialog.getByRole('button', { name: /^Open \/Team\/Research\/Experiments\/Lab\/agent-/ })).toHaveCount(80)
+    await page.screenshot({ path: testInfo.outputPath(`fixed-${sample}-${theme}-${mobile ? '390' : 'desktop'}.png`) })
+    for (const id of ['level-0', 'level-1', 'level-2', 'level-3']) {
+      await dialog.getByRole('combobox', { name: 'Go to', exact: true }).selectOption(id)
     }
-    await deepAgent.focus()
-    await page.keyboard.press('Enter')
+    await expect(dialog.getByRole('button', { name: 'Lab', exact: true })).toHaveAttribute('aria-current', 'location')
+    const picker = dialog.getByRole('combobox', { name: 'Go to', exact: true })
+    await expect(picker.locator('option[value="deep-0"]')).toHaveText(/\/Team\/Research\/Experiments\/Lab\/agent-01 · agent · workstation · working/)
+    await noMapOverflow(page)
+    if (sample === 'large' && mobile) {
+      const dot = dialog.locator('[data-map-id="deep-0"]')
+      await expect(dot).toHaveAttribute('role', 'img')
+      await expect(dot).toHaveAttribute('title', /\/Team\/Research\/Experiments\/Lab\/agent-01.*working/)
+    }
+    const marker = dialog.locator('[data-map-id="deep-0"]')
+    await marker.hover()
+    await expect(dialog.getByRole('tooltip')).toContainText('/Team/Research/Experiments/Lab/agent-01')
+    if (sample === 'large') await page.screenshot({ path: testInfo.outputPath(`fixed-large-${theme}-${mobile ? '390' : 'desktop'}-tooltip.png`) })
+    if (await marker.evaluate((el) => el.tagName === 'BUTTON')) {
+      await marker.focus()
+      await expect(dialog.getByRole('tooltip')).toContainText('working')
+    }
+    await picker.focus()
+    await picker.selectOption('deep-0')
     await expect(dialog).toHaveCount(0)
-    if (mobile) await backToWorkloads(page)
-    await expect(page.locator('[data-agent-id="deep-0"]')).toHaveAttribute('aria-selected', 'true')
-    await expect(page.locator('[data-agent-id="deep-0"] [data-workload-icon="agent"]')).toBeVisible()
+    await expect(page.locator('#workspace-panel-deep-0')).toBeVisible()
+    if (!mobile) await expect(page.locator('[data-agent-id="deep-0"]')).toHaveAttribute('aria-selected', 'true')
   })
 }
 
-
-test('a very deep small tree respects the node budget instead of recursively mounting every folder', async ({ page }) => {
-  await mockDeepTreeMapApi(page, false, 110)
+test('resize recomputes rectangles; status and input order do not move blocks', async ({ page }) => {
+  await mockTreeMapApi(page)
+  let events: import('@playwright/test').WebSocketRoute | undefined
+  await page.routeWebSocket(/\/events$/, (socket) => { events = socket })
+  let agents = mapSnapshot.agents
+  await page.route('**/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, agents } }))
+  await page.setViewportSize({ width: 1360, height: 960 })
   await page.goto('/')
-  await browseTreeOnMobile(page)
   await openOverviewMap(page)
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
-  await expect(dialog.getByRole('button', { name: 'View contents of /Team', exact: true })).toContainText('3 agents')
-  await expect(dialog.getByRole('region', { name: /^Folder / })).toHaveCount(1)
-  await expect(dialog.getByRole('button', { name: /^Open .*agent-01/ })).toHaveCount(0)
-  await dialog.getByRole('button', { name: 'View contents of /Team', exact: true }).click()
+  const blocks = dialog.locator('[data-map-id]')
+  await expect(blocks.first()).toBeVisible()
+  const geometry = () => blocks.evaluateAll((els) => els.map((el) => [el.getAttribute('data-map-id'), el.getAttribute('style')]))
+  const before = await geometry()
+  agents = [...agents].reverse().map((agent) => ({ ...agent, status: 'stopped' }))
+  events!.send(JSON.stringify({ event: 'workspace.snapshot', data: { ...mapSnapshot, revision: 2, agents } }))
+  await expect(dialog.getByRole('button', { name: /Open .*coordinator.*stopped/ })).toBeVisible()
+  expect(await geometry()).toEqual(before)
+  await dialog.locator('.treemap-agent').last().hover()
+  await expect(dialog.getByRole('tooltip')).toBeVisible()
+  await page.setViewportSize({ width: 390, height: 640 })
+  await expect.poll(geometry).not.toEqual(before)
+  await noMapOverflow(page)
+  await page.setViewportSize({ width: 1360, height: 960 })
+  await expect.poll(geometry).toEqual(before)
+  await noMapOverflow(page)
+})
+
+test('very deep trees bound nested DOM, retain ancestors and allow keyboard drill-down', async ({ page }) => {
+  await mockDeepTreeMapApi(page, false, 110)
+  await page.setViewportSize({ width: 390, height: 640 })
+  await page.goto('/')
+  await openOverviewMap(page)
+  const dialog = page.getByRole('dialog', { name: 'Workspace map' })
+  await expect(dialog.getByRole('combobox', { name: 'Folder chain /Team', exact: true }).locator('option[value="level-0"]')).toHaveText('/Team')
+  expect(await dialog.getByRole('region', { name: /^Folder / }).count()).toBeLessThanOrEqual(13)
+  const picker = dialog.getByRole('combobox', { name: 'Go to', exact: true })
+  for (let i = 0; i < 12; i++) await picker.selectOption(`level-${i}`)
+  await noMapOverflow(page)
+  await dialog.getByRole('combobox', { name: 'Earlier folders', exact: true }).selectOption('level-0')
   await expect(dialog.getByRole('button', { name: 'Team', exact: true })).toHaveAttribute('aria-current', 'location')
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('button', { name: 'Expand tree map', exact: true })).toBeFocused()
+})
+
+
+test('Chinese map localizes navigation, counts and folder descriptions', async ({ page }) => {
+  await mockTreeMapApi(page)
+  await page.addInitScript(() => localStorage.setItem('treer-lang', 'zh'))
+  await page.goto('/')
+  await page.getByRole('button', { name: '展开树图', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('combobox', { name: '前往', exact: true })).toBeVisible()
+  await expect(dialog.getByRole('region', { name: '文件夹 /Research', exact: true })).toBeVisible()
+  await expect(dialog.getByText('7 个工作负载', { exact: true })).toBeVisible()
+})
+
+
+test('single-child folder chains share one title row; every segment still drills down', async ({ page }) => {
+  await mockDeepTreeMapApi(page, true)
+  await page.setViewportSize({ width: 1360, height: 960 })
+  await page.goto('/')
+  await openOverviewMap(page)
+  const dialog = page.getByRole('dialog', { name: 'Workspace map' })
+  const segments = ['/Team', '/Team/Research', '/Team/Research/Experiments', '/Team/Research/Experiments/Lab']
+  const boxes = []
+  for (const path of segments) boxes.push((await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).boundingBox())!)
+  expect(new Set(boxes.map((box) => box.y)).size).toBe(1)
+  // Folder chains read as one compact breadcrumb rather than stretched columns.
+  expect(boxes.at(-1)!.x + boxes.at(-1)!.width - boxes[0].x).toBeLessThan(400)
+  expect(boxes[0].width).toBeLessThan(100)
+  for (const [index, path] of segments.entries()) {
+    await dialog.getByRole('button', { name: `Explore folder ${path}`, exact: true }).focus()
+    await page.keyboard.press('Enter')
+    await expect(dialog.getByRole('button', { name: path.split('/').at(-1), exact: true })).toHaveAttribute('aria-current', 'location')
+    await dialog.getByRole('button', { name: 'Workspace', exact: true }).click()
+    if (index === segments.length - 1) await noMapOverflow(page)
+  }
 })

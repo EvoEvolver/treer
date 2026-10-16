@@ -1,5 +1,9 @@
 # Tree menu and treemap review notes
 
+The original flow layout and measurements below are historical. Issue #72
+replaces it with a fixed, space-filling canvas; see the current
+[Workspace map behavior](README.md#tree-creation-menu-and-overview-map).
+
 Base: `origin/main` at `6f38c3f5f5860adc72192d2cd78c6be405188111`.
 
 The header combines creation into one + dropdown, preserving the existing
@@ -157,3 +161,47 @@ isolated `pnpm typecheck`, documentation and diff checks passed. Logs are
 visually checked and are retained locally in the ignored directory
 `/Users/dooms/treer-treemap-density/.treer/reviews/treemap-flow/`, named
 `nested-{small,medium,large}-{light,dark}-{desktop,390}.png`.
+
+## Issue #72: fixed canvas (2026-10-15)
+
+The current map fills a fixed dialog canvas instead of vertically scrolling.
+A repository-local squarified strip layout uses descendant workload counts,
+with siblings in canonical path order. ResizeObserver measures both dimensions;
+status changes do not change geometry. An empty folder has zero weight and is
+still reachable through the native Go to picker. Labels reduce with block size;
+blocks below 44×44px are non-interactive markers with accessible descriptions.
+Folder drill-down enlarges available space, and Go to keeps every immediate
+child reachable even in a dense flat folder. Breadcrumbs collapse older
+ancestors into a native picker rather than a scrolling strip.
+
+Measured against `origin/main` at `169259f`, same locked pnpm 10.12.4 toolchain:
+index.html grows from 1,106,272 to 1,110,468 bytes (+4,196 bytes); Vite's gzip
+measurement changes from 315.75 to 317.06 kB (+1.31 kB). No new dependencies,
+assets, data requests, storage, build, CSP, Worker or release changes.
+
+Local browser coverage includes 5/40/300 workloads in both themes at desktop
+and 390px, minimum click sizes, no scroll containers/overflow, 110-level trees,
+resize and geometry stability, stable-ID activation, empty and deleted folders,
+text-only hostile names, Chinese navigation, Escape and focus return. Pure layout
+checks cover proportional area, bounds, non-overlap and zero-weight inputs.
+Screenshots are local review artifacts under
+`/Users/dooms/treer/.treer/reviews/fixed-treemap-compact/` (12 base images
+and four dense-map tooltip views). No real workspace
+mutations or live-system validation were performed; no Rust/PostgreSQL tests
+are needed for this presentation-only change.
+
+Before release, single-child folder chains were compressed into one title bar.
+Each visible segment drills down independently; a native picker retains omitted
+segments on narrow screens or very deep chains. A four-level chain now reserves
+44px of title height instead of four bars. The final screenshots are under
+`/Users/dooms/treer/.treer/reviews/fixed-treemap-compact/`.
+
+The final visual increment adds a localized status legend, a visible hover/focus
+tooltip, top-left labels, and adaptive gutters/dot diameters for very thin cells.
+Browser assertions check that every status dot stays within its block, including
+the right edge at 390px; no scrollbar is introduced.
+
+Folder-chain segments use their content width and align left as a compact
+breadcrumb, with the count at the right. Segments may shrink on narrow screens
+but retain 44px hit targets and the deep-chain picker. A desktop regression
+assertion prevents the four-segment chain from stretching into separate columns.
