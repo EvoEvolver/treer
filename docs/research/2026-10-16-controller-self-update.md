@@ -67,6 +67,21 @@ activator entry must authenticate the private socket's peer/job/verified image
 and commit handoff before the parent reports accepted. No public activation
 command exists yet.
 
+The process-proof wrapper for this transport now obtains UID/PID from the exact
+connected socket (Linux SO_PEERCRED; Darwin LOCAL_PEERPID/getpeereid), requires
+the expected owned process's creation identity and the held verified image inode
+and digest, and rechecks that process before and after sending/receiving locks.
+The wrapper exposes no raw socket accessor. Same UID or same binary alone is
+insufficient; another PID, an equal-content different inode, a wrong digest or
+an exited process is rejected. Sender descriptors must already be CLOEXEC.
+This is not yet the job-bound handshake: private endpoint creation, owned child
+launch/detachment, durable ownership ACK and parent-release coordination remain
+to be wired and tested. The wrapper is not a same-account sandbox.
+Immediate lock-release proofs run in isolated test subprocesses: CLOEXEC closes
+descriptors on exec, not fork, so an unrelated parallel test's fork/exec window
+can transiently retain another lock reference. The tests remove that unrelated
+fork window rather than retrying a failed release assertion.
+
 1. Acquire an installation-wide cross-process lock (shared binaries span
    workspaces), then selected-enrollment activation lock in that order. Enumerate
    enrollment names without exposing credentials; require explicit shared-bin

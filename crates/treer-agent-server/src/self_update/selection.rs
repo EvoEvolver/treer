@@ -351,7 +351,7 @@ impl SelectionLocks {
     /// Caller must authenticate the job-local activator on this private socket
     /// before sending. Keep self alive until ownership is durably acknowledged.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    pub fn send(&self, stream: &std::os::unix::net::UnixStream) -> Result<()> {
+    pub(super) fn send(&self, stream: &std::os::unix::net::UnixStream) -> Result<()> {
         let mut files: Vec<_> = self.directories.iter().map(|(_, _, lock)| lock).collect();
         files.push(&self._enrollment);
         treer_platform::lock_transfer::send(stream, &files)
@@ -362,7 +362,10 @@ impl SelectionLocks {
     /// No caller-provided destination is accepted: all descriptor inodes must
     /// match the selected checked installation/enrollment lock names.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    pub fn receive(selected: &Selected, stream: &std::os::unix::net::UnixStream) -> Result<Self> {
+    pub(super) fn receive(
+        selected: &Selected,
+        stream: &std::os::unix::net::UnixStream,
+    ) -> Result<Self> {
         let parent = selected
             .controller_path()
             .parent()
@@ -518,8 +521,25 @@ mod tests {
         assert!(SelectionLocks::receive(&b, &receiver).is_err());
         assert!(a.lock().is_err());
         let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
-        held.send(&sender).unwrap();
-        let adopted = SelectionLocks::receive(&a, &receiver).unwrap();
+        let process =
+            treer_platform::process_image::ProcessImage::capture(std::process::id()).unwrap();
+        let digest = super::super::images::digest_file(process.executable()).unwrap();
+        let sender = super::super::handoff::AuthenticatedPeer::authenticate(
+            sender,
+            &process,
+            process.executable(),
+            &digest,
+        )
+        .unwrap();
+        let receiver = super::super::handoff::AuthenticatedPeer::authenticate(
+            receiver,
+            &process,
+            process.executable(),
+            &digest,
+        )
+        .unwrap();
+        sender.send_locks(&held).unwrap();
+        let adopted = receiver.receive_locks(&a).unwrap();
         drop(held);
         assert!(a.lock().is_err());
         assert!(b.lock().is_err());

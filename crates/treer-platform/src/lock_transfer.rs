@@ -46,6 +46,11 @@ pub fn send(stream: &UnixStream, locks: &[&File]) -> io::Result<()> {
     if locks.is_empty() || locks.len() > MAX_LOCKS {
         return Err(invalid());
     }
+    for file in locks {
+        if !rustix::io::fcntl_getfd(file)?.contains(rustix::io::FdFlags::CLOEXEC) {
+            return Err(invalid());
+        }
+    }
     stream.set_write_timeout(Some(TIMEOUT))?;
     let fds: Vec<_> = locks.iter().map(|file| file.as_fd()).collect();
     let mut space = [MaybeUninit::uninit(); rustix::cmsg_space!(ScmRights(3))];
@@ -150,8 +155,29 @@ mod tests {
         );
     }
 
+    fn isolated(helper: &str) {
+        // CLOEXEC closes on exec, not fork. Unrelated concurrent test spawns can
+        // briefly inherit lock references between fork/exec and falsify an
+        // immediate-release assertion. Run the proof with no unrelated spawns.
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", helper, "--ignored"])
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "isolated lock fixture failed: {helper}");
+    }
+
     #[test]
     fn transfer_keeps_the_original_lock_until_the_last_owner_drops() {
+        isolated("lock_transfer::tests::transfer_child");
+    }
+
+    #[test]
+    #[ignore = "isolated release proof, actually invoked by outer test"]
+    fn transfer_child() {
         let (_fixture, directory) = Fixture::new();
         let original = directory.lock("held").unwrap();
         let contender = directory.read_file("held").unwrap();
@@ -174,7 +200,38 @@ mod tests {
     }
 
     #[test]
+    fn inheritable_sender_is_rejected_in_an_isolated_child() {
+        // Never clear CLOEXEC in the concurrently spawning parent test process.
+        isolated("lock_transfer::tests::inheritable_sender_child");
+    }
+
+    #[test]
+    #[ignore = "isolated no-concurrent-spawn helper, actually invoked by outer test"]
+    fn inheritable_sender_child() {
+        let (_fixture, directory) = Fixture::new();
+        let original = directory.lock("held").unwrap();
+        let (sender, mut receiver) = UnixStream::pair().unwrap();
+        rustix::io::fcntl_setfd(&original, rustix::io::FdFlags::empty()).unwrap();
+        assert!(send(&sender, &[&original]).is_err());
+        rustix::io::fcntl_setfd(&original, rustix::io::FdFlags::CLOEXEC).unwrap();
+        receiver.set_nonblocking(true).unwrap();
+        let mut byte = [0];
+        assert_eq!(
+            std::io::Read::read(&mut receiver, &mut byte)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[test]
     fn malformed_or_wrong_count_transfer_does_not_keep_a_hidden_lock_owner() {
+        isolated("lock_transfer::tests::malformed_child");
+    }
+
+    #[test]
+    #[ignore = "isolated release proof, actually invoked by outer test"]
+    fn malformed_child() {
         for malformed in [false, true] {
             let (_fixture, directory) = Fixture::new();
             let original = directory.lock("held").unwrap();
@@ -218,6 +275,12 @@ mod tests {
 
     #[test]
     fn child_retains_all_locks_after_parent_drops_and_releases_them_on_exit() {
+        isolated("lock_transfer::tests::retention_child");
+    }
+
+    #[test]
+    #[ignore = "isolated release proof, actually invoked by outer test"]
+    fn retention_child() {
         use std::{
             io::Read,
             process::{Command, Stdio},
