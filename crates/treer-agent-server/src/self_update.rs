@@ -12,6 +12,8 @@ use uuid::Uuid;
 
 const RECEIPT_LIMIT: u64 = 64 * 1024;
 
+pub mod artifacts;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Phase {

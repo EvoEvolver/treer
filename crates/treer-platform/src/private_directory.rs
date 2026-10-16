@@ -56,6 +56,11 @@ pub struct PrivateDirectory {
 }
 
 impl PrivateDirectory {
+    /// Persist directory entries after creating transaction files.
+    pub fn sync(&self) -> io::Result<()> {
+        self.file.sync_all()
+    }
+
     /// Open an existing absolute physical directory, rejecting every symlink
     /// component. Callers canonicalize trusted OS aliases before selecting it.
     /// This never chmods a pre-existing directory or creates missing ancestors.
