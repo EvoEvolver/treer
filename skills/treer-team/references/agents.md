@@ -42,6 +42,11 @@ on **each** destination machine before using a shared profile there. Missing
 provider executables are runtime errors, not an invitation to use another
 provider or conversation.
 
+The Controller resolves bare `treer-agent` only through absolute directories in
+the Agent's final PATH, never its working directory. If it reports
+`command_not_found`, check launcher install/status; do not bypass discovery with
+a relative path such as `./treer-agent`.
+
 The shim pins Node and the local launcher; do not paste another machine's
 absolute launcher path into a profile. Native Windows `.exe` and supported
 standard npm `.cmd` provider shims are resolved without enabling arbitrary shell
@@ -69,6 +74,8 @@ Do not reuse a saved Codex session as a Claude session or edit another Agent's
 state file. Native Codex/Claude session export/import is available for deliberate
 transfers; ACP does not advertise it. Exports can contain sensitive conversation
 content even though auth/config files are excluded.
+Keep `.treer/` in the project's `.gitignore`: its session state, queues and
+transcripts can contain sensitive conversation data. Treat backups accordingly.
 
 For a plain interactive terminal Agent with no AIS/UI:
 
@@ -179,6 +186,9 @@ permission requests and selects a no-prompt/full-access mode where available.
 Treer identity/folders are not a sandbox. Use an OS account/container/VM when
 tasks need isolation; no UI confirmation protects the machine. Do not weaken
 browser guards to make direct local browser URLs work; use the Treer UI tunnel.
+Do not launch in an untrusted repository with these defaults: providers may load
+project hooks, MCP servers and settings from the working directory. Review the
+repository first or use an isolated environment.
 
 ## Verify the new integration
 
@@ -192,6 +202,9 @@ treer agent transcript /team/reviewer --page 0
 Structured transcript applies only with `transcript.read`. Inspect the actual
 saved startup and registered interface, then send an authorized small prompt
 through the UI or `treer agent prompt /team/reviewer "Reply with ready."`.
+Creating an Agent requires the corresponding `agent.create` Policy permission;
+investigate authorization failures rather than switching identities to bypass
+them.
 Check for a real assistant reply: idle or a listening port alone does not prove
 provider authentication/model requests work. Failed resume, missing provider or
 manifest mismatch should produce a clear error; do not repair them by creating
