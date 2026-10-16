@@ -5,6 +5,7 @@ export const zh: Messages = {
   "waudit.count": "{count} 条事件",
   "waudit.outcome_failed": "失败",
   "waudit.outcome_succeeded": "成功",
+  "waudit.by": "操作者：{actor}",
   "waudit.title": "工作区审计",
   "waudit.scope": "仅显示归属于此工作区的事件。覆盖并不完整：部分操作未记录，缺失的历史归属不回填，读取本日志本身不记审计。日志不防篡改。",
   "waudit.unsupported": "此 Proxy 不支持工作区审计。不会回退读取组织日志。",

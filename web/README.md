@@ -445,8 +445,13 @@ shows a clear refusal. Missing capability or HTTP 404/405 shows unsupported,
 without falling back to organization audit. Organization audit remains separate.
 
 The shared event list resolves known Agent IDs to full tree paths and renders
-text only. The workspace reader validates scope and projects display fields;
-credentials, arbitrary payloads, names and raw server error bodies are not shown.
+text only. Workspace rows explicitly show “by” the actor (Agent path, a name from
+the already-loaded member directory, or the stable ID), a resource-type icon and
+a colored outcome badge. Secondary row text is at least 12px. On phones the
+filters are collapsed by default behind an accessible Filters button. No extra
+member-directory request is introduced for audit. The workspace reader validates
+scope and projects display fields; credentials, arbitrary payloads, server-supplied
+display names and raw server error bodies are not shown.
 Coverage is incomplete, missing historical attribution is not backfilled, and
 reads are not themselves audited. Workspace deletion can remove attribution.
 This is an operational log, not a complete or tamper-proof ledger; see the Core

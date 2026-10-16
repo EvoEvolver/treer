@@ -38,7 +38,7 @@ for (const theme of ['light', 'dark']) for (const width of [1360, 390]) test(`wo
     return ok(route, query.has('before') ? { events: [event(70, { resource_kind: 'app', resource_id: 'older-app' })], next_cursor: null } : { events: [event()], next_cursor: 80 })
   })
   const audit = await openAudit(page, width === 390)
-  await expect(audit.getByText('/Research/reviewer', { exact: true })).toBeVisible()
+  await expect(audit.getByText('by /Research/reviewer', { exact: true })).toBeVisible()
   await expect(audit.getByText('/Product/reviewer', { exact: true })).toBeVisible()
   await expect(audit.getByText(/Coverage is incomplete/)).toBeVisible()
   await audit.getByRole('button', { name: 'Older', exact: true }).click()
@@ -48,6 +48,13 @@ for (const theme of ['light', 'dark']) for (const width of [1360, 390]) test(`wo
   expect(queries.at(-1)?.get('before')).toBe('80')
   await audit.getByRole('button', { name: 'Newer', exact: true }).click()
   await expect(audit.getByText('/Product/reviewer', { exact: true })).toBeVisible()
+  if (width === 390) {
+    const filters = audit.getByRole('button', { name: 'Audit filters', exact: true })
+    await expect(filters).toHaveAttribute('aria-expanded', 'false')
+    await expect(audit.getByRole('form', { name: 'Audit filters', exact: true })).toBeHidden()
+    await filters.click()
+    await expect(filters).toHaveAttribute('aria-expanded', 'true')
+  }
   await audit.getByLabel('Actor ID', { exact: true }).fill('reviewer-a')
   await audit.getByLabel('Action', { exact: true }).fill('agent.created')
   await audit.getByLabel('Resource kind', { exact: true }).fill('agent')
@@ -62,10 +69,12 @@ for (const theme of ['light', 'dark']) for (const width of [1360, 390]) test(`wo
   expect(query.get('limit')).toBe('50')
   expect(Date.parse(query.get('until')!) - Date.parse(query.get('since')!)).toBe(86_400_000)
   await expect(audit.getByText('/Product/reviewer', { exact: true })).toBeVisible()
+  if (width === 390) await audit.getByRole('button', { name: 'Audit filters', exact: true }).click()
   if (width === 390) await page.screenshot({ path: info.outputPath(`workspace-audit-events-${theme}-${width}.png`), fullPage: true })
   await audit.evaluate((element) => { for (let parent: HTMLElement | null = element; parent; parent = parent.parentElement) parent.scrollTop = 0 })
   await page.screenshot({ path: info.outputPath(`workspace-audit-${theme}-${width}.png`), fullPage: true })
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  if (width === 390) await audit.getByRole('button', { name: 'Audit filters', exact: true }).click()
   await audit.getByRole('button', { name: 'Clear filters', exact: true }).click()
   await expect.poll(() => queries.at(-1)?.has('action')).toBe(false)
   expect(orgRequests).toEqual([])
@@ -102,12 +111,12 @@ test('workspace audit rejects cross-workspace rows and hides arbitrary fields', 
   let crossWorkspace = false
   await page.route(path, (route) => ok(route, { events: [event(80, { workspace_id: crossWorkspace ? 'other-workspace' : workspaceId, actor_name: 'private-name', resource_name: '<img src=x onerror=alert(1)>', payload: { body: 'private-body', argv: 'private-argv' } })], next_cursor: null }))
   const audit = await openAudit(page)
-  await expect(audit.getByText('/Research/reviewer', { exact: true })).toBeVisible()
+  await expect(audit.getByText('by /Research/reviewer', { exact: true })).toBeVisible()
   await expect(page.getByText(/private-name|private-body|private-argv|onerror/)).toHaveCount(0)
   crossWorkspace = true
   await audit.getByRole('button', { name: 'Refresh audit', exact: true }).click()
   await expect(audit.getByRole('alert')).toContainText('Unable to load')
-  await expect(audit.getByText('/Research/reviewer', { exact: true })).toHaveCount(0)
+  await expect(audit.getByText('by /Research/reviewer', { exact: true })).toHaveCount(0)
 })
 
 test('filter validation avoids requests for invalid IDs and oversized time ranges', async ({ page }) => {
@@ -202,4 +211,19 @@ test('switching workspace drops the old feed and ignores a delayed old response'
   release!()
   await expect(audit.getByText('first-private-result', { exact: true })).toHaveCount(0)
   await expect(audit.getByRole('status')).toHaveText('Page 1')
+})
+
+
+test('audit actor names resolve only from the already-visible directory, with stable ID fallback', async ({ page }) => {
+  await setup(page)
+  await page.route('**/members', (route) => ok(route, { members: [{ user_id: 'known-user', preferred_name: 'Visible colleague', email: 'synthetic@example.test', role: 'member' }] }))
+  await page.route(path, (route) => ok(route, { events: [event(80, { actor_kind: 'user', actor_id: 'known-user', actor_name: 'do-not-use-server-name' }), event(79, { actor_kind: 'user', actor_id: 'unknown-user', outcome: 'failed' })], next_cursor: null }))
+  const audit = await openAudit(page)
+  await expect(audit.getByText('by Visible colleague', { exact: true })).toBeVisible()
+  await expect(audit.getByText('by unknown-user', { exact: true })).toBeVisible()
+  await expect(audit.getByText('do-not-use-server-name')).toHaveCount(0)
+  await expect(audit.locator('svg.lucide-bot')).toHaveCount(2)
+  await expect(audit.getByText('Failed', { exact: true })).toHaveClass(/text-destructive/)
+  await expect(audit.getByText('Succeeded', { exact: true })).toHaveClass(/text-status-working/)
+  expect(await audit.getByText('Failed', { exact: true }).evaluate((element) => parseFloat(getComputedStyle(element).fontSize))).toBeGreaterThanOrEqual(12)
 })

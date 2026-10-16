@@ -1,10 +1,14 @@
 import { TrafficOverview } from "@/components/traffic-overview"
 import { agentPath } from "@/lib/workload-path"
 import { EmptyState } from "@/components/control-plane-ui"
-import { type Agent, type Machine, type OrganizationAuditEvent } from "@/lib/api"
+import { type Agent, type Machine, type Member, type OrganizationAuditEvent } from "@/lib/api"
+import { cn } from "@/lib/utils"
 import { initials } from "@/lib/control-plane"
 import {
   Activity,
+  AppWindow,
+  Bot,
+  Server,
   RotateCw,
   ScrollText
 } from "lucide-react"
@@ -40,7 +44,21 @@ export function AuditView({ events, workspaceId, refreshRevision, agents, machin
   </div></div>
 }
 
-// Shared by organization and workspace audit; identity/path rendering stays identical.
-export function AuditEventList({ events, agents = [], loading, workspace = false }: { events: OrganizationAuditEvent[]; agents?: Agent[]; loading: boolean; workspace?: boolean }) {
-  return <section><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">{t("org.activity")}</h2><span className="text-[10px] text-muted-foreground">{workspace ? t("waudit.count", { count: events.length }) : `${events.length} events`}</span></div><div className="border-y divide-y">{events.map((event) => { const actorAgent = agents.find((agent) => agent.agent_id === event.actor_id); const resourceAgent = agents.find((agent) => agent.agent_id === event.resource_id); const actor = event.actor_kind === "agent" ? actorAgent ? agentPath(actorAgent) : event.actor_id ?? t("dialogs.agent_fallback") : event.actor_name ?? event.actor_id ?? event.actor_kind; const resource = event.resource_kind === "agent" ? resourceAgent ? agentPath(resourceAgent) : event.resource_id : event.resource_name ?? event.resource_id; return <div key={event.event_id} className="grid min-h-16 grid-cols-[32px_minmax(0,1fr)] gap-3 py-3 sm:grid-cols-[32px_minmax(0,1fr)_auto] sm:items-center"><span className="grid size-8 place-items-center rounded bg-[#dcebea] text-[10px] font-bold text-[#35645f]">{initials(actor)}</span><div className="min-w-0"><div className="truncate text-xs"><span className="font-medium" title={actor}>{actor}</span> <span className="text-muted-foreground">{workspace ? event.action : auditActionLabels[event.action] ?? event.action}</span></div><div title={resource} className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{resource}</div>{workspace && <p className="mt-1 text-[10px] text-muted-foreground">{t(event.outcome === "failed" ? "waudit.outcome_failed" : "waudit.outcome_succeeded")}</p>}</div><time className="col-start-2 text-[10px] text-muted-foreground sm:col-start-auto" dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleString(intlLocale())}</time></div>})}{!events.length && <EmptyState icon={loading ? <RotateCw className="animate-spin" /> : <Activity />} label={loading ? t("audit.loading_activity") : t("audit.no_activity")} />}</div></section>
+// Shared path resolution; workspace rows use only the already-visible member directory.
+export function AuditEventList({ events, agents = [], members = [], loading, workspace = false }: { events: OrganizationAuditEvent[]; agents?: Agent[]; members?: Member[]; loading: boolean; workspace?: boolean }) {
+  return <section><div className="mb-3 flex items-center justify-between"><h2 className="text-sm font-semibold">{t("org.activity")}</h2><span className="text-[10px] text-muted-foreground">{workspace ? t("waudit.count", { count: events.length }) : `${events.length} events`}</span></div><div className="border-y divide-y">{events.map((event) => { const actorAgent = agents.find((agent) => agent.agent_id === event.actor_id); const resourceAgent = agents.find((agent) => agent.agent_id === event.resource_id); const actor = event.actor_kind === "agent" ? actorAgent ? agentPath(actorAgent) : event.actor_id ?? t("dialogs.agent_fallback") : event.actor_name ?? event.actor_id ?? event.actor_kind; const resource = event.resource_kind === "agent" ? resourceAgent ? agentPath(resourceAgent) : event.resource_id : event.resource_name ?? event.resource_id; if (workspace) {
+      const who = event.actor_kind === "agent" ? actor : members.find((member) => member.user_id === event.actor_id)?.preferred_name || event.actor_id || event.actor_kind
+      const Icon = event.resource_kind === "agent" ? Bot : event.resource_kind === "app" ? AppWindow : event.resource_kind === "machine" ? Server : ScrollText
+      return <div key={event.event_id} className="grid grid-cols-[32px_minmax(0,1fr)] gap-3 py-4 sm:grid-cols-[32px_minmax(0,1fr)_auto] sm:items-start">
+        <span className="grid size-8 place-items-center rounded bg-muted text-muted-foreground"><Icon aria-hidden="true" className="size-4" /></span>
+        <div className="min-w-0 space-y-1.5">
+          <p title={resource} className="break-words text-sm font-medium [overflow-wrap:anywhere]">{resource}</p>
+          <p title={who} className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{t("waudit.by", { actor: who })}</p>
+          <p className="break-words font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">{event.action}</p>
+          <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-medium", event.outcome === "failed" ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-status-working/30 bg-status-working/10 text-status-working")}>{t(event.outcome === "failed" ? "waudit.outcome_failed" : "waudit.outcome_succeeded")}</span>
+        </div>
+        <time className="col-start-2 text-xs text-muted-foreground sm:col-start-auto" dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleString(intlLocale())}</time>
+      </div>
+    }
+    return <div key={event.event_id} className="grid min-h-16 grid-cols-[32px_minmax(0,1fr)] gap-3 py-3 sm:grid-cols-[32px_minmax(0,1fr)_auto] sm:items-center"><span className="grid size-8 place-items-center rounded bg-[#dcebea] text-[10px] font-bold text-[#35645f]">{initials(actor)}</span><div className="min-w-0"><div className="truncate text-xs"><span className="font-medium" title={actor}>{actor}</span> <span className="text-muted-foreground">{workspace ? event.action : auditActionLabels[event.action] ?? event.action}</span></div><div title={resource} className="mt-1 truncate font-mono text-[9px] text-muted-foreground">{resource}</div>{workspace && <p className="mt-1 text-[10px] text-muted-foreground">{t(event.outcome === "failed" ? "waudit.outcome_failed" : "waudit.outcome_succeeded")}</p>}</div><time className="col-start-2 text-[10px] text-muted-foreground sm:col-start-auto" dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleString(intlLocale())}</time></div>})}{!events.length && <EmptyState icon={loading ? <RotateCw className="animate-spin" /> : <Activity />} label={loading ? t("audit.loading_activity") : t("audit.no_activity")} />}</div></section>
 }

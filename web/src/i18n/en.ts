@@ -4,6 +4,7 @@ export const en = {
   "waudit.count": "Events: {count}",
   "waudit.outcome_failed": "Failed",
   "waudit.outcome_succeeded": "Succeeded",
+  "waudit.by": "by {actor}",
   "waudit.title": "Workspace audit",
   "waudit.scope": "Events attributed to this workspace only. Coverage is incomplete: some operations are not recorded, missing historical attribution is not backfilled, and reading this log is not itself audited. This log is not tamper-proof.",
   "waudit.unsupported": "Workspace audit is not supported by this Proxy. No organization log fallback is used.",

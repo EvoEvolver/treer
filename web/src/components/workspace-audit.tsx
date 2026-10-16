@@ -1,10 +1,11 @@
 import { useEffect, useState, type FormEvent } from "react"
-import { RotateCw } from "lucide-react"
+import { ChevronDown, RotateCw } from "lucide-react"
 import { AuditEventList } from "@/components/audit-view"
 import { Field } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
-import { api, ApiError, type Agent, type OrganizationAuditEvent } from "@/lib/api"
+import { api, ApiError, type Agent, type Member, type OrganizationAuditEvent } from "@/lib/api"
+import { cn } from "@/lib/utils"
 import { t } from "@/i18n"
 
 interface Filters { since: string; until: string; actor_id: string; action: string; resource_kind: string }
@@ -25,7 +26,8 @@ function auditPage(value: unknown, workspaceId: string): Page {
   return { events, next_cursor: page.next_cursor }
 }
 
-export function WorkspaceAudit({ workspaceId, agents, preview }: { workspaceId: string; agents: Agent[]; preview: boolean }) {
+export function WorkspaceAudit({ workspaceId, agents, members, preview }: { workspaceId: string; agents: Agent[]; members: Member[]; preview: boolean }) {
+  const [filtersOpen, setFiltersOpen] = useState(false)
   const [draft, setDraft] = useState<Filters>(emptyFilters)
   const [filters, setFilters] = useState<Filters>(emptyFilters)
   const [cursors, setCursors] = useState<(number | undefined)[]>([undefined])
@@ -80,13 +82,14 @@ export function WorkspaceAudit({ workspaceId, agents, preview }: { workspaceId: 
   return <section aria-label={t("waudit.title")} className="min-w-0 space-y-5">
     <div className="flex flex-wrap items-center justify-between gap-3"><h2 className="text-lg font-semibold">{t("waudit.title")}</h2><Button variant="outline" className="min-h-11" onClick={() => { setPage(undefined); setRevision((value) => value + 1) }} disabled={loading}><RotateCw className={loading ? "animate-spin" : ""} />{t("waudit.refresh")}</Button></div>
     <p className="text-xs leading-5 text-muted-foreground">{t("waudit.scope")}</p>
-    <form onSubmit={apply} aria-label={t("waudit.filters")} className="grid min-w-0 gap-3 rounded-md border bg-muted/20 p-4 sm:grid-cols-2 lg:grid-cols-3">
+    <Button variant="outline" className="min-h-11 w-full justify-between sm:hidden" aria-expanded={filtersOpen} aria-controls="workspace-audit-filters" onClick={() => setFiltersOpen((open) => !open)}>{t("waudit.filters")}<ChevronDown aria-hidden="true" className={cn("size-4", filtersOpen && "rotate-180")} /></Button>
+    <form id="workspace-audit-filters" onSubmit={apply} aria-label={t("waudit.filters")} className={cn("min-w-0 gap-3 rounded-md border bg-muted/20 p-4 sm:grid sm:grid-cols-2 lg:grid-cols-3", filtersOpen ? "grid" : "hidden")}>
       {(["since", "until", "actor_id", "action", "resource_kind"] as const).map((key) => <Field key={key} label={t(`waudit.${key}`)}><Input aria-label={t(`waudit.${key}`)} className="min-h-11 min-w-0 w-full" type={key === "since" || key === "until" ? "datetime-local" : "text"} maxLength={128} value={draft[key]} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} /></Field>)}
       <div className="flex flex-wrap items-end gap-2"><Button className="min-h-11" type="submit">{t("waudit.apply")}</Button><Button className="min-h-11" variant="outline" type="button" onClick={() => { setDraft(emptyFilters); setFilters({ ...emptyFilters }); setPage(undefined); setValidation(undefined); setCursors([undefined]) }}>{t("waudit.clear")}</Button></div>
-      <p className="text-[11px] leading-5 text-muted-foreground sm:col-span-2 lg:col-span-3">{t("waudit.filter_hint")}</p>
+      <p className="text-xs leading-5 text-muted-foreground sm:col-span-2 lg:col-span-3">{t("waudit.filter_hint")}</p>
       {validation && <p role="alert" className="text-xs text-destructive sm:col-span-2 lg:col-span-3">{validation}</p>}
     </form>
-    {error ? <p role="alert" className="rounded-md border p-4 text-sm">{error}</p> : <div aria-busy={loading}><AuditEventList events={page?.events ?? []} agents={agents} loading={loading} workspace /></div>}
+    {error ? <p role="alert" className="rounded-md border p-4 text-sm">{error}</p> : <div aria-busy={loading}><AuditEventList events={page?.events ?? []} agents={agents} members={members} loading={loading} workspace /></div>}
     <nav aria-label={t("waudit.pagination")} className="flex flex-wrap items-center justify-between gap-3">
       <Button className="min-h-11" variant="outline" disabled={loading || cursors.length <= 1} onClick={() => { setPage(undefined); setCursors((current) => current.slice(0, -1)) }}>{t("waudit.newer")}</Button>
       <span role="status" className="text-xs text-muted-foreground">{t("waudit.page", { page: cursors.length })}</span>

@@ -184,7 +184,7 @@ export function WorkspaceSettingsView({ agents, workspace, organization, name, m
         <TabsTrigger value="settings" className="min-h-11">{t("settings.title")}</TabsTrigger>
         <TabsTrigger value="audit" className="min-h-11">{t("audit.audit")}</TabsTrigger>
       </TabsList>
-      <TabsContent value="audit"><WorkspaceAudit key={workspace.workspace_id} workspaceId={workspace.workspace_id} agents={agents} preview={preview} /></TabsContent>
+      <TabsContent value="audit"><WorkspaceAudit key={workspace.workspace_id} workspaceId={workspace.workspace_id} agents={agents} members={organizationMembers} preview={preview} /></TabsContent>
       <TabsContent value="settings">
     {!preview && machines.length === 0 && machineCount === 0 && <div role="status" className="mb-6 flex flex-col items-start gap-3 rounded-md border bg-muted/50 p-4 text-sm sm:flex-row sm:items-center sm:justify-between">
       <div><p className="font-medium">{t("wsettings.add_a_machine_to_create")}</p><p className="mt-1 text-xs text-muted-foreground">{t("wsettings.agents_run_on_machines_connect")}</p></div>
