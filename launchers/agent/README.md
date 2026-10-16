@@ -204,7 +204,7 @@ stale `rollouts/.lock` directory and repeating the same command. An interrupted
 or incomplete rollback requires inspecting the journal and recovering explicitly,
 not blindly starting a new rollout. No command uses broad process killing.
 
-The default launcher is installed through the local Controller (next release):
+The default launcher is installed through the local Controller:
 
 ```bash
 treer-agent-server launcher install --node /absolute/trusted/path/to/node
@@ -212,6 +212,24 @@ treer-agent-server launcher update --node /absolute/trusted/path/to/node
 treer-agent-server launcher status --node /absolute/trusted/path/to/node
 treer-agent-server launcher rollback --node /absolute/trusted/path/to/node
 ```
+
+With multiple local Controller enrollments, discovery fails closed with
+`launcher_controller_ambiguous`. Select the local workspace explicitly; add the
+URL only when that workspace still matches multiple enrollments:
+
+```bash
+treer-agent-server launcher --workspace WORKSPACE_ID --url http://127.0.0.1:PORT \
+  --node /absolute/trusted/path/to/node status
+```
+
+The selectors apply to install/update/status/rollback. The URL must match a local
+enrollment; it cannot select an arbitrary remote Controller. Managed or bound
+operator identities cannot override their workspace/URL bindings. One selection
+is preserved through the contract probe, installer profile writes/readbacks and
+status queries. Candidates expose bounded server/workspace IDs and listen
+addresses, not credentials or machine roots. No enrollment, failed probe and
+unsupported contract are distinct errors; none permits fallback to another
+Controller. Even status requires a successful query of the selected Controller.
 
 Official binaries embed the same-release portable runtime, UI, profiles and
 installer, authenticated by the signed Controller artifact. No repository,
