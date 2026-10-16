@@ -54,7 +54,8 @@ if [ "${TREER_RELEASE_RESUME:-0}" = 1 ] && \
 else
     rm -f "$checkpoint"
     just test-db-up
-    just check
+    # The release gate takes priority over author gates for the machine-wide slot.
+    TREER_GATE_ROLE=release TREER_GATE_NAME=release just check
     python3 scripts/release-checkpoint.py write "$checkpoint" "$commit" web/dist/index.html
 fi
 cp web/dist/index.html "$release_root/app/index.html"

@@ -10,7 +10,7 @@ fmt:
     cargo fmt --all
 
 test:
-    cargo test --workspace
+    python3 scripts/gate-lock.py -- cargo test --workspace
 
 lint:
     cargo clippy --workspace --all-targets -- -D warnings
@@ -18,7 +18,11 @@ lint:
 service-canary:
     cargo test -p treer-agent-server service_canary_ -- --nocapture
 
+# Full gate: takes the machine-wide gate slot (see scripts/gate-lock.py); focused recipes do not.
 check:
+    python3 scripts/gate-lock.py -- just check-unlocked
+
+check-unlocked:
     node scripts/check-docs.mjs
     python3 -m unittest discover -s scripts/tests -p 'test_*.py' -v
     node --test scripts/release-r2.test.mjs scripts/machine-artifacts.test.mjs scripts/release-security.test.mjs scripts/prepare-launcher-release.test.mjs scripts/machine-rollout.test.mjs
@@ -43,7 +47,7 @@ web-build:
     cd web && pnpm build
 
 web-test:
-    cd web && pnpm test:e2e
+    python3 scripts/gate-lock.py -- sh -c 'cd web && pnpm test:e2e'
 
 mail config state=".treer/apps/mail":
     TREER_APP_CONFIG={{config}} TREER_APP_STATE_DIR={{state}} python3 apps/mail/mail.py
@@ -75,6 +79,9 @@ app-test:
     just agent-launcher-test
 
 agent-launcher-test:
+    python3 scripts/gate-lock.py -- just agent-launcher-test-unlocked
+
+agent-launcher-test-unlocked:
     npm --prefix launchers/agent ci
     npm --prefix launchers/agent run check
     npm --prefix launchers/agent test

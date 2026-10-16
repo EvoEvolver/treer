@@ -101,3 +101,31 @@ the author gate: the defaults-profile change (#84) passed its focused PostgreSQL
 tests and still broke a workspace-deletion test only the full suite runs. Release
 keeps the final say and still runs the exact-SHA gate, CI, native, canary and
 the Policy check.
+
+## One full gate at a time on the shared machine
+
+Up to five agents used to run full gates (Rust with PostgreSQL/NATS, Playwright
+with four workers, launcher browser tests) on the same Mac at once. The load
+average reached 11-27 and timing-sensitive tests then failed for reasons that
+had nothing to do with the change (#112, #125, #128, #129). `just check`,
+`just agent-launcher-test`, `just test` and `just web-test` therefore take a
+machine-wide slot through `scripts/gate-lock.py` (an advisory `flock` under
+`~/.cache/treer-gate/`, released by the OS if the holder dies):
+
+- One holder at a time. A waiting gate prints
+  `gate-lock: waiting for gate slot held by <name> (pid ..., since ...)`.
+- Release gates take priority: the release scripts set `TREER_GATE_ROLE=release`
+  (`scripts/release-canary.sh` does it for `just check`); while a live release
+  gate is waiting or running, author gates do not start, and a release gate
+  that arrives goes before queued authors.
+- Nested use is free (the child gets `TREER_GATE_HELD=1`), so `just check`
+  can call `just agent-launcher-test`.
+- Focused runs (one spec, `cargo test -p <crate> <filter>`, a single script
+  test) do not take the slot; they stay cheap. Do not run
+  `pnpm test:e2e` or `cargo test --workspace` directly as an author gate: use
+  the recipes so the slot applies.
+- Hosted CI (`CI` set) and `TREER_GATE_LOCK=0` skip the slot; the latter is for
+  emergencies and must be stated in the freeze comment.
+- Author gates run with private databases/ports as before; the slot only stops
+  them from competing with each other and with the release gate.
+
