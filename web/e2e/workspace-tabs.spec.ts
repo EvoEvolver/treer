@@ -654,7 +654,8 @@ test.describe('an App opens on its own ingress URL in a new browser tab', () => 
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
     expect(popup.url()).toBe(own)
     // The new page gets no Referer and no opener from the Console.
-    expect(referers.at(-1)).toBeUndefined()
+    await expect.poll(() => referers.length).toBe(1)
+    expect(referers[0]).toBeUndefined()
     expect(await popup.evaluate(() => window.opener)).toBeNull()
     await popup.close()
   })
