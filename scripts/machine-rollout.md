@@ -29,6 +29,10 @@ including releases that deliberately reused verified machine artifacts. The
 operator must trust the local release receipt and explicitly supplied HTTPS
 Proxy origin: checksum pinning does **not** add independent publisher signatures.
 Redirects, credentials in URLs and ambient download proxies are refused.
+The operator needs Policy authorization for `machine.exec`, `machine.file.write`
+(including the private job directory), and Agent create/delete. Keep targets and
+receipts outside the repository and shared directories: they reveal installation
+and backup locations. Treat backups as sensitive startup intent.
 
 ## Explicit targets
 
@@ -79,7 +83,8 @@ shorter machine root rather than treating verbatim prefixes as a universal fix.
 `harness` is explicitly `codex`, `claude`, or `acp`; for ACP also supply an absolute
 trusted `acpCommand`. No automatic login, harness fallback or credentials copying
 occurs. Optional `smokeFolder` is an authorized absolute Tree folder (default `/`),
-independent of the smoke Agent's filesystem cwd `.`.
+independent of the smoke Agent's filesystem cwd (a new empty `smoke` directory
+inside its private rollout job).
 
 ## Execution and recovery
 
@@ -104,7 +109,10 @@ After core activation, the worker explicitly binds workspace/server/loopback URL
 for `launcher install` and all CLI calls. It creates one UUID-named smoke Agent,
 waits for `idle` **and** a registered `treer.agent-interface/v1` interface, then
 deletes only the Agent ID returned by its own creation. This checks startup and
-UI registration, not an authenticated model prompt/reply. Existing Agents are
+UI registration, not an authenticated model prompt/reply.
+The dedicated empty cwd avoids project settings in the enrolled root itself;
+it does not disable provider-global or inherited ancestor hooks/MCP settings.
+Existing Agents are
 not switched to a new launcher or restarted. Installation saves the canonical
 shared profiles in the selected workspace.
 

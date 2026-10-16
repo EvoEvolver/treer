@@ -73,13 +73,13 @@ export async function download(url, limit = 8192) {
   }
   return Buffer.concat(chunks);
 }
-export async function smoke(target, cli, timeout, run = command, observe = () => {}) {
+export async function smoke(target, cli, timeout, run = command, observe = () => {}, cwd = ".") {
   const name = "rollout-smoke-" + randomUUID();
   observe({ name, status: "creating" });
   let id;
   try {
     const value = JSON.parse(await run([...cli, "agent", "admin", "create", "--kind", "command", "--name", name,
-      "--machine", target.serverId, "--folder", target.smokeFolder || "/", "--cwd", ".", "--",
+      "--machine", target.serverId, "--folder", target.smokeFolder || "/", "--cwd", cwd, "--",
       "treer-agent", "--harness", target.harness, ...(target.harness === "acp" ? ["--acp-command", target.acpCommand] : [])], undefined, timeout));
     id = value.agent_id || value.agent?.agent_id;
     if (!/^ag_[A-Za-z0-9_-]+$/.test(id || "")) throw new Error("smoke_agent_id_missing");
@@ -161,8 +161,9 @@ export async function worker(jobPath, { runCommand = command, fetchArtifact = do
     receipt.phase = "launcher_install"; receipt.coreUpdated = true; progress();
     await run([target.controller, "launcher", "--workspace", target.workspace, "--url", local.origin,
       "--node", target.node, "--treer", target.cli, "install"], undefined, 360000);
+    const smokeDirectory = join(directory, "smoke"); mkdirSync(smokeDirectory, { mode: 0o700 });
     receipt.phase = "smoke"; progress();
-    receipt.smoke = await smoke(target, [target.cli], 90000, run, value => { receipt.smoke = value; progress(); });
+    receipt.smoke = await smoke(target, [target.cli], 90000, run, value => { receipt.smoke = value; progress(); }, smokeDirectory);
     receipt.phase = "complete"; receipt.status = "complete";
   } catch (error) {
     for (const file of [join(directory, "core/result.json"), join(directory, "windows-stage/result.json")]) {

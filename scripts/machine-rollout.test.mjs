@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync, existsSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
@@ -102,7 +102,11 @@ test("worker enforces pinned sums, core-before-launcher ordering, partial receip
           return "{}";
         }
         if (argv.includes("launcher")) { if (mode === "partial") throw new Error("launcher_failed"); return "{}"; }
-        if (argv.includes("create")) return '{"agent_id":"ag_smoke"}';
+        if (argv.includes("create")) {
+          assert.equal(argv[argv.indexOf("--cwd") + 1], join(jobDir, "smoke"));
+          assert.deepEqual(readdirSync(join(jobDir, "smoke")), []);
+          return '{"agent_id":"ag_smoke"}';
+        }
         if (argv.includes("show")) return '{"status":"idle","interface":{"protocol":"treer.agent-interface/v1"}}';
         return "{}";
       } });
