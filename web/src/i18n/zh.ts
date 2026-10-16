@@ -637,6 +637,7 @@ export const zh: Messages = {
   "tree.move_to_folder": "移到文件夹",
   "tree.move_up": "上移",
   "tree.move_down": "下移",
+  "tree.no_machines": "此工作区还没有机器。前往设置添加机器，即可运行 Agent。",
   "tree.tree": "Tree",
   "tree.add_folder": "添加文件夹",
   "tree.set_up_a_machine_first": "请先设置机器",

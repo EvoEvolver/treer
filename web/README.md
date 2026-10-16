@@ -153,6 +153,9 @@ The Tree header has one **+** menu for **Add folder** and **Add agent**. Each it
 keeps its original disabled conditions; without machines, Add agent explains the
 required setup and opens machine settings, with a visible explanation and a
 **Set up a machine** button that opens enrollment instructions. The tour still targets `create-agent`.
+When a workspace has no machines, the Tree also shows an always-visible setup
+button linking to the same workspace settings and enrollment flow; it is hidden
+in tour previews and disappears when a machine joins.
 Folder context menus retain their existing creation actions and destinations.
 
 **Workspace map** in the Overview header opens a read-only treemap in a large
