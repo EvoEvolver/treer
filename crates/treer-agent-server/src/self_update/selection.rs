@@ -430,7 +430,7 @@ impl SelectionLocks {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use std::{
         io::Write,
@@ -438,13 +438,13 @@ mod tests {
     };
     use uuid::Uuid;
 
-    struct Fixture {
-        path: PathBuf,
+    pub(in crate::self_update) struct Fixture {
+        pub(in crate::self_update) path: PathBuf,
         config: PrivateDirectory,
-        bin: PathBuf,
+        pub(in crate::self_update) bin: PathBuf,
     }
     impl Fixture {
-        fn new() -> Self {
+        pub(in crate::self_update) fn new() -> Self {
             let path = std::env::temp_dir()
                 .canonicalize()
                 .unwrap()
@@ -470,7 +470,12 @@ mod tests {
                 .unwrap();
             Self { path, config, bin }
         }
-        fn enrollment(&self, server: &str, workspace: &str, controller: &Path) {
+        pub(in crate::self_update) fn enrollment(
+            &self,
+            server: &str,
+            workspace: &str,
+            controller: &Path,
+        ) {
             for (name, json) in [
                 (
                     format!("{server}-controller.json"),
@@ -497,7 +502,7 @@ mod tests {
                     .unwrap();
             }
         }
-        fn inventory(&self) -> Inventory {
+        pub(in crate::self_update) fn inventory(&self) -> Inventory {
             Inventory::load(&self.path.join("config"), "fixture-host").unwrap()
         }
     }
@@ -505,6 +510,237 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.path).unwrap();
         }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn durable_ownership_handoff_runs_in_an_isolated_process() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "self_update::selection::tests::ownership_case",
+                "--ignored",
+                "--nocapture",
+            ])
+            .env_clear()
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[ignore = "isolated subprocess fixture, invoked by the outer ownership test"]
+    fn ownership_case() {
+        use super::super::{
+            handoff::{AuthenticatedPeer, Endpoint},
+            images::digest_file,
+            Journal,
+        };
+        use std::{
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        use treer_platform::process_image::ProcessImage;
+
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let f = Fixture::new();
+        f.enrollment("srv_a", "ws_a", &f.bin.join("treer-agent-server"));
+        f.enrollment("srv_b", "ws_b", &f.bin.join("treer-agent-server"));
+        let selected = f.inventory().select(Some("ws_a"), true).unwrap();
+        let other = f.inventory().select(Some("ws_b"), true).unwrap();
+        let short = std::fs::canonicalize("/tmp")
+            .unwrap()
+            .join(format!("to-{}", Uuid::new_v4().simple()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&short)
+            .unwrap();
+        struct Jobs(PathBuf);
+        impl Drop for Jobs {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let jobs = Jobs(short);
+        let root = PrivateDirectory::open(&jobs.0).unwrap();
+        let own = ProcessImage::capture(std::process::id()).unwrap();
+        let digest = digest_file(own.executable()).unwrap();
+        for mode in ["normal", "exit-before-ack", "wrong-job", "existing-record"] {
+            let held = selected.lock().unwrap();
+            let mut receipt = super::super::tests::receipt();
+            receipt.workspace_id = "ws_a".into();
+            receipt.server_id = "srv_a".into();
+            let journal = Journal::create(&root, &receipt).unwrap();
+            let job = jobs.0.join(receipt.job_id.to_string());
+            Endpoint::mark_prepared(&journal, &job).unwrap();
+            let prepared = journal.read().unwrap();
+            if mode == "existing-record" {
+                journal
+                    .directory
+                    .create_file("ownership.json")
+                    .unwrap()
+                    .write_all(b"uncertain previous takeover")
+                    .unwrap();
+            }
+            let endpoint = Endpoint::bind(&journal, &job).unwrap();
+            let mut child = Child(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "self_update::selection::tests::ownership_child",
+                        "--ignored",
+                    ])
+                    .env_clear()
+                    .env("TREER_TEST_CONFIG", f.path.join("config"))
+                    .env("TREER_TEST_JOBS", &jobs.0)
+                    .env("TREER_TEST_JOB", receipt.job_id.to_string())
+                    .env("TREER_TEST_PARENT", own.pid().to_string())
+                    .env("TREER_TEST_DIGEST", &digest)
+                    .env("TREER_TEST_MODE", mode)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap(),
+            );
+            let image = ProcessImage::capture(child.0.id()).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let peer: AuthenticatedPeer = loop {
+                if let Some(peer) = endpoint.accept(&image, own.executable(), &digest).unwrap() {
+                    break peer;
+                }
+                assert!(Instant::now() < deadline);
+                assert!(child.0.try_wait().unwrap().is_none());
+                std::thread::sleep(Duration::from_millis(5));
+            };
+            if mode == "normal" || mode == "wrong-job" {
+                // Hashing this unoptimized test executable is separate from
+                // the ownership exchange. Begin only with both peers authed.
+                std::fs::write(job.join("test-parent-authed"), b"ready").unwrap();
+                let auth_deadline = Instant::now() + Duration::from_secs(30);
+                while !job.join("test-child-authed").exists() {
+                    assert!(Instant::now() < auth_deadline);
+                    assert!(child.0.try_wait().unwrap().is_none());
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
+            let accepted = peer.offer_ownership(&journal, &selected, &held);
+            if mode == "normal" {
+                assert_eq!(accepted.unwrap().prepared(), &prepared);
+                let ready_deadline = Instant::now() + Duration::from_secs(5);
+                while !job.join("test-child-ready").exists() {
+                    assert!(
+                        child.0.try_wait().unwrap().is_none(),
+                        "activator exited before lock probe"
+                    );
+                    assert!(Instant::now() < ready_deadline);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                let stored: serde_json::Value =
+                    serde_json::from_slice(&std::fs::read(job.join("ownership.json")).unwrap())
+                        .unwrap();
+                assert_eq!(stored["pid"], child.0.id());
+                assert_eq!(stored["prepared"]["job_id"], receipt.job_id.to_string());
+                drop(held);
+                assert!(selected.lock().is_err());
+                assert!(other.lock().is_err());
+            } else {
+                assert!(accepted.is_err());
+                assert!(selected.lock().is_err());
+                assert_eq!(journal.read().unwrap(), prepared);
+                if mode == "existing-record" {
+                    assert_eq!(
+                        std::fs::read(job.join("ownership.json")).unwrap(),
+                        b"uncertain previous takeover"
+                    );
+                } else {
+                    assert!(!job.join("ownership.json").exists());
+                }
+                drop(held);
+            }
+            std::fs::write(job.join("test-child-release"), b"release").unwrap();
+            drop(child.0.stdin.take());
+            assert!(child.0.wait().unwrap().success(), "child failed: {mode}");
+            assert!(selected.lock().is_ok());
+        }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[ignore = "owned activator fixture, invoked by ownership_case"]
+    fn ownership_child() {
+        use super::super::{handoff::AuthenticatedPeer, Journal};
+        use std::{io::Read, os::unix::net::UnixStream};
+        use treer_platform::process_image::ProcessImage;
+
+        let config = PathBuf::from(std::env::var_os("TREER_TEST_CONFIG").unwrap());
+        let jobs = PathBuf::from(std::env::var_os("TREER_TEST_JOBS").unwrap());
+        let job = std::env::var("TREER_TEST_JOB").unwrap();
+        let mode = std::env::var("TREER_TEST_MODE").unwrap();
+        let inventory = Inventory::load(&config, "fixture-host").unwrap();
+        let selected = inventory.select(Some("ws_a"), true).unwrap();
+        let root = PrivateDirectory::open(&jobs).unwrap();
+        let journal = Journal::open(&root, &job).unwrap();
+        let mut stream = UnixStream::connect(jobs.join(&job).join("handoff.sock")).unwrap();
+        let parent =
+            ProcessImage::capture(std::env::var("TREER_TEST_PARENT").unwrap().parse().unwrap())
+                .unwrap();
+        let digest = std::env::var("TREER_TEST_DIGEST").unwrap();
+        if mode == "exit-before-ack" || mode == "existing-record" {
+            // Keep the authenticated peer alive until parent consumes the
+            // connection. Then EOF makes the transfer fail before any ACK.
+            stream.read_to_end(&mut Vec::new()).unwrap();
+            return;
+        }
+        let peer =
+            AuthenticatedPeer::authenticate(stream, &parent, parent.executable(), &digest).unwrap();
+        std::fs::write(jobs.join(&job).join("test-child-authed"), b"ready").unwrap();
+        let auth_deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !jobs.join(&job).join("test-parent-authed").exists() {
+            assert!(std::time::Instant::now() < auth_deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let result = if mode == "wrong-job" {
+            // Same job ID but another selected enrollment is not interchangeable.
+            let other = inventory.select(Some("ws_b"), true).unwrap();
+            peer.take_ownership(&journal, &other)
+        } else {
+            peer.take_ownership(&journal, &selected)
+        };
+        if mode == "wrong-job" {
+            assert!(result.is_err());
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !jobs.join(&job).join("test-child-release").exists() {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            return;
+        }
+        let owned = result.unwrap();
+        assert_eq!(owned.prepared(), &journal.read().unwrap());
+        assert!(owned
+            .locks()
+            .directory(&selected, Binary::Controller)
+            .is_ok());
+        std::fs::write(jobs.join(&job).join("test-child-ready"), b"ready").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !jobs.join(&job).join("test-child-release").exists() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(owned);
     }
 
     #[test]

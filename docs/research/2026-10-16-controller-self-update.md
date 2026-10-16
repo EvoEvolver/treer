@@ -1,8 +1,9 @@
 # Controller self-update transaction
 
-Design for Issues #111, 2026-10-16. P0 only: implementation waits for security
-review. Baseline: `2bb65dbe323457e8be6779c36d7469885e2433d5`. This is proposed
-behavior, not a claim that Windows self-update already works.
+Design and P1 implementation notes for Issues #111, 2026-10-16. The Unix engine
+remains internal WIP, without a public self-update CLI or full activation gate.
+Baseline: `2bb65dbe323457e8be6779c36d7469885e2433d5`. This is not a claim that
+Windows self-update already works.
 
 ## Scope and reuse
 
@@ -85,9 +86,40 @@ three-second I/O bounds; listener and authenticated sockets require CLOEXEC.
 The parent directory supplies privacy, not the socket file's umask-derived mode.
 Pathname checks do not provide atomic bind-at semantics against another process
 of the same OS account. This wrapper is not a same-account sandbox.
-This is still not the complete job-bound ownership handshake: owned child launch/
-detachment, durable ownership ACK and parent-release coordination remain to be
-wired and tested. The activator must close the handoff socket before any further
+The one-shot ownership exchange now binds the complete Prepared receipt on both
+sides before transferring descriptors. The child adopts the checked locks, then
+exclusively creates `ownership.json` with that receipt and its OS PID/creation
+identity, syncs the file and directory, and only then sends its ACK. The parent
+requires an exact ACK/durable-record match to its authenticated live owned child,
+and an unchanged journal. Its final confirmation lets the child continue without
+racing the parent's journal check. Both APIs consume and close the channel;
+the child retains the received locks in `OwnedActivation`. The parent's API only
+borrows its locks: errors do not drop them, and acceptance permits their release.
+Frames are bounded to 96 KiB, deny unknown fields, and use one three-second
+deadline per complete frame (partial reads do not restart it); descriptor I/O
+retains three-second bounds. Reads poll the dedicated single-reader socket with
+the remaining deadline. A Mac regression proved that changing SO_RCVTIMEO after
+the peer closes returns EINVAL even while its complete final confirmation is
+still queued; polling drains that frame without requiring the sender to linger.
+The earlier timeout hypothesis was disproved: no longer timeout is needed for
+this failure. Disk sync/process authentication themselves are not claimed to be
+interruptible by I/O deadlines. The future coordinator still needs an overall
+owned-child startup/activation deadline. The owned-process fixture synchronizes
+authentication before beginning its ownership exchange, keeping unoptimized
+test-executable hashing outside that exchange's I/O budget.
+
+An existing ownership file, including an incomplete one, is never overwritten or
+removed on failure. A lost ACK/final confirmation is uncertain and requires
+explicit recovery, not another submission, automatic retry or PID-file takeover.
+Child connection loss before final confirmation returns an error and drops its
+received locks; the parent retains its originals. Tests include an actual owned
+subprocess retaining exclusion after parent-handle release, plus forged ACK,
+missing/different durable record, changed journal, uncertain-record retention,
+malformed/oversized/truncated/stalled frame and cross-enrollment rejection.
+This is still not the full updater: owned child launch/detachment, integration of
+parent-release/activation/recovery, launcher installation and real isolated
+upgrade acceptance remain to be wired and tested.
+The activator must close the handoff socket before any further
 fork/exec: CLOEXEC alone cannot prevent another child inheriting it on fork.
 The preparation coordinator must use `Endpoint::mark_prepared`: it validates the
 host's Unix socket address length and the private locator before writing Prepared,

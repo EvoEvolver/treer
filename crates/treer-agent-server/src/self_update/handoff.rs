@@ -1,7 +1,7 @@
 //! Authenticate the exact connected lock-transfer peer, not a PID file or a
-//! second probe connection. This is only the process-proof layer: the activator
-//! coordinator must still create a private endpoint, bind the job, and persist
-//! ownership ACK before the sender releases its locks or reports acceptance.
+//! second probe connection. The one-shot ownership protocol binds the prepared
+//! job and durable ACK; launching/detaching the owned activator and coordinating
+//! activation/recovery remain separate work.
 use std::{cell::Cell, fs::File, os::unix::net::UnixStream, path::Path};
 
 use anyhow::{bail, Result};
@@ -14,6 +14,9 @@ use super::{
     selection::{Selected, SelectionLocks},
     Journal, Phase, Receipt,
 };
+
+mod ownership;
+pub use ownership::{AcceptedOwnership, OwnedActivation};
 
 /// Only this module can construct proof of the endpoint preflight. Keep the
 /// complete checked receipt so another job/revision cannot consume the proof.

@@ -366,7 +366,7 @@ mod tests {
             std::fs::remove_dir_all(&self.0).unwrap();
         }
     }
-    fn receipt() -> Receipt {
+    pub(super) fn receipt() -> Receipt {
         Receipt {
             schema_version: 1,
             job_id: Uuid::new_v4(),
