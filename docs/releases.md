@@ -158,7 +158,7 @@ silently falling back to an older GitHub `latest` Release.
 
 The CLI, Host and Controller are built from `crates/`, the Cargo and toolchain
 files, `skills/` and `launchers/agent`. When a candidate changes only paths under
-`web/`, `apps/` or `docs/` since an earlier `canary_passed` commit, waiting for a
+`web/`, `apps/`, `docs/` or the root `README.md` since an earlier `canary_passed` commit, waiting for a
 new five-platform build adds nothing. `scripts/ensure-machine-artifacts.sh` then
 calls `scripts/reuse-machine-artifacts.sh` before dispatching a native run, but
 only when no native run exists for the exact commit. It reuses the `dist/` of the
@@ -166,7 +166,7 @@ newest `canary_passed` commit in `.treer/canary-checkouts/` that is an ancestor 
 the candidate, and only if all of the following hold:
 
 - `git diff --no-renames --name-only` between the two commits lists only
-  `web/`, `apps/` and `docs/` paths (a rename out of a native path is a change;
+  `web/`, `apps/` and `docs/` paths or the exact root `README.md` (a rename out of a native path is a change;
   any other or unknown path forces the normal build);
 - that commit's manifest is `canary_passed`, records the SHA-256 of all 25
   artifact files, and its `dist/` still matches those recorded hashes byte for

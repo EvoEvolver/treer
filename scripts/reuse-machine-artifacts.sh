@@ -40,7 +40,7 @@ fi
 [ ! -e dist ] || { echo "dist already exists; refusing to replace it" >&2; exit 1; }
 # Only these paths cannot influence the CLI, Host or Controller binaries. Anything
 # else, including unknown paths, requires a native build at the exact commit.
-allowed='^(web|apps|docs)/'
+allowed='^((web|apps|docs)/|README\.md$)'
 
 candidates() {
     if [ -n "$requested" ]; then

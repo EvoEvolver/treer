@@ -37,7 +37,7 @@ if [ -e "$directory/artifact-provenance.json" ]; then
             echo "artifact source $built_commit is not an ancestor of $commit" >&2; exit 1;
         }
         changed=$(git -C "$root" diff --no-renames --no-ext-diff --name-only "$built_commit" "$commit")
-        if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Evq '^(web|apps|docs)/'; then
+        if [ -n "$changed" ] && printf '%s\n' "$changed" | grep -Evq '^((web|apps|docs)/|README\.md$)'; then
             echo "native inputs changed since artifact source $built_commit" >&2; exit 1
         fi
     fi

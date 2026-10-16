@@ -86,6 +86,19 @@ class ReuseTest(unittest.TestCase):
         verified = subprocess.run(["sh", "scripts/verify-machine-artifacts.sh", candidate, "dist"], cwd=self.repo, capture_output=True, text=True)
         self.assertEqual(verified.returncode, 0, verified.stderr)
 
+    def test_the_root_readme_alone_may_change_but_no_other_markdown(self):
+        candidate = commit_files(self.repo, {"README.md": "2", "web/index.html": "2"}, "readme")
+        self.assertEqual(self.reuse().returncode, 0)
+        verified = subprocess.run(["sh", "scripts/verify-machine-artifacts.sh", candidate, "dist"], cwd=self.repo, capture_output=True, text=True)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        for path in ("README.md.bak", "crates/README.md", "launchers/agent/README.md", "CHANGELOG.md", "READMEXmd"):
+            with self.subTest(path=path):
+                git(self.repo, "reset", "-q", "--hard", self.source)
+                shutil.rmtree(self.repo / "dist", ignore_errors=True)
+                commit_files(self.repo, {path: "1", "README.md": "3"}, "other")
+                self.assertNotEqual(self.reuse().returncode, 0)
+                self.assertFalse((self.repo / "dist").exists())
+
     def test_any_native_input_change_forces_a_native_build(self):
         for files in ({"crates/core/lib.rs": "2"}, {"launchers/agent/x.ts": "1"}, {"skills/treer/SKILL.md": "1"}, {"new-top/dir/file": "1"}, {"Cargo.lock": "1"}):
             with self.subTest(files=files):
