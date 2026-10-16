@@ -506,3 +506,12 @@ workload in place; ctrl/cmd/shift-click, middle-click and the browser's own "Ope
 use the href natively, so they open the full Console on that workload. A link is never nested inside another
 interactive element (a row's actions button is a sibling), and Space activates it like a button.
 
+An App that the Proxy ingress routes (its server-provided `public_url`, e.g. `https://svc-….<apps domain>/`) opens
+on that URL instead of the Console deep link wherever a new browser tab is opened: the tab/Tree menu item, the
+native link behind a Tree row, Overview row or map block (ctrl/cmd/middle-click, "Open in new tab"). The ingress URL
+is workspace-authenticated, so no token is added. The URL is never built from the name and is used only if it is
+`https:`, has no credentials, is a real DNS name (no IP literal, `localhost` or single label) and is neither the
+Console nor the Proxy origin; otherwise the Console deep link is used. A plain left click still opens the App inside
+the Console. Pinning the host to the configured apps domain needs that domain from the server (the Console does not
+receive it), which is a follow-up.
+

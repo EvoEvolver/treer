@@ -1,4 +1,5 @@
 import { WorkloadSurface } from "@/components/workload-surface"
+import { appOwnUrl } from "@/lib/app-url"
 import { WorkloadFocusBar } from "@/components/workload-focus-bar"
 import { WorkspaceTabBar, type TabLabel, type TabAction, type TabActions } from "@/components/workspace-tab-bar"
 import { OVERVIEW_TAB, useWorkspaceTabs } from "@/components/use-workspace-tabs"
@@ -252,9 +253,14 @@ function WorkspaceAppContent() {
     if (!inventoryReady || !routeMatchesWorkspace || preview || deepLinkWorkspace.current !== workspaceId) return
     if (selectedWorkloadId !== routeWorkloadId) replaceWorkloadRoute(selectedWorkloadId)
   }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute])
-  const workloadHref = (id: string) => workloadPath(organizationId, workspaceId, id)
-  // Focus-mode page in a new browser tab; synchronous so it keeps the click gesture. Same origin and session, no token.
-  const openInNewTab = (id: string) => { window.open(workloadPath(organizationId, workspaceId, id, true), "_blank", "noopener") }
+  // An App with a routed ingress URL opens on that URL in a new browser tab; Agents and other Apps use the Console deep link.
+  const appOwnUrls = useMemo(() => {
+    const blocked = [window.location.origin, proxyUrl("/")].map((value) => { try { return new URL(value).origin } catch { return value } })
+    return new Map(apps.flatMap((app) => { const url = appOwnUrl(app, blocked); return url ? [[app.runtime_agent_id ?? app.app_id, url] as const] : [] }))
+  }, [apps])
+  const workloadHref = (id: string) => appOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id)
+  // Synchronous so it keeps the click gesture. Same-origin Console pages carry no token; an App's own URL is opened with noopener.
+  const openInNewTab = (id: string) => { window.open(appOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id, true), "_blank", "noopener") }
   const focusedId = focusMode && selectedWorkloadId ? selectedWorkloadId : null
   const tabLabels = new Map<string, TabLabel>(workloads.map((agent) => {
     const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === agent.agent_id)

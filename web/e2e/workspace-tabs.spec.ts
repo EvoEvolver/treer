@@ -626,3 +626,64 @@ test.describe('workload links: semantics and keyboard', () => {
     expect(loads - before).toBeLessThanOrEqual(1)
   })
 })
+
+test.describe('an App opens on its own ingress URL in a new browser tab', () => {
+  const own = 'https://svc-abc123.apps.example.test/'
+  const deepLink = `${workspaceUrl}/workloads/tab-7`
+  async function withAppUrl(page: Page, publicUrl: string | null | undefined) {
+    // The App's own origin is not a real host in tests; serve a stub so the new page keeps the requested URL.
+    await page.context().route(/^https:\/\/svc-abc123\.apps\.example\.test\//, (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>App</title><h1>App</h1>' }))
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    // Registered after the fixture so it takes precedence over its apps mock.
+    const app = { app_id: 'app-archive', runtime_agent_id: 'tab-7', name: 'Archive', server_id: 'local', status: 'running', hostname: 'archive.test', ...(publicUrl === undefined ? {} : { public_url: publicUrl }) }
+    await page.route('**/apps', (route) => route.fulfill({ json: { apps: [app] } }))
+    await gotoWorkspace(page)
+  }
+
+  test('the menu item, the Overview row and the Tree row use the App URL; a plain click stays in the Console', async ({ page, context }) => {
+    await withAppUrl(page, own)
+    await expect(page.getByRole('link', { name: 'Open /Archive', exact: true })).toHaveAttribute('href', own)
+    await expect(page.getByRole('tree').getByRole('link', { name: /^Archive/ })).toHaveAttribute('href', own)
+    // External links never leak the Console as referrer or opener.
+    await expect(page.getByRole('link', { name: 'Open /Archive', exact: true })).toHaveAttribute('rel', 'noopener noreferrer')
+    await page.getByRole('link', { name: 'Open /Archive', exact: true }).click()
+    await expect(page.getByRole('tab', { name: 'Tab /Archive', exact: true })).toHaveAttribute('aria-selected', 'true')
+    await page.getByRole('tab', { name: 'Tab /Archive', exact: true }).click({ button: 'right' })
+    const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
+    expect(popup.url()).toBe(own)
+    await popup.close()
+  })
+
+  test('the Tree right-click menu opens an App on its own URL', async ({ page, context }) => {
+    await withAppUrl(page, own)
+    await page.getByRole('tree').getByRole('link', { name: /^Archive/ }).click({ button: 'right' })
+    const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
+    expect(popup.url()).toBe(own)
+    await popup.close()
+  })
+
+  test('Agents keep the Console deep link', async ({ page, context }) => {
+    await withAppUrl(page, own)
+    await expect(page.getByRole('link', { name: 'Open /Alpha', exact: true })).toHaveAttribute('href', `${workspaceUrl}/workloads/tab-1`)
+    await expect(page.getByRole('link', { name: 'Open /Alpha', exact: true })).not.toHaveAttribute('rel', /.*/)
+    await open(page, 'Alpha')
+    await page.getByRole('tab', { name: 'Tab /Alpha', exact: true }).click({ button: 'right' })
+    const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
+    expect(new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
+    await popup.close()
+  })
+
+  for (const [label, value] of [['absent', undefined], ['null', null], ['http', 'http://svc-abc.apps.example.test/'], ['credentials', 'https://user:pw@svc-abc.apps.example.test/'], ['javascript', 'javascript:alert(1)'], ['localhost', 'https://localhost/'], ['ip literal', 'https://10.0.0.5/'], ['single label', 'https://intranet/'], ['not a URL', 'svc-abc'], ['empty', '']] as const) {
+    test(`an unusable App URL (${label}) falls back to the Console deep link`, async ({ page, context }) => {
+      await withAppUrl(page, value)
+      await expect(page.getByRole('link', { name: 'Open /Archive', exact: true })).toHaveAttribute('href', deepLink)
+      await page.getByRole('tab', { name: 'Tab Overview', exact: true }).click().catch(() => undefined)
+      await page.getByRole('link', { name: 'Open /Archive', exact: true }).click()
+      await page.getByRole('tab', { name: 'Tab /Archive', exact: true }).click({ button: 'right' })
+      const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
+      expect(new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${deepLink}?focus=1`)
+      await popup.close()
+    })
+  }
+})
