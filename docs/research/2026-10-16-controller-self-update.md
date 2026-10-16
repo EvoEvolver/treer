@@ -226,6 +226,16 @@ from a caller default. An old build string is an observed claim, not signed
 release provenance. The detached coordinator and end-to-end activation gate
 remain outstanding.
 
+The HTTP-to-process binding is indirect: a response at the selected loopback
+address and a simultaneously verified Host child image do not prove that this
+child owns the listening socket. Loopback TCP provides no peer process
+attestation here. Another process under the same OS account could occupy the
+health port and forge an epoch, causing an incorrect health decision. This is
+within the documented single-account trust domain, not an authorization grant.
+Later live observation still requires the target image, a changed epoch and the
+same verified parent Host; those checks do not make the HTTP response itself
+process-attested.
+
 After activator death, the next explicit `self-update --recover JOB_ID` reconciles
 journal, actual hashes and live process identities under the same locks. Never
 infer success from a PID or an old receipt alone; never restart the Host or replay

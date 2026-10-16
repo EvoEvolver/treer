@@ -53,6 +53,9 @@ impl InitialController {
 impl Monitor {
     /// Before publication, bind the HTTP epoch to the selected original image
     /// executing as this verified Host's direct child. No mutation is performed.
+    /// Binding is indirect: loopback TCP does not attest the listening process.
+    /// Another process in the same OS-account trust domain could occupy this
+    /// port and forge the epoch; the independent image/Host checks still apply.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub async fn observe_initial(
         &self,
