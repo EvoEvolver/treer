@@ -4,6 +4,7 @@ export const en = {
   "images.attached": "Attached images",
   "images.storageInside": "Image uploads disabled: private storage is inside the working directory.",
   "images.storageUnsafe": "Image uploads disabled: private storage needs its permissions repaired.",
+  "images.storageAdministrator": "Image uploads disabled: Treer on Windows requires an administrator account.",
   "images.storageUnavailable": "Image uploads unavailable: this Controller has no usable private attachment storage.",
   "images.remove": "Remove image {{number}}",
   "images.preview": "Attached image {{number}}",

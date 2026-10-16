@@ -161,7 +161,7 @@ export function Dock() {
             </div>
           </div>
           <p className="hint shortcut-hint" id="hint">{hint}</p>
-          {snapshot?.attachmentsAvailable === false && <p className="hint image-storage-status" role="status">{t(snapshot.attachmentStorageStatus === "agent_private_state_inside_cwd" ? "images.storageInside" : snapshot.attachmentStorageStatus === "agent_private_state_unsafe" ? "images.storageUnsafe" : "images.storageUnavailable")}</p>}
+          {snapshot?.attachmentsAvailable === false && <p className="hint image-storage-status" role="status">{t(snapshot.attachmentStorageStatus === "windows_requires_administrator" ? "images.storageAdministrator" : snapshot.attachmentStorageStatus === "agent_private_state_inside_cwd" ? "images.storageInside" : snapshot.attachmentStorageStatus === "agent_private_state_unsafe" ? "images.storageUnsafe" : "images.storageUnavailable")}</p>}
           {snapshot?.attachmentsAvailable && images.images.length === 0 && <p className="hint">{t("images.limits")}</p>}
         </div>
       </div>

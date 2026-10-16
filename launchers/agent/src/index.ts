@@ -80,7 +80,7 @@ try {
   } else if (!privateStateRoot && attachmentStorageStatus === "available") attachmentStorageStatus = "agent_private_state_unavailable";
 } catch (error) {
   // Image storage failures must never prevent text-only Agent recovery.
-  attachmentStorageStatus = error instanceof AttachmentError && error.code === "agent_private_state_inside_cwd" ? "agent_private_state_inside_cwd" : "agent_private_state_unavailable";
+  attachmentStorageStatus = error instanceof AttachmentError && error.code === "windows_requires_administrator" ? "windows_requires_administrator" : error instanceof AttachmentError && error.code === "agent_private_state_inside_cwd" ? "agent_private_state_inside_cwd" : "agent_private_state_unavailable";
 }
 if (attachments) setInterval(() => {
   try { attachments!.sweep(); }

@@ -568,6 +568,9 @@ launcher restarts; unsubmitted drafts expire after one hour and the per-Agent
 store is capped at 256 MiB. Missing Controller private-state support disables
 attachments rather than writing to the checkout; the UI explains an unavailable,
 unsafe or inside-working-directory state without exposing a filesystem path.
+On Windows, a Controller status of `windows_requires_administrator` disables
+image uploads and displays “Treer on Windows requires an administrator account”.
+It does not redirect storage to the checkout or block text-only Agent recovery.
 The Controller advertises `agent.private-state.v1` as an interface-contract
 feature, separately from AIS registration capabilities. The launcher authenticates
 to its bound loopback Controller using its workload identity, checks
