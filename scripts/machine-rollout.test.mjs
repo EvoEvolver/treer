@@ -229,16 +229,33 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
         }|Sort-Object)
         return ([string]$security.AreAccessRulesProtected+':'+($rules -join ';'))
       }
+      function ReceiptSummary($File){
+        $security=[IO.File]::GetAccessControl($File)
+        $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+        $rules=@($security.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])|ForEach-Object{
+          $principal=if($_.IdentityReference.Value -eq $sid){'current'}elseif($_.IdentityReference.Value -eq 'S-1-5-18'){'system'}else{'other'}
+          $principal+':'+[int]$_.AccessControlType+':'+[int]$_.FileSystemRights+':'+[int]$_.InheritanceFlags+':'+[int]$_.PropagationFlags+':'+$_.IsInherited
+        }|Sort-Object)
+        return ([string]$security.AreAccessRulesProtected+':'+($rules -join ';'))
+      }
       Write-UpdateJson $receipt @{status='running'}
       $acl=ReceiptRules $receipt
+      $aclSummary=ReceiptSummary $receipt
       foreach($state in @('activating','complete')){
         Write-UpdateJson $receipt @{status=$state}
         if(([IO.File]::ReadAllText($receipt)|ConvertFrom-Json).status -cne $state){throw 'receipt_replacement_failed'}
         # File.Replace may set SE_DACL_AUTO_INHERITED; compare principals,
         # rights, inheritance and protection, rather than SDDL spelling.
-        if((ReceiptRules $receipt) -cne $acl){throw 'receipt_acl_changed'}
+        if((ReceiptRules $receipt) -cne $acl){
+          [Console]::WriteLine(('receipt_acl_before='+$aclSummary))
+          [Console]::WriteLine(('receipt_acl_after='+(ReceiptSummary $receipt)))
+          throw 'receipt_acl_changed'
+        }
       }
       if([IO.Directory]::GetFiles($directory,'*.tmp').Count -ne 0){throw 'receipt_temporary_leftover'}
+    } catch {
+      $code=if($_.Exception.Message -in @('receipt_replacement_failed','receipt_acl_changed','receipt_temporary_leftover','update_directory_exists')){$_.Exception.Message}else{'receipt_operation_failed'}
+      [Console]::WriteLine(('inventory_failure='+$code));[Console]::Out.Flush();throw
     } finally { if([IO.Directory]::Exists($directory)){[IO.Directory]::Delete($directory,$true)} }
     Mark 'receipts_replaced'
     Write-Output 'real-inventory-optional-pid-passed'`;
@@ -252,7 +269,9 @@ test("native Windows real updater inventory accepts omitted pid without weakenin
   } catch (error) {
     // Diagnostics only from this synthetic fixture, never arbitrary shell output.
     const phases = String(error.stdout || '').split(/\r?\n/).filter(line => /^inventory_phase=[a-z_]+ elapsed_ms=\d+$/.test(line));
-    throw new Error(`inventory shell ${error.code || 'failed'} after ${Date.now() - started}ms; phases: ${phases.join('; ') || 'none (before first script statement)'}`);
+    const codes = String(error.stdout || '').split(/\r?\n/).filter(line => /^inventory_failure=(receipt_replacement_failed|receipt_acl_changed|receipt_temporary_leftover|update_directory_exists|receipt_operation_failed)$/.test(line));
+    const acls = String(error.stdout || '').split(/\r?\n/).filter(line => line.length <= 2048 && /^receipt_acl_(before|after)=(True|False):((current|system|other):[01]:\d+:\d+:\d+:(True|False);?)*$/.test(line));
+    throw new Error(`inventory shell ${error.code || 'failed'} after ${Date.now() - started}ms; phases: ${phases.join('; ') || 'none (before first script statement)'}; codes: ${codes.join('; ') || 'none'}; ACL: ${acls.join('; ') || 'none'}`);
   }
   console.log(output.split(/\r?\n/).filter(line => /^inventory_phase=[a-z_]+ elapsed_ms=\d+$/.test(line)).join('; '));
   assert.match(output, /real-inventory-optional-pid-passed/);
