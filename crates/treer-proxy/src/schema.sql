@@ -460,6 +460,17 @@ CREATE TABLE IF NOT EXISTS deleted_agents (
 );
 CREATE INDEX IF NOT EXISTS deleted_agents_workspace_id ON deleted_agents(workspace_id);
 
+-- Original human ownership of a new Agent reservation, never inferred from
+-- names, client error details or an audit message. Existing identities are not
+-- backfilled, and non-human creates do not acquire this cleanup authority.
+CREATE TABLE IF NOT EXISTS agent_creation_reservations (
+    agent_id TEXT PRIMARY KEY REFERENCES agent_credentials(agent_id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    server_id TEXT NOT NULL,
+    created_by TEXT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS machine_services (
     service_id TEXT PRIMARY KEY,
     workspace_id TEXT NOT NULL,

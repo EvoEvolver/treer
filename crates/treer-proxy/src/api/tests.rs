@@ -13,6 +13,260 @@ use treer_protocol::{
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
 #[tokio::test]
+async fn reservation_cleanup_requires_owned_record_policy_and_durable_fence() {
+    for outcome in [
+        "success",
+        "old",
+        "offline",
+        "observed",
+        "unconfirmed",
+        "audit_failure",
+        "snapshot",
+        "app_metadata",
+    ] {
+        let auth = AuthStore::for_test("test").await;
+        auth.seed_test_workspace("default").await;
+        auth.seed_test_workspace("other").await;
+        sqlx::query("INSERT INTO users(id,email,preferred_name,password_hash,created_at) VALUES('creator','creator@example.test','Creator','fixture','now'),('other','other@example.test','Other','fixture','now')")
+            .execute(&auth.pool()).await.unwrap();
+        for workspace in ["default", "other"] {
+            for user in ["creator", "other"] {
+                sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES($1,$2,'member','now')")
+                    .bind(format!("org_{workspace}")).bind(user).execute(&auth.pool()).await.unwrap();
+            }
+        }
+        auth.reserve_named_agent(
+            "default",
+            "machine-a",
+            "ag_candidate",
+            "reserved-name",
+            None,
+            None,
+            Some("creator"),
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO machine_services(service_id,workspace_id,name,server_id,target_agent_id,target_host,target_port,protocol,created_at,created_by,updated_at,updated_by) VALUES('svc_candidate','default','candidate','machine-a','ag_candidate','127.0.0.1',8080,'http','now','creator','now','creator')")
+            .execute(&auth.pool()).await.unwrap();
+        let state = state_with_managed_agent().await;
+        let server = state.resolve_server("default", "machine-a").await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let connection_id = Uuid::new_v4();
+        state
+            .register_server_instance_with_capabilities(
+                server,
+                connection_id,
+                "cleanup-fixture".into(),
+                if outcome == "old" {
+                    vec![]
+                } else {
+                    vec![treer_protocol::CAPABILITY_AGENT_RESERVATION_FENCE.into()]
+                },
+                tx,
+            )
+            .await
+            .unwrap();
+        let call = |workspace: &str, user: &str, id: &str, policy: PolicyEngine| {
+            let (state, auth) = (state.clone(), auth.clone());
+            let (workspace, user, id) = (workspace.to_owned(), user.to_owned(), id.to_owned());
+            async move {
+                cleanup_agent_reservation(
+                    State(state),
+                    Extension(auth),
+                    Extension(policy),
+                    Extension(CurrentSession {
+                        token: "fixture-session".into(),
+                        user_id: user,
+                        email: "fixture@example.test".into(),
+                        preferred_name: "Fixture".into(),
+                    }),
+                    Path((workspace, id)),
+                    axum::body::Bytes::new(),
+                )
+                .await
+            }
+        };
+        for (workspace, user, id) in [
+            ("default", "other", "ag_candidate"),
+            ("other", "creator", "ag_candidate"),
+            ("default", "creator", "ag_absent"),
+        ] {
+            let error = call(workspace, user, id, PolicyEngine::allow_all())
+                .await
+                .unwrap_err();
+            assert_eq!(error.status, StatusCode::NOT_FOUND);
+            assert_eq!(error.error.code, "agent_reservation_not_found");
+            assert_eq!(error.error.message, "Agent reservation not available");
+        }
+        let denied = PolicyEngine::new(
+            crate::policy::PolicyDecision::Deny(crate::policy::PolicyDenial::new(
+                "policy_denied",
+                "denied by fixture",
+            )),
+            vec![],
+        );
+        assert_eq!(
+            call("default", "creator", "ag_candidate", denied)
+                .await
+                .unwrap_err()
+                .status,
+            StatusCode::FORBIDDEN
+        );
+        assert!(
+            rx.try_recv().is_err(),
+            "ownership/Policy denials must not contact Controller"
+        );
+        if outcome == "snapshot" {
+            let mut agent = state.snapshot("default").await.unwrap().agents[0].clone();
+            agent.agent_id = "ag_candidate".into();
+            state.test_insert_agent(agent).await;
+        }
+        if outcome == "app_metadata" {
+            let app = auth
+                .create_app_deployment(
+                    "default",
+                    "creator",
+                    "machine-a".into(),
+                    CreateAppDeploymentRequest {
+                        folder_id: None,
+                        server_id: Some("machine-a".into()),
+                        name: "candidate-app".into(),
+                        command: "fixture".into(),
+                        args: vec![],
+                        cwd: ".".into(),
+                        port: 8081,
+                        hostname: String::new(),
+                        public: false,
+                    },
+                )
+                .await
+                .unwrap();
+            sqlx::query(
+                "UPDATE app_deployments SET runtime_agent_id='ag_candidate' WHERE app_id=$1",
+            )
+            .bind(app.app_id)
+            .execute(&auth.pool())
+            .await
+            .unwrap();
+        }
+        if outcome == "offline" {
+            state
+                .disconnect_server("default", "machine-a", connection_id)
+                .await;
+        }
+        if outcome == "audit_failure" {
+            sqlx::raw_sql("CREATE FUNCTION refuse_cleanup_audit() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.action='agent.reservation.cleanup' THEN RAISE EXCEPTION 'fixture'; END IF; RETURN NEW; END $$; CREATE TRIGGER refuse_cleanup BEFORE INSERT ON organization_audit_events FOR EACH ROW EXECUTE FUNCTION refuse_cleanup_audit()")
+                .execute(&auth.pool()).await.unwrap();
+        }
+        let responder = if !matches!(outcome, "old" | "offline" | "snapshot" | "app_metadata") {
+            Some(tokio::spawn({
+                let state = state.clone();
+                async move {
+                    let SocketFrame::Text(frame) = rx.recv().await.unwrap() else {
+                        panic!("command frame")
+                    };
+                    let ProxyMessage::Command { envelope } = serde_json::from_str(&frame).unwrap()
+                    else {
+                        panic!("command")
+                    };
+                    assert!(
+                        matches!(&envelope.command, AgentCommand::FenceAbsentAgentReservation { agent_id } if agent_id=="ag_candidate")
+                    );
+                    let result = if outcome == "observed" {
+                        CommandResult::failure(
+                            envelope.command_id,
+                            ProtocolError::new("agent_reservation_observed", "fixture"),
+                        )
+                    } else {
+                        CommandResult::success(
+                            envelope.command_id,
+                            json!({"fenced":outcome!="unconfirmed"}),
+                        )
+                    };
+                    state.complete_command(result).await;
+                }
+            }))
+        } else {
+            None
+        };
+        let result = call(
+            "default",
+            "creator",
+            "ag_candidate",
+            PolicyEngine::allow_all(),
+        )
+        .await;
+        if let Some(task) = responder {
+            task.await.unwrap();
+        }
+        if outcome == "success" {
+            assert_eq!(
+                result.unwrap().0,
+                json!({"agent_id":"ag_candidate","deleted":true,"already_deleted":false})
+            );
+            let repeat = call(
+                "default",
+                "creator",
+                "ag_candidate",
+                PolicyEngine::allow_all(),
+            )
+            .await
+            .unwrap()
+            .0;
+            assert_eq!(repeat["already_deleted"], true);
+            let audit: (String, serde_json::Value) = sqlx::query_as("SELECT actor_id,payload FROM organization_audit_events WHERE action='agent.reservation.cleanup'")
+                .fetch_one(&auth.pool()).await.unwrap();
+            assert_eq!(audit.0, "creator");
+            assert_eq!(audit.1, json!({"server_id":"machine-a","deleted":true}));
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM machine_services WHERE service_id='svc_candidate'"
+                )
+                .fetch_one(&auth.pool())
+                .await
+                .unwrap(),
+                0
+            );
+            assert!(sqlx::query_scalar::<_, bool>("SELECT revoked_at IS NOT NULL FROM agent_credentials WHERE agent_id='ag_candidate'").fetch_one(&auth.pool()).await.unwrap());
+            auth.reserve_named_agent(
+                "default",
+                "machine-a",
+                "ag_retry",
+                "reserved-name",
+                None,
+                None,
+                Some("creator"),
+            )
+            .await
+            .unwrap();
+        } else {
+            assert_eq!(
+                result.unwrap_err().status,
+                match outcome {
+                    "old" => StatusCode::NOT_IMPLEMENTED,
+                    "offline" => StatusCode::SERVICE_UNAVAILABLE,
+                    "audit_failure" => StatusCode::INTERNAL_SERVER_ERROR,
+                    _ => StatusCode::CONFLICT,
+                },
+                "{outcome}"
+            );
+            let untouched: (bool, bool) = sqlx::query_as("SELECT revoked_at IS NULL,NOT EXISTS(SELECT 1 FROM deleted_agents WHERE agent_id='ag_candidate') FROM agent_credentials WHERE agent_id='ag_candidate'")
+                .fetch_one(&auth.pool()).await.unwrap();
+            assert_eq!(untouched, (true, true), "{outcome} must retain reservation");
+            assert_eq!(
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT COUNT(*) FROM agent_names WHERE agent_id='ag_candidate'"
+                )
+                .fetch_one(&auth.pool())
+                .await
+                .unwrap(),
+                1
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn agent_create_pre_dispatch_denial_and_offline_preserve_their_errors() {
     let auth = AuthStore::for_test("test").await;
     auth.seed_test_workspace("default").await;
@@ -109,11 +363,17 @@ async fn agent_create_transport_failure_keeps_reservation_and_binds_error_scope(
         let state = state.clone();
         let auth = auth.clone();
         async move {
+            let creator = CurrentSession {
+                token: "fixture-session".into(),
+                user_id: "human-creator".into(),
+                email: "creator@example.test".into(),
+                preferred_name: "Creator".into(),
+            };
             execute_agent_create(
                 &state,
                 &auth,
                 &PolicyEngine::allow_all(),
-                None,
+                Some(&creator),
                 None,
                 "default",
                 CreateAgentRequest {
@@ -157,6 +417,16 @@ async fn agent_create_transport_failure_keeps_reservation_and_binds_error_scope(
     );
     assert!(details.command.is_none());
     let id = details.agent_id.unwrap();
+    assert_eq!(
+        auth.owned_agent_reservation("default", &id, "human-creator")
+            .await
+            .unwrap(),
+        ("machine-a".into(), false)
+    );
+    assert!(auth
+        .owned_agent_reservation("default", &id, "other-human")
+        .await
+        .is_err());
     let active: bool =
         sqlx::query_scalar("SELECT revoked_at IS NULL FROM agent_credentials WHERE agent_id=$1")
             .bind(id)

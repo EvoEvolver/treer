@@ -9,6 +9,7 @@ mod machine;
 mod machine_files;
 mod policy;
 mod profiles;
+mod reservations;
 #[path = "agents/startup.rs"]
 mod startup;
 mod terminal;
@@ -20,5 +21,6 @@ pub(super) use machine::*;
 pub(super) use machine_files::*;
 pub(super) use policy::*;
 pub(super) use profiles::*;
+pub(super) use reservations::*;
 pub(super) use startup::*;
 pub(super) use terminal::*;

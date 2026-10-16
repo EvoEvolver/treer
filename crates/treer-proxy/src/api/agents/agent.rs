@@ -364,7 +364,7 @@ pub(crate) async fn execute_agent_create(
         .await?;
     let agent_name = request.name.clone();
     let workload_credential = auth
-        .create_named_agent_credential_for_caller(
+        .reserve_named_agent(
             workspace_id,
             &server_id,
             &agent_id,
@@ -374,6 +374,13 @@ pub(crate) async fn execute_agent_create(
                 Some(PolicySubject::Agent { agent_id, .. }) => Some(agent_id.as_str()),
                 _ => None,
             },
+            session
+                .filter(|session| match subject {
+                    None => true,
+                    Some(PolicySubject::Human { user_id }) => user_id == &session.user_id,
+                    _ => false,
+                })
+                .map(|session| session.user_id.as_str()),
         )
         .await?;
     let data = state

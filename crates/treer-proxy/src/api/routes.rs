@@ -577,6 +577,10 @@ pub fn router(
             get(get_agent).patch(rename_agent).delete(delete_agent),
         )
         .registered_route(
+            "/api/workspaces/{workspace_id}/agent-reservations/{agent_id}/cleanup",
+            post(cleanup_agent_reservation),
+        )
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui",
             any(proxy_agent_interface_ui_root),
         )

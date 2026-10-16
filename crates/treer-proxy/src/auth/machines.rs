@@ -270,7 +270,61 @@ impl AuthStore {
         workspace_id: &str,
         agent_id: &str,
     ) -> Result<(), AuthFailure> {
+        self.delete_agent_with_reservation_actor(workspace_id, agent_id, None)
+            .await
+            .map(|_| ())
+    }
+
+    pub(crate) async fn owned_agent_reservation(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        user_id: &str,
+    ) -> Result<(String, bool), AuthFailure> {
+        sqlx::query_as("SELECT r.server_id,EXISTS(SELECT 1 FROM deleted_agents d WHERE d.workspace_id=r.workspace_id AND d.agent_id=r.agent_id) FROM agent_creation_reservations r JOIN agent_credentials c ON c.agent_id=r.agent_id AND c.workspace_id=r.workspace_id AND c.server_id=r.server_id WHERE r.workspace_id=$1 AND r.agent_id=$2 AND r.created_by=$3")
+            .bind(workspace_id).bind(agent_id).bind(user_id).fetch_optional(&self.pool)
+            .await.map_err(AuthFailure::database)?
+            .ok_or_else(|| AuthFailure::not_found("agent_reservation_not_found", "Agent reservation not available"))
+    }
+
+    /// Caller has confirmed a durable Controller denial fence while holding the
+    /// workload lifecycle guard. Ownership, revocation and audit share one PG tx.
+    pub(crate) async fn cleanup_agent_reservation(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        user_id: &str,
+    ) -> Result<bool, AuthFailure> {
+        self.delete_agent_with_reservation_actor(workspace_id, agent_id, Some(user_id))
+            .await
+    }
+
+    async fn delete_agent_with_reservation_actor(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        reservation_actor: Option<&str>,
+    ) -> Result<bool, AuthFailure> {
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        let mut reservation_server = None;
+        if let Some(user_id) = reservation_actor {
+            reservation_server = Some(sqlx::query_scalar::<_, String>("SELECT r.server_id FROM agent_creation_reservations r JOIN agent_credentials c ON c.agent_id=r.agent_id AND c.workspace_id=r.workspace_id AND c.server_id=r.server_id WHERE r.workspace_id=$1 AND r.agent_id=$2 AND r.created_by=$3 FOR UPDATE OF r,c")
+                .bind(workspace_id).bind(agent_id).bind(user_id)
+                .fetch_optional(&mut *transaction).await.map_err(AuthFailure::database)?
+                .ok_or_else(|| AuthFailure::not_found("agent_reservation_not_found", "Agent reservation not available"))?);
+            let deleted: bool = sqlx::query_scalar(
+                "SELECT EXISTS(SELECT 1 FROM deleted_agents WHERE workspace_id=$1 AND agent_id=$2)",
+            )
+            .bind(workspace_id)
+            .bind(agent_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+            if deleted {
+                transaction.commit().await.map_err(AuthFailure::database)?;
+                return Ok(true);
+            }
+        }
         sqlx::query(
             "INSERT INTO deleted_agents(agent_id, workspace_id, deleted_at) \
              VALUES($1, $2, $3) \
@@ -307,9 +361,34 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
+        if let Some(user_id) = reservation_actor {
+            let organization: String =
+                sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE workspace_id=$1")
+                    .bind(workspace_id)
+                    .fetch_one(&mut *transaction)
+                    .await
+                    .map_err(AuthFailure::database)?;
+            audit::insert(
+                &mut transaction,
+                NewAuditEvent {
+                    organization_id: &organization,
+                    workspace_id: Some(workspace_id),
+                    actor_kind: "user",
+                    actor_id: Some(user_id),
+                    source: "control-plane",
+                    action: "agent.reservation.cleanup",
+                    resource_kind: "agent",
+                    resource_id: agent_id,
+                    resource_name: None,
+                    payload: json!({"deleted":true,"server_id":reservation_server}),
+                },
+            )
+            .await
+            .map_err(AuthFailure::database)?;
+        }
         transaction.commit().await.map_err(AuthFailure::database)?;
         self.agent_credentials.write().await.remove(agent_id);
-        Ok(())
+        Ok(false)
     }
 
     pub async fn delete_machine(

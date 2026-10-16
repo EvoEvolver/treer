@@ -77,6 +77,7 @@ impl AuthStore {
             .await
     }
 
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub async fn create_named_agent_credential_for_caller(
         &self,
@@ -86,6 +87,21 @@ impl AuthStore {
         name: &str,
         folder: Option<&str>,
         caller: Option<&str>,
+    ) -> Result<String, AuthFailure> {
+        self.reserve_named_agent(workspace, server, agent, name, folder, caller, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn reserve_named_agent(
+        &self,
+        workspace: &str,
+        server: &str,
+        agent: &str,
+        name: &str,
+        folder: Option<&str>,
+        caller: Option<&str>,
+        human_creator: Option<&str>,
     ) -> Result<String, AuthFailure> {
         treer_protocol::validate_workload_label(name)
             .map_err(|e| AuthFailure::bad_request("invalid_agent_name", &e.message))?;
@@ -113,6 +129,11 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         sqlx::query("INSERT INTO workload_placements(workspace_id,agent_id,folder_id,position) SELECT $1,$2,$3,COALESCE(MAX(position)+1,0) FROM workload_placements WHERE workspace_id=$1 AND folder_id IS NOT DISTINCT FROM $3").bind(workspace).bind(agent).bind(folder).execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        if let Some(creator) = human_creator {
+            sqlx::query("INSERT INTO agent_creation_reservations(agent_id,workspace_id,server_id,created_by) VALUES($1,$2,$3,$4)")
+                .bind(agent).bind(workspace).bind(server).bind(creator)
+                .execute(&mut *tx).await.map_err(AuthFailure::database)?;
+        }
         audit::insert_workspace_mutation(
             &mut tx,
             workspace,

@@ -548,6 +548,25 @@ fixed text and records the failed creation without PATH, argv or output. A
 missing provider inside an already running launcher is a separate launcher
 status, not inferred from terminal output. This error contract installs nothing.
 
+New human Agent creations also atomically record their original human creator,
+workspace and machine in `agent_creation_reservations`; legacy and non-human
+creations are not backfilled. Only that human's current workspace session can
+call `POST /api/workspaces/{workspace}/agent-reservations/{agent}/cleanup` with
+an empty body (or `{}`). The route explicitly evaluates `agent.delete` for the
+stable Agent/machine even without a live snapshot. Foreign/missing reservations
+share a 404; Policy denial is 403. Runtime snapshot or durable App metadata
+rejects cleanup (409). Under the lifecycle guard, the capability-gated Controller
+command verifies runtime, startup and all Host inventory absence, then durably
+fences the ID before acknowledging. Old Controllers return 501; unavailable or
+unconfirmed fencing leaves the reservation intact (503/409). PostgreSQL then
+atomically revokes credentials, releases names/services, adds the tombstone and
+records `agent.reservation.cleanup` with human/Agent/machine metadata only.
+Repeated cleanup of one's own deleted reservation is idempotent. UI confirmation
+is explicit and never automatically retries creation. App identities and service
+audience human tokens cannot use this human-session API. The startup-store
+[rollback floor](../scripts/machine-rollout.md#startup-store-rollback-floor)
+applies after a fence is persisted, including when subsequent PG cleanup fails.
+
 `workload.create-placement.v1` is advertised by Proxy health and Controllers.
 The thin CLI gates creation/profile launch before forwarding argv. Controller
 creation routes check Proxy health and use new `/agents/placed`, `/apps/placed`
