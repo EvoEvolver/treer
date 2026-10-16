@@ -7,6 +7,8 @@ param(
     [string]$ConfigPath,
     [string]$BinDirectory,
     [string]$StageDirectory,
+    [string]$StartupStore,
+    [switch]$AcceptSharedBinaries,
     [string]$ArtifactBase = 'https://proxy.canary.treer.ai/artifacts/windows-x86_64/',
     [ValidateSet('treer-agent-server','treer')][string]$Binary,
     [ValidateRange(1,1800)][int]$TimeoutSeconds = 180,
@@ -134,7 +136,7 @@ function Get-UpdateVersion($Path) {
         return $Matches[1]
     } finally { $process.Dispose() }
 }
-function Get-UpdateConfig($Path) {
+function Get-UpdateConfig($Path, $AllowSharedBinaries = $false) {
     $expected = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Treer/agent-servers'))
     if ([IO.Path]::GetDirectoryName($Path) -ine $expected) { throw 'require_default_local_config_directory' }
     $config = [IO.File]::ReadAllText($Path) | ConvertFrom-Json
@@ -142,7 +144,7 @@ function Get-UpdateConfig($Path) {
     $siblings = @(Get-ChildItem -LiteralPath ([IO.Path]::GetDirectoryName($Path)) -Filter '*-controller.json' | Where-Object {
         ([IO.File]::ReadAllText($_.FullName) | ConvertFrom-Json).install_hostname -eq [Net.Dns]::GetHostName()
     })
-    if ($siblings.Count -ne 1) { throw 'shared_binary_multi_workspace_refused' }
+    if ($siblings.Count -lt 1 -or ($siblings.Count -gt 1 -and !$AllowSharedBinaries)) { throw 'shared_binary_multi_workspace_refused' }
     $uri = [Uri]('http://' + $config.listen)
     $address = $null
     if (![Net.IPAddress]::TryParse($uri.DnsSafeHost, [ref]$address) -or ![Net.IPAddress]::IsLoopback($address)) { throw 'require_loopback_controller' }
@@ -203,9 +205,10 @@ function Invoke-UpdateRestart($Controller, $Workspace, $Directory) {
         if ($process.ExitCode -ne 0) { throw 'restart_command_failed' }
     } finally { $process.Dispose() }
 }
-function Set-UpdateBinary($Source, $Destination, $ExpectedHash) {
+function Set-UpdateBinary($Source, $Destination, $ExpectedHash, $Tag = 'rollback') {
+    if ($Tag -notmatch '^[a-z0-9-]{1,64}$') { throw 'invalid_update_backup_tag' }
     $temporary = $Destination + '.' + [Guid]::NewGuid().ToString('N') + '.new'
-    $old = $Destination + '.' + [Guid]::NewGuid().ToString('N') + '.old'
+    $old = $Destination + '.prev-' + $Tag + '-' + [Guid]::NewGuid().ToString('N')
     [IO.File]::Copy($Source, $temporary, $false)
     if ($ExpectedHash -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash -ine $ExpectedHash) {
         [IO.File]::Delete($temporary)
@@ -214,10 +217,11 @@ function Set-UpdateBinary($Source, $Destination, $ExpectedHash) {
     [IO.File]::Move($Destination, $old)
     try { [IO.File]::Move($temporary, $Destination) }
     catch { [IO.File]::Move($old, $Destination); throw }
-    # Keep the running image's .old file until explicit maintenance after exit.
+    # Keep the running image's .prev-* file until explicit maintenance after exit.
 }
 function Invoke-UpdateTransaction($Job, $Stage) {
-    $config = Get-UpdateConfig $Job.config_path
+    $allowShared = $Job.PSObject.Properties.Name -contains 'accept_shared_binaries' -and $Job.accept_shared_binaries
+    $config = Get-UpdateConfig $Job.config_path $allowShared
     $bin = Assert-UpdatePath $Job.bin_directory
     $health = Get-UpdateLocal $config '/api/health'
     if (!$health.proxy_connected -or !$health.controller_epoch) { throw 'controller_not_ready_before_update' }
@@ -242,17 +246,23 @@ function Invoke-UpdateTransaction($Job, $Stage) {
         [IO.File]::Copy((Join-Path $bin ($name + '.exe')), (Join-Path $backup ($name + '.exe')), $false)
         $backupHashes[$name] = (Get-FileHash -LiteralPath (Join-Path $backup ($name + '.exe')) -Algorithm SHA256).Hash
     }
+    [IO.File]::Copy((Join-Path $bin 'treer-agent-host.exe'), (Join-Path $backup 'treer-agent-host.exe'), $false)
+    if ($Job.PSObject.Properties.Name -contains 'startup_store' -and $Job.startup_store) {
+        $startup = Assert-UpdatePath $Job.startup_store
+        if (![IO.File]::Exists($startup)) { throw 'startup_store_missing' }
+        [IO.File]::Copy($startup, (Join-Path $backup 'agent-startup.json'), $false)
+    }
     Write-UpdateJson (Join-Path $Stage 'progress.json') @{ status='activating'; backup=$backup }
     $changed = New-Object 'Collections.Generic.List[string]'; $activated = $false
     try {
         $changed.Add('treer-agent-server')
-        Set-UpdateBinary (Join-Path $Stage 'treer-agent-server.exe') $controller $hashes['treer-agent-server']
+        Set-UpdateBinary (Join-Path $Stage 'treer-agent-server.exe') $controller $hashes['treer-agent-server'] $Job.commit
         $activated = $true
         Invoke-UpdateRestart $controller $config.workspace $Stage
         $ready = Wait-UpdateController $config $health.controller_epoch $Job.commit $agents $Job.timeout
         if (!(Test-UpdateCommit $hostCommit $ready.host_build.git_commit)) { throw 'host_build_changed' }
         $changed.Add('treer')
-        Set-UpdateBinary (Join-Path $Stage 'treer.exe') (Join-Path $bin 'treer.exe') $hashes['treer']
+        Set-UpdateBinary (Join-Path $Stage 'treer.exe') (Join-Path $bin 'treer.exe') $hashes['treer'] $Job.commit
         foreach ($name in @('treer-agent-server','treer')) {
             if ((Get-FileHash -LiteralPath (Join-Path $bin ($name + '.exe')) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hashes[$name]) { throw 'installed_checksum_mismatch' }
         }
@@ -288,7 +298,7 @@ function Invoke-WindowsMachineUpdate {
         if ($Commit -notmatch '^[0-9a-f]{40}$' -or !$ConfigPath -or !$BinDirectory) { throw 'require_commit_config_and_binary_directory' }
         if ($SumsSha256 -notmatch '^[0-9a-fA-F]{64}$') { throw 'require_out_of_band_release_receipt_sums_sha256' }
         $configFile = Assert-UpdatePath $ConfigPath; $bin = Assert-UpdatePath $BinDirectory
-        $null = Get-UpdateConfig $configFile
+        $null = Get-UpdateConfig $configFile $AcceptSharedBinaries.IsPresent
         $base = Assert-UpdateOrigin $ArtifactBase
         if (!(Test-Path -LiteralPath ([IO.Path]::GetDirectoryName($stage)))) { throw 'create_user_owned_stage_parent_first' }
         $null = Assert-UpdatePath ([IO.Path]::GetDirectoryName($stage))
@@ -297,7 +307,7 @@ function Invoke-WindowsMachineUpdate {
         Assert-UpdateSums (Join-Path $stage 'SHA256SUMS') $SumsSha256
         $null = Get-UpdateManifest (Join-Path $stage 'SHA256SUMS')
         [IO.File]::Copy($PSCommandPath, (Join-Path $stage 'worker.ps1'), $false)
-        Write-UpdateJson (Join-Path $stage 'job.json') @{ schema=1; commit=$Commit; sums_sha256=$SumsSha256.ToLowerInvariant(); config_path=$configFile; bin_directory=$bin; artifact_base=$base; timeout=$TimeoutSeconds }
+        Write-UpdateJson (Join-Path $stage 'job.json') @{ schema=1; commit=$Commit; sums_sha256=$SumsSha256.ToLowerInvariant(); config_path=$configFile; bin_directory=$bin; artifact_base=$base; timeout=$TimeoutSeconds; startup_store=$StartupStore; accept_shared_binaries=$AcceptSharedBinaries.IsPresent }
         @{ status='prepared'; stage=$stage } | ConvertTo-Json; return
     }
     $null = Assert-UpdatePath $stage

@@ -161,6 +161,51 @@ else:
         self.assertEqual(originals, {name: update.digest(self.bindir / name) for name in update.BINARIES})
         self.assertEqual(json.loads(self.state.read_text())["events"], [])
 
+    def test_release_receipt_pins_sums_and_binary_hashes_before_activation(self):
+        self.config["expected_sums"] = "0" * 64
+        code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertIn("canary_passed release receipt", result["error"])
+        self.assertEqual(json.loads(self.state.read_text())["events"], [])
+        (self.job / "result.json").unlink()
+        self.config["expected_sums"] = hashlib.sha256((self.artifacts / "SHA256SUMS").read_bytes()).hexdigest()
+        self.config["expected_files"] = {name: "0" * 64 for name in update.BINARIES}
+        code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertIn("artifact checksums differ", result["error"])
+        self.assertEqual(json.loads(self.state.read_text())["events"], [])
+
+    def test_release_source_commit_must_match_even_with_valid_binary_hashes(self):
+        self.config["expected_commit"] = "c" * 40
+        code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertIn("pinned release", result["error"])
+        self.assertEqual(json.loads(self.state.read_text())["events"], [])
+
+    def test_startup_store_is_backed_up_without_logging_its_contents(self):
+        startup = self.home / "startup.json"
+        startup.write_text("synthetic-sensitive-startup")
+        self.config["startup_store"] = str(startup)
+        code, result = self.invoke()
+        self.assertEqual(code, 0, result)
+        saved = Path(result["backup"]) / "agent-startup.json"
+        self.assertEqual(saved.read_text(), startup.read_text())
+        self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
+        self.assertNotIn("synthetic-sensitive-startup", (self.job / "result.json").read_text())
+
+    def test_separate_cli_install_path_is_updated_and_backed_up(self):
+        cli_directory = self.home / "cli-bin"
+        cli_directory.mkdir()
+        cli = cli_directory / "treer"
+        self.binary(cli, self.old)
+        self.config["cli_path"] = str(cli)
+        original_alias = (self.bindir / "treer").read_bytes()
+        code, result = self.invoke()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(update.digest(cli), update.digest(self.artifacts / "treer"))
+        self.assertEqual((self.bindir / "treer").read_bytes(), original_alias)
+        self.assertIn(self.old, (Path(result["backup"]) / "treer").read_text())
+
     def test_local_manifest_must_match_online(self):
         real_fetch = update.fetch
         changed = (self.artifacts / "SHA256SUMS").read_bytes().replace(

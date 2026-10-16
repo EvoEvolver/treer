@@ -48,7 +48,7 @@ try {
     Assert-UpdateTest ([IO.File]::ReadAllText($target) -ceq 'new') 'rename-and-copy'
     Assert-UpdateThrows { Set-UpdateBinary $source $target ('b' * 64) } 'copy-digest-before-move'
     Assert-UpdateTest ([IO.File]::ReadAllText($target) -ceq 'new') 'copy-digest-keeps-installed-target'
-    $oldFiles = @(Get-ChildItem $temporary -Filter 'target.*.old')
+    $oldFiles = @(Get-ChildItem $temporary -Filter 'target.prev-rollback-*')
     Assert-UpdateTest ($oldFiles.Count -eq 1 -and [IO.File]::ReadAllText($oldFiles[0].FullName) -ceq 'old') 'old-image-retained'
     # Pure transaction fixtures: real hashes, file moves, backups, atomic receipts;
     # only enrolled health, versions and restart are replaced. No user's service.
@@ -94,7 +94,9 @@ try {
         $script:failRollback = $scenario -eq 'rollback_failed'
         if ($scenario -eq 'checksum_refused') { [IO.File]::AppendAllText((Join-Path $stage 'treer.exe'),'tampered') }
         $script:fixtureBin = $bin
-        $job = [PSCustomObject]@{config_path='fixture';bin_directory=$bin;commit=$script:newCommit;sums_sha256=(Get-FileHash -LiteralPath (Join-Path $stage 'SHA256SUMS') -Algorithm SHA256).Hash;timeout=1}
+        $startup = Join-Path $case 'startup.json'
+        [IO.File]::WriteAllText($startup,'synthetic-startup-intent')
+        $job = [PSCustomObject]@{config_path='fixture';bin_directory=$bin;commit=$script:newCommit;sums_sha256=(Get-FileHash -LiteralPath (Join-Path $stage 'SHA256SUMS') -Algorithm SHA256).Hash;timeout=1;startup_store=$startup}
         if ($scenario -eq 'complete') { Invoke-UpdateTransaction $job $stage }
         else { Assert-UpdateThrows { Invoke-UpdateTransaction $job $stage } ('transaction-' + $scenario) }
         if ($scenario -eq 'checksum_refused') {
@@ -109,6 +111,7 @@ try {
             Assert-UpdateTest ($script:events[0] -ceq 'restart' -and $script:events[1] -ceq ('ready:' + $script:newCommit)) 'controller-before-cli'
             $backup = Get-Item -LiteralPath $receipt.backup
             Assert-UpdateTest ([IO.File]::ReadAllText((Join-Path $backup.FullName 'treer.exe')).StartsWith('old')) 'backup-retained'
+            Assert-UpdateTest ([IO.File]::ReadAllText((Join-Path $backup.FullName 'agent-startup.json')) -ceq 'synthetic-startup-intent') 'startup-store-backup'
         }
     }
     if ($env:OS -eq 'Windows_NT') {
