@@ -30,6 +30,7 @@ have `node_min: 22`, `install` and `check`:
     "kind": "npm-global",
     "package": "@openai/codex",
     "version": "0.163.0",
+    "integrity": "sha512-HNd7vR9oTK6M2ikxFnvNDCdYUgAsyo9VVnd5KnEd2ON0GYI++7MiX9XNPUkhtdgGKFPsWS+CEppQ1UU63uVhUw==",
     "registry": "https://registry.npmjs.org/",
     "ignore_scripts": true
   },
@@ -41,10 +42,22 @@ have `node_min: 22`, `install` and `check`:
 
 `install` is typed package data rather than arbitrary executable/argv input.
 Core owns **one** expansion function, used both for the response's `display`
-and for execution. POSIX expansion is a vetted npm executable with literal
-`install --global --registry=https://registry.npmjs.org/` plus the exact
-`package@version` and `--ignore-scripts` when declared. No sudo, shell, editable
-argv, environment substitutions, URL scripts, version tags or ranges.
+and for execution. Per security review 2277, expansion must pack the exact
+package into a private operation directory, verify its tarball SHA-512 against
+`integrity`, then install that verified local tarball globally. Both command
+steps and the integrity verification must be shown at confirmation; a single
+display command is insufficient. This multi-step DTO requires Core/Web
+agreement before implementation. No sudo, shell, editable argv, environment
+substitutions, URL scripts, version tags or ranges.
+
+Each npm step uses explicit official registry and scope registry arguments,
+Core-created empty private user/global config files, and a minimal cleared
+environment excluding npm configuration variables, NODE_OPTIONS and proxy
+variables. Do not inherit user npmrc or trust the default registry for scoped
+packages. Global prefix selection must be identical for display, installation
+and check; check resolves the binary only in that installed prefix's bin
+directory, never a different PATH candidate. Enterprise proxy support requires
+a separate explicit contract. These execution mechanics are Core-owned.
 
 On Windows Core must resolve trusted absolute Node and its adjacent
 `node_modules/npm/bin/npm-cli.js`, verify a regular physical file inside that
@@ -92,8 +105,10 @@ Installation can replace an existing global package; it never restarts Agents.
 
 Read the exact-version registry tarball members `package/install.cjs` (Claude)
 and `package/postinstall.mjs` (OpenCode) as text, without extracting to an
-installation or executing them. This inspection is not a transitive dependency
-audit or a signature/integrity verification of an installed package.
+installation or executing them. Subsequently verified both downloaded tarballs
+against the exact-version registry SHA-512 and recorded member SHA-256 values
+in [provider-review.json](provider-review.json). This inspection is not a
+transitive dependency audit or a signature verification of an installed package.
 
 - Claude's script selects a version-pinned native optional dependency, then
   hardlinks or copies its binary to `bin/claude.exe` inside the wrapper package.
