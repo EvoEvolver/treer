@@ -68,6 +68,11 @@ it never creates/restarts Agents or restarts the Host/Controller. Run
 `treer interface contract` for the authenticated enrolled machine/root and actual
 Controller compatibility. Missing support means update is needed, not permission
 to fall back silently. See the operator guide before legacy/source installation.
+With multiple local enrollments, pass `treer-agent-server launcher --workspace
+WORKSPACE_ID --url http://127.0.0.1:PORT install` (URL is optional if workspace
+alone is unique). Ambiguous discovery fails before installation; all installer
+subprocesses stay bound to the same selected Controller. Existing managed/operator
+identity bindings still cannot be overridden.
 
 ## Understand identity and scope
 
