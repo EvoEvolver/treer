@@ -169,6 +169,21 @@ lock ownership and idempotent RollingBack receipts. These tests retain the
 original sealed ownership and locks: they cover durable file reconciliation,
 not recovery after worker death or reacquisition of abandoned ownership.
 
+The forward `activate_core` orchestration now reconnects to the saved Host
+baseline before publishing, then issues the existing durable one-shot
+Controller-only restart request. It never retries a lost/error ACK. A separate
+30-second total observation budget (250 ms between attempts, after the existing
+bounded restart request) checks the actual live Controller image, source commit,
+new epoch, verified Host parent and unchanged workload/output baseline through
+`observe_live`. ACK alone cannot advance CoreHealthy; lost ACK can still be
+resolved by that full independent observation. Failed or stalled health restores
+the two images and leaves RollingBack, without claiming the old Controller is
+running. Ownership remains with the caller. Tests substitute only the private
+runtime seam to cover ACK/health disagreement, lost ACK, a stalled observation,
+and rejection of a second activation. Real Host activation acceptance, the
+old-Controller restart/health half of rollback, production command dispatch,
+launcher work and post-worker-death recovery are still pending.
+
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
 child receives references to the same open file descriptions, so closing the

@@ -141,7 +141,7 @@ pub fn restore_images(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::self_update::{
         publication::{FileStep, Publications},
@@ -152,7 +152,7 @@ mod tests {
     use std::{io::Write, os::unix::fs::PermissionsExt};
     use treer_platform::private_directory::PrivateDirectory;
 
-    fn fixture() -> (Fixture, Selected, OwnedActivation, Journal) {
+    pub(in crate::self_update) fn fixture() -> (Fixture, Selected, OwnedActivation, Journal) {
         let f = Fixture::new();
         f.enrollment("srv_a", "ws_a", &f.bin.join("treer-agent-server"));
         for binary in [Binary::Controller, Binary::Cli] {
