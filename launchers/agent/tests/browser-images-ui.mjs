@@ -52,6 +52,11 @@ export async function testImagesUi(browser, base, screenshots, entry = "index.ht
       await expect(page.locator(".image-drafts img")).toHaveCount(0);
       const message = page.locator(".msg.user").filter({ has: page.locator(".sent-images") }).last();
       await expect(message.locator("img")).toHaveCount(1);
+      if (width === 390) {
+        await expect(message.locator(".body")).toHaveCount(0);
+        await expect(message).toHaveClass(/image-only/);
+        assert.equal(await message.evaluate(node => getComputedStyle(node, "::before").content), "none");
+      }
       await page.reload();
       await expect(message.locator("img")).toHaveCount(1);
       await expect.poll(() => message.locator("img").evaluate(node => node.complete && node.naturalWidth > 0)).toBe(true);

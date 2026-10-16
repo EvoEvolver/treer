@@ -20,6 +20,7 @@ export async function testMobileComposer(browser, base, screenshots, entry) {
               const box = document.querySelector("#box").getBoundingClientRect();
               return { separate: area.bottom <= controls.top, full: area.width > box.width - 50,
                 hints: getComputedStyle(document.querySelector("#hint")).display,
+                keyGlyph: getComputedStyle(document.querySelector(".send-t"), "::after").content,
                 targets: [...document.querySelectorAll(".ctl button")].every(button => { const r = button.getBoundingClientRect(); return !r.width || (r.width >= 44 && r.height >= 44); }),
                 overflow: document.documentElement.scrollWidth > innerWidth };
             });
@@ -27,6 +28,7 @@ export async function testMobileComposer(browser, base, screenshots, entry) {
             if (width < 768) {
               assert.ok(layout.separate && layout.full && layout.targets, `${width}/${look}/${theme}/${focused}: input row and 44px controls ${JSON.stringify(layout)}`);
               assert.equal(layout.hints, "none");
+              assert.equal(layout.keyGlyph, "none");
             } else if (!focused) assert.equal(layout.separate, false, "desktop compact layout unchanged");
             else assert.notEqual(layout.hints, "none", "desktop shortcuts retained");
           }

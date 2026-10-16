@@ -18,10 +18,11 @@ function Message({ item }: { item: HistoryItem }) {
   if (!item.text && !item.attachments?.length) return null;
   if (item.kind === "userMessage") {
     const origin = FROM.exec(item.text);
+    const bodyText = origin ? item.text.slice(origin[0].length) : item.text;
     return (
-      <article className="msg user">
+      <article className={`msg user${bodyText.trim() ? "" : " image-only"}`}>
         <div className="who">{origin ? t("message.from", { name: origin[1] ?? "" }) : t("message.you")}</div>
-        <Markdown className="body" text={origin ? item.text.slice(origin[0].length) : item.text} />
+        {!!bodyText.trim() && <Markdown className="body" text={bodyText} />}
         {!!item.attachments?.length && <div className="image-list sent-images">{item.attachments.map((image, index) => <img key={image.id} src={safeImageUrl(imageUrl(image.id))} alt={t("images.preview", { number: index + 1 })} loading="lazy" />)}</div>}
       </article>
     );
