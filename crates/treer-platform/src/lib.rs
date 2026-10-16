@@ -6,6 +6,8 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite};
 
 mod environment;
+#[cfg(unix)]
+pub mod installation_directory;
 pub mod machine_file;
 #[cfg(unix)]
 pub mod private_directory;

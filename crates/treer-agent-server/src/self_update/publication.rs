@@ -71,6 +71,10 @@ impl Publications {
         self.image(binary).step
     }
 
+    pub(super) fn original_digest(&self, binary: Binary) -> &str {
+        &self.image(binary).original_sha256
+    }
+
     fn image(&self, binary: Binary) -> &Publication {
         match binary {
             Binary::Controller => &self.controller,

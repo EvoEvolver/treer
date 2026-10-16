@@ -17,7 +17,7 @@ fn denied() -> io::Error {
     )
 }
 
-fn name(value: &str) -> io::Result<&str> {
+pub(super) fn name(value: &str) -> io::Result<&str> {
     if value.is_empty()
         || value.len() > 255
         || matches!(value, "." | "..")
@@ -56,6 +56,10 @@ pub struct PrivateDirectory {
 }
 
 impl PrivateDirectory {
+    pub(super) fn from_handle(file: File) -> io::Result<Self> {
+        check(&file, true)?;
+        Ok(Self { file })
+    }
     /// Persist directory entries after creating transaction files.
     pub fn sync(&self) -> io::Result<()> {
         self.file.sync_all()
@@ -65,32 +69,7 @@ impl PrivateDirectory {
     /// component. Callers canonicalize trusted OS aliases before selecting it.
     /// This never chmods a pre-existing directory or creates missing ancestors.
     pub fn open(path: &Path) -> io::Result<Self> {
-        if !path.is_absolute() {
-            return Err(denied());
-        }
-        let mut file: File = sys::open(
-            "/",
-            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
-            Mode::empty(),
-        )?
-        .into();
-        for component in path.components() {
-            match component {
-                Component::RootDir => {}
-                Component::Normal(component) => {
-                    file = sys::openat(
-                        &file,
-                        component,
-                        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
-                        Mode::empty(),
-                    )?
-                    .into();
-                }
-                _ => return Err(denied()),
-            }
-        }
-        check(&file, true)?;
-        Ok(Self { file })
+        Self::from_handle(open_physical_directory(path)?)
     }
 
     pub fn open_child(&self, child: &str) -> io::Result<Self> {
@@ -182,6 +161,34 @@ impl PrivateDirectory {
         sys::unlinkat(&self.file, name(child)?, AtFlags::empty())?;
         self.file.sync_all()
     }
+}
+
+pub(super) fn open_physical_directory(path: &Path) -> io::Result<File> {
+    if !path.is_absolute() {
+        return Err(denied());
+    }
+    let mut file: File = sys::open(
+        "/",
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )?
+    .into();
+    for component in path.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(component) => {
+                file = sys::openat(
+                    &file,
+                    component,
+                    OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+                    Mode::empty(),
+                )?
+                .into();
+            }
+            _ => return Err(denied()),
+        }
+    }
+    Ok(file)
 }
 
 #[cfg(test)]

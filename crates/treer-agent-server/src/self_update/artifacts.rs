@@ -22,7 +22,7 @@ pub enum Binary {
 }
 
 impl Binary {
-    fn name(self) -> &'static str {
+    pub(super) fn name(self) -> &'static str {
         match self {
             Self::Controller => "treer-agent-server",
             Self::Cli => "treer",
