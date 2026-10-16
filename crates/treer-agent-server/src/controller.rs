@@ -130,6 +130,9 @@ pub enum PrivateStateStatus {
     Unavailable,
     /// The directory would be inside the workload cwd; nothing is injected.
     InsideCwd,
+    /// Windows: the Controller does not run under an Administrators-group
+    /// account; private state is not served at all (product rule).
+    RequiresAdministrator,
 }
 
 impl PrivateStateStatus {
@@ -139,6 +142,7 @@ impl PrivateStateStatus {
             Self::Unsafe => "agent_private_state_unsafe",
             Self::Unavailable => "agent_private_state_unavailable",
             Self::InsideCwd => "agent_private_state_inside_cwd",
+            Self::RequiresAdministrator => crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR,
         }
     }
 }
@@ -285,6 +289,8 @@ impl ControllerRuntime {
                 warn!(code = %error.code, "Agent private state root is degraded; private state disabled");
                 Err(if error.code == "agent_private_state_unsafe" {
                     "agent_private_state_unsafe"
+                } else if error.code == crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR {
+                    crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR
                 } else {
                     "agent_private_state_unavailable"
                 })
@@ -2087,6 +2093,9 @@ impl ControllerRuntime {
             }
             Err(error) if error.code == "agent_private_state_unavailable" => {
                 return Ok(PrivateStateStatus::Unavailable)
+            }
+            Err(error) if error.code == crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR => {
+                return Ok(PrivateStateStatus::RequiresAdministrator)
             }
             Err(error) => return Err(error),
         };

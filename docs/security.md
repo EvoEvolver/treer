@@ -337,11 +337,24 @@ domain. The Windows check accepts as owner only this process's token user or tok
 owner (the SID the system assigns to objects the process creates; for an
 elevated administrator that is the Administrators group) and requires a
 protected DACL whose entries are all non-inherited plain allow entries for
-the token user or LocalSystem; any other ACE type is never parsed beyond its
-header and fails closed. Failures log a categorical report (owner class,
-control flags, ACE type/inherited/principal class) without SIDs or paths. The
-Windows variants (protected DACL, reparse-point rejection, free space) are
-compile-guarded and have not been exercised on a Windows runner.
+the token user or LocalSystem; plain deny entries are parsed and rejected, and
+unsupported ACE types (object, callback, audit, unknown) are never parsed
+beyond their header and fail closed. Failures log a categorical report (owner class,
+control flags, ACE type/inherited/principal class) without SIDs or paths.
+Treer on Windows assumes an Administrators-group account: the Controller
+classifies its own token (elevation type and BUILTIN\Administrators
+membership, never names, paths or environment; a classification error counts
+as non-administrator) and, for a standard account, reports the fixed code
+`windows_requires_administrator` for private state (variable omitted,
+reservations refused, status API) instead of a DACL verdict; the owner and ACE
+rules are never relaxed for such accounts. On a hosted windows-2022 runner (an
+elevated account whose token owner is the Administrators group) the earlier
+owner-equals-user rule failed; the token-bound rule and the DACL negative
+regressions (wide DACL, DACL loosened after creation, callback ACE) ran
+natively and passed in the released train ed6390f (run 38965604130). Not
+exercised: a non-administrator account (unsupported by product rule), the
+win_native acceptance machine, and the reparse-point and free-space paths
+beyond compilation.
 The private state quota is cooperative
 admission control for launchers that reserve before writing; same-account code
 can bypass it, after which the Controller only refuses further reservations.

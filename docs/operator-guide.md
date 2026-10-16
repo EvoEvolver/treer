@@ -1092,6 +1092,23 @@ as unavailable. Usage is capped at 256 MiB per Agent and 4 GiB per machine,
 and the Controller refuses new content when the volume would drop below 1 GiB
 free. Directories of previous server enrollments are not touched.
 
+Windows requires an account in the Administrators group; under a standard
+account private state is not served at all and the status reads
+`windows_requires_administrator`. The Controller only trusts an
+`agent-private` level whose owner is its own process token (user or token
+owner) and whose protected DACL names only that user and LocalSystem. If the Controller later runs under a different
+account or elevation than the one that created the directories, the
+Controller log reports `insecure_dacl` with a categorical owner/ACE summary,
+the variable is omitted and attachments stay unavailable; nothing is deleted
+or repaired automatically, because the directories hold the Agents' sent
+attachments. To recover, stop the Controller, back up or move the affected
+`agent-private/<server_id>` tree, then either recreate it under the account
+and elevation the Controller runs with, or repair the existing tree in two
+separate steps: set the owner to the Controller's own token user (or its token
+owner), and reapply a protected DACL whose allow entries name only the
+Controller's token user and `SYSTEM` (never the token-owner group), then start
+the Controller again.
+
 Workspace members and managed Agents can also save reusable launch profiles:
 
 ```bash

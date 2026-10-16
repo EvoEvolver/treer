@@ -62,6 +62,39 @@ fn unavailable(path: &Path, error: io::Error) -> ProtocolError {
     )
 }
 
+/// Fixed code for the Windows product rule: private state is only served to
+/// an Administrators-group account; a standard account gets this code instead
+/// of a misleading DACL verdict.
+pub const WINDOWS_REQUIRES_ADMINISTRATOR: &str = "windows_requires_administrator";
+
+/// Windows: whether this process runs under an Administrators-group token.
+/// Decided from the token alone (never from names, paths or environment) and
+/// cached for the process lifetime; a classification error counts as not an
+/// administrator (fail closed). Always true elsewhere.
+fn windows_account_is_administrator() -> bool {
+    #[cfg(windows)]
+    {
+        static ADMINISTRATOR: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ADMINISTRATOR.get_or_init(|| match treer_platform::account_class() {
+            Ok(treer_platform::WindowsAccountClass::Standard) => false,
+            Ok(_) => true,
+            Err(error) => {
+                warn!(%error, "Windows account classification failed; treating as non-administrator");
+                false
+            }
+        })
+    }
+    #[cfg(not(windows))]
+    true
+}
+
+fn requires_administrator() -> ProtocolError {
+    ProtocolError::new(
+        WINDOWS_REQUIRES_ADMINISTRATOR,
+        "Treer on Windows requires an account in the Administrators group; private state is unavailable",
+    )
+}
+
 fn unsafe_directory(path: &Path, reason: &str) -> ProtocolError {
     warn!(path = %path.display(), reason, "Agent private state directory failed its safety check");
     ProtocolError::new(
@@ -100,6 +133,11 @@ impl PrivateStateRoot {
         }
         if !valid_identity(server_id) {
             return Err(invalid_identity());
+        }
+        // Product rule first: a non-administrator Windows account gets the
+        // fixed code before any directory is created, resolved or inspected.
+        if !windows_account_is_administrator() {
+            return Err(requires_administrator());
         }
         let (parent, name) = match (root.parent(), root.file_name()) {
             (Some(parent), Some(name)) => (parent, name),
@@ -146,6 +184,9 @@ impl PrivateStateRoot {
     /// unsafe level fails closed; nothing below the Agent directory is read.
     pub fn prepare(&self, agent_id: &str) -> Result<PathBuf, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
+        if !windows_account_is_administrator() {
+            return Err(requires_administrator());
+        }
         self.verify_levels()?;
         ensure_private_directory(&directory)?;
         Ok(directory)
@@ -156,6 +197,9 @@ impl PrivateStateRoot {
     /// its directory through the local API.
     pub fn verify_existing(&self, agent_id: &str) -> Result<PathBuf, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
+        if !windows_account_is_administrator() {
+            return Err(requires_administrator());
+        }
         self.verify_levels()?;
         match fs::symlink_metadata(&directory) {
             Ok(metadata) => verify_private_directory(&directory, &metadata)?,
@@ -194,6 +238,9 @@ impl PrivateStateRoot {
     /// before and after removal; a link at the Agent level is never followed.
     pub fn purge(&self, agent_id: &str) -> Result<bool, ProtocolError> {
         let directory = self.agent_directory(agent_id)?;
+        if !windows_account_is_administrator() {
+            return Err(requires_administrator());
+        }
         verify_ancestors(&self.root)?;
         for level in [&self.root, &self.server] {
             match fs::symlink_metadata(level) {
@@ -288,6 +335,9 @@ fn verify_ancestors(root: &Path) -> Result<(), ProtocolError> {
 }
 
 fn ensure_private_directory(path: &Path) -> Result<(), ProtocolError> {
+    if !windows_account_is_administrator() {
+        return Err(requires_administrator());
+    }
     match fs::symlink_metadata(path) {
         Ok(metadata) => verify_private_directory(path, &metadata),
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
@@ -326,6 +376,9 @@ fn is_reparse_point(metadata: &fs::Metadata) -> bool {
 }
 
 fn verify_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), ProtocolError> {
+    if !windows_account_is_administrator() {
+        return Err(requires_administrator());
+    }
     if metadata.file_type().is_symlink() {
         return Err(unsafe_directory(path, "symlink"));
     }
@@ -345,10 +398,15 @@ fn verify_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), 
             Ok(false) => {
                 // SIDs, control flags and masks only: enough to diagnose a
                 // foreign owner or inherited entry without exposing content.
+                // One bounded, categorical log line and the fixed code; the
+                // path-logging helper is deliberately not used on this branch.
                 let report = treer_platform::private_path_security_report(path)
                     .unwrap_or_else(|error| format!("report unavailable: {error}"));
-                warn!(%report, "Agent private state directory DACL is not private");
-                return Err(unsafe_directory(path, "insecure_dacl"));
+                warn!(%report, reason = "insecure_dacl", "Agent private state directory failed its safety check");
+                return Err(ProtocolError::new(
+                    "agent_private_state_unsafe",
+                    "Agent private state directory failed its safety check; inspect the Controller log",
+                ));
             }
             Err(error) => return Err(unavailable(path, error)),
         }
@@ -1158,11 +1216,16 @@ mod tests {
                 .expect("run icacls");
             assert!(status.success(), "icacls grant failed");
         }
-        fn report(path: &Path) -> String {
-            treer_platform::private_path_security_report(path)
-                .unwrap_or_else(|error| format!("report unavailable: {error}"))
-        }
         let fixture = Fixture::new();
+        let fixture_path = fixture.0.to_string_lossy().into_owned();
+        // The diagnostic is categorical: no raw SIDs and no fixture path.
+        let report = move |path: &Path| -> String {
+            let report = treer_platform::private_path_security_report(path)
+                .unwrap_or_else(|error| format!("report unavailable: {error}"));
+            assert!(!report.contains("S-1-"), "raw SID in report: {report}");
+            assert!(!report.contains(&fixture_path), "path in report");
+            report
+        };
         let root = fixture.0.join("agent-private");
         // Baseline: secure_directory must produce the protected private DACL
         // on this machine; on failure print what the system actually reports.

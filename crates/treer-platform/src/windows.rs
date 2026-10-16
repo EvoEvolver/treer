@@ -107,6 +107,97 @@ impl Drop for Allocation {
     }
 }
 
+/// Classify the PROCESS token for the Windows administrator requirement.
+/// Elevated: full-elevation token, or an unsplit token that is a member of
+/// BUILTIN\Administrators (UAC off, built-in Administrator, elevated service).
+/// AdminCapable: the UAC-limited token of an Administrators member.
+/// Standard: an unsplit token that is not a member. Every query uses the
+/// process token (membership through an identification-level duplicate of
+/// it), so thread impersonation never influences the result.
+pub fn account_class() -> io::Result<super::WindowsAccountClass> {
+    unsafe {
+        let mut token = ptr::null_mut();
+        // TOKEN_DUPLICATE is required for the identification-level duplicate
+        // that the membership check below needs.
+        checked(OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        ))?;
+        let token = OwnedHandle::from_raw_handle(token);
+        let mut elevation: TOKEN_ELEVATION_TYPE = 0;
+        let mut size = 0u32;
+        checked(GetTokenInformation(
+            token.as_raw_handle(),
+            TokenElevationType,
+            (&mut elevation as *mut TOKEN_ELEVATION_TYPE).cast(),
+            mem::size_of::<TOKEN_ELEVATION_TYPE>() as u32,
+            &mut size,
+        ))?;
+        if elevation == TokenElevationTypeFull {
+            return Ok(super::WindowsAccountClass::Elevated);
+        }
+        if elevation == TokenElevationTypeLimited {
+            return Ok(super::WindowsAccountClass::AdminCapable);
+        }
+        // Unsplit token (UAC off, built-in Administrator, service, or a
+        // standard user): membership decides.
+        Ok(if administrators_member(&token)? {
+            super::WindowsAccountClass::Elevated
+        } else {
+            super::WindowsAccountClass::Standard
+        })
+    }
+}
+
+/// Whether BUILTIN\Administrators is an enabled group of `token` (a process
+/// token opened with TOKEN_QUERY | TOKEN_DUPLICATE). CheckTokenMembership needs
+/// an impersonation token, so an identification-level duplicate of the given
+/// token is used: the verdict is bound to that token, never to a thread's
+/// impersonation state. For a UAC-limited administrator token the group is
+/// deny-only and this returns false.
+fn administrators_member(token: &OwnedHandle) -> io::Result<bool> {
+    unsafe {
+        let mut sid = [0u8; SECURITY_MAX_SID_SIZE as usize];
+        let mut sid_size = SECURITY_MAX_SID_SIZE;
+        checked(CreateWellKnownSid(
+            WinBuiltinAdministratorsSid,
+            ptr::null_mut(),
+            sid.as_mut_ptr().cast(),
+            &mut sid_size,
+        ))?;
+        let mut impersonation = ptr::null_mut();
+        checked(DuplicateToken(
+            token.as_raw_handle(),
+            SecurityIdentification,
+            &mut impersonation,
+        ))?;
+        let impersonation = OwnedHandle::from_raw_handle(impersonation);
+        let mut member = 0;
+        checked(CheckTokenMembership(
+            impersonation.as_raw_handle(),
+            sid.as_mut_ptr().cast(),
+            &mut member,
+        ))?;
+        Ok(member != 0)
+    }
+}
+
+/// Exercise the membership path (DuplicateToken + CheckTokenMembership) on the
+/// current process token regardless of its elevation type. Diagnostic/test
+/// support: returns the raw membership verdict.
+pub fn process_token_administrators_member() -> io::Result<bool> {
+    unsafe {
+        let mut token = ptr::null_mut();
+        checked(OpenProcessToken(
+            GetCurrentProcess(),
+            TOKEN_QUERY | TOKEN_DUPLICATE,
+            &mut token,
+        ))?;
+        administrators_member(&OwnedHandle::from_raw_handle(token))
+    }
+}
+
 pub fn current_user_sid() -> io::Result<String> {
     token_sid(TokenUser)
 }

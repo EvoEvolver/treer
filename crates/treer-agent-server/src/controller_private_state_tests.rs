@@ -1157,3 +1157,47 @@ async fn a_local_fence_never_purges_and_survives_a_tombstone_purge_of_another_ag
     assert!(!fenced.exists());
     assert!(runtime.inner.startup_store.is_denied("ag_fenced").unwrap());
 }
+
+#[test]
+fn private_state_status_codes_are_fixed_and_include_the_windows_product_rule() {
+    assert_eq!(
+        PrivateStateStatus::RequiresAdministrator.code(),
+        "windows_requires_administrator"
+    );
+    assert_eq!(
+        PrivateStateStatus::Unsafe.code(),
+        "agent_private_state_unsafe"
+    );
+    assert_eq!(
+        PrivateStateStatus::InsideCwd.code(),
+        "agent_private_state_inside_cwd"
+    );
+    assert_eq!(
+        PrivateStateStatus::Unavailable.code(),
+        "agent_private_state_unavailable"
+    );
+}
+
+/// Hosted and native Windows gates run as administrators: the live token must
+/// classify as such, so private state is served there.
+#[cfg(windows)]
+#[test]
+fn windows_gate_runner_is_an_administrator_for_private_state() {
+    let class = treer_platform::account_class().unwrap();
+    assert_ne!(
+        class,
+        treer_platform::WindowsAccountClass::Standard,
+        "{class:?}"
+    );
+    // The unsplit-token branch (DuplicateToken on a TOKEN_QUERY|TOKEN_DUPLICATE
+    // process token + CheckTokenMembership) must execute without an access
+    // error whatever the runner's elevation type; the verdict itself depends
+    // on that type (enabled group => true, UAC-limited => deny-only => false).
+    let member = treer_platform::process_token_administrators_member().unwrap();
+    if class == treer_platform::WindowsAccountClass::Elevated {
+        assert!(
+            member,
+            "an elevated or unsplit administrator token has the group enabled"
+        );
+    }
+}

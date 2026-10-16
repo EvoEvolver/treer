@@ -119,6 +119,31 @@ pub fn config_directory() -> Option<PathBuf> {
     }
 }
 
+/// Windows account classification for the administrator requirement (#130).
+/// Defined on every platform so decision logic can be unit-tested anywhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowsAccountClass {
+    /// Full-elevation token, or an unsplit token in BUILTIN\Administrators.
+    Elevated,
+    /// UAC-limited token of an Administrators member.
+    AdminCapable,
+    /// Not a member of Administrators.
+    Standard,
+}
+
+/// Windows only: classify the current process token.
+#[cfg(windows)]
+pub fn account_class() -> io::Result<WindowsAccountClass> {
+    windows::account_class()
+}
+
+/// Windows only, diagnostics/tests: run the Administrators membership path
+/// (DuplicateToken + CheckTokenMembership) on the current process token.
+#[cfg(windows)]
+pub fn process_token_administrators_member() -> io::Result<bool> {
+    windows::process_token_administrators_member()
+}
+
 pub fn secure_directory(path: &Path) -> io::Result<()> {
     std::fs::create_dir_all(path)?;
     #[cfg(unix)]
