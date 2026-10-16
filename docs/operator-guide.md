@@ -715,6 +715,16 @@ Installation, `PATH`, profile migration and bundle delivery are in the
 [launcher guide](../launchers/agent/README.md#create-an-agent). The runtime and its
 provider login remain the user's responsibility.
 
+New workspaces start with six portable `treer-agent` profiles: **Claude + UI**,
+**Codex + UI**, **Cursor + UI**, **Gemini + UI**, **Grok + UI**, and
+**OpenCode + UI**. Their descriptions and arguments come from the launcher's
+`profiles.json`; all use `cwd=.`. **Claude (terminal)** and **Codex (terminal)**
+are additional options without the launcher. Core does not migrate existing
+workspace profiles; the launcher installer manages its own UI profiles.
+If a UI profile reports `command_not_found`, install the launcher on the selected
+machine with `treer-agent-server launcher install` and ensure its bin directory
+is on that machine's `PATH`.
+
 ## Users, administrators, and invitations
 
 The platform administrator is not a Treer user and does not belong to an

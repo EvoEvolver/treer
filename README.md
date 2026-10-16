@@ -85,6 +85,11 @@ the [operator guide](docs/operator-guide.md).
    profile such as Claude + UI or Codex + UI. A plain terminal needs no
    launcher. Install and sign in to the Agent runtime yourself.
 
+New workspaces include six launcher profiles: Claude, Codex, Cursor, Gemini,
+Grok, and OpenCode, each with **+ UI**, plus **Claude (terminal)** and
+**Codex (terminal)** for machines without the launcher. Existing workspace
+profiles are left unchanged; installing the launcher manages its six UI profiles.
+
 The console opens on a workspace overview, keeps open agent pages in tabs, and
 is available in English and Simplified Chinese.
 

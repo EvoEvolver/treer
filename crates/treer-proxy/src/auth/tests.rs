@@ -1499,20 +1499,46 @@ async fn new_workspaces_include_deletable_default_launch_profiles() {
             .map(|profile| (profile.name.as_str(), profile.command.as_str()))
             .collect::<Vec<_>>(),
         [
-            ("Claude", "claude"),
-            ("Codex", "codex"),
-            ("OpenCode", "opencode"),
-            ("Pi", "pi"),
+            ("Claude (terminal)", "claude"),
+            ("Claude + UI", "treer-agent"),
+            ("Codex (terminal)", "codex"),
+            ("Codex + UI", "treer-agent"),
+            ("Cursor + UI", "treer-agent"),
+            ("Gemini + UI", "treer-agent"),
+            ("Grok + UI", "treer-agent"),
+            ("OpenCode + UI", "treer-agent"),
         ]
     );
-    assert!(profiles.iter().all(|profile| {
-        profile.cwd == "." && profile.args.is_empty() && profile.created_by == owner.user_id
-    }));
+    assert!(profiles
+        .iter()
+        .all(|profile| { profile.cwd == "." && profile.created_by == owner.user_id }));
+    let bundle: Value = serde_json::from_str(DEFAULT_AGENT_LAUNCH_PROFILES).unwrap();
+    for expected in bundle["profiles"].as_array().unwrap() {
+        let actual = profiles
+            .iter()
+            .find(|profile| profile.name == expected["name"])
+            .unwrap();
+        assert_eq!(actual.description, expected["description"]);
+        assert_eq!(json!(actual.args), expected["args"]);
+        assert_eq!(actual.command, "treer-agent");
+    }
+    assert!(profiles
+        .iter()
+        .filter(|profile| profile.name.ends_with("(terminal)"))
+        .all(|profile| profile.args.is_empty()));
+    assert_eq!(
+        profiles
+            .iter()
+            .map(|profile| &profile.name)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        8
+    );
 
     store
         .delete_agent_launch_profile(
             "defaults",
-            "Codex",
+            "Codex + UI",
             ProfileMutationActor {
                 kind: "user",
                 id: Some(&owner.user_id),
@@ -1527,7 +1553,7 @@ async fn new_workspaces_include_deletable_default_launch_profiles() {
             .await
             .expect("list profiles after delete")
             .len(),
-        3
+        7
     );
 }
 
