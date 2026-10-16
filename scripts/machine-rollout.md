@@ -6,6 +6,12 @@ Node.js 22+ is required locally and on every target; POSIX targets also need a
 trusted absolute Python 3.11+ interpreter. Windows uses its built-in Windows
 PowerShell 5.1 and CIM. Provider CLIs and their login remain user prerequisites.
 
+Run it from a trusted repository checkout, using the script at its original
+`scripts/machine-rollout.mjs` location. Do not copy just that file elsewhere: it
+imports the worker and `launchers/agent/scripts/private-state.mjs`, and uploads
+the checked-out updater/helper files. Missing checkout files fail before a job
+can be submitted (for example, `ERR_MODULE_NOT_FOUND`).
+
 First inspect an offline plan (no network, writes, or machine commands):
 
 ```sh
