@@ -5,7 +5,7 @@
 use std::{
     fs::File,
     io,
-    os::unix::net::{UnixListener, UnixStream},
+    os::unix::net::{SocketAddr, UnixListener, UnixStream},
     path::{Component, Path, PathBuf},
     time::Duration,
 };
@@ -88,7 +88,7 @@ impl PrivateDirectory {
     /// The pathname is only a locator: it must reopen to this directory inode.
     /// No stale socket is unlinked or replaced, even on a failed bind/check.
     pub fn bind_handoff(&self, path: &Path) -> io::Result<PrivateListener> {
-        self.matches_path(path)?;
+        self.preflight_handoff(path)?;
         let listener = UnixListener::bind(path.join("handoff.sock"))?;
         listener.set_nonblocking(true)?;
         let result = PrivateListener {
@@ -99,6 +99,19 @@ impl PrivateDirectory {
         };
         result.verify()?;
         Ok(result)
+    }
+
+    /// Validate address length/NUL using the host's sockaddr_un contract before
+    /// preparing a job. No socket is created, replaced or unlinked here. Binding
+    /// repeats this check because a successful preflight is not a reservation.
+    pub fn preflight_handoff(&self, path: &Path) -> io::Result<()> {
+        SocketAddr::from_pathname(path.join("handoff.sock"))?;
+        self.matches_path(path)?;
+        match sys::statat(&self.file, "handoff.sock", AtFlags::SYMLINK_NOFOLLOW) {
+            Err(rustix::io::Errno::NOENT) => Ok(()),
+            Err(error) => Err(error.into()),
+            Ok(_) => Err(denied()),
+        }
     }
 
     pub fn open_child(&self, child: &str) -> io::Result<Self> {

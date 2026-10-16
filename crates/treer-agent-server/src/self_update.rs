@@ -389,7 +389,8 @@ mod tests {
         let journal = Journal::create(&root, &r).unwrap();
         let job = fixture.0.join(r.job_id.to_string());
         assert!(handoff::Endpoint::bind(&journal, &job).is_err());
-        journal.advance(0, Phase::Prepared).unwrap();
+        handoff::Endpoint::mark_prepared(&journal, &job).unwrap();
+        assert!(handoff::Endpoint::mark_prepared(&journal, &job).is_err());
         assert!(handoff::Endpoint::bind(&journal, &fixture.0).is_err());
         assert!(!fixture.0.join("handoff.sock").exists());
         let endpoint = handoff::Endpoint::bind(&journal, &job).unwrap();
@@ -439,6 +440,33 @@ mod tests {
             );
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
+        // A same-account process racing the expected child can cause a loud
+        // abort, but must not be accepted or silently retried on this endpoint.
+        let rejected_receipt = receipt();
+        let rejected_journal = Journal::create(&root, &rejected_receipt).unwrap();
+        let rejected_job = fixture.0.join(rejected_receipt.job_id.to_string());
+        handoff::Endpoint::mark_prepared(&rejected_journal, &rejected_job).unwrap();
+        let rejected_endpoint = handoff::Endpoint::bind(&rejected_journal, &rejected_job).unwrap();
+        let intruder =
+            std::os::unix::net::UnixStream::connect(rejected_job.join("handoff.sock")).unwrap();
+        assert_eq!(
+            rejected_endpoint
+                .accept(&child_image, child_image.executable(), &digest)
+                .err()
+                .unwrap()
+                .to_string(),
+            "update_handoff_peer_mismatch"
+        );
+        assert_eq!(
+            rejected_endpoint
+                .accept(&child_image, child_image.executable(), &digest)
+                .err()
+                .unwrap()
+                .to_string(),
+            "update_handoff_aborted"
+        );
+        assert_eq!(rejected_journal.read().unwrap().phase, Phase::Prepared);
+        drop(intruder);
         drop(child.0.stdin.take());
         assert!(child.0.wait().unwrap().success());
         drop(authenticated);
@@ -448,6 +476,26 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(error.to_string(), "update_handoff_job_changed");
+
+        // A real private directory can still exceed the sockaddr path limit.
+        // Preflight must not mark it Prepared or create a socket as a side effect.
+        let long_component = "x".repeat(160);
+        let long_root = root.create_child(&long_component).unwrap();
+        let long_receipt = receipt();
+        let long_journal = Journal::create(&long_root, &long_receipt).unwrap();
+        let long_job = fixture
+            .0
+            .join(long_component)
+            .join(long_receipt.job_id.to_string());
+        assert_eq!(
+            handoff::Endpoint::mark_prepared(&long_journal, &long_job)
+                .err()
+                .unwrap()
+                .to_string(),
+            "update_handoff_endpoint_unavailable"
+        );
+        assert_eq!(long_journal.read().unwrap(), long_receipt);
+        assert!(!long_job.join("handoff.sock").exists());
     }
 
     #[test]

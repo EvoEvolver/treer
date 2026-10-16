@@ -2,7 +2,7 @@
 //! second probe connection. This is only the process-proof layer: the activator
 //! coordinator must still create a private endpoint, bind the job, and persist
 //! ownership ACK before the sender releases its locks or reports acceptance.
-use std::{fs::File, os::unix::net::UnixStream, path::Path};
+use std::{cell::Cell, fs::File, os::unix::net::UnixStream, path::Path};
 
 use anyhow::{bail, Result};
 use treer_platform::private_directory::PrivateListener;
@@ -21,9 +21,24 @@ pub struct Endpoint<'a> {
     listener: PrivateListener,
     journal: &'a Journal,
     receipt: Receipt,
+    failed: Cell<bool>,
 }
 
 impl<'a> Endpoint<'a> {
+    /// Preparation coordinator's phase transition: reject an unusable private
+    /// endpoint before recording Prepared. This does not reserve the socket.
+    pub fn mark_prepared(journal: &Journal, job_directory: &Path) -> Result<Receipt> {
+        let receipt = journal.read()?;
+        if receipt.phase != Phase::Preparing {
+            bail!("update_handoff_phase_conflict");
+        }
+        journal
+            .directory
+            .preflight_handoff(job_directory)
+            .map_err(|_| anyhow::anyhow!("update_handoff_endpoint_unavailable"))?;
+        journal.advance(receipt.revision, Phase::Prepared)
+    }
+
     pub fn bind(journal: &'a Journal, job_directory: &Path) -> Result<Self> {
         let receipt = journal.read()?;
         if receipt.phase != Phase::Prepared {
@@ -37,6 +52,7 @@ impl<'a> Endpoint<'a> {
             listener,
             journal,
             receipt,
+            failed: Cell::new(false),
         };
         result.verify()?;
         Ok(result)
@@ -51,7 +67,25 @@ impl<'a> Endpoint<'a> {
 
     /// No waiting/retry hidden here. The future owned-child coordinator must
     /// enforce its deadline and abort before acceptance when the child dies.
+    /// Any error permanently aborts this endpoint; an unauthenticated connection
+    /// fails loud rather than being silently ignored until another peer arrives.
     pub fn accept(
+        &self,
+        child: &ProcessImage,
+        verified_image: &File,
+        digest: &str,
+    ) -> Result<Option<AuthenticatedPeer>> {
+        if self.failed.get() {
+            bail!("update_handoff_aborted");
+        }
+        let result = self.try_accept(child, verified_image, digest);
+        if result.is_err() {
+            self.failed.set(true);
+        }
+        result
+    }
+
+    fn try_accept(
         &self,
         child: &ProcessImage,
         verified_image: &File,

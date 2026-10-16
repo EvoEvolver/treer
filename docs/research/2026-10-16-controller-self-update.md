@@ -89,6 +89,15 @@ This is still not the complete job-bound ownership handshake: owned child launch
 detachment, durable ownership ACK and parent-release coordination remain to be
 wired and tested. The activator must close the handoff socket before any further
 fork/exec: CLOEXEC alone cannot prevent another child inheriting it on fork.
+The preparation coordinator must use `Endpoint::mark_prepared`: it validates the
+host's Unix socket address length and the private locator before writing Prepared,
+returning the fixed `update_handoff_endpoint_unavailable` code on failure without
+creating a socket. Binding repeats the check; preflight does not reserve a name.
+The handoff deliberately fails loud on any authentication/endpoint/journal error:
+the endpoint latches aborted and refuses further accepts. The future coordinator
+must record the fixed error while retaining the parent's locks; it must not retry
+or report ownership accepted. A same-account process racing the child can thus
+abort this job, an availability limitation of the single-account trust domain.
 Immediate lock-release proofs run in isolated test subprocesses: CLOEXEC closes
 descriptors on exec, not fork, so an unrelated parallel test's fork/exec window
 can transiently retain another lock reference. The tests remove that unrelated
