@@ -18,6 +18,7 @@ pub fn inherited_variable_allowed(name: &str, value: &str) -> bool {
             | "TREER_SERVER_ID"
             | "TREER_IDENTITY_MODE"
             | "TREER_HTTP_PROXY"
+            | "TREER_AGENT_PRIVATE_STATE_DIR"
             | "TREER_BIN"
             | "TREER_MACHINE_TOKEN"
             | "TREER_OPERATOR_CREDENTIAL"
@@ -352,6 +353,7 @@ mod tests {
             "TREER_SERVER_ID",
             "TREER_IDENTITY_MODE",
             "TREER_HTTP_PROXY",
+            "TREER_AGENT_PRIVATE_STATE_DIR",
             "TREER_BIN",
             "TREER_MACHINE_TOKEN",
             "TREER_OPERATOR_CREDENTIAL",

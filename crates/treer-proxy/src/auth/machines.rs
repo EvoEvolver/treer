@@ -1056,6 +1056,26 @@ impl AuthStore {
         Ok(())
     }
 
+    /// Requested IDs with a permanent deletion tombstone in this workspace.
+    /// Controllers purge an Agent's private state only on this confirmation.
+    pub async fn deleted_agent_ids(
+        &self,
+        workspace_id: &str,
+        ids: &[String],
+    ) -> Result<Vec<String>, AuthFailure> {
+        if self.disabled || ids.is_empty() {
+            return Ok(vec![]);
+        }
+        sqlx::query_scalar(
+            "SELECT agent_id FROM deleted_agents WHERE workspace_id = $1 AND agent_id = ANY($2) ORDER BY agent_id",
+        )
+        .bind(workspace_id)
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(AuthFailure::database)
+    }
+
     pub async fn stopped_agent_recovery_ids(
         &self,
         workspace_id: &str,

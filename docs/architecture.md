@@ -499,6 +499,45 @@ state before forwarding to the Controller; deletion/revocation prevents replay.
 A normal successful Agent exit disables its snapshot. Abnormal termination is
 recoverable after a new Host epoch or explicit restore, not an unbounded restart loop.
 
+The Controller also owns one private state directory per Agent,
+`<state dir>/agent-private/<server_id>/<agent_id>`, derived only from its own
+server ID and the stable Agent ID (both `[A-Za-z0-9_-]{1,128}`; anything else
+fails the launch with `agent_private_state_invalid_identity`). Every process
+start, restart and recovery prepares the three Treer levels with mode 0700 (a
+protected current-user DACL on Windows), re-verifies them and the canonical
+ancestors, and injects `TREER_AGENT_PRIVATE_STATE_DIR`. The variable is omitted
+with a fixed log code when a level is unsafe (`agent_private_state_unsafe`), the
+directory cannot be prepared (`agent_private_state_unavailable`) or it would be
+inside the workload cwd (`agent_private_state_inside_cwd`); the Agent still
+starts and launchers keep private-state features disabled. The inherited
+environment filter removes the variable, so only this explicit injection can
+supply it. Stop, restart, Controller replacement and startup updates never
+touch the directory.
+
+Deletion cleanup is confirmed by the Proxy tombstone only. Startup validation
+(`startup/validate`, on connect and every heartbeat) asks about startup entries
+plus every private directory under this server, and the Proxy answers
+`deleted_agent_ids` from `deleted_agents`. Under the recovery lock the
+Controller stops a still-running deleted Agent and defers, otherwise removes the
+directory (`remove_dir_all`, no symlink following, lstat before and after) and
+the stale startup entry. The directory itself is the pending record; an older
+Proxy omits the field and nothing is purged. Directories under other server IDs
+are never touched.
+
+The local API exposes the caller's own private state to the workload identity
+only: `GET /api/private-state` (status, usage, feature
+`agent.private-state.v1`), `POST /api/private-state/reservations {bytes}`,
+`POST /api/private-state/reservations/{id}/commit` and
+`DELETE /api/private-state/reservations/{id}`. Admission uses the Controller's
+own measurement of the whole Agent directory (symlinks counted, never
+followed; walks over 65536 entries count as over quota): 256 MiB per Agent,
+4 GiB per machine, 64 MiB per reservation, 16 open reservations per Agent, 15
+minute reservation TTL, and a 1 GiB free-space floor. Commit re-measures and
+rejects over-cap content; unknown, expired and foreign reservations share
+`private_state_reservation_expired`. Reservations are memory only; a restarted
+Controller recounts from disk. `agent.private-state.v1` is a launcher-contract
+feature, not an AIS manifest capability.
+
 The workspace workload tree stores folders and placements in PostgreSQL.
 Agents and Apps share the same tree and lifecycle endpoints. Folder mutations
 serialize against the workspace row, validate parents and cycles, and require

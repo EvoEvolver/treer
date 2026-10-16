@@ -509,6 +509,19 @@ pub fn router(state: LocalApiState) -> Router {
                 .delete(clear_agent_interface),
         )
         .route("/api/interface/contract", get(launcher_contract))
+        .route("/api/private-state", get(private_state_report))
+        .route(
+            "/api/private-state/reservations",
+            post(reserve_private_state),
+        )
+        .route(
+            "/api/private-state/reservations/{reservation_id}/commit",
+            post(commit_private_state_reservation),
+        )
+        .route(
+            "/api/private-state/reservations/{reservation_id}",
+            axum::routing::delete(release_private_state_reservation),
+        )
         .route(
             "/api/agent/startup",
             get(get_agent_startup)
@@ -621,6 +634,24 @@ impl LocalApiError {
             status: StatusCode::UNAUTHORIZED,
             error,
         }
+    }
+
+    /// Private state errors keep their fixed codes; only the HTTP status is
+    /// derived here so launchers can branch on the code alone.
+    fn private_state(error: ProtocolError) -> Self {
+        let status = match error.code.as_str() {
+            "invalid_private_state_reservation" | "agent_private_state_invalid_identity" => {
+                StatusCode::BAD_REQUEST
+            }
+            "private_state_agent_quota_exceeded" | "private_state_global_quota_exceeded" => {
+                StatusCode::PAYLOAD_TOO_LARGE
+            }
+            "private_state_too_many_reservations" => StatusCode::TOO_MANY_REQUESTS,
+            "private_state_disk_space_low" => StatusCode::INSUFFICIENT_STORAGE,
+            "agent_not_found" => StatusCode::NOT_FOUND,
+            _ => StatusCode::CONFLICT,
+        };
+        Self { status, error }
     }
 }
 

@@ -188,8 +188,10 @@ clean too. Controller hot replacement applies the same filter.
 
 The PTY runtime filters the Host environment before applying each workload's
 explicit environment, so restored Agents and Apps cannot inherit another
-Agent's UI identity through the Host. Fresh workload credentials and per-Agent
-proxy entries are injected afterwards. This is inheritance hygiene, not
+Agent's UI identity through the Host. Fresh workload credentials, per-Agent
+proxy entries and the per-Agent private state directory are injected afterwards.
+The filter also removes `TREER_AGENT_PRIVATE_STATE_DIR`, so no inherited or
+caller-supplied value can redirect an Agent's private state. This is inheritance hygiene, not
 provider-secret isolation: other user environment variables are retained and
 same-account access remains possible. The Controller's control-plane HTTP
 clients ignore environment proxies; external proxy variables are preserved for
@@ -308,6 +310,24 @@ separate OS accounts/containers where that authority is not appropriate.
 Treer does not constrain Windows PowerShell's startup reconstruction or automatic
 loading of that account's default CurrentUser/AllUsers modules. Its fixed exec
 module environment is not a native-runtime sandbox.
+
+The per-Agent private state directory (`agent-private/<server_id>/<agent_id>`
+below the Treer state directory) is a same-user privacy boundary, not
+isolation: its 0700 mode and the Controller's lstat/ownership checks keep other
+OS users out, but every Agent and tool running as the machine account can read
+and write every Agent's directory, including other Agents' processes. The
+pathname checks before removal or measurement share that same-account trust
+domain. The Windows variants (protected DACL, reparse-point rejection, free
+space) are compile-guarded and have not been exercised on a Windows runner.
+The private state quota is cooperative
+admission control for launchers that reserve before writing; same-account code
+can bypass it, after which the Controller only refuses further reservations.
+Deletion cleanup depends on the Proxy's `deleted_agents` tombstone; an older
+Proxy never confirms, and directories of previous server enrollments remain
+until an operator removes them. When the enrolled machine root contains the
+Treer state directory, file transfer rejects the `agent-private` root by
+protected identity, but the rest of the state directory relies on
+`machine.file` Policy (follow-up #127).
 
 Public Unix and Windows bootstrap installers check SHA256 hashes from the same
 artifact origin before installation; Windows also checks matching build identities.

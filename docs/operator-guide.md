@@ -1077,6 +1077,21 @@ workload credential; they can use the local agent server API to discover or
 control other agents in the same workspace. The credential is consumed by the
 CLI and should not be printed or forwarded directly.
 
+Each Agent also receives `TREER_AGENT_PRIVATE_STATE_DIR`, a Controller-owned
+directory for private state such as launcher attachments. It lives under the
+Treer state directory (`agent-private/<server_id>/<agent_id>` below
+`~/.local/state/treer`, `$XDG_STATE_HOME/treer`, `TREER_STATE_DIR`, or
+`%LOCALAPPDATA%\Treer\state`), never in the checkout, and survives stop,
+restart and Controller replacement. It is removed, together with everything in
+it, only after the Proxy confirms the Agent's permanent deletion; machines whose
+Proxy predates this confirmation keep the directory until an operator removes
+it. The variable is omitted when the directory would be inside the Agent's
+working directory (for example a machine root at the home directory) or fails
+its safety check; the Agent still starts and the launcher reports attachments
+as unavailable. Usage is capped at 256 MiB per Agent and 4 GiB per machine,
+and the Controller refuses new content when the volume would drop below 1 GiB
+free. Directories of previous server enrollments are not touched.
+
 Workspace members and managed Agents can also save reusable launch profiles:
 
 ```bash

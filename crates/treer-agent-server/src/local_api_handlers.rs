@@ -167,6 +167,73 @@ pub(super) async fn health(State(state): State<LocalApiState>) -> Json<Value> {
     }))
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct PrivateStateReservationRequest {
+    bytes: u64,
+}
+
+/// The authenticated workload's own private state status and usage. The
+/// directory is always the caller's; no path, body or query selects it.
+pub(super) async fn private_state_report(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let report = state
+        .runtime
+        .private_state_report(&agent.agent_id)
+        .map_err(LocalApiError::private_state)?;
+    let mut value = serde_json::to_value(report)
+        .map_err(|error| LocalApiError::bad_gateway(error.to_string()))?;
+    value["feature"] = Value::String(treer_protocol::CAPABILITY_AGENT_PRIVATE_STATE.to_owned());
+    Ok(Json(value))
+}
+
+pub(super) async fn reserve_private_state(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Json(request): Json<PrivateStateReservationRequest>,
+) -> Result<(StatusCode, Json<Value>), LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let reservation = state
+        .runtime
+        .reserve_private_state(&agent.agent_id, request.bytes)
+        .map_err(LocalApiError::private_state)?;
+    Ok((
+        StatusCode::CREATED,
+        Json(
+            serde_json::to_value(reservation)
+                .map_err(|error| LocalApiError::bad_gateway(error.to_string()))?,
+        ),
+    ))
+}
+
+pub(super) async fn commit_private_state_reservation(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(reservation_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let usage = state
+        .runtime
+        .commit_private_state_reservation(&agent.agent_id, &reservation_id)
+        .map_err(LocalApiError::private_state)?;
+    Ok(Json(json!({ "usage": usage })))
+}
+
+pub(super) async fn release_private_state_reservation(
+    State(state): State<LocalApiState>,
+    headers: HeaderMap,
+    Path(reservation_id): Path<String>,
+) -> Result<Json<Value>, LocalApiError> {
+    let agent = required_validated_source_agent(&state, &headers)?;
+    let released = state
+        .runtime
+        .release_private_state_reservation(&agent.agent_id, &reservation_id)
+        .map_err(LocalApiError::private_state)?;
+    Ok(Json(json!({ "released": released })))
+}
+
 pub(super) async fn launcher_contract(
     State(state): State<LocalApiState>,
     headers: HeaderMap,

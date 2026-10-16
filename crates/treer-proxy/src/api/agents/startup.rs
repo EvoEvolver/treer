@@ -373,6 +373,9 @@ pub(crate) async fn validate_agent_startup(
     let stopped_agent_ids = auth
         .stopped_agent_recovery_ids(&workspace_id, &server_id, &request.agent_ids)
         .await?;
+    let deleted_agent_ids = auth
+        .deleted_agent_ids(&workspace_id, &request.agent_ids)
+        .await?;
     let active_agent_ids: Vec<String> = auth
         .active_agent_ids(&workspace_id, &server_id, &request.agent_ids)
         .await?
@@ -409,5 +412,6 @@ pub(crate) async fn validate_agent_startup(
         app_startups,
         stopped_agent_ids,
         active_agent_ids,
+        deleted_agent_ids,
     }))
 }

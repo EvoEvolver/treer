@@ -39,6 +39,7 @@ pub(crate) fn controller_contract() -> treer_protocol::LauncherControllerContrac
             treer_protocol::CAPABILITY_LAUNCHER_INSTALL.to_owned(),
             treer_protocol::CAPABILITY_AGENT_INTERFACE_PROVENANCE.to_owned(),
             treer_protocol::CAPABILITY_AGENT_PROMPT_DELIVERY.to_owned(),
+            treer_protocol::CAPABILITY_AGENT_PRIVATE_STATE.to_owned(),
         ],
     }
 }

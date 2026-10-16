@@ -268,6 +268,7 @@ async fn windows_isolated_host_fixture() {
             treer_binary: None,
             interface_cache_path: fixture.1.root.join("fixture-interfaces.json"),
             startup_store_path: fixture.1.root.join("fixture-startup.json"),
+            private_state_root: fixture.1.root.join("fixture-agent-private"),
             root: fixture.1.root.clone(),
         },
     )

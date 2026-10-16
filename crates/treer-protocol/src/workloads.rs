@@ -75,6 +75,11 @@ pub struct ValidateAgentStartupResponse {
     pub stopped_agent_ids: Vec<String>,
     #[serde(default)]
     pub active_agent_ids: Vec<String>,
+    /// Requested IDs with a permanent deletion tombstone. Controllers remove
+    /// the Agent's private state only on this confirmation; older Proxies omit
+    /// the field, which purges nothing.
+    #[serde(default)]
+    pub deleted_agent_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
