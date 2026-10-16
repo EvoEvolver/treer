@@ -154,6 +154,53 @@ capability fails clearly once protection is enabled; key rotation/recovery needs
 an explicit local trusted procedure. P1/P2 must not claim anti-rollback protection
 until P4 ships. Owner rescue/Provider authorization are unchanged.
 
+## Security review questions and refinements (comment 1676)
+
+Use existing HTTP/Ed25519/SHA-256 dependencies; no additional network client.
+Staging must stream into exclusive no-follow files and hash incrementally.
+Windows verified files remain protected from concurrent write/delete through
+checked handles until publication; receipt/binary mutation uses those verified
+identities, not a later unchecked reopen. Test Host executable bytes as well as
+PID/creation identity unchanged. Bind launcher workspace, server and URL explicitly.
+
+The future signed sequence document needs an expiry, authenticated sequence and
+local highest accepted value; advance the value only after healthy activation,
+never lower it on rollback. Explicit same-version/downgrade recovery is local
+operator break-glass, recorded in receipts and audit. Pinned SHA has no intrinsic
+ordering: require an explicit `--allow-same` or `--allow-downgrade` acknowledgment
+when the operator cannot establish forward order from authenticated metadata.
+Audit submission and outcome with actor/mode/hash/sequence/fixed code, not paths
+or credentials. Offline audit delivery must not erase the durable local receipt.
+
+Two decisions require agreement before implementation:
+
+1. Comment 1676 requests pinned mode only for local operators and signed-only
+   remote triggers; the epic currently asks the coordinator to submit pinned
+   Canary jobs through `machine.exec`. Adopt signed-only for any **new dedicated
+   remote update endpoint**. Decide whether to retain the existing exec-origin
+   pinned transition or require signed Canary metadata before P3. An Agent-mode
+   environment guard prevents accidents, but cannot authenticate a local operator
+   against a same-account process clearing its environment. Existing authorized
+   machine.exec already permits arbitrary code as that account; do not claim the
+   binary subcommand removes that authority or resists a compromised Proxy.
+   Pins supplied through that path trust the authorized caller and its release
+   manifest, not an independent signature. A configured artifact-origin allowlist
+   reduces mistakes but cannot repair that trust model.
+2. Build/hash checks of the staged successor happen **before** old Controller
+   termination; Host-owned sequential respawn remains the lifecycle authority.
+   A running successor cannot first connect with the same machine credential and
+   then terminate the old Controller without split-brain risk. A preflight-only
+   successor may prove executable identity over local IPC but must not open a
+   Proxy connection. Existing Host restart stays wire-compatible; any stronger
+   authenticated handoff requires explicit Host capability negotiation. On
+   startup detect unfinished transactions and refuse ordinary activation until
+   deterministic reconciliation; do not implicitly replay launcher/smoke work.
+
+Additional fault cases: truncate downloads, replace checked parent directories,
+crash during rollback, expired signed metadata and any same-version/downgrade
+override without operator acknowledgment. Neither an operator flag nor a local
+receipt grants new remote permissions.
+
 ## Phases and acceptance
 
 | Phase | Deliverable / gate |
