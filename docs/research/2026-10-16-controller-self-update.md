@@ -225,6 +225,17 @@ receipt grants new remote permissions.
 | P3 | Signed Canary channel live; remove pinned mode. Coordinator submits/polls only; migrate per-machine receipts. Remove PS/Python engines only after replacement feature parity and platform acceptance; no double activation or fallback to legacy after ambiguous success. |
 | P4 | Signed sequence/replay protection, key-rotation and backward-compatibility tests; clearly advertise capability. |
 
+Dependency correction from security1690: the phase numbers do not authorize a
+P3-before-P4 rollout. P3 signed-only cutover and removal of pinned mode require
+P4 sequence/expiry verification plus a durable local high-water mark to be
+implemented and tested first (or delivered in the same reviewed cut). The signed
+Canary publisher and consumer must agree on these fields before cutover. P1
+journal schema reserves nullable accepted key/channel/sequence/expiry fields;
+null means protection is unavailable, never sequence zero or permission to
+downgrade. Legacy signatures alone provide authenticity, not freshness or replay
+protection. Until the dependency is satisfied, keep the documented transition
+explicit and do not advertise the signed-only target as complete.
+
 Required deterministic tests: bad/missing/duplicate SUMS, wrong digest/signature/
 platform/source identity, redirects/URL credentials/ambient proxy; path traversal,
 UNC/verbatim/ADS/reserved names/reparse replacement races; inherited NTFS ACLs,
