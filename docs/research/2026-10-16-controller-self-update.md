@@ -147,6 +147,21 @@ production dispatch must exit on bootstrap error and must complete this sequence
 before creating runtime threads or child processes; that dispatch is not wired
 yet, and no public self-update command is exposed.
 
+The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
+exact matching Prepared receipt. It preflights both images' backups, original
+modes/current bytes and executable stages before recording Activating or making
+the first rename. The consuming publication operation preserves the existing
+per-file intent/completion journal and publishes Controller then CLI. Failure
+immediately attempts verified reverse-order image restoration; an unrecognized
+backup or destination fails closed and records RollbackFailed when possible,
+retaining evidence and the caller's locks. Rollback binds the original job,
+source, target hashes, original hashes and timestamps, allowing only monotonic
+progress fields to change. A file-only restoration remains RollingBack: it
+does not prove that the old Controller is running or healthy. No Host request,
+startup-store overwrite, launcher installation or terminal success is performed
+by this layer. Isolated tests use a cfg(test)-only ownership constructor and
+synthetic image bytes; they do not constitute real handoff/activation acceptance.
+
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
 child receives references to the same open file descriptions, so closing the

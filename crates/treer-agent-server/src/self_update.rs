@@ -15,6 +15,8 @@ const RECEIPT_LIMIT: u64 = 64 * 1024;
 pub mod activator;
 pub mod artifacts;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod batch;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod handoff;
 pub mod health;
 #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -192,6 +192,39 @@ pub fn prepare(
     Ok(())
 }
 
+/// Read-only batch preflight before changing either installed image. Backups,
+/// original modes, current bytes and (when needed) executable stages must all
+/// match the Prepared job. This is not a claim that two renames are atomic.
+pub(super) fn preflight(
+    installed: &InstallationDirectory,
+    journal: &Journal,
+    revision: u64,
+    binary: Binary,
+) -> Result<()> {
+    let receipt = current(journal, revision)?;
+    if receipt.phase != Phase::Prepared {
+        bail!("update_revision_or_phase_conflict");
+    }
+    matches(
+        &journal.directory.read_file(backup(binary))?,
+        receipt.publications.original_digest(binary),
+    )?;
+    let mode = backup_mode(journal, binary)?;
+    let original = installed.read_file(binary.name())?;
+    matches(&original, receipt.publications.original_digest(binary))?;
+    if original.metadata()?.permissions().mode() & 0o7777 != mode {
+        bail!("update_original_mode_changed");
+    }
+    if receipt.publications.step(binary) != FileStep::Unchanged {
+        let staged = installed.read_file(&stage(&receipt, binary, false))?;
+        matches(&staged, target(&receipt, binary))?;
+        if staged.metadata()?.permissions().mode() & 0o7777 != 0o755 {
+            bail!("invalid_update_stage_mode");
+        }
+    }
+    Ok(())
+}
+
 /// Install one image, persisting the intent BEFORE atomic rename and completion
 /// AFTER it. Reopening the same job after a crash only reconciles that intent;
 /// it never turns a terminal job into another update or performs activation.

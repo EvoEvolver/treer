@@ -47,6 +47,13 @@ impl AcceptedOwnership {
 }
 
 impl OwnedActivation {
+    /// Test-only ownership substitute for isolated image orchestration tests;
+    /// production construction still requires the authenticated durable handoff.
+    #[cfg(test)]
+    pub(in crate::self_update) fn fixture(locks: SelectionLocks, prepared: Receipt) -> Self {
+        Self { locks, prepared }
+    }
+
     pub fn prepared(&self) -> &Receipt {
         &self.prepared
     }
