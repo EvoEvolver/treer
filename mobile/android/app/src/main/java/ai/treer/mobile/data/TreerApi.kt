@@ -87,7 +87,7 @@ class TreerApi {
 
     fun requestPasswordReset(baseUrl: String, email: String) {
         val body = JsonObject().apply { addProperty("email", email) }
-        request(baseUrl, null, "POST", "/api/auth/request-password-reset", body.toString())
+        request(baseUrl, null, "POST", "/api/auth/request-password-reset", body.toString(), nativeClient = true)
     }
 
     fun resetPassword(baseUrl: String, token: String, password: String) {
@@ -95,7 +95,7 @@ class TreerApi {
             addProperty("token", token)
             addProperty("password", password)
         }
-        request(baseUrl, null, "POST", "/api/auth/reset-password", body.toString())
+        request(baseUrl, null, "POST", "/api/auth/reset-password", body.toString(), nativeClient = true)
     }
 
     fun me(baseUrl: String, token: String): User {

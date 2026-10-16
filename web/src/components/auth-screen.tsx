@@ -2,7 +2,7 @@ import { oauthAuthorizationUrl } from "@/lib/oauth-start"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import { api, proxyUrl, type User } from "@/lib/api"
+import { api, type User } from "@/lib/api"
 import { authorizationReturnUrl } from "@/lib/control-plane"
 import { cn } from "@/lib/utils"
 import {
@@ -95,13 +95,12 @@ export function AuthScreen({ onAuthenticated, inviteToken, initialMode, joinOrga
   async function startOAuth(provider: "github" | "google") {
     if (submitting) return
     const path = `/api/auth/oauth/${provider}/start`
-    if (!invite) { window.location.assign(proxyUrl(path)); return }
     setSubmitting(true)
     setError("")
     try {
       const { authorization_url } = await api<{ authorization_url: string }>(path, {
         method: "POST", headers: { "X-Treer-Console": "1" },
-        body: JSON.stringify({ invite_token: invite, join_organization: joinOrganization }),
+        body: JSON.stringify(invite ? { invite_token: invite, join_organization: joinOrganization } : {}),
       })
       window.location.assign(oauthAuthorizationUrl(provider, authorization_url))
     } catch { setError(t("auth.err.oauth")) }

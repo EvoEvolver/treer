@@ -425,3 +425,20 @@ are not shown or copied; used invitations cannot be revoked. Revocation sends
 only the non-bearer handle. An older list schema is refused with an upgrade
 notice. Creating a new invitation still displays its link in a temporary dialog
 for distribution, without writing it to browser storage.
+
+
+## Cookie mutation compatibility
+
+All Console provider sign-ins start with JSON POST to
+`/api/auth/oauth/{provider}/start`, including ordinary sign-in without an
+invitation. Navigation uses the returned, validated GitHub/Google authorization
+URL. A rejected or unsupported POST stays on the sign-in screen with a clear
+error; there is no GET fallback. Invitation consent and its POST-only body are
+unchanged. Admin **Check for updates** also uses POST; viewing update status
+remains a read-only GET. Browser cookies and Origin are managed by the browser;
+the Console does not set the native-client header or use a service token.
+
+These client changes must land before Core disables the old OAuth-start and
+update-check GET handlers. Deploy the client with the corresponding Core POST
+support; do not publish a client-only candidate whose Proxy lacks update-check POST. Core owns CSRF checks and documented OAuth exceptions;
+changing the client method alone is not a server-side CSRF guarantee.
