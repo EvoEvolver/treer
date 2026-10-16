@@ -342,11 +342,12 @@ finger cancels the long-press so scrolling still works. Menus support arrow
 keys, Enter and Escape, and return focus to their originating tab. Agent status
 stays on tabs; full paths appear in tab titles and menu headers.
 
-The menu contains App/logs switching, rename, upload, interface reload or
-terminal reconnect, stop and delete, plus close/close others/close to the right.
+The menu contains App/logs switching, rename, upload, open in a new browser tab,
+interface reload or terminal reconnect, plus close/close others/close to the
+right. It deliberately has no Stop or Delete: those are destructive and a stray
+click in a tab strip is too easy; use the Tree row menu or the App settings page.
 Overview stays pinned. A reload affects only that browser page, not the running
-Agent. Stop asks for confirmation; delete keeps its existing confirmation.
-Uploads pin the target machine from the selected menu, even when another page
+Agent. Uploads pin the target machine from the selected menu, even when another page
 is active, and stay disabled for offline machines. On phones, the menu also
 contains full-screen opening and Back to workloads. App settings retain their
 existing lifecycle actions and authorization. No menu grants additional access;
