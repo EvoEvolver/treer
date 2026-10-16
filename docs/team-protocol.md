@@ -74,3 +74,30 @@ Channel B rules:
 Release tickets carry the `type:release` label. Each push, CI run, canary result,
 manifest and hash is a `[release]` comment. Only the release role pushes or
 deploys.
+
+## Author gate before freeze
+
+Release re-runs everything, but first-attempt surprises (a test the author never
+ran, a platform path nobody exercised) cost a full gate cycle each. So before a
+`[freeze]` comment the author runs the graded gate for their change class, the
+same command release runs, and pastes the exit code and the log path into the
+freeze comment. `python3 scripts/release-grade.py <base> <head>` prints the
+class, the local gate commands and whether native, canary and Policy checks are
+required; see [Graded gates](releases.md#graded-gates-and-staging-batches).
+
+| Change touches | Author runs before freezing |
+| --- | --- |
+| `docs/`, root `*.md` | `node scripts/check-docs.mjs` |
+| one App under `apps/` | the printed gate: docs check, that App's tests, and `npm run check` when its `package.json` defines it |
+| `web/` | `cd web && pnpm typecheck && pnpm build && pnpm test:e2e` (build first, then test; use random or exclusive ports) |
+| `launchers/agent` | `just agent-launcher-test`, plus the Windows launcher smoke (`launchers/agent/tests/windows-smoke.mjs`) when the change touches Windows or installer paths: run it on the `win_native` runner or state that it was not run |
+| `crates/`, `skills/`, build files, unknown paths | `just check`, and for auth, identity or policy changes the full Proxy auth tests against PostgreSQL (`cargo test -p treer-proxy` with `TREER_TEST_DATABASE_URL`), not a focused subset |
+| `scripts/`, `.github/`, `justfile` | `just check` |
+
+The freeze comment says what was not run (for example no JDK for the Android
+tests, no Windows runner) so release can decide, instead of assuming a green
+local gate. A focused test subset is a legitimate development check but is not
+the author gate: the defaults-profile change (#84) passed its focused PostgreSQL
+tests and still broke a workspace-deletion test only the full suite runs. Release
+keeps the final say and still runs the exact-SHA gate, CI, native, canary and
+the Policy check.
