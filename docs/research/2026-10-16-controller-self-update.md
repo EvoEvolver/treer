@@ -180,9 +180,10 @@ resolved by that full independent observation. Failed or stalled health restores
 the two images and leaves RollingBack, without claiming the old Controller is
 running. Ownership remains with the caller. Tests substitute only the private
 runtime seam to cover ACK/health disagreement, lost ACK, a stalled observation,
-and rejection of a second activation. Real Host activation acceptance, the
-old-Controller restart/health half of rollback, production command dispatch,
-launcher work and post-worker-death recovery are still pending.
+and rejection of a second activation. The old-Controller restart/health half is
+now composed separately by rollback_core (described below). Real Host activation
+acceptance, production command dispatch, launcher work and post-worker-death
+recovery are still pending.
 Only fixed known startup-transition errors are retried. Explicit Host identity,
 workload/output continuity or binding failures, and unknown errors, immediately
 enter verified image restoration; they do not wait out the observation budget.
@@ -191,10 +192,11 @@ a correct Controller whose cold startup exceeds it can trigger a safe rollback.
 Reassess that budget using release acceptance measurements, not retry-until-green.
 Restoration can race a previously accepted restart whose ACK was lost or whose
 execution is still pending. That request may then launch the restored old image;
-it is not evidence of rollback health. The pending rollback activation layer must
-use the existing independent `controller-rollback-intent.json` / `-rollback`
-operation ID at most once, reconcile the in-flight forward request, and prove
-the old running image and unchanged Host/workloads before writing RolledBack.
+it is not evidence of rollback health. The rollback activation layer uses the
+independent `controller-rollback-intent.json` / `-rollback` operation ID at most
+once, and reconciles the live result instead of replaying the forward request.
+It proves the old running image and unchanged Host/workloads before writing
+RolledBack; ACKs cannot settle either direction.
 
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
@@ -445,8 +447,22 @@ schema 1, or an altered original digest is rejected; this unshipped private
 format has no migration/default that could invent rollback evidence. A later
 rollback health check must use this saved old source SHA and original digest,
 never the replacement source SHA or a newly captured post-failure baseline.
-This increment records the evidence only; old-Controller rollback activation
-and its terminal health transition remain unfinished.
+The rollback coordinator now consumes this saved evidence while retaining the
+same ownership and locks. It accepts only an already RollingBack job, rechecks
+the verified image restoration and recovers the same saved Host/workload
+baseline. It uses the separate durable rollback restart intent/operation (never
+retries a Host mutation after a lost ACK or an existing intent), then observes
+the original installed/live image inode and digest, the old source SHA, a new
+epoch distinct from the original epoch, the same Host parent, and unchanged
+workloads/output. Only this full proof advances to RolledBack; observation
+failure/timeout advances to RollbackFailed with original files and evidence
+retained. A journal change during observation is refused, not overwritten. The
+forward restart can still be in flight and may itself launch the restored old
+bytes: its ACK is not rollback proof. The private observation seam is shared by
+forward and rollback coordination; production cannot replace it with HTTP-only
+or ACK-only success. These paths remain library work, not a production command
+or worker-death ownership-recovery entry point; a real isolated upgrade and
+service-manager survival gate are still required.
 An old build string is an observed claim, not signed
 release provenance. The detached coordinator and end-to-end activation gate
 remain outstanding.
