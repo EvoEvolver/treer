@@ -7,7 +7,7 @@ use treer_platform::process_image::ProcessImage;
 
 use super::{
     artifacts::Binary,
-    hex,
+    diagnostics, hex,
     images::digest_file,
     publication::FileStep,
     safety::{HostIdentity, HostSnapshot},
@@ -280,7 +280,7 @@ impl Observation {
         {
             if !image
                 .matches_file(&file)
-                .map_err(|_| anyhow::anyhow!("update_controller_identity_unavailable"))?
+                .map_err(|_| anyhow::anyhow!(diagnostics::CONTROLLER_IDENTITY_UNAVAILABLE))?
             {
                 continue;
             }
@@ -292,10 +292,10 @@ impl Observation {
             }
             image
                 .verify_current()
-                .map_err(|_| anyhow::anyhow!("update_controller_identity_changed"))?;
+                .map_err(|_| anyhow::anyhow!(diagnostics::CONTROLLER_IDENTITY_CHANGED))?;
             found = Some(image);
         }
-        found.ok_or_else(|| anyhow::anyhow!("update_running_controller_unproven"))
+        found.ok_or_else(|| anyhow::anyhow!(diagnostics::RUNNING_CONTROLLER_UNPROVEN))
     }
 
     /// The held socket must still belong to the same live Host. Hash the

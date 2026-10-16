@@ -7,6 +7,7 @@ use tokio::time::{sleep, timeout};
 
 use super::{
     batch::{restore_images, ImageBatch, PublicationResult},
+    diagnostics,
     handoff::OwnedActivation,
     health::Monitor,
     host::Observation,
@@ -24,11 +25,11 @@ const POLL_INTERVAL: Duration = Duration::from_millis(250);
 fn retryable_observation(error: &anyhow::Error) -> bool {
     matches!(
         error.to_string().as_str(),
-        "update_running_controller_unproven"
-            | "update_controller_identity_changed"
-            | "update_controller_identity_unavailable"
-            | "update_health_unavailable"
-            | "update_controller_health_mismatch"
+        diagnostics::RUNNING_CONTROLLER_UNPROVEN
+            | diagnostics::CONTROLLER_IDENTITY_CHANGED
+            | diagnostics::CONTROLLER_IDENTITY_UNAVAILABLE
+            | diagnostics::HEALTH_UNAVAILABLE
+            | diagnostics::CONTROLLER_HEALTH_MISMATCH
     )
 }
 
@@ -112,6 +113,9 @@ pub async fn activate_core(
 /// Durable rollback intent is independent of the forward intent: even a lost
 /// ACK or an existing intent never authorizes another Host mutation. A retry
 /// can only observe its result; worker-death ownership recovery is not provided.
+/// Setup/recovery errors can leave RollingBack unchanged. The caller must report
+/// a fixed recovery-required status, retain ownership/evidence, and stop; it must
+/// neither label this RolledBack nor loop spawning/restarting an activator.
 pub async fn rollback_core(
     selected: &Selected,
     owned: &OwnedActivation,
@@ -440,6 +444,16 @@ mod tests {
             "update_controller_health_mismatch",
         ] {
             assert!(retryable_observation(&anyhow::anyhow!(code)), "{code}");
+        }
+        // An added/renamed diagnostic does not inherit retry permission from
+        // a familiar prefix or surrounding message text.
+        for code in [
+            "update_health_new_diagnostic",
+            "update_health_unavailable_v2",
+            "context: update_health_unavailable",
+            "update_controller_identity_changed_new_reason",
+        ] {
+            assert!(!retryable_observation(&anyhow::anyhow!(code)), "{code}");
         }
         for code in [
             "update_host_changed",

@@ -525,7 +525,7 @@ pub(super) fn initial_controller_epoch(
         || !hex(&health.controller_build.git_commit, 40)
         || !health.proxy_connected
     {
-        bail!("update_controller_health_mismatch");
+        bail!(super::diagnostics::CONTROLLER_HEALTH_MISMATCH);
     }
     Ok((health.controller_epoch, health.controller_build.git_commit))
 }
@@ -554,7 +554,7 @@ impl ControllerExpectation {
             || health.controller_build.git_commit != self.artifact_source_sha
             || installed_image_sha256 != self.executable_sha256
         {
-            bail!("update_controller_health_mismatch");
+            bail!(super::diagnostics::CONTROLLER_HEALTH_MISMATCH);
         }
         Ok(health.controller_epoch)
     }

@@ -463,6 +463,22 @@ forward and rollback coordination; production cannot replace it with HTTP-only
 or ACK-only success. These paths remain library work, not a production command
 or worker-death ownership-recovery entry point; a real isolated upgrade and
 service-manager survival gate are still required.
+If rollback setup/recovery fails (for example, the saved Host was replaced or
+its baseline cannot be proved), the call can return an error with the receipt
+still RollingBack. This is deliberately not terminal success. The production
+caller must report the fixed status `update_recovery_required`, preserve the
+receipt/evidence and original lock ownership, and stop automatic activation;
+it must not loop spawning workers, restart the Host, or label the files-only
+restoration RolledBack. Any later manual recovery entry point needs explicit
+authorization, the full original receipt and attested lock ownership; none is
+provided by this increment. Worker-death recovery acceptance must include death
+after a forward restart was accepted but before its ACK, with that request then
+launching restored old bytes: reconcile durable intent and actual live identity
+without replaying either restart or inventing a new baseline.
+The five retryable observation diagnostics are shared constants at their
+production sources and the explicit allowlist. Unknown/new/renamed diagnostics
+remain permanent by default, including familiar prefixes or wrapped text;
+negative tests guard that boundary.
 An old build string is an observed claim, not signed
 release provenance. The detached coordinator and end-to-end activation gate
 remain outstanding.

@@ -18,6 +18,7 @@ pub mod activator;
 pub mod artifacts;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod batch;
+mod diagnostics;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod handoff;
 pub mod health;

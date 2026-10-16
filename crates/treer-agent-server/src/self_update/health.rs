@@ -8,6 +8,7 @@ use reqwest::{redirect::Policy, Client};
 
 use super::{
     artifacts::Binary,
+    diagnostics,
     images::digest_file,
     safety::ControllerExpectation,
     selection::{Selected, SelectionLocks},
@@ -50,7 +51,7 @@ impl InitialController {
         }
         self.process
             .verify_current()
-            .map_err(|_| anyhow::anyhow!("update_controller_identity_changed"))?;
+            .map_err(|_| anyhow::anyhow!(diagnostics::CONTROLLER_IDENTITY_CHANGED))?;
         Ok(&self.epoch)
     }
 }
@@ -103,7 +104,7 @@ impl Monitor {
             .read_file(Binary::Controller.name())
             .map_err(|_| anyhow::anyhow!("unsafe_update_health_image"))?;
         if digest_file(&image)? != initial.digest {
-            bail!("update_controller_health_mismatch");
+            bail!(diagnostics::CONTROLLER_HEALTH_MISMATCH);
         }
         Ok(initial)
     }
@@ -131,9 +132,9 @@ impl Monitor {
             .get(format!("http://{address}/api/health"))
             .send()
             .await
-            .map_err(|_| anyhow::anyhow!("update_health_unavailable"))?;
+            .map_err(|_| anyhow::anyhow!(diagnostics::HEALTH_UNAVAILABLE))?;
         if response.status() != reqwest::StatusCode::OK {
-            bail!("update_health_unavailable");
+            bail!(diagnostics::HEALTH_UNAVAILABLE);
         }
         if response
             .content_length()
@@ -145,7 +146,7 @@ impl Monitor {
         while let Some(chunk) = response
             .chunk()
             .await
-            .map_err(|_| anyhow::anyhow!("update_health_unavailable"))?
+            .map_err(|_| anyhow::anyhow!(diagnostics::HEALTH_UNAVAILABLE))?
         {
             if chunk.len() > LIMIT - document.len() {
                 bail!("update_health_too_large");
@@ -172,7 +173,7 @@ impl Monitor {
             .read_file(Binary::Controller.name())
             .map_err(|_| anyhow::anyhow!("unsafe_update_health_image"))?;
         if digest_file(&image)? != expected.executable_sha256 {
-            bail!("update_controller_health_mismatch");
+            bail!(diagnostics::CONTROLLER_HEALTH_MISMATCH);
         }
         let document = self.document(selected.health_address()?).await?;
         let image = directory
@@ -196,11 +197,11 @@ impl Monitor {
         let epoch = self.observe(selected, locks, expected).await?;
         process
             .verify_current()
-            .map_err(|_| anyhow::anyhow!("update_controller_identity_changed"))?;
+            .map_err(|_| anyhow::anyhow!(diagnostics::CONTROLLER_IDENTITY_CHANGED))?;
         host.verify().await?;
         process
             .verify_current()
-            .map_err(|_| anyhow::anyhow!("update_controller_identity_changed"))?;
+            .map_err(|_| anyhow::anyhow!(diagnostics::CONTROLLER_IDENTITY_CHANGED))?;
         Ok(epoch)
     }
 }
