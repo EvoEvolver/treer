@@ -165,6 +165,11 @@ Tests cover malformed/missing/unprepared jobs before inventory enumeration,
 workspace/server mismatch, aliased directories and a wrong running image without
 ownership creation or installed-file changes. This is not yet wired to main or
 parent spawning; launcher completion and worker-death recovery remain pending.
+Production dispatch acceptance must additionally inject an early return after
+successful bootstrap: it must reach the phase-appropriate RollbackFailed or
+`update_recovery_required` path with evidence retained, never silently exit after
+claiming ownership. This regression remains pending with production dispatch;
+the resource resolver does not claim to implement or test that failure path.
 
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original

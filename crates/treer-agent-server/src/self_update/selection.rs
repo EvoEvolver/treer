@@ -161,6 +161,11 @@ impl Inventory {
         })
     }
 
+    /// Select resources, without taking locks or granting mutation authority.
+    /// Submitting callers must obtain explicit shared-binary consent before
+    /// passing true. A private worker may use true only to rediscover resources
+    /// bound by its Prepared receipt: it still needs the authenticated parent's
+    /// SAME lock descriptions and sealed OwnedActivation before activation.
     pub fn select(
         &self,
         workspace: Option<&str>,

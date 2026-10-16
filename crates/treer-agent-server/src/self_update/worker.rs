@@ -161,6 +161,37 @@ mod tests {
     }
 
     #[test]
+    fn shared_resource_discovery_cannot_bypass_parent_locks_or_grant_ownership() {
+        let (f, journal) = fixture("ws_b", "srv_b");
+        let before = journal.prepare_fixture().unwrap();
+        let inventory = f.inventory();
+        assert!(inventory.select(Some("ws_b"), false).is_err());
+        let parent = inventory.select(Some("ws_b"), true).unwrap();
+        let held = parent.lock().unwrap();
+        let resources =
+            WorkerResources::open_at(&f.path.join("jobs"), &before.job_id.to_string(), || {
+                Ok(f.inventory())
+            })
+            .unwrap();
+        // Discovery succeeds while the submitting parent holds the locks;
+        // neither another lock acquisition nor worker ownership follows from it.
+        assert!(resources.selected.lock().is_err());
+        assert_eq!(
+            resources.enter().err().unwrap().to_string(),
+            "update_worker_bootstrap_failed"
+        );
+        assert!(parent.lock().is_err());
+        assert!(journal.directory.read_file("ownership.json").is_err());
+        assert_eq!(journal.read().unwrap(), before);
+        assert_eq!(
+            std::fs::read(f.bin.join("treer-agent-server")).unwrap(),
+            b"controller"
+        );
+        drop(held);
+        assert!(parent.lock().is_ok());
+    }
+
+    #[test]
     fn invalid_missing_or_unprepared_job_is_rejected_before_inventory() {
         let (f, journal) = fixture("ws_a", "srv_a");
         let visited = Cell::new(false);
