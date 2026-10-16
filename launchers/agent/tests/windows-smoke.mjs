@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { shimPath } from "../scripts/path-shim.mjs";
 import { execFileSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, existsSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { isAbsolute, join, resolve, toNamespacedPath } from "node:path";
+import { dirname, isAbsolute, join, resolve, toNamespacedPath } from "node:path";
 import { chromium, expect } from "@playwright/test";
 import { hermeticEnv, localFetch } from "./hermetic.mjs";
 import { spawnProvider, stopProcessTree } from "../scripts/process.mjs";
@@ -39,13 +39,30 @@ const controller = { git_commit: "a".repeat(40), protocol: contract.protocol, ca
   minimum_launcher_security_epoch: contract.launcher_security_epoch, machine: { root: machine, server_id: "srv_smoke", workspace_id: "ws_smoke" } };
 writeFileSync(join(fixture, "contract.json"), JSON.stringify(controller));
 const env = hermeticEnv({ HOME: home, USERPROFILE: home, APPDATA: home, LOCALAPPDATA: home, TEMP: temp, TMP: temp,
+  XDG_CONFIG_HOME: home,
   FIXTURE_ROOT: fixture, FIXTURE_NODE: process.execPath, FIXTURE_TREER_SCRIPT: join(launcher, "tests/fake-treer.mjs"), PATH: "",
   TREER_AGENT_ID: "ag_windows_smoke", AGENT_UI_INSTANCE_ID: "windows-smoke-instance", AGENT_UI_TREER_BIN: cli,
   AGENT_UI_MESSAGE_WATCH: "0", FAKE_ACP_CALLS: join(fixture, "acp-calls.jsonl"), FAKE_ACP_CHILD_PID_FILE: join(fixture, "provider-pids.json") });
 for (const name of Object.keys(env)) if (/^NODE_/i.test(name)) delete env[name];
+// The official Controller discovers local enrollments before probing the CLI.
+// Keep that discovery inside this fixture, including its hostname subprocess;
+// never let XDG_CONFIG_HOME or LOCALAPPDATA expose a real user's enrollment.
+const hostnameCommand = windows ? join(process.env.SystemRoot, "System32/hostname.exe") : "/bin/hostname";
+const installHostname = execFileSync(hostnameCommand, [], { env, encoding: "utf8" }).trim();
+const configHome = join(home, windows ? "Treer/agent-servers" : "treer/agent-servers");
+mkdirSync(configHome, { recursive: true, mode: 0o700 });
+writeFileSync(join(configHome, "srv_smoke-controller.json"), JSON.stringify({
+  proxy: "https://proxy.invalid", workspace: "ws_smoke", server_id: "srv_smoke",
+  machine_token: "synthetic-smoke-token", operator_credential: "",
+  root: windows ? toNamespacedPath(machine) : machine, listen: "127.0.0.1:18790",
+  host_socket: join(fixture, "unused-host.sock"), install_hostname: installHostname,
+}), { mode: 0o600 });
 const installBase = join(machine, ".treer/launchers/agent");
 function install(operation, version, cwd = ".") {
   const installEnv = { ...env }; delete installEnv.TREER_AGENT_ID;
+  // Discovery requires hostname, not a provider or a globally installed treer.
+  installEnv.PATH = dirname(hostnameCommand);
+  if (options.controller) installEnv.FIXTURE_EXPECT_SELECTION = "1";
   if (options.controller) return JSON.parse(execFileSync(options.controller, ["launcher", "--node", process.execPath, "--treer", cli, operation, ...(version ? [version] : []), ...(["install", "update"].includes(operation) ? ["--cwd", cwd] : [])], { env: installEnv, encoding: "utf8", stdio: "pipe", timeout: 360000 }));
   const manifest = readFileSync(join(options.bundle, "bundle-manifest.json"));
   const request = { schema: "treer.launcher-install/v1", operation, bundle_dir: options.bundle, version: `sha256-${digest(manifest)}`,

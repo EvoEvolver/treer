@@ -5,6 +5,11 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { join, toNamespacedPath } from "node:path";
 import { localFetch } from "./hermetic.mjs";
 const root = process.env.FIXTURE_ROOT, args = process.argv.slice(2);
+if (process.env.FIXTURE_EXPECT_SELECTION === "1") {
+  assert.equal(process.env.TREER_WORKSPACE_ID, "ws_smoke");
+  assert.equal(process.env.TREER_SERVER_ID, "srv_smoke");
+  assert.equal(process.env.TREER_AGENT_SERVER_URL, "http://127.0.0.1:18790");
+}
 const json = name => JSON.parse(readFileSync(join(root, name), "utf8"));
 const save = (name, value) => writeFileSync(join(root, name), JSON.stringify(value), { mode: 0o600 });
 if (args.join(" ") === "interface contract") console.log(JSON.stringify(json("contract.json")));
