@@ -16,6 +16,7 @@ use super::{
 };
 
 mod ownership;
+pub mod parent;
 pub use ownership::{AcceptedOwnership, OwnedActivation};
 
 /// Only this module can construct proof of the endpoint preflight. Keep the

@@ -101,7 +101,7 @@ fn detached_owner_retains_both_workspace_locks_after_parent_exit() {
     }
     let _release = Release(job.clone());
     let mut parent = OwnedChild(
-        Command::new(std::env::current_exe().unwrap())
+        Command::new(f.bin.join("treer-agent-server"))
             .args([
                 "--exact",
                 "self_update::selection::survival_tests::parent",
@@ -169,7 +169,8 @@ fn parent() {
     let image = ActivatorImage::prepare(&selected, &held, &journal).unwrap();
     Endpoint::mark_prepared(&journal, &job).unwrap();
     let endpoint = Endpoint::bind(&journal, &job).unwrap();
-    let own = ProcessImage::capture(std::process::id()).unwrap();
+    crate::self_update::handoff::parent::save(&journal, &selected, &held).unwrap();
+    assert!(crate::self_update::handoff::parent::save(&journal, &selected, &held).is_err());
     let child = OwnedChild(
         Command::new(job.join("activator"))
             .args([
@@ -181,7 +182,6 @@ fn parent() {
             .env("TREER_TEST_CONFIG", config)
             .env("TREER_TEST_JOBS", &jobs)
             .env("TREER_TEST_JOB", id)
-            .env("TREER_TEST_PARENT", own.pid().to_string())
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -232,10 +232,49 @@ fn worker() {
     let journal = Journal::open(&root, &id).unwrap();
     let job = jobs.join(&id);
     let running = RunningActivator::enter(&selected, &journal).unwrap();
+    // Only this isolated worker mutates its bootstrap fixture. Each rejected
+    // record must leave the complete journal untouched and send no socket data.
+    let path = job.join("handoff-parent.json");
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    let original = std::fs::read(&path).unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&original).unwrap();
+    let prepared = journal.read().unwrap();
+    let mut invalid = Vec::new();
+    for (pointer, replacement) in [
+        ("/schema_version", serde_json::json!(2)),
+        ("/pid", serde_json::json!(std::process::id())),
+        ("/creation", serde_json::json!("changed")),
+        ("/inode", serde_json::json!(0)),
+        ("/prepared/workspace_id", serde_json::json!("ws_other")),
+    ] {
+        let mut changed = value.clone();
+        *changed.pointer_mut(pointer).unwrap() = replacement;
+        invalid.push(serde_json::to_vec(&changed).unwrap());
+    }
+    let mut unknown = value.clone();
+    unknown["unrecognized"] = serde_json::json!("must not appear in errors");
+    invalid.push(serde_json::to_vec(&unknown).unwrap());
+    invalid.push(b"not JSON, must not appear in errors".to_vec());
+    invalid.push(vec![b' '; 96 * 1024 + 1]);
+    for bytes in invalid {
+        std::fs::write(&path, bytes).unwrap();
+        let error = crate::self_update::handoff::parent::load(&journal, &selected)
+            .err()
+            .expect("invalid parent bootstrap accepted");
+        assert!(matches!(
+            error.to_string().as_str(),
+            "invalid_update_handoff_parent"
+                | "update_handoff_parent_binding_mismatch"
+                | "update_handoff_parent_image_mismatch"
+        ));
+        assert_eq!(journal.read().unwrap(), prepared);
+    }
+    std::fs::write(&path, original).unwrap();
     std::fs::write(job.join("bootstrapped"), b"ready").unwrap();
-    let parent =
-        ProcessImage::capture(std::env::var("TREER_TEST_PARENT").unwrap().parse().unwrap())
-            .unwrap();
+    let parent = crate::self_update::handoff::parent::load(&journal, &selected).unwrap();
     let digest = journal
         .read()
         .unwrap()

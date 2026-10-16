@@ -111,6 +111,21 @@ startup before any concurrent thread can fork. The parent-exit fixture uses this
 connector; platform regressions cover alias rejection, a closed listener, and
 an unconsumed full backlog without false connection success or an endless wait.
 
+The private parent bootstrap now records the complete Prepared receipt and the
+submitting process's OS creation identity and executable device/inode, only
+after proving it is executing the selected installed old Controller under the
+selection locks. The bounded, exclusive 0600 record contains no paths or
+credentials; an existing or partial record is never adopted or overwritten.
+After verifying its own running activator, the worker obtains its direct parent
+PID from the OS and checks that record, live creation identity, executable inode
+and original Controller hash before connecting. Socket peer authentication is
+still mandatory; this file alone grants no ownership. The parent-exit fixture
+now executes its submitting parent from the isolated installed Controller and
+uses this bootstrap instead of an environment-supplied parent PID. It rejects
+changed schema, parent PID, creation, inode, full receipt, unknown fields,
+malformed and oversized records before socket traffic. Synchronous production
+dispatch and the complete activation/recovery engine remain pending.
+
 Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
 descriptors). The parent retains its handles until durable ownership ACK; the
 child receives references to the same open file descriptions, so closing the
