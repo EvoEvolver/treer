@@ -79,12 +79,12 @@ export async function submit(job, treer = "treer", onPrepared = () => {}) {
     }protectDirectory(current);
     for(const child of ['scripts','launchers','launchers/agent','launchers/agent/scripts'])fs.mkdirSync(p.join(current,child),{mode:448});
     const environment={};for(const [k,v] of Object.entries(process.env))if(/^(OS|SystemRoot|windir|USERPROFILE|USERNAME|USERDOMAIN|APPDATA|LOCALAPPDATA|ProgramData|HOMEDRIVE|HOMEPATH|ComSpec|PATHEXT|TEMP|TMP)$/i.test(k))environment[k]=v;
-    console.log(JSON.stringify({directory:current,environment}));})().catch(()=>{process.exitCode=1});`;
+    console.log(JSON.stringify({directory:current,machineRoot:fs.realpathSync.native(process.cwd()),environment}));})().catch(()=>{process.exitCode=1});`;
   const setup = await remote(job.target, code, treer);
   const path = job.target.platform.startsWith("windows-") ? win32 : posix;
   for (const asset of assets) await upload(job.target, join(root, asset), relative + "/" + asset, treer);
   const verified = Object.fromEntries(assets.map(asset => [asset, digest(readFileSync(join(root, asset)))]));
-  const payload = { ...job, environment: setup.environment };
+  const payload = { ...job, machineRoot: setup.machineRoot, environment: setup.environment };
   // Persist the pointer BEFORE launching: a lost exec reply is not a reason to
   // submit another worker. Resume polls this same private directory.
   const prepared = { directory: setup.directory, target: job.target, commit: job.commit };

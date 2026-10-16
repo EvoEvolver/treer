@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { execFileSync } from "node:child_process";
 import { Script } from "node:vm";
 import { jobsFor, submit, validateTarget, windowsQuote } from "./machine-rollout.mjs";
-import { checkWindowsPaths, cleanEnvironment, digest, parseSums, smoke, worker } from "./machine-rollout-worker.mjs";
+import { checkWindowsPaths, cleanEnvironment, digest, parseSums, relativeCwd, smoke, worker } from "./machine-rollout-worker.mjs";
 
 const commit = "a".repeat(40), sourceCommit = "b".repeat(40);
 const platform = { darwin: "darwin", linux: "linux", win32: "windows" }[process.platform] + "-" + ({ arm64: "aarch64", x64: "x86_64" }[process.arch]);
@@ -59,6 +59,12 @@ test("checksums reject duplicate, extra or malformed filenames", () => {
   assert.throws(() => parseSums(Buffer.concat([sums, sums])));
   assert.throws(() => parseSums(Buffer.from("0".repeat(64) + "  ../treer\n")));
 });
+test("Host cwd is relative to the physical machine root and cannot escape", () => {
+  const root = realpathSync.native(tmpdir());
+  assert.equal(relativeCwd(root, join(root, "job", "smoke")), join("job", "smoke"));
+  assert.throws(() => relativeCwd(join(root, "job"), join(root, "other", "smoke")), /outside_machine_root/);
+  assert.throws(() => relativeCwd(root, root), /outside_machine_root/);
+});
 test("smoke checks AIS idle, deletes only returned ID even when it exits, and does not delete an uncertain create", async () => {
   const calls = [];
   const run = async argv => { calls.push(argv); if (argv.includes("create")) return '{"agent_id":"ag_smoke"}';
@@ -78,7 +84,7 @@ test("worker enforces pinned sums, core-before-launcher ordering, partial receip
         python: join(directory, "python"), config: join(directory, "config.json"), startupStore: join(directory, "startup.json") };
       for (const path of [current.controller, current.cli, current.python, current.startupStore]) writeFileSync(path, "fixture");
       writeFileSync(current.config, JSON.stringify({ workspace: target.workspace, server_id: target.serverId, listen: "127.0.0.1:12345", operator_credential: "synthetic-not-for-logs" }));
-      const job = { commit, sourceCommit, target: current, files: parseSums(sums), sumsHash: mode === "mismatch" ? "0".repeat(64) : digest(sums), proxy: "https://proxy.invalid" };
+      const job = { commit, sourceCommit, machineRoot: directory, target: current, files: parseSums(sums), sumsHash: mode === "mismatch" ? "0".repeat(64) : digest(sums), proxy: "https://proxy.invalid" };
       if (mode === "environment_missing") { job.target.platform = "windows-x86_64"; job.environment = {}; }
       const file = join(jobDir, "rollout.json"); writeFileSync(file, JSON.stringify(job));
       const calls = [];
@@ -103,7 +109,7 @@ test("worker enforces pinned sums, core-before-launcher ordering, partial receip
         }
         if (argv.includes("launcher")) { if (mode === "partial") throw new Error("launcher_failed"); return "{}"; }
         if (argv.includes("create")) {
-          assert.equal(argv[argv.indexOf("--cwd") + 1], join(jobDir, "smoke"));
+          assert.equal(argv[argv.indexOf("--cwd") + 1], join(mode, "smoke"));
           assert.deepEqual(readdirSync(join(jobDir, "smoke")), []);
           return '{"agent_id":"ag_smoke"}';
         }

@@ -84,7 +84,8 @@ shorter machine root rather than treating verbatim prefixes as a universal fix.
 trusted `acpCommand`. No automatic login, harness fallback or credentials copying
 occurs. Optional `smokeFolder` is an authorized absolute Tree folder (default `/`),
 independent of the smoke Agent's filesystem cwd (a new empty `smoke` directory
-inside its private rollout job).
+inside its private rollout job, passed as a path relative to the physical machine
+root as required by the Host).
 
 ## Execution and recovery
 

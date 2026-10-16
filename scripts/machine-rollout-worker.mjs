@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, renameSync, rmdirSync, writeFileSync, openSync, fsyncSync, closeSync } from "node:fs";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { protectDirectory, syncDirectory } from "../launchers/agent/scripts/private-state.mjs";
 
@@ -18,6 +18,11 @@ export function requirePhysical(path) {
     const parent = dirname(current); if (parent === current) break; current = parent;
   }
   return realpathSync.native(path);
+}
+export function relativeCwd(root, path) {
+  const cwd = relative(root, path);
+  if (!cwd || isAbsolute(cwd) || cwd === ".." || cwd.startsWith(".." + sep)) throw new Error("smoke_directory_outside_machine_root");
+  return cwd;
 }
 export function save(path, value) {
   const temporary = path + "." + randomUUID() + ".tmp";
@@ -116,6 +121,7 @@ export async function worker(jobPath, { runCommand = command, fetchArtifact = do
     const actualPlatform = { win32: "windows", darwin: "darwin", linux: "linux" }[process.platform] + "-" + ({ arm64: "aarch64", x64: "x86_64" }[process.arch]);
     if (target.platform !== actualPlatform) throw new Error("machine_platform_mismatch");
     if (target.platform.startsWith("windows-")) checkWindowsPaths(directory, target);
+    const smokeCwd = relativeCwd(requirePhysical(job.machineRoot), join(directory, "smoke"));
     for (const key of ["controller", "cli", "config", "startupStore"]) requirePhysical(target[key]);
     const node = realpathSync.native(target.node);
     if (node !== realpathSync.native(process.execPath)) throw new Error("trusted_node_mismatch");
@@ -163,7 +169,7 @@ export async function worker(jobPath, { runCommand = command, fetchArtifact = do
       "--node", target.node, "--treer", target.cli, "install"], undefined, 360000);
     const smokeDirectory = join(directory, "smoke"); mkdirSync(smokeDirectory, { mode: 0o700 });
     receipt.phase = "smoke"; progress();
-    receipt.smoke = await smoke(target, [target.cli], 90000, run, value => { receipt.smoke = value; progress(); }, smokeDirectory);
+    receipt.smoke = await smoke(target, [target.cli], 90000, run, value => { receipt.smoke = value; progress(); }, smokeCwd);
     receipt.phase = "complete"; receipt.status = "complete";
   } catch (error) {
     for (const file of [join(directory, "core/result.json"), join(directory, "windows-stage/result.json")]) {
