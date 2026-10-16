@@ -1,5 +1,6 @@
 //! Prepare the old Controller's job-local activator image before any installed
-//! name changes. This does not spawn, detach, or authorize an activation.
+//! name changes, and attest the running copy before child-side session setup.
+//! This does not spawn a worker or authorize an activation.
 use std::{
     fs::File,
     io::Write,
@@ -132,6 +133,80 @@ impl ActivatorImage {
         self.preparing
             .publications
             .original_digest(Binary::Controller)
+    }
+}
+
+/// Child-side proof, retained only in the process actually executing the job's
+/// old Controller copy. No Debug/Serialize or path-based executable fallback.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub struct RunningActivator {
+    process: treer_platform::process_image::ProcessImage,
+    prepared: Receipt,
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+impl RunningActivator {
+    /// Invoke synchronously after exec, before connecting the handoff endpoint
+    /// or starting runtime threads. A failure must terminate worker startup.
+    pub fn enter(selected: &Selected, journal: &Journal) -> Result<Self> {
+        let prepared = journal.read()?;
+        if prepared.phase != Phase::Prepared
+            || prepared.workspace_id != selected.workspace()
+            || prepared.server_id != selected.server_id()
+        {
+            bail!("update_activator_job_mismatch");
+        }
+        let result = Self {
+            process: treer_platform::process_image::ProcessImage::capture(std::process::id())
+                .map_err(|_| anyhow::anyhow!("update_activator_process_unavailable"))?,
+            prepared,
+        };
+        // Check the running inode and bytes before changing the session. An
+        // arbitrary executable with identical bytes is not the job's copy.
+        result.verify_image(selected, journal)?;
+        treer_platform::process_image::enter_private_session()
+            .map_err(|_| anyhow::anyhow!("update_activator_session_unavailable"))?;
+        result.verify(selected, journal)?;
+        Ok(result)
+    }
+
+    pub fn verify(&self, selected: &Selected, journal: &Journal) -> Result<()> {
+        self.verify_image(selected, journal)?;
+        self.process
+            .verify_private_session()
+            .map_err(|_| anyhow::anyhow!("update_activator_session_unavailable"))
+    }
+
+    fn verify_image(&self, selected: &Selected, journal: &Journal) -> Result<()> {
+        if self.process.pid() != std::process::id()
+            || self.prepared.workspace_id != selected.workspace()
+            || self.prepared.server_id != selected.server_id()
+            || journal.read()? != self.prepared
+        {
+            bail!("update_activator_job_changed");
+        }
+        self.process
+            .verify_current()
+            .map_err(|_| anyhow::anyhow!("update_activator_process_unavailable"))?;
+        let named = journal.directory.read_file(NAME)?;
+        let expected = self
+            .prepared
+            .publications
+            .original_digest(Binary::Controller);
+        if named.metadata()?.permissions().mode() & 0o7777 != 0o500
+            || !self.process.matches_file(&named)?
+            || digest_file(&named)? != expected
+            || digest_file(self.process.executable())? != expected
+        {
+            bail!("update_activator_image_conflict");
+        }
+        self.process
+            .verify_current()
+            .map_err(|_| anyhow::anyhow!("update_activator_process_unavailable"))?;
+        if journal.read()? != self.prepared {
+            bail!("update_activator_job_changed");
+        }
+        Ok(())
     }
 }
 

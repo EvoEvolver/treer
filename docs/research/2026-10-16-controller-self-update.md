@@ -79,6 +79,15 @@ polling before the child connects does not abort startup. An attached owned
 child is rejected with a fixed error and permanently aborts that endpoint,
 leaving the journal, ownership record and the parent's locks unchanged. The
 ownership fixture exercises this rejection without sending any lock handles.
+The child-side `RunningActivator` primitive now checks the exact Prepared
+receipt and selected enrollment, the OS-reported running executable's inode
+against the job-private 0500 image, and both file digests against the original
+Controller pin before calling `setsid`. It then rechecks the receipt, image and
+private session before returning a proof. The normal isolated ownership child
+uses this sequence before connecting; an identical executable at another inode
+is rejected before changing session or connecting, leaving the parent's locks
+and journal untouched. A different enrollment is rejected as well. This is an
+internal bootstrap primitive, not yet a production worker dispatch path.
 This is not proof of survival after parent exit or escape from a cgroup/service
 manager's termination scope. Wiring the synchronous internal worker entry,
 null/private bounded stdio and the complete owned-child lifecycle remain pending.

@@ -592,6 +592,7 @@ pub(super) mod tests {
         .unwrap();
         for mode in [
             "normal",
+            "wrong-image",
             "attached",
             "exit-before-ack",
             "wrong-job",
@@ -609,7 +610,7 @@ pub(super) mod tests {
             );
             let journal = Journal::create(&root, &receipt).unwrap();
             let job = jobs.0.join(receipt.job_id.to_string());
-            let activator = if mode == "normal" {
+            let activator = if mode == "normal" || mode == "wrong-image" {
                 Some(
                     super::super::activator::ActivatorImage::prepare(&selected, &held, &journal)
                         .unwrap(),
@@ -632,7 +633,7 @@ pub(super) mod tests {
             }
             let endpoint = Endpoint::bind(&journal, &job).unwrap();
             let mut child = Child(
-                Command::new(if activator.is_some() {
+                Command::new(if mode == "normal" {
                     job.join("activator")
                 } else {
                     std::env::current_exe().unwrap()
@@ -655,6 +656,34 @@ pub(super) mod tests {
                 .spawn()
                 .unwrap(),
             );
+            if mode == "wrong-image" {
+                let deadline = Instant::now() + Duration::from_secs(30);
+                loop {
+                    if let Some(status) = child.0.try_wait().unwrap() {
+                        assert!(status.success());
+                        break;
+                    }
+                    assert!(Instant::now() < deadline);
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                assert_eq!(journal.read().unwrap(), prepared);
+                assert!(!job.join("ownership.json").exists());
+                assert!(selected.lock().is_err());
+                assert!(other.lock().is_err());
+                drop(held);
+                assert!(selected.lock().is_ok());
+                continue;
+            }
+            if mode == "normal" {
+                // Image verification hashes the debug binary before connect;
+                // keep that startup work outside the socket exchange budget.
+                let deadline = Instant::now() + Duration::from_secs(30);
+                while !job.join("test-child-bootstrapped").exists() {
+                    assert!(Instant::now() < deadline);
+                    assert!(child.0.try_wait().unwrap().is_none());
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+            }
             let image = ProcessImage::capture(child.0.id()).unwrap();
             if mode == "attached" {
                 let deadline = Instant::now() + Duration::from_secs(5);
@@ -770,13 +799,47 @@ pub(super) mod tests {
         let jobs = PathBuf::from(std::env::var_os("TREER_TEST_JOBS").unwrap());
         let job = std::env::var("TREER_TEST_JOB").unwrap();
         let mode = std::env::var("TREER_TEST_MODE").unwrap();
-        if mode != "attached" {
+        if mode != "attached" && mode != "normal" && mode != "wrong-image" {
             treer_platform::process_image::enter_private_session().unwrap();
         }
         let inventory = Inventory::load(&config, "fixture-host").unwrap();
         let selected = inventory.select(Some("ws_a"), true).unwrap();
         let root = PrivateDirectory::open(&jobs).unwrap();
         let journal = Journal::open(&root, &job).unwrap();
+        let running = if mode == "normal" || mode == "wrong-image" {
+            use super::super::activator::RunningActivator;
+            let other = inventory.select(Some("ws_b"), true).unwrap();
+            assert_eq!(
+                RunningActivator::enter(&other, &journal)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "update_activator_job_mismatch"
+            );
+            if mode == "wrong-image" {
+                // Same native bytes, different inode: reject before setsid or
+                // connecting, without a transfer capability or journal writes.
+                assert_eq!(
+                    RunningActivator::enter(&selected, &journal)
+                        .err()
+                        .unwrap()
+                        .to_string(),
+                    "update_activator_image_conflict"
+                );
+                assert!(ProcessImage::capture(std::process::id())
+                    .unwrap()
+                    .verify_private_session()
+                    .is_err());
+                return;
+            }
+            let running = RunningActivator::enter(&selected, &journal).unwrap();
+            running.verify(&selected, &journal).unwrap();
+            assert!(running.verify(&other, &journal).is_err());
+            std::fs::write(jobs.join(&job).join("test-child-bootstrapped"), b"ready").unwrap();
+            Some(running)
+        } else {
+            None
+        };
         let mut stream = UnixStream::connect(jobs.join(&job).join("handoff.sock")).unwrap();
         let parent =
             ProcessImage::capture(std::env::var("TREER_TEST_PARENT").unwrap().parse().unwrap())
@@ -813,6 +876,9 @@ pub(super) mod tests {
             return;
         }
         let owned = result.unwrap();
+        if let Some(running) = &running {
+            running.verify(&selected, &journal).unwrap();
+        }
         assert_eq!(owned.prepared(), &journal.read().unwrap());
         assert!(owned
             .locks()
