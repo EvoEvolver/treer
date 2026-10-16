@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { WebSocket } from "ws";
 import { hermeticEnv, localFetch as fetch } from "./hermetic.mjs";
+import { launcherReady } from "./launcher-ready.js";
 const root = resolve(import.meta.dirname, "..");
 const fake = join(root, "tests/fake-claude.mjs");
 const temp = () => realpathSync(mkdtempSync(join(tmpdir(), "agent-ui-claude-http-")));
@@ -18,12 +19,7 @@ test("native Claude HTTP/WS state, queue deletion, AIS compatibility and bounded
   let logs = ""; child.stderr.on("data", (chunk) => { logs += chunk; });
   let socket: WebSocket | undefined;
   try {
-    let base = "";
-    for (let index = 0; index < 100; index++) {
-      if (child.exitCode !== null) throw new Error(logs);
-      try { base = `http://127.0.0.1:${Number(readFileSync(portFile, "utf8"))}`; if ((await fetch(base + "/api/health")).ok) break; } catch { /* startup */ }
-      await new Promise((done) => setTimeout(done, 25));
-    }
+    const base = await launcherReady(child, portFile).catch(error => { throw new Error(error.message, { cause: logs }); });
     const state = () => fetch(base + "/api/state").then((response) => response.json());
     const post = (path: string, body: unknown) => fetch(base + path, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     socket = new WebSocket(base.replace("http:", "ws:") + "/ws");
