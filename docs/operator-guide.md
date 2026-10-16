@@ -804,9 +804,52 @@ The workspace feed excludes organization-only events and sensitive payloads,
 including file paths/hashes, argv, environment and configuration. Actor IDs are
 stable references; stored display names are omitted. Coverage is partial and
 best effort for several runtime mutations. Existing attributed history is shown,
-but missing history is not backfilled and deleted-workspace events lose their FK
-attribution. Audit reads themselves are not recorded. The organization view
+but missing history is not backfilled. Newly written events preserve immutable
+workspace attribution even after deletion. Audit reads themselves are not recorded. The organization view
 retains its original permissions and output.
+
+On `audit.maintenance.v1` Proxies, both audit views add `maintenance` with
+`retention_days` and a scoped `deleted_through` watermark (null before cleanup
+has deleted anything in that scope). This is not a completeness guarantee or the
+time of the oldest event. Add `include_statistics=true` for a fixed recent 30-day
+UTC `rows_per_day` list (`day`, `action`, `rows`), `statistics_since` and
+`statistics_truncated` (at 4096 groups), independent of feed filters. Scoped
+`oldest_expired_at` is null when no expired rows remain; otherwise it indicates
+cleanup backlog. Check the
+capability before using the new query against old Proxies. Statistics require
+the same authorization as audit reads and can fail rather than run longer than
+their two-second database statement budget. An opted-in statistics failure fails
+that request; retry without `include_statistics` to read the ordinary feed.
+
+Retention starts at 180 days for every organization audit kind, including
+security-sensitive events. Set Proxy `--audit-retention-days DAYS` or
+`TREER_AUDIT_RETENTION_DAYS` (30..3650) to explicitly update the shared database
+setting. Omission preserves the existing setting; keep explicit settings equal
+across replicas: the last explicit configuration wins. A configuration change
+records old/new days in platform audit; startup logs effective days and source.
+Idle checks run each minute; cleanup commits 256-row batches for up to one second
+or 64 batches per cycle, then resumes next second while backlogged. The budget
+limits starting the next batch; a started batch finishes under a five-second
+statement timeout rather than being repeatedly rolled back at one second. Backlogs can
+still exceed the configured age. Deletion begins at the first worker tick after
+startup: set a longer lifetime before deploying if needed. There is no forever
+setting or built-in export. Deletion is irreversible without an
+independent backup; increasing retention does not move deletion watermarks back.
+This setting does not clean backups, platform audit or Policy decision logs.
+
+Accepted prompt auditing uses a shared 4096-entry PostgreSQL outbox and a fixed
+batch worker. Admission still waits for durable storage (up to one second), and
+failed audit admission never turns an accepted prompt into a retryable failure.
+The global settings lock serializes admission and drain; no tenant fairness
+quota prevents one workspace from filling this audit queue for others.
+Monitor body-free `audit_queue_overflow`, `audit_enqueue_unconfirmed`,
+`audit_drain_failed`, `audit_cleanup_failed` and shutdown-flush warnings. Database
+operators can inspect `pending`, `queue_capacity` and `overflow_total` in
+`audit_maintenance_settings`; the global counter is deliberately absent from
+workspace responses. Shutdown flush is bounded to ten seconds, with committed
+entries replayed after restart. Old-only Proxy rollback pauses drain/cleanup,
+retains pending entries, and resumes direct writes. Budget audit rows/day along
+with index/WAL/outbox/backup overhead; no universal bytes-per-row estimate applies.
 
 `GET /api/admin/invitations` returns the latest 100 personal registration
 invitations as `{invitations:[{invitation_id,token_prefix,created_at,used_at}]}`.

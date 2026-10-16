@@ -123,6 +123,31 @@ async fn workspace_audit_http_role_scope_filters_pagination_and_redaction() {
     )
     .await;
     let router = test_router(&auth, PolicyEngine::allow_all());
+    let stats = body(
+        response(
+            router.clone(),
+            "/api/workspaces/a/audit-events?include_statistics=true",
+            Some("owner"),
+        )
+        .await,
+    )
+    .await;
+    let stats = &stats["maintenance"];
+    assert_eq!(stats["retention_days"], 180);
+    assert!(stats["deleted_through"].is_null());
+    let daily = stats["rows_per_day"].as_array().unwrap();
+    assert_eq!(daily.len(), 2);
+    assert!(daily
+        .iter()
+        .all(|row| row["action"] != "agent.delete" && row["action"] != "organization.invite"));
+    assert!(stats.get("overflow_total").is_none());
+    let denied = response(
+        router.clone(),
+        "/api/workspaces/a/audit-events?include_statistics=true",
+        Some("member"),
+    )
+    .await;
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
     for (user, status) in [
         (None, StatusCode::UNAUTHORIZED),
         (Some("member"), StatusCode::FORBIDDEN),
@@ -490,6 +515,7 @@ fn workspace_audit_query_and_page_protocol_round_trip() {
     let page = WorkspaceAuditEventsPage {
         events: vec![],
         next_cursor: None,
+        maintenance: None,
     };
     let restored: WorkspaceAuditEventsPage =
         serde_json::from_value(serde_json::to_value(page).unwrap()).unwrap();

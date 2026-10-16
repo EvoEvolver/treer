@@ -938,7 +938,8 @@ workspace foreign key. Hard deletion clears the live FK but the organization
 view can still attribute these new events to the original workspace. Older
 already-unattributed rows remain unknown; organization deletion still cascades.
 
-The shared response is `{events, next_cursor}`. `before` is a positive, exclusive
+The shared response is `{events, next_cursor, maintenance}`. Older responses may
+omit `maintenance`. `before` is a positive, exclusive
 sequence cursor within the requested workspace; events sort by descending
 sequence. `limit` defaults to 50 and clamps to 1..100. `next_cursor` is the last
 returned sequence only when another matching row exists, otherwise NULL. Optional
@@ -975,7 +976,7 @@ State-change audit delivery is explicit:
 | Enrollment claim/re-enrollment | Same credential binding and single-use enrollment consumption transaction. Replayed keys fail without a success event. |
 | Service create/update/delete, virtual-host create/delete, HTTP ingress create/update/delete, TCP publish/unpublish | Best-effort after durable mutation; audit failure logs a body-free warning and does not turn a committed change into a retryable failure. |
 | Managed App compound creation/deletion | Service, virtual-host creation and placement events share the App transaction. Service deletion represents cascading routing removal rather than separate child events. |
-| Accepted prompt submission | Best-effort after Controller success; only actor, target ID and event kind. A repeated accepted submission request can produce another acceptance event; this is not a turn-completion log. |
+| Accepted prompt submission | Best-effort durable outbox admission after Controller success; only captured actor, target ID, timestamp and event ID. A repeated accepted submission request can produce another acceptance event; this is not a turn-completion log. |
 
 No-op updates and repeated ingress publication do not append state-change events.
 Authenticated request middleware scopes actor kind/ID to the request future,
@@ -987,12 +988,55 @@ organization view retains its existing human actor display-name lookup; the
 workspace projection removes it. Existing runtime
 lifecycle audit events may additionally describe the operation's outcome.
 Core Message delivery and all failure paths do not have universal audit coverage;
-there is no transactional outbox or completeness guarantee for best-effort writes.
+there is no universal transactional outbox or completeness guarantee for best-effort writes.
 `system` also covers authenticated entry points that do not set the request
 scope (for example administrator or service-audience handlers); it is not proof
-that a human or App was uninvolved. Prompt acceptance is not aggregated and adds
-an awaited database write on the response path. Audit retention/compaction is not
-implemented, so operators must budget storage for this potentially frequent feed.
+that a human or App was uninvolved.
+
+Prompt admission waits for one durable PostgreSQL function call, bounded to one
+second; it is not a memory queue or a promise of zero database latency. A shared
+settings-row lock bounds pending entries to 4096 across replicas. Overflow is
+durably counted in `audit_maintenance_settings.overflow_total` and logged without
+row values. Unconfirmed admission (including ambiguous commit acknowledgements)
+has a separate process-local counter in warning logs. Successful runtime commands
+are not retried or failed because auditing failed. One worker per Proxy drains
+up to 256 entries each second; audit insertion, event-ID deduplication and outbox
+deletion commit together. Actor attribution never depends on the worker's task
+local state. After HTTP graceful shutdown drains requests, the worker has ten
+seconds to flush; remaining committed entries replay after restart. The settings
+row is a global serialization point: contention can exhaust the one-second
+admission budget. Capacity has no tenant fairness quota; one workspace can fill
+it and cause counted prompt-audit drops for others. This does not drop prompts
+or transactional security-kind audit writes.
+
+Every organization audit kind has the same maximum age, initially 180 days.
+`--audit-retention-days` / `TREER_AUDIT_RETENTION_DAYS` (30..3650) explicitly changes
+the shared database setting; omission preserves it. Workers use database time
+and bounded 256-row cleanup batches. Idle checks run every minute; each cleanup
+cycle starts additional batches within a one-second/64-batch budget, then resumes
+next second if backlogged. A started batch may finish beyond that budget (with a
+five-second database statement timeout), so slow first batches can make progress.
+Retention configuration is
+read from PostgreSQL, not a NATS cache. Deletion records monotonic scoped
+`maintenance.deleted_through` watermarks; these do not establish completeness.
+Increasing retention cannot recover deleted history, and cleanup may lag the
+configured deadline. Organization deletion still cascades immediately.
+
+Proxies advertise `audit.maintenance.v1`. Authorized organization and workspace
+audit reads expose retention metadata; `include_statistics=true` additionally
+returns recent 30-day UTC rows/day/action, independent of pagination filters,
+with `statistics_since` and an explicit `statistics_truncated` flag at 4096
+groups. Workspace statistics never include organization-only/other-workspace
+events or the global overflow count. With statistics, scoped `oldest_expired_at`
+indicates a retention backlog. Statistical scans have a two-second statement
+budget, but no result cache or per-user rate limit. No new read privilege is introduced.
+The additive schema supports older Proxies writing directly; old-only rollback
+pauses draining and cleanup until an updated worker returns. Operators must use
+consistent explicit retention settings across replicas (the last explicit
+configuration wins). Configuration changes produce a platform audit row and
+typed old/new/source startup log; no keep-forever setting or export is provided.
+Operators must budget stored audit,
+outbox, indexes, WAL and backups separately.
 Legacy/local-auth enrollments without a durable workspace retain their existing
 behavior and have no organization audit attribution; no organization is invented.
 

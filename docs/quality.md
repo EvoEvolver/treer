@@ -54,6 +54,19 @@ attribution, immutable attribution for newly written deleted-workspace events,
 and fail-closed payload projection. Networking and prompt audit delivery still
 has no completeness guarantee; an acceptance event is not proof of turn completion.
 
+Audit maintenance PostgreSQL regressions exercise concurrent bounded admission,
+durable overflow accounting, capacity release on organization cascade, captured
+actor attribution, replay/deduplication, multi-worker drain, shutdown flush,
+failed-write recovery, 256-row retention batches, uniform sensitive/high-volume
+kind expiry and scoped metadata/statistics. Retention watermarks never move
+backward when the age increases. Cleanup cycles also cover catching up more
+than two batches, scoped oldest-expired
+indicators, rejection of a one-day configuration and atomic platform config audit.
+The prompt writer latency test prints 100 paired
+local-PostgreSQL direct-write/enqueue p50/p95 samples; it makes no flaky timing
+assertion and does not establish production latency or throughput. Queue capacity
+and batch size bound resources, not audit completeness or maximum cleanup lag.
+
 Windows native artifact builds exercise ConPTY without an attached browser.
 The Host answers the initial cursor inheritance query required by portable-pty
 so child output can begin. The runtime tests cover split query bytes and the

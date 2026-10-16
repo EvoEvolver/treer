@@ -458,6 +458,23 @@ organization deletion still removes its events. Runtime audit delivery can fail
 after a successful mutation, and database/Host operators can modify stored events:
 this is neither complete, tamperproof nor non-repudiable auditing.
 
+Prompt audit admission is a bounded durable PostgreSQL outbox, not a guarantee
+that every accepted runtime mutation is audited. Queue overflow increments a
+durable global counter and warns; unconfirmed admission warns with a separate
+process-local counter without database error values. No prompt bodies enter the
+outbox. Worker insertion/removal is atomic and deduplicated by event ID. Workspace
+metadata/statistics use the same sensitive-read authorization and exact tenant
+scope as their audit feed; global queue counters are operator/database metadata.
+All organization audit kinds, including authentication, membership and policy,
+expire under the same configurable default 180-day policy. Retention
+configuration has a 30-day minimum; changes emit a platform event and numeric
+startup log. Capacity is shared without per-tenant fairness: a tenant can cause
+counted prompt-audit drops in another tenant, while accepted prompts themselves
+and transactional security-kind writes are unaffected. Scoped deletion
+watermarks describe removed history, not completeness. Database/Host operators
+can change retention and stored events; retention is not an immutable compliance
+archive, and does not expire independent backups, platform audit or Policy logs.
+
 Proxy help hides configured administrator-password and NATS-URL environment
 values, alongside existing secret arguments. This is diagnostic hygiene, not a
 general guarantee of log redaction: arbitrary command/environment values and

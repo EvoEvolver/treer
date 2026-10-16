@@ -209,6 +209,67 @@ CREATE INDEX IF NOT EXISTS organization_audit_events_workspace_sequence
 CREATE INDEX IF NOT EXISTS organization_audit_events_correlation
     ON organization_audit_events(correlation_id) WHERE correlation_id IS NOT NULL;
 
+-- Shared across replicas. Omitted startup configuration preserves these values.
+CREATE TABLE IF NOT EXISTS audit_maintenance_settings (
+    singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK(singleton),
+    retention_days INTEGER NOT NULL DEFAULT 180 CHECK(retention_days BETWEEN 30 AND 3650),
+    queue_capacity INTEGER NOT NULL DEFAULT 4096 CHECK(queue_capacity BETWEEN 1 AND 65536),
+    pending INTEGER NOT NULL DEFAULT 0 CHECK(pending >= 0),
+    overflow_total BIGINT NOT NULL DEFAULT 0 CHECK(overflow_total >= 0)
+);
+INSERT INTO audit_maintenance_settings(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING;
+CREATE TABLE IF NOT EXISTS prompt_audit_outbox (
+    event_id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    workspace_id TEXT REFERENCES workspaces(workspace_id) ON DELETE SET NULL,
+    workspace_origin_id TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    actor_kind TEXT NOT NULL CHECK(actor_kind IN ('user','agent','machine','service','system')),
+    actor_id TEXT,
+    actor_name TEXT,
+    resource_id TEXT NOT NULL
+);
+CREATE OR REPLACE FUNCTION release_prompt_audit_capacity() RETURNS TRIGGER AS $$
+BEGIN
+    UPDATE audit_maintenance_settings SET pending=pending-1 WHERE singleton;
+    RETURN OLD;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER prompt_audit_capacity_released
+    AFTER DELETE ON prompt_audit_outbox FOR EACH ROW
+    EXECUTE FUNCTION release_prompt_audit_capacity();
+-- One network round trip for durable admission. Invoker privileges only; this
+-- function is not an authorization API and never accepts a prompt body.
+CREATE OR REPLACE FUNCTION enqueue_prompt_audit(
+    new_event TEXT, workspace TEXT, event_time TEXT, actor TEXT, actor_identifier TEXT, target TEXT
+) RETURNS BOOLEAN AS $$
+DECLARE full_queue BOOLEAN;
+BEGIN
+    SELECT pending>=queue_capacity INTO STRICT full_queue
+        FROM audit_maintenance_settings WHERE singleton FOR UPDATE;
+    IF full_queue THEN
+        UPDATE audit_maintenance_settings SET overflow_total=overflow_total+1 WHERE singleton;
+        RETURN FALSE;
+    END IF;
+    INSERT INTO prompt_audit_outbox(event_id,organization_id,workspace_id,workspace_origin_id,occurred_at,actor_kind,actor_id,actor_name,resource_id)
+        SELECT new_event,organization_id,workspace_id,workspace_id,event_time,actor,actor_identifier,
+            (SELECT preferred_name FROM users WHERE id=actor_identifier),target
+        FROM workspaces WHERE workspace_id=workspace;
+    IF NOT FOUND THEN RAISE EXCEPTION 'audit workspace unavailable'; END IF;
+    UPDATE audit_maintenance_settings SET pending=pending+1 WHERE singleton;
+    RETURN TRUE;
+END;
+$$ LANGUAGE plpgsql;
+CREATE TABLE IF NOT EXISTS audit_retention_boundaries (
+    organization_id TEXT NOT NULL REFERENCES organizations(organization_id) ON DELETE CASCADE,
+    scope_id TEXT NOT NULL,
+    deleted_through TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY(organization_id,scope_id)
+);
+-- Date-prefix narrowing is indexable without an unsafe immutable timestamp cast.
+CREATE INDEX IF NOT EXISTS organization_audit_events_retention_date
+    ON organization_audit_events(left(occurred_at,10),sequence);
+
 CREATE TABLE IF NOT EXISTS workspace_policies (
     workspace_id TEXT PRIMARY KEY,
     revision BIGINT NOT NULL CHECK(revision > 0),

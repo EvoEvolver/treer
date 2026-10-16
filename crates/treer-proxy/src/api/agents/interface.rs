@@ -57,6 +57,7 @@ pub(crate) async fn prompt_agent(
             .into());
         }
     }
+    let audit_actor = crate::audit::maintenance::capture_actor();
     let data = context
         .state()
         .send_command(
@@ -69,12 +70,11 @@ pub(crate) async fn prompt_agent(
             },
         )
         .await?;
-    crate::audit::mutation_best_effort(
+    crate::audit::maintenance::prompt_best_effort(
         &auth.pool(),
         &workspace_id,
-        "agent.prompt",
-        "agent",
         &agent.agent_id,
+        audit_actor,
     )
     .await;
     Ok(Json(data))

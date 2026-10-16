@@ -78,7 +78,16 @@ pub(crate) async fn audit_events(
         )
         .await?;
     let next_cursor = events.last().map(|event| event.sequence);
+    // Only after list_audit_events has checked organization membership/role.
+    let maintenance = crate::audit::maintenance::metadata(
+        &auth.pool(),
+        Some(&organization_id),
+        query.workspace_id.as_deref(),
+        query.include_statistics,
+    )
+    .await
+    .map_err(AuthFailure::database)?;
     Ok(Json(
-        json!({ "events": events, "next_cursor": next_cursor }),
+        json!({ "events": events, "next_cursor": next_cursor, "maintenance": maintenance }),
     ))
 }
