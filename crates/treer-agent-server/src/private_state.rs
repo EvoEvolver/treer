@@ -345,10 +345,15 @@ fn verify_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), 
             Ok(false) => {
                 // SIDs, control flags and masks only: enough to diagnose a
                 // foreign owner or inherited entry without exposing content.
+                // One bounded, categorical log line and the fixed code; the
+                // path-logging helper is deliberately not used on this branch.
                 let report = treer_platform::private_path_security_report(path)
                     .unwrap_or_else(|error| format!("report unavailable: {error}"));
-                warn!(%report, "Agent private state directory DACL is not private");
-                return Err(unsafe_directory(path, "insecure_dacl"));
+                warn!(%report, reason = "insecure_dacl", "Agent private state directory failed its safety check");
+                return Err(ProtocolError::new(
+                    "agent_private_state_unsafe",
+                    "Agent private state directory failed its safety check; inspect the Controller log",
+                ));
             }
             Err(error) => return Err(unavailable(path, error)),
         }
@@ -1158,11 +1163,16 @@ mod tests {
                 .expect("run icacls");
             assert!(status.success(), "icacls grant failed");
         }
-        fn report(path: &Path) -> String {
-            treer_platform::private_path_security_report(path)
-                .unwrap_or_else(|error| format!("report unavailable: {error}"))
-        }
         let fixture = Fixture::new();
+        let fixture_path = fixture.0.to_string_lossy().into_owned();
+        // The diagnostic is categorical: no raw SIDs and no fixture path.
+        let report = move |path: &Path| -> String {
+            let report = treer_platform::private_path_security_report(path)
+                .unwrap_or_else(|error| format!("report unavailable: {error}"));
+            assert!(!report.contains("S-1-"), "raw SID in report: {report}");
+            assert!(!report.contains(&fixture_path), "path in report");
+            report
+        };
         let root = fixture.0.join("agent-private");
         // Baseline: secure_directory must produce the protected private DACL
         // on this machine; on failure print what the system actually reports.

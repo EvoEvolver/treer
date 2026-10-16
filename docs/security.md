@@ -321,8 +321,9 @@ domain. The Windows check accepts as owner only this process's token user or tok
 owner (the SID the system assigns to objects the process creates; for an
 elevated administrator that is the Administrators group) and requires a
 protected DACL whose entries are all non-inherited plain allow entries for
-the token user or LocalSystem; any other ACE type is never parsed beyond its
-header and fails closed. Failures log a categorical report (owner class,
+the token user or LocalSystem; plain deny entries are parsed and rejected, and
+unsupported ACE types (object, callback, audit, unknown) are never parsed
+beyond their header and fail closed. Failures log a categorical report (owner class,
 control flags, ACE type/inherited/principal class) without SIDs or paths. The
 Windows variants (protected DACL, reparse-point rejection, free space) are
 compile-guarded and have not been exercised on a Windows runner.
