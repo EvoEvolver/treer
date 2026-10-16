@@ -260,7 +260,11 @@ function WorkspaceAppContent() {
   }, [apps])
   const workloadHref = (id: string) => appOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id)
   // Synchronous so it keeps the click gesture. Same-origin Console pages carry no token; an App's own URL is opened with noopener.
-  const openInNewTab = (id: string) => { window.open(appOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id, true), "_blank", "noopener") }
+  const openInNewTab = (id: string) => {
+    const own = appOwnUrls.get(id)
+    // noreferrer for another origin: the Console URL (org/workspace/workload IDs) is not sent to the App.
+    window.open(own ?? workloadPath(organizationId, workspaceId, id, true), "_blank", own ? "noopener,noreferrer" : "noopener")
+  }
   const focusedId = focusMode && selectedWorkloadId ? selectedWorkloadId : null
   const tabLabels = new Map<string, TabLabel>(workloads.map((agent) => {
     const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === agent.agent_id)

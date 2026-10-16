@@ -630,9 +630,10 @@ test.describe('workload links: semantics and keyboard', () => {
 test.describe('an App opens on its own ingress URL in a new browser tab', () => {
   const own = 'https://svc-abc123.apps.example.test/'
   const deepLink = `${workspaceUrl}/workloads/tab-7`
+  const referers: (string | undefined)[] = []
   async function withAppUrl(page: Page, publicUrl: string | null | undefined) {
     // The App's own origin is not a real host in tests; serve a stub so the new page keeps the requested URL.
-    await page.context().route(/^https:\/\/svc-abc123\.apps\.example\.test\//, (route) => route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>App</title><h1>App</h1>' }))
+    await page.context().route(/^https:\/\/svc-abc123\.apps\.example\.test\//, (route) => { referers.push(route.request().headers()['referer']); return route.fulfill({ contentType: 'text/html', body: '<!doctype html><title>App</title><h1>App</h1>' }) })
     await page.setViewportSize({ width: 1360, height: 900 })
     await fixture(page)
     // Registered after the fixture so it takes precedence over its apps mock.
@@ -652,6 +653,9 @@ test.describe('an App opens on its own ingress URL in a new browser tab', () => 
     await page.getByRole('tab', { name: 'Tab /Archive', exact: true }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
     expect(popup.url()).toBe(own)
+    // The new page gets no Referer and no opener from the Console.
+    expect(referers.at(-1)).toBeUndefined()
+    expect(await popup.evaluate(() => window.opener)).toBeNull()
     await popup.close()
   })
 

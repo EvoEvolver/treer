@@ -512,6 +512,7 @@ native link behind a Tree row, Overview row or map block (ctrl/cmd/middle-click,
 is workspace-authenticated, so no token is added. The URL is never built from the name and is used only if it is
 `https:`, has no credentials, is a real DNS name (no IP literal, `localhost` or single label) and is neither the
 Console nor the Proxy origin; otherwise the Console deep link is used. A plain left click still opens the App inside
-the Console. Pinning the host to the configured apps domain needs that domain from the server (the Console does not
-receive it), which is a follow-up.
+the Console. The server fills `public_url` only for the platform-hosted ingress hostname it computes from its configured
+base domain (it is not user-settable), so the Console does not pin the host to a domain itself; the checks above are
+defense in depth. Menu opens use `noopener,noreferrer` so the Console URL is not sent as a referrer.
 
