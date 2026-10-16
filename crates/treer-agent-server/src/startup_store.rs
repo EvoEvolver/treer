@@ -9,6 +9,7 @@ use treer_protocol::AgentStartupSpec;
 use uuid::Uuid;
 
 const STORE_VERSION: u32 = 2;
+const MAX_DENIED_AGENT_IDS: usize = 4096;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StoredAgentStartup {
@@ -183,6 +184,9 @@ impl StartupStore {
         if state.denied_agent_ids.contains(agent_id) {
             return Ok(());
         }
+        if state.denied_agent_ids.len() >= MAX_DENIED_AGENT_IDS {
+            return Err(io::Error::other("Agent denial fence limit reached"));
+        }
         let mut updated = state.clone();
         updated.denied_agent_ids.insert(agent_id.to_owned());
         persist(&self.inner.path, &updated)?;
@@ -207,6 +211,12 @@ fn read_store(path: &Path) -> io::Result<StoreState> {
     };
     let store: StoreFile = serde_json::from_slice(&bytes)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if store.denied_agent_ids.len() > MAX_DENIED_AGENT_IDS {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Agent denial fence limit exceeded",
+        ));
+    }
     if !matches!(store.version, 1 | STORE_VERSION)
         || (store.version == 1 && !store.denied_agent_ids.is_empty())
         || store
@@ -312,6 +322,36 @@ mod tests {
             cols: 120,
             rows: 36,
         }
+    }
+
+    #[test]
+    fn denial_limit_preserves_existing_fences_and_refuses_unbounded_load() {
+        let directory =
+            std::env::temp_dir().join(format!("treer-startup-limit-{}", Uuid::new_v4().simple()));
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("startup.json");
+        let mut fixture = StoreFile {
+            version: 2,
+            entries: vec![],
+            denied_agent_ids: (0..MAX_DENIED_AGENT_IDS)
+                .map(|i| format!("ag_{i}"))
+                .collect(),
+        };
+        fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        let store = StartupStore::load(path.clone()).unwrap();
+        store.deny_absent("ag_0").unwrap();
+        assert_eq!(
+            store.deny_absent("one-more").unwrap_err().to_string(),
+            "Agent denial fence limit reached"
+        );
+        assert!(store.is_denied("ag_0").unwrap());
+        assert!(!store.is_denied("one-more").unwrap());
+        fixture.denied_agent_ids.insert("one-more".into());
+        fs::write(&path, serde_json::to_vec(&fixture).unwrap()).unwrap();
+        assert!(
+            matches!(StartupStore::load(path), Err(error) if error.kind() == io::ErrorKind::InvalidData)
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -344,6 +344,12 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
                     }
                 }
                 HostCommand::Spawn { request } => {
+                    let durable = StartupStore::load(host_saved_path.clone()).unwrap();
+                    assert!(
+                        durable.get(&request.process_id).is_some(),
+                        "startup intent must be durable before any Host spawn"
+                    );
+                    assert!(!durable.is_denied(&request.process_id).unwrap());
                     observed_spawns.lock().unwrap().push(request.clone());
                     let now = Utc::now();
                     let metadata: AgentMetadata = serde_json::from_str(&request.metadata).unwrap();

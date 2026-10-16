@@ -119,6 +119,12 @@ Uninvolved machines continue writing v1. Never strip denied IDs, lower the
 schema version, or restore a pre-cleanup startup backup to bypass this floor:
 late/replayed Creates could start a revoked identity. Old Controllers explicitly
 refuse v2 (`startup_store_error`); use a supporting build or repair forward.
+Fences are retained indefinitely, matching the current PostgreSQL deletion
+tombstones; there is no automatic GC. Each machine allows at most 4096 denied
+IDs. At that limit a new cleanup fails closed (`startup_store_error`) and keeps
+the reservation; existing fences remain effective and idempotent. Do not remove
+them manually to make space; a future coordinated tombstone/queue-retention
+protocol is required before safe GC can be introduced.
 
 ## Execution and recovery
 
