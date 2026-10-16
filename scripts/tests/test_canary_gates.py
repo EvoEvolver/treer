@@ -247,5 +247,38 @@ class EntrypointTest(unittest.TestCase):
         self.assertFalse(self.marker.exists(), "dry-run must not reach gh")
 
 
+class TimingTest(unittest.TestCase):
+    def test_laps_record_seconds_since_the_previous_lap_in_both_implementations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "timings.tsv"
+            self.assertIsNone(release.lap("ignored", None))
+            Path(str(path) + ".last").write_text("100\n")
+            with patch.object(release.time, "time", return_value=107.9):
+                release.lap("ci_wait", path)
+            self.assertEqual(path.read_text(), "ci_wait\t7\n")
+            self.assertEqual(Path(str(path) + ".last").read_text(), "107\n")
+            shell = subprocess.run(
+                ["sh", "-c", '. "$1"; lap native_ready; lap deploy_total', "timing-test",
+                 str(SCRIPTS / "release-timing.sh")],
+                env={"PATH": "/usr/bin:/bin", "TREER_TIMINGS_FILE": str(path)}, capture_output=True, text=True)
+            self.assertEqual(shell.returncode, 0, shell.stderr)
+            rows = [line.split("\t") for line in path.read_text().splitlines()]
+            self.assertEqual([row[0] for row in rows], ["ci_wait", "native_ready", "deploy_total"])
+            self.assertTrue(all(row[1].isdigit() for row in rows))
+            self.assertGreater(int(rows[1][1]), 1_000_000)  # first shell lap measures from the python lap (107s epoch)
+
+    def test_lap_is_a_no_op_without_a_timings_file_and_never_fails_the_pipeline(self):
+        shell = subprocess.run(["sh", "-c", 'set -eu; . "$1"; lap anything; echo done', "timing-test",
+                                str(SCRIPTS / "release-timing.sh")],
+                               env={"PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+        self.assertEqual((shell.returncode, shell.stdout.strip()), (0, "done"))
+
+    def test_the_manifest_records_the_stage_timings_from_the_pipeline_script(self):
+        script = (SCRIPTS / "release-canary.sh").read_text()
+        self.assertIn("timings_seconds: $timings", script)
+        for stage in ("local_gate", "deploy_total", "canary_e2e_total"):
+            self.assertIn(f"lap {stage}", script)
+
+
 if __name__ == "__main__":
     unittest.main()

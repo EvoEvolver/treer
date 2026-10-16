@@ -3,6 +3,7 @@ set -eu
 
 root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$root"
+. "$root/scripts/release-timing.sh"
 
 project_id=${TREER_RAILWAY_PROJECT_ID:-09d4eeeb-cc5a-49e5-bcfe-f43c1c1b112b}
 environment=${TREER_CANARY_ENVIRONMENT:-canary}
@@ -63,6 +64,7 @@ railway variable set \
     --environment "$environment" \
     --service "$proxy_service" \
     --skip-deploys --json >/dev/null
+lap deploy_railway_variables
 
 proxy_deploy=$(railway up "$upload" --path-as-root --no-gitignore --detach --json \
     --project "$project_id" \
@@ -77,10 +79,13 @@ proxy_deployment_id=$(printf '%s' "$proxy_deploy" | jq -er '.deploymentId // .id
     exit 1
 }
 
+lap deploy_railway_upload
 (cd web && pnpm exec wrangler deploy --env "$worker_environment" \
     --message "canary $commit" --tag "$short_commit")
+lap deploy_worker
 
 wait_for_deployment "$proxy_service" "$proxy_deployment_id"
+lap deploy_proxy_build_wait
 curl -fsS --retry 12 --retry-all-errors "$proxy_url/api/health" >/dev/null
 sh scripts/verify-served-artifacts.sh "$proxy_url" "$upload/dist"
 curl -fsS --retry 12 --retry-all-errors "$app_url/health" \
@@ -130,4 +135,5 @@ if [ -n "$result_file" ]; then
           app_url: $app_url}' > "$result_file"
 fi
 
+lap deploy_served_checks
 echo "Canary control plane is healthy at $short_commit"

@@ -378,6 +378,17 @@ The manifest records the commit, frontend checksum, Railway deployment ID,
 Cloudflare Worker version ID, endpoints, and test timestamp. Failure never
 creates an eligible manifest.
 
+The manifest also carries `timings_seconds`, the wall time of each sequential
+pipeline stage (`prepare_worktree`, `ci_wait`, `native_ready`, `pnpm_install`,
+`local_gate`, `deploy_railway_variables`, `deploy_railway_upload`,
+`deploy_worker`, `deploy_proxy_build_wait`, `deploy_served_checks`,
+`deploy_total`, `canary_login`, `canary_machine_restart_connect`,
+`canary_forward_and_traffic`, `canary_public_ingress`, `canary_e2e_total`).
+`scripts/release-timing.sh` (`lap <stage>`) and `canary-release.py` append them
+to `.treer/releases/<full-commit>/timings.tsv`; timing only observes and never
+changes a result. The Policy default-install check runs after the manifest and
+is timed separately by the operator.
+
 The deployment scripts also set `TREER_BUILD_COMMIT` on the Railway Proxy
 service before each build. The hosted builder embeds the candidate commit in
 the Proxy; the native workflow embeds the same commit in the bundled Host,

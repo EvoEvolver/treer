@@ -13,6 +13,18 @@ import time
 GH_TIMEOUT = 120
 
 
+def lap(stage, path):
+    """Append the seconds since the previous lap (see scripts/release-timing.sh)."""
+    if not path:
+        return
+    now = int(time.time())
+    last_file = Path(str(path) + ".last")
+    last = int(last_file.read_text()) if last_file.exists() else now
+    with open(path, "a") as handle:
+        handle.write(f"{stage}\t{now - last}\n")
+    last_file.write_text(f"{now}\n")
+
+
 def run(*args, cwd, capture=False, **kwargs):
     if args and args[0] == "gh":
         kwargs.setdefault("timeout", GH_TIMEOUT)  # an external hang must not outlive the CI deadline
@@ -148,6 +160,11 @@ def deploy(root, args):
         lock.mkdir()
     except FileExistsError:
         raise RuntimeError(f"another release is active ({lock}); inspect it before removing the lock") from None
+    timings = root / ".treer" / "releases" / commit / "timings.tsv"
+    timings.parent.mkdir(parents=True, exist_ok=True)
+    for stale in (timings, Path(str(timings) + ".last")):
+        stale.unlink(missing_ok=True)
+    Path(str(timings) + ".last").write_text(f"{int(time.time())}\n")
     try:
         run("git", "fetch", "origin", cwd=root)
         remote_ref = os.environ.get("TREER_RELEASE_REMOTE_REF", "origin/main")
@@ -167,10 +184,15 @@ def deploy(root, args):
         else:
             checkout.parent.mkdir(parents=True, exist_ok=True)
             run("git", "worktree", "add", "--detach", str(checkout), commit, cwd=root)
+        lap("prepare_worktree", timings)
         wait_ci(root, commit)
+        lap("ci_wait", timings)
         native_ready(checkout, commit)
+        lap("native_ready", timings)
         run("pnpm", "--dir", "web", "install", "--frozen-lockfile", cwd=checkout)
+        lap("pnpm_install", timings)
         env = os.environ.copy()
+        env["TREER_TIMINGS_FILE"] = str(timings)
         env["TREER_RELEASE_RESUME"] = "1" if args.resume else "0"
         env["CARGO_TARGET_DIR"] = str(checkout / "target")
         # One maintained release pipeline; no local Host/Controller operations.

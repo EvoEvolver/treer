@@ -23,6 +23,9 @@ git merge-base --is-ancestor "$commit" "$release_ref" || {
 }
 
 release_root="$root/.treer/releases/$commit"
+. "$root/scripts/release-timing.sh"
+TREER_TIMINGS_FILE=${TREER_TIMINGS_FILE:-$release_root/timings.tsv}
+export TREER_TIMINGS_FILE
 lock="$root/.treer/release.lock"
 mkdir -p "$root/.treer/releases"
 mkdir "$lock" 2>/dev/null || {
@@ -56,11 +59,14 @@ else
 fi
 cp web/dist/index.html "$release_root/app/index.html"
 artifact_sha=$(sha256_file "$release_root/app/index.html")
+lap local_gate
 
 TREER_RELEASE_RESULT_FILE="$release_root/canary-deploy.json" \
     sh scripts/deploy-canary.sh "$commit"
+lap deploy_total
 TREER_CANARY_KEEP_RESOURCES=0 TREER_CANARY_SKIP_PUBLIC=0 \
     sh scripts/test-canary.sh
+lap canary_e2e_total
 
 tested_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 manifest="$release_root/manifest.json"
@@ -74,6 +80,7 @@ artifact_hashes=$(sh scripts/machine-artifact-hashes.sh dist) || {
 printf '%s' "$artifact_hashes" | jq -e 'length == 25 and all(.[]; test("^[0-9a-f]{64}$"))' >/dev/null || {
     echo "machine artifact hash receipt is incomplete" >&2; exit 1;
 }
+timings=$(jq -Rn '[inputs | split("\t") | select(length == 2) | {(.[0]): (.[1] | tonumber)}] | add // {}' "$TREER_TIMINGS_FILE" 2>/dev/null || echo '{}')
 jq -n \
     --arg commit "$commit" \
     --arg created_at "$tested_at" \
@@ -83,12 +90,14 @@ jq -n \
     --argjson artifact_hashes "$artifact_hashes" \
     --arg reuse_disabled "${TREER_REUSE_NATIVE_ARTIFACTS:-1}" \
     --slurpfile canary "$release_root/canary-deploy.json" \
+    --argjson timings "$timings" \
     '{schema_version: 1,
       status: "canary_passed",
       commit: $commit,
       created_at: $created_at,
       app_artifact: {path: $artifact_path, sha256: $artifact_sha256},
       machine_artifacts: {source_commit: $artifact_source, reused: ($artifact_source != $commit), files: $artifact_hashes, reuse_enabled: ($reuse_disabled == "1")},
+      timings_seconds: $timings,
       canary: ($canary[0] + {tested_at: $created_at})}' > "$manifest"
 
 echo "Canary release passed: $manifest"
