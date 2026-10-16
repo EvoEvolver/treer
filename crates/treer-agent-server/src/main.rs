@@ -8,6 +8,7 @@ mod launcher;
 mod local_api;
 mod machine_file_transfer;
 mod network;
+mod private_state;
 mod proxy;
 mod release_update;
 mod service;
@@ -325,6 +326,7 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
             treer_binary: sibling_treer_binary(),
             interface_cache_path: args.host_socket.with_extension("interfaces.json"),
             startup_store_path: service::startup_state_path(&server_id)?,
+            private_state_root: service::agent_private_state_root()?,
             root: root.clone(),
         },
     )

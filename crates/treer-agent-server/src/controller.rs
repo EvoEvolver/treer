@@ -29,6 +29,7 @@ use uuid::Uuid;
 
 use crate::host_client::{HostClient, HostEvents};
 use crate::interface_cache::{CachedAgentInterface, InterfaceCache};
+use crate::private_state::{PrivateStateRoot, QuotaLedger, QuotaLimits};
 use crate::startup_store::{StartupStore, StoredAgentStartup};
 
 #[path = "controller_launch.rs"]
@@ -119,6 +120,43 @@ impl ProxyLinkStatus {
     }
 }
 
+/// Per-Agent private state as the Controller sees it for one workload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrivateStateStatus {
+    Available(PathBuf),
+    /// A Treer level or ancestor failed its safety check; nothing is injected.
+    Unsafe,
+    /// Missing (never started or purged) or an I/O failure.
+    Unavailable,
+    /// The directory would be inside the workload cwd; nothing is injected.
+    InsideCwd,
+}
+
+impl PrivateStateStatus {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::Available(_) => "available",
+            Self::Unsafe => "agent_private_state_unsafe",
+            Self::Unavailable => "agent_private_state_unavailable",
+            Self::InsideCwd => "agent_private_state_inside_cwd",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateStateReport {
+    pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<crate::private_state::AgentUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct PrivateStateReservation {
+    pub reservation_id: String,
+    pub bytes: u64,
+    pub expires_at: chrono::DateTime<Utc>,
+}
+
 #[derive(Clone)]
 pub struct ControllerRuntime {
     inner: Arc<ControllerInner>,
@@ -133,6 +171,8 @@ pub struct ControllerConfig {
     pub treer_binary: Option<PathBuf>,
     pub interface_cache_path: PathBuf,
     pub startup_store_path: PathBuf,
+    /// Controller-derived `agent-private` directory (below the Treer state dir).
+    pub private_state_root: PathBuf,
     pub root: PathBuf,
 }
 
@@ -151,6 +191,10 @@ struct ControllerInner {
     host_epoch: String,
     interface_cache: InterfaceCache,
     startup_store: StartupStore,
+    /// `Err(code)` when the root could not be opened safely: private state is
+    /// then unavailable for every Agent, but the Controller keeps running.
+    private_state: Result<PrivateStateRoot, &'static str>,
+    private_state_ledger: Mutex<QuotaLedger>,
     recovery_lock: tokio::sync::Mutex<()>,
     uploads: Mutex<HashMap<String, PendingUpload>>,
     file_transfers: crate::machine_file_transfer::Transfers,
@@ -226,6 +270,48 @@ impl ControllerRuntime {
         let (agent_events, _) = broadcast::channel(512);
         let (terminal_events, _) = broadcast::channel(2048);
         let (process_events, _) = broadcast::channel(512);
+        // Only an invalid server identity fails Controller start. An unsafe or
+        // unavailable root degrades private state to "unavailable" for every
+        // Agent (variable omitted, quota refused) while recovery proceeds.
+        let private_state = match PrivateStateRoot::open(
+            &config.private_state_root,
+            &config.server_id,
+        ) {
+            Ok(root) => Ok(root),
+            Err(error) if error.code == "agent_private_state_invalid_identity" => {
+                return Err(error)
+            }
+            Err(error) => {
+                warn!(code = %error.code, "Agent private state root is degraded; private state disabled");
+                Err(if error.code == "agent_private_state_unsafe" {
+                    "agent_private_state_unsafe"
+                } else {
+                    "agent_private_state_unavailable"
+                })
+            }
+        };
+        // Crash/restart accounting: measure what is on disk now; in-flight
+        // reservations of a previous Controller are gone and any leftover
+        // temporary files count as usage until the owning launcher sweeps them.
+        let mut ledger = QuotaLedger::new(QuotaLimits::default());
+        if let Ok(root) = &private_state {
+            match root.agent_ids() {
+                Ok(ids) => ledger.replace_inventory(
+                    ids.into_iter()
+                        .map(|agent_id| {
+                            let measurement = root.measure(&agent_id).ok();
+                            (agent_id, measurement)
+                        })
+                        .collect(),
+                ),
+                Err(error) => {
+                    // Unknown existing usage must not read as zero: refuse new
+                    // reservations until a later enumeration succeeds.
+                    warn!(%error, "Agent private state directories could not be listed; reservations paused");
+                    ledger.mark_inventory_incomplete();
+                }
+            }
+        }
         let runtime = Self {
             inner: Arc::new(ControllerInner {
                 #[cfg(all(test, windows))]
@@ -236,6 +322,7 @@ impl ControllerRuntime {
                     [
                         Some(config.startup_store_path.clone()),
                         Some(config.interface_cache_path.clone()),
+                        Some(config.private_state_root.clone()),
                         treer_platform::config_directory(),
                     ]
                     .into_iter()
@@ -265,6 +352,8 @@ impl ControllerRuntime {
                         format!("failed to load Agent startup store: {error}"),
                     )
                 })?,
+                private_state,
+                private_state_ledger: Mutex::new(ledger),
                 recovery_lock: tokio::sync::Mutex::new(()),
                 uploads: Mutex::new(HashMap::new()),
                 agents: RwLock::new(HashMap::new()),
@@ -617,6 +706,7 @@ impl ControllerRuntime {
                 })
                 .map_err(startup_store_error)?;
         }
+        self.inject_private_state(&mut env, &agent_id, &request.cwd)?;
         let proxy_port =
             self.inner
                 .workload_proxies
@@ -1464,8 +1554,12 @@ impl ControllerRuntime {
         ids
     }
 
+    /// Identities the Proxy must confirm: startup entries plus every private
+    /// state directory under this server, so deletions confirmed while this
+    /// Controller was offline are still cleaned up.
     pub fn startup_validation_ids(&self) -> Vec<String> {
-        self.inner
+        let mut ids: Vec<String> = self
+            .inner
             .startup_store
             .entries()
             .into_iter()
@@ -1474,7 +1568,22 @@ impl ControllerRuntime {
                     && entry.spec.server_id == self.inner.server_id
             })
             .map(|entry| entry.spec.agent_id)
-            .collect()
+            .collect();
+        match self
+            .inner
+            .private_state
+            .as_ref()
+            .map(PrivateStateRoot::agent_ids)
+        {
+            Ok(Ok(private)) => ids.extend(private),
+            Ok(Err(error)) => {
+                warn!(%error, "Agent private state directories could not be listed")
+            }
+            Err(_) => {}
+        }
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     pub fn automatic_startup_candidate_ids(&self) -> Vec<String> {
@@ -1544,6 +1653,7 @@ impl ControllerRuntime {
         let agent_id = &entry.spec.agent_id;
         let mut env = self.process_environment(Some((agent_id, &entry.workload_credential)));
         let command = resolve_agent_command(&entry.spec.command, &env)?;
+        self.inject_private_state(&mut env, agent_id, &entry.spec.cwd)?;
         let proxy_port =
             self.inner
                 .workload_proxies
@@ -1919,6 +2029,358 @@ impl ControllerRuntime {
             join_agent_path(self.inner.treer_binary.as_deref()),
         );
         env
+    }
+
+    /// Inject the Controller-owned private state directory. Only an invalid
+    /// identity fails the launch. An unsafe or unavailable directory, or one
+    /// that would sit inside the workload cwd, omits the variable with a fixed
+    /// code: the launcher then keeps private-state features disabled, and the
+    /// state stays visible through `private_state_status`.
+    fn inject_private_state(
+        &self,
+        env: &mut BTreeMap<String, String>,
+        agent_id: &str,
+        cwd: &str,
+    ) -> Result<(), ProtocolError> {
+        match self.private_state_status(agent_id, cwd, true)? {
+            PrivateStateStatus::Available(directory) => {
+                // `private_state_status` only reports Unicode-representable
+                // paths as available, so this always succeeds.
+                if let Some(value) = directory.to_str() {
+                    env.insert(
+                        crate::private_state::ENVIRONMENT_VARIABLE.to_string(),
+                        value.to_string(),
+                    );
+                }
+            }
+            status => {
+                warn!(
+                    agent_id,
+                    code = status.code(),
+                    "Agent private state is not injected"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// Derive and check the Agent's private state. `create` prepares missing
+    /// Treer levels (process starts); otherwise an absent directory is reported
+    /// as unavailable so the local API never recreates a purged directory.
+    fn private_state_status(
+        &self,
+        agent_id: &str,
+        cwd: &str,
+        create: bool,
+    ) -> Result<PrivateStateStatus, ProtocolError> {
+        let prepared = self.private_state_root().and_then(|root| {
+            if create {
+                root.prepare(agent_id)
+            } else {
+                root.verify_existing(agent_id)
+            }
+        });
+        let directory = match prepared {
+            Ok(directory) => directory,
+            Err(error) if error.code == "agent_private_state_unsafe" => {
+                return Ok(PrivateStateStatus::Unsafe)
+            }
+            Err(error) if error.code == "agent_private_state_unavailable" => {
+                return Ok(PrivateStateStatus::Unavailable)
+            }
+            Err(error) => return Err(error),
+        };
+        let Ok(resolved) = std::fs::canonicalize(&directory) else {
+            return Ok(PrivateStateStatus::Unavailable);
+        };
+        if directory.to_str().is_none() {
+            // The environment carries UTF-8 only; a non-Unicode path is not
+            // advertised and the launcher keeps private state disabled.
+            warn!(
+                agent_id,
+                "Agent private state directory path is not valid Unicode"
+            );
+            return Ok(PrivateStateStatus::Unavailable);
+        }
+        if let Ok(workload_cwd) = std::fs::canonicalize(self.inner.root.join(cwd.trim())) {
+            if resolved.starts_with(&workload_cwd) {
+                return Ok(PrivateStateStatus::InsideCwd);
+            }
+        }
+        if create {
+            // A fresh start re-admits an identity that was purged earlier.
+            let measurement = self
+                .private_state_root()
+                .and_then(|root| root.measure(agent_id))
+                .ok();
+            if let Ok(mut ledger) = self.inner.private_state_ledger.lock() {
+                ledger.record(agent_id, measurement);
+            }
+        }
+        Ok(PrivateStateStatus::Available(directory))
+    }
+
+    fn private_state_root(&self) -> Result<&PrivateStateRoot, ProtocolError> {
+        self.inner.private_state.as_ref().map_err(|code| {
+            ProtocolError::new(
+                *code,
+                "Agent private state root is unavailable on this Controller",
+            )
+        })
+    }
+
+    fn workload_cwd(&self, agent_id: &str) -> Result<String, ProtocolError> {
+        if let Some(entry) = self.inner.startup_store.get(agent_id) {
+            return Ok(entry.spec.cwd);
+        }
+        let agent = self.get(agent_id)?;
+        let agent = agent
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "agent lock poisoned"))?;
+        Ok(agent.info.cwd.clone())
+    }
+
+    fn private_state_ledger(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, QuotaLedger>, ProtocolError> {
+        self.inner
+            .private_state_ledger
+            .lock()
+            .map_err(|_| ProtocolError::new("state_error", "private state ledger lock poisoned"))
+    }
+
+    /// After a failed startup enumeration, retry the complete inventory before
+    /// any admission decision; stays paused while the listing keeps failing.
+    fn complete_private_state_inventory(&self) -> Result<(), ProtocolError> {
+        if !self.private_state_ledger()?.inventory_incomplete() {
+            return Ok(());
+        }
+        let root = self.private_state_root()?;
+        let ids = root.agent_ids().map_err(|error| {
+            warn!(%error, "Agent private state directories still cannot be listed; reservations stay paused");
+            ProtocolError::new(
+                "agent_private_state_unavailable",
+                "Agent private state inventory is incomplete; reservations resume after a successful re-enumeration",
+            )
+        })?;
+        let measured = ids
+            .into_iter()
+            .map(|agent_id| {
+                let measurement = root.measure(&agent_id).ok();
+                (agent_id, measurement)
+            })
+            .collect();
+        self.private_state_ledger()?.replace_inventory(measured);
+        Ok(())
+    }
+
+    /// Re-measure the caller's directory and refresh the ledger. Only the
+    /// Controller's own measurement ever enters the accounting.
+    fn refresh_private_state_measurement(&self, agent_id: &str) -> Result<(), ProtocolError> {
+        self.complete_private_state_inventory()?;
+        let measurement = self
+            .private_state_root()
+            .and_then(|root| root.measure(agent_id));
+        let mut ledger = self.private_state_ledger()?;
+        match measurement {
+            Ok(measurement) => ledger.record(agent_id, Some(measurement)),
+            Err(error) => {
+                warn!(agent_id, code = %error.code, "Agent private state could not be measured");
+                ledger.record(agent_id, None);
+            }
+        }
+        Ok(())
+    }
+
+    /// Status and usage for the authenticated Agent only. Never lists other
+    /// Agents; the global headroom is folded into `available_bytes`.
+    pub fn private_state_report(
+        &self,
+        agent_id: &str,
+    ) -> Result<PrivateStateReport, ProtocolError> {
+        if self.private_state_ledger()?.is_purged(agent_id) {
+            return Ok(PrivateStateReport {
+                status: PrivateStateStatus::Unavailable.code(),
+                usage: None,
+            });
+        }
+        let cwd = self.workload_cwd(agent_id)?;
+        let status = self.private_state_status(agent_id, &cwd, false)?;
+        let usage = if matches!(status, PrivateStateStatus::Available(_)) {
+            self.refresh_private_state_measurement(agent_id)?;
+            Some(self.private_state_ledger()?.usage(agent_id))
+        } else {
+            None
+        };
+        Ok(PrivateStateReport {
+            status: status.code(),
+            usage,
+        })
+    }
+
+    fn require_private_state_available(&self, agent_id: &str) -> Result<PathBuf, ProtocolError> {
+        if self.private_state_ledger()?.is_purged(agent_id) {
+            return Err(ProtocolError::new(
+                "agent_private_state_unavailable",
+                "Agent private state was removed after deletion",
+            ));
+        }
+        let cwd = self.workload_cwd(agent_id)?;
+        match self.private_state_status(agent_id, &cwd, false)? {
+            PrivateStateStatus::Available(directory) => Ok(directory),
+            status => Err(ProtocolError::new(
+                status.code(),
+                "Agent private state is not available; attachments stay disabled",
+            )),
+        }
+    }
+
+    /// Admission before the launcher writes `bytes` of new private content.
+    pub fn reserve_private_state(
+        &self,
+        agent_id: &str,
+        bytes: u64,
+    ) -> Result<PrivateStateReservation, ProtocolError> {
+        let directory = self.require_private_state_available(agent_id)?;
+        self.refresh_private_state_measurement(agent_id)?;
+        let free_bytes = treer_platform::available_disk_bytes(&directory).map_err(|error| {
+            warn!(agent_id, %error, "free disk space for private state is unknown");
+            ProtocolError::new(
+                "agent_private_state_unavailable",
+                "free disk space could not be determined; inspect the Controller log",
+            )
+        })?;
+        let now = Instant::now();
+        let mut ledger = self.private_state_ledger()?;
+        let reservation = ledger.reserve(agent_id, bytes, free_bytes, now)?;
+        let ttl = ledger.limits().reservation_ttl;
+        Ok(PrivateStateReservation {
+            reservation_id: reservation.id,
+            bytes: reservation.bytes,
+            expires_at: Utc::now() + chrono::Duration::from_std(ttl).unwrap_or_default(),
+        })
+    }
+
+    /// Close a reservation after the launcher's content is durable, then let
+    /// the Controller's own measurement decide whether the caps still hold.
+    pub fn commit_private_state_reservation(
+        &self,
+        agent_id: &str,
+        reservation_id: &str,
+    ) -> Result<crate::private_state::AgentUsage, ProtocolError> {
+        self.require_private_state_available(agent_id)?;
+        self.private_state_ledger()?
+            .commit(agent_id, reservation_id, Instant::now())?;
+        self.refresh_private_state_measurement(agent_id)?;
+        let ledger = self.private_state_ledger()?;
+        ledger.check_caps(agent_id)?;
+        Ok(ledger.usage(agent_id))
+    }
+
+    /// Idempotent release of the caller's own reservation.
+    pub fn release_private_state_reservation(
+        &self,
+        agent_id: &str,
+        reservation_id: &str,
+    ) -> Result<bool, ProtocolError> {
+        self.require_private_state_available(agent_id)?;
+        let released =
+            self.private_state_ledger()?
+                .release(agent_id, reservation_id, Instant::now());
+        self.refresh_private_state_measurement(agent_id)?;
+        Ok(released)
+    }
+
+    /// Remove private state and the disabled startup entry of Agents whose
+    /// permanent deletion the Proxy confirmed (`deleted_agents` tombstones).
+    /// A still-running process is stopped first and its purge deferred to the
+    /// next validation pass; nothing is forced while the Host reports it alive.
+    pub async fn purge_deleted_private_state(
+        &self,
+        deleted_agent_ids: &[String],
+    ) -> Vec<(String, Result<bool, ProtocolError>)> {
+        let mut ids: Vec<&String> = deleted_agent_ids
+            .iter()
+            .filter(|id| crate::private_state::valid_identity(id))
+            .collect();
+        ids.sort();
+        ids.dedup();
+        if ids.is_empty() {
+            return Vec::new();
+        }
+        let _guard = self.inner.recovery_lock.lock().await;
+        let root = match self.private_state_root() {
+            Ok(root) => root,
+            Err(error) => {
+                return ids
+                    .into_iter()
+                    .map(|id| (id.clone(), Err(error.clone())))
+                    .collect()
+            }
+        };
+        let inventory = match self.inner.host.sync(Default::default()).await {
+            Ok(HostResponse::Synced { processes, .. }) => processes,
+            Ok(_) | Err(_) => {
+                let error = ProtocolError::new(
+                    "host_unavailable",
+                    "Host inventory is unavailable; private state purge deferred",
+                );
+                return ids
+                    .into_iter()
+                    .map(|id| (id.clone(), Err(error.clone())))
+                    .collect();
+            }
+        };
+        let mut results = Vec::with_capacity(ids.len());
+        for agent_id in ids {
+            let running = inventory
+                .iter()
+                .any(|process| process.process_id == *agent_id && process.running);
+            if running {
+                let stop = self
+                    .inner
+                    .host
+                    .request(
+                        HostCommand::Stop {
+                            process_id: agent_id.clone(),
+                        },
+                        Some(format!("private-state-purge:{agent_id}")),
+                    )
+                    .await;
+                match stop {
+                    Ok(response) => {
+                        let _ = self.process_response(response, AgentStatus::Exited);
+                    }
+                    Err(error) => {
+                        warn!(%agent_id, %error, "stop before private state purge failed")
+                    }
+                }
+                results.push((
+                    agent_id.clone(),
+                    Err(ProtocolError::new(
+                        "agent_private_state_purge_deferred",
+                        "the deleted Agent was still running; stop requested, purge retried later",
+                    )),
+                ));
+                continue;
+            }
+            let result = root.purge(agent_id).and_then(|removed| {
+                // The disabled startup entry of a deleted Agent is stale. A
+                // denied-ID fence (startup store v2) is not an entry and stays.
+                self.inner
+                    .startup_store
+                    .remove(agent_id)
+                    .map_err(startup_store_error)?;
+                Ok(removed)
+            });
+            if result.is_ok() {
+                if let Ok(mut ledger) = self.inner.private_state_ledger.lock() {
+                    ledger.forget(agent_id);
+                }
+            }
+            results.push((agent_id.clone(), result));
+        }
+        results
     }
 
     fn machine_exec_environment(&self) -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
@@ -3122,6 +3584,9 @@ fn workload_credential_matches(expected: &str, supplied: &str) -> bool {
         && expected.as_bytes().ct_eq(supplied.as_bytes()).unwrap_u8() == 1
 }
 
+#[cfg(test)]
+#[path = "controller_private_state_tests.rs"]
+mod private_state_tests;
 #[cfg(test)]
 #[path = "controller_tests.rs"]
 mod tests;

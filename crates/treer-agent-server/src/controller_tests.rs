@@ -114,6 +114,7 @@ async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
         treer_binary: None,
         interface_cache_path: root.join("interfaces.json"),
         startup_store_path: root.join("startup.json"),
+        private_state_root: root.join("agent-private"),
         root: root.clone(),
     };
     let (runtime, _) =
@@ -418,6 +419,7 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
             treer_binary: Some(bin.join("treer")),
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: saved_path.clone(),
+            private_state_root: root.join("agent-private"),
             root: std::fs::canonicalize(&root).unwrap(),
         },
     )
@@ -937,6 +939,7 @@ async fn recovery_real_host_cold_restart_preserves_intent_identity_and_argv() {
                 treer_binary: None,
                 interface_cache_path: root.join("interfaces.json"),
                 startup_store_path: root.join("startup.json"),
+                private_state_root: root.join("agent-private"),
                 root: root.into(),
             },
         )
@@ -1622,6 +1625,7 @@ async fn recovery_rechecks_host_and_preserves_stopped_and_revoked_identity() {
             treer_binary: None,
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: root.join("startup.json"),
+            private_state_root: root.join("agent-private"),
             root: std::fs::canonicalize(&root).unwrap(),
         },
     )

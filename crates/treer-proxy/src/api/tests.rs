@@ -2498,6 +2498,27 @@ async fn app_update_restore_validation_returns_current_spec_only_for_valid_machi
         "revoked identities must not be restarted by spec reconciliation"
     );
     assert!(revoked.active_agent_ids.is_empty());
+    assert!(
+        revoked.deleted_agent_ids.is_empty(),
+        "revocation alone is not a deletion confirmation"
+    );
+    auth.delete_agent("default", &app.app_id).await.unwrap();
+    let deleted = agents::validate_agent_startup(
+        Extension(auth.clone()),
+        Extension(MachineSession {
+            server_id: Some("machine-a".into()),
+            workspace_id: Some("default".into()),
+        }),
+        Path(("default".into(), "machine-a".into())),
+        Json(treer_protocol::ValidateAgentStartupRequest {
+            agent_ids: vec![app.app_id.clone(), "ag_unrelated".into()],
+        }),
+    )
+    .await
+    .unwrap()
+    .0;
+    assert_eq!(deleted.deleted_agent_ids, vec![app.app_id.clone()]);
+    assert!(deleted.active_agent_ids.is_empty());
 }
 
 fn app_update_patch() -> treer_protocol::UpdateAppDeploymentRequest {

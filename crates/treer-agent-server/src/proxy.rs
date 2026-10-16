@@ -708,6 +708,19 @@ impl ProxyClient {
             .apply_stopped_startups(&response.stopped_agent_ids)
             .await
             .map_err(|error| anyhow!("{}: {}", error.code, error.message))?;
+        // Permanent deletion confirmed by the Proxy tombstone: remove private
+        // state now or on a later pass; the directory is the pending record.
+        for (agent_id, result) in self
+            .runtime
+            .purge_deleted_private_state(&response.deleted_agent_ids)
+            .await
+        {
+            match result {
+                Ok(true) => info!(%agent_id, "removed private state of a deleted Agent"),
+                Ok(false) => {}
+                Err(error) => warn!(%agent_id, code = %error.code, "private state purge deferred"),
+            }
+        }
         let mut active_agent_ids = response.active_agent_ids;
         for startup in response.app_startups {
             if let Err(error) = self
@@ -1160,6 +1173,7 @@ async fn validate_startup_batches(
         app_startups: vec![],
         active_agent_ids: vec![],
         stopped_agent_ids: vec![],
+        deleted_agent_ids: vec![],
     };
     for batch in agent_ids.chunks(256) {
         let mut request = client.post(url.clone()).json(&ValidateAgentStartupRequest {
@@ -1186,6 +1200,9 @@ async fn validate_startup_batches(
         validated
             .stopped_agent_ids
             .extend(response.stopped_agent_ids);
+        validated
+            .deleted_agent_ids
+            .extend(response.deleted_agent_ids);
     }
     Ok(validated)
 }
@@ -1382,6 +1399,7 @@ mod tests {
                 treer_binary: None,
                 interface_cache_path: root.join("interface.json"),
                 startup_store_path: root.join("startup.json"),
+                private_state_root: root.join("agent-private"),
             },
         )
         .unwrap();
@@ -1580,6 +1598,7 @@ mod tests {
                             app_startups: vec![],
                             active_agent_ids,
                             stopped_agent_ids,
+                            deleted_agent_ids: vec![],
                         })
                     }
                 },

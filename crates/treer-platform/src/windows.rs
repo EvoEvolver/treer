@@ -181,6 +181,96 @@ pub fn secure_path(path: &Path) -> io::Result<()> {
     }
 }
 
+/// Whether `path` carries the private descriptor `secure_path` writes: owned by
+/// the current user, a present and protected DACL whose entries all allow only
+/// the current user or SYSTEM (no inherited or foreign principals, no deny
+/// entries). Reads the live security descriptor, so later loosening is seen.
+pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
+    // ACE type values are fixed by the Win32 ABI (ACCESS_ALLOWED_ACE_TYPE = 0).
+    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+    let name = wide(path.as_os_str());
+    let current = current_user_sid()?;
+    unsafe {
+        let mut owner = ptr::null_mut();
+        let mut dacl = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        let status = GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            &mut dacl,
+            ptr::null_mut(),
+            &mut descriptor,
+        );
+        if status != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(status as i32));
+        }
+        let descriptor = Allocation(descriptor.cast());
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        checked(GetSecurityDescriptorControl(
+            descriptor.0,
+            &mut control,
+            &mut revision,
+        ))?;
+        if owner.is_null() || dacl.is_null() {
+            return Ok(false);
+        }
+        if sid_string(owner)? != current {
+            return Ok(false);
+        }
+        if control & SE_DACL_PRESENT == 0 || control & SE_DACL_PROTECTED == 0 {
+            return Ok(false);
+        }
+        let mut size = ACL_SIZE_INFORMATION {
+            AceCount: 0,
+            AclBytesInUse: 0,
+            AclBytesFree: 0,
+        };
+        checked(GetAclInformation(
+            dacl,
+            (&mut size as *mut ACL_SIZE_INFORMATION).cast(),
+            mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+            AclSizeInformation,
+        ))?;
+        if size.AceCount == 0 {
+            return Ok(false);
+        }
+        for index in 0..size.AceCount {
+            let mut ace = ptr::null_mut();
+            checked(GetAce(dacl, index, &mut ace))?;
+            let header = &*ace.cast::<ACE_HEADER>();
+            if header.AceType != ACCESS_ALLOWED_ACE_TYPE
+                || header.AceFlags & INHERITED_ACE as u8 != 0
+            {
+                return Ok(false);
+            }
+            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+            let sid = sid_string(ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
+            if sid != current && sid != "S-1-5-18" {
+                return Ok(false);
+            }
+        }
+    }
+    Ok(true)
+}
+
+unsafe fn sid_string(sid: PSID) -> io::Result<String> {
+    let mut text = ptr::null_mut();
+    checked(ConvertSidToStringSidW(sid, &mut text))?;
+    let allocation = Allocation(text.cast());
+    let mut length = 0;
+    while *text.add(length) != 0 {
+        length += 1;
+    }
+    let result = String::from_utf16(std::slice::from_raw_parts(text, length))
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+    drop(allocation);
+    result
+}
+
 pub fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
     use windows_sys::Win32::Storage::FileSystem::{
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,

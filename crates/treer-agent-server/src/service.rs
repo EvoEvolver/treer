@@ -1726,6 +1726,11 @@ pub fn startup_state_path(server_id: &str) -> Result<PathBuf> {
     Ok(state_dir()?.join(format!("{server_id}-agent-startup.json")))
 }
 
+/// Controller-owned root for per-Agent private state; see `private_state`.
+pub fn agent_private_state_root() -> Result<PathBuf> {
+    Ok(state_dir()?.join(crate::private_state::ROOT_DIRECTORY_NAME))
+}
+
 #[cfg(unix)]
 fn runtime_dir() -> Result<PathBuf> {
     if let Some(path) = env::var_os("TREER_RUNTIME_DIR") {

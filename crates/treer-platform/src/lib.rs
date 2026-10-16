@@ -131,6 +131,26 @@ pub fn secure_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Windows only: whether `path` still carries the private owner/DACL that
+/// `secure_directory` applies. Unix callers check uid/mode themselves.
+#[cfg(windows)]
+pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
+    windows::private_path_is_secure(path)
+}
+
+/// Available bytes on the volume holding `path`, for quota admission.
+pub fn available_disk_bytes(path: &Path) -> io::Result<u64> {
+    #[cfg(unix)]
+    {
+        let stat = rustix::fs::statvfs(path)?;
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+    #[cfg(windows)]
+    {
+        windows::transfer_available_bytes(path)
+    }
+}
+
 pub fn secure_file(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {

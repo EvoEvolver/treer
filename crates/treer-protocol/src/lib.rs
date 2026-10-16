@@ -39,6 +39,9 @@ pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";
 pub const CAPABILITY_SERVICE_HTTP_FETCH: &str = "service.http-fetch.v1";
 pub const CAPABILITY_LAUNCHER_INSTALL: &str = "launcher.install.v1";
 pub const CAPABILITY_AGENT_INTERFACE_PROVENANCE: &str = "agent.interface-provenance.v1";
+/// Launcher-contract feature: Controller-owned per-Agent private state directory,
+/// quota reservations and deletion cleanup. Not an AIS manifest capability.
+pub const CAPABILITY_AGENT_PRIVATE_STATE: &str = "agent.private-state.v1";
 pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_LAUNCHER_INSTALL,
     CAPABILITY_AGENT_INTERFACE_PROVENANCE,
