@@ -275,6 +275,27 @@ impl Selected {
     pub fn host_socket(&self) -> &Path {
         &self.enrollment.host.socket_path
     }
+    pub(super) fn health_address(&self) -> Result<std::net::SocketAddr> {
+        let mut address: std::net::SocketAddr = self
+            .enrollment
+            .controller
+            .listen
+            .parse()
+            .map_err(|_| anyhow::anyhow!("invalid_update_health_address"))?;
+        // Connect to the local family-specific loopback for wildcard listeners;
+        // never use an ambient TREER_AGENT_SERVER_URL or resolve a DNS name.
+        if address.ip().is_unspecified() {
+            address.set_ip(if address.is_ipv4() {
+                std::net::Ipv4Addr::LOCALHOST.into()
+            } else {
+                std::net::Ipv6Addr::LOCALHOST.into()
+            });
+        }
+        if address.port() == 0 {
+            bail!("invalid_update_health_address");
+        }
+        Ok(address)
+    }
     pub fn shared_server_ids(&self) -> &[String] {
         &self.shared_server_ids
     }
@@ -446,6 +467,108 @@ mod tests {
         assert!(held.directory(&a, Binary::Cli).is_ok());
         drop(held);
         assert!(b.lock().is_ok());
+    }
+
+    #[test]
+    fn health_address_uses_only_saved_numeric_listener_with_family_specific_loopback() {
+        let f = Fixture::new();
+        f.enrollment("srv_a", "ws_a", &f.bin.join("treer-agent-server"));
+        let mut selected = f.inventory().select(None, false).unwrap();
+        for (listen, expected) in [
+            ("0.0.0.0:1234", "127.0.0.1:1234"),
+            ("[::]:1234", "[::1]:1234"),
+            ("192.0.2.1:1234", "192.0.2.1:1234"),
+        ] {
+            selected.enrollment.controller.listen = listen.into();
+            assert_eq!(selected.health_address().unwrap().to_string(), expected);
+        }
+        for invalid in ["127.0.0.1:0", "localhost:1234", "http://127.0.0.1:1234/"] {
+            selected.enrollment.controller.listen = invalid.into();
+            assert!(selected.health_address().is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn real_health_observation_binds_enrollment_locks_and_image_not_just_http_success() {
+        use super::super::{health::Monitor, safety::ControllerExpectation};
+        use sha2::{Digest, Sha256};
+        use tokio::{
+            io::{AsyncReadExt, AsyncWriteExt},
+            net::TcpListener,
+        };
+
+        let f = Fixture::new();
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        f.enrollment("srv_a", "ws_a", &f.bin.join("treer-agent-server"));
+        let config = f.path.join("config/srv_a-controller.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config).unwrap()).unwrap();
+        json["listen"] = listener.local_addr().unwrap().to_string().into();
+        std::fs::write(config, serde_json::to_vec(&json).unwrap()).unwrap();
+        let selected = f.inventory().select(None, false).unwrap();
+        let locks = selected.lock().unwrap();
+        let mut expected = ControllerExpectation {
+            workspace: "ws_other".into(),
+            server: "srv_a".into(),
+            previous_epoch: "old-epoch".into(),
+            artifact_source_sha: "a".repeat(40),
+            executable_sha256: format!("{:x}", Sha256::digest(b"controller")),
+        };
+        let monitor = Monitor::new().unwrap();
+        assert_eq!(
+            monitor
+                .observe(&selected, &locks, &expected)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "update_health_binding_mismatch"
+        );
+        expected.workspace = "ws_a".into();
+        let digest = expected.executable_sha256.clone();
+        expected.executable_sha256 = "b".repeat(64);
+        assert_eq!(
+            monitor
+                .observe(&selected, &locks, &expected)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "update_controller_health_mismatch"
+        );
+        // Neither precondition failure may contact a Controller.
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(30), listener.accept())
+                .await
+                .is_err()
+        );
+        expected.executable_sha256 = digest;
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                request.push(socket.read_u8().await.unwrap());
+                assert!(request.len() < 8192);
+            }
+            let body = serde_json::json!({"service":"treer-agent-server", "workspace_id":"ws_a", "server_id":"srv_a", "controller_epoch":"new-epoch", "controller_build":{"version":"0.1.14", "git_commit":"a".repeat(40)}, "proxy_connected":true}).to_string();
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            monitor.observe(&selected, &locks, &expected).await.unwrap(),
+            "new-epoch"
+        );
+        server.await.unwrap();
     }
 
     #[test]

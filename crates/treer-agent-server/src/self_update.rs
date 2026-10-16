@@ -13,6 +13,7 @@ use uuid::Uuid;
 const RECEIPT_LIMIT: u64 = 64 * 1024;
 
 pub mod artifacts;
+pub mod health;
 pub mod images;
 pub mod probe;
 pub mod publication;
