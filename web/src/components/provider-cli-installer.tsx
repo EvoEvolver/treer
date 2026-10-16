@@ -212,7 +212,7 @@ function breakable(value: string) {
 }
 function visibleOutput(value: string) {
   // Keep output literal and readable, without interpreting terminal controls.
-  return value.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)
+  return value.replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f\u200b-\u200f\u202a-\u202e\u2066-\u2069\ufeff]/g, char => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`)
 }
 function failureText(reason: unknown) {
   if (reason instanceof ApiError) {

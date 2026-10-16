@@ -2692,12 +2692,12 @@ test('provider installer lets the server decide expiry when the browser clock is
 })
 
 
-test('provider installer escapes terminal controls in technical output', async ({ page }) => {
-  await mockProviderApi(page, { output: '\u001b[31mred\u0007' })
+test('provider installer escapes terminal and bidirectional controls in technical output', async ({ page }) => {
+  await mockProviderApi(page, { output: '\u001b[31mred\u0007\u200b\u200f\u202a\u202e\u2066\u2069\ufeff\nplain\ttext' })
   await openProviderMachine(page)
   await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
   await page.getByRole('button', { name: 'Install codex', exact: true }).click()
   await page.getByRole('button', { name: 'Confirm and install', exact: true }).click()
   await page.getByText('Technical details and output', { exact: true }).click()
-  await expect(page.getByRole('dialog').locator('pre')).toHaveText('\\u001b[31mred\\u0007')
+  await expect(page.getByRole('dialog').locator('pre')).toHaveText('\\u001b[31mred\\u0007\\u200b\\u200f\\u202a\\u202e\\u2066\\u2069\\ufeff\nplain\ttext')
 })
