@@ -1157,6 +1157,17 @@ async fn provider_cli_stale_rows_reconcile_past_retention_and_free_the_slot() {
         2,
         "each stale row is audited once"
     );
+    let actors: Vec<(String, Option<String>, Value)> = sqlx::query_as("SELECT actor_kind, actor_id, payload FROM organization_audit_events WHERE action='provider_cli.install.finished' ORDER BY occurred_at")
+        .fetch_all(&auth.pool()).await.unwrap();
+    for (kind, id, payload) in &actors {
+        assert_eq!(
+            (kind.as_str(), id.as_deref()),
+            ("system", None),
+            "reconciliation is a control-plane event"
+        );
+        assert_eq!(payload["created_by"], "creator");
+        assert_eq!(payload["reconciled_during_request_by"], "creator");
+    }
     // Rows inside the grace are left alone by both paths.
     sqlx::query("UPDATE provider_cli_operations SET status='failed', finished_at=CURRENT_TIMESTAMP WHERE operation_id=$1")
         .bind(&accepted.operation_id).execute(&auth.pool()).await.unwrap();
