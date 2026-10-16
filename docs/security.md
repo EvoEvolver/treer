@@ -317,8 +317,15 @@ isolation: its 0700 mode and the Controller's lstat/ownership checks keep other
 OS users out, but every Agent and tool running as the machine account can read
 and write every Agent's directory, including other Agents' processes. The
 pathname checks before removal or measurement share that same-account trust
-domain. The Windows variants (protected DACL, reparse-point rejection, free
-space) are compile-guarded and have not been exercised on a Windows runner.
+domain. The Windows check accepts as owner only this process's token user or token
+owner (the SID the system assigns to objects the process creates; for an
+elevated administrator that is the Administrators group) and requires a
+protected DACL whose entries are all non-inherited plain allow entries for
+the token user or LocalSystem; any other ACE type is never parsed beyond its
+header and fails closed. Failures log a categorical report (owner class,
+control flags, ACE type/inherited/principal class) without SIDs or paths. The
+Windows variants (protected DACL, reparse-point rejection, free space) are
+compile-guarded and have not been exercised on a Windows runner.
 The private state quota is cooperative
 admission control for launchers that reserve before writing; same-account code
 can bypass it, after which the Controller only refuses further reservations.

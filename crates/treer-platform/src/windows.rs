@@ -108,6 +108,16 @@ impl Drop for Allocation {
 }
 
 pub fn current_user_sid() -> io::Result<String> {
+    token_sid(TokenUser)
+}
+
+/// The SID the process token assigns as default owner of new objects. For an
+/// elevated administrator this is the Administrators group, not the user.
+pub fn current_token_owner_sid() -> io::Result<String> {
+    token_sid(TokenOwner)
+}
+
+fn token_sid(class: TOKEN_INFORMATION_CLASS) -> io::Result<String> {
     unsafe {
         let mut token = ptr::null_mut();
         checked(OpenProcessToken(
@@ -117,37 +127,27 @@ pub fn current_user_sid() -> io::Result<String> {
         ))?;
         let token = OwnedHandle::from_raw_handle(token);
         let mut size = 0;
-        GetTokenInformation(
-            token.as_raw_handle(),
-            TokenUser,
-            ptr::null_mut(),
-            0,
-            &mut size,
-        );
+        GetTokenInformation(token.as_raw_handle(), class, ptr::null_mut(), 0, &mut size);
         if size == 0 {
             return Err(io::Error::last_os_error());
         }
-        // usize storage provides TOKEN_USER pointer alignment as well as the requested bytes.
+        // usize storage provides pointer alignment as well as the requested bytes.
         let mut storage = vec![0usize; (size as usize).div_ceil(mem::size_of::<usize>())];
         checked(GetTokenInformation(
             token.as_raw_handle(),
-            TokenUser,
+            class,
             storage.as_mut_ptr().cast(),
             size,
             &mut size,
         ))?;
-        let user = &*storage.as_ptr().cast::<TOKEN_USER>();
-        let mut sid = ptr::null_mut();
-        checked(ConvertSidToStringSidW(user.User.Sid, &mut sid))?;
-        let allocation = Allocation(sid.cast());
-        let mut length = 0;
-        while *sid.add(length) != 0 {
-            length += 1;
-        }
-        let result = String::from_utf16(std::slice::from_raw_parts(sid, length))
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
-        drop(allocation);
-        result
+        // TOKEN_USER starts with SID_AND_ATTRIBUTES { Sid, Attributes } and
+        // TOKEN_OWNER with { Owner }: both begin with the PSID.
+        let sid: PSID = if class == TokenOwner {
+            (*storage.as_ptr().cast::<TOKEN_OWNER>()).Owner
+        } else {
+            (*storage.as_ptr().cast::<TOKEN_USER>()).User.Sid
+        };
+        sid_string(sid)
     }
 }
 
@@ -181,15 +181,30 @@ pub fn secure_path(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Whether `path` carries the private descriptor `secure_path` writes: owned by
-/// the current user, a present and protected DACL whose entries all allow only
-/// the current user or SYSTEM (no inherited or foreign principals, no deny
-/// entries). Reads the live security descriptor, so later loosening is seen.
-pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
-    // ACE type values are fixed by the Win32 ABI (ACCESS_ALLOWED_ACE_TYPE = 0).
-    const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+/// One discretionary ACE. Mask and principal are read only for the two plain
+/// ACE types whose layout is `{ Header, Mask, SidStart }`; every other type is
+/// recorded by header only and never parsed as that layout.
+struct AceReport {
+    ace_type: u8,
+    flags: u8,
+    /// `Some` only for ACCESS_ALLOWED / ACCESS_DENIED ACEs of a sane size.
+    plain: Option<(u32, String)>,
+}
+
+/// Owner and discretionary ACL of a file object as the system reports them.
+struct SecurityReport {
+    owner: String,
+    control: u16,
+    aces: Vec<AceReport>,
+}
+
+const ACCESS_ALLOWED_ACE_TYPE: u8 = 0;
+const ACCESS_DENIED_ACE_TYPE: u8 = 1;
+/// Bound on ACEs inspected or reported; a longer DACL is not private anyway.
+const MAX_REPORTED_ACES: u32 = 32;
+
+fn read_security(path: &Path) -> io::Result<SecurityReport> {
     let name = wide(path.as_os_str());
-    let current = current_user_sid()?;
     unsafe {
         let mut owner = ptr::null_mut();
         let mut dacl = ptr::null_mut();
@@ -215,46 +230,170 @@ pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
             &mut control,
             &mut revision,
         ))?;
-        if owner.is_null() || dacl.is_null() {
-            return Ok(false);
-        }
-        if sid_string(owner)? != current {
-            return Ok(false);
-        }
-        if control & SE_DACL_PRESENT == 0 || control & SE_DACL_PROTECTED == 0 {
-            return Ok(false);
-        }
-        let mut size = ACL_SIZE_INFORMATION {
-            AceCount: 0,
-            AclBytesInUse: 0,
-            AclBytesFree: 0,
+        let owner = if owner.is_null() {
+            String::from("<none>")
+        } else {
+            sid_string(owner)?
         };
-        checked(GetAclInformation(
-            dacl,
-            (&mut size as *mut ACL_SIZE_INFORMATION).cast(),
-            mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
-            AclSizeInformation,
-        ))?;
-        if size.AceCount == 0 {
+        let mut aces = Vec::new();
+        if !dacl.is_null() {
+            let mut size = ACL_SIZE_INFORMATION {
+                AceCount: 0,
+                AclBytesInUse: 0,
+                AclBytesFree: 0,
+            };
+            checked(GetAclInformation(
+                dacl,
+                (&mut size as *mut ACL_SIZE_INFORMATION).cast(),
+                mem::size_of::<ACL_SIZE_INFORMATION>() as u32,
+                AclSizeInformation,
+            ))?;
+            for index in 0..size.AceCount.min(MAX_REPORTED_ACES) {
+                let mut ace = ptr::null_mut();
+                checked(GetAce(dacl, index, &mut ace))?;
+                // Only the header is common to every ACE type. The plain
+                // allowed/denied layout is read solely for those two types and
+                // only when the ACE is large enough to hold it; anything else
+                // (object, callback, audit, unknown) stays header-only.
+                let header = *ace.cast::<ACE_HEADER>();
+                let plain = if matches!(
+                    header.AceType,
+                    ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE
+                ) && usize::from(header.AceSize)
+                    >= mem::size_of::<ACCESS_ALLOWED_ACE>()
+                {
+                    let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                    let sid = sid_string(ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
+                    Some((allowed.Mask, sid))
+                } else {
+                    None
+                };
+                aces.push(AceReport {
+                    ace_type: header.AceType,
+                    flags: header.AceFlags,
+                    plain,
+                });
+            }
+            if size.AceCount > MAX_REPORTED_ACES {
+                aces.push(AceReport {
+                    ace_type: u8::MAX,
+                    flags: 0,
+                    plain: None,
+                });
+            }
+        }
+        Ok(SecurityReport {
+            owner,
+            control,
+            aces,
+        })
+    }
+}
+
+const SYSTEM_SID: &str = "S-1-5-18";
+const ADMINISTRATORS_SID: &str = "S-1-5-32-544";
+
+/// Whether `path` carries the private descriptor `secure_path` writes: owned by
+/// this process's token user or token owner (the SID the system assigns as
+/// default owner of objects this process creates), a present and protected
+/// DACL whose entries are all non-inherited plain ACCESS_ALLOWED entries for
+/// the token user or LocalSystem. Any other ACE type, principal, deny entry or
+/// inherited entry fails closed. Reads the live descriptor, so later
+/// loosening is seen.
+pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
+    let user = current_user_sid()?;
+    let token_owner = current_token_owner_sid()?;
+    let report = read_security(path)?;
+    if report.owner != user && report.owner != token_owner {
+        return Ok(false);
+    }
+    if report.control & SE_DACL_PRESENT == 0 || report.control & SE_DACL_PROTECTED == 0 {
+        return Ok(false);
+    }
+    if report.aces.is_empty() {
+        return Ok(false);
+    }
+    for ace in &report.aces {
+        if ace.ace_type != ACCESS_ALLOWED_ACE_TYPE || ace.flags & INHERITED_ACE as u8 != 0 {
             return Ok(false);
         }
-        for index in 0..size.AceCount {
-            let mut ace = ptr::null_mut();
-            checked(GetAce(dacl, index, &mut ace))?;
-            let header = &*ace.cast::<ACE_HEADER>();
-            if header.AceType != ACCESS_ALLOWED_ACE_TYPE
-                || header.AceFlags & INHERITED_ACE as u8 != 0
-            {
-                return Ok(false);
-            }
-            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
-            let sid = sid_string(ptr::addr_of!(allowed.SidStart).cast_mut().cast())?;
-            if sid != current && sid != "S-1-5-18" {
-                return Ok(false);
-            }
+        match &ace.plain {
+            Some((_mask, sid)) if sid == &user || sid == SYSTEM_SID => {}
+            _ => return Ok(false),
         }
     }
     Ok(true)
+}
+
+/// Categorical, bounded owner/control/ACE listing for diagnostics. Principals
+/// are classified relative to this process's token (current_user,
+/// token_owner, system, administrators, everyone, users, authenticated_users,
+/// other); raw SIDs, paths, host names and environment values never appear.
+pub fn private_path_security_report(path: &Path) -> io::Result<String> {
+    fn classify(sid: &str, user: &str, token_owner: &str) -> &'static str {
+        match sid {
+            _ if sid == user => "current_user",
+            _ if sid == token_owner => "token_owner",
+            SYSTEM_SID => "system",
+            ADMINISTRATORS_SID => "administrators",
+            "S-1-1-0" => "everyone",
+            "S-1-5-32-545" => "users",
+            "S-1-5-11" => "authenticated_users",
+            "<none>" => "none",
+            _ => "other",
+        }
+    }
+    let user = current_user_sid()?;
+    let token_owner = current_token_owner_sid()?;
+    let report = read_security(path)?;
+    let mut text = format!(
+        "owner={} token_owner_is_user={} control=0x{:04x} dacl_present={} dacl_protected={} aces={}",
+        classify(&report.owner, &user, &token_owner),
+        token_owner == user,
+        report.control,
+        report.control & SE_DACL_PRESENT != 0,
+        report.control & SE_DACL_PROTECTED != 0,
+        report.aces.len()
+    );
+    for ace in &report.aces {
+        let inherited = ace.flags & INHERITED_ACE as u8 != 0;
+        match &ace.plain {
+            Some((mask, sid)) => text.push_str(&format!(
+                " [type={} inherited={inherited} flags=0x{:02x} mask=0x{mask:08x} principal={}]",
+                ace.ace_type,
+                ace.flags,
+                classify(sid, &user, &token_owner)
+            )),
+            None => text.push_str(&format!(
+                " [type={} inherited={inherited} flags=0x{:02x} unsupported]",
+                ace.ace_type, ace.flags
+            )),
+        }
+    }
+    Ok(text)
+}
+
+/// Apply an SDDL security descriptor (DACL part) to a path. Test support for
+/// native regressions that need unusual ACE types; production code uses
+/// `secure_path`.
+pub fn apply_sddl_dacl(path: &Path, sddl: &str) -> io::Result<()> {
+    let sddl = wide(OsStr::new(sddl));
+    let name = wide(path.as_os_str());
+    unsafe {
+        let mut descriptor = ptr::null_mut();
+        checked(ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            ptr::null_mut(),
+        ))?;
+        let descriptor = Allocation(descriptor);
+        checked(SetFileSecurityW(
+            name.as_ptr(),
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            descriptor.0,
+        ))
+    }
 }
 
 unsafe fn sid_string(sid: PSID) -> io::Result<String> {

@@ -342,7 +342,14 @@ fn verify_private_directory(path: &Path, metadata: &fs::Metadata) -> Result<(), 
         // the protected DACL may only allow the current user and SYSTEM.
         match treer_platform::private_path_is_secure(path) {
             Ok(true) => {}
-            Ok(false) => return Err(unsafe_directory(path, "insecure_dacl")),
+            Ok(false) => {
+                // SIDs, control flags and masks only: enough to diagnose a
+                // foreign owner or inherited entry without exposing content.
+                let report = treer_platform::private_path_security_report(path)
+                    .unwrap_or_else(|error| format!("report unavailable: {error}"));
+                warn!(%report, "Agent private state directory DACL is not private");
+                return Err(unsafe_directory(path, "insecure_dacl"));
+            }
             Err(error) => return Err(unavailable(path, error)),
         }
     }
@@ -1098,6 +1105,45 @@ mod tests {
         assert!(ledger.reserve("b", 55, u64::MAX, later).is_ok());
     }
 
+    /// Windows diagnostic for hosted/native runners: prints the categorical
+    /// owner/DACL report of a temp parent, a fresh secure_directory root, and
+    /// the server/agent levels, plus each verifier verdict. Never fails.
+    /// Run: cargo test -p treer-agent-server windows_private_state_dacl_diagnostic -- --ignored --nocapture
+    #[cfg(windows)]
+    #[ignore = "diagnostic only; prints per-layer DACL categories"]
+    #[test]
+    fn windows_private_state_dacl_diagnostic() {
+        fn line(layer: &str, path: &Path) {
+            let report = treer_platform::private_path_security_report(path)
+                .unwrap_or_else(|error| format!("report unavailable: {error}"));
+            let verdict = treer_platform::private_path_is_secure(path)
+                .map(|secure| secure.to_string())
+                .unwrap_or_else(|error| format!("error: {error}"));
+            println!("DACL layer={layer} secure={verdict} {report}");
+        }
+        let fixture = Fixture::new();
+        line("temp_parent", &fixture.0);
+        let root = fixture.0.join("agent-private");
+        treer_platform::secure_directory(&root).unwrap();
+        line("root_after_secure_directory", &root);
+        let plain = fixture.0.join("plain-create-dir");
+        fs::create_dir(&plain).unwrap();
+        line("plain_create_dir", &plain);
+        match PrivateStateRoot::open(&root, "srv_diag") {
+            Ok(state) => {
+                line("server", &root.join("srv_diag"));
+                match state.prepare("ag_diag") {
+                    Ok(agent) => line("agent", &agent),
+                    Err(error) => println!("DACL layer=agent prepare_failed code={}", error.code),
+                }
+            }
+            Err(error) => {
+                println!("DACL layer=server open_failed code={}", error.code);
+                line("server_if_present", &root.join("srv_diag"));
+            }
+        }
+    }
+
     /// Windows: the live owner/DACL is what decides, not the creation branch.
     /// Executed by the native Windows gate; it shells out to icacls to loosen
     /// a test-private directory and removes that directory afterwards.
@@ -1112,18 +1158,44 @@ mod tests {
                 .expect("run icacls");
             assert!(status.success(), "icacls grant failed");
         }
+        fn report(path: &Path) -> String {
+            treer_platform::private_path_security_report(path)
+                .unwrap_or_else(|error| format!("report unavailable: {error}"))
+        }
         let fixture = Fixture::new();
         let root = fixture.0.join("agent-private");
-        let state = PrivateStateRoot::open(&root, "srv_a").unwrap();
+        // Baseline: secure_directory must produce the protected private DACL
+        // on this machine; on failure print what the system actually reports.
+        treer_platform::secure_directory(&root).unwrap();
+        assert!(
+            treer_platform::private_path_is_secure(&root).unwrap(),
+            "fresh private root is not accepted: {} (fixture {})",
+            report(&root),
+            report(&fixture.0)
+        );
+        let state = PrivateStateRoot::open(&root, "srv_a").unwrap_or_else(|error| {
+            panic!(
+                "{}: root {} / server {}",
+                error.code,
+                report(&root),
+                report(&root.join("srv_a"))
+            )
+        });
         let agent = state.prepare("ag_1").unwrap();
-        // Baseline: secure_directory produced the protected private DACL.
-        assert!(treer_platform::private_path_is_secure(&agent).unwrap());
-        assert!(treer_platform::private_path_is_secure(&root).unwrap());
+        assert!(
+            treer_platform::private_path_is_secure(&agent).unwrap(),
+            "{}",
+            report(&agent)
+        );
         // A pre-existing directory with a wide DACL is never adopted.
         let wide = root.join("srv_a").join("ag_wide");
         fs::create_dir(&wide).unwrap();
         grant_everyone(&wide);
-        assert!(!treer_platform::private_path_is_secure(&wide).unwrap());
+        assert!(
+            !treer_platform::private_path_is_secure(&wide).unwrap(),
+            "{}",
+            report(&wide)
+        );
         assert_eq!(
             state.prepare("ag_wide").unwrap_err().code,
             "agent_private_state_unsafe"
@@ -1131,7 +1203,11 @@ mod tests {
         // Loosening after creation fails the next verification of a
         // directory that passed before.
         grant_everyone(&agent);
-        assert!(!treer_platform::private_path_is_secure(&agent).unwrap());
+        assert!(
+            !treer_platform::private_path_is_secure(&agent).unwrap(),
+            "{}",
+            report(&agent)
+        );
         assert_eq!(
             state.verify_existing("ag_1").unwrap_err().code,
             "agent_private_state_unsafe"
@@ -1142,5 +1218,24 @@ mod tests {
         );
         // Everything else below the root stays usable.
         assert!(state.prepare("ag_2").is_ok());
+        // An ACE of a type the verifier does not understand (here a callback
+        // ACE) is recorded by header only and fails closed, even when the
+        // principal would otherwise be acceptable.
+        let callback = state.prepare("ag_callback").unwrap();
+        treer_platform::apply_sddl_dacl(
+            &callback,
+            "D:P(A;;GA;;;SY)(XA;;GA;;;SY;(Member_of {SID(BA)}))",
+        )
+        .unwrap();
+        let report = report(&callback);
+        assert!(report.contains("unsupported"), "{report}");
+        assert!(
+            !treer_platform::private_path_is_secure(&callback).unwrap(),
+            "{report}"
+        );
+        assert_eq!(
+            state.verify_existing("ag_callback").unwrap_err().code,
+            "agent_private_state_unsafe"
+        );
     }
 }
