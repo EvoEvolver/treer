@@ -5,6 +5,8 @@ import { Field } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { api, ApiError, type Agent, type Member, type OrganizationAuditEvent } from "@/lib/api"
+import { agentPath } from "@/lib/workload-path"
+import { WorkspaceAuditFilter, auditFilterOptions, type AuditFilterKey } from "@/components/workspace-audit-filter"
 import { cn } from "@/lib/utils"
 import { t } from "@/i18n"
 
@@ -37,6 +39,23 @@ export function WorkspaceAudit({ workspaceId, agents, members, preview }: { work
   const [validation, setValidation] = useState<string>()
   const [revision, setRevision] = useState(0)
   const cursor = cursors.at(-1)
+  // Catalog suggestions are not an authorization or completeness claim. Current
+  // page codes come only from the validated feed; identities are already visible.
+  const actions = ["agent.created", "agent.renamed", "agent.deleted", "agent.stopped", "app.created", "machine.exec", "machine.renamed", "machine.deleted", "workspace.created", "workspace.renamed", "launch_profile.created", "launch_profile.updated", "launch_profile.deleted"]
+  const kinds = ["agent", "app", "machine", "workspace", "launch_profile"]
+  const kindLabel = (kind: string) => kinds.includes(kind) ? t(`waudit.kind_${kind}` as "waudit.kind_agent") : kind
+  const actionLabel = (action: string) => {
+    const [kind, verb] = action.split(".")
+    return actions.includes(action) ? `${kindLabel(kind)} · ${t(`waudit.verb_${verb}` as "waudit.verb_created")}` : action
+  }
+  const choices = {
+    actor_id: auditFilterOptions([
+      ...agents.map((agent) => ({ value: agent.agent_id, label: agentPath(agent) })),
+      ...members.map((member) => ({ value: member.user_id, label: member.preferred_name || member.user_id })),
+    ]),
+    action: auditFilterOptions([...new Set([...actions, ...(page?.events.map((event) => event.action) ?? [])])].map((action) => ({ value: action, label: actionLabel(action) }))),
+    resource_kind: auditFilterOptions([...new Set([...kinds, ...(page?.events.map((event) => event.resource_kind) ?? [])])].map((kind) => ({ value: kind, label: kindLabel(kind) }))),
+  }
 
   useEffect(() => {
     const controller = new AbortController()
@@ -84,7 +103,8 @@ export function WorkspaceAudit({ workspaceId, agents, members, preview }: { work
     <p className="text-xs leading-5 text-muted-foreground">{t("waudit.scope")}</p>
     <Button variant="outline" className="min-h-11 w-full justify-between sm:hidden" aria-expanded={filtersOpen} aria-controls="workspace-audit-filters" onClick={() => setFiltersOpen((open) => !open)}>{t("waudit.filters")}<ChevronDown aria-hidden="true" className={cn("size-4", filtersOpen && "rotate-180")} /></Button>
     <form id="workspace-audit-filters" onSubmit={apply} aria-label={t("waudit.filters")} className={cn("min-w-0 gap-3 rounded-md border bg-muted/20 p-4 sm:grid sm:grid-cols-2 lg:grid-cols-3", filtersOpen ? "grid" : "hidden")}>
-      {(["since", "until", "actor_id", "action", "resource_kind"] as const).map((key) => <Field key={key} label={t(`waudit.${key}`)}><Input aria-label={t(`waudit.${key}`)} className="min-h-11 min-w-0 w-full" type={key === "since" || key === "until" ? "datetime-local" : "text"} maxLength={128} value={draft[key]} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} /></Field>)}
+      {(["since", "until"] as const).map((key) => <Field key={key} label={t(`waudit.${key}`)}><Input aria-label={t(`waudit.${key}`)} className="min-h-11 min-w-0 w-full" type="datetime-local" maxLength={128} value={draft[key]} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} /></Field>)}
+      {(["actor_id", "action", "resource_kind"] satisfies AuditFilterKey[]).map((key) => <WorkspaceAuditFilter key={key} field={key} value={draft[key]} options={choices[key]} onChange={(value) => setDraft((current) => ({ ...current, [key]: value }))} />)}
       <div className="flex flex-wrap items-end gap-2"><Button className="min-h-11" type="submit">{t("waudit.apply")}</Button><Button className="min-h-11" variant="outline" type="button" onClick={() => { setDraft(emptyFilters); setFilters({ ...emptyFilters }); setPage(undefined); setValidation(undefined); setCursors([undefined]) }}>{t("waudit.clear")}</Button></div>
       <p className="text-xs leading-5 text-muted-foreground sm:col-span-2 lg:col-span-3">{t("waudit.filter_hint")}</p>
       {validation && <p role="alert" className="text-xs text-destructive sm:col-span-2 lg:col-span-3">{validation}</p>}

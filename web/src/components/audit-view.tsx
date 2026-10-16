@@ -55,7 +55,7 @@ export function AuditEventList({ events, agents = [], members = [], loading, wor
           <p title={resource} className="break-words text-sm font-medium [overflow-wrap:anywhere]">{resource}</p>
           <p title={who} className="break-words text-xs text-muted-foreground [overflow-wrap:anywhere]">{t("waudit.by", { actor: who })}</p>
           <p className="break-words font-mono text-xs text-muted-foreground [overflow-wrap:anywhere]">{event.action}</p>
-          <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-medium", event.outcome === "failed" ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-status-working/30 bg-status-working/10 text-status-working")}>{t(event.outcome === "failed" ? "waudit.outcome_failed" : "waudit.outcome_succeeded")}</span>
+          <span className={cn("inline-flex rounded-full border px-2 py-0.5 text-xs font-medium", event.outcome === "failed" ? "border-destructive/30 bg-destructive/10 text-destructive" : "border-status-online/30 bg-status-online/10 text-status-success")}>{t(event.outcome === "failed" ? "waudit.outcome_failed" : "waudit.outcome_succeeded")}</span>
         </div>
         <time className="col-start-2 text-xs text-muted-foreground sm:col-start-auto" dateTime={event.occurred_at}>{new Date(event.occurred_at).toLocaleString(intlLocale())}</time>
       </div>

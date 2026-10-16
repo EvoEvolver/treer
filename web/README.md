@@ -452,6 +452,12 @@ filters: inclusive `since`, exclusive `until` (RFC3339), exact `actor_id`,
 `action`, `resource_kind`, and 50-event pages with an exclusive `before` cursor.
 Times entered in the form are local time and converted to UTC; empty bounds
 include all available history. A bounded time range must not exceed 366 days.
+The exact-input filters also offer keyboard-accessible menus: already-visible
+Agent tree paths and member names resolve to stable IDs; common action/kind
+codes and codes on the current validated page are suggestions, not a complete
+catalog. Each menu is capped at 200 valid suggestions; exact input supports
+unknown identities and newer action/kind codes. No additional directory or audit
+requests are made until Apply (apart from the existing explicit paging/refresh).
 Changing filters resets pagination; switching workspaces or leaving the tab
 aborts pending requests and discards the displayed feed. There is no polling.
 
