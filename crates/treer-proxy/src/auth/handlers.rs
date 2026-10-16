@@ -2,6 +2,8 @@ use super::*;
 
 #[path = "handlers/admin.rs"]
 mod admin;
+#[path = "handlers/csrf.rs"]
+mod csrf;
 #[path = "handlers/helpers.rs"]
 mod helpers;
 #[path = "handlers/middleware.rs"]
@@ -18,6 +20,7 @@ mod session;
 mod workspaces;
 
 pub(crate) use admin::*;
+pub(crate) use csrf::*;
 pub(crate) use helpers::*;
 pub(crate) use middleware::*;
 pub(crate) use oauth::*;

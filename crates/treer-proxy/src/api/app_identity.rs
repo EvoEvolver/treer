@@ -89,6 +89,7 @@ pub(super) async fn authorize_workspace_app(
     OriginalUri(original_uri): OriginalUri,
     Query(query): Query<AppOAuthAuthorizeQuery>,
 ) -> Result<Response, ApiFailure> {
+    auth::require_authorization_navigation(&headers)?;
     if query.response_type != "code"
         || query.code_challenge_method != "S256"
         || query.state.is_empty()

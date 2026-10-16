@@ -1,11 +1,10 @@
 use super::*;
-pub(crate) async fn oauth_start(
-    Extension(auth): Extension<AuthStore>,
-    AxumPath(provider): AxumPath<String>,
-    Query(_query): Query<OAuthStartQuery>,
-) -> Result<Response, AuthFailure> {
-    // Legacy GET cannot opt into an organization membership mutation.
-    start_oauth(&auth, &provider, None, false, false).await
+pub(crate) async fn oauth_start() -> Result<Response, AuthFailure> {
+    Err(AuthFailure::new(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "oauth_post_required",
+        "start OAuth with a same-origin JSON POST",
+    ))
 }
 
 pub(crate) async fn oauth_start_json(
@@ -14,14 +13,8 @@ pub(crate) async fn oauth_start_json(
     request: Request,
 ) -> Result<Response, AuthFailure> {
     let headers = request.headers();
-    let origin = auth.app_public_url.origin().ascii_serialization();
-    if headers.get_all(header::ORIGIN).iter().count() != 1
-        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(origin.as_str())
-        || headers.get("x-treer-console").and_then(|v| v.to_str().ok()) != Some("1")
-        || headers
-            .get("sec-fetch-site")
-            .is_some_and(|v| v == "cross-site")
-    {
+    require_console_origin(&auth, headers)?;
+    if headers.get("x-treer-console").and_then(|v| v.to_str().ok()) != Some("1") {
         return Err(AuthFailure::forbidden(
             "csrf_denied",
             "console origin required",

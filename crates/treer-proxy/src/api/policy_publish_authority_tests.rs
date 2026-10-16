@@ -154,6 +154,7 @@ async fn app_identity_cannot_modify_authority_and_demoted_owner_is_rejected() {
         let mut request = axum::http::Request::builder()
             .method("PUT")
             .uri(path)
+            .header(header::ORIGIN, "https://app.treer.example")
             .header(header::CONTENT_TYPE, "application/json")
             .body(Body::from(request_body.clone()))
             .unwrap();

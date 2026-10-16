@@ -6,19 +6,20 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 
+use crate::api::RegisteredRoutes;
 use crate::audit::{self, NewPlatformAuditEvent};
 use crate::auth::{AuthFailure, AuthStore};
 use crate::state::AppState;
 
 pub fn routes() -> Router<AppState> {
     let mut router = Router::new()
-        .route("/api/admin/dashboard", get(dashboard))
-        .route("/api/admin/traffic", get(platform_traffic))
-        .route(
+        .registered_route("/api/admin/dashboard", get(dashboard))
+        .registered_route("/api/admin/traffic", get(platform_traffic))
+        .registered_route(
             "/api/admin/invitations",
             get(list_invitations).post(create_invitation),
         )
-        .route(
+        .registered_route(
             "/api/admin/invitations/{invitation_id}",
             delete(revoke_invitation),
         );
@@ -27,8 +28,8 @@ pub fn routes() -> Router<AppState> {
     for resource in ["users", "machines", "agents", "organizations", "activity"] {
         let path = format!("/api/admin/{resource}");
         router = router
-            .route(&path, any(details_removed))
-            .route(&format!("{path}/{{*rest}}"), any(details_removed));
+            .registered_route(&path, any(details_removed))
+            .registered_route(&format!("{path}/{{*rest}}"), any(details_removed));
     }
     router.layer(axum::middleware::map_response(
         |mut response: axum::response::Response| async move {
@@ -397,6 +398,7 @@ mod tests {
                         Request::builder()
                             .method(method)
                             .uri(format!("/api/admin/{path}"))
+                            .header("origin", "https://app.treer.example")
                             .header("cookie", &cookie)
                             .body(Body::empty())
                             .unwrap(),
@@ -647,6 +649,7 @@ mod tests {
                     Request::builder()
                         .method("DELETE")
                         .uri(format!("/api/admin/invitations/{id}"))
+                        .header("origin", "https://app.treer.example")
                         .header("cookie", &cookie)
                         .body(Body::empty())
                         .unwrap(),
@@ -676,6 +679,7 @@ mod tests {
                 Request::builder()
                     .method("POST")
                     .uri("/api/admin/invitations")
+                    .header("origin", "https://app.treer.example")
                     .header("cookie", &cookie)
                     .body(Body::empty())
                     .unwrap(),

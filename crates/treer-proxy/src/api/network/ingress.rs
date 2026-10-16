@@ -17,6 +17,7 @@ pub(in crate::api) async fn authorize_service_ingress(
     headers: HeaderMap,
     Query(query): Query<IngressAuthorizeQuery>,
 ) -> Result<Response, ApiFailure> {
+    auth::require_authorization_navigation(&headers)?;
     let request_host = request_hostname(&headers)?;
     let proxy_host = config
         .proxy_public_url

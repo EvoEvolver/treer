@@ -39,6 +39,17 @@ Set `TREER_PROXY_PUBLIC_URL` to the URL other machines can reach and
 `TREER_APP_PUBLIC_URL` to the exact browser origin. Operator detail, rollback,
 and GHCR tag rules are in [deploy/README.md](../deploy/README.md).
 
+Browser control-plane writes require an exact `Origin` matching
+`TREER_APP_PUBLIC_URL`; absent/null/foreign origins fail with `csrf_denied`.
+Use a trusted Console build with the Proxy update: OAuth login starts through
+JSON POST with `X-Treer-Console: 1`, and admin update checks use POST. Legacy
+OAuth start GET returns 405 without creating login state. Native password
+clients use `X-Treer-Client` only on pre-authentication requests without browser
+cookies or Fetch Metadata. Authenticated native/operator clients use Bearer
+credentials; adding Authorization never exempts cookie-only admin routes.
+See [control-plane CSRF boundaries](security.md#control-plane-browser-csrf),
+including the distinct App OAuth and ingress navigation exceptions.
+
 Local source builds overlay `compose.dev.yaml` and pass `--build`. The hosted
 Railway plus Cloudflare path is a separate source rebuild of Proxy plus a
 Worker App; see [Managed deployment](#managed-deployment).

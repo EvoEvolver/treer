@@ -692,6 +692,49 @@ the configured Proxy origin of the embedded tunnel, rather than the rewritten
 upstream Host. Non-browser service-token clients may lack these browser headers;
 that is not a reason to exempt human browser requests from validation.
 
+### Control-plane browser CSRF
+
+With authentication enabled, Core cookie-authenticated POST/PUT/PATCH/DELETE
+requests and WebSocket upgrades require exactly one `Origin` equal to the
+configured Console origin. Missing, `null`, duplicate and foreign origins are
+rejected with `403 csrf_denied`; Fetch Metadata, when present, must not contradict
+that origin (`Sec-Fetch-Site` must be `same-origin` or `same-site`). A same-site
+subdomain is not a trusted origin. CORS and SameSite cookies alone are not this
+check. Administrator routes select only the admin cookie: adding Authorization
+does not exempt them. User routes select a syntactically valid Bearer first,
+otherwise the session cookie; invalid selected Bearer credentials never fall
+back to a cookie. Valid Bearer/service clients do not need browser Origin.
+
+Login, registration, password reset, invitation preview and admin login are
+protected before their handlers run. Only the four user login/register/reset
+endpoints have a native pre-authentication channel: exactly one recognized
+`X-Treer-Client`, no Treer session/admin cookie, no Origin and no Fetch Metadata.
+It never exempts authenticated writes or admin login. Native clients carrying a
+browser session must use the browser protocol or remove that session first.
+OAuth start requires a same-origin JSON POST with `X-Treer-Console: 1`; the old
+GET returns an explicit error without creating state. Admin update checks use
+POST, rather than a stateful GET. Older browser clients must update together.
+
+Credential-authenticated machine enrollment, Controller/Agent APIs, App runtime
+and service-audience-token APIs, identity-token verification, public health and
+artifact reads are separate protocols. OAuth callbacks use their single-use
+state and browser-cookie binding, rather than requiring Origin from the external
+provider. App OAuth and ingress authorization are explicit top-level GET
+navigation exceptions; supplied Fetch Mode/Dest must be `navigate`/`document`.
+App OAuth requires bounded state, S256 PKCE, an enabled workspace ingress with
+an exactly matching scheme/host/port and service audience, and a single-use code
+bound to the full redirect and challenge with a five-minute TTL. Apps validate
+returned state. Ingress codes separately bind to the enabled hostname/ingress
+and current membership, are single-use with a five-minute TTL, and accept only
+local return paths. They currently have no initiating-browser/PKCE binding;
+do not describe the ingress flow as providing that guarantee. A member can
+currently induce another browser to redeem the member's code, causing login
+identity confusion; a separate nonce-cookie handshake is needed to close this
+existing login-CSRF window.
+
+These checks do not apply to arbitrary App ingress traffic: each App remains
+responsible for its own browser CSRF protection as described above.
+
 
 Self-hosted Compose gives the updater sidecar the host Docker socket and a
 read-only bind of `compose.yaml`. Compromise of that sidecar is host Docker

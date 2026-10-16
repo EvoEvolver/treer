@@ -335,13 +335,13 @@ async fn oauth_start_requires_json_custom_header_and_get_never_carries_invite() 
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let row = sqlx::query("SELECT invite_hash,join_organization FROM oauth_states")
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(!response.headers().contains_key(header::SET_COOKIE));
+    let rows: i64 = sqlx::query_scalar("SELECT count(*) FROM oauth_states")
         .fetch_one(&store.pool)
         .await
         .unwrap();
-    assert!(row.get::<Option<String>, _>("invite_hash").is_none());
-    assert!(!row.get::<bool, _>("join_organization"));
+    assert_eq!(rows, 0, "legacy GET must not create OAuth state");
 }
 
 #[tokio::test]

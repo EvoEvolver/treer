@@ -13,22 +13,6 @@ pub(crate) async fn preview_invitation(
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(preview)).into_response())
 }
 
-fn invitation_origin(auth: &AuthStore, headers: &HeaderMap) -> Result<(), AuthFailure> {
-    let origin = auth.app_public_url.origin().ascii_serialization();
-    if headers.get_all(header::ORIGIN).iter().count() != 1
-        || headers.get(header::ORIGIN).and_then(|v| v.to_str().ok()) != Some(origin.as_str())
-        || headers
-            .get("sec-fetch-site")
-            .is_some_and(|v| v != "same-origin" && v != "same-site")
-    {
-        return Err(AuthFailure::forbidden(
-            "csrf_denied",
-            "console origin required",
-        ));
-    }
-    Ok(())
-}
-
 async fn invitation_session(
     auth: &AuthStore,
     headers: &HeaderMap,
@@ -63,7 +47,7 @@ pub(crate) async fn discard_pending_invitation(
     Extension(auth): Extension<AuthStore>,
     headers: HeaderMap,
 ) -> Result<Response, AuthFailure> {
-    invitation_origin(&auth, &headers)?;
+    require_console_origin(&auth, &headers)?;
     let session = invitation_session(&auth, &headers).await?;
     auth.discard_pending_invitation(&session).await?;
     Ok((
@@ -81,7 +65,7 @@ pub(crate) async fn accept_invitation(
 ) -> Result<Response, AuthFailure> {
     // This is deliberately cookie-only, unlike generic native/operator APIs.
     // Short-lived service-audience tokens cannot authorize joining an org.
-    invitation_origin(&auth, &headers)?;
+    require_console_origin(&auth, &headers)?;
     let session = invitation_session(&auth, &headers).await?;
     let source = peer
         .map(|Extension(axum::extract::ConnectInfo(peer))| peer.ip().to_string())

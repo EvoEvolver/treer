@@ -2,6 +2,134 @@ use super::*;
 use tower::ServiceExt;
 use treer_protocol::{NetworkBinaryFrame, NetworkBinaryKind, ServerInfo};
 
+#[tokio::test]
+async fn oauth_navigation_exception_is_bound_to_ingress_pkce_audience_and_single_use() {
+    use sha2::Digest;
+    let (auth, _, app, _, _, _) = fixture().await;
+    let ingress = auth
+        .ensure_app_ingress(
+            &app,
+            "alice",
+            "apps.treer.example",
+            Some(ServiceIngressAccess::Workspace),
+        )
+        .await
+        .unwrap();
+    let config = IngressConfig::new(
+        Some(Url::parse("https://apps.treer.example/").unwrap()),
+        &Url::parse("https://proxy.treer.example/").unwrap(),
+        &Url::parse("https://app.treer.example/").unwrap(),
+    )
+    .unwrap();
+    let redirect = format!("https://{}/auth/callback", ingress.hostname);
+    for candidate in [
+        format!("https://{}.evil.example/auth/callback", ingress.hostname),
+        format!("http://{}/auth/callback", ingress.hostname),
+        format!("https://{}:444/auth/callback", ingress.hostname),
+        format!("https://attacker@{}/auth/callback", ingress.hostname),
+        format!("{redirect}#fragment"),
+        "https://evil.example/auth/callback".to_owned(),
+    ] {
+        assert!(
+            resolve_app_redirect(&auth, &config, &app.service_id, &candidate)
+                .await
+                .is_err(),
+            "reject unregistered redirect origin/credentials/fragment"
+        );
+    }
+    assert!(
+        resolve_app_redirect(&auth, &config, "other-service", &redirect)
+            .await
+            .is_err()
+    );
+    let verifier = "v".repeat(64);
+    let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .encode(sha2::Sha256::digest(verifier.as_bytes()));
+    let route = Router::new()
+        .route("/authorize", axum::routing::get(authorize_workspace_app))
+        .layer(Extension(auth.clone()))
+        .layer(Extension(config));
+    let mut uri = Url::parse("https://proxy.treer.example/authorize").unwrap();
+    uri.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", &app.service_id)
+        .append_pair("redirect_uri", &redirect)
+        .append_pair("state", "app-bound-state")
+        .append_pair("code_challenge", &challenge)
+        .append_pair("code_challenge_method", "S256");
+    let target = format!("{}?{}", uri.path(), uri.query().unwrap());
+    for (name, value) in [("sec-fetch-dest", "image"), ("sec-fetch-mode", "cors")] {
+        let response = route
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(&target)
+                    .header(header::COOKIE, "treer_session=login")
+                    .header(name, value)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+    let codes: i64 = sqlx::query_scalar("SELECT count(*) FROM app_oauth_codes")
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(codes, 0, "subresource requests must not issue codes");
+    let members_before: i64 = sqlx::query_scalar("SELECT count(*) FROM organization_members")
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap();
+    let response = route
+        .oneshot(
+            Request::builder()
+                .uri(&target)
+                .header(header::COOKIE, "treer_session=login")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "document")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let callback = Url::parse(response.headers()[header::LOCATION].to_str().unwrap()).unwrap();
+    assert_eq!(callback.origin(), Url::parse(&redirect).unwrap().origin());
+    let query: std::collections::HashMap<_, _> = callback.query_pairs().into_owned().collect();
+    assert_eq!(query["state"], "app-bound-state");
+    let code = &query["code"];
+    assert!(auth
+        .consume_app_oauth_code(code, "other-service", &redirect, &verifier)
+        .await
+        .is_err());
+    assert!(auth
+        .consume_app_oauth_code(code, &app.service_id, "https://evil.example/", &verifier)
+        .await
+        .is_err());
+    assert!(auth
+        .consume_app_oauth_code(code, &app.service_id, &redirect, &"x".repeat(64))
+        .await
+        .is_err());
+    let ttl: bool = sqlx::query_scalar("SELECT (expires_at::timestamptz - created_at::timestamptz) <= interval '5 minutes' FROM app_oauth_codes").fetch_one(&auth.pool()).await.unwrap();
+    assert!(ttl);
+    let grant = auth
+        .consume_app_oauth_code(code, &app.service_id, &redirect, &verifier)
+        .await
+        .unwrap();
+    assert_eq!(grant.user_id, "alice");
+    assert!(auth
+        .consume_app_oauth_code(code, &app.service_id, &redirect, &verifier)
+        .await
+        .is_err());
+    let members_after: i64 = sqlx::query_scalar("SELECT count(*) FROM organization_members")
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(members_after, members_before);
+}
+
 async fn fixture() -> (
     AuthStore,
     IdentityIssuer,

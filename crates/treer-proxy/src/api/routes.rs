@@ -27,262 +27,262 @@ pub fn router(
         config: ingress.clone(),
     };
     let agent_control = Router::new()
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/workload-tree",
             get(get_workload_tree),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/workload-tree/folders",
             post(create_workload_folder),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/workload-tree/folders/{folder_id}",
             patch(update_workload_folder).delete(delete_workload_folder),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/workload-tree/placements/{agent_id}",
             axum::routing::put(set_workload_placement),
         )
-        .route("/agent/machine/identity", post(bind_machine_identity))
-        .route(
+        .registered_route("/agent/machine/identity", post(bind_machine_identity))
+        .registered_route(
             "/agent/workspaces/{workspace_id}/snapshot",
             get(workspace_snapshot),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/identity/token",
             post(agent_issue_identity_token),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/humans",
             get(agent_list_humans),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents",
             get(list_agents).post(create_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/placed",
             post(create_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/apps/placed",
             post(create_app_deployment),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/launch-profiles/{profile_id}/launch-placed",
             post(launch_agent_profile),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/apps",
             get(list_app_deployments).post(create_app_deployment),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/apps/{app_id}",
             get(get_app_deployment).delete(delete_app_deployment),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/apps/{app_id}/start",
             post(start_app_deployment),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/apps/{app_id}/stop",
             post(stop_app_deployment),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/apps/{app_id}/restart",
             post(restart_app_deployment),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/apps/{app_id}/update",
             post(update_app_deployment),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/policy-provider/invalidate",
             post(invalidate_policy_provider),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/launch-profiles",
             get(list_agent_launch_profiles).post(create_agent_launch_profile),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/launch-profiles/{profile_id}",
             get(get_agent_launch_profile)
                 .patch(update_agent_launch_profile)
                 .delete(delete_agent_launch_profile),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/launch-profiles/{profile_id}/launch",
             post(launch_agent_profile),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}",
             get(get_agent).patch(rename_agent).delete(delete_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/startup",
             get(get_agent_startup)
                 .put(set_agent_startup)
                 .delete(clear_agent_startup),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/admin/startup",
             get(get_admin_agent_startup).put(set_admin_agent_startup),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/restart-with-startup",
             post(restart_agent_with_startup),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/startup/validate",
             post(validate_agent_startup),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/restore",
             post(machine_restore_runtime),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/servers/{server_id}",
             axum::routing::patch(rename_server).delete(delete_server),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/exec",
             post(exec_machine),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/files",
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/machines/{server_id}/file-transfer",
             get(machine_file_transfer_info)
                 .post(machine_file_transfer)
                 .layer(DefaultBodyLimit::max(96 * 1024)),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/services",
             get(agent_list_machine_services).post(agent_create_machine_service),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/services/{service_id}",
             axum::routing::patch(agent_update_machine_service).delete(agent_delete_machine_service),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/services/{service_id}/probe",
             post(agent_probe_machine_service),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/services/{service_id}/connect",
             get(agent_connect_machine_service).post(agent_connect_machine_service),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/services/{service_id}/public-tcp",
             post(agent_publish_public_tcp_service).delete(agent_unpublish_public_tcp_service),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/virtual-hosts",
             get(agent_list_virtual_network_hosts).post(agent_network_publication_forbidden),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/virtual-hosts/{hostname}",
             axum::routing::delete(agent_network_publication_forbidden),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/ingresses",
             get(agent_list_service_ingresses).post(agent_create_service_ingress),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/ingresses/{ingress_id}",
             axum::routing::patch(agent_update_service_ingress).delete(agent_delete_service_ingress),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/prompt",
             post(prompt_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/queue",
             get(read_prompt_queue),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/queue/{submission_id}",
             axum::routing::delete(cancel_prompt_submission),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/submissions/{submission_id}",
             get(read_prompt_submission),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/input",
             post(input_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/output",
             get(read_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/transcript",
             get(read_agent_transcript),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/stop",
             post(stop_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/start",
             post(start_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/restart",
             post(restart_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/abort",
             post(abort_agent),
         )
-        .route(
+        .registered_route(
             "/agent/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
         );
     let agent_control = if rollout.core_messages {
         agent_control
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages",
                 get(list_core_messages).post(send_core_message),
             )
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages/receive",
                 post(receive_core_messages),
             )
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages/ack",
                 post(acknowledge_core_messages),
             )
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages/import",
                 post(import_core_messages),
             )
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages/{message_id}",
                 get(get_core_message),
             )
     } else {
         agent_control
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages",
                 any(core_messages_rollout_disabled),
             )
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages/receive",
                 any(core_messages_rollout_disabled),
             )
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages/ack",
                 any(core_messages_rollout_disabled),
             )
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages/import",
                 any(core_messages_rollout_disabled),
             )
-            .route(
+            .registered_route(
                 "/agent/workspaces/{workspace_id}/messages/{message_id}",
                 any(core_messages_rollout_disabled),
             )
@@ -293,379 +293,379 @@ pub fn router(
     ));
     let app_messages = if rollout.core_messages {
         Router::new()
-            .route(
+            .registered_route(
                 "/api/apps/{service_id}/messages",
                 get(list_app_messages).post(send_app_message),
             )
-            .route(
+            .registered_route(
                 "/api/apps/{service_id}/messages/receive",
                 post(receive_app_messages),
             )
-            .route(
+            .registered_route(
                 "/api/apps/{service_id}/messages/ack",
                 post(acknowledge_app_messages),
             )
-            .route(
+            .registered_route(
                 "/api/apps/{service_id}/messages/{message_id}",
                 get(get_app_message),
             )
     } else {
         Router::new()
-            .route(
+            .registered_route(
                 "/api/apps/{service_id}/messages",
                 any(core_messages_rollout_disabled),
             )
-            .route(
+            .registered_route(
                 "/api/apps/{service_id}/messages/receive",
                 any(core_messages_rollout_disabled),
             )
-            .route(
+            .registered_route(
                 "/api/apps/{service_id}/messages/ack",
                 any(core_messages_rollout_disabled),
             )
-            .route(
+            .registered_route(
                 "/api/apps/{service_id}/messages/{message_id}",
                 any(core_messages_rollout_disabled),
             )
     };
     let authenticated = Router::new()
-        .route(
+        .registered_route(
             "/api/organizations",
             get(auth::organizations).post(auth::create_organization_handler),
         )
-        .route(
+        .registered_route(
             "/api/organizations/{organization_id}",
             axum::routing::patch(auth::rename_organization_handler),
         )
-        .route(
+        .registered_route(
             "/api/organizations/{organization_id}/members",
             get(auth::members),
         )
-        .route(
+        .registered_route(
             "/api/organizations/{organization_id}/groups",
             get(auth::organization_groups).post(auth::create_organization_group_handler),
         )
-        .route(
+        .registered_route(
             "/api/organizations/{organization_id}/groups/{group_id}",
             axum::routing::delete(auth::delete_organization_group_handler),
         )
-        .route(
+        .registered_route(
             "/api/organizations/{organization_id}/groups/{group_id}/members/{user_id}",
             axum::routing::put(auth::add_organization_group_member_handler)
                 .delete(auth::remove_organization_group_member_handler),
         )
-        .route(
+        .registered_route(
             "/api/organizations/{organization_id}/audit-events",
             get(auth::audit_events),
         )
-        .route(
+        .registered_route(
             "/api/organizations/{organization_id}/members/{user_id}",
             axum::routing::patch(auth::update_member_role_handler)
                 .delete(auth::remove_member_handler),
         )
-        .route(
+        .registered_route(
             "/api/organizations/{organization_id}/invitations",
             post(auth::create_invitation),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/bootstrap",
             post(bootstrap_info),
         )
-        .route(
+        .registered_route(
             "/api/workspaces",
             get(list_workspaces).post(create_workspace),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}",
             axum::routing::patch(rename_workspace).delete(delete_workspace),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/access",
             get(auth::workspace_access).patch(auth::update_workspace_access),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/access/users/{user_id}",
             axum::routing::put(auth::update_workspace_user_grant)
                 .delete(auth::delete_workspace_user_grant),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/access/groups/{group_id}",
             axum::routing::put(auth::update_workspace_group_grant)
                 .delete(auth::delete_workspace_group_grant),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/snapshot",
             get(workspace_snapshot),
         )
-        .route("/api/workspaces/{workspace_id}/servers", get(list_servers))
-        .route(
+        .registered_route("/api/workspaces/{workspace_id}/servers", get(list_servers))
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps",
             get(list_app_deployments).post(create_app_deployment),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/workload-tree",
             get(get_workload_tree),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/workload-tree/folders",
             post(create_workload_folder),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/workload-tree/folders/{folder_id}",
             patch(update_workload_folder).delete(delete_workload_folder),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/workload-tree/placements/{agent_id}",
             axum::routing::put(set_workload_placement),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}",
             get(get_app_deployment).delete(delete_app_deployment),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/access",
             axum::routing::patch(update_app_access),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/start",
             post(start_app_deployment),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/stop",
             post(stop_app_deployment),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/restart",
             post(restart_app_deployment),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/update",
             post(update_app_deployment),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/ui/",
             any(proxy_app_ui_root),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/ui/{*path}",
             any(proxy_app_ui_path),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/policy-provider",
             get(get_policy_provider)
                 .put(set_policy_provider)
                 .delete(clear_policy_provider),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/policy/explain",
             post(explain_policy),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/policy-provider/publish-authority",
             axum::routing::put(set_policy_publish_authority),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/policy/decisions",
             get(policy_decisions),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/policy/validate",
             post(validate_policy_document),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/policy-provider/default-app",
             post(install_default_policy_app),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/services",
             get(list_machine_services).post(create_machine_service),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/services/{service_id}",
             axum::routing::patch(update_machine_service).delete(delete_machine_service),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/services/{service_id}/probe",
             post(probe_machine_service),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/services/{service_id}/connect",
             post(connect_machine_service),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/services/{service_id}/public-tcp",
             post(publish_public_tcp_service).delete(unpublish_public_tcp_service),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/virtual-hosts",
             get(list_virtual_network_hosts).post(create_virtual_network_host),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}",
             axum::routing::delete(delete_virtual_network_host),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/ingresses",
             get(list_service_ingresses).post(create_service_ingress),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/ingresses/{ingress_id}",
             axum::routing::patch(update_service_ingress).delete(delete_service_ingress),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/traffic",
             get(list_machine_traffic),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/traffic/agents",
             get(list_agent_traffic),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy",
             any(proxy_virtual_network_host_root),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/",
             any(proxy_virtual_network_host_root),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/virtual-hosts/{hostname}/proxy/{*path}",
             any(proxy_virtual_network_host_path),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/servers/{server_id}",
             axum::routing::patch(rename_server).delete(delete_server),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/exec",
             post(exec_machine),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/restore",
             post(restore_machine_runtime),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/files",
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/file-transfer",
             get(machine_file_transfer_info)
                 .post(machine_file_transfer)
                 .layer(DefaultBodyLimit::max(96 * 1024)),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents",
             get(list_agents).post(create_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/launch-profiles",
             get(list_agent_launch_profiles).post(create_agent_launch_profile),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/launch-profiles/{profile_id}",
             get(get_agent_launch_profile)
                 .patch(update_agent_launch_profile)
                 .delete(delete_agent_launch_profile),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/launch-profiles/{profile_id}/launch",
             post(launch_agent_profile),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}",
             get(get_agent).patch(rename_agent).delete(delete_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui",
             any(proxy_agent_interface_ui_root),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/",
             any(proxy_agent_interface_ui_root),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/{*path}",
             any(proxy_agent_interface_ui_path),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/prompt",
             post(prompt_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/queue",
             get(read_prompt_queue),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/queue/{submission_id}",
             axum::routing::delete(cancel_prompt_submission),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/submissions/{submission_id}",
             get(read_prompt_submission),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/input",
             post(input_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/output",
             get(read_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/transcript",
             get(read_agent_transcript),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/stop",
             post(stop_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/start",
             post(start_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/restart",
             post(restart_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/admin/startup",
             get(get_admin_agent_startup).put(set_admin_agent_startup),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/restart-with-startup",
             post(restart_agent_with_startup),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/abort",
             post(abort_agent),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/terminal",
             get(agent_terminal),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/events",
             get(workspace_events),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/voice/asr",
             get(voice_asr_status),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/voice/asr/stream",
             get(voice_asr_stream),
         )
-        .route(
+        .registered_route(
             "/api/workspaces/{workspace_id}/voice/command",
             get(voice_command_status).post(voice_command),
         )
-        .route("/api/auth/me", get(auth::me))
-        .route(
+        .registered_route("/api/auth/me", get(auth::me))
+        .registered_route(
             "/api/auth/profile",
             axum::routing::patch(auth::update_profile),
         )
-        .route("/api/auth/logout", post(auth::logout))
+        .registered_route("/api/auth/logout", post(auth::logout))
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
             auth::require_workspace_access,
@@ -675,93 +675,97 @@ pub fn router(
             auth::require_user,
         ));
     let admin = admin::routes()
-        .route("/api/admin/me", get(auth::admin_me))
-        .route("/api/admin/logout", post(auth::admin_logout))
-        .route(
+        .registered_route("/api/admin/me", get(auth::admin_me))
+        .registered_route("/api/admin/logout", post(auth::admin_logout))
+        .registered_route(
             "/api/admin/update",
             get(crate::updater::status).post(crate::updater::apply),
         )
-        .route("/api/admin/update/check", get(crate::updater::check))
+        .registered_route("/api/admin/update/check", post(crate::updater::check))
         .route_layer(middleware::from_fn_with_state(
             auth_store.clone(),
             auth::require_admin,
         ));
     let control = Router::new()
-        .route("/install.sh", get(install_script))
-        .route("/install.ps1", get(windows_install_script))
-        .route("/api/machines/enroll", post(enroll_machine))
-        .route("/artifacts/{platform}/{binary}", get(download_artifact))
-        .route("/api/health", get(health))
-        .route("/.well-known/jwks.json", get(workload_identity_jwks))
-        .route("/.treer/identity/verify", post(verify_workload_identity))
-        .route("/.treer/apps/identity/verify", post(verify_app_identity))
-        .route("/api/apps/oauth/authorize", get(authorize_workspace_app))
-        .route("/api/apps/oauth/token", post(exchange_workspace_app_code))
-        .route("/api/apps/{service_id}/email", post(send_app_email))
-        .route(
+        .registered_route("/install.sh", get(install_script))
+        .registered_route("/install.ps1", get(windows_install_script))
+        .registered_route("/api/machines/enroll", post(enroll_machine))
+        .registered_route("/artifacts/{platform}/{binary}", get(download_artifact))
+        .registered_route("/api/health", get(health))
+        .registered_route("/.well-known/jwks.json", get(workload_identity_jwks))
+        .registered_route("/.treer/identity/verify", post(verify_workload_identity))
+        .registered_route("/.treer/apps/identity/verify", post(verify_app_identity))
+        .registered_route("/api/apps/oauth/authorize", get(authorize_workspace_app))
+        .registered_route("/api/apps/oauth/token", post(exchange_workspace_app_code))
+        .registered_route("/api/apps/{service_id}/email", post(send_app_email))
+        .registered_route(
             "/api/apps/{service_id}/policy/explain",
             post(app_explain_policy),
         )
-        .route(
+        .registered_route(
             "/api/apps/{service_id}/policy/decisions",
             get(app_policy_decisions),
         )
-        .route(
+        .registered_route(
             "/api/apps/{service_id}/policy/validate",
             post(app_validate_policy_document),
         )
-        .route(
+        .registered_route(
             "/api/apps/{service_id}/policy/publish-authority",
             get(app_get_policy_publish_authority),
         )
-        .route(
+        .registered_route(
             "/api/apps/{service_id}/policy/operator/validate",
             post(app_operator_validate_policy),
         )
-        .route(
+        .registered_route(
             "/api/apps/{service_id}/policy/operator/explain",
             post(app_operator_explain_policy),
         )
-        .route(
+        .registered_route(
             "/api/apps/{service_id}/directory",
             get(workspace_app_directory),
         )
-        .route(
+        .registered_route(
             "/api/apps/{service_id}/recipients/resolve",
             post(resolve_workspace_app_recipients),
         )
-        .route("/api/auth/login", post(auth::login))
-        .route("/api/auth/config", get(auth::oauth_config))
-        .route(
+        .registered_route("/api/auth/login", post(auth::login))
+        .registered_route("/api/auth/config", get(auth::oauth_config))
+        .registered_route(
             "/api/auth/oauth/{provider}/start",
             get(auth::oauth_start).post(auth::oauth_start_json),
         )
-        .route(
+        .registered_route(
             "/api/auth/oauth/{provider}/callback",
             get(auth::oauth_callback),
         )
-        .route(
+        .registered_route(
             "/api/auth/request-password-reset",
             post(auth::request_password_reset),
         )
-        .route("/api/auth/reset-password", post(auth::reset_password))
-        .route("/api/auth/register", post(auth::register))
-        .route("/api/invitations/preview", post(auth::preview_invitation))
-        .route("/api/invitations/accept", post(auth::accept_invitation))
-        .route(
+        .registered_route("/api/auth/reset-password", post(auth::reset_password))
+        .registered_route("/api/auth/register", post(auth::register))
+        .registered_route("/api/invitations/preview", post(auth::preview_invitation))
+        .registered_route("/api/invitations/accept", post(auth::accept_invitation))
+        .registered_route(
             "/api/invitations/pending",
             get(auth::pending_invitation).delete(auth::discard_pending_invitation),
         )
-        .route("/api/admin/login", post(auth::admin_login))
-        .route("/agent/connect", get(agent_socket::upgrade))
+        .registered_route("/api/admin/login", post(auth::admin_login))
+        .registered_route("/agent/connect", get(agent_socket::upgrade))
         .merge(agent_control)
         .merge(app_messages)
         .merge(authenticated)
         .merge(admin)
+        .layer(middleware::from_fn_with_state(
+            auth_store.clone(),
+            auth::require_preauth_origin,
+        ))
         .layer(cors);
     Router::new()
         .merge(control)
-        .route("/.treer/ingress/authorize", get(authorize_service_ingress))
+        .registered_route("/.treer/ingress/authorize", get(authorize_service_ingress))
         .fallback(any(proxy_service_ingress))
         .layer(Extension(bootstrap))
         .layer(Extension(policy))
