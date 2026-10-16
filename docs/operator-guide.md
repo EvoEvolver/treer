@@ -1241,6 +1241,30 @@ then use the restore command below. Remove an installed native extension
 using its normal OS deactivation/uninstall procedure; deleting source does not
 deactivate a previously installed extension.
 
+### Retired macOS network extension: existing installations
+
+Removing source or upgrading the Controller does not uninstall an already active
+extension. Before switching an existing machine to plain networking:
+
+1. Inventory Agent endpoints that relied on private namespaces or virtual names.
+   Make them reachable from the Controller and register explicit service ports.
+2. If the old signed TreerNetwork application is installed, use that installed
+   application's `deactivate` / `uninstall` commands to remove its own provider
+   configuration, then verify that the extension is inactive. Consult the old
+   build's documentation if macOS requires an approval or a reboot.
+3. Check for resolver configuration left by that installation. Remove only files
+   positively identified as owned by Treer, after verifying they are no longer
+   used; do not alter VPN, Tailscale, or system-wide DNS settings.
+4. Start or repair the Controller with `TREER_NETWORK_MODE=plain`. Retired saved
+   modes are rejected with migration guidance rather than silently activated.
+
+Treer does not execute these machine-level cleanup steps during an ordinary
+source update. Existing installed binaries must remain available until cleanup
+is verified. This document does not claim that an installed extension has been
+removed or that its prior experimental gates passed.
+
+### Register and forward services
+
 Start a process yourself or use a Managed App. An authenticated Agent registers
 its own loopback endpoint; an operator selects `--machine` and may configure
 another reachable target address. External containers must expose a reachable
@@ -2137,3 +2161,54 @@ never passed in argv or written to progress/error logs. The worker strips
 inherited Treer, HTTP proxy and Node/loader variables from child processes.
 This protects accidental disclosure; the same Windows user can still alter
 scripts, files and processes and is not an isolation boundary.
+
+## Voice APIs (opt-in)
+
+The native iOS/Android clients were retired on 2026-10-16. Core Voice ASR and
+command routes remain available to authenticated clients; this configuration
+does not install a Voice UI. Native-client Bearer/session compatibility also
+remains; browser sessions and CSRF checks are unchanged.
+
+### Voice ASR
+
+ASR is enabled when the **Proxy process** has
+`TREER_VOICE_ASR_PROVIDER=qwen` and `TREER_VOICE_ASR_API_KEY` or
+`DASHSCOPE_API_KEY` (shell env, Compose `.env`, or the process supervisor). Do
+not put these in client code or browser storage.
+`GET /api/workspaces/{workspace_id}/voice/asr` reports configuration/status;
+stream 16 kHz PCM16 audio over
+`GET WS /api/workspaces/{workspace_id}/voice/asr/stream`
+
+(`Authorization: Bearer`). Audio is forwarded to Qwen
+`qwen3-asr-flash-realtime` and is not stored in Core. Optional
+`TREER_VOICE_ASR_URL` (default Singapore
+`wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime`) and
+`TREER_VOICE_ASR_MODEL`. Unconfigured deployments report that ASR is unavailable.
+Use a Beijing key only with `wss://dashscope.aliyuncs.com/api-ws/v1/realtime`;
+keys are region-specific.
+
+### Voice command
+
+ASR text is turned into Treer actions on the **Proxy**, not the client. Enable
+with `TREER_VOICE_LLM_API_KEY`. Optional:
+
+- `TREER_VOICE_LLM_BASE_URL` (default `https://sub.lnz-study.com`)
+- `TREER_VOICE_LLM_WIRE_API` (`responses` or `completions`, default `responses`)
+- `TREER_VOICE_LLM_MODEL` (default `gpt-5.6-luna`)
+
+`GET /api/workspaces/{workspace_id}/voice/command` reports availability.
+An authenticated client submits the utterance with
+`POST /api/workspaces/{workspace_id}/voice/command`
+
+`{"text":"...","history":[{"role":"user","text":"..."},{"role":"assistant","text":"..."}]}`
+→ `{"reply":"...","utterance":"...","tools":[...]}`. `history` is optional and
+is the prior spoken turns in the client, not including the current
+`text`. The Proxy keeps at most the last 12 user/assistant turns.
+
+The LLM receives the bundled voice skill (`skills/treer-voice/SKILL.md`) plus a
+live workspace roster and that spoken history. It may call a `treer` tool whose argv matches
+`status`, `whoami`, `machine list`, and `agent ls|show|prompt|read`. Those
+commands run in-process under the signed-in user. Clients choose how to present
+the returned `reply`; no native TTS client is shipped in this repository.
+Vendor LLM keys stay in the Proxy process. This is not the later Voice Live
+confirm-card protocol.

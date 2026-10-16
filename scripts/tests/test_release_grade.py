@@ -30,7 +30,7 @@ class ReleaseGradeTest(unittest.TestCase):
             self.assertTrue(result["policy_install_check"])
 
     def test_core_and_unknown_paths_run_everything_and_never_batch(self):
-        for paths in (["crates/treer-cli/src/main.rs"], ["brand-new-dir/file"], ["skills/treer/SKILL.md"], ["deploy/updater/x.py"]):
+        for paths in (["crates/treer-cli/src/main.rs"], ["brand-new-dir/file"], ["mobile/new-native-client.swift"], ["skills/treer/SKILL.md"], ["deploy/updater/x.py"]):
             result = grade.plan(paths)
             self.assertEqual(result["local_gate"], ["just check"], paths)
             self.assertTrue(result["native_build_and_canary"])

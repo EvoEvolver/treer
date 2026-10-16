@@ -92,7 +92,6 @@ required; see [Graded gates](releases.md#graded-gates-and-staging-batches).
 | `web/` | `cd web && pnpm typecheck && pnpm build && pnpm test:e2e` (build first, then test; use random or exclusive ports) |
 | `launchers/agent` | `just agent-launcher-test`, plus the Windows launcher smoke (`launchers/agent/tests/windows-smoke.mjs`) when the change touches Windows or installer paths: run it on the `win_native` runner or state that it was not run |
 | `crates/`, `skills/`, build files, unknown paths | `just check` against an isolated PostgreSQL/NATS and a private build target (never the shared database or another agent's target), and for auth, identity or policy changes the full Proxy suite, not a focused subset; `just check` already runs the workspace tests, so no extra `cargo test -p treer-proxy` is needed when it ran with the PostgreSQL URL set |
-| `mobile/` | the touched platform's own tests (Android JVM `./gradlew :app:testDebugUnitTest`, iOS `just mobile-ios-ci`); `release-grade.py` classifies `mobile/` as web, so a green Web gate says nothing about Android or iOS: state them as unverified when the toolchain is missing (the Android CI job is #97) |
 | `scripts/`, `.github/`, `justfile` | `just check` |
 
 The freeze comment says what was not run (for example no JDK for the Android

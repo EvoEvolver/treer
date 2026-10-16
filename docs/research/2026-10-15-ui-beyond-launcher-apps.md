@@ -1,5 +1,9 @@
 # UI beyond the launcher and Apps: what to improve next
 
+Historical note (2026-10-16, #100): native clients and transparent-network probes
+were retired. Paths and reproduction commands below describe the reviewed revision,
+not the current tree. [Pinned source before removal](https://github.com/EvoEvolver/treer/blob/2bb65dbe323457e8be6779c36d7469885e2433d5/mobile/README.md).
+
 2026-10-15. Owner: ui-dev. Scope: every user-facing surface except `launchers/agent`
 (just rebuilt) and workspace Apps (`apps/`). Read-only research; no code changed.
 Evidence: `web/` at `origin/main` 43aeca4 rendered through its own mocked e2e

@@ -26,7 +26,7 @@
 | 实际 PostgreSQL relay ledger | 通过 | 两个方向精确 12 / 18 payload bytes，各 1 frame |
 | Mac 客户端先 `shutdown(SHUT_WR)` 再接收 | 失败，已定位上游 | 账本收到 12 / 18，但客户端回包为 0；签名 helper 提前全关闭 |
 
-完整复现入口：[network-lab](../../scripts/network-lab/README.md)。原始结果位于
+完整复现入口：[network-lab](https://github.com/EvoEvolver/treer/blob/2bb65dbe323457e8be6779c36d7469885e2433d5/scripts/network-lab/README.md)。原始结果位于
 忽略目录 `output/network-research/`，不提交二进制、依赖和第三方源码。
 
 ## 1. Apple container machine

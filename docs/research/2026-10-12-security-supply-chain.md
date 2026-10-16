@@ -1,5 +1,9 @@
 # Supply-chain and release security review — 2026-10-12
 
+Historical note (2026-10-16, #100): native clients and transparent-network probes
+were retired. Paths and reproduction commands below describe the reviewed revision,
+not the current tree. [Pinned source before removal](https://github.com/EvoEvolver/treer/blob/2bb65dbe323457e8be6779c36d7469885e2433d5/scripts/network-lab/README.md).
+
 Status: local review; workflow fixes committed in `53139a8` (reviewed as `d3844fd`), approved by core-dev
 with an independent 3/3 regression run. Source baseline: `732da11` (same dependency locks as
 the released `3372b34`). This is evidence and a remediation plan, not a security

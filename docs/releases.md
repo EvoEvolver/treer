@@ -193,7 +193,8 @@ checksum files were rewritten. The Canary manifest records
 embedded launcher keep reporting the commit they were actually built from. The
 trust base is the operator's local `.treer/canary-checkouts/` state, as for any
 collected `dist/`: the recorded hashes pin what was verified at copy time, but
-they are not a signature or an independent pin of the previous release's bytes. `mobile/` is not on the allowlist, so a change there builds natively. The
+they are not a signature or an independent pin of the previous release's bytes. Retired native-client paths are not on the allowlist; unknown paths still require
+a native build. The
 Proxy serves only the three binaries and `SHA256SUMS` per platform, so the
 provenance file is never downloaded by clients, and the installed binaries'
 reported commit (the build commit) is not treated as a downgrade of the
@@ -229,7 +230,7 @@ make a release stricter.
 | --- | --- | --- |
 | `docs/`, root `*.md` only | `node scripts/check-docs.mjs` | not required |
 | `apps/` only | docs check plus each changed App's own tests and `npm run check` | not required; the App owner deploys the App after CI |
-| `web/`, `mobile/` | web typecheck, build and Playwright | Canary and the Policy check required; for `web/` changes the native build is reused from a previous `canary_passed` commit when [allowed](#reusing-native-artifacts-for-web-apps-and-docs-changes) |
+| `web/` | web typecheck, build and Playwright | Canary and the Policy check required; for `web/` changes the native build is reused from a previous `canary_passed` commit when [allowed](#reusing-native-artifacts-for-web-apps-and-docs-changes) |
 | `launchers/` | `just agent-launcher-test` | required: the Controller embeds the launcher payload |
 | `scripts/`, `.github/`, `justfile` that are not part of the release pipeline | `just check` | not required |
 | release pipeline: canary, deploy, promote, artifact staging/verification, machine-update scripts and `build-release-artifacts.yml`/`publish-ghcr.yml` | `just check` | required; ships alone |

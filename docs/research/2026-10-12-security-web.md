@@ -1,5 +1,9 @@
 # Web and mobile security review — 2026-10-12
 
+Historical note (2026-10-16, #100): native clients and transparent-network probes
+were retired. Paths and reproduction commands below describe the reviewed revision,
+not the current tree. [Pinned source before removal](https://github.com/EvoEvolver/treer/blob/2bb65dbe323457e8be6779c36d7469885e2433d5/mobile/README.md).
+
 Scope: `web/`, native WebView integration in `mobile/`, and the checked-in
 Cloudflare Worker configuration for `app.canary.treer.ai`. Baseline:
 `3372b34`. This is a source review plus isolated local regressions, not a

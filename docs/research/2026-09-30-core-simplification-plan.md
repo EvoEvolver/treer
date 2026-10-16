@@ -49,7 +49,7 @@ Treer 提供最基础的身份认证、授权、机器互联、进程托管和�
 - [Agent startup store](../../crates/treer-agent-server/src/startup_store.rs) 已保存启动配置和凭据；新 Host epoch 可以恢复已登记的 Agent，但不是所有 Agent 的统一恢复契约。
 - [Managed App](../../crates/treer-proxy/src/api/apps.rs) 已有持久化期望状态、替换运行实例和重连协调，不能因收缩 App 域名功能而删除这部分价值。
 - [服务与 UI 入口](../../crates/treer-proxy/src/api/network.rs) 已支持 HTTP/WebSocket 转发，应提取保留的能力。
-- [原生 macOS 网络](../../native/macos-network/README.md) 仍有已安装扩展、系统 DNS 和故障恢复验收缺口，停止继续追求平台对齐。
+- [原生 macOS 网络](https://github.com/EvoEvolver/treer/blob/2bb65dbe323457e8be6779c36d7469885e2433d5/native/macos-network/README.md) 仍有已安装扩展、系统 DNS 和故障恢复验收缺口，停止继续追求平台对齐。
 
 ## 4. 目标架构
 
