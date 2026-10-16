@@ -974,7 +974,9 @@ Authenticated request middleware scopes actor kind/ID to the request future,
 never caller-provided JSON. Internal work without that scope (including spawned
 recovery tasks) is attributed to `system`, not to an inherited user. Enrollment
 uses the trusted enrollment creator. New events have empty payloads and omit
-names, paths, hosts, ports, argv, environment, tokens and bodies. Existing runtime
+resource names, paths, hosts, ports, argv, environment, tokens and bodies. The
+organization view retains its existing human actor display-name lookup; the
+workspace projection removes it. Existing runtime
 lifecycle audit events may additionally describe the operation's outcome.
 Core Message delivery and all failure paths do not have universal audit coverage;
 there is no transactional outbox or completeness guarantee for best-effort writes.
