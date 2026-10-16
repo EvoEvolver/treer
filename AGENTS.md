@@ -37,6 +37,7 @@ second manual.
 | Verify a change or assess known gaps | [docs/quality.md](docs/quality.md) |
 | Install, develop, deploy, or operate Treer | [docs/operator-guide.md](docs/operator-guide.md) |
 | Build or operate a workspace App | [apps/README.md](apps/README.md) |
+| Change or review a Console, launcher or App browser screen | [skills/treer-ui/SKILL.md](skills/treer-ui/SKILL.md) |
 | Operate Treer from a managed agent | [skills/treer/SKILL.md](skills/treer/SKILL.md) |
 | Install a git recipe with an installer Agent | [skills/treer-install/SKILL.md](skills/treer-install/SKILL.md) |
 | Put a Treer Host in an Apple container machine | [skills/treer-macos-container/SKILL.md](skills/treer-macos-container/SKILL.md) |
