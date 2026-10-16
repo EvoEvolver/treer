@@ -654,6 +654,39 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
         .startup_store
         .update("stable-id", |entry| entry.spec.enabled = false)
         .unwrap();
+    // Stopped intent is still an established workload, even if the volatile
+    // Controller projection disappeared. Cleanup must not fence its identity.
+    let stopped_projection = runtime
+        .inner
+        .agents
+        .write()
+        .unwrap()
+        .remove("stable-id")
+        .unwrap();
+    assert_eq!(
+        runtime
+            .fence_absent_agent_reservation("stable-id")
+            .await
+            .unwrap_err()
+            .code,
+        "agent_reservation_observed"
+    );
+    assert_eq!(
+        runtime
+            .inner
+            .startup_store
+            .get("stable-id")
+            .unwrap()
+            .workload_credential,
+        credential
+    );
+    assert!(!runtime.inner.startup_store.is_denied("stable-id").unwrap());
+    runtime
+        .inner
+        .agents
+        .write()
+        .unwrap()
+        .insert("stable-id".into(), stopped_projection);
     assert!(
         !runtime
             .replace_startup("stable-id", replace())

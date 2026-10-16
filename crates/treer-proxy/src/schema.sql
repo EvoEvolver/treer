@@ -468,8 +468,10 @@ CREATE TABLE IF NOT EXISTS agent_creation_reservations (
     workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
     server_id TEXT NOT NULL,
     created_by TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    confirmed_at TIMESTAMPTZ
 );
+ALTER TABLE agent_creation_reservations ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ;
 
 CREATE TABLE IF NOT EXISTS machine_services (
     service_id TEXT PRIMARY KEY,

@@ -85,7 +85,13 @@ pub(crate) async fn cleanup_agent_reservation(
     // remains, but credentials/name stay reserved; an explicit retry is safe.
     let repeated = auth
         .cleanup_agent_reservation(&workspace_id, &agent_id, &session.user_id)
-        .await?;
+        .await.map_err(|error| {
+            // The fence is already durable. Make the recovery path explicit
+            // without claiming that the PG transaction committed.
+            let mut failure = ApiFailure::from(error);
+            failure.error.hint = Some(vec!["The Agent ID is fenced. Explicitly retry this cleanup request to finish bookkeeping; do not retry Agent creation.".into()]);
+            failure
+        })?;
     guard.commit().await.map_err(|_| {
         ApiFailure::internal("lifecycle_lock_failed", "Cleanup lifecycle lock failed")
     })?;

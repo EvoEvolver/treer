@@ -566,6 +566,17 @@ is explicit and never automatically retries creation. App identities and service
 audience human tokens cannot use this human-session API. The startup-store
 [rollback floor](../scripts/machine-rollout.md#startup-store-rollback-floor)
 applies after a fence is persisted, including when subsequent PG cleanup fails.
+After a successful Create acknowledgement or validated inventory/event, the
+reservation is marked confirmed and no longer eligible (404), including after
+that workload stops. Confirmation ignores deleted IDs so late inventory cannot
+invalidate an already-cleaned reservation's idempotent response. These small
+ownership/confirmation records are bounded by credential rows and cascade with
+them. Mixed-version limitation: reservations made by an older Proxy have no
+ownership record and cannot use this route, even for `cleanup_failed`; an
+operator must inspect the machine and reconcile through supported lifecycle or
+administrative procedures. Do not treat a missing record as permission to retry
+creation. If fencing succeeded but PG cleanup failed, explicitly retry cleanup
+to finish bookkeeping; never delete the local fence or retry Agent creation.
 
 `workload.create-placement.v1` is advertised by Proxy health and Controllers.
 The thin CLI gates creation/profile launch before forwarding argv. Controller

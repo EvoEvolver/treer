@@ -447,6 +447,20 @@ pub(crate) async fn execute_agent_create(
             return Err(ApiFailure::from(error));
         }
     };
+    if auth
+        .confirm_agent_creation(workspace_id, &server_id, &agent_id)
+        .await
+        .is_err()
+    {
+        let mut error = ProtocolError::new("agent_creation_confirmation_failed", "Agent creation was acknowledged but bookkeeping could not be confirmed; inspect the Agent before retrying");
+        error.details = Some(Box::new(treer_protocol::AgentCreationErrorDetails {
+            command: None,
+            machine_id: Some(server_id.clone()),
+            agent_id: Some(agent_id.clone()),
+            creation_state: treer_protocol::AgentCreationFailureState::ReservedOutcomeUnknown,
+        }));
+        return Err(error.into());
+    }
     let tree = auth.workload_tree(workspace_id).await?;
     data["path"] = json!(tree.workload_path(&agent_id, &agent_name)?);
     let (actor_kind, actor_id) = control_audit_actor(session, subject);

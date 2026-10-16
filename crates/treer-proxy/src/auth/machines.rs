@@ -1,6 +1,28 @@
 use super::*;
 
+async fn confirm_reservations(
+    connection: &mut sqlx::PgConnection,
+    workspace: &str,
+    server: &str,
+    agent_ids: &[&str],
+) -> Result<(), AuthFailure> {
+    sqlx::query("UPDATE agent_creation_reservations r SET confirmed_at=CURRENT_TIMESTAMP WHERE r.workspace_id=$1 AND r.server_id=$2 AND r.agent_id=ANY($3) AND r.confirmed_at IS NULL AND NOT EXISTS(SELECT 1 FROM deleted_agents d WHERE d.workspace_id=r.workspace_id AND d.agent_id=r.agent_id)")
+        .bind(workspace).bind(server).bind(agent_ids)
+        .execute(connection).await.map_err(AuthFailure::database)?;
+    Ok(())
+}
+
 impl AuthStore {
+    pub(crate) async fn confirm_agent_creation(
+        &self,
+        workspace: &str,
+        server: &str,
+        agent_id: &str,
+    ) -> Result<(), AuthFailure> {
+        let mut connection = self.pool.acquire().await.map_err(AuthFailure::database)?;
+        confirm_reservations(&mut connection, workspace, server, &[agent_id]).await
+    }
+
     pub(crate) fn authentication_disabled(&self) -> bool {
         self.disabled
     }
@@ -186,6 +208,13 @@ impl AuthStore {
             &mut tx,
         )
         .await?;
+        confirm_reservations(
+            &mut tx,
+            &snapshot.server.workspace_id,
+            &snapshot.server.server_id,
+            &agent_ids,
+        )
+        .await?;
         // Credential-less legacy inventory may still register previously unknown IDs.
         for agent in &snapshot.agents {
             sqlx::query("INSERT INTO agent_names(agent_id,workspace_id,name,updated_at) VALUES($1,$2,COALESCE((SELECT name FROM app_deployments WHERE workspace_id=$2 AND runtime_agent_id=$1 LIMIT 1),$3),$4) ON CONFLICT(agent_id) DO NOTHING").bind(&agent.agent_id).bind(&agent.workspace_id).bind(&agent.name).bind(Utc::now().to_rfc3339()).execute(&mut *tx).await.map_err(AuthFailure::database)?;
@@ -236,6 +265,13 @@ impl AuthStore {
             &[&agent.agent_id],
             &mut connection,
         )
+        .await?;
+        confirm_reservations(
+            &mut connection,
+            &agent.workspace_id,
+            &agent.server_id,
+            &[&agent.agent_id],
+        )
         .await
     }
 
@@ -281,7 +317,7 @@ impl AuthStore {
         agent_id: &str,
         user_id: &str,
     ) -> Result<(String, bool), AuthFailure> {
-        sqlx::query_as("SELECT r.server_id,EXISTS(SELECT 1 FROM deleted_agents d WHERE d.workspace_id=r.workspace_id AND d.agent_id=r.agent_id) FROM agent_creation_reservations r JOIN agent_credentials c ON c.agent_id=r.agent_id AND c.workspace_id=r.workspace_id AND c.server_id=r.server_id WHERE r.workspace_id=$1 AND r.agent_id=$2 AND r.created_by=$3")
+        sqlx::query_as("SELECT r.server_id,EXISTS(SELECT 1 FROM deleted_agents d WHERE d.workspace_id=r.workspace_id AND d.agent_id=r.agent_id) FROM agent_creation_reservations r JOIN agent_credentials c ON c.agent_id=r.agent_id AND c.workspace_id=r.workspace_id AND c.server_id=r.server_id WHERE r.workspace_id=$1 AND r.agent_id=$2 AND r.created_by=$3 AND r.confirmed_at IS NULL")
             .bind(workspace_id).bind(agent_id).bind(user_id).fetch_optional(&self.pool)
             .await.map_err(AuthFailure::database)?
             .ok_or_else(|| AuthFailure::not_found("agent_reservation_not_found", "Agent reservation not available"))
@@ -305,10 +341,15 @@ impl AuthStore {
         agent_id: &str,
         reservation_actor: Option<&str>,
     ) -> Result<bool, AuthFailure> {
-        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        // Same lock order as inventory confirmation: workspace before record.
+        let mut transaction = if reservation_actor.is_some() {
+            self.lock_workload_tree(workspace_id).await?
+        } else {
+            self.pool.begin().await.map_err(AuthFailure::database)?
+        };
         let mut reservation_server = None;
         if let Some(user_id) = reservation_actor {
-            reservation_server = Some(sqlx::query_scalar::<_, String>("SELECT r.server_id FROM agent_creation_reservations r JOIN agent_credentials c ON c.agent_id=r.agent_id AND c.workspace_id=r.workspace_id AND c.server_id=r.server_id WHERE r.workspace_id=$1 AND r.agent_id=$2 AND r.created_by=$3 FOR UPDATE OF r,c")
+            reservation_server = Some(sqlx::query_scalar::<_, String>("SELECT r.server_id FROM agent_creation_reservations r JOIN agent_credentials c ON c.agent_id=r.agent_id AND c.workspace_id=r.workspace_id AND c.server_id=r.server_id WHERE r.workspace_id=$1 AND r.agent_id=$2 AND r.created_by=$3 AND r.confirmed_at IS NULL FOR UPDATE OF r,c")
                 .bind(workspace_id).bind(agent_id).bind(user_id)
                 .fetch_optional(&mut *transaction).await.map_err(AuthFailure::database)?
                 .ok_or_else(|| AuthFailure::not_found("agent_reservation_not_found", "Agent reservation not available"))?);

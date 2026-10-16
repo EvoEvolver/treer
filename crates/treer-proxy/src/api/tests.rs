@@ -13,6 +13,133 @@ use treer_protocol::{
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
 #[tokio::test]
+async fn agent_creation_ack_and_validated_inventory_close_reservation_cleanup_scope() {
+    for confirmation_fails in [false, true] {
+        let auth = AuthStore::for_test("test").await;
+        auth.seed_test_workspace("default").await;
+        if confirmation_fails {
+            sqlx::raw_sql("CREATE FUNCTION refuse_confirmation() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'private fixture detail'; END $$; CREATE TRIGGER refuse_confirmation BEFORE UPDATE ON agent_creation_reservations FOR EACH ROW EXECUTE FUNCTION refuse_confirmation()")
+                .execute(&auth.pool()).await.unwrap();
+        }
+        let state = state_with_managed_agent().await;
+        let server = state.resolve_server("default", "machine-a").await.unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        state
+            .register_server_instance_with_capabilities(
+                server,
+                Uuid::new_v4(),
+                "ack-fixture".into(),
+                vec![treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT.into()],
+                tx,
+            )
+            .await
+            .unwrap();
+        let waiting = tokio::spawn({
+            let (state, auth) = (state.clone(), auth.clone());
+            async move {
+                let creator = CurrentSession {
+                    token: "fixture".into(),
+                    user_id: "creator".into(),
+                    email: "creator@example.test".into(),
+                    preferred_name: "Creator".into(),
+                };
+                execute_agent_create(&state,&auth,&PolicyEngine::allow_all(),Some(&creator),None,"default",
+                    serde_json::from_value(json!({"server_id":"machine-a","kind":"command","name":"created","cwd":".","args":["fixture"]})).unwrap(),None).await
+            }
+        });
+        let check = next_lifecycle_command(&mut rx).await;
+        assert!(matches!(
+            check.command,
+            AgentCommand::CreationPlacementCheck {}
+        ));
+        state
+            .complete_command(CommandResult::success(
+                check.command_id,
+                json!({"supported":true}),
+            ))
+            .await;
+        let create = next_lifecycle_command(&mut rx).await;
+        let AgentCommand::Create { agent_id, .. } = create.command else {
+            panic!("Create")
+        };
+        state
+            .complete_command(CommandResult::success(
+                create.command_id,
+                json!({"agent_id":agent_id}),
+            ))
+            .await;
+        let result = waiting.await.unwrap();
+        let confirmed: bool = sqlx::query_scalar(
+            "SELECT confirmed_at IS NOT NULL FROM agent_creation_reservations WHERE agent_id=$1",
+        )
+        .bind(&agent_id)
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap();
+        assert_eq!(confirmed, !confirmation_fails);
+        if confirmation_fails {
+            let error = result.unwrap_err().error;
+            assert_eq!(error.code, "agent_creation_confirmation_failed");
+            assert!(!error.message.contains("private fixture detail"));
+            assert_eq!(
+                error.details.unwrap().creation_state,
+                treer_protocol::AgentCreationFailureState::ReservedOutcomeUnknown
+            );
+        } else {
+            result.unwrap();
+            assert!(auth
+                .owned_agent_reservation("default", &agent_id, "creator")
+                .await
+                .is_err());
+        }
+    }
+    let auth = AuthStore::for_test("test").await;
+    auth.seed_test_workspace("default").await;
+    let state = state_with_managed_agent().await;
+    for (id, through_event) in [("ag_inventory", false), ("ag_event", true)] {
+        let name = if through_event { "event" } else { "inventory" };
+        auth.reserve_named_agent(
+            "default",
+            "machine-a",
+            id,
+            name,
+            None,
+            None,
+            Some("creator"),
+        )
+        .await
+        .unwrap();
+        let mut agent = state.snapshot("default").await.unwrap().agents[0].clone();
+        agent.agent_id = id.into();
+        agent.name = name.into();
+        agent.status = treer_protocol::AgentStatus::Exited;
+        if through_event {
+            auth.validate_agent_event(&agent).await.unwrap();
+        } else {
+            auth.apply_agent_names(&mut treer_protocol::AgentServerSnapshot {
+                server: state.resolve_server("default", "machine-a").await.unwrap(),
+                agents: vec![agent],
+            })
+            .await
+            .unwrap();
+        }
+        assert!(
+            auth.owned_agent_reservation("default", id, "creator")
+                .await
+                .is_err(),
+            "even stopped, confirmed workload is not an unconfirmed reservation"
+        );
+        assert!(sqlx::query_scalar::<_, bool>(
+            "SELECT revoked_at IS NULL FROM agent_credentials WHERE agent_id=$1"
+        )
+        .bind(id)
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap());
+    }
+}
+
+#[tokio::test]
 async fn reservation_cleanup_requires_owned_record_policy_and_durable_fence() {
     for outcome in [
         "success",
@@ -240,8 +367,15 @@ async fn reservation_cleanup_requires_owned_record_policy_and_durable_fence() {
             .await
             .unwrap();
         } else {
+            let error = result.unwrap_err();
+            if outcome == "audit_failure" {
+                assert!(error.error.hint.as_ref().unwrap()[0].contains("retry this cleanup"));
+                assert!(
+                    error.error.hint.as_ref().unwrap()[0].contains("do not retry Agent creation")
+                );
+            }
             assert_eq!(
-                result.unwrap_err().status,
+                error.status,
                 match outcome {
                     "old" => StatusCode::NOT_IMPLEMENTED,
                     "offline" => StatusCode::SERVICE_UNAVAILABLE,
