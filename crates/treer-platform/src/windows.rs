@@ -291,15 +291,27 @@ pub fn private_path_is_secure(path: &Path) -> io::Result<bool> {
     Ok(true)
 }
 
-/// Human-readable owner/control/ACE listing for diagnostics (SIDs, flags and
-/// masks only; no path content or credentials).
+/// Categorical owner/control/ACE listing for diagnostics: principals are
+/// classified (current_user, system, administrators, everyone, other), never
+/// printed as raw SIDs; no path content or credentials.
 pub fn private_path_security_report(path: &Path) -> io::Result<String> {
+    fn classify(sid: &str, current: &str) -> &'static str {
+        match sid {
+            _ if sid == current => "current_user",
+            SYSTEM_SID => "system",
+            ADMINISTRATORS_SID => "administrators",
+            "S-1-1-0" => "everyone",
+            "S-1-5-32-545" => "users",
+            "S-1-5-11" => "authenticated_users",
+            "<none>" => "none",
+            _ => "other",
+        }
+    }
     let current = current_user_sid()?;
     let report = read_security(path)?;
     let mut text = format!(
-        "owner={} current_user={} control=0x{:04x} dacl_present={} dacl_protected={} aces={}",
-        report.owner,
-        current,
+        "owner={} control=0x{:04x} dacl_present={} dacl_protected={} aces={}",
+        classify(&report.owner, &current),
         report.control,
         report.control & SE_DACL_PRESENT != 0,
         report.control & SE_DACL_PROTECTED != 0,
@@ -307,7 +319,9 @@ pub fn private_path_security_report(path: &Path) -> io::Result<String> {
     );
     for (ace_type, flags, mask, sid) in &report.aces {
         text.push_str(&format!(
-            " [type={ace_type} flags=0x{flags:02x} mask=0x{mask:08x} sid={sid}]"
+            " [type={ace_type} inherited={} flags=0x{flags:02x} mask=0x{mask:08x} principal={}]",
+            flags & INHERITED_ACE as u8 != 0,
+            classify(sid, &current)
         ));
     }
     Ok(text)
