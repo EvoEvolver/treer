@@ -980,6 +980,11 @@ workspace projection removes it. Existing runtime
 lifecycle audit events may additionally describe the operation's outcome.
 Core Message delivery and all failure paths do not have universal audit coverage;
 there is no transactional outbox or completeness guarantee for best-effort writes.
+`system` also covers authenticated entry points that do not set the request
+scope (for example administrator or service-audience handlers); it is not proof
+that a human or App was uninvolved. Prompt acceptance is not aggregated and adds
+an awaited database write on the response path. Audit retention/compaction is not
+implemented, so operators must budget storage for this potentially frequent feed.
 Legacy/local-auth enrollments without a durable workspace retain their existing
 behavior and have no organization audit attribution; no organization is invented.
 
