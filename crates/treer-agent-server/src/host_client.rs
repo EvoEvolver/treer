@@ -37,6 +37,44 @@ impl HostClient {
         let stream = connect_local(path)
             .await
             .with_context(|| format!("failed to connect to host {}", path.display()))?;
+        Ok(Self::connected(stream))
+    }
+
+    /// Maintenance observes the peer of this exact socket, not a separate PID
+    /// file or probe connection. Does not send a restart or any other mutation.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    pub(crate) async fn connect_for_update(
+        path: &Path,
+    ) -> Result<(
+        Self,
+        HostEvents,
+        treer_platform::process_image::ProcessImage,
+    )> {
+        let stream = tokio::time::timeout(
+            Duration::from_secs(3),
+            tokio::net::UnixStream::connect(path),
+        )
+        .await
+        .map_err(|_| anyhow!("update_host_unavailable"))?
+        .map_err(|_| anyhow!("update_host_unavailable"))?;
+        let credentials = stream
+            .peer_cred()
+            .map_err(|_| anyhow!("update_host_peer_unavailable"))?;
+        let pid = credentials
+            .pid()
+            .and_then(|pid| u32::try_from(pid).ok())
+            .filter(|pid| *pid != 0)
+            .ok_or_else(|| anyhow!("update_host_peer_unavailable"))?;
+        if credentials.uid() != nix::unistd::geteuid().as_raw() {
+            bail!("update_host_peer_unavailable");
+        }
+        let identity = treer_platform::process_image::ProcessImage::capture(pid)
+            .map_err(|_| anyhow!("update_host_identity_unavailable"))?;
+        let (client, events) = Self::connected(Box::new(stream));
+        Ok((client, events, identity))
+    }
+
+    fn connected(stream: treer_platform::LocalStream) -> (Self, HostEvents) {
         let (reader, mut writer) = tokio::io::split(stream);
         let (outgoing_tx, mut outgoing_rx) = mpsc::unbounded_channel::<HostRequest>();
         let pending = Arc::new(Mutex::new(PendingRequests::new()));
@@ -99,7 +137,7 @@ impl HostClient {
             }
         });
 
-        Ok((
+        (
             Self {
                 outgoing: outgoing_tx,
                 pending,
@@ -109,7 +147,7 @@ impl HostClient {
                 processes: process_rx,
                 disconnected: disconnected_rx,
             },
-        ))
+        )
     }
 
     pub async fn sync(&self, cursors: BTreeMap<String, OutputCursor>) -> Result<HostResponse> {

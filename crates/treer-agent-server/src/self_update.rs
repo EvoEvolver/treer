@@ -14,6 +14,8 @@ const RECEIPT_LIMIT: u64 = 64 * 1024;
 
 pub mod artifacts;
 pub mod health;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod host;
 pub mod images;
 pub mod probe;
 pub mod publication;

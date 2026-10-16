@@ -13,10 +13,13 @@ unicode-normalization = "0.1"
 [target.'cfg(unix)'.dependencies]
 rustix = { version = "1.1", features = ["fs", "process"] }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authorization", "Win32_System_SystemInformation", "Win32_System_Memory", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Storage_FileSystem"] }
 
-# Win32 has no safe system-call API. Keep FFI inside the reviewed windows module;
+# Keep Win32/libproc FFI inside the reviewed platform modules;
 # the public platform interface and all consumers remain safe Rust.
 [lints.rust]
 unsafe_code = "deny"
