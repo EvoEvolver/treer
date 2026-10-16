@@ -68,6 +68,58 @@ pub(crate) fn launch_profile_write_error(error: sqlx::Error) -> AuthFailure {
     }
 }
 
+#[derive(Deserialize)]
+struct DefaultLaunchProfile {
+    name: String,
+    description: String,
+    args: Vec<String>,
+    #[serde(skip)]
+    command: String,
+}
+
+fn default_agent_launch_profiles() -> Result<Vec<DefaultLaunchProfile>, AuthFailure> {
+    #[derive(Deserialize)]
+    struct Bundle {
+        schema: String,
+        profiles: Vec<DefaultLaunchProfile>,
+    }
+    let mut bundle: Bundle = serde_json::from_str(DEFAULT_AGENT_LAUNCH_PROFILES).map_err(|_| {
+        AuthFailure::internal(
+            "invalid_default_profiles",
+            "invalid bundled launcher profiles".into(),
+        )
+    })?;
+    if bundle.schema != "treer.launcher-profiles/v1" {
+        return Err(AuthFailure::internal(
+            "invalid_default_profiles",
+            "unsupported bundled launcher profiles schema".into(),
+        ));
+    }
+    for profile in &mut bundle.profiles {
+        profile.command = "treer-agent".into();
+    }
+    for (name, description, command) in [
+        (
+            "Claude (terminal)",
+            "Anthropic Claude Code in a plain terminal.",
+            "claude",
+        ),
+        (
+            "Codex (terminal)",
+            "OpenAI Codex in a plain terminal.",
+            "codex",
+        ),
+    ] {
+        bundle.profiles.push(DefaultLaunchProfile {
+            name: name.into(),
+            description: description.into(),
+            command: command.into(),
+            args: vec![],
+        });
+    }
+    Ok(bundle.profiles)
+}
+
 pub(crate) async fn insert_default_agent_launch_profiles(
     transaction: &mut Transaction<'_, Postgres>,
     workspace_id: &str,
@@ -75,7 +127,7 @@ pub(crate) async fn insert_default_agent_launch_profiles(
     now: &chrono::DateTime<Utc>,
 ) -> Result<(), AuthFailure> {
     let timestamp = now.to_rfc3339();
-    for (name, description, command) in DEFAULT_AGENT_LAUNCH_PROFILES {
+    for profile in default_agent_launch_profiles()? {
         sqlx::query(
             "INSERT INTO agent_launch_profiles(\
              profile_id, workspace_id, name, description, cwd, command, args, created_at, \
@@ -83,10 +135,10 @@ pub(crate) async fn insert_default_agent_launch_profiles(
         )
         .bind(format!("alp_{}", Uuid::new_v4().simple()))
         .bind(workspace_id)
-        .bind(name)
-        .bind(description)
-        .bind(command)
-        .bind(json!([]))
+        .bind(profile.name)
+        .bind(profile.description)
+        .bind(profile.command)
+        .bind(json!(profile.args))
         .bind(&timestamp)
         .bind(user_id)
         .execute(&mut **transaction)
@@ -126,4 +178,33 @@ pub(crate) async fn insert_launch_profile_audit(
     )
     .await
     .map_err(AuthFailure::database)
+}
+
+#[cfg(test)]
+mod default_profile_tests {
+    use super::*;
+
+    #[test]
+    fn bundled_ui_defaults_match_launcher_portable_specs_and_have_unique_names() {
+        let defaults = default_agent_launch_profiles().unwrap();
+        let asset: Value = serde_json::from_str(DEFAULT_AGENT_LAUNCH_PROFILES).unwrap();
+        let entries = asset["profiles"].as_array().unwrap();
+        assert_eq!(entries.len(), 6);
+        assert_eq!(defaults.len(), 8);
+        for (actual, expected) in defaults.iter().zip(entries) {
+            assert_eq!(actual.name, expected["name"]);
+            assert_eq!(actual.description, expected["description"]);
+            assert_eq!(json!(actual.args), expected["args"]);
+            assert_eq!(actual.command, "treer-agent");
+        }
+        assert_eq!(
+            defaults
+                .iter()
+                .map(|profile| &profile.name)
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
+            defaults.len()
+        );
+        assert!(defaults.iter().all(|profile| profile.name != "Pi"));
+    }
 }

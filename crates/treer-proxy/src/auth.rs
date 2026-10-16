@@ -55,12 +55,9 @@ const MAX_LAUNCH_PROFILE_CWD_BYTES: usize = 4_096;
 const MAX_LAUNCH_PROFILE_ARGS: usize = 128;
 const MAX_LAUNCH_PROFILE_ARG_BYTES: usize = 4_096;
 const MAX_LAUNCH_PROFILE_ARGS_BYTES: usize = 64 * 1024;
-const DEFAULT_AGENT_LAUNCH_PROFILES: [(&str, &str, &str); 4] = [
-    ("Codex", "OpenAI Codex", "codex"),
-    ("Claude", "Anthropic Claude Code", "claude"),
-    ("Pi", "Pi coding agent", "pi"),
-    ("OpenCode", "OpenCode", "opencode"),
-];
+// Keep UI defaults byte-identical to the installer's portable profiles so it
+// can adopt them without treating them as customized user commands.
+const DEFAULT_AGENT_LAUNCH_PROFILES: &str = include_str!("../../../launchers/agent/profiles.json");
 
 pub(crate) struct ProfileMutationActor<'a> {
     pub kind: &'a str,

@@ -143,8 +143,13 @@ pub(super) fn resolve_agent_command(
     Err(ProtocolError::new(
         "command_not_found",
         format!(
-            "executable not found in absolute PATH directories: {}",
-            command.chars().take(128).collect::<String>()
+            "executable not found in absolute PATH directories: {}{}",
+            command.chars().take(128).collect::<String>(),
+            if command == "treer-agent" {
+                "; install the agent launcher on this machine (treer-agent-server launcher install)"
+            } else {
+                ""
+            }
         ),
     ))
 }
@@ -363,6 +368,15 @@ mod command_resolution_tests {
         assert_eq!(error.code, "command_not_found");
         assert!(!error.message.contains(fixture.0.to_str().unwrap()));
         assert!(error.message.contains("treer-agent"));
+        assert!(error
+            .message
+            .contains("treer-agent-server launcher install"));
+        assert!(
+            !resolve_agent_command("missing-harness", &fixture.environment())
+                .unwrap_err()
+                .message
+                .contains("launcher install")
+        );
     }
 
     #[cfg(unix)]
