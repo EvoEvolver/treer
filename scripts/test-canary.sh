@@ -10,6 +10,10 @@ environment=${TREER_CANARY_ENVIRONMENT:-canary}
 proxy_service=${TREER_CANARY_PROXY_SERVICE:-c7f70740-49fa-4ab9-bb41-97b82f99dcce}
 proxy_url=${TREER_CANARY_PROXY_URL:-https://proxy.canary.treer.ai/}
 proxy_url=${proxy_url%/}
+# Exact Console origin for cookie-authenticated writes (the Proxy checks it).
+console_url=${TREER_CANARY_APP_URL:-https://app.canary.treer.ai/}
+canary_console_origin=$(printf '%s' "$console_url" | sed -n 's|^\(https\{0,1\}://[^/]*\).*|\1|p')
+[ -n "$canary_console_origin" ] || { echo "TREER_CANARY_APP_URL must be an http(s) URL" >&2; exit 1; }
 timeout=${TREER_CANARY_TEST_TIMEOUT:-900}
 keep_resources=${TREER_CANARY_KEEP_RESOURCES:-0}
 skip_public=${TREER_CANARY_SKIP_PUBLIC:-0}
@@ -37,7 +41,7 @@ api() {
     api_path=$2
     data=${3:-}
     if [ -n "$data" ]; then
-        if ! api_response=$(curl -sS --fail-with-body -b "$user_cookies" \
+        if ! api_response=$(curl -sS --fail-with-body -b "$user_cookies" -H "Origin: $canary_console_origin" \
             -X "$method" -H 'Content-Type: application/json' --data "$data" \
             "$proxy_url$api_path"); then
             printf 'Treer API %s %s failed: %s\n' "$method" "$api_path" "$api_response" >&2
@@ -51,7 +55,7 @@ api() {
             return 1
         fi
     else
-        if ! api_response=$(curl -sS --fail-with-body -b "$user_cookies" \
+        if ! api_response=$(curl -sS --fail-with-body -b "$user_cookies" -H "Origin: $canary_console_origin" \
             -X "$method" "$proxy_url$api_path"); then
             printf 'Treer API %s %s failed: %s\n' "$method" "$api_path" "$api_response" >&2
             return 1
@@ -190,7 +194,7 @@ login_payload=$(jq -n --arg email "$test_email" --arg password "$admin_password"
 if ! user_cookies=$(printf '%s' "$login_payload" \
     | canary_login_cookies "$proxy_url/api/auth/login" 2>/dev/null); then
     invitation=$(curl -fsS -b "$admin_cookies" -H 'Content-Type: application/json' \
-        -X POST "$proxy_url/api/admin/invitations")
+        -H "Origin: $canary_console_origin" -X POST "$proxy_url/api/admin/invitations")
     invite=$(printf '%s' "$invitation" | jq -er '.token')
     register_payload=$(jq -n --arg invite "$invite" --arg email "$test_email" \
         --arg password "$admin_password" \

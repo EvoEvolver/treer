@@ -71,6 +71,12 @@ just release-canary HEAD
 The `canary` wrapper prepares an isolated worktree, supports `--resume`, and
 optionally notifies a verified Agent after success. See [Release process](releases.md#canary-release).
 
+Cookie-authenticated writes (`scripts/test-canary.sh` login, admin invitation and
+API calls; the Docker e2e uses `http://web.invalid`) send the exact configured
+Console origin as `Origin`, taken from `TREER_CANARY_APP_URL` (default
+`https://app.canary.treer.ai/`), never guessed from the Proxy URL. The Proxy
+rejects such writes without it.
+
 `release-canary` requires a clean committed revision, runs `just check`, deploys
 the current worktree to the Railway Proxy and the built App artifact to
 Cloudflare, and verifies their health endpoints. It also sets the Canary public

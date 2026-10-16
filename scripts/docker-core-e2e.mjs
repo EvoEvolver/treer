@@ -47,7 +47,9 @@ async function run(suffix, ...args) {
   containers.push(name);
 }
 async function api(route, body, options={}) {
-  const headers = {Cookie:cookie, ...options.headers};
+  const method = options.method || (body===undefined?'GET':'POST');
+  // Cookie writes must carry the exact configured Console origin (TREER_APP_PUBLIC_URL).
+  const headers = {Cookie:cookie, ...(method==='GET'||method==='HEAD'?{}:{Origin:'http://web.invalid'}), ...options.headers};
   const payload = body === undefined ? undefined : JSON.stringify(body);
   if (payload !== undefined) {
     headers['Content-Type'] = 'application/json';
@@ -55,7 +57,7 @@ async function api(route, body, options={}) {
   }
   const response = await new Promise((resolve,reject) => {
     // node:http preserves Host; fetch may replace it with the request URL host.
-    const req = http.request(base+route, {method:options.method || (body===undefined?'GET':'POST'),headers}, res => {
+    const req = http.request(base+route, {method,headers}, res => {
       const chunks=[];
       res.on('data',chunk=>chunks.push(chunk));
       res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,text:Buffer.concat(chunks).toString()}));
