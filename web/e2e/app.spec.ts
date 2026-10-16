@@ -790,6 +790,8 @@ test("mixed workloads use common lifecycle endpoints and logs", async ({ page })
       await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()
       const request = page.waitForRequest((request) => request.url().endsWith(`/agents/${id}/${action.toLowerCase()}`) && request.method() === "POST")
       await page.getByRole("menuitem", { name: action, exact: true }).click()
+      // Stop is destructive and asks first; Start and Restart act immediately.
+      if (action === "Stop") await page.getByRole("dialog").getByRole("button", { name: "Stop", exact: true }).click()
       await request
     }
     await page.getByRole("button", { name: `Actions for ${name}`, exact: true }).click()

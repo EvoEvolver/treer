@@ -736,4 +736,6 @@ export const zh: Messages = {
   "app.open_full_console": "打开完整控制台",
   "app.workload_not_found": "找不到此工作负载,或你没有访问权限。",
   "app.open_in_new_tab": "在新浏览器标签页中打开",
+  "tree.stop_confirm": "停止 {path}？",
+  "tree.stop_detail": "这会停止正在运行的进程，未保存的工作可能丢失。",
 }

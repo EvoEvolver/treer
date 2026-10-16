@@ -305,6 +305,8 @@ bundle before running `pnpm test:e2e security.spec.ts --workers=1`.
 - Right-clicking a Tree row (or Shift+F10 / the Menu key on the focused row) opens the same actions as its ⋯
   button at the pointer. For an Agent or App that includes **Open in new browser tab**, which opens the focus-mode
   page; Escape returns focus to the row. Right-click does not select or open the workload.
+  The menu keeps the lifecycle actions (Start, Restart, Stop, Delete): the Tree is where they live, since the tab
+  menu has none. Stop and Delete are last, after a separator, and both ask for confirmation first.
 - The error toast is a `role="alert"` live region portalled to `<body>` so it is
   announced and can be dismissed while a modal dialog is open.
 - `prefers-reduced-motion: reduce` disables animation and shortens transitions.

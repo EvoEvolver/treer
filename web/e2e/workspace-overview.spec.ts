@@ -248,3 +248,47 @@ test.describe('Tree row context menu', () => {
     }
   })
 })
+
+test.describe('Tree Stop and Delete are at the bottom and confirm first', () => {
+  async function setup(page: Page) {
+    await page.setViewportSize({ width: 1360, height: 900 })
+    await fixture(page)
+    await page.goto('/')
+    const folder = page.getByRole('treeitem', { name: 'Research', exact: true })
+    if ((await folder.getAttribute('aria-expanded')) !== 'true') await folder.getByRole('button').first().click()
+  }
+  async function openMenu(page: Page, how: 'button' | 'right-click') {
+    if (how === 'button') await page.getByRole('button', { name: 'Actions for reviewer', exact: true }).first().click()
+    else await page.getByRole('tree').getByRole('link', { name: /^reviewer/ }).first().click({ button: 'right' })
+  }
+  for (const how of ['button', 'right-click'] as const) {
+    test(`Stop asks for confirmation, Cancel sends nothing, and the destructive items are last (${how})`, async ({ page }) => {
+      await setup(page)
+      // Registered after the fixture so it takes precedence over its catch-all API mock.
+      const stops: string[] = []
+      await page.route('**/agents/*/stop', (route) => { stops.push(route.request().url()); return route.fulfill({ json: {} }) })
+      await openMenu(page, how)
+      const names = await page.getByRole('menu').getByRole('menuitem').allInnerTexts()
+      expect(names.slice(-2)).toEqual(['Stop', 'Delete'])
+      // A separator sits between the regular actions and the destructive pair.
+      await expect(page.getByRole('menu').getByRole('separator')).toHaveCount(1)
+      await page.getByRole('menuitem', { name: 'Stop', exact: true }).click()
+      await expect(page.getByRole('dialog').getByRole('heading', { name: /^Stop .*reviewer\?$/ })).toBeVisible()
+      expect(stops).toEqual([])
+      await page.getByRole('dialog').getByRole('button', { name: 'Cancel', exact: true }).click()
+      expect(stops).toEqual([])
+      await openMenu(page, how)
+      await page.getByRole('menuitem', { name: 'Stop', exact: true }).click()
+      await page.getByRole('dialog').getByRole('button', { name: 'Stop', exact: true }).click()
+      await expect.poll(() => stops.length).toBe(1)
+      expect(stops[0]).toMatch(/\/agents\/reviewer-a\/stop$/)
+    })
+  }
+
+  test('Delete still asks for confirmation from the Tree', async ({ page }) => {
+    await setup(page)
+    await openMenu(page, 'right-click')
+    await page.getByRole('menuitem', { name: 'Delete', exact: true }).click()
+    await expect(page.getByRole('dialog')).toBeVisible()
+  })
+})

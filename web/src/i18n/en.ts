@@ -735,6 +735,8 @@ export const en = {
   "app.open_full_console": "Open full Console",
   "app.workload_not_found": "This workload was not found, or you do not have access to it.",
   "app.open_in_new_tab": "Open in new browser tab",
+  "tree.stop_confirm": "Stop {path}?",
+  "tree.stop_detail": "This stops the running process. Unsaved work may be lost.",
 } as const
 
 export type MessageKey = keyof typeof en
