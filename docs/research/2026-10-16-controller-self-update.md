@@ -51,6 +51,22 @@ timeouts/body sizes, and production HTTPS. Loopback HTTP is fixture-only.
 
 ## Transaction and Windows handoff
 
+Unix lock handoff now has a bounded SCM_RIGHTS transport (one to three lock
+descriptors). The parent retains its handles until durable ownership ACK; the
+child receives references to the same open file descriptions, so closing the
+parent's copies does not create an unlock/relock gap. Core reopens checked stable
+lock names only for inode comparison, adopts each received exclusive lock, and
+rechecks the selected enrollment/shared-installation inventory. A different
+workspace's enrollment lock is rejected. Descriptor count/header/truncation
+errors fail closed and close received handles; no ambiguous-send retry. Linux
+receives with atomic CLOEXEC. On Darwin receive must run before activator threads
+or subprocess creation, because CLOEXEC is applied immediately after receipt.
+The socket must be dedicated blocking I/O with bounded deadlines. This transport
+does not authenticate its peer or establish a durable ownership ACK: the future
+activator entry must authenticate the private socket's peer/job/verified image
+and commit handoff before the parent reports accepted. No public activation
+command exists yet.
+
 1. Acquire an installation-wide cross-process lock (shared binaries span
    workspaces), then selected-enrollment activation lock in that order. Enumerate
    enrollment names without exposing credentials; require explicit shared-bin

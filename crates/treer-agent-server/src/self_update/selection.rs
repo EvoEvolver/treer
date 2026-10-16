@@ -348,6 +348,65 @@ impl Selected {
 }
 
 impl SelectionLocks {
+    /// Caller must authenticate the job-local activator on this private socket
+    /// before sending. Keep self alive until ownership is durably acknowledged.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn send(&self, stream: &std::os::unix::net::UnixStream) -> Result<()> {
+        let mut files: Vec<_> = self.directories.iter().map(|(_, _, lock)| lock).collect();
+        files.push(&self._enrollment);
+        treer_platform::lock_transfer::send(stream, &files)
+            .map_err(|_| anyhow::anyhow!("update_lock_transfer_failed"))
+    }
+
+    /// Receive before starting activator threads (Darwin CLOEXEC requirement).
+    /// No caller-provided destination is accepted: all descriptor inodes must
+    /// match the selected checked installation/enrollment lock names.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn receive(selected: &Selected, stream: &std::os::unix::net::UnixStream) -> Result<Self> {
+        let parent = selected
+            .controller_path()
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("invalid_update_installation"))?;
+        let mut directories = Vec::new();
+        for path in [parent, selected.cli_parent.as_path()] {
+            let directory = InstallationDirectory::open(path)?;
+            directories.push((directory.identity()?, path.to_path_buf(), directory));
+        }
+        directories.sort_by_key(|(identity, _, _)| *identity);
+        directories.dedup_by_key(|(identity, _, _)| *identity);
+        let files = treer_platform::lock_transfer::receive(stream, directories.len() + 1)
+            .map_err(|_| anyhow::anyhow!("update_lock_transfer_failed"))?;
+        let mut files = files.into_iter();
+        let mut held = Vec::new();
+        for (_, path, directory) in directories {
+            let expected = directory.existing_lock()?;
+            let file = treer_platform::lock_transfer::adopt(files.next().unwrap(), &expected)
+                .map_err(|_| anyhow::anyhow!("update_lock_transfer_mismatch"))?;
+            held.push((path, directory, file));
+        }
+        let config = PrivateDirectory::open(&selected.config_root)?;
+        let expected = config.read_file(&format!("{}-self-update.lock", selected.server_id()))?;
+        let enrollment = treer_platform::lock_transfer::adopt(files.next().unwrap(), &expected)
+            .map_err(|_| anyhow::anyhow!("update_lock_transfer_mismatch"))?;
+        let fresh = Inventory::load(
+            &selected.config_root,
+            &selected.enrollment.controller.install_hostname,
+        )?
+        .select(Some(selected.workspace()), selected.accept_shared_binaries)?;
+        if fresh.enrollment != selected.enrollment
+            || fresh.cli_parent != selected.cli_parent
+            || fresh.shared_server_ids != selected.shared_server_ids
+        {
+            bail!("update_enrollment_changed");
+        }
+        Ok(Self {
+            directories: held,
+            _enrollment: enrollment,
+            binding: selected.enrollment.clone(),
+            config_root: selected.config_root.clone(),
+        })
+    }
+
     pub fn directory(&self, selected: &Selected, binary: Binary) -> Result<&InstallationDirectory> {
         if self.binding != selected.enrollment || self.config_root != selected.config_root {
             bail!("update_installation_lock_mismatch");
@@ -443,6 +502,30 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.path).unwrap();
         }
+    }
+
+    #[test]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    fn transferred_locks_have_no_unlock_gap_and_cannot_adopt_another_enrollment() {
+        let f = Fixture::new();
+        f.enrollment("srv_a", "ws_a", &f.bin.join("treer-agent-server"));
+        f.enrollment("srv_b", "ws_b", &f.bin.join("treer-agent-server"));
+        let a = f.inventory().select(Some("ws_a"), true).unwrap();
+        let b = f.inventory().select(Some("ws_b"), true).unwrap();
+        let held = a.lock().unwrap();
+        let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+        held.send(&sender).unwrap();
+        assert!(SelectionLocks::receive(&b, &receiver).is_err());
+        assert!(a.lock().is_err());
+        let (sender, receiver) = std::os::unix::net::UnixStream::pair().unwrap();
+        held.send(&sender).unwrap();
+        let adopted = SelectionLocks::receive(&a, &receiver).unwrap();
+        drop(held);
+        assert!(a.lock().is_err());
+        assert!(b.lock().is_err());
+        assert!(adopted.directory(&a, Binary::Controller).is_ok());
+        drop(adopted);
+        assert!(a.lock().is_ok());
     }
 
     #[test]

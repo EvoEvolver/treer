@@ -77,6 +77,19 @@ impl InstallationDirectory {
         Ok(lock)
     }
 
+    /// Open the already-created stable lock for descriptor handoff comparison;
+    /// do not acquire a fresh lock or create/unlink any name here.
+    pub fn existing_lock(&self) -> io::Result<File> {
+        let file: File = sys::openat(
+            &self.file,
+            ".treer-self-update",
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?
+        .into();
+        PrivateDirectory::from_handle(file)?.read_file("installation.lock")
+    }
+
     /// Exclusive non-executable sibling stage. Do not execute or publish until
     /// the caller has verified the full digest, closed writers and synced it.
     pub fn create_file(&self, child: &str) -> io::Result<File> {
