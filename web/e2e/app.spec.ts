@@ -2307,3 +2307,61 @@ for (const mobile of [false, true]) {
     }
   })
 }
+
+for (const width of [1280, 390]) for (const state of ['cleanup_failed', 'reserved_outcome_unknown']) {
+  test(`reservation cleanup confirms, preserves draft and never auto-creates (${state}, ${width})`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 850 })
+    let creates = 0, cleanups = 0
+    await page.route('**/api/workspaces/ws-1/agents', route => {
+      if (route.request().method() !== 'POST') return route.fallback()
+      creates++
+      return route.fulfill({ status: 409, json: { error: { code: 'spawn_failed', message: 'Startup could not be confirmed', details: {
+        machine_id: 'srv-a', agent_id: 'ag_reserved', creation_state: state,
+      } } } })
+    })
+    await page.route('**/api/workspaces/ws-1/agent-reservations/ag_reserved/cleanup', route => {
+      cleanups++
+      expect(route.request().method()).toBe('POST')
+      expect(route.request().postDataJSON()).toEqual({})
+      return ok(route, { agent_id: 'ag_reserved', deleted: true, already_deleted: false })
+    })
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+    await page.getByRole('menuitem', { name: 'Add agent', exact: true }).click()
+    const create = page.getByRole('button', { name: 'Create terminal', exact: true })
+    await page.getByRole('textbox', { name: 'Name', exact: true }).fill('Keep my draft')
+    await create.click()
+    await expect(create).toBeDisabled()
+    await expect(page.getByText('ag_reserved', { exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Clean up reserved identity', exact: true }).click()
+    const confirmation = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Clean up reserved identity', exact: true }) })
+    await confirmation.getByRole('button', { name: 'Cancel', exact: true }).click()
+    expect(cleanups).toBe(0)
+    await page.getByRole('button', { name: 'Clean up reserved identity', exact: true }).click()
+    await page.screenshot({ path: info.outputPath(`reservation-${width}-${state}.png`) })
+    await confirmation.getByRole('button', { name: 'Confirm cleanup', exact: true }).click()
+    await expect(confirmation).toBeHidden()
+    await expect(create).toBeEnabled()
+    await expect(page.getByRole('textbox', { name: 'Name', exact: true })).toHaveValue('Keep my draft')
+    expect(cleanups).toBe(1)
+    expect(creates).toBe(1)
+    await expect(page.getByText(/Reservation removed/)).toBeVisible()
+  })
+}
+
+for (const status of [403, 409, 501, 503]) test(`reservation cleanup failure ${status} keeps identity and creation blocked`, async ({ page }) => {
+  await page.route('**/api/workspaces/ws-1/agents', route => route.request().method() !== 'POST' ? route.fallback() : route.fulfill({ status: 409, json: { error: { message: 'Not confirmed', details: { machine_id: 'srv-a', agent_id: 'ag_reserved', creation_state: 'cleanup_failed' } } } }))
+  let requests = 0
+  await page.route('**/api/workspaces/ws-1/agent-reservations/ag_reserved/cleanup', route => { requests++; return route.fulfill({ status, json: { error: { message: 'Cleanup denied' } } }) })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Add to tree', exact: true }).click()
+  await page.getByRole('menuitem', { name: 'Add agent', exact: true }).click()
+  await page.getByRole('button', { name: 'Create terminal', exact: true }).click()
+  await page.getByRole('button', { name: 'Clean up reserved identity', exact: true }).click()
+  const confirmation = page.getByRole('dialog').filter({ has: page.getByRole('heading', { name: 'Clean up reserved identity', exact: true }) })
+  await confirmation.getByRole('button', { name: 'Confirm cleanup', exact: true }).click()
+  await expect(confirmation.getByRole('alert')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Create terminal', exact: true, includeHidden: true })).toBeDisabled()
+  expect(requests).toBe(1)
+})

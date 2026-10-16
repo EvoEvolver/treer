@@ -523,3 +523,16 @@ defense in depth. Menu opens use `noopener,noreferrer` so the Console URL is not
 
 Creating an Agent from Overview starts at the workspace root and shows no Tree folder hint.
 Creating from a folder in the Tree shows that folder’s full path and reserves placement there.
+
+### Reserved Agent identities
+
+Creation errors retain optional Core `code`/`details`; the Console never infers a
+provider or cleanup outcome from error text. If Core reports an unconfirmed or
+failed reservation cleanup, creation remains blocked and the draft is preserved.
+The explicit **Clean up reserved identity** confirmation uses the human-session
+reservation cleanup endpoint, with existing `agent.delete` Policy; Core rechecks
+ownership and absence and fences late creates before removing the reservation.
+Old or offline Controllers and observed workloads fail visibly without claiming
+cleanup. Successful cleanup enables an explicit new submission; it never creates
+an Agent automatically. This requires the Core reservation-cleanup capability;
+the Web UI alone does not provide it.

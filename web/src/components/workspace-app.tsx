@@ -1,3 +1,4 @@
+import { agentCreationFailure, type AgentCreationFailure } from "@/lib/agent-creation-failure"
 import { WorkloadSurface } from "@/components/workload-surface"
 import { appOwnUrl } from "@/lib/app-url"
 import { WorkloadFocusBar } from "@/components/workload-focus-bar"
@@ -92,6 +93,8 @@ function WorkspaceAppContent() {
   const treeWidth = useTreeWidth(user?.user_id, () => requestAnimationFrame(() => terminalPaneRef.current?.fit()))
   const ctrlArmedRef = useRef(false)
   const [error, setError] = useState<string | null>(null)
+  const [reservationCleaned, setReservationCleaned] = useState(false)
+  const [creationFailure, setCreationFailure] = useState<AgentCreationFailure | null>(null)
   const dialogState = useWorkspaceDialogState()
   const {
     setSettingsOpen, setCreateOrganizationOpen, setCreateWorkspaceOpen, setDeleteWorkspaceOpen,
@@ -554,11 +557,12 @@ function WorkspaceAppContent() {
       setCreateAgentOpen(false)
       return
     }
-    if (!workspaceId || creatingAgent) return
+    if (!workspaceId || creatingAgent || (creationFailure && creationFailure.creation_state !== "identity_removed")) return
+    const creationMachineId = agentServerId
     const creationWorkspaceId = workspaceId
     const folder = agentFolder
     const placement = folder ? { folder_id: folder.folderId } : {}
-    setCreatingAgent(true); setCreateAgentError("")
+    setCreatingAgent(true); setCreateAgentError(""); setCreationFailure(null); setReservationCleaned(false)
     try {
       let agent
       if (agentProfileId === "terminal") {
@@ -581,7 +585,10 @@ function WorkspaceAppContent() {
       setCreateAgentOpen(false)
       await refreshSnapshot()
       if (workspaceIdRef.current === creationWorkspaceId) showAgentTerminal(agentId)
-    } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) setCreateAgentError(reason instanceof Error ? reason.message : t("app.create_failed")) }
+    } catch (reason) { if (workspaceIdRef.current === creationWorkspaceId) {
+      setCreateAgentError(reason instanceof Error ? reason.message : t("app.create_failed"))
+      setCreationFailure(reason instanceof ApiError ? agentCreationFailure(reason.details, creationMachineId) : null)
+    } }
     finally { setCreatingAgent(false) }
   }
 
@@ -607,7 +614,7 @@ function WorkspaceAppContent() {
     openCreateAgent(true, folder ?? null)
   }
 
-  useEffect(() => { setCreateAgentOpen(false); setAgentFolder(null) }, [workspaceId])
+  useEffect(() => { setCreateAgentOpen(false); setAgentFolder(null); setCreationFailure(null); setReservationCleaned(false) }, [workspaceId])
 
   function selectAgentProfile(profileId: string) {
     changeAgentProfile(profileId)
@@ -1079,6 +1086,9 @@ function WorkspaceAppContent() {
     <ErrorToast message={error} onDismiss={() => setError(null)} />
 
     <WorkspaceDialogs state={dialogState}
+      creationFailure={creationFailure}
+      reservationCleaned={reservationCleaned}
+      onReservationCleaned={() => { setCreationFailure(null); setCreateAgentError(""); setReservationCleaned(true) }}
       user={user}
       setUser={setUser}
       showError={showError}

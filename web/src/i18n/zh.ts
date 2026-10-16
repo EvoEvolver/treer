@@ -737,5 +737,14 @@ export const zh: Messages = {
   "app.workload_not_found": "找不到此工作负载,或你没有访问权限。",
   "app.open_in_new_tab": "在新浏览器标签页中打开",
   "tree.stop_confirm": "停止 {path}？",
-  "tree.stop_detail": "这会停止正在运行的进程，未保存的工作可能丢失。",
+  "tree.stop_detail": "这会停止正在运行的进程，未保存的工作可能丢失。",  "provider.reservation_unknown": "Agent 身份仍被预留，尚不能确认是否启动。请先处理此预留身份，再创建 Agent。",
+  "provider.cleanup": "清理预留身份",
+  "provider.cleanup_detail": "只有 Core 能证明尚未启动的身份才能清理。这会永久释放名称并撤销凭据。如果发现工作负载，清理会被拒绝。",
+  "provider.confirm_cleanup": "确认清理",
+  "provider.cleaning": "正在清理…",
+  "provider.cleaned": "预留身份已清理。请检查草稿，准备好后手动重新提交。",
+  "provider.cleanup_unavailable": "此控制平面或 Controller 不支持预留身份清理。身份仍被预留。",
+  "provider.cleanup_observed": "Core 无法证明此工作负载不存在，已保留身份。请检查状态后使用正常生命周期操作。",
+  "provider.cleanup_unconfirmed": "无法确认清理成功。身份仍被预留。",
+
 }

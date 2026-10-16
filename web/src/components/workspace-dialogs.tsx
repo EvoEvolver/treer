@@ -1,3 +1,5 @@
+import { AgentReservationRecovery } from "@/components/agent-reservation-recovery"
+import type { AgentCreationFailure } from "@/lib/agent-creation-failure"
 import { Field,SimpleNameDialog } from "@/components/control-plane-ui"
 import { SettingsDialog } from "@/components/settings"
 import { Button } from "@/components/ui/button"
@@ -15,6 +17,9 @@ import type { Dispatch,FormEvent,SetStateAction } from "react"
 import { t } from "@/i18n"
 
 interface WorkspaceDialogsProps {
+  reservationCleaned: boolean
+  creationFailure: AgentCreationFailure | null
+  onReservationCleaned: () => void
   state: ReturnType<typeof useWorkspaceDialogState>
   user: User
   setUser: Dispatch<SetStateAction<User | null | undefined>>
@@ -46,7 +51,7 @@ interface WorkspaceDialogsProps {
   confirmDeleteWorkspace: () => Promise<void>
 }
 
-export function WorkspaceDialogs({ state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadToAgentMachine, selectedAgentMachine, selectedAgent, selectedAgentMachineOnline, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
+export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadToAgentMachine, selectedAgentMachine, selectedAgent, selectedAgentMachineOnline, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
   const {
     settingsOpen, setSettingsOpen, createOrganizationOpen, setCreateOrganizationOpen,
     createWorkspaceOpen, setCreateWorkspaceOpen, deleteWorkspaceOpen, setDeleteWorkspaceOpen,
@@ -108,10 +113,12 @@ export function WorkspaceDialogs({ state, user, setUser, showError, createOrgani
           {agentProfileId === "manual" && <Field label={t("apps.command")}><Input aria-label={t("apps.command")} className="font-mono" value={agentCommandLine} onChange={(event) => changeAgentCommandLine(event.target.value)} placeholder={t("dialogs.path_to_your_launcher_option")} required /></Field>}
           {selectedCreateProfile && <span className="block text-[10px] text-muted-foreground">{t("dialogs.runs_the_saved_command_on")}</span>}
           <Field label={t("dialogs.name")}><Input aria-label={t("dialogs.name")} value={agentName} onChange={(event) => { setAgentName(event.target.value); setAgentNameCustomized(true) }} required /></Field>
+          {reservationCleaned && <p role="status" className="text-sm">{t("provider.cleaned")}</p>}
           {createAgentError && <p role="alert" className="break-words text-sm text-destructive">{createAgentError}</p>}
+          {creationFailure && creationFailure.creation_state !== "identity_removed" && workspace && <AgentReservationRecovery key={`${workspace.workspace_id}/${creationFailure.agent_id}`} workspaceId={workspace.workspace_id} failure={creationFailure} onCleaned={onReservationCleaned} />}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>{t("common.cancel")}</Button>
-            <Button type="submit" disabled={creatingAgent || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? t("dialogs.starting") : agentProfileId === "terminal" ? t("dialogs.create_terminal") : t("dialogs.create_agent")}</Button>
+            <Button type="submit" disabled={creatingAgent || Boolean(creationFailure && creationFailure.creation_state !== "identity_removed") || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? t("dialogs.starting") : agentProfileId === "terminal" ? t("dialogs.create_terminal") : t("dialogs.create_agent")}</Button>
           </DialogFooter>
         </form>
       </DialogContent>

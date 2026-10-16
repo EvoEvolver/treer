@@ -737,6 +737,15 @@ export const en = {
   "app.open_in_new_tab": "Open in new browser tab",
   "tree.stop_confirm": "Stop {path}?",
   "tree.stop_detail": "This stops the running process. Unsaved work may be lost.",
+  "provider.reservation_unknown": "The Agent identity is still reserved. Startup was not confirmed. Resolve this reservation before creating another Agent.",
+  "provider.cleanup": "Clean up reserved identity",
+  "provider.cleanup_detail": "Only an identity that Core proves has not started can be removed. This permanently releases its name and revokes its credentials. If a workload is observed, cleanup will be refused.",
+  "provider.confirm_cleanup": "Confirm cleanup",
+  "provider.cleaning": "Cleaning up…",
+  "provider.cleaned": "Reservation removed. Review your draft and explicitly submit again when ready.",
+  "provider.cleanup_unavailable": "This control plane or Controller does not support reservation cleanup. The identity remains reserved.",
+  "provider.cleanup_observed": "Core could not prove this workload is absent. The identity was kept; inspect its state before using normal lifecycle controls.",
+  "provider.cleanup_unconfirmed": "Cleanup could not be confirmed. The identity remains reserved.",
 } as const
 
 export type MessageKey = keyof typeof en
