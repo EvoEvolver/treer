@@ -2,6 +2,7 @@
 const symbols: Record<string, string> = {
   folder: "M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
   file: "M6 3h8l4 4v14H6zM14 3v4h4",
+  download: "M12 4v11M7 10.5l5 5 5-5M5 19.5h14",
   tasks: "M5 7h14M5 12h14M5 17h9",
   up: "M12 19V5M6 11l6-6 6 6",
   down: "M12 5v14M6 13l6 6 6-6",

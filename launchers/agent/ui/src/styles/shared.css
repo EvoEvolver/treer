@@ -175,6 +175,11 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
 .trow .tn{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .trow .chev{transition:transform var(--dur,0ms)}
 .trow[aria-expanded=true] .chev{transform:rotate(90deg)}
+.tree li.has-dl{display:flex;align-items:center}
+.tree li.has-dl .trow{flex:1;min-width:0;width:auto}
+.trow-dl{flex:none;display:inline-flex;align-items:center;justify-content:center;min-width:28px;min-height:30px;color:inherit;border-radius:4px;opacity:0}
+.tree li:hover .trow-dl,.tree li:focus-within .trow-dl,.trow-dl:focus-visible{opacity:1}
+.btn.dl{display:inline-flex;align-items:center;gap:4px;text-decoration:none;color:inherit}
 .preview{display:flex;flex-direction:column;min-height:0}
 .preview pre{margin:0;overflow:auto;flex:1;white-space:pre}
 .filter{display:flex;align-items:center;gap:8px}
@@ -210,6 +215,9 @@ progress.meter::-moz-progress-bar{background:var(--accent)}
   :root[data-look] .app button,:root[data-look] .app summary,
   :root[data-look] .app .field input,:root[data-look] .app .field select{min-width:44px;min-height:44px}
   :root[data-look] .app button.model{align-items:center;justify-content:center}
+  /* Download links: always visible on touch/narrow layouts, with real 44px hit areas. */
+  :root[data-look] .app .trow-dl{opacity:1;min-width:44px;min-height:44px}
+  :root[data-look] .app .btn.dl{min-width:44px;min-height:44px;justify-content:center}
 }
 .image-drafts{padding:8px 12px}.image-drafts p{font-size:12px;margin:6px 0;overflow-wrap:anywhere}.image-list{display:flex;flex-wrap:wrap;gap:8px;max-width:100%}.image-list figure{position:relative;margin:0}.image-list img{display:block;width:88px;height:88px;object-fit:contain;border:1px solid var(--line);border-radius:6px}.image-list figure button{position:absolute;right:0;top:0;min-width:28px;min-height:28px;border:1px solid var(--line);border-radius:4px;background:var(--panel);color:var(--fg);cursor:pointer}.sent-images{margin-top:8px}.sent-images img{width:120px;height:120px}.image-add{flex-shrink:0}
 @media (max-width:767px){

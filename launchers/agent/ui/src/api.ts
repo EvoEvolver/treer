@@ -28,6 +28,11 @@ export async function uploadImage(file: File) {
   return payload.attachment as import("./types").ImageAttachment;
 }
 
+// A plain same-origin GET: the browser streams the file straight to disk with the server's attachment headers.
+export function fileDownloadUrl(path: string) {
+  return `v1/files/download?path=${encodeURIComponent(path)}`;
+}
+
 export function imageUrl(id: string) {
   if (!/^img_[a-f0-9]{32}$/.test(id)) return "";
   return `api/attachments/${id}`;

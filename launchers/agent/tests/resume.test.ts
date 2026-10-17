@@ -119,6 +119,81 @@ test("session archive HTTP route rejects browser origins and DNS-rebinding Hosts
   } finally { await stop(server.child); }
 });
 
+test("file download streams regular files with safe headers and keeps the working-directory confinement", async () => {
+  const cwd = temp();
+  writeFileSync(join(cwd, "plain.txt"), "hello download\n");
+  writeFileSync(join(cwd, "résumé 日本語.txt"), "unicode name");
+  writeFileSync(join(cwd, 'quote";x.txt'), "quote name");
+  writeFileSync(join(cwd, "empty.bin"), "");
+  mkdirSync(join(cwd, "nested"));
+  writeFileSync(join(cwd, "nested", "inner.txt"), "inner");
+  symlinkSync(join(cwd, "nested", "inner.txt"), join(cwd, "inside-link"));
+  const elsewhere = temp();
+  writeFileSync(join(elsewhere, "secret.txt"), "not yours");
+  symlinkSync(elsewhere, join(cwd, "outside"));
+  symlinkSync(join(elsewhere, "secret.txt"), join(cwd, "outside-file"));
+  if (process.platform !== "win32") execFileSync("mkfifo", [join(cwd, "pipe")]);
+  const server = await launchServer(cwd);
+  const get = (path: string, init?: RequestInit) => fetch(server.base + "/v1/files/download?path=" + encodeURIComponent(path), init);
+  try {
+    const plain = await get("plain.txt");
+    assert.equal(plain.status, 200);
+    assert.equal(await plain.text(), "hello download\n");
+    assert.equal(plain.headers.get("content-type"), "application/octet-stream");
+    assert.equal(plain.headers.get("content-length"), "15");
+    assert.equal(plain.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(plain.headers.get("cache-control"), "no-store");
+    assert.match(plain.headers.get("content-disposition")!, /^attachment; filename="plain\.txt"; filename\*=UTF-8''plain\.txt$/);
+    // Non-ASCII names: ASCII-only fallback plus an RFC 5987 UTF-8 filename*; quotes and semicolons never break the header.
+    const unicode = await get("résumé 日本語.txt");
+    assert.equal(await unicode.text(), "unicode name");
+    const disposition = unicode.headers.get("content-disposition")!;
+    assert.match(disposition, /^attachment; filename="[\x20-\x7e]+"; filename\*=UTF-8''r%C3%A9sum%C3%A9%20%E6%97%A5%E6%9C%AC%E8%AA%9E\.txt$/);
+    const quoted = (await get('quote";x.txt')).headers.get("content-disposition")!;
+    assert.match(quoted, /^attachment; filename="quote__x\.txt"; filename\*=UTF-8''quote%22%3Bx\.txt$/);
+    assert.equal((await (await get("empty.bin")).arrayBuffer()).byteLength, 0);
+    // Internal symlinks work, like the preview.
+    assert.equal(await (await get("inside-link")).text(), "inner");
+    // Confinement negatives and non-regular files.
+    for (const path of ["../secret", "nested/../plain.txt", "/etc/passwd", "outside", "outside-file", "outside/secret.txt"]) {
+      const denied = await get(path);
+      assert.equal(denied.status, 403, path);
+      assert.equal((await denied.json()).error.code, "file_access_failed");
+    }
+    assert.equal((await get("nested")).status, 400);
+    if (process.platform !== "win32") assert.equal((await get("pipe")).status, 400);
+    assert.equal((await get("")).status, 400);
+    assert.equal((await get("missing")).status, 404);
+    const post = await get("plain.txt", { method: "POST", body: "x" });
+    assert.equal(post.status, 405);
+    assert.equal(post.headers.get("allow"), "GET");
+    assert.equal(readFileSync(join(cwd, "plain.txt"), "utf8"), "hello download\n");
+  } finally { await stop(server.child); }
+});
+
+test("file download streams a large file with bounded server memory", { skip: process.platform === "win32" }, async () => {
+  const cwd = temp();
+  const size = 192 * 1024 * 1024;
+  execFileSync("truncate", ["-s", String(size), join(cwd, "big.bin")]);
+  const server = await launchServer(cwd);
+  const rss = () => Number(execFileSync("ps", ["-o", "rss=", "-p", String(server.child.pid)], { encoding: "utf8" }).trim()) * 1024;
+  try {
+    const before = rss();
+    const response = await fetch(server.base + "/v1/files/download?path=big.bin");
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-length"), String(size));
+    let received = 0, peak = before;
+    const reader = response.body!.getReader();
+    for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
+      received += chunk.value.length;
+      if (received % (16 * 1024 * 1024) < chunk.value.length) peak = Math.max(peak, rss());
+    }
+    assert.equal(received, size);
+    // A full read into memory would add 192 MiB; streaming stays far below that.
+    assert.ok(peak - before < 80 * 1024 * 1024, `RSS grew by ${((peak - before) / 1048576).toFixed(0)} MiB`);
+  } finally { await stop(server.child); }
+});
+
 test("read-only file HTTP routes reject traversal and outside symlinks and report truncated previews", async () => {
   const cwd = temp();
   writeFileSync(join(cwd, "large.txt"), "x".repeat(65537));
