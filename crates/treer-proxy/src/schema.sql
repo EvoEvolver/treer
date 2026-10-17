@@ -891,6 +891,18 @@ CREATE UNIQUE INDEX IF NOT EXISTS provider_cli_operations_active_machine
     ON provider_cli_operations(workspace_id, server_id) WHERE status IN ('queued', 'running');
 CREATE INDEX IF NOT EXISTS provider_cli_operations_creator
     ON provider_cli_operations(workspace_id, server_id, created_by, created_at);
+-- #134: every prepare counts against the per-minute limit before the machine
+-- observes anything, including prepares that end as noop or unobservable.
+CREATE TABLE IF NOT EXISTS provider_cli_prepare_attempts (
+    attempt_id BIGSERIAL PRIMARY KEY,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    server_id TEXT NOT NULL,
+    user_id TEXT NOT NULL,
+    attempted_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS provider_cli_prepare_attempts_scope
+    ON provider_cli_prepare_attempts(workspace_id, server_id, user_id, attempted_at);
+
 ALTER TABLE provider_cli_operations ADD COLUMN IF NOT EXISTS action TEXT;
 ALTER TABLE provider_cli_operations ADD COLUMN IF NOT EXISTS version_relation TEXT;
 ALTER TABLE provider_cli_operations ADD COLUMN IF NOT EXISTS observation_hash TEXT;

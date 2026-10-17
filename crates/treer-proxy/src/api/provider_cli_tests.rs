@@ -770,14 +770,30 @@ async fn provider_cli_refuses_before_consuming_tokens_and_limits_prepares() {
     }
     assert_eq!(live_tokens().await, 4);
 
-    // Ten prepares per minute per user and machine, by database time.
+    // Ten prepares per minute per user and machine, by database time, counted
+    // as attempts before any Controller command (refused recipes count too:
+    // the changed and unsupported references above were attempts).
+    let attempts = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM provider_cli_prepare_attempts WHERE user_id='creator'",
+        )
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap()
+    };
+    assert_eq!(
+        attempts().await,
+        6,
+        "changed, unsupported, four tokens; the exhausted prepare was refused before counting"
+    );
     sqlx::query("UPDATE provider_cli_install_tokens SET consumed_at=CURRENT_TIMESTAMP WHERE user_id='creator'")
         .execute(&auth.pool()).await.unwrap();
-    for n in 0..6 {
-        sqlx::query("INSERT INTO provider_cli_install_tokens(token_hash, workspace_id, server_id, user_id, session_hash, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, expires_at, consumed_at) VALUES($1,$2,$3,'creator','s','codex-npm-posix',1,$4,$5,'c0ffee','h', CURRENT_TIMESTAMP + INTERVAL '2 minutes', CURRENT_TIMESTAMP)")
-            .bind(format!("filler-{n}")).bind(WORKSPACE).bind(MACHINE).bind(CODEX_HASH).bind(TABLE_HASH)
+    for _ in 0..4 {
+        sqlx::query("INSERT INTO provider_cli_prepare_attempts(workspace_id, server_id, user_id) VALUES($1,$2,'creator')")
+            .bind(WORKSPACE).bind(MACHINE)
             .execute(&auth.pool()).await.unwrap();
     }
+    let commands_before = seen.load(std::sync::atomic::Ordering::SeqCst);
     let error = prepare(creator.clone(), allow.clone(), codex_ref())
         .await
         .unwrap_err();
@@ -785,9 +801,14 @@ async fn provider_cli_refuses_before_consuming_tokens_and_limits_prepares() {
         (error.status, error.error.code.as_str()),
         (StatusCode::TOO_MANY_REQUESTS, "provider_cli_rate_limited")
     );
-    sqlx::query("UPDATE provider_cli_install_tokens SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes', consumed_at = NULL WHERE user_id='creator' AND token_hash NOT LIKE 'filler-%'")
+    assert_eq!(
+        seen.load(std::sync::atomic::Ordering::SeqCst),
+        commands_before,
+        "a rate-limited prepare sends the machine nothing"
+    );
+    sqlx::query("UPDATE provider_cli_install_tokens SET created_at = CURRENT_TIMESTAMP - INTERVAL '2 minutes', consumed_at = NULL WHERE user_id='creator'")
         .execute(&auth.pool()).await.unwrap();
-    sqlx::query("DELETE FROM provider_cli_install_tokens WHERE token_hash LIKE 'filler-%'")
+    sqlx::query("DELETE FROM provider_cli_prepare_attempts")
         .execute(&auth.pool())
         .await
         .unwrap();
@@ -1676,4 +1697,70 @@ async fn provider_cli_prepare_binds_observed_state_and_requires_acknowledgement(
         (StatusCode::CONFLICT, "provider_cli_token_invalid")
     );
     assert_eq!(dispatched.lock().unwrap().len(), 3);
+
+    // A malformed observation from the Controller fails closed: 502, no token,
+    // nothing stored or audited from it.
+    let token_rows_before = token_rows().await;
+    let prepare_audits_before = audit_actions(&auth, "provider_cli.prepare").await.len();
+    let mut malformed = observation(Some("0.164.0"), true);
+    malformed.current_version = Some("latest".into());
+    *observed.lock().unwrap() = malformed;
+    let error = prepare().await.unwrap_err();
+    assert_eq!(
+        (error.status, error.error.code.as_str()),
+        (StatusCode::BAD_GATEWAY, "provider_cli_controller_error")
+    );
+    let mut malformed = observation(Some("0.164.0"), true);
+    malformed.executable = Some("relative/codex".into());
+    *observed.lock().unwrap() = malformed;
+    assert_eq!(
+        prepare().await.unwrap_err().error.code,
+        "provider_cli_controller_error"
+    );
+    let mut malformed = observation(None, true);
+    malformed.version_text = Some("x\u{7}y".into());
+    *observed.lock().unwrap() = malformed;
+    assert_eq!(
+        prepare().await.unwrap_err().error.code,
+        "provider_cli_controller_error"
+    );
+    assert_eq!(token_rows().await, token_rows_before);
+    assert_eq!(
+        audit_actions(&auth, "provider_cli.prepare").await.len(),
+        prepare_audits_before
+    );
+    let all_audit = sqlx::query_scalar::<_, String>(
+        "SELECT payload::text FROM organization_audit_events WHERE action LIKE 'provider_cli.%'",
+    )
+    .fetch_all(&auth.pool())
+    .await
+    .unwrap()
+    .join("\n");
+    assert!(!all_audit.contains("latest") && !all_audit.contains("relative/codex"));
+
+    // Every prepare, including noop, is an attempt: the eleventh per minute
+    // is refused before the machine is asked anything.
+    *observed.lock().unwrap() = observation(Some(TARGET_VERSION), true);
+    let attempts: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM provider_cli_prepare_attempts WHERE user_id='creator'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    let mut refused = None;
+    for _ in attempts..=treer_protocol::PROVIDER_CLI_PREPARES_PER_MINUTE {
+        match prepare().await {
+            Ok(response) => assert_eq!(response.0.action, ProviderCliAction::Noop),
+            Err(error) => {
+                refused = Some(error);
+                break;
+            }
+        }
+    }
+    let refused = refused.expect("the limit applies to noop prepares");
+    assert_eq!(
+        (refused.status, refused.error.code.as_str()),
+        (StatusCode::TOO_MANY_REQUESTS, "provider_cli_rate_limited")
+    );
+    assert_eq!(token_rows().await, token_rows_before);
 }

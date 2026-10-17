@@ -226,7 +226,25 @@ async fn controller_observation(
         .observation
         .clone()
         .ok_or_else(controller_outdated)?;
+    // The Controller's observation is input, not truth: it is stored, audited
+    // and shown, so its shape is checked here and a bad one fails closed.
+    validate_observation(&observation, workspace_id, server_id)?;
     Ok((response, observation))
+}
+
+fn validate_observation(
+    observation: &ProviderCliObservation,
+    workspace_id: &str,
+    server_id: &str,
+) -> Result<(), ApiFailure> {
+    if let Err(reason) = observation.validate() {
+        tracing::warn!(%workspace_id, %server_id, reason, "Controller returned a malformed provider CLI observation");
+        return Err(ApiFailure::bad_gateway(
+            "provider_cli_controller_error",
+            "Controller returned an unexpected provider CLI response",
+        ));
+    }
+    Ok(())
 }
 
 /// Audit payload for an observation: classification only, never the path.
@@ -272,6 +290,10 @@ pub(crate) async fn provider_cli_prepare(
     provider_cli_scope(&state, &auth, &policy, &session, &workspace_id, &server_id).await?;
     validate_recipe_ref(&reference)?;
     require_observing_controller(&state, &workspace_id, &server_id).await?;
+    // Admission (rate and live-token ceilings) precedes every Controller
+    // command: noop and unobservable prepares make the machine run npm too.
+    let scope = scope(&session, &workspace_id, &server_id);
+    auth.provider_cli_prepare_begin(&scope).await?;
     let recipes = controller_recipes(&state, &workspace_id, &server_id).await?;
     let recipe = recipes
         .recipes
@@ -301,7 +323,6 @@ pub(crate) async fn provider_cli_prepare(
     let (_, observation) =
         controller_observation(&state, &workspace_id, &server_id, &reference).await?;
     let observation_hash = observation.hash(&reference.recipe_hash, &target_version);
-    let scope = scope(&session, &workspace_id, &server_id);
     let Some(decision) = decide_provider_cli_action(&observation, &target_version) else {
         let mut payload = observation_payload(&observation);
         payload["outcome"] = Value::String("unobservable".into());
@@ -556,6 +577,9 @@ pub(crate) async fn provider_cli_check(
         .await
         .map_err(controller_failure)?;
     let response: ProviderCliCheckResponse = parse_controller(value)?;
+    if let Some(observation) = &response.observation {
+        validate_observation(observation, &workspace_id, &server_id)?;
+    }
     let mut payload = json!({
         "installed": response.installed,
         "found_in_prefix": response.found_in_prefix,

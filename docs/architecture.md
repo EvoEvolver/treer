@@ -616,7 +616,9 @@ function that produces the plan shown at `recipes`/`prepare` and executed on
 `install`: `npm pack` into a private job directory, SHA-512 verification of the
 single tarball, `npm install --global <local tarball>`, `npm prefix --global`,
 then the probe from that prefix's `bin` (never PATH). Before minting a token,
-`prepare` runs the Controller's observation (`ProviderCliObservation`, the
+`prepare` is admitted against the per-minute attempt and live-token ceilings
+(`provider_cli_prepare_attempts`, counted before any Controller command and
+whatever the outcome), then runs the Controller's observation (`ProviderCliObservation`, the
 same procedure as `check`): `npm prefix --global` under the private job
 environment, an `lstat` of `<prefix>/bin/<binary>` and, only when a regular
 file inside the prefix is there, the recipe's version probe. The state is
@@ -624,7 +626,9 @@ decided from evidence (`absent`, `installed` with a strict normalized semver,
 or `unknown` with a named reason), never from an error, and maps to exactly
 one action: `install`, `replace` (with a `version_relation` of `upgrade`,
 `downgrade`, `incomparable` or `unknown`) or `noop` (already at the pinned
-version: no token, no operation, nothing counted). An unresolvable prefix is
+version: no token, no operation, no machine slot). The Proxy validates the
+observation's shape and consistency before using it (a malformed one is a
+502 Controller error). An unresolvable prefix is
 409 `provider_cli_state_unobservable`. The Proxy binds the hash of the
 displayed plan, the `observation_hash`
 (`treer.provider-cli-observation/v1` over recipe hash, target version, state,

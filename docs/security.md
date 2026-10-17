@@ -272,6 +272,16 @@ What Core does promise:
   same account's trust domain. Tokens minted before observation existed are
   never accepted, and a v1-only Controller is refused with
   `provider_cli_controller_outdated` rather than served unobserved.
+- The Controller's observation is treated as input, not truth: the Proxy
+  validates its shape before storing, auditing or showing it (canonical strict
+  version, bounded control-free text, bounded absolute executable path, a
+  probe code from the known set, and state/evidence agreement such as
+  `installed` requiring a found binary and a clean probe); a malformed
+  observation is a Controller error (502) that mints nothing. Every `prepare`
+  is admitted against the per-minute and live-token ceilings before any
+  Controller command, and counts whatever its outcome (`noop`, unobservable,
+  refused recipe), so a session cannot make the machine run `npm prefix` and
+  the probe without bound.
 - The observed executable path (`<prefix>/bin/<binary>`, under the machine
   account's home) is returned only to the creator's `prepare` and `check`
   responses for display. Proxy rows, audit payloads, operation reports
@@ -282,7 +292,7 @@ What Core does promise:
   workspace, machine, user, session, recipe triple, table hash, Controller
   build, plan hash, observation hash, action and relation. Expired, consumed,
   foreign and mismatched tokens share one 409. At most four live tokens and
-  ten prepares per minute per user and machine.
+  ten prepare attempts per minute per user and machine.
 - One active installation per machine, enforced by a PostgreSQL partial unique
   index, with a five-minute deadline. Provider CLI commands are excluded from
   reconnect replay. Each step runs in its own Unix process group that is

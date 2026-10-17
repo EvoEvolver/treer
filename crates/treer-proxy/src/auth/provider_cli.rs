@@ -313,10 +313,77 @@ fn timestamp(
     Ok(millis.and_then(DateTime::from_timestamp_millis))
 }
 
+fn tokens_exhausted() -> AuthFailure {
+    AuthFailure::too_many_requests(
+        "provider_cli_tokens_exhausted",
+        "Too many unconfirmed installations; wait for them to expire",
+    )
+}
+
 impl AuthStore {
+    /// Admits one prepare before the Controller observes anything: at most
+    /// ten attempts per minute and four live tokens per user and machine, by
+    /// database time, counting every attempt whatever its outcome (noop,
+    /// unobservable, refused recipe) so a session cannot make the machine run
+    /// npm and the probe without bound.
+    pub(crate) async fn provider_cli_prepare_begin(
+        &self,
+        scope: &ProviderCliScope<'_>,
+    ) -> Result<(), AuthFailure> {
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!(
+                "provider_cli:{}:{}:{}",
+                scope.workspace_id, scope.server_id, scope.user_id
+            ))
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM provider_cli_prepare_attempts WHERE attempt_id IN (SELECT attempt_id FROM provider_cli_prepare_attempts WHERE attempted_at < CURRENT_TIMESTAMP - INTERVAL '1 hour' LIMIT 100)")
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        let recent: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_cli_prepare_attempts WHERE workspace_id=$1 AND server_id=$2 AND user_id=$3 AND attempted_at > CURRENT_TIMESTAMP - INTERVAL '1 minute'",
+        )
+        .bind(scope.workspace_id)
+        .bind(scope.server_id)
+        .bind(scope.user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if recent >= PROVIDER_CLI_PREPARES_PER_MINUTE {
+            return Err(AuthFailure::too_many_requests(
+                "provider_cli_rate_limited",
+                "Too many installation requests; retry in a minute",
+            ));
+        }
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_cli_install_tokens WHERE workspace_id=$1 AND server_id=$2 AND user_id=$3 AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP",
+        )
+        .bind(scope.workspace_id)
+        .bind(scope.server_id)
+        .bind(scope.user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if live >= PROVIDER_CLI_MAX_LIVE_TOKENS {
+            return Err(tokens_exhausted());
+        }
+        sqlx::query("INSERT INTO provider_cli_prepare_attempts(workspace_id, server_id, user_id) VALUES($1,$2,$3)")
+            .bind(scope.workspace_id)
+            .bind(scope.server_id)
+            .bind(scope.user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)
+    }
+
     /// Mints a single-use confirmation token after the caller displayed the
-    /// exact recipe. Limits use database time and shared state so every Proxy
-    /// replica enforces the same ceiling. Returns the plaintext token once.
+    /// exact recipe and observation. `provider_cli_prepare_begin` already
+    /// admitted the attempt; the live-token ceiling is restated here under the
+    /// same lock so concurrent replicas cannot overshoot it.
     pub(crate) async fn provider_cli_prepare(
         &self,
         scope: &ProviderCliScope<'_>,
@@ -337,8 +404,8 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
-        let (live, recent): (i64, i64) = sqlx::query_as(
-            "SELECT COUNT(*) FILTER (WHERE consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP), COUNT(*) FILTER (WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '1 minute') FROM provider_cli_install_tokens WHERE workspace_id=$1 AND server_id=$2 AND user_id=$3",
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_cli_install_tokens WHERE workspace_id=$1 AND server_id=$2 AND user_id=$3 AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP",
         )
         .bind(scope.workspace_id)
         .bind(scope.server_id)
@@ -347,16 +414,7 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         if live >= PROVIDER_CLI_MAX_LIVE_TOKENS {
-            return Err(AuthFailure::too_many_requests(
-                "provider_cli_tokens_exhausted",
-                "Too many unconfirmed installations; wait for them to expire",
-            ));
-        }
-        if recent >= PROVIDER_CLI_PREPARES_PER_MINUTE {
-            return Err(AuthFailure::too_many_requests(
-                "provider_cli_rate_limited",
-                "Too many installation requests; retry in a minute",
-            ));
+            return Err(tokens_exhausted());
         }
         let observed = binding.observed.as_ref().ok_or_else(|| {
             AuthFailure::internal(

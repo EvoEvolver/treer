@@ -161,7 +161,97 @@ pub struct ProviderCliObservation {
     pub probe: ProviderCliProbe,
 }
 
+/// Every probe error code a Controller may report; anything else is a
+/// malformed response.
+pub const PROVIDER_CLI_PROBE_ERROR_CODES: [&str; 8] = [
+    "provider_cli_prefix_unresolved",
+    "provider_cli_stat_failed",
+    "provider_cli_binary_not_found",
+    "provider_cli_binary_outside_prefix",
+    "provider_cli_probe_failed",
+    "provider_cli_probe_timed_out",
+    "provider_cli_version_unparsed",
+    "cleanup_unconfirmed",
+];
+/// Longest executable path a Controller may report.
+pub const PROVIDER_CLI_EXECUTABLE_MAX: usize = 4096;
+
 impl ProviderCliObservation {
+    /// Shape and consistency rules the Proxy enforces before an observation
+    /// is stored, audited or shown: bounded, control-free strings, a known
+    /// probe code, a canonical strict version, and state/evidence agreement.
+    /// A Controller response that fails is treated as invalid (fail closed).
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if let Some(version) = &self.current_version {
+            match parse_strict_version(version) {
+                Some(parsed) if parsed.normalized() == *version => {}
+                _ => return Err("current_version is not a canonical strict version"),
+            }
+        }
+        if let Some(text) = &self.version_text {
+            if text.is_empty()
+                || text.len() > PROVIDER_CLI_VERSION_TEXT_MAX
+                || text.chars().any(char::is_control)
+            {
+                return Err("version_text is empty, too long or has control characters");
+            }
+        }
+        if let Some(executable) = &self.executable {
+            if executable.len() > PROVIDER_CLI_EXECUTABLE_MAX
+                || !(executable.starts_with('/')
+                    || executable
+                        .as_bytes()
+                        .get(1..3)
+                        .is_some_and(|rest| rest == b":\\"))
+                || executable.chars().any(char::is_control)
+            {
+                return Err("executable is not a bounded absolute path");
+            }
+        }
+        if let Some(code) = &self.probe.error_code {
+            if !PROVIDER_CLI_PROBE_ERROR_CODES.contains(&code.as_str()) {
+                return Err("probe.error_code is unknown");
+            }
+        }
+        match self.state {
+            ProviderCliObservedState::Absent => {
+                if self.current_version.is_some()
+                    || self.found_in_prefix
+                    || self.executable.is_none()
+                    || self.probe.error_code.as_deref() != Some("provider_cli_binary_not_found")
+                {
+                    return Err("absent requires a resolved prefix, no binary and no version");
+                }
+            }
+            ProviderCliObservedState::Installed => {
+                if self.current_version.is_none()
+                    || !self.found_in_prefix
+                    || self.executable.is_none()
+                    || self.probe.exit_code != Some(0)
+                    || self.probe.timed_out
+                    || !self.probe.cleanup_confirmed
+                    || self.probe.error_code.is_some()
+                {
+                    return Err("installed requires a found binary, a clean probe and a version");
+                }
+            }
+            ProviderCliObservedState::Unknown => {
+                if self.current_version.is_some() || self.probe.error_code.is_none() {
+                    return Err("unknown carries no version and names its reason");
+                }
+                if !self.found_in_prefix
+                    && self.executable.is_some()
+                    && self.probe.error_code.as_deref() != Some("provider_cli_stat_failed")
+                {
+                    return Err(
+                        "unknown with a resolved prefix but nothing found must be a stat failure",
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Nothing can be said about the prefix (unresolved, unreadable): no
     /// action can be offered and the plan's own prefix step would fail too.
     pub fn unobservable(&self) -> bool {
@@ -822,6 +912,73 @@ mod tests {
         x ^= x >> 27;
         *state = x;
         x.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    #[test]
+    fn validation_fails_closed_on_malformed_or_inconsistent_observations() {
+        let mut absent = observation(ProviderCliObservedState::Absent, None, false);
+        absent.probe.exit_code = None;
+        absent.probe.error_code = Some("provider_cli_binary_not_found".into());
+        absent.executable = Some("/opt/prefix/bin/codex".into());
+        assert_eq!(absent.validate(), Ok(()));
+        let installed = observation(ProviderCliObservedState::Installed, Some("0.162.0"), true);
+        assert_eq!(installed.validate(), Ok(()));
+        let mut unknown = observation(ProviderCliObservedState::Unknown, None, true);
+        unknown.probe.exit_code = Some(3);
+        unknown.probe.error_code = Some("provider_cli_probe_failed".into());
+        assert_eq!(unknown.validate(), Ok(()));
+        let mut unresolved = observation(ProviderCliObservedState::Unknown, None, false);
+        unresolved.executable = None;
+        unresolved.probe.error_code = Some("provider_cli_prefix_unresolved".into());
+        assert_eq!(unresolved.validate(), Ok(()));
+
+        let mut bad = installed.clone();
+        bad.current_version = Some("latest".into());
+        assert!(bad.validate().is_err(), "non-semver version");
+        let mut bad = installed.clone();
+        bad.current_version = Some("v0.162.0".into());
+        assert!(bad.validate().is_err(), "non-canonical version");
+        let mut bad = installed.clone();
+        bad.version_text = Some("x\u{1b}[0m".into());
+        assert!(bad.validate().is_err(), "control character");
+        let mut bad = installed.clone();
+        bad.version_text = Some("a".repeat(PROVIDER_CLI_VERSION_TEXT_MAX + 1));
+        assert!(bad.validate().is_err(), "overlong text");
+        let mut bad = installed.clone();
+        bad.executable = Some("bin/codex".into());
+        assert!(bad.validate().is_err(), "relative path");
+        let mut bad = installed.clone();
+        bad.executable = Some(format!("/{}", "p".repeat(PROVIDER_CLI_EXECUTABLE_MAX)));
+        assert!(bad.validate().is_err(), "overlong path");
+        let mut bad = installed.clone();
+        bad.probe.error_code = Some("made_up".into());
+        assert!(bad.validate().is_err(), "unknown probe code");
+        let mut bad = installed.clone();
+        bad.probe.exit_code = Some(1);
+        assert!(bad.validate().is_err(), "installed with failing probe");
+        let mut bad = installed.clone();
+        bad.found_in_prefix = false;
+        assert!(bad.validate().is_err(), "installed but not found");
+        let mut bad = absent.clone();
+        bad.found_in_prefix = true;
+        assert!(bad.validate().is_err(), "absent but found");
+        let mut bad = absent.clone();
+        bad.current_version = Some("1.2.3".into());
+        assert!(bad.validate().is_err(), "absent with version");
+        let mut bad = unknown.clone();
+        bad.probe.error_code = None;
+        assert!(bad.validate().is_err(), "unknown without reason");
+        let mut bad = unknown.clone();
+        bad.current_version = Some("1.2.3".into());
+        assert!(bad.validate().is_err(), "unknown with version");
+        let mut bad = unresolved.clone();
+        bad.executable = Some("/opt/prefix/bin/codex".into());
+        assert!(bad.validate().is_err(), "unresolved prefix with a path");
+        let windows = ProviderCliObservation {
+            executable: Some("C:\\prefix\\codex.cmd".into()),
+            ..installed.clone()
+        };
+        assert_eq!(windows.validate(), Ok(()));
     }
 
     #[test]

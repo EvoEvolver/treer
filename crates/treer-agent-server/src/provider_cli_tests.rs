@@ -756,12 +756,16 @@ async fn observation_classifies_the_prefix_from_evidence_only() {
         let reference = reference.clone();
         let service = service.clone();
         async move {
-            service
+            let observation = service
                 .check(&reference)
                 .await
                 .unwrap()
                 .observation
-                .unwrap()
+                .unwrap();
+            // Every observation this Controller emits passes the Proxy's
+            // shape and consistency validation.
+            assert_eq!(observation.validate(), Ok(()), "{observation:?}");
+            observation
         }
     };
     let expected_path = fixture.prefix_binary().display().to_string();
