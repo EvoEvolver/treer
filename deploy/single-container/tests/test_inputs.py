@@ -61,6 +61,25 @@ class InputTests(unittest.TestCase):
         self.verify("amd64")
         self.assertEqual((self.output / "bin" / "treer-proxy").read_bytes()[18:20], (62).to_bytes(2, "little"))
 
+    def test_private_artifact_extraction_still_serves_non_root_proxy(self):
+        for entry in [self.source, *self.source.rglob("*")]:
+            entry.chmod(0o700 if entry.is_dir() else 0o600)
+        digest = module.input_digest(self.source)
+        previous = os.umask(0o077)
+        try:
+            self.verify()
+        finally:
+            os.umask(previous)
+        for entry in [self.output, *self.output.rglob("*")]:
+            mode = entry.stat().st_mode & 0o777
+            if entry.is_dir():
+                self.assertEqual(mode, 0o755)
+            else:
+                self.assertTrue(mode & 0o004, str(entry))
+                self.assertEqual(mode & 0o022, 0)
+        self.assertEqual(module.input_digest(self.source), digest)
+        self.assertEqual((self.source / "machines/linux-aarch64/SHA256SUMS").stat().st_mode & 0o777, 0o600)
+
     def test_wrong_sha_or_version_or_platform_rejected(self):
         path = self.source / "machines/linux-aarch64/build-metadata.json"
         original = json.loads(path.read_text())

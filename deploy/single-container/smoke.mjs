@@ -101,6 +101,8 @@ try {
     '-e',`TREER_PROXY_PUBLIC_URL=http://${proxyHost}/`,'-e',`TREER_APP_PUBLIC_URL=http://${appHost}/`,image);
   port=Number((await docker('port',server,'8080/tcp')).split(':').at(-1));
   await wait('Proxy health',async()=> (await request('/api/health')).status===200);
+  await docker('exec','-u','treer',server,'python3','-I','-c',
+    "import os,stat; from pathlib import Path; root=Path('/app'); checksums=list(root.glob('dist/*/SHA256SUMS')); assert len(checksums)==2; [p.read_bytes() for p in checksums]; entries=[root,root/'bin',root/'dist',root/'build.json',root/'bin/treer-proxy',*root.glob('dist/*'),*root.glob('dist/*/*')]; assert all(p.stat().st_uid==0 and not p.stat().st_mode & 0o022 for p in entries); target=root/'dist/.non-root-write-probe';\ntry:\n fd=os.open(target,os.O_CREAT|os.O_EXCL|os.O_WRONLY,0o600)\nexcept PermissionError: pass\nexcept OSError as error:\n assert error.errno==30\nelse:\n os.close(fd); target.unlink(); raise AssertionError('Proxy can modify public machine artifacts')");
   assert.match((await request('/',undefined,{host:appHost,session:''})).text, /<html/i);
   const config=await request('/config.json',undefined,{host:appHost,session:''});
   assert.equal(config.data.proxy_url,`http://${proxyHost}/`);
@@ -164,6 +166,11 @@ CMD ["sleep","infinity"]
     const agent=(created.agent??created).agent_id;
     await wait('agent output',async()=> (await request(`/api/workspaces/${workspace}/agents/${agent}/output`)).data.text.includes('SINGLE_SMOKE_READY'));
     await docker('stop','-t','65',server);await docker('start',server);
+    // Docker reallocates an ephemeral published host port on stop/start.
+    // Read the new mapping before probing persistence, rather than timing out
+    // against the old socket and misreporting a lost workspace.
+    port=Number((await docker('port',server,'8080/tcp')).split(':').at(-1));
+    await wait('Proxy health after restart',async()=> (await request('/api/health')).status===200);
     await wait('persistent workspace after restart',async()=> (await request(`/api/workspaces/${workspace}/snapshot`)).data.agents.some(a=>a.agent_id===agent));
     assert.deepEqual(await fingerprints(server),primaryFingerprints);
     console.log('PASS single container: Host/origin/same-origin refusal/fresh keys → auth → enroll disposable machine → create Agent → persistent restart');

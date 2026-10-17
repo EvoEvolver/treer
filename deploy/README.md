@@ -246,6 +246,9 @@ Inputs must come from the trusted native release job for **the same SHA**,
 including the Proxy; metadata/checksums alone do not authenticate their producer.
 The Dockerfile verifies both machine platforms and the native Proxy's metadata,
 checksums, regular-file types and ELF architecture before copying any binaries.
+Verified public artifact directories/binaries use mode 0755 and checksum/build
+metadata files use 0644, so private extraction umasks do not prevent the non-root
+Proxy from serving machine downloads. This does not change `/data` secret modes.
 It does not compile Rust or fetch release binaries. GitHub artifact downloads
 can lose executable bits; verified output gets executable bits restored.
 The staging directory is ignored by Git. CI downloads exact-SHA artifacts,

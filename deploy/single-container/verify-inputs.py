@@ -120,19 +120,31 @@ def verify(source, output, commit, version, architecture, cargo, expected_input_
     shutil.copytree(source / "machines", output / "dist")
     (output / "bin").mkdir()
     shutil.copyfile(source / "proxy" / platform / "treer-proxy", output / "bin" / "treer-proxy")
-    for binary in (output / "dist").glob("*/treer*"):
-        binary.chmod(0o755)
-    (output / "bin" / "treer-proxy").chmod(0o755)
     (output / "build.json").write_text(json.dumps({"schema_version": 1, "git_commit": commit,
                                                 "version": version, "platform": platform,
                                                 "input_sha256": expected_input_digest,
                                                 "input_files": input_hashes(source)}) + "\n")
+    # Artifact extraction can use umask 077. These are public build artifacts,
+    # not credentials: the non-root Proxy must traverse directories and read
+    # SHA256SUMS as well as execute the binaries. Never inherit input modes.
+    for directory_path in [output, output / "bin", output / "dist",
+                           *(output / "dist" / name for name in PLATFORMS)]:
+        require(stat.S_ISDIR(directory_path.lstat().st_mode), "invalid output directory")
+        directory_path.chmod(0o755)
+    public_files = {output / "bin" / "treer-proxy": 0o755, output / "build.json": 0o644}
+    for machine_platform in PLATFORMS:
+        for name in MACHINE_FILES | {"SHA256SUMS", "build-metadata.json"}:
+            public_files[output / "dist" / machine_platform / name] = 0o755 if name in MACHINE_FILES else 0o644
+    for public_file, mode in public_files.items():
+        require(stat.S_ISREG(public_file.lstat().st_mode), "invalid output file")
+        public_file.chmod(mode)
     checksums = []
     for binary in sorted(output.rglob("*")):
         if binary.is_file():
             digest = hash_file(binary)
             checksums.append(f"{digest}  {binary.relative_to(output)}\n")
     (output / "SHA256SUMS").write_text("".join(checksums))
+    (output / "SHA256SUMS").chmod(0o644)
 
 
 if __name__ == "__main__":
