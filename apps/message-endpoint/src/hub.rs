@@ -95,8 +95,8 @@ impl Status {
 }
 
 pub struct Hub<M> {
-    store: Store,
-    mailbox: M,
+    pub(crate) store: Store,
+    pub(crate) mailbox: M,
     workspace: String,
 }
 fn stable(id: &str) -> bool {
@@ -284,7 +284,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         tx.commit()?;
         Ok(())
     }
-    fn blocked(&self) -> Result<bool, Error> {
+    pub(crate) fn blocked(&self) -> Result<bool, Error> {
         Ok(self.store.db.query_row(
             "SELECT blocked FROM hub_identity WHERE singleton=1",
             [],
@@ -317,7 +317,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         self.mailbox.ack(&delivery.delivery_id)?;
         Ok(())
     }
-    fn active(&self, id: &str, now: i64) -> Result<View, Error> {
+    pub(crate) fn active(&self, id: &str, now: i64) -> Result<View, Error> {
         let view = self.view(id)?;
         if view.paused
             || view

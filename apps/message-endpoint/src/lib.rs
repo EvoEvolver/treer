@@ -11,4 +11,6 @@ pub mod protocol;
 #[cfg(unix)]
 pub mod relay;
 pub mod store;
+#[cfg(unix)]
+pub mod telegram;
 pub mod transfers;

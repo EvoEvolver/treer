@@ -364,3 +364,40 @@ matching hashes, `running`, or repeated status messages cannot resume, re-pin or
 authorize anything. This implements the receiver side of security follow-up3570
 item6; its UI labeling remains an activation gate. Owner receipt clearing/resume,
 worker scheduling, external transports and authenticated settings are unfinished.
+
+
+## Development Telegram worker mechanics
+
+`telegram` implements target admission and durable worker steps against a fakeable
+transport. The Bot API network adapter, secret configuration, scheduler and UI are
+not implemented yet; no bot is polled or sent to in these tests. Each immutable
+binding generation pins one account/chat/topic and 1–32 explicit sender IDs;
+(account, chat, topic) must be unique. A sender, chat or topic mismatch cannot
+create a message job. Unsupported/non-text updates advance the durable offset
+with an ignored counter, without storing their content. Invalid batch ordering,
+duplicate update IDs and numeric overflow are rejected before processing.
+
+Admitted text is durably queued with its binding-owned recipient and source
+metadata before offset advancement. Crash before offset commit replays the same
+external ID; enqueue deduplication prevents a second job. A full/paused/stale
+admitted target holds the account's offset, preventing loss; it can block other
+chats sharing that bot until resolved. Use separate bot accounts when independent
+availability is required. Other accounts and the settings server must have
+independent scheduling; stall/fault acceptance remains pending the runtime.
+
+Hub-to-endpoint delivery leases one FIFO job and sends deterministic Core
+fragments as the hub itself. It records completion only after all parts are
+accepted. A failed or ambiguous part repeats identical keys after lease expiry.
+External source account/conversation/message are transport assertions, not
+Core-authenticated human identities. Received body text cannot select a recipient.
+
+Telegram output uses plain text (no Markdown/HTML parse mode), lossless chunks
+of at most 3500 UTF-16 units and one external chunk per worker invocation. Chunk
+intent commits before sending; each accepted result commits separately. Retries
+skip committed parts, including recovery after the final result commit but before
+transfer retirement. Lost external responses can still duplicate messages; there
+is no exactly-once Bot API promise. The worker must periodically call both store
+retention functions followed by `cleanup_telegram`, which frees only metadata
+whose parent receipt/job has been pruned. Pending sources and polling offsets
+are retained. Pending queue limits do not bound all historical metadata volume
+within the 30-day retention window; monitor disk use and use encrypted backups.
