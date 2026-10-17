@@ -25,6 +25,8 @@ pub mod health;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod host;
 pub mod images;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod launcher_preflight;
 pub mod launcher_report;
 pub mod probe;
 pub mod publication;

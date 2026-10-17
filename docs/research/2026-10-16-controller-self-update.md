@@ -300,6 +300,25 @@ persist child-start evidence or cover worker death. The future launcher executor
 must still bind both installed images to the owned receipt and build its fixed
 command/environment under the original locks.
 
+The read-only `launcher_preflight::check` now binds both installed Controller and
+CLI images to that same sealed ownership and a CoreHealthy receipt, requiring
+Installed/Unchanged publication records. It authenticates both files before
+executing either fixed version probe, retains both original inodes across both
+probes, then rechecks the images and exact journal revision/content. Matching
+version text must agree between binaries and with the receipt's native artifact
+source, which may differ from the release wrapper SHA. A single absolute
+twenty-second budget covers both probes and synchronous authentication checks;
+late synchronous work is rejected rather than forcibly interrupted. Tests use
+only isolated scripts and synthetic ownership/health fixtures: wrong CLI digest
+prevents either execution; foreign ownership/phase, source/version disagreement,
+journal corruption and a CLI replacing the already-probed Controller with
+identical bytes all fail without releasing the original locks. Expired budgets
+execute neither image. Success returns no reusable execution capability and
+does not advance the receipt. No installer is started: authenticated fixed
+installer argv/environment, durable child-start/identity and worker-death
+reconciliation, spawn/completion revalidation and final live health remain
+required before production dispatch or whole-P1 acceptance.
+
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
 modes/current bytes and executable stages before recording Activating or making

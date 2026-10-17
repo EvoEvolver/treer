@@ -21,7 +21,10 @@ fn check_deadline(deadline: tokio::time::Instant) -> Result<()> {
 // Synchronous filesystem work cannot be interrupted safely. Account for its
 // elapsed time on BOTH sides; a slow disk cannot grant a late probe result or
 // a fresh child timeout after authentication consumed the original budget.
-fn within_budget<T>(deadline: tokio::time::Instant, work: impl FnOnce() -> Result<T>) -> Result<T> {
+pub(super) fn within_budget<T>(
+    deadline: tokio::time::Instant,
+    work: impl FnOnce() -> Result<T>,
+) -> Result<T> {
     check_deadline(deadline)?;
     let result = work();
     check_deadline(deadline)?;
@@ -93,6 +96,25 @@ async fn run(
     let deadline = tokio::time::Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| anyhow::anyhow!("update_image_probe_timeout"))?;
+    version_until(
+        directory,
+        executable,
+        binary,
+        authenticated_sha256,
+        deadline,
+    )
+    .await
+}
+
+/// Internal multi-image preflight shares its original absolute budget with
+/// every hash and child, rather than resetting the budget between probes.
+pub(super) async fn version_until(
+    directory: &InstallationDirectory,
+    executable: &Path,
+    binary: Binary,
+    authenticated_sha256: &str,
+    deadline: tokio::time::Instant,
+) -> Result<ImageVersion> {
     let image = within_budget(deadline, || {
         VerifiedImage::open(directory, executable, authenticated_sha256)
     })?;
