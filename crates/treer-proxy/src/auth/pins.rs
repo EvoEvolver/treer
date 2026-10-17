@@ -11,7 +11,9 @@ use crate::audit;
 
 /// Pins whose target still exists in the workspace, newest first. Agents
 /// count as existing while their credential is unrevoked; Apps and folders
-/// while their row exists (their deletion cascades anyway). Read-only.
+/// while their row exists (their deletion cascades anyway). Read-only. The
+/// composite foreign keys keep every row inside its own workspace; the PUT
+/// existence check is the first line, the keys the second.
 const LIST_SQL: &str = "SELECT p.agent_id, p.app_id, p.folder_id, p.pinned_by, (EXTRACT(EPOCH FROM p.pinned_at)*1000)::BIGINT AS pinned_at_ms \
     FROM workspace_pins p \
     LEFT JOIN agent_credentials a ON a.agent_id = p.agent_id AND a.workspace_id = p.workspace_id AND a.revoked_at IS NULL \
@@ -112,6 +114,14 @@ impl AuthStore {
         if !exists {
             return Err(item_not_found());
         }
+        // Agents revoked through paths other than Agent deletion (machine
+        // deletion, member removal) leave invisible rows; they must not hold
+        // a slot. This is a write path under the lock, so clean them here.
+        sqlx::query("DELETE FROM workspace_pins p USING agent_credentials a WHERE p.workspace_id=$1 AND a.workspace_id=p.workspace_id AND a.agent_id=p.agent_id AND a.revoked_at IS NOT NULL")
+            .bind(workspace)
+            .execute(&mut *tx)
+            .await
+            .map_err(AuthFailure::database)?;
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM workspace_pins WHERE workspace_id=$1")
                 .bind(workspace)

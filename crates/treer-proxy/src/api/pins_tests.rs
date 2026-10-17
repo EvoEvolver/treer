@@ -268,6 +268,14 @@ async fn pins_round_trip_is_idempotent_filtered_and_audited_with_ids_only() {
         .iter()
         .any(|row| row.resource_id == folder.folder_id));
 
+    // The database refuses a cross-workspace reference even if a write path
+    // ever forgot the check.
+    let cross = sqlx::query("INSERT INTO workspace_pins(workspace_id, app_id, pinned_by) VALUES($1,'app_other','creator')")
+        .bind(WS)
+        .execute(&auth.pool())
+        .await;
+    assert!(cross.is_err(), "composite foreign key");
+
     // Unknown item, another workspace's App, revoked agent: uniform 404.
     for (kind, id) in [
         ("agent", "ag_missing"),
@@ -470,6 +478,66 @@ async fn pins_limit_is_per_workspace_and_the_last_slot_race_admits_one() {
         audit_rows(&auth, "tree.pin.create").await.len(),
         WORKSPACE_PINS_LIMIT
     );
+
+    // A pin whose Agent was revoked by another path (machine deletion, member
+    // removal) is invisible and must not hold a slot: the next PUT reclaims it.
+    sqlx::query("UPDATE agent_credentials SET revoked_at='now' WHERE agent_id='agent-a'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        list(&state, &auth, &allow, "creator")
+            .await
+            .unwrap()
+            .pins
+            .len(),
+        WORKSPACE_PINS_LIMIT - 1
+    );
+    pin(
+        &state,
+        &auth,
+        &allow,
+        "creator",
+        "folder",
+        &folders[WORKSPACE_PINS_LIMIT - 1],
+    )
+    .await
+    .expect("the dangling pin does not count");
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM workspace_pins WHERE agent_id='agent-a'"
+        )
+        .fetch_one(&auth.pool())
+        .await
+        .unwrap(),
+        0,
+        "reclaimed inside the write transaction"
+    );
+    assert_eq!(
+        list(&state, &auth, &allow, "creator")
+            .await
+            .unwrap()
+            .pins
+            .len(),
+        WORKSPACE_PINS_LIMIT
+    );
+    unpin(
+        &state,
+        &auth,
+        &allow,
+        "creator",
+        "folder",
+        &folders[WORKSPACE_PINS_LIMIT - 1],
+    )
+    .await
+    .unwrap();
+    sqlx::query("UPDATE agent_credentials SET revoked_at=NULL WHERE agent_id='agent-a'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    pin(&state, &auth, &allow, "creator", "agent", "agent-a")
+        .await
+        .unwrap();
 
     // Free one slot, then race two new items for it: exactly one wins.
     unpin(&state, &auth, &allow, "creator", "folder", &folders[0])

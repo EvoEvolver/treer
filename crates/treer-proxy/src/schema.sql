@@ -914,14 +914,20 @@ ALTER TABLE provider_cli_operations ADD COLUMN IF NOT EXISTS observed_in_prefix 
 -- column is set; App and folder deletion cascade here, agent deletion revokes
 -- its credential row instead of deleting it, so the agent path deletes pins
 -- explicitly and reads also filter on an unrevoked credential.
+-- Composite targets so a pin row can never reference another workspace's
+-- Agent or App at the database level (the write path checks too).
+CREATE UNIQUE INDEX IF NOT EXISTS agent_credentials_workspace_agent ON agent_credentials(workspace_id, agent_id);
+CREATE UNIQUE INDEX IF NOT EXISTS app_deployments_workspace_app ON app_deployments(workspace_id, app_id);
 CREATE TABLE IF NOT EXISTS workspace_pins (
     workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
-    agent_id TEXT REFERENCES agent_credentials(agent_id) ON DELETE CASCADE,
-    app_id TEXT REFERENCES app_deployments(app_id) ON DELETE CASCADE,
+    agent_id TEXT,
+    app_id TEXT,
     folder_id TEXT,
     pinned_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     pinned_by TEXT REFERENCES users(id) ON DELETE SET NULL,
     CHECK (num_nonnulls(agent_id, app_id, folder_id) = 1),
+    FOREIGN KEY (workspace_id, agent_id) REFERENCES agent_credentials(workspace_id, agent_id) ON DELETE CASCADE,
+    FOREIGN KEY (workspace_id, app_id) REFERENCES app_deployments(workspace_id, app_id) ON DELETE CASCADE,
     FOREIGN KEY (workspace_id, folder_id) REFERENCES workload_folders(workspace_id, folder_id) ON DELETE CASCADE
 );
 CREATE UNIQUE INDEX IF NOT EXISTS workspace_pins_agent ON workspace_pins(workspace_id, agent_id) WHERE agent_id IS NOT NULL;
