@@ -17,6 +17,18 @@ const ROOT: &[&str] = &[
     "win32_error",
 ];
 const ATTEMPT: &[&str] = &[
+    "control",
+    "flags",
+    "child_pid",
+    "child_creation_time",
+    "child_in_job",
+    "child_in_parent_job",
+    "cleanup_confirmed",
+    "result",
+    "error_stage",
+    "win32_error",
+];
+const CONTROL: &[&str] = &[
     "flags",
     "child_pid",
     "child_creation_time",
@@ -75,19 +87,26 @@ fn optional_number(value: &Value) -> bool {
 fn optional_bool(value: &Value) -> bool {
     value.is_null() || value.is_boolean()
 }
-fn outcome(value: &Value) -> bool {
-    matches!(
-        value["result"].as_str(),
-        Some("failed" | "breakaway_observed")
-    ) && (value["error_stage"].is_null()
-        || value["error_stage"]
-            .as_str()
-            .is_some_and(|s| STAGES.contains(&s)))
+fn outcome(value: &Value, success: &str) -> bool {
+    (value["result"] == "failed" || value["result"] == success)
+        && (value["error_stage"].is_null()
+            || value["error_stage"]
+                .as_str()
+                .is_some_and(|s| STAGES.contains(&s)))
         && (value["win32_error"].is_null() || value["win32_error"].as_i64().is_some())
+}
+fn process_fields(v: &Value, success: &str) -> bool {
+    outcome(v, success)
+        && v["flags"].as_u64().is_some()
+        && optional_number(&v["child_pid"])
+        && optional_number(&v["child_creation_time"])
+        && optional_bool(&v["child_in_job"])
+        && optional_bool(&v["child_in_parent_job"])
+        && v["cleanup_confirmed"].is_boolean()
 }
 pub(super) fn valid(value: &Value) -> bool {
     keys(value, ROOT)
-        && outcome(value)
+        && outcome(value, "breakaway_observed")
         && value["schema"] == 1
         && value["parent_pid"].as_u64().is_some_and(|pid| pid > 0)
         && value["host_version_source"] == "runner_existing_host_query"
@@ -104,13 +123,10 @@ pub(super) fn valid(value: &Value) -> bool {
             a.len() <= 2
                 && a.iter().all(|v| {
                     keys(v, ATTEMPT)
-                        && outcome(v)
-                        && v["flags"].as_u64().is_some()
-                        && optional_number(&v["child_pid"])
-                        && optional_number(&v["child_creation_time"])
-                        && optional_bool(&v["child_in_job"])
-                        && optional_bool(&v["child_in_parent_job"])
-                        && v["cleanup_confirmed"].is_boolean()
+                        && process_fields(v, "breakaway_observed")
+                        && (v["control"].is_null()
+                            || (keys(&v["control"], CONTROL)
+                                && process_fields(&v["control"], "control_started")))
                 })
         })
 }
@@ -124,7 +140,10 @@ mod tests {
         let mut baseline = empty(1);
         baseline["attempts"] = json!([{"flags":1,"child_pid":null,"child_creation_time":null,
             "child_in_job":null,"child_in_parent_job":null,"cleanup_confirmed":false,
-            "result":"failed","error_stage":"child_create","win32_error":5}]);
+            "result":"failed","error_stage":"child_create","win32_error":5,"control":null}]);
+        baseline["attempts"][0]["control"] = json!({"flags":0,"child_pid":2,"child_creation_time":1,
+            "child_in_job":true,"child_in_parent_job":true,"cleanup_confirmed":true,
+            "result":"control_started","error_stage":null,"win32_error":null});
         assert!(valid(&baseline));
         for key in [
             "path",
@@ -140,6 +159,9 @@ mod tests {
             let mut value = baseline.clone();
             value["attempts"][0][key] = json!("private material");
             assert!(!valid(&value), "extra nested field {key}");
+            let mut value = baseline.clone();
+            value["attempts"][0]["control"][key] = json!("private material");
+            assert!(!valid(&value), "extra control field {key}");
         }
         for key in [
             "result",
@@ -154,6 +176,10 @@ mod tests {
         }
         let mut value = baseline.clone();
         value["attempts"][0]["error_stage"] = json!("raw OS error containing private path");
+        assert!(!valid(&value));
+        let mut value = baseline.clone();
+        value["attempts"][0]["control"]["error_stage"] =
+            json!("raw control error containing private path");
         assert!(!valid(&value));
         baseline["attempts"][0]["child_pid"] = json!("environment value");
         assert!(!valid(&baseline));

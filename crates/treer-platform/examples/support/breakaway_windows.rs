@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 
 const CHILD_MS: u64 = 10_000;
 const WAIT_MS: u32 = 5_000;
-const MAX_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_IMAGE_BYTES: u64 = 32 * 1024 * 1024;
 const FLAGS: [u32; 2] = [
     CREATE_BREAKAWAY_FROM_JOB | CREATE_UNICODE_ENVIRONMENT,
     CREATE_BREAKAWAY_FROM_JOB
@@ -300,15 +300,7 @@ impl Child {
             )
         };
         if created == 0 {
-            let error = os_error("child_create");
-            return Err(if error.win32 == Some(ERROR_ACCESS_DENIED as i32) {
-                Failure {
-                    stage: "breakaway_denied",
-                    win32: error.win32,
-                }
-            } else {
-                error
-            });
+            return Err(os_error("child_create"));
         }
         // SAFETY: successful CreateProcess transfers these two valid owned handles.
         let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
@@ -469,6 +461,43 @@ fn parent_job_details() -> Result<(u32, Vec<usize>)> {
     ))
 }
 
+fn child_fields(flags: u32) -> Value {
+    json!({"flags":flags,"child_pid":null,"child_creation_time":null,
+        "child_in_job":null,"child_in_parent_job":null,"cleanup_confirmed":false,
+        "result":"failed","error_stage":null,"win32_error":null})
+}
+
+fn record_outcome(fields: &mut Value, outcome: &Result<()>, success: &'static str) {
+    match outcome {
+        Ok(()) => fields["result"] = json!(success),
+        Err(e) => {
+            fields["error_stage"] = json!(e.stage);
+            fields["win32_error"] = json!(e.win32);
+        }
+    }
+}
+
+fn owned_attempt(image: &Image, flags: u32, outside: bool, fields: &mut Value) -> Result<()> {
+    let mut child = Child::spawn(image, flags)?;
+    fields["child_pid"] = json!(child.pid);
+    let observed = (|| -> Result<()> {
+        let (creation, membership) = child.inspect(image)?;
+        fields["child_creation_time"] = json!(creation);
+        fields["child_in_job"] = json!(membership);
+        let (_, members) = parent_job_details()?;
+        let listed = members.contains(&(child.pid as usize));
+        fields["child_in_parent_job"] = json!(listed);
+        if outside && (membership || listed) {
+            return Err(failed("child_still_in_job"));
+        }
+        Ok(())
+    })();
+    let cleanup = child.cleanup();
+    fields["cleanup_confirmed"] = json!(child.cleaned);
+    cleanup?;
+    observed
+}
+
 fn probe(report: &mut Value) -> Result<()> {
     let mut version: OSVERSIONINFOW = unsafe { mem::zeroed() };
     version.dwOSVersionInfoSize = mem::size_of_val(&version) as u32;
@@ -488,36 +517,31 @@ fn probe(report: &mut Value) -> Result<()> {
     let (limits, _) = parent_job_details()?;
     report["parent_job_limit_flags"] = json!(limits);
     for flags in FLAGS {
-        let mut attempt = json!({"flags":flags,"child_pid":null,"child_creation_time":null,
-            "child_in_job":null,"child_in_parent_job":null,"cleanup_confirmed":false,
-            "result":"failed","error_stage":null,"win32_error":null});
-        let result = (|| -> Result<()> {
-            let mut child = Child::spawn(&image, flags)?;
-            attempt["child_pid"] = json!(child.pid);
-            let observed = (|| -> Result<()> {
-                let (creation, membership) = child.inspect(&image)?;
-                attempt["child_creation_time"] = json!(creation);
-                attempt["child_in_job"] = json!(membership);
-                let (_, members) = parent_job_details()?;
-                let listed = members.contains(&(child.pid as usize));
-                attempt["child_in_parent_job"] = json!(listed);
-                if membership || listed {
-                    return Err(failed("child_still_in_job"));
-                }
-                Ok(())
-            })();
-            let cleanup = child.cleanup();
-            attempt["cleanup_confirmed"] = json!(child.cleaned);
-            cleanup?;
-            observed
-        })();
-        match &result {
-            Ok(()) => attempt["result"] = json!("breakaway_observed"),
-            Err(e) => {
-                attempt["error_stage"] = json!(e.stage);
-                attempt["win32_error"] = json!(e.win32);
-            }
+        let mut attempt = child_fields(flags);
+        attempt["control"] = Value::Null;
+        let mut result = owned_attempt(&image, flags, true, &mut attempt);
+        if matches!(&result, Err(e) if e.stage == "child_create" && e.win32 == Some(ERROR_ACCESS_DENIED as i32))
+        {
+            // Access denied alone is not proof of a Job refusal (ACL/AV/SRP can
+            // deny image launch too). One fixed control, never a successful probe.
+            let control_flags = flags & !CREATE_BREAKAWAY_FROM_JOB;
+            let mut control = child_fields(control_flags);
+            let control_result = owned_attempt(&image, control_flags, false, &mut control);
+            record_outcome(&mut control, &control_result, "control_started");
+            result = match control_result {
+                Ok(()) => Err(Failure {
+                    stage: "breakaway_denied",
+                    win32: Some(ERROR_ACCESS_DENIED as i32),
+                }),
+                Err(e) if e.stage == "cleanup_unconfirmed" => Err(e),
+                Err(_) => Err(Failure {
+                    stage: "child_create",
+                    win32: Some(ERROR_ACCESS_DENIED as i32),
+                }),
+            };
+            attempt["control"] = control;
         }
+        record_outcome(&mut attempt, &result, "breakaway_observed");
         report["attempts"]
             .as_array_mut()
             .expect("fixed report array")
@@ -664,6 +688,11 @@ mod tests {
                 assert_eq!(error.win32, Some(ERROR_ACCESS_DENIED as i32));
                 assert_eq!(report["attempts"].as_array().unwrap().len(), 1);
                 assert_eq!(report["attempts"][0]["child_pid"], Value::Null);
+                assert_eq!(
+                    report["attempts"][0]["control"]["result"],
+                    "control_started"
+                );
+                assert_eq!(report["attempts"][0]["control"]["cleanup_confirmed"], true);
             }
             _ => panic!("unknown test fixture"),
         }

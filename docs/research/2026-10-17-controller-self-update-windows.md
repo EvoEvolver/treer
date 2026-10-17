@@ -38,7 +38,15 @@ CREATE_BREAKAWAY_FROM_JOB first, then in a second fixed attempt
 CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP; no
 CREATE_NEW_CONSOLE, shell launch or Job-policy changes. The flags are a request,
 not proof. Stop at the first failure; this is a diagnostic sequence, never a
-policy-changing retry. The child only waits for ten seconds and exits; it spawns nothing,
+policy-changing retry. Exception required by security3182: if CreateProcess is
+denied, run one fixed control with only CREATE_BREAKAWAY_FROM_JOB removed. This
+control can distinguish a breakaway-specific refusal from general image launch
+denial; it cannot make the probe succeed. Verify its image/liveness and clean it
+up through its owned handle too. Report `breakaway_denied` only when this control
+starts and is fully cleaned up; otherwise preserve `child_create` and the original
+Win32 error, with a nested control report. Control cleanup uncertainty takes
+precedence as `cleanup_unconfirmed`. Stop after this diagnostic; do not try the
+next breakaway flag combination. The child only waits for ten seconds and exits; it spawns nothing,
 prints nothing and never enters updater code. There is no child-ready assertion
 from a message or PID file.
 
@@ -88,7 +96,9 @@ The implementation report keys are fixed: `schema`, `result`, `parent_pid`,
 `helper_size`, `parent_in_job`, `parent_job_limit_flags`, `attempts`,
 `error_stage`, `win32_error`. Each attempt has `flags`, `child_pid`,
 `child_creation_time`, `child_in_job`, `child_in_parent_job`, `cleanup_confirmed`,
-`result`, `error_stage`, `win32_error`. Results are `failed` or
+`result`, `error_stage`, `win32_error`, `control`. The nullable `control` has the
+same process fields without another `control`, with result `control_started` or
+`failed`; it never reports `breakaway_observed`. Root/attempt results are `failed` or
 `breakaway_observed`; diagnostic failures are distinguished by fixed error stage
 (including `not_exec_job_evidence`). Output is below 8192 bytes; stdout failure
 returns nonzero without a raw error message. Invalid argv fails before hashing
@@ -105,7 +115,21 @@ test Job only; their code is absent from the production example. The production
 build is `cargo build -p treer-platform --example treer-breakaway-probe --release`;
 live argv is only `treer-breakaway-probe.exe --probe`. A native artifact hash,
 full author gate, reviewed source SHA and exact #98 paths are still required
-before any live run; cross-compilation checking alone is insufficient.
+before any live run; cross-compilation checking alone is insufficient. Run the
+synthetic Job fixtures only on a hosted/disposable Windows worker, never on the
+user's win_native machine. That machine receives only the reviewed production
+helper's fixed `--probe` command.
+
+The runner must use the actual Host exec account's native Known Folder location,
+not its own account's LocalAppData. Native fixtures intentionally differ only in
+approved directory (their own executable directory) and child argv (the isolated
+test-harness sleeper); those differences are compiled out of the production
+example and must not be treated as coverage of the production placement/argv
+checks. Keep the release helper small (image bound 32 MiB) and record its size;
+the ten-second child budget includes hashing/inspection under load. The runner,
+not this helper, enforces the twenty-second total deadline. Injected OS query/
+termination failures and actual parent death still require acceptance evidence;
+the existing native fixtures do not claim those cases covered.
 
 Validate on native Windows with no Job, a synthetic Job allowing breakaway and
 a synthetic Job refusing it; synthetic fixtures may create their own Jobs, but
