@@ -116,6 +116,22 @@ pub(super) fn protocol_error(code: &str, error: impl std::fmt::Display) -> Proto
     ProtocolError::new(code, error.to_string())
 }
 
+/// A Host error that names an absent stop target keeps its code
+/// (`process_not_found`, `process_not_running`) so the Proxy can treat the
+/// stop as complete; every other Host error stays `host_error` (#150).
+pub(super) fn host_stop_error(error: impl std::fmt::Display) -> ProtocolError {
+    let text = error.to_string();
+    for code in ["process_not_found", "process_not_running"] {
+        if text
+            .strip_prefix(code)
+            .is_some_and(|rest| rest.starts_with(':'))
+        {
+            return ProtocolError::new(code, text);
+        }
+    }
+    protocol_error("host_error", text)
+}
+
 pub(super) fn startup_store_error(error: impl std::fmt::Display) -> ProtocolError {
     protocol_error("startup_store_error", error)
 }

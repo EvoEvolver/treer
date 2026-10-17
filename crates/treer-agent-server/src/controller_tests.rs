@@ -860,6 +860,45 @@ async fn startup_admin_preserves_identity_credentials_and_fences_concurrent_rest
         .await
         .unwrap();
     assert_eq!(runtime.list()[0].agent_id, "stable-id");
+    // #150: an App whose first launch failed before the Host spawned anything
+    // keeps only its saved declaration. Stopping it is idempotent (reported as
+    // exited from that declaration) and never asks the Host to stop a process
+    // it never had; an id with no declaration is simply absent.
+    let never_spawned: CreateAgentRequest = serde_json::from_value(serde_json::json!({
+        "kind":"app", "name":"never", "cwd":"repo",
+        "args":["fail-command"], "cols":80, "rows":24
+    }))
+    .unwrap();
+    let failed = runtime
+        .ensure_app_lifecycle(
+            "never-spawned-launch",
+            "never-spawned".into(),
+            Some(credential.clone()),
+            never_spawned,
+            true,
+            true,
+            Some(1),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(failed.code, "host_error");
+    assert!(runtime.get("never-spawned").is_err(), "no live record");
+    let stopped = runtime
+        .stop("never-spawned-stop", "never-spawned")
+        .await
+        .unwrap();
+    assert_eq!(stopped.agent_id, "never-spawned");
+    assert!(stopped.status.is_terminal());
+    assert!(!runtime.get_startup("never-spawned").unwrap().enabled);
+    assert_eq!(
+        runtime
+            .stop("unknown-stop", "no-such-workload")
+            .await
+            .unwrap_err()
+            .code,
+        "agent_not_found"
+    );
+    runtime.inner.workload_proxies.remove("never-spawned");
     task.abort();
     runtime.inner.workload_proxies.remove("stable-id");
     drop(runtime);
@@ -2081,4 +2120,24 @@ fn provider_kinds_and_namespace_ports_require_explicit_migration() {
         resolve_launch(&request).unwrap_err().code,
         "sandbox_ports_retired"
     );
+}
+
+#[test]
+fn host_stop_errors_keep_absent_target_codes() {
+    use super::output::host_stop_error;
+    assert_eq!(
+        host_stop_error("process_not_found: process app_1 was not found").code,
+        "process_not_found"
+    );
+    assert_eq!(
+        host_stop_error("process_not_running: process app_1 is not running").code,
+        "process_not_running"
+    );
+    for other in [
+        "process_not_found_extra: x",
+        "spawn_failed: process_not_found",
+        "host request timed out",
+    ] {
+        assert_eq!(host_stop_error(other).code, "host_error", "{other}");
+    }
 }

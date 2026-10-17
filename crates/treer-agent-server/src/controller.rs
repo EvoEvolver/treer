@@ -1047,7 +1047,7 @@ impl ControllerRuntime {
                         Some(format!("{operation_id}:stop")),
                     )
                     .await
-                    .map_err(|error| protocol_error("host_error", error))?;
+                    .map_err(host_stop_error)?;
                 return self.process_response(response, AgentStatus::Exited);
             }
         }
@@ -3187,6 +3187,18 @@ impl ControllerRuntime {
                     .clone();
                 return Ok(info);
             }
+            // No live process and no local record: a launch that failed before
+            // the Host spawned anything leaves only its saved declaration
+            // (#150). Stop is idempotent, so report that workload as exited
+            // instead of asking the Host to stop a process it never had; an
+            // id with no declaration either is simply absent.
+            return match self.inner.startup_store.get(agent_id) {
+                Some(entry) => self.materialize_startup(&entry),
+                None => Err(ProtocolError::new(
+                    "agent_not_found",
+                    "no live process or saved launch for workload",
+                )),
+            };
         }
         let response = self
             .inner
@@ -3198,7 +3210,7 @@ impl ControllerRuntime {
                 Some(operation_id.to_string()),
             )
             .await
-            .map_err(|error| protocol_error("host_error", error))?;
+            .map_err(host_stop_error)?;
         self.process_response(response, AgentStatus::Exited)
     }
 
