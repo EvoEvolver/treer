@@ -537,6 +537,13 @@ per page; after the budget no further ack is started, and remaining deliveries
 stay in Core. State admission commits before ack, and neither receive nor ack
 holds the state mutex. A separate maintenance worker runs every second and
 promotes at most ten held fragments per binding.
+Consecutive failed inbox drains back off 1, 2, 4, 8, 16, then at most 30 seconds;
+a successful drain resets the streak. Worker status exposes the streak and a
+fixed last inbox failure code (Core receive/ack, storage, binding, failure
+budget, state unavailable, invalid batch or revision), without raw errors or
+message text. The optional oldest-unacked age is monotonic time **since this
+process first observed the current unacked delivery**, not Core creation time;
+it resets when that delivery is acked or the oldest visible delivery changes.
 
 The readback supervisor starts at most one independent worker per configured
 binding (maximum twenty), including bindings added later. Each targets a query
@@ -609,6 +616,10 @@ Each receipt permits at most five preparations in a rolling hour, recorded in
 SQLite separately from the audit so archiving audit rows cannot reset the rate.
 Rate refusals add no audit rows. Pending leases and unsuccessful retrievals count
 as attempts; there is no automatic retry.
+Maintenance removes at most 1000 expired rate rows per tick, retaining recent
+and future timestamps. The hub host needs a monitored clock: wall-clock steps
+affect freshness, expiry, leases and rate budgets; backward steps cause refusals
+rather than extending authority. Observation-age status uses a monotonic clock.
 
 The owned intent calls the fixed Core adapter outside state access, checking
 that its configured identity is the pinned hub's. Its result has no public

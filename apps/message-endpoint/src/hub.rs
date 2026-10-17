@@ -432,6 +432,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         self.store.cleanup_transfers(now)?;
         self.store.prune_completed(now)?;
         self.cleanup_failure_notices(now)?;
+        self.cleanup_refetch_rate(now)?;
         let telegram: bool = self.store.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_chunks')",
             [],

@@ -99,6 +99,19 @@ impl RefetchOutcome {
     }
 }
 impl<M: Mailbox + Directory> Hub<M> {
+    pub(crate) fn cleanup_refetch_rate(&self, now: i64) -> Result<(), Error> {
+        let exists: bool = self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='hub_refetch_rate')",
+            [],
+            |r| r.get(0),
+        )?;
+        if exists {
+            // Rate rows are independent of archiveable audit history. Keep
+            // future timestamps after a backward clock step, fail closed.
+            self.store.db.execute("DELETE FROM hub_refetch_rate WHERE audit IN (SELECT audit FROM hub_refetch_rate WHERE at<=?1 ORDER BY at,audit LIMIT 1000)",[now.saturating_sub(3600)])?;
+        }
+        Ok(())
+    }
     fn refetch_schema(&self) -> Result<(), Error> {
         self.recovery_schema()?;
         self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_refetch_leases(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,delivery TEXT NOT NULL,token TEXT NOT NULL,until_at INTEGER NOT NULL,audit INTEGER NOT NULL,PRIMARY KEY(endpoint,generation,delivery));
@@ -821,5 +834,39 @@ mod tests {
             );
             assert_eq!(hub.owner_audit(None, 10).unwrap()[0].action, code);
         }
+    }
+    #[test]
+    fn maintenance_prunes_at_most_a_thousand_expired_rate_rows_and_keeps_recent_or_future_rows() {
+        let mut hub = fixture(Limits::default());
+        hub.refetch_schema().unwrap();
+        hub.store.db.execute_batch("WITH RECURSIVE n(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM n WHERE x<1005) INSERT INTO hub_refetch_rate(endpoint,generation,delivery,at,audit) SELECT 'ag_endpoint',1,'del_synthetic_'||x,1799996399,x FROM n;").unwrap();
+        hub.store
+            .db
+            .execute(
+                "INSERT INTO hub_refetch_rate VALUES('ag_endpoint',1,'del_recent',?1,1006)",
+                [NOW],
+            )
+            .unwrap();
+        hub.store
+            .db
+            .execute(
+                "INSERT INTO hub_refetch_rate VALUES('ag_endpoint',1,'del_future',?1,1007)",
+                [NOW + 5000],
+            )
+            .unwrap();
+        hub.maintenance(NOW).unwrap();
+        let count = |h: &Hub<NoIo>| {
+            h.store
+                .db
+                .query_row("SELECT COUNT(*) FROM hub_refetch_rate", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap()
+        };
+        assert_eq!(count(&hub), 7);
+        hub.maintenance(NOW).unwrap();
+        assert_eq!(count(&hub), 2);
+        hub.maintenance(NOW - 100).unwrap();
+        assert_eq!(count(&hub), 2);
     }
 }

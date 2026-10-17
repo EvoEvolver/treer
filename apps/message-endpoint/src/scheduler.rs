@@ -38,6 +38,9 @@ struct Counters {
     maintenance: AtomicU64,
     readbacks: AtomicU64,
     stopping: AtomicBool,
+    consecutive_failures: AtomicU64,
+    last_inbox_failure: AtomicU64,
+    oldest: Mutex<Option<(String, Instant)>>,
 }
 fn increment(counter: &AtomicU64) {
     let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| {
@@ -52,6 +55,10 @@ pub struct WorkerStatus {
     pub maintenance_ticks: u64,
     pub readback_completions: u64,
     pub stopping: bool,
+    pub consecutive_failed_drains: u64,
+    pub last_inbox_failure: Option<&'static str>,
+    /// Local monotonic observation age, NOT Core message creation age.
+    pub oldest_unacked_observed_age_seconds: Option<u64>,
 }
 /// Owns only threads started by this object. No process names, external signals
 /// or restarts. Stop waits for bounded Core CLI calls already in flight.
@@ -79,11 +86,11 @@ impl CoreWorkers {
                     .push(thread::Builder::new().name("hub-core-inbox".into()).spawn(
                         move || {
                             while !c.stopping.load(Ordering::Acquire) {
-                                if !drain(&s, &backend, &c, MAX_PAGES, DRAIN_BUDGET) {
-                                    increment(&c.failures);
-                                }
-                                // Yield after EVERY bounded drain, including a full backlog.
-                                wait(&c, Duration::from_millis(100));
+                                let good = drain(&s, &backend, &c, MAX_PAGES, DRAIN_BUDGET);
+                                // Yield on healthy backlog; exponential backoff
+                                // prevents persistent unacked poison/storage
+                                // faults hammering Core and the local disk.
+                                wait(&c, record_inbox_result(&c, good));
                             }
                         },
                     )?);
@@ -124,6 +131,13 @@ impl CoreWorkers {
             maintenance_ticks: c.maintenance.load(Ordering::Relaxed),
             readback_completions: c.readbacks.load(Ordering::Relaxed),
             stopping: c.stopping.load(Ordering::Acquire),
+            consecutive_failed_drains: c.consecutive_failures.load(Ordering::Relaxed),
+            last_inbox_failure: failure_code(c.last_inbox_failure.load(Ordering::Relaxed)),
+            oldest_unacked_observed_age_seconds: c
+                .oldest
+                .lock()
+                .ok()
+                .and_then(|old| old.as_ref().map(|(_, at)| at.elapsed().as_secs())),
         }
     }
     pub fn stop(&mut self) {
@@ -138,6 +152,66 @@ impl CoreWorkers {
 impl Drop for CoreWorkers {
     fn drop(&mut self) {
         self.stop();
+    }
+}
+fn failure_code(code: u64) -> Option<&'static str> {
+    match code {
+        1 => Some("core_receive"),
+        2 => Some("core_ack"),
+        3 => Some("storage"),
+        4 => Some("binding"),
+        5 => Some("failure_budget"),
+        6 => Some("state_unavailable"),
+        7 => Some("invalid_batch"),
+        8 => Some("revision"),
+        9 => Some("refetch_rate_limited"),
+        _ => None,
+    }
+}
+fn hub_failure(error: crate::hub::Error) -> u64 {
+    match error {
+        crate::hub::Error::Storage(_) => 3,
+        crate::hub::Error::Core(_) => 1,
+        crate::hub::Error::Binding => 4,
+        crate::hub::Error::FailureBudget => 5,
+        crate::hub::Error::Revision => 8,
+        crate::hub::Error::RefetchRateLimited => 9,
+    }
+}
+fn record_inbox_result(c: &Counters, good: bool) -> Duration {
+    if good {
+        c.consecutive_failures.store(0, Ordering::Relaxed);
+        c.last_inbox_failure.store(0, Ordering::Relaxed);
+        return Duration::from_millis(100);
+    }
+    increment(&c.failures);
+    increment(&c.consecutive_failures);
+    let streak = c.consecutive_failures.load(Ordering::Relaxed);
+    Duration::from_secs(
+        1u64.checked_shl(streak.saturating_sub(1).min(5) as u32)
+            .unwrap_or(30)
+            .min(30),
+    )
+}
+fn observe(c: &Counters, id: Option<&str>, new_page: bool) {
+    if let Ok(mut oldest) = c.oldest.lock() {
+        match id {
+            None => *oldest = None,
+            Some(id)
+                if oldest.is_none()
+                    || (new_page && oldest.as_ref().is_some_and(|(old, _)| old != id)) =>
+            {
+                *oldest = Some((id.into(), Instant::now()))
+            }
+            _ => {}
+        }
+    }
+}
+fn observed_ack(c: &Counters, id: &str) {
+    if let Ok(mut oldest) = c.oldest.lock() {
+        if oldest.as_ref().is_some_and(|(old, _)| old == id) {
+            *oldest = None;
+        }
     }
 }
 fn unix_now() -> i64 {
@@ -170,27 +244,50 @@ fn drain<M: CoreInbox>(
         }
         let batch = match backend.receive_batch(if page == 0 { 1000 } else { 0 }) {
             Ok(b) => b,
-            Err(_) => return false,
+            Err(_) => {
+                c.last_inbox_failure.store(1, Ordering::Relaxed);
+                return false;
+            }
         };
         increment(&c.pages);
         let empty = batch.deliveries.is_empty();
         // The production adapter caps this at ten. Defend against faulty test
         // or future adapters rather than doing unbounded state work here.
         if batch.deliveries.len() > 10 {
+            c.last_inbox_failure.store(7, Ordering::Relaxed);
             return false;
         }
+        observe(
+            c,
+            batch.deliveries.first().map(|d| d.delivery_id.as_str()),
+            true,
+        );
         for delivery in batch.deliveries {
             if c.stopping.load(Ordering::Acquire) {
                 return good;
             }
+            observe(c, Some(&delivery.delivery_id), false);
             let admitted = match state.lock() {
-                Ok(mut hub) => hub.admit_core_delivery(&delivery, unix_now()).is_ok(),
-                Err(_) => false,
+                Ok(mut hub) => hub
+                    .admit_core_delivery(&delivery, unix_now())
+                    .map_err(hub_failure),
+                Err(_) => Err(6),
             };
-            if admitted && backend.ack(&delivery.delivery_id).is_ok() {
-                increment(&c.acked);
-            } else {
-                good = false;
+            match admitted {
+                Ok(()) => match backend.ack(&delivery.delivery_id) {
+                    Ok(()) => {
+                        increment(&c.acked);
+                        observed_ack(c, &delivery.delivery_id);
+                    }
+                    Err(_) => {
+                        good = false;
+                        c.last_inbox_failure.store(2, Ordering::Relaxed);
+                    }
+                },
+                Err(code) => {
+                    good = false;
+                    c.last_inbox_failure.store(code, Ordering::Relaxed);
+                }
             }
             // Always process at least one delivery, even if the initial long
             // poll used the budget. Do not begin another potentially 15s ack
@@ -323,6 +420,8 @@ mod tests {
         receive_entered: Arc<AtomicBool>,
         block_metadata: Arc<AtomicBool>,
         metadata_entered: Arc<AtomicBool>,
+        fail_ack: Arc<AtomicBool>,
+        fail_receive: Arc<AtomicBool>,
     }
     impl Fake {
         fn stall(block: &AtomicBool, entered: &AtomicBool) {
@@ -354,6 +453,9 @@ mod tests {
             panic!("use backlog-aware receive")
         }
         fn ack(&self, id: &str) -> Result<(), crate::core::Error> {
+            if self.fail_ack.load(Ordering::Relaxed) {
+                return Err(crate::core::Error::Rejected);
+            }
             let mut q = self.queue.lock().unwrap();
             let i = q
                 .iter()
@@ -387,6 +489,9 @@ mod tests {
     }
     impl CoreInbox for Fake {
         fn receive_batch(&self, wait: u32) -> Result<ReceiveBatch, crate::core::Error> {
+            if self.fail_receive.load(Ordering::Relaxed) {
+                return Err(crate::core::Error::Unavailable);
+            }
             self.waits.lock().unwrap().push(wait);
             Self::stall(&self.block_receive, &self.receive_entered);
             let q = self.queue.lock().unwrap();
@@ -587,5 +692,94 @@ mod tests {
         wait_until(|| workers.status().stopping);
         workers.stop();
         assert!(workers.status().failures >= 1);
+    }
+    #[test]
+    fn failed_inbox_drains_back_off_to_thirty_seconds_and_recovery_resets_status() {
+        let workers = CoreWorkers {
+            shared: Arc::new(Counters::default()),
+            joins: vec![],
+        };
+        let c = &workers.shared;
+        c.last_inbox_failure.store(3, Ordering::Relaxed);
+        for seconds in [1, 2, 4, 8, 16, 30, 30] {
+            assert_eq!(record_inbox_result(c, false), Duration::from_secs(seconds));
+        }
+        assert_eq!(workers.status().consecutive_failed_drains, 7);
+        assert_eq!(workers.status().last_inbox_failure, Some("storage"));
+        assert_eq!(record_inbox_result(c, true), Duration::from_millis(100));
+        assert_eq!(workers.status().consecutive_failed_drains, 0);
+        assert_eq!(workers.status().last_inbox_failure, None);
+    }
+    #[test]
+    fn failed_ack_exposes_local_unacked_age_and_fixed_reason_until_redelivery_commits() {
+        let (state, fake) = fixture();
+        fake.push("ag_slow", 0);
+        fake.fail_ack.store(true, Ordering::Relaxed);
+        let workers = CoreWorkers {
+            shared: Arc::new(Counters::default()),
+            joins: vec![],
+        };
+        let c = &workers.shared;
+        assert!(!drain(&state, &fake, c, 1, Duration::from_secs(1)));
+        assert_eq!(workers.status().last_inbox_failure, Some("core_ack"));
+        assert!(workers
+            .status()
+            .oldest_unacked_observed_age_seconds
+            .is_some());
+        // The public age is monotonic/local, and never includes the stored ID.
+        c.oldest.lock().unwrap().as_mut().unwrap().1 = Instant::now() - Duration::from_secs(2);
+        let status = serde_json::to_string(&workers.status()).unwrap();
+        assert!(!status.contains("del_0"));
+        assert!(
+            workers
+                .status()
+                .oldest_unacked_observed_age_seconds
+                .unwrap()
+                >= 2
+        );
+        fake.fail_ack.store(false, Ordering::Relaxed);
+        assert!(drain(&state, &fake, c, 1, Duration::from_secs(1)));
+        assert_eq!(workers.status().oldest_unacked_observed_age_seconds, None);
+        assert_eq!(fake.acks.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            state
+                .lock()
+                .unwrap()
+                .hold_summary("ag_slow")
+                .unwrap()
+                .held_fragments,
+            1
+        );
+        fake.fail_receive.store(true, Ordering::Relaxed);
+        assert!(!drain(&state, &fake, c, 1, Duration::from_secs(1)));
+        assert_eq!(workers.status().last_inbox_failure, Some("core_receive"));
+    }
+    #[test]
+    fn actual_worker_reports_storage_stall_then_resumes_without_restart() {
+        let (state, fake) = fixture();
+        fake.push("ag_slow", 0);
+        state
+            .lock()
+            .unwrap()
+            .store
+            .db
+            .execute("UPDATE hub_bindings SET checked_at='damaged'", [])
+            .unwrap();
+        let mut workers = CoreWorkers::start(state.clone()).unwrap();
+        wait_until(|| workers.status().consecutive_failed_drains >= 1);
+        assert_eq!(workers.status().last_inbox_failure, Some("storage"));
+        assert_eq!(fake.acks.load(Ordering::Relaxed), 0);
+        state
+            .lock()
+            .unwrap()
+            .store
+            .db
+            .execute("UPDATE hub_bindings SET checked_at=NULL", [])
+            .unwrap();
+        wait_until(|| {
+            fake.acks.load(Ordering::Relaxed) == 1
+                && workers.status().consecutive_failed_drains == 0
+        });
+        workers.stop();
     }
 }
