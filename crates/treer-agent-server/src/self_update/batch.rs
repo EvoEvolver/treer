@@ -21,7 +21,7 @@ pub struct ImageBatch<'a> {
     activating: Receipt,
 }
 
-fn same_job(receipt: &Receipt, prepared: &Receipt) -> bool {
+pub(super) fn same_job(receipt: &Receipt, prepared: &Receipt) -> bool {
     let mut expected = prepared.clone();
     expected.phase = receipt.phase;
     expected.revision = receipt.revision;

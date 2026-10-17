@@ -13,6 +13,9 @@ use super::{
     Journal, Phase, Receipt,
 };
 
+mod core;
+pub use core::{CoreProgress, CoreRun};
+
 /// This only locates existing resources; it is not ownership or authority to
 /// mutate installed files. Fields intentionally private and not Debug/Serialize.
 pub struct WorkerResources {
@@ -24,10 +27,13 @@ pub struct WorkerResources {
 
 /// Only obtainable after synchronous running-image/session/parent/peer proof
 /// and the durable, one-shot transfer of the parent's SAME lock descriptions.
+#[must_use = "retain the owned worker and handle its progress before exiting"]
 pub struct OwnedWorker {
     selected: Selected,
     journal: Journal,
     owned: OwnedActivation,
+    core_started: bool,
+    progress: CoreProgress,
 }
 
 impl WorkerResources {
@@ -89,6 +95,8 @@ impl WorkerResources {
                 selected: self.selected,
                 journal: self.journal,
                 owned,
+                core_started: false,
+                progress: CoreProgress::RecoveryRequired,
             })
         })();
         // Never expose OS errors, paths or secret configuration projections.
@@ -97,10 +105,10 @@ impl WorkerResources {
 }
 
 impl OwnedWorker {
-    /// Async execution can be started only after the synchronous bootstrap has
-    /// returned this capability. Caller must retain ownership through all work.
-    pub fn into_parts(self) -> (Selected, Journal, OwnedActivation) {
-        (self.selected, self.journal, self.owned)
+    /// Recovery is the default after ownership until a complete stage proves
+    /// otherwise. Keep this owner alive; status alone cannot release its locks.
+    pub fn progress(&self) -> CoreProgress {
+        self.progress
     }
 }
 

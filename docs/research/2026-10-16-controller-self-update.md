@@ -160,7 +160,7 @@ authenticated full-receipt handoff and the same installation lock descriptions.
 The consuming synchronous entry verifies the running private image, session,
 parent and endpoint peer before taking ownership. Failures return a fixed
 bootstrap diagnostic; there is no ordinary Controller fallback or reconnect.
-Only the resulting owned capability exposes resources for async execution.
+Only the resulting owned capability permits async execution.
 Tests cover malformed/missing/unprepared jobs before inventory enumeration,
 workspace/server mismatch, aliased directories and a wrong running image without
 ownership creation or installed-file changes. This is not yet wired to main or
@@ -170,6 +170,25 @@ successful bootstrap: it must reach the phase-appropriate RollbackFailed or
 `update_recovery_required` path with evidence retained, never silently exit after
 claiming ownership. This regression remains pending with production dispatch;
 the resource resolver does not claim to implement or test that failure path.
+
+The owned worker now offers a one-shot Core coordinator. Synchronous
+`begin_core` permanently marks the attempt before constructing the asynchronous
+run; progress defaults to the fixed `update_recovery_required` label immediately
+after ownership. The run mutably borrows the owner instead of consuming its
+locks. Dropping an unpolled run or cancelling a polled run leaves the owner,
+locks and recovery-required status intact; it never authorizes another attempt.
+The production engine calls the complete Core activation proof, and only an
+exact, bound RollingBack restoration result authorizes one rollback coordinator
+call. Errors, foreign/stale results and RollbackFailed all require recovery,
+without diagnostic text escaping. A proven CoreHealthy result requires launcher
+work, not Complete; only independently proven RolledBack reports rollback success.
+The coordinator does not invent journal transitions on error. Its private test
+engine verifies orchestration, including cancellation after publication, while
+the existing activation tests cover the underlying live-proof rules. This is
+not a main-entry early-exit or worker-death recovery test: a process exit still
+releases OS locks, and production main must explicitly report/handle this status
+instead of silently returning. Launcher execution, production dispatch and crash
+recovery remain pending. No network failure authorizes restarting the Host.
 
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
