@@ -17,6 +17,7 @@ use super::{
 };
 
 mod start;
+pub use start::RecordedIntent;
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -376,9 +377,15 @@ mod tests {
             .unwrap()
             .bind_temporary(&temporary)
             .unwrap();
-            plan.record_start_intent().unwrap();
+            let intent = plan.record_start_intent().unwrap();
+            intent.verify().unwrap();
             let path = job.join(format!("launcher-{suffix}-intent.json"));
             let bytes = std::fs::read(&path).unwrap();
+            use sha2::{Digest, Sha256};
+            assert_eq!(
+                intent.sha256().unwrap(),
+                format!("{:x}", Sha256::digest(&bytes))
+            );
             assert!(bytes.len() <= 64 * 1024);
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(value["schema_version"], 1);
@@ -396,13 +403,103 @@ mod tests {
                 0o600
             );
             assert_eq!(
-                plan.record_start_intent().unwrap_err().to_string(),
+                plan.record_start_intent().err().unwrap().to_string(),
                 "update_recovery_required"
             );
             assert_eq!(std::fs::read(&path).unwrap(), bytes);
             assert_eq!(journal.read().unwrap(), before);
             drop(plan);
             assert_eq!(std::fs::read(path).unwrap(), bytes); // Recovery evidence remains.
+        }
+    }
+
+    #[test]
+    fn recorded_intent_rejects_replacement_mutation_and_revoked_recipe() {
+        use std::os::unix::fs::{symlink, MetadataExt};
+        for fault in [
+            "replacement",
+            "mutation",
+            "symlink",
+            "missing",
+            "receipt",
+            "node",
+            "temporary",
+        ] {
+            let f = Fixture::standard_config();
+            f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+            let (selected, owned, journal) = bind(&f, "ws_a");
+            let before = journal.read().unwrap();
+            let job = f.path.join("jobs").join(before.job_id.to_string());
+            let temporary = LauncherTemporary::create(&selected, &owned, &journal, &job).unwrap();
+            let node = NodeFixture::new();
+            let plan = Invocation::with_context(
+                &selected,
+                &owned,
+                &journal,
+                Operation::Install,
+                &f.path,
+                &node.node(),
+            )
+            .unwrap()
+            .bind_node(retain_node(&node.node()).unwrap())
+            .unwrap()
+            .bind_temporary(&temporary)
+            .unwrap();
+            let intent = plan.record_start_intent().unwrap();
+            let path = job.join("launcher-install-intent.json");
+            let bytes = std::fs::read(&path).unwrap();
+            let inode = std::fs::metadata(&path).unwrap().ino();
+            intent.sha256().unwrap();
+            match fault {
+                "replacement" | "symlink" => {
+                    // Retain the original evidence; a byte-identical replacement
+                    // must still fail the retained-inode comparison.
+                    let saved = job.join("saved-intent");
+                    std::fs::rename(&path, &saved).unwrap();
+                    if fault == "symlink" {
+                        symlink(&saved, &path).unwrap();
+                    } else {
+                        std::fs::write(&path, &bytes).unwrap();
+                        use std::os::unix::fs::PermissionsExt;
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                            .unwrap();
+                        assert_ne!(std::fs::metadata(&path).unwrap().ino(), inode);
+                    }
+                }
+                "mutation" => {
+                    // Even semantically equivalent JSON differs from the exact
+                    // bytes whose digest the future registration will bind.
+                    let mut changed = bytes.clone();
+                    changed.push(b'\n');
+                    std::fs::write(&path, changed).unwrap();
+                    assert_eq!(std::fs::metadata(&path).unwrap().ino(), inode);
+                }
+                "missing" => std::fs::rename(&path, job.join("saved-intent")).unwrap(),
+                "receipt" => {
+                    let mut changed = before.clone();
+                    changed.revision += 1;
+                    journal.write(&changed).unwrap();
+                }
+                "node" => node.script("exit 0"),
+                "temporary" => {
+                    std::fs::rename(job.join("launcher-tmp"), job.join("saved-tmp")).unwrap()
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                intent.verify().unwrap_err().to_string(),
+                "update_recovery_required",
+                "{fault}"
+            );
+            assert_eq!(
+                intent.sha256().unwrap_err().to_string(),
+                "update_recovery_required",
+                "{fault}"
+            );
+            // Verification never repairs, replays or launches the inert recipe.
+            if !matches!(fault, "missing" | "symlink" | "mutation") {
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            }
         }
     }
 
@@ -443,7 +540,7 @@ mod tests {
             let before = std::fs::symlink_metadata(&path).unwrap();
             for _ in 0..2 {
                 assert_eq!(
-                    plan.record_start_intent().unwrap_err().to_string(),
+                    plan.record_start_intent().err().unwrap().to_string(),
                     "update_recovery_required"
                 );
             }
@@ -479,7 +576,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            plan.record_start_intent().unwrap_err().to_string(),
+            plan.record_start_intent().err().unwrap().to_string(),
             "update_launcher_binding_mismatch"
         );
         let plan = plan

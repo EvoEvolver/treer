@@ -464,6 +464,19 @@ transitions, durable attested child identity and worker-death/accepted-before-AC
 reconciliation still must be wired before any installer dispatch. An intent
 without completion remains ambiguous, never proof that no child ran.
 
+Fresh intent evidence now returns `RecordedIntent`, with private fields and no
+Clone, deserialization, file accessor or public constructor. It borrows the
+original invocation (and thereby its locked owner), retaining the newly created
+file handle and exact synced/read-back bytes. `verify` rechecks the recipe/job,
+private named entry, original dev/inode and byte equality; `sha256` first performs
+that same check and exposes only the exact-byte digest for future registration.
+It cannot be reconstructed by opening an old marker, and dropping it never removes
+recovery evidence. Tests reject byte-identical inode replacement, same-inode
+JSON whitespace changes, symlink/missing entries, changed journal revision,
+replaced Node and moved temporary directory. These are verification snapshots,
+not atomic protection from a trusted same-account writer, supervisor registration,
+single-gate ownership or installer execution authority; those remain unwired.
+
 Status intent policy (security2596): this is the updater's one-shot post-install
 status verification, not an intent requirement for ordinary `treer launcher
 status`. Its conservative marker is intentional: a supposedly read-only command
