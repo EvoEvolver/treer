@@ -6,6 +6,9 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+#[allow(unsafe_code)]
+pub mod birth_lock;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod bounded_child;
 mod environment;
 #[cfg(unix)]
