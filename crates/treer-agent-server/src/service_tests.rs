@@ -558,6 +558,14 @@ fn roots_equal_to_or_inside_the_state_directory_are_refused() {
     // An absent state directory is still a boundary (compared by path).
     let absent = home.join("absent-state");
     root_outside_state_dir(&absent.join("x"), &absent).unwrap_err();
+    // A still-absent tail that differs only by case is inside on
+    // case-insensitive filesystems, where the transfer reservation folds case.
+    let folded = root_outside_state_dir(&home.join(".local/state/TREER/missing"), &state);
+    if cfg!(any(target_os = "macos", windows)) {
+        folded.unwrap_err();
+    } else {
+        folded.unwrap();
+    }
     assert!(new_enrollment_root(Some(&home.join("projects"))).is_ok());
     fs::remove_dir_all(home).unwrap();
 }

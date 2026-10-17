@@ -499,13 +499,37 @@ pub fn ensure_root_outside_state_dir(root: &Path) -> Result<()> {
 pub(crate) fn root_outside_state_dir(root: &Path, state: &Path) -> Result<()> {
     let state = canonical_prefix(state);
     let root = canonical_prefix(root);
-    if root == state || root.starts_with(&state) {
+    if path_is_equal_or_below(&root, &state) {
         bail!(
             "root_inside_treer_state_directory: the workspace root must not be the Treer state directory or inside it ({}); choose another --root",
             state.display()
         );
     }
     Ok(())
+}
+
+/// Component-wise prefix test. On case-insensitive filesystems (macOS,
+/// Windows) a still-absent tail cannot be canonicalized, so its components are
+/// compared ASCII case-insensitively; elsewhere the comparison is exact.
+fn path_is_equal_or_below(path: &Path, ancestor: &Path) -> bool {
+    let mut path_components = path.components();
+    for expected in ancestor.components() {
+        let Some(actual) = path_components.next() else {
+            return false;
+        };
+        let (expected, actual) = (expected.as_os_str(), actual.as_os_str());
+        let same = if cfg!(any(target_os = "macos", windows)) {
+            expected
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&actual.to_string_lossy())
+        } else {
+            expected == actual
+        };
+        if !same {
+            return false;
+        }
+    }
+    true
 }
 
 /// Canonicalizes the longest existing ancestor and re-appends the missing
