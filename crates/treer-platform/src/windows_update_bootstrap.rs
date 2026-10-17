@@ -21,10 +21,17 @@ use sha2::{Digest, Sha256};
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use windows_sys::Win32::{
     Foundation::*,
-    Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG},
+    Security::{
+        Authorization::*,
+        Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG},
+        *,
+    },
     Storage::FileSystem::*,
     System::{
-        JobObjects::*, Pipes::GetNamedPipeClientProcessId, Threading::*,
+        JobObjects::*,
+        Pipes::GetNamedPipeClientProcessId,
+        SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE, MAXIMUM_ALLOWED},
+        Threading::*,
         WindowsProgramming::DRIVE_FIXED,
     },
 };
@@ -101,6 +108,107 @@ fn open_pinned(path: &Path, directory: bool) -> io::Result<File> {
     Ok(file)
 }
 
+struct SecurityAllocation(*mut std::ffi::c_void);
+impl Drop for SecurityAllocation {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0) };
+    }
+}
+
+fn sid_text(sid: PSID) -> io::Result<String> {
+    if sid.is_null() || unsafe { IsValidSid(sid) } == 0 {
+        return Err(denied());
+    }
+    let mut text = ptr::null_mut();
+    check(unsafe { ConvertSidToStringSidW(sid, &mut text) })?;
+    let _allocation = SecurityAllocation(text.cast());
+    // A SID has at most 15 subauthorities; its textual representation is bounded.
+    let length = (0..184)
+        .find(|&index| unsafe { *text.add(index) } == 0)
+        .ok_or_else(denied)?;
+    String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).map_err(|_| denied())
+}
+
+fn private_owner_dacl(file: &File, owner_sid: &str) -> io::Result<()> {
+    let mut owner = ptr::null_mut();
+    let mut acl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    let result = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            &mut acl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    let _allocation = SecurityAllocation(descriptor);
+    if result != ERROR_SUCCESS
+        || sid_text(owner)? != owner_sid
+        || acl.is_null()
+        || unsafe { IsValidAcl(acl) } == 0
+    {
+        return Err(denied());
+    }
+    let mut info: ACL_SIZE_INFORMATION = unsafe { mem::zeroed() };
+    check(unsafe {
+        GetAclInformation(
+            acl,
+            (&mut info as *mut ACL_SIZE_INFORMATION).cast(),
+            mem::size_of_val(&info) as u32,
+            AclSizeInformation,
+        )
+    })?;
+    let mutation = GENERIC_ALL
+        | GENERIC_WRITE
+        | MAXIMUM_ALLOWED
+        | WRITE_DAC
+        | WRITE_OWNER
+        | DELETE
+        | FILE_WRITE_DATA
+        | FILE_APPEND_DATA
+        | FILE_WRITE_EA
+        | FILE_WRITE_ATTRIBUTES
+        | FILE_DELETE_CHILD;
+    for index in 0..info.AceCount {
+        let mut raw = ptr::null_mut();
+        check(unsafe { GetAce(acl, index, &mut raw) })?;
+        let header = unsafe { ptr::read_unaligned(raw.cast::<ACE_HEADER>()) };
+        // Only ordinary allow/deny ACEs are understood. Conditional, object and
+        // callback ACEs are refused rather than approximating effective access.
+        if !matches!(
+            u32::from(header.AceType),
+            ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE
+        ) || usize::from(header.AceSize) < mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart) + 8
+        {
+            return Err(denied());
+        }
+        let ace = unsafe { ptr::read_unaligned(raw.cast::<ACCESS_ALLOWED_ACE>()) };
+        let sid = unsafe {
+            raw.cast::<u8>()
+                .add(mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart))
+        };
+        let sid_size = 8 + 4 * usize::from(unsafe { *sid.add(1) });
+        if sid_size + mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart) > usize::from(header.AceSize) {
+            return Err(denied());
+        }
+        let trustee = sid_text(sid.cast())?;
+        if u32::from(header.AceType) == ACCESS_ALLOWED_ACE_TYPE
+            && ace.Mask & mutation != 0
+            && trustee != owner_sid
+            && trustee != "S-1-5-18"
+        {
+            // Reject even when another ACE denies the grant, and include
+            // inherit-only grants: no future child may inherit foreign writers.
+            return Err(denied());
+        }
+    }
+    Ok(())
+}
+
 fn final_path(file: &File) -> io::Result<PathBuf> {
     let mut buffer = vec![0; 32_768];
     let length = unsafe {
@@ -146,8 +254,9 @@ fn digest(mut file: &File) -> io::Result<[u8; 32]> {
     Ok(hash.finalize().into())
 }
 
-/// Read-only pinned old-Controller copy. Digest authenticity, job directory ACL
-/// and installation/enrollment selection are the future coordinator's job.
+/// Read-only pinned old-Controller copy in a validated private job directory.
+/// Digest authenticity and installation/enrollment selection remain the future
+/// coordinator's job.
 /// Neither a path nor an expected digest alone is an execution permit.
 pub struct PinnedImage {
     path: PathBuf,
@@ -180,6 +289,11 @@ impl PinnedImage {
             }
         }
         let file = open_pinned(path, false)?;
+        let owner_sid = super::windows::current_user_sid().map_err(|_| denied())?;
+        let parent = ancestors.last().ok_or_else(denied)?;
+        private_owner_dacl(parent, &owner_sid)?;
+        private_owner_dacl(&file, &owner_sid)?;
+        Self::directory_contents(path)?;
         let canonical = final_path(&file)?;
         let drive = match canonical.components().next() {
             Some(Component::Prefix(p)) => match p.kind() {
@@ -222,11 +336,26 @@ impl PinnedImage {
     }
 
     fn verify(&self) -> io::Result<()> {
+        let owner_sid = super::windows::current_user_sid().map_err(|_| denied())?;
+        private_owner_dacl(self._ancestors.last().ok_or_else(denied)?, &owner_sid)?;
+        private_owner_dacl(&self.file, &owner_sid)?;
+        Self::directory_contents(&self.path)?;
         let current = open_pinned(&self.path, false)?;
         if identity(&current)? != self.id
             || identity(&self.file)? != self.id
             || digest(&current)? != self.digest
         {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
+    fn directory_contents(image: &Path) -> io::Result<()> {
+        let parent = image.parent().ok_or_else(denied)?;
+        let expected = image.file_name().ok_or_else(denied)?;
+        let mut entries = std::fs::read_dir(parent).map_err(|_| denied())?;
+        let only = entries.next().ok_or_else(denied)?.map_err(|_| denied())?;
+        if only.file_name() != expected || entries.next().is_some() {
             return Err(denied());
         }
         Ok(())
@@ -518,6 +647,61 @@ mod tests {
     use super::*;
     use tokio::net::windows::named_pipe::ClientOptions;
 
+    struct PrivateImage {
+        directory: PathBuf,
+        path: PathBuf,
+    }
+
+    fn set_fixture_security(path: &Path, extra: &str) {
+        let sid = super::super::windows::current_user_sid().unwrap();
+        let sddl = wide(OsStr::new(&format!(
+            "O:{sid}D:P(A;OICI;GA;;;SY)(A;OICI;GA;;;{sid}){extra}"
+        )));
+        let mut descriptor = ptr::null_mut();
+        check(unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        })
+        .unwrap();
+        let _allocation = SecurityAllocation(descriptor);
+        let path = wide(path.as_os_str());
+        check(unsafe {
+            SetFileSecurityW(
+                path.as_ptr(),
+                OWNER_SECURITY_INFORMATION
+                    | DACL_SECURITY_INFORMATION
+                    | PROTECTED_DACL_SECURITY_INFORMATION,
+                descriptor,
+            )
+        })
+        .unwrap();
+    }
+
+    impl PrivateImage {
+        fn new() -> Self {
+            let directory = std::env::temp_dir().join(format!("treer-bootstrap-{}", selector()));
+            std::fs::create_dir(&directory).unwrap();
+            set_fixture_security(&directory, "");
+            let path = directory.join("controller.exe");
+            std::fs::copy(std::env::current_exe().unwrap(), &path).unwrap();
+            set_fixture_security(&path, "");
+            Self { directory, path }
+        }
+    }
+
+    impl Drop for PrivateImage {
+        fn drop(&mut self) {
+            // Exact fixture files only, no recursive deletion or glob cleanup.
+            let _ = std::fs::remove_file(self.directory.join("unexpected.dll"));
+            let _ = std::fs::remove_file(&self.path);
+            let _ = std::fs::remove_dir(&self.directory);
+        }
+    }
+
     #[tokio::test]
     async fn blocking_phase_refuses_single_thread_runtime_without_running_work() {
         assert!(blocking_phase(|| -> io::Result<()> {
@@ -585,7 +769,8 @@ mod tests {
 
     #[test]
     fn pinned_image_rejects_digest_conflict_and_keeps_the_file_unwritable() {
-        let path = std::env::current_exe().unwrap();
+        let fixture = PrivateImage::new();
+        let path = fixture.path.clone();
         let expected = digest(&File::open(&path).unwrap()).unwrap();
         let image = PinnedImage::open_blocking(&path, expected).unwrap();
         image.verify().unwrap();
@@ -594,6 +779,29 @@ mod tests {
         conflict[0] ^= 1;
         assert!(PinnedImage::open_blocking(&path, conflict).is_err());
         assert!(PinnedImage::open_blocking(Path::new("relative.exe"), expected).is_err());
+    }
+
+    #[test]
+    fn pinned_image_refuses_foreign_writers_and_extra_directory_entries() {
+        let fixture = PrivateImage::new();
+        let expected = digest(&File::open(&fixture.path).unwrap()).unwrap();
+        let image = PinnedImage::open_blocking(&fixture.path, expected).unwrap();
+        // Directory content is checked again before any launch/connection proof.
+        std::fs::write(fixture.directory.join("unexpected.dll"), b"not executable").unwrap();
+        assert!(image.verify().is_err());
+        drop(image);
+        assert!(PinnedImage::open_blocking(&fixture.path, expected).is_err());
+        std::fs::remove_file(fixture.directory.join("unexpected.dll")).unwrap();
+
+        // World write on the job directory is rejected even when the image
+        // itself retains its protected, current-user/SYSTEM-only DACL.
+        set_fixture_security(&fixture.directory, "(A;;GW;;;WD)");
+        assert!(PinnedImage::open_blocking(&fixture.path, expected).is_err());
+        set_fixture_security(&fixture.directory, "");
+        set_fixture_security(&fixture.path, "(A;;GW;;;WD)");
+        assert!(PinnedImage::open_blocking(&fixture.path, expected).is_err());
+        set_fixture_security(&fixture.path, "");
+        assert!(PinnedImage::open_blocking(&fixture.path, expected).is_ok());
     }
 
     #[tokio::test]
@@ -641,7 +849,8 @@ mod tests {
         // This isolated test process is itself in the Job. Retain the root until
         // process exit, so dropping it does not kill the harness before reporting.
         mem::forget(job);
-        let path = std::env::current_exe().unwrap();
+        let fixture = PrivateImage::new();
+        let path = fixture.path.clone();
         let expected = digest(&File::open(&path).unwrap()).unwrap();
         let id = format!("f{}", &selector()[1..]);
         let endpoint = Endpoint::bind(&id).unwrap();

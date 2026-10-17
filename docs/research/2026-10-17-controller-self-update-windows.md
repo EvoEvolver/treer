@@ -209,14 +209,34 @@ of the PowerShell updater. No new live-machine test is part of this slice.
 
 `windows_update_bootstrap` is an unwired, private, test-build-only platform adapter.
 Downstream crates cannot call it until directory trust and the daemon-owned
-handoff have been reviewed and implemented. It
+handoff have been reviewed and accepted. It
 pins a non-reparse local fixed-drive NTFS image and every ancestor without delete sharing,
 refuses hardlinks/alternate data streams, checks the expected SHA256 and bounds
-the image to 128 MiB. The expected digest's authenticity, job-directory ACL,
+the image to 128 MiB. The expected digest's authenticity,
 selected installation/enrollment and provenance of the old Controller copy must
 come from a future trusted preparation coordinator; this adapter cannot prove
 them from a path/hash supplied by a caller. It does not use a downloaded image
 or PATH implicitly.
+
+The immediate job directory and image must both be owned by the current token's
+user SID. `GetSecurityInfo` reads their owner and DACL through the retained,
+non-reparse handles. A null DACL, invalid ACL, unsupported ACE type or any allow
+ACE granting mutation rights to a SID other than that user or SYSTEM is refused.
+Mutation includes generic write/all, file write/append/EA/attributes, child
+deletion, deletion and owner/DACL changes. The conservative check also rejects
+foreign inherit-only grants and grants denied elsewhere; it does not approximate
+Windows effective-access evaluation. The directory must contain exactly the
+pinned image, with no extra files or subdirectories. These checks run again
+before launch and connection proof. They do not isolate the current account or
+SYSTEM: either can change its own ACL/content between checks. The adapter never
+repairs permissions on a supplied path.
+
+Native fixtures create a separate current-user-owned directory with protected
+current-user/SYSTEM DACLs and one copied helper image. Cases reject world-write
+grants on the directory or image and an extra DLL entry, including a change after
+pinning. Fixture cleanup names only its two exact files and empty directory;
+there is no recursive deletion. Native results are still required for these
+checks; cross compilation is not execution evidence.
 
 The owner endpoint generates a 128-bit selector using the Windows system CSPRNG
 and derives one fixed private pipe name from its 32-character lowercase hex
