@@ -41,6 +41,7 @@ const CONNECT_BUDGET: Duration = Duration::from_secs(5);
 const CLEANUP_MS: u32 = 5_000;
 
 mod parent_proof;
+mod tick_deadline;
 
 fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "update_bootstrap_refused")

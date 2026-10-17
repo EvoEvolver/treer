@@ -4,19 +4,19 @@
 const MAX_BUDGET_MS: u64 = 5_000;
 
 #[derive(Clone, Copy)]
-struct Window {
-    start: u64,
-    expiry: u64,
+pub(super) struct Window {
+    pub(super) start: u64,
+    pub(super) expiry: u64,
 }
 
-struct Deadline {
+pub(super) struct Deadline {
     expiry: u64,
     last: u64,
     refused: bool,
 }
 
 impl Window {
-    fn begin(now: u64) -> Result<Self, ()> {
+    pub(super) fn begin(now: u64) -> Result<Self, ()> {
         Ok(Self {
             start: now,
             expiry: now.checked_add(MAX_BUDGET_MS).ok_or(())?,
@@ -25,7 +25,7 @@ impl Window {
 
     // Both readers validate independently. The owner additionally supplies its
     // original local expiry; record corruption must not extend that deadline.
-    fn accept(self, now: u64, original_expiry: Option<u64>) -> Result<Deadline, ()> {
+    pub(super) fn accept(self, now: u64, original_expiry: Option<u64>) -> Result<Deadline, ()> {
         let span = self.expiry.checked_sub(self.start).ok_or(())?;
         if self.start > now || span == 0 || span > MAX_BUDGET_MS {
             return Err(());
@@ -46,7 +46,7 @@ impl Window {
 impl Deadline {
     // Invoke after each blocking phase/wake, independently of async timers.
     // An anomalous or expired sample permanently poisons this local attempt.
-    fn check(&mut self, now: u64) -> Result<(), ()> {
+    pub(super) fn check(&mut self, now: u64) -> Result<(), ()> {
         if self.refused || now < self.last || now >= self.expiry {
             self.refused = true;
             return Err(());
@@ -56,12 +56,20 @@ impl Deadline {
     }
 }
 
+impl Deadline {
+    pub(super) fn remaining_ms(&mut self, now: u64) -> Result<u64, ()> {
+        self.check(now)?;
+        self.expiry.checked_sub(now).ok_or(())
+    }
+}
+
 #[test]
 fn independent_readers_share_original_expiry_without_receive_budget() {
     let window = Window::begin(100).unwrap();
     let mut owner = window.accept(150, Some(window.expiry)).unwrap();
     let mut child = window.accept(4_900, None).unwrap();
     assert!(owner.check(5_099).is_ok());
+    assert_eq!(owner.remaining_ms(5_099), Ok(1));
     assert!(child.check(5_099).is_ok());
     assert!(owner.check(5_100).is_err());
     assert!(child.check(5_100).is_err());

@@ -430,7 +430,19 @@ independent reader validation, original-owner expiry ceiling and permanently
 refusing backward/expired samples. Its tests supply synthetic millisecond
 readings, including a suspension-sized jump; they do not acquire or validate the
 Windows clock, publish records, or wire the existing pipe exchange to this model.
-Native clock acquisition and the full fixture integration remain subsequent work.
+Full fixture integration remains subsequent work; the native adapter substep is
+described below.
+
+The private Windows-only `windows_update_bootstrap/tick_deadline.rs` substep now
+samples `GetTickCount64` into the validated model. It creates a bounded owner
+window, independently accepts a supplied fixture window with an optional original
+owner ceiling, and rechecks the native clock whenever returning remaining time.
+It is exercised only by an ordinary native test; the process/pipe fixture does
+not yet use it. The test covers ordinary elapsed time and short-window expiry,
+future-start refusal and an already expired original-owner ceiling. Thread sleep
+does not suspend Windows: actual sleep, hibernation and modern standby remain
+unverified, and no power transition is attempted on any machine. Hosted exact-SHA
+evidence is required before accepting this native substep.
 
 Integration must not treat the child's local window as evidence of the owner's
 remaining budget. A corrupted but internally valid record can leave the child
