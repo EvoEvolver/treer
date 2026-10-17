@@ -47,7 +47,7 @@ pub struct Store {
     pub(crate) db: Connection,
     pub(crate) limits: Limits,
     #[cfg(unix)]
-    _private_files: Option<crate::private_store::PrivateFiles>,
+    pub(crate) _private_files: Option<crate::private_store::PrivateFiles>,
 }
 
 /// One unique transport item, with stable IDs supplied by the trusted adapter.

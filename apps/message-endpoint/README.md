@@ -256,6 +256,10 @@ lock and SQLite sidecar files are exclusively created at 0600; existing files
 must be regular, single-link, 0600 and owned by the effective UID. A lifetime
 nonblocking lock excludes another cooperating hub writer. SQLite opens the
 database with NOFOLLOW, uses WAL/FULL synchronization and checks sidecar permissions.
+Closing the store explicitly unlocks after SQLite closes, so a forked CLI child's
+inherited descriptor cannot keep the writer lock alive until exec/exit. A
+regression holds that shared descriptor in a private child while reopening;
+another genuinely live store must still be refused.
 Special-file opens use NONBLOCK/NOCTTY before rejecting non-regular files. The
 periodic runtime status tick must recheck any sidecars SQLite later recreates;
 a failed check pauses admissions and is reported as a fixed storage error.

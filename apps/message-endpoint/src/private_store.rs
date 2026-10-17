@@ -13,6 +13,16 @@ pub(crate) struct PrivateFiles {
     _directory: OwnedFd,
 }
 
+impl Drop for PrivateFiles {
+    fn drop(&mut self) {
+        // CLOEXEC still permits a fork-before-exec inheritance window. Closing
+        // only our descriptor leaves flock held by an inherited open file
+        // description. Explicit unlock releases that description immediately,
+        // after Store's earlier-declared SQLite connection has been dropped.
+        let _ = fs::flock(&self._lock, FlockOperation::Unlock);
+    }
+}
+
 fn denied<T, E>(result: Result<T, E>) -> Result<T, Error> {
     result.map_err(|_| Error::PrivateStorage)
 }
@@ -122,6 +132,10 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, PrivateFiles), Error> {
             Error::PrivateStorage
         }
     })?;
+    let files = PrivateFiles {
+        _lock: lock,
+        _directory: directory,
+    };
     for name in [
         "hub.sqlite3",
         "hub.sqlite3-wal",
@@ -130,7 +144,7 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, PrivateFiles), Error> {
     ] {
         // Existing sidecars are checked before SQLite can follow or modify them.
         // Empty files are safe SQLite initial state. Never truncate existing data.
-        private_file(&directory, name)?;
+        private_file(&files._directory, name)?;
     }
     let db = denied(Connection::open_with_flags(
         path.join("hub.sqlite3"),
@@ -138,13 +152,7 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, PrivateFiles), Error> {
     ))?;
     // Retain directory and lock descriptors. Hostile same-UID code can replace
     // either paths or locks; preventing that requires a separate OS account.
-    Ok((
-        db,
-        PrivateFiles {
-            _lock: lock,
-            _directory: directory,
-        },
-    ))
+    Ok((db, files))
 }
 
 pub(crate) fn enable_wal(db: &Connection, path: &Path) -> Result<(), Error> {
@@ -255,6 +263,40 @@ mod tests {
         drop(store);
         let mut reopened = Store::open(&path, Limits::default()).unwrap();
         assert!(reopened.register_paused("ag_test", 1, "ag_target").is_err());
+    }
+
+    #[test]
+    fn closing_owner_releases_lock_even_when_spawned_child_inherits_descriptor() {
+        use std::process::Stdio;
+        let (_temporary, path) = fixture();
+        let store = Store::open(&path, Limits::default()).unwrap();
+        // Model the fork-before-exec inheritance window deterministically by
+        // retaining the same open file description as this private child's stdin.
+        let inherited = store
+            ._private_files
+            .as_ref()
+            .unwrap()
+            ._lock
+            .try_clone()
+            .unwrap();
+        let mut child = Command::new("/usr/bin/python3")
+            .env_clear()
+            .args(["-c", "import time; time.sleep(30)"])
+            .stdin(Stdio::from(std::fs::File::from(inherited)))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        drop(store);
+        let result = Store::open(&path, Limits::default());
+        // Reap this exact child even if the assertion below fails.
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            result.is_ok(),
+            "owner closed but inherited descriptor retained lock: {:?}",
+            result.err()
+        );
     }
 
     #[test]
