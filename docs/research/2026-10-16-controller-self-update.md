@@ -740,6 +740,26 @@ recovery authority. There is no production caller, OS/channel authentication,
 receiver drain/close, ACK handling, persistence or actual supervisor in this
 module. Real-process races and the complete fault matrix remain outstanding.
 
+Required before lifecycle integration (security2665): replace caller-constructible
+EOF observations with a sealed value whose constructor is restricted to the
+authenticated transport/drain module. Tie it to the actual still-open receiver
+and exact registered attempt; only the path that proves authenticated empty EOF
+and all writers gone may construct it. Similarly restrict construction of the
+verified binding. Add compile-fail or equivalent source-boundary checks that
+other modules cannot fabricate either proof. The current ordinary data model
+does not satisfy this requirement and must not be connected as an authority.
+
+Recovery must distinguish three independent facts: the supervisor's in-memory
+decision, the owner's observation of a bound acceptance ACK (or lack/ambiguity
+of that observation), and the decision record's verified durable sync/readback.
+`Accepted` describes only the first. It means neither owner-ACKed nor durably
+committed; writing an ACK is not receiving it. Model pending/verified/uncertain
+persistence separately, and do not expose a memory-only decision as durable
+evidence. A failed or ambiguous write/sync/readback remains unresolved. The
+future record and recovery classifiers must preserve these distinctions,
+including lost ACK and process death between decision, persistence and ACK.
+No such persistence or recovery classifier is implemented by the current model.
+
 Known permission boundary (security2545): these checks inspect Unix owner/mode
 bits only. They do not inspect macOS/POSIX ACL-granted write access or platform
 file flags (including Linux immutable flags). A passing check is not proof that
