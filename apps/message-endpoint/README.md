@@ -414,6 +414,17 @@ Accepted results can commit after owner pause without admitting more work.
 Intent tokens are private capabilities, never JSON API/UI fields. This split
 allows independent channel tasks; actual scheduler/UI stall tests remain pending.
 
+The Core receive/readback side follows the same boundary. Workers fetch current
+metadata outside state access, then submit `record_readback` with the binding
+revision; stale completions cannot override a newer owner pause or mutation.
+`resume_after_readback` is an internal owner-service operation, never a browser
+metadata upload. `admit_core_delivery` commits state without network calls; only
+its successful return permits the worker to acknowledge Core. Ack failures replay
+the durable receipt. `maintenance` checks private storage and prunes terminal
+metadata independently from channel requests. Tests use a backend that panics on
+every network operation to enforce this state boundary; they do not establish
+that the not-yet-built runtime schedules independent workers correctly.
+
 Chunk reservations persist exponential retry delays (5, 10, 20, 40, 80, 160,
 300, 300 seconds) and cap at eight attempts, including reservations interrupted
 by a process crash. On exhaustion the hub saves a fixed-code failure receipt and

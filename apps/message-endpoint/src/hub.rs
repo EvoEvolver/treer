@@ -216,12 +216,29 @@ impl<M: Mailbox + Directory> Hub<M> {
     }
     /// Per-ID lookup only. Failure/drift pauses and is sticky until owner resumes.
     /// Old expected and current observed values remain separately visible.
+    #[cfg(test)]
     pub fn refresh(&mut self, id: &str, now: i64) -> Result<(), Error> {
+        let revision = self.view(id)?.revision;
+        let observed = self.mailbox.metadata(id).ok();
+        self.record_readback(id, revision, observed, now)
+    }
+    /// State-only completion of a Core per-ID query. The runtime, never browser
+    /// JSON, supplies `observed`; revision fencing rejects an obsolete query.
+    pub fn record_readback(
+        &mut self,
+        id: &str,
+        revision: i64,
+        observed: Option<AgentMetadata>,
+        now: i64,
+    ) -> Result<(), Error> {
         if now < 0 {
             return Err(Error::Binding);
         }
-        let expected = self.view(id)?.binding;
-        let observed = self.mailbox.metadata(id).ok();
+        let view = self.view(id)?;
+        if view.revision != revision {
+            return Err(Error::Revision);
+        }
+        let expected = view.binding;
         let reason = match &observed {
             None => "metadata_unavailable",
             Some(o)
@@ -256,14 +273,24 @@ impl<M: Mailbox + Directory> Hub<M> {
     }
     /// HTTP wiring must authenticate owner, CSRF, revision and confirmation first.
     /// This performs a NEW readback but never interprets status as authorization.
+    #[cfg(test)]
     pub fn resume(&mut self, id: &str, revision: i64, now: i64) -> Result<(), Error> {
+        let observed = self.mailbox.metadata(id).ok();
+        self.resume_after_readback(id, revision, observed, now)
+    }
+    /// Owner-service internal API: authenticate owner/CSRF/confirmation first,
+    /// fetch Core metadata outside state access, then submit this exact revision.
+    pub fn resume_after_readback(
+        &mut self,
+        id: &str,
+        revision: i64,
+        observed: Option<AgentMetadata>,
+        now: i64,
+    ) -> Result<(), Error> {
         if self.blocked()? {
             return Err(Error::FailureBudget);
         }
-        if self.view(id)?.revision != revision {
-            return Err(Error::Revision);
-        }
-        self.refresh(id, now)?;
+        self.record_readback(id, revision, observed, now)?;
         let view = self.view(id)?;
         if view.revision != revision {
             return Err(Error::Revision);
@@ -341,7 +368,6 @@ impl<M: Mailbox + Directory> Hub<M> {
             [now - crate::transfers::TOMBSTONE_TTL],
         )?;
         tx.commit()?;
-        self.mailbox.ack(&delivery.delivery_id)?;
         Ok(())
     }
     pub(crate) fn active(&self, id: &str, now: i64) -> Result<View, Error> {
@@ -355,17 +381,41 @@ impl<M: Mailbox + Directory> Hub<M> {
         }
         Ok(view)
     }
-    /// Persist first, ack second. Paused/stale bindings retain unacked deliveries.
-    pub fn receive_once(&mut self, now: i64) -> Result<(), Error> {
+    /// Workers call periodically, independent from channel network requests.
+    pub fn maintenance(&mut self, now: i64) -> Result<(), Error> {
         self.store.recheck_private_storage()?;
         self.store.cleanup_transfers(now)?;
         self.store.prune_completed(now)?;
+        let telegram: bool = self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_chunks')",
+            [],
+            |r| r.get(0),
+        )?;
+        if telegram {
+            self.cleanup_telegram().map_err(|error| match error {
+                crate::telegram::Error::Storage(error) => Error::Storage(error),
+                _ => Error::Binding,
+            })?;
+        }
+        Ok(())
+    }
+    /// Backend handle for independent network workers; never await it while
+    /// holding the state actor. Core is cloneable and holds no borrowed identity.
+    pub fn backend(&self) -> &M {
+        &self.mailbox
+    }
+    #[cfg(test)]
+    pub fn receive_once(&mut self, now: i64) -> Result<(), Error> {
+        self.maintenance(now)?;
         if self.blocked()? {
             return Err(Error::FailureBudget);
         }
         let mut failed = None;
         for delivery in self.mailbox.receive(1000)? {
-            if let Err(error) = self.handle(&delivery, now) {
+            let result = self
+                .admit_core_delivery(&delivery, now)
+                .and_then(|()| self.mailbox.ack(&delivery.delivery_id).map_err(Error::from));
+            if let Err(error) = result {
                 if matches!(error, Error::FailureBudget) {
                     return Err(error);
                 }
@@ -379,7 +429,15 @@ impl<M: Mailbox + Directory> Hub<M> {
         }
         Ok(())
     }
-    fn handle(&mut self, delivery: &Delivery, now: i64) -> Result<(), Error> {
+    /// Persist BEFORE the worker acknowledges Core. Success authorizes an ack,
+    /// errors leave Core unacked. No receive/send/ack/metadata network calls here.
+    pub fn admit_core_delivery(&mut self, delivery: &Delivery, now: i64) -> Result<(), Error> {
+        if now < crate::transfers::TOMBSTONE_TTL {
+            return Err(Error::Binding);
+        }
+        if self.blocked()? {
+            return Err(Error::FailureBudget);
+        }
         if delivery.recipient.kind != SenderKind::Agent || delivery.recipient.id != self.own_id {
             return Err(Error::Binding);
         }
@@ -400,7 +458,6 @@ impl<M: Mailbox + Directory> Hub<M> {
                 if status.valid(view.binding.generation) {
                     let text = serde_json::to_string(&status).map_err(|_| Error::Binding)?;
                     self.store.db.execute("UPDATE hub_bindings SET diagnostic=?2,diagnostic_at=?3 WHERE endpoint=?1 AND (diagnostic_at IS NULL OR diagnostic_at<=?4)",params![id,text,now,now-STATUS_INTERVAL])?;
-                    self.mailbox.ack(&delivery.delivery_id)?;
                     return Ok(());
                 }
             }
@@ -430,7 +487,6 @@ impl<M: Mailbox + Directory> Hub<M> {
             )?,
             Err(error) => return Err(error.into()),
         }
-        self.mailbox.ack(&delivery.delivery_id)?;
         Ok(())
     }
     fn record_rejection(
@@ -919,6 +975,69 @@ mod tests {
         assert!(hub.receive_once(NOW).is_err());
         assert!(fake.acks.borrow().is_empty());
         assert!(hub.ready_outbound("ag_endpoint", NOW).unwrap().is_empty());
+    }
+    #[test]
+    fn state_admission_readback_and_maintenance_never_call_network_backend() {
+        struct NoIo;
+        impl Directory for NoIo {
+            fn metadata(&self, _: &str) -> Result<AgentMetadata, crate::core::Error> {
+                panic!("metadata in state actor")
+            }
+        }
+        impl Mailbox for NoIo {
+            fn receive(&self, _: u32) -> Result<Vec<Delivery>, crate::core::Error> {
+                panic!("receive in state actor")
+            }
+            fn ack(&self, _: &str) -> Result<(), crate::core::Error> {
+                panic!("ack in state actor")
+            }
+            fn send(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[String],
+                _: Option<serde_json::Value>,
+            ) -> Result<String, crate::core::Error> {
+                panic!("send in state actor")
+            }
+        }
+        let mut hub = Hub::new(
+            Store::memory(Limits::default()).unwrap(),
+            NoIo,
+            "app_hub",
+            "ws_test",
+        )
+        .unwrap();
+        hub.add_binding(binding()).unwrap();
+        hub.resume_after_readback("ag_endpoint", 1, Some(metadata()), NOW)
+            .unwrap();
+        hub.maintenance(NOW).unwrap();
+        let wire = outbound("body").remove(0);
+        hub.admit_core_delivery(&delivery("del_state", "ag_endpoint", &wire), NOW)
+            .unwrap();
+        assert_eq!(hub.ready_outbound("ag_endpoint", NOW).unwrap().len(), 1);
+        hub.admit_core_delivery(&delivery("del_unknown", "ag_unknown", "untrusted"), NOW)
+            .unwrap();
+        // Ack intentionally stays with the worker AFTER these commits.
+    }
+    #[test]
+    fn stale_metadata_completion_cannot_override_newer_owner_pause() {
+        let (mut hub, _) = fixture();
+        activate(&mut hub);
+        let revision = hub.view("ag_endpoint").unwrap().revision;
+        hub.pause("ag_endpoint", revision).unwrap();
+        assert!(matches!(
+            hub.record_readback("ag_endpoint", revision, Some(metadata()), NOW + 1),
+            Err(Error::Revision)
+        ));
+        assert!(matches!(
+            hub.resume_after_readback("ag_endpoint", revision, Some(metadata()), NOW + 1),
+            Err(Error::Revision)
+        ));
+        let view = hub.view("ag_endpoint").unwrap();
+        assert!(view.paused);
+        assert_eq!(view.reason, "owner_paused");
     }
     #[test]
     fn restart_keeps_partial_fragments_pins_and_pause_state() {

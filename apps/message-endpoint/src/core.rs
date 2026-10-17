@@ -58,6 +58,7 @@ pub struct Message {
     pub context_ids: Vec<String>,
 }
 
+#[derive(Clone)]
 pub struct Core {
     executable: PathBuf,
     own_id: String,
