@@ -16,7 +16,10 @@ use super::{
     launcher_temporary::LauncherTemporary, selection::Selected, Journal, Receipt,
 };
 
-#[derive(Clone, Copy)]
+mod start;
+
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Operation {
     Install,
     Status,
@@ -29,6 +32,7 @@ pub struct Invocation<'a> {
     owned: &'a OwnedActivation,
     journal: &'a Journal,
     receipt: Receipt,
+    operation: Operation,
     program: PathBuf,
     cwd: PathBuf,
     arguments: Vec<OsString>,
@@ -139,6 +143,7 @@ impl<'a> Invocation<'a> {
             owned,
             journal,
             receipt,
+            operation,
             program,
             cwd,
             arguments,
@@ -342,6 +347,152 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn launch_intent_is_exclusive_private_bound_and_never_means_child_started() {
+        use std::os::unix::fs::PermissionsExt;
+        for (operation, suffix) in [
+            (Operation::Install, "install"),
+            (Operation::Status, "status"),
+        ] {
+            let f = Fixture::standard_config();
+            f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+            let (selected, owned, journal) = bind(&f, "ws_a");
+            let before = journal.read().unwrap();
+            let job = f.path.join("jobs").join(before.job_id.to_string());
+            let temporary = LauncherTemporary::create(&selected, &owned, &journal, &job).unwrap();
+            let node = NodeFixture::new(); // Inert, never executed.
+            let plan = Invocation::with_context(
+                &selected,
+                &owned,
+                &journal,
+                operation,
+                &f.path,
+                &node.node(),
+            )
+            .unwrap()
+            .bind_node(retain_node(&node.node()).unwrap())
+            .unwrap()
+            .bind_temporary(&temporary)
+            .unwrap();
+            plan.record_start_intent().unwrap();
+            let path = job.join(format!("launcher-{suffix}-intent.json"));
+            let bytes = std::fs::read(&path).unwrap();
+            assert!(bytes.len() <= 64 * 1024);
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["schema_version"], 1);
+            assert_eq!(value["receipt"], serde_json::to_value(&before).unwrap());
+            assert_eq!(value["operation"], suffix);
+            assert_eq!(
+                value["operation_id"],
+                format!("update-{}-launcher-{suffix}", before.job_id)
+            );
+            assert_eq!(value.as_object().unwrap().len(), 4);
+            assert!(!String::from_utf8_lossy(&bytes).contains(f.path.to_str().unwrap()));
+            assert!(!String::from_utf8_lossy(&bytes).contains(node.node().to_str().unwrap()));
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert_eq!(
+                plan.record_start_intent().unwrap_err().to_string(),
+                "update_recovery_required"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+            assert_eq!(journal.read().unwrap(), before);
+            drop(plan);
+            assert_eq!(std::fs::read(path).unwrap(), bytes); // Recovery evidence remains.
+        }
+    }
+
+    #[test]
+    fn launch_intent_preserves_empty_corrupt_and_nonfile_entries() {
+        use std::os::unix::fs::symlink;
+        for kind in ["empty", "corrupt", "directory", "symlink"] {
+            let f = Fixture::standard_config();
+            f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+            let (selected, owned, journal) = bind(&f, "ws_a");
+            let job = f
+                .path
+                .join("jobs")
+                .join(journal.read().unwrap().job_id.to_string());
+            let temporary = LauncherTemporary::create(&selected, &owned, &journal, &job).unwrap();
+            let node = NodeFixture::new();
+            let plan = Invocation::with_context(
+                &selected,
+                &owned,
+                &journal,
+                Operation::Install,
+                &f.path,
+                &node.node(),
+            )
+            .unwrap()
+            .bind_node(retain_node(&node.node()).unwrap())
+            .unwrap()
+            .bind_temporary(&temporary)
+            .unwrap();
+            let path = job.join("launcher-install-intent.json");
+            match kind {
+                "empty" => std::fs::write(&path, b"").unwrap(),
+                "corrupt" => std::fs::write(&path, b"{private partial evidence").unwrap(),
+                "directory" => std::fs::create_dir(&path).unwrap(),
+                "symlink" => symlink(node.node(), &path).unwrap(),
+                _ => unreachable!(),
+            }
+            let before = std::fs::symlink_metadata(&path).unwrap();
+            for _ in 0..2 {
+                assert_eq!(
+                    plan.record_start_intent().unwrap_err().to_string(),
+                    "update_recovery_required"
+                );
+            }
+            assert_eq!(
+                std::fs::symlink_metadata(&path).unwrap().file_type(),
+                before.file_type()
+            );
+            if kind == "corrupt" {
+                assert_eq!(std::fs::read(&path).unwrap(), b"{private partial evidence");
+            }
+            if kind == "empty" {
+                assert!(std::fs::read(&path).unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn launch_intent_rejects_unbound_recipe_or_changed_receipt_before_writing() {
+        let f = Fixture::standard_config();
+        f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+        let (selected, owned, journal) = bind(&f, "ws_a");
+        let before = journal.read().unwrap();
+        let job = f.path.join("jobs").join(before.job_id.to_string());
+        let temporary = LauncherTemporary::create(&selected, &owned, &journal, &job).unwrap();
+        let node = NodeFixture::new();
+        let plan = Invocation::with_context(
+            &selected,
+            &owned,
+            &journal,
+            Operation::Install,
+            &f.path,
+            &node.node(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.record_start_intent().unwrap_err().to_string(),
+            "update_launcher_binding_mismatch"
+        );
+        let plan = plan
+            .bind_node(retain_node(&node.node()).unwrap())
+            .unwrap()
+            .bind_temporary(&temporary)
+            .unwrap();
+        let mut changed = before;
+        changed.revision += 1;
+        journal.write(&changed).unwrap();
+        assert!(plan.record_start_intent().is_err());
+        assert!(!job.join("launcher-install-intent.json").exists());
+        assert_eq!(journal.read().unwrap(), changed);
     }
 
     #[test]

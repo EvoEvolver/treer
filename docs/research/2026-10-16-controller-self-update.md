@@ -440,6 +440,30 @@ transitions and record durable child-start identity/recovery before installation
 The standalone version probe does not supply that lifecycle authority, production
 dispatch or a worker-death recovery path; the installer must not start yet.
 
+`Invocation::record_start_intent` now provides the pre-dispatch durable marker
+only. A fully bound recipe (original owner/locks, exact CoreHealthy receipt,
+retained Node and job-private TMPDIR) writes one fixed install/status marker
+exclusively through the original journal directory handle. The private schema
+contains only schema version, the full original receipt, typed operation and
+job/operation-derived ID; no argv, paths, environment, output, PID or claim that
+a child started is stored. The bounded 64KiB record is 0600, file-synced then
+directory-synced, reopened without following links, compared to the original
+file inode and strictly decoded/compared to the expected record, with recipe
+binding checks around readback. No journal phase/revision is advanced.
+
+Any existing marker, including an empty/corrupt record, directory or symlink,
+or an uncertain persistence/readback result yields `update_recovery_required`;
+the marker is never replaced, adopted or removed on error/Drop. A binding error
+before creation leaves the directory untouched. Isolated regressions verify
+both operation records, exact receipt/ID, private mode and bounded/no-path
+contents, repeated refusal with evidence unchanged, all conflicting entry kinds,
+and incomplete/changed-receipt refusal before writing. This is not child-start
+identity, a completion record or permission to spawn, and readback does not
+authorize replay. Actual pre-spawn image authentication, expected phase
+transitions, durable attested child identity and worker-death/accepted-before-ACK
+reconciliation still must be wired before any installer dispatch. An intent
+without completion remains ambiguous, never proof that no child ran.
+
 Known permission boundary (security2545): these checks inspect Unix owner/mode
 bits only. They do not inspect macOS/POSIX ACL-granted write access or platform
 file flags (including Linux immutable flags). A passing check is not proof that
