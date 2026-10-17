@@ -589,6 +589,7 @@ async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips
         "agent-root",
         "agent-slash",
         "agent-asset",
+        "agent-websocket",
         "virtual-host",
         "app-ui",
     ] {
@@ -629,7 +630,10 @@ async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips
             )
             .await
             .unwrap();
-        let observer = observe_response(state.clone(), connection, rx,
+        let websocket = kind == "agent-websocket";
+        let upstream: &'static [u8] = if websocket {
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+        } else {
             concat!(
                 "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 8\r\n",
                 "Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; form-action 'none'\r\n",
@@ -637,7 +641,9 @@ async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips
                 "Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=(), clipboard-read=(), bluetooth=(), hid=(), serial=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), screen-wake-lock=()\r\n",
                 "Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n",
                 "Set-Cookie: launcher=must-not-forward\r\nConnection: close\r\n\r\nlauncher",
-            ).as_bytes());
+            ).as_bytes()
+        };
+        let observer = observe_response(state.clone(), connection, rx, upstream);
         let proxy_url = Url::parse("https://proxy.treer.example/").unwrap();
         let console_url = Url::parse("https://app.treer.example/").unwrap();
         let messages = MessageStore::open(auth.pool()).await.unwrap();
@@ -662,6 +668,7 @@ async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips
             "agent-root" => "/api/workspaces/default/agents/agent-ui/interface/ui".into(),
             "agent-slash" => "/api/workspaces/default/agents/agent-ui/interface/ui/".into(),
             "agent-asset" => "/api/workspaces/default/agents/agent-ui/interface/ui/app.js".into(),
+            "agent-websocket" => "/api/workspaces/default/agents/agent-ui/interface/ui/ws".into(),
             "virtual-host" => format!(
                 "/api/workspaces/default/virtual-hosts/{}/proxy/",
                 app.hostname
@@ -669,13 +676,20 @@ async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips
             "app-ui" => format!("/api/workspaces/default/apps/{}/ui/", app.app_id),
             _ => unreachable!(),
         };
+        let mut request = Request::builder();
+        if websocket {
+            request = request
+                .header(header::ORIGIN, "https://app.treer.example")
+                .header(header::CONNECTION, "Upgrade")
+                .header(header::UPGRADE, "websocket");
+        }
         let response = tokio::time::timeout(
             Duration::from_secs(30),
             route.oneshot(
-                Request::builder()
+                request
                     .uri(path)
                     .header(header::COOKIE, "treer_session=login")
-                    // A top-level navigation has no Origin header.
+                    // Ordinary top-level navigations have no Origin header.
                     .header("sec-fetch-mode", "navigate")
                     .header("sec-fetch-dest", "document")
                     .header("x-treer-interface-source", "controller-api")
@@ -690,8 +704,32 @@ async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips
         .await
         .unwrap()
         .unwrap();
-        assert_eq!(response.status(), StatusCode::OK, "{kind}");
+        assert_eq!(
+            response.status(),
+            if websocket {
+                StatusCode::SWITCHING_PROTOCOLS
+            } else {
+                StatusCode::OK
+            },
+            "{kind}"
+        );
         let headers = response.headers();
+        if websocket {
+            assert_eq!(headers[header::UPGRADE], "websocket");
+            assert_eq!(headers[header::CONNECTION], "Upgrade");
+            assert_eq!(
+                headers[header::CONTENT_SECURITY_POLICY],
+                "frame-ancestors 'self' https://app.treer.example"
+            );
+            assert!(!headers.contains_key(header::X_FRAME_OPTIONS));
+            let forwarded = tokio::time::timeout(Duration::from_secs(30), observer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(forwarded.starts_with("GET /launcher/ws HTTP/1.1\r\n"));
+            assert!(!forwarded.to_ascii_lowercase().contains("forged"));
+            continue;
+        }
         assert_eq!(
             headers["permissions-policy"],
             "camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=(), clipboard-read=(), bluetooth=(), hid=(), serial=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), screen-wake-lock=()"

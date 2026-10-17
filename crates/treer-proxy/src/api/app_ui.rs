@@ -172,4 +172,19 @@ mod tests {
             "frame-ancestors 'self' https://app.treer.example"
         );
     }
+
+    #[test]
+    fn embedding_preserves_configured_console_origin_port() {
+        let browser = BrowserAccess::new(
+            &Url::parse("http://console.treer.localhost:8080/").unwrap(),
+            &Url::parse("http://proxy.treer.localhost:8080/").unwrap(),
+        )
+        .unwrap();
+        let mut headers = HeaderMap::new();
+        allow_control_plane_frame(&mut headers, &browser).unwrap();
+        assert_eq!(
+            headers[header::CONTENT_SECURITY_POLICY],
+            "frame-ancestors 'self' http://console.treer.localhost:8080"
+        );
+    }
 }
