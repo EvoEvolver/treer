@@ -7,20 +7,30 @@ start this sidecar.
 
 ## Single container
 
-The single-container **central server** has passed native amd64/arm64 image
-smoke tests in CI. Image publishing is currently disabled pending the user's
-decision: **there is no published single-container image to pull yet**.
-[Build locally](#build-and-verify-the-single-image) to try it now. The planned
-registry name is `ghcr.io/evoevolver/treer`; the pull/run examples below apply
-after a version has been published.
+Build the single-container **central server** locally from the checkout.
+There is no registry publishing for this image; the script never pushes.
 It contains PostgreSQL 17, the standalone Proxy, the browser Console, and native
 Linux machine binaries built from the same commit. Machines, Controllers,
 Hosts, Agent runtimes and workspace Apps run separately and enroll normally;
 they are not started inside this container. The Compose installation below is
 still supported.
 
-Use a published version or `sha-<full commit>` tag (substitute `vX.Y.Z` below).
-There is no `latest` channel. First create a named volume and start:
+From a clean checkout, with Git and Docker (including Buildx) installed:
+
+```bash
+./scripts/build-single-image.sh
+```
+
+The script compiles the committed source in Docker, packages both Linux machine
+architectures, builds the Docker engine's amd64/arm64 server image, and loads it
+as `treer-single:<12-character commit>`. It prints the startup command and URLs
+without starting a server. The first build needs network access to fetch pinned
+base images and locked Rust/npm dependencies; compiling both architectures takes
+time and uses Docker build cache for subsequent builds. Rust, Node and PostgreSQL
+do not need to be installed on the host. Uncommitted tracked changes are refused;
+ignored/untracked files and `.git` never enter the build context.
+
+Use the tag printed by the script (replace `COMMIT12` below), then start:
 
 ```bash
 docker run -d --name treer --restart unless-stopped --stop-timeout 65 \
@@ -29,7 +39,7 @@ docker run -d --name treer --restart unless-stopped --stop-timeout 65 \
   --cap-add SETUID --cap-add SETGID --cap-add KILL \
   --security-opt no-new-privileges:true \
   -p 127.0.0.1:8080:8080 --mount type=volume,src=treer-data,dst=/data \
-  ghcr.io/evoevolver/treer:vX.Y.Z
+  treer-single:COMMIT12
 ```
 
 Docker creates the named volume if absent. Open the Console at
@@ -162,8 +172,9 @@ browser differences.
 
 ### Single-container updates and backups
 
-Update by pulling an immutable version/SHA, stopping the old container with
-65 seconds of grace, and recreating it with **the same `/data` volume and URL /
+Update by checking out a clean new commit and rerunning
+`./scripts/build-single-image.sh`. Back up first, then stop the old container
+with 65 seconds of grace and recreate it using the printed local image tag with **the same `/data` volume and URL /
 secret configuration**. There is no in-place `/admin` updater. Proxy starts
 after PG readiness and runs the existing idempotent schema migrations. Child
 crashes back off and exit nonzero after more than five failures in five
@@ -177,20 +188,22 @@ Keep it encrypted and restrict the output file to `0600`:
 
 ```bash
 umask 077
+IMAGE=$(docker inspect --format '{{.Config.Image}}' treer)
 docker stop -t 65 treer
 docker run --rm --volumes-from treer:ro --entrypoint /bin/tar \
-  ghcr.io/evoevolver/treer:vX.Y.Z -C /data -czf - . > treer-backup.tar.gz
+  "$IMAGE" -C /data -czf - . > treer-backup.tar.gz
 docker start treer
 ```
 
 Use your encrypted backup destination/tool; do not commit or upload the archive
 unencrypted. Restore while the server is stopped, into a **new empty volume**,
-using the matching image version; keep the original volume untouched:
+using the saved matching local image tag (replace `COMMIT12` below); keep the
+original volume untouched:
 
 ```bash
 docker volume create treer-restored
 docker run --rm -i --mount type=volume,src=treer-restored,dst=/data \
-  --entrypoint /bin/tar ghcr.io/evoevolver/treer:vX.Y.Z \
+  --entrypoint /bin/tar treer-single:COMMIT12 \
   -C /data -xzf - < treer-backup.tar.gz
 ```
 
@@ -226,14 +239,36 @@ backup volume**, not just changing the image tag.
 
 Compared with Compose: one replica, no internal NATS/JetStream durable event
 history or multi-Proxy coordination, no socket updater, and shared container
-lifecycle for PG/Proxy. Committed Core Messages remain in PostgreSQL. Each
-image bundles both Linux machine architectures; missing non-Linux
-platforms fail closed instead of downloading `latest`. For other machine
+lifecycle for PG/Proxy. Committed Core Messages remain in PostgreSQL. The local image
+bundles only the Docker engine’s Linux machine architecture; CI images bundle
+both Linux architectures. Missing machine platforms fail closed instead of downloading `latest`. For other machine
 platforms provide an explicitly trusted, matching release artifact base URL.
 
 ### Build and verify the single image
 
-From the repository root, with a clean exact-SHA checkout, stage the trusted
+For a local build, run `./scripts/build-single-image.sh` from a clean checkout.
+It archives committed files into a private temporary directory (excluding
+untracked/ignored files and `.git`), builds only the Docker engine's native
+amd64/arm64 architecture, and loads `treer-single:<12-character commit>` locally.
+It never starts containers or publishes images. Docker receives a whitelist
+environment, without Agent/cloud/Git credentials; only a local Unix-socket
+Docker engine is supported. No registry credentials or private dependency
+registries are supported by this build path.
+
+Local binaries are compiled with locked dependencies inside pinned base images.
+`/app/build.json` and the `io.treer.provenance` label say `local-build`:
+checksums establish consistency, **not release provenance**. A local build is
+not equivalent to a CI release artifact, is not guaranteed reproducible, and
+must not be pushed to a registry. Apt/npm/Cargo downloads require network
+access; the first build can take substantial time and disk space. No host
+Rust, Node or PostgreSQL installation is needed.
+
+Run `just single-image-smoke` to build through the script and check real HTTP
+health in a disposable container/volume with a random loopback port, under the
+machine-wide gate lock. This heavy test is deliberately not part of `just check`.
+
+The separate CI prebuilt-input path remains unchanged. With a clean exact-SHA
+checkout, stage the trusted
 native release artifacts under `.single-container-input/` before building:
 
 ```text
@@ -254,7 +289,7 @@ checksums, regular-file types and ELF architecture before copying any binaries.
 Verified public artifact directories/binaries use mode 0755 and checksum/build
 metadata files use 0644, so private extraction umasks do not prevent the non-root
 Proxy from serving machine downloads. This does not change `/data` secret modes.
-It does not compile Rust or fetch release binaries. GitHub artifact downloads
+The CI final-image path does not compile Rust or fetch release binaries. GitHub artifact downloads
 can lose executable bits; verified output gets executable bits restored.
 The staging directory is ignored by Git. CI downloads exact-SHA artifacts,
 never a moving latest or a previous release's binaries.
@@ -289,8 +324,8 @@ PG against a fake Proxy to exercise volume/permissions without a Rust build.
 Base-image indexes are pinned by digest; release rebuilds still pick up apt
 security updates. The binary checksum manifest in `/app/SHA256SUMS` and
 `/app/build.json` identify the native binaries and exact source SHA; the build
-verifies hashes before installing them. CI must smoke each native architecture
-before publishing the combined image manifest.
+verifies hashes before installing them. CI smokes each native architecture without publishing a single-container
+image. No registry publication is enabled for this image.
 
 ## Images and tags
 
