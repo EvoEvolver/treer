@@ -554,11 +554,11 @@ new page is the same Console origin with the same session. The iframe sandbox an
 
 `?focus=1` is focus mode: only that workload fills the window, with a narrow bar to open the full Console. Plain
 links open the full Console. **Open in new browser tab** (tab menu, and the phone menu) opens the focus-mode URL with
-`window.open(..., "noopener")`.
+`window.open(..., "noopener,noreferrer")` when no standalone UI is registered.
 
 Tree rows, Overview rows and map blocks are real links (`<a href>` to the deep link). A plain left click opens the
 workload in place; ctrl/cmd/shift-click, middle-click and the browser's own "Open in new tab" and "Copy link address"
-use the href natively, so they open the full Console on that workload. A link is never nested inside another
+use the href natively, with the standalone UI exceptions below. A link is never nested inside another
 interactive element (a row's actions button is a sibling), and Space activates it like a button.
 
 An App that the Proxy ingress routes (its server-provided `public_url`, e.g. `https://svc-….<apps domain>/`) opens
@@ -570,6 +570,22 @@ Console nor the Proxy origin; otherwise the Console deep link is used. A plain l
 the Console. The server fills `public_url` only for the platform-hosted ingress hostname it computes from its configured
 base domain (it is not user-settable), so the Console does not pin the host to a domain itself; the checks above are
 defense in depth. Menu opens use `noopener,noreferrer` so the Console URL is not sent as a referrer.
+
+An Agent with a registered `interface.ui_path` opens its UI directly in a new tab at the fixed Proxy route
+`/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/`, without a Console shell. The descriptor path
+is never used as an external URL; IDs are encoded. Agent interfaces without a UI retain the Console deep link.
+Plain clicks still open in place. Native links and menu opens use `noopener,noreferrer`, even when Console
+and Proxy share an origin. Appearance uses theme/look/lang query hints; framed URLs also specify the exact
+Console `embed_origin` for the launcher parent-message check. These hints grant no authority and carry no tokens.
+Proxy session cookies remain required; an unauthenticated or cross-site-cookie-blocked request must fail closed,
+never fall back to a URL token. The launcher top-level response must retain its restrictive Permissions-Policy,
+Referrer-Policy and CSP through the Proxy tunnel. Top-level pages do not have the iframe sandbox restrictions;
+the standalone page and embedded page share the same origin and authority. This remains trusted workspace UI
+on the Proxy origin, pending per-Agent origin isolation. Deployments rejected by Core's separate-origin check
+return `503 embedded_ui_requires_separate_app_origin` at this route, including top-level navigation; opening
+a new tab cannot bypass this restriction. No token fallback or automatic retry is attempted. Agent-interface
+frame-embedding policy currently depends on the served page's own CSP; the App UI proxy's frame policy does
+not apply to this separate route (tracked as an existing Core hardening gap in #143).
 
 Creating an Agent from Overview starts at the workspace root and shows no Tree folder hint.
 Creating from a folder in the Tree shows that folder’s full path and reserves placement there.

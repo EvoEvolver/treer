@@ -327,7 +327,7 @@ for (const runtimeId of ["app-runtime", "app-1"]) {
     await page.getByRole("link", { name: /^Soul Archive(\s|$)/ }).click()
     const frame = page.locator("iframe[title='/Soul Archive interface']")
     await expect(frame).toBeVisible()
-    await expect(frame).toHaveAttribute("src", /\/apps\/app-1\/ui\/\?theme=light&lang=en$/)
+    await expect(frame).toHaveAttribute("src", /\/apps\/app-1\/ui\/\?theme=light&embed_origin=[^&]+&lang=en$/)
     await expect(page.frameLocator("iframe[title='/Soul Archive interface']").getByRole("heading", { name: "Soul human interface" })).toBeVisible()
     await expect(page.locator(".xterm")).toBeHidden()
 
@@ -767,3 +767,43 @@ test("organization settings render in Chinese without leaking English copy", asy
   const body = await page.locator("main").innerText()
   for (const english of ["Members", "Groups", "Open audit", "New organization", "Activity"]) expect(body).not.toContain(english)
 })
+
+for (const width of [1360, 390]) {
+  test(`registered Agent new-tab entries use its standalone UI at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 })
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    const link = page.locator('aside').getByRole('link', { name: /^dashboard(?: |$)/ })
+    const href = await link.getAttribute('href')
+    const url = new URL(href!)
+    expect(url.pathname).toBe('/api/workspaces/ws-1/agents/ag-ui/interface/ui/')
+    expect(url.searchParams.get('embed_origin')).toBe(new URL(page.url()).origin)
+    expect([...url.searchParams.keys()].sort()).toEqual(['embed_origin', 'lang', 'theme'])
+    await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+    await expect(page.locator('aside').getByRole('link', { name: /^plain-tty(?: |$)/ })).toHaveAttribute('href', '/orgs/org-1/workspaces/ws-1/workloads/ag-tty')
+    await page.evaluate(() => {
+      (window as unknown as { opened: unknown[] }).opened = []
+      window.open = ((...args: unknown[]) => { (window as unknown as { opened: unknown[] }).opened.push(args); return null }) as typeof window.open
+    })
+    await link.click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()
+    const treeOpen = await page.evaluate(() => (window as unknown as { opened: string[][] }).opened)
+    expect(treeOpen[0]).toEqual([href, '_blank', 'noopener,noreferrer'])
+    // Plain navigation still embeds the UI; only the native href/menu opens standalone.
+    await link.click()
+    await expect(page.locator("iframe[title='/dashboard interface']")).toBeVisible()
+    const frameUrl = new URL((await page.locator('iframe').getAttribute('src'))!)
+    expect(frameUrl.searchParams.get('embed_origin')).toBe(new URL(page.url()).origin)
+    await page.evaluate(() => {
+      (window as unknown as { opened: unknown[] }).opened = []
+      window.open = ((...args: unknown[]) => { (window as unknown as { opened: unknown[] }).opened.push(args); return null }) as typeof window.open
+    })
+    await openTabMenu(page)
+    await page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()
+    const opened = await page.evaluate(() => (window as unknown as { opened: string[][] }).opened)
+    expect(opened).toHaveLength(1)
+    expect(new URL(opened[0][0]).pathname).toBe(url.pathname)
+    expect(opened[0].slice(1)).toEqual(['_blank', 'noopener,noreferrer'])
+    expect(opened[0][0]).not.toMatch(/token|secret|password/i)
+  })
+}

@@ -4,11 +4,11 @@ import type { KeyboardEvent, MouseEvent } from "react"
 // middle-click and the browser's own "Open in new tab" and "Copy link address" use the href natively.
 // Space activates it like a button, so rows keep the keyboard behaviour they had as buttons.
 export function workloadLinkProps(href: string, open: () => void) {
-  // An address on another origin (an App's own URL) never leaks the Console as referrer or opener.
-  const external = (() => { try { return new URL(href, window.location.href).origin !== window.location.origin } catch { return false } })()
   return {
     href,
-    ...(external ? { rel: "noopener noreferrer" } : {}),
+    // Agent interfaces may share the Console origin. Native new-tab navigation
+    // must still isolate the opener and avoid leaking the Console route.
+    rel: "noopener noreferrer",
     draggable: false, // a draggable row must be dragged by its link, not drag the URL
     onClick: (event: MouseEvent<HTMLElement>) => {
       if (event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
