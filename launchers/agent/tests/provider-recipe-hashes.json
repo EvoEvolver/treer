@@ -1,11 +1,12 @@
 {
-  "table_hash": "859a60731bd8f04707ddc8becfb7dc0cf405a24517385b849053154dbdeee10b",
+  "table_hash": "61f38be07db4edc3504f4efbdef7a75da7c3012e558996e7fb1d3f894ac0653d",
   "recipe_hashes": {
-    "codex-npm-posix": "e9e559641f371bb3c403245e97ad6cff629e410175dd9677e19226cc415f7c12",
+    "codex-npm-posix": "704707e8ba3d93db6dfb5aeff7cde8816cdf4fe288488bb5e626429ad5220518",
     "codex-windows": "c71a15af81463bf5ee6e0de286dd3d61e562057fa2537bdf30ab927053a011ea",
-    "gemini-npm-posix": "bde8f5403b16eaaeb7045a2ec52719e435f843634fd18e326fa518a18486ad03",
+    "gemini-npm-posix": "c888f5da070293890bd39edb0f302c76b98526cd0e7b3d0459ea9ac28cc09d36",
     "gemini-windows": "e6278325dc4afd768fb73c2234d34435a6926ce82726d5f9a0e889a7d98293da",
-    "claude-native-npm": "91ddd665a03dd3873e59c7358e9b21e55c8c4e7e32f4aa4557e891762c84dc0b",
+    "claude-native-npm": "41bffa354fddb35726c3d2bf12637ae51d9039dc40ad327b31a2c0029aad25d6",
+    "claude-native-unavailable": "1cf053db18f56fafac7d7f9ab72c153193ff74ef62b3e1352308bf138e4d77b8",
     "opencode-native-npm": "9e9b9e04dae2e9c386e823068092b2a27c766b4ddaa1fe3e58204cfce066f82d",
     "cursor-cli": "8511f9fccdef5367333f067856bac7f99125ac2bdfe80127bf16a0dfd3dc74d5",
     "grok-cli": "14a3fe46387839a438a39d3d0108e3c6276ea2422950ac7574da95eba2751ff0"

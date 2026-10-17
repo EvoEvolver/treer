@@ -1,11 +1,12 @@
 {
   "schema": "treer.provider-recipes/v1",
-  "schema_version": 1,
+  "schema_version": 2,
   "recipes": [
     {
       "provider_id": "codex",
       "recipe_id": "codex-npm-posix",
-      "recipe_version": 1,
+      "recipe_version": 2,
+      "expected_version": "0.163.0",
       "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64"],
       "binary_names": ["codex"],
       "supported": true,
@@ -36,7 +37,8 @@
     {
       "provider_id": "gemini",
       "recipe_id": "gemini-npm-posix",
-      "recipe_version": 1,
+      "recipe_version": 2,
+      "expected_version": "0.64.0",
       "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64"],
       "binary_names": ["gemini"],
       "supported": true,
@@ -67,11 +69,77 @@
     {
       "provider_id": "claude",
       "recipe_id": "claude-native-npm",
+      "recipe_version": 2,
+      "platforms": ["darwin-aarch64", "linux-x86_64", "linux-aarch64"],
+      "binary_names": ["claude"],
+      "supported": true,
+      "node_min": 22,
+      "expected_version": "2.1.302",
+      "install": {
+        "kind": "npm-global",
+        "package": "@anthropic-ai/claude-code",
+        "version": "2.1.302",
+        "integrity": "sha512-+5GARMH0vX8a+o8xGrmx67KH+aDI5aYVO2qFustRhUJrSMdxzb4LtUmF2rL+PyaxCpHfXYZz38vfIuT2irg/Cg==",
+        "registry": "https://registry.npmjs.org/",
+        "ignore_scripts": false,
+        "omit_optional": false
+      },
+      "check": {"executable": "claude", "args": ["--version"]},
+      "binary_path": "bin/claude.exe",
+      "native_binaries": {
+        "darwin-aarch64": {
+          "package": "@anthropic-ai/claude-code-darwin-arm64",
+          "version": "2.1.302",
+          "integrity": "sha512-h0MlQtldJnHXdPB6KGQ6rYQocvNTEXBI+NW4791OD2mIZcq6fHrV4PsM+XK297OL0+wVENlDHtlBj1BL/3S52A==",
+          "member": "package/claude",
+          "size": 267956720,
+          "sha256": "5262ce9de86243fed0d21edc39b271555d56780d0112e2b194439fe1c6662d37",
+          "unpacked_size": 267957297
+        },
+        "linux-x86_64": {
+          "package": "@anthropic-ai/claude-code-linux-x64",
+          "version": "2.1.302",
+          "integrity": "sha512-+d4RUq3E3K+3/J4MysB3z4QXA4rkDNt70VYpTLE6kJCnUe/Z6SB8VJsVJG/NV4bECrvkxkLHjXk+vrgBstfZkw==",
+          "member": "package/claude",
+          "size": 285793528,
+          "sha256": "60d7eb7f12fbb28a52533fe8be5884097403562aa02dc73991a021c7067e29a5",
+          "unpacked_size": 285794114
+        },
+        "linux-aarch64": {
+          "package": "@anthropic-ai/claude-code-linux-arm64",
+          "version": "2.1.302",
+          "integrity": "sha512-eRgp1cK2oSC7vK1/Dha9EsfSxNb6b/LyduzBxRW02c0X+C6xtyAzeGMmRobQSNuTazRxsr/Cf2/l4Sf/LMgxCA==",
+          "member": "package/claude",
+          "size": 285335616,
+          "sha256": "2bd4f4e5ed5cb09955b490098f745321cb5491e7ea8c752ba1e3bb010cdadb10",
+          "unpacked_size": 285336210
+        }
+      },
+      "lifecycle_review": {
+        "reviewed_at": "2026-10-17",
+        "reviewer": "launcher-dev audit 3091; security-claude 3100/3107",
+        "files": [
+          {"member": "package/install.cjs", "sha256": "32a7b2429d7447c5aa043e383bcf9a72e0b233dff66336ea4b5b32531da981ad"},
+          {"member": "package/package.json", "sha256": "7aefd02c45ca3d00fc7ac15bcb378ac3d30f37c1709dbed1190b3f4fa914ea50"}
+        ],
+        "scripts": {
+          "prepare": "node -e \"if (!process.env.AUTHORIZED) { console.error('ERROR: Direct publishing is not allowed.\\nPlease see the release workflow documentation to publish this package.'); process.exit(1); }\"",
+          "postinstall": "node install.cjs"
+        },
+        "runs": ["postinstall"],
+        "closure": {"packages": 2, "with_scripts": ["@anthropic-ai/claude-code"]}
+      },
+      "official_docs": "https://code.claude.com/docs/en/setup",
+      "login_hint": "Run claude in your own terminal to sign in. This installation runs the package's reviewed postinstall. Linux musl is unsupported. Treer does not handle provider credentials."
+    },
+    {
+      "provider_id": "claude",
+      "recipe_id": "claude-native-unavailable",
       "recipe_version": 1,
-      "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64", "windows-x86_64"],
+      "platforms": ["darwin-x86_64", "windows-x86_64"],
       "binary_names": ["claude"],
       "supported": false,
-      "unsupported_reason": "lifecycle_review_pending",
+      "unsupported_reason": "claude_native_unavailable",
       "official_docs": "https://code.claude.com/docs/en/setup",
       "login_hint": "Install Claude Code using its official instructions, then run claude in your own terminal to sign in."
     },

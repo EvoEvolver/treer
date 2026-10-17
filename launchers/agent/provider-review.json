@@ -31,7 +31,19 @@
         "sha256": "32a7b2429d7447c5aa043e383bcf9a72e0b233dff66336ea4b5b32531da981ad",
         "tarball_integrity_verified": true
       },
-      "disposition": "requires-explicit-lifecycle-review-and-consent"
+      "package_json_sha256": "7aefd02c45ca3d00fc7ac15bcb378ac3d30f37c1709dbed1190b3f4fa914ea50",
+      "reviewed_at": "2026-10-17",
+      "audit": {
+        "reference": "Issue #131 comments 2442, 2482, 3091, 3100, 3107, 3109",
+        "optional_dependencies": "Eight native packages, all exact version 2.1.302; root dependencies empty.",
+        "writes": "Only package-local bin/claude.exe: link, copy, unlink, chmod and placeholder restoration; no directory creation or HOME/npmrc writes.",
+        "execution": "No network or native binary execution. Darwin x64 runs PATH sysctl without a timeout; the mandatory native-arm64 Node gate excludes that branch on supported macOS.",
+        "failure": "Native absence may exit zero leaving a 500-byte placeholder. Placement is not atomic; install or later failure may leave a modified prefix and requires uninstall before retry.",
+        "closure": "Expected root plus one native, only root postinstall runs. Both tarballs must verify before offline installation using an empty private cache; sealed acceptance must prove the optional dependency uses that single native copy.",
+        "prepare": "Publishing guard; not expected to run for tarball installation. If invoked without AUTHORIZED it exits 1, failing closed.",
+        "verification": "Read-only tarball/member inspection only; no installer, provider binary or lifecycle code executed. Native member is package/claude; installation target is root bin/claude.exe."
+      },
+      "disposition": "reviewed-offline-local-tarballs-with-native-pin; sealed-install-acceptance-required"
     },
     {
       "name": "@google/gemini-cli",

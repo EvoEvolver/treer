@@ -9,19 +9,22 @@ user-editable table, and validates before expanding any command.
 
 ## Serialized table
 
-Top-level fields: `schema: "treer.provider-recipes/v1"`, `schema_version: 1`,
+Top-level fields: `schema: "treer.provider-recipes/v1"`, `schema_version: 2`,
 `recipes: []`. Each entry has `provider_id`, `recipe_id`, positive integer
 `recipe_version`, `platforms` (explicit members of the five release platforms),
 `binary_names` (exact bare names), `supported`, `official_docs`, and `login_hint`
 (plain English text, no login execution). Unsupported entries have a fixed
 `unsupported_reason` and **no** `install` or `check` command. Supported entries
-have `node_min: 22`, `install` and `check`:
+have `node_min: 22`, `install`, `check` and `expected_version` equal to the exact
+install version. Optional `deadline_seconds` is 60–900, default 300; the release
+owner must measure sealed installation before raising it. For example:
 
 ```json
 {
   "provider_id": "codex",
   "recipe_id": "codex-npm-posix",
-  "recipe_version": 1,
+  "recipe_version": 2,
+  "expected_version": "0.163.0",
   "platforms": ["darwin-aarch64", "darwin-x86_64", "linux-aarch64", "linux-x86_64"],
   "binary_names": ["codex"],
   "supported": true,
@@ -156,7 +159,8 @@ tests once its consumer contract is confirmed. Full gates use
 
 Core contract v2 (2283/2284/2286) and security design review 2287 settle the
 `platforms` array shape. The first table declares Codex and Gemini on four POSIX
-platforms with scripts disabled. Claude, OpenCode, Cursor, Grok and Windows
+platforms with scripts disabled. Schema version 2 adds the reviewed Claude
+recipe on three platforms as described below. OpenCode, Cursor, Grok and Windows
 remain explicitly unsupported. `scripts/provider-recipes.mjs` validates release
 data before bundle preparation; Core must independently validate its embedded
 bytes, not trust the launcher validator. `tests/provider-recipe-hashes.json`
@@ -173,7 +177,7 @@ the Controller can find the provider through its service PATH; the final UI
 must explain any manual environment/profile step without promising immediate
 Agent creation or silently changing PATH. Lifecycle consent, when eventually
 enabled, covers scripts in the resolved dependency closure, not just the top
-package. Current review records do not approve that closure for Claude.
+package. Claude's reviewed closure below still requires sealed runtime acceptance.
 
 POSIX process-group cleanup cannot guarantee cleanup of descendants which
 detach into a different session/group. It is not a sandbox. A same-account
@@ -181,3 +185,59 @@ actor replacing verified tarballs inside the private operation directory is
 within the user's existing trust domain; this feature does not isolate hostile
 code already running as that user. Windows execution is not implemented or
 claimed verified in the first iteration.
+
+## Claude reviewed native recipe (Issue #131)
+
+`claude-native-npm` version 2 pins the root package `2.1.302` and one native
+package for each of `darwin-aarch64`, `linux-x86_64`, `linux-aarch64`. Intel macOS
+and Windows are covered by the unsupported `claude-native-unavailable` entry.
+Linux musl is unsupported: a mismatched native binary fails verification. Grok
+remains unsupported. This data must ship together with Core's reviewed executor
+and the Web consent/plan consumer; schema version 2 fails closed on old consumers.
+
+The native pin contains `package`, `version`, tarball SHA-512 `integrity`, member
+`package/claude`, member `size`/`sha256`, and `unpacked_size`. The latter records
+the registry's unpacked payload size; size and SHA-256 of the member were measured
+from integrity-verified archives. `binary_path: "bin/claude.exe"` is the root
+package's installed target, not a native archive member. All pins are bounded by
+1 GiB, with `size <= unpacked_size`. Core reserves 1 GiB + twice unpacked size.
+
+The nine-step plan checks native Node architecture before downloads, packs root
+and native with scripts disabled, verifies both SHA-512 values, installs both
+verified local tgz files offline, reads the prefix, verifies the installed native
+file and entry link, and only then executes the exact-version check. The offline
+install uses an empty private npm cache and unreachable registry; only the pack
+steps access the official registry. `install.omit_optional` must be explicitly
+false for this recipe. Codex/Gemini keep scripts disabled and their five steps.
+
+Claude alone has `ignore_scripts: false`. The consent dialog must show that this
+install runs the package's reviewed postinstall, including the hashes recorded
+in `lifecycle_review.files`. Its `scripts` is the exact root package script map;
+`runs: ["postinstall"]` excludes the publishing guard `prepare`; `closure` expects
+two packages, with only the root in `with_scripts`. The pinned root package JSON
+has no regular dependencies and eight exact-version optional native dependencies.
+These records describe reviewed code, not a dependency sandbox. The read-only
+audit and its limits are recorded in [provider-review.json](provider-review.json).
+
+Core requires a matching native Node architecture (arm64/x64) and verifies every
+path component with no-follow opens, root/current-user ownership and no group or
+world writes. The target must be a regular file with the pinned size and SHA-256.
+The root target may share an inode with the native package member (`nlink == 2`
+is expected after a hardlink). `prefix/bin/claude` must resolve within the prefix
+to exactly that verified inode before it can run. Version matching requires the
+whole `2.1.302` token; `2.1.3020` and `v2.1.302` fail.
+
+Missing native packages can leave a 500-byte placeholder with npm exit zero;
+placement can fail non-atomically. Any failure after installation starts must
+state that the prefix may have been modified and direct the user to uninstall
+before retry, without automatic retries or elevation. Same-account races remain
+within the existing trust boundary; byte verification does not prove behavior.
+
+Release/security must use a disposable sealed environment, never a developer
+machine or win_native, to prove the empty-cache offline install has exactly one
+native copy satisfying the root optional dependency, no other lifecycle scripts,
+the expected version, and clean uninstall. Injected wrong bytes or placeholder
+must fail before the probe runs. No actual provider installation was executed
+while preparing these data and tests. If npm cannot satisfy that dependency from
+the two local tarballs, the install fails closed; any alternate sequence needs
+the separately reviewed Core plan and fresh sealed acceptance.
