@@ -504,6 +504,10 @@ writing, after sync and during later verification. A byte-identical executable
 at another inode fails closed. Isolated children cover a wrong-image copy,
 pre-ready rejection followed by a barrier-controlled same-PID exec into the
 expected copy, and replacement of the expected path after registration.
+If the executable path is replaced while the supervisor still runs the old
+inode, its identity is no longer provable: fail closed with
+`update_recovery_required` and preserve evidence. Recovery must not treat this
+as a transient error to retry against the replacement image.
 This narrows identity to an owned Child running the expected executable; it is
 not authenticated IPC, proof of the permit owner's parent relationship or an
 all-descendants containment guarantee. Production lifecycle wiring must invoke this
