@@ -4,6 +4,8 @@
 pub mod core;
 pub mod failures;
 #[cfg(unix)]
+pub mod hub;
+#[cfg(unix)]
 mod private_store;
 pub mod protocol;
 #[cfg(unix)]

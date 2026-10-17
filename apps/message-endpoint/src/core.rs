@@ -25,6 +25,19 @@ pub enum Error {
     Invalid,
 }
 
+/// Deliberately a projection of Core AgentInfo, not an invented folder/profile API.
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+pub struct AgentMetadata {
+    pub agent_id: String,
+    pub workspace_id: String,
+    pub server_id: String,
+    pub kind: String,
+    pub cwd: String,
+    pub status: String,
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct Principal {
     pub kind: SenderKind,
@@ -59,6 +72,35 @@ impl Core {
             executable: executable.into(),
             own_id: own_id.into(),
         })
+    }
+
+    /// Stable IDs bypass CLI Tree enumeration. Never resolve a user-supplied path.
+    pub fn agent_metadata(&self, id: &str) -> Result<AgentMetadata, Error> {
+        if !(id.starts_with("ag_") || id.starts_with("app_")) || !valid_id(id) {
+            return Err(Error::Invalid);
+        }
+        let result: AgentMetadata = serde_json::from_value(run(
+            &self.executable,
+            &["agent".into(), "show".into(), "--".into(), id.into()],
+            None,
+            Duration::from_secs(15),
+        )?)
+        .map_err(|_| Error::Invalid)?;
+        if result.agent_id != id
+            || !valid_id(&result.workspace_id)
+            || !valid_id(&result.server_id)
+            || result.cwd.len() > 4096
+            || result.cwd.chars().any(char::is_control)
+            || result.status.len() > 64
+            || result.kind.len() > 64
+            || result
+                .path
+                .as_ref()
+                .is_some_and(|p| p.len() > 4096 || p.chars().any(char::is_control))
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(result)
     }
 
     pub fn receive(&self, wait_ms: u32) -> Result<Vec<Delivery>, Error> {
@@ -339,6 +381,9 @@ elif args[:2]==['message','receive']:
 elif args[:2]==['message','ack']:
  assert args[-2:]==['--','del_received']
  result={{'acknowledged_delivery_ids':['del_received'],'already_acknowledged_delivery_ids':[]}}
+elif args[:2]==['agent','show']:
+ assert args[2:]==['--','ag_target']
+ result={{'agent_id':'ag_target','workspace_id':'ws_test','server_id':'machine_test','kind':'command','cwd':'/private/endpoint','status':'running','path':'/team/endpoint'}}
 else: raise AssertionError('unexpected operation')
 print(json.dumps(result))
 "#
@@ -360,6 +405,11 @@ print(json.dumps(result))
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].recipient.id, "app_own");
         core.ack("del_received").unwrap();
+        assert_eq!(
+            core.agent_metadata("ag_target").unwrap().path.as_deref(),
+            Some("/team/endpoint")
+        );
+        assert!(core.agent_metadata("/team/endpoint").is_err());
     }
     #[test]
     fn bounded_process_kills_and_reaps_timeout_and_output_flood() {

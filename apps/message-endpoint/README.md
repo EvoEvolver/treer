@@ -335,3 +335,32 @@ and reports that state. It does not silently resume after pruning. Owner viewing
 explicit receipt clearing/resume and hub-side status/backlog presentation are
 still to implement before activation. The hub must make Policy/command-integrity
 limitations visible alongside those states.
+
+
+## Development hub receiver library
+
+`hub::Hub` now owns the bounded durable Core fragment inbox and per-ID metadata
+checks. It is not yet an HTTP server or complete hub program. Only a future
+owner-authenticated service may call its binding/resume/pause methods; this Rust
+API does not perform browser authentication. New bindings start paused. Resume
+requires an exact revision and fresh per-stable-ID `agent show -- ID`, matching
+workspace, command kind, canonical path, cwd and machine. It never enumerates the
+Tree or reads command/argv/credentials/Policy. A refresh failure, hidden/missing
+path or mismatch pauses; the old expected and current observed values remain
+visible, and later matching data never automatically resumes. Metadata older than
+30 seconds prevents work admission and transport job access until refreshed.
+
+Outer Core sender kind/ID selects the binding. Unknown/human senders get bounded
+body-free durable rejection receipts before ack; exhaustion persists a hub-wide
+blocked flag without ack. Bound poison uses the existing bounded failure ledger.
+Valid outbound fragments commit before ack and reassemble into durable transport
+work; Core ack is not external delivery. Partial inboxes and binding/pause state
+survive reopening. Changing the hub runtime ID/workspace refuses existing state;
+relay and hub state directories cannot be shared.
+
+Endpoint status JSON is strictly parsed and stored at most once per binding per
+60 seconds, including while paused. It is only an endpoint-asserted diagnostic:
+matching hashes, `running`, or repeated status messages cannot resume, re-pin or
+authorize anything. This implements the receiver side of security follow-up3570
+item6; its UI labeling remains an activation gate. Owner receipt clearing/resume,
+worker scheduling, external transports and authenticated settings are unfinished.

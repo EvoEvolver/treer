@@ -1,0 +1,834 @@
+//! Private hub receiver. No HTTP/owner authorization or external transport here.
+//! Public callers must never be given these provisioning methods directly.
+use crate::{
+    core::{AgentMetadata, Core, Delivery},
+    failures::FailureReason,
+    protocol::{Direction, Envelope, SenderKind},
+    relay::Mailbox,
+    store::{valid_id, Error as StorageError, Store},
+    transfers::FragmentReceipt,
+};
+use rusqlite::params;
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+const READBACK_TTL: i64 = 30;
+const STATUS_INTERVAL: i64 = 60;
+const UNKNOWN_BUDGET: i64 = 1000;
+
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("hub_storage_unavailable")]
+    Storage(#[from] StorageError),
+    #[error("hub_core_unavailable")]
+    Core(#[from] crate::core::Error),
+    #[error("hub_binding_unavailable")]
+    Binding,
+    #[error("hub_revision_conflict")]
+    Revision,
+    #[error("hub_rejection_budget_exhausted")]
+    FailureBudget,
+}
+impl From<rusqlite::Error> for Error {
+    fn from(error: rusqlite::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
+pub trait Directory {
+    fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error>;
+}
+impl Directory for Core {
+    fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error> {
+        self.agent_metadata(id)
+    }
+}
+
+/// Owner-provisioned expectations. Paths are drift detection, never authority.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Binding {
+    pub endpoint_id: String,
+    pub generation: i64,
+    pub recipient: String,
+    pub expected_path: String,
+    pub expected_cwd: String,
+    pub expected_server_id: String,
+}
+#[derive(Serialize)]
+pub struct View {
+    pub binding: Binding,
+    pub revision: i64,
+    pub paused: bool,
+    pub reason: String,
+    pub observed: Option<AgentMetadata>,
+    pub checked_at: Option<i64>,
+    /// Endpoint-asserted diagnostic, NOT verification of command or Policy.
+    pub diagnostic: Option<Status>,
+}
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct Status {
+    protocol: String,
+    generation: i64,
+    release_sha256: String,
+    actual_sha256: String,
+    version: String,
+    state: String,
+}
+impl Status {
+    fn valid(&self, generation: i64) -> bool {
+        let hash = |s: &str| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        };
+        self.protocol == "treer.endpoint.status/v1"
+            && self.generation == generation
+            && hash(&self.release_sha256)
+            && hash(&self.actual_sha256)
+            && !self.version.is_empty()
+            && self.version.len() <= 64
+            && !self.version.chars().any(char::is_control)
+            && matches!(self.state.as_str(), "running" | "failure_budget_exhausted")
+    }
+}
+
+pub struct Hub<M> {
+    store: Store,
+    mailbox: M,
+    workspace: String,
+}
+fn stable(id: &str) -> bool {
+    valid_id(id) && (id.starts_with("ag_") || id.starts_with("app_"))
+}
+fn physical_tree_path(path: &str) -> bool {
+    path.len() <= 4096
+        && path.starts_with('/')
+        && !path.chars().any(char::is_control)
+        && path
+            .split('/')
+            .skip(1)
+            .all(|p| !p.is_empty() && p.trim() == p && p != "." && p != "..")
+}
+impl<M: Mailbox + Directory> Hub<M> {
+    /// Pins this hub runtime ID. Restart with a different ID requires human drain,
+    /// fresh provisioning and endpoint repinning, never automatic authority transfer.
+    pub fn new(mut store: Store, mailbox: M, own_id: &str, workspace: &str) -> Result<Self, Error> {
+        if !stable(own_id) || !valid_id(workspace) {
+            return Err(Error::Binding);
+        }
+        let relay: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='relay_pins')",
+            [],
+            |r| r.get(0),
+        )?;
+        if relay {
+            return Err(Error::Binding);
+        }
+        let tx = store.db.transaction()?;
+        tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);
+        CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);")?;
+        tx.execute(
+            "INSERT OR IGNORE INTO hub_identity(singleton,agent,workspace) VALUES(1,?1,?2)",
+            params![own_id, workspace],
+        )?;
+        let pins: (String, String) = tx.query_row(
+            "SELECT agent,workspace FROM hub_identity WHERE singleton=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if pins != (own_id.into(), workspace.into()) {
+            return Err(Error::Binding);
+        }
+        tx.commit()?;
+        Ok(Self {
+            store,
+            mailbox,
+            workspace: workspace.into(),
+        })
+    }
+    /// Internal owner-service boundary only. New bindings always start paused.
+    pub fn add_binding(&mut self, binding: Binding) -> Result<(), Error> {
+        if !stable(&binding.endpoint_id)
+            || !stable(&binding.recipient)
+            || binding.generation <= 0
+            || !valid_id(&binding.expected_server_id)
+            || !physical_tree_path(&binding.expected_path)
+            || binding.expected_cwd.is_empty()
+            || binding.expected_cwd.len() > 4096
+            || binding.expected_cwd.chars().any(char::is_control)
+        {
+            return Err(Error::Binding);
+        }
+        let definition = serde_json::to_string(&binding).map_err(|_| Error::Binding)?;
+        let tx = self.store.db.transaction()?;
+        let count: i64 = tx.query_row("SELECT COUNT(*) FROM endpoints", [], |r| r.get(0))?;
+        if count >= 20 {
+            return Err(StorageError::Full.into());
+        }
+        tx.execute(
+            "INSERT INTO endpoints(id,generation,recipient,paused) VALUES(?1,?2,?3,1)",
+            params![binding.endpoint_id, binding.generation, binding.recipient],
+        )?;
+        tx.execute(
+            "INSERT INTO hub_bindings(endpoint,definition) VALUES(?1,?2)",
+            params![binding.endpoint_id, definition],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn view(&self, id: &str) -> Result<View, Error> {
+        let (definition,revision,paused,reason,observed,checked_at,diagnostic):(String,i64,bool,String,Option<String>,Option<i64>,Option<String>)=self.store.db.query_row(
+            "SELECT b.definition,b.revision,e.paused,b.reason,b.observed,b.checked_at,b.diagnostic FROM hub_bindings b JOIN endpoints e ON e.id=b.endpoint WHERE e.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
+        Ok(View {
+            binding: serde_json::from_str(&definition).map_err(|_| Error::Binding)?,
+            revision,
+            paused,
+            reason,
+            observed: observed
+                .map(|s| serde_json::from_str(&s))
+                .transpose()
+                .map_err(|_| Error::Binding)?,
+            checked_at,
+            diagnostic: diagnostic
+                .map(|s| serde_json::from_str(&s))
+                .transpose()
+                .map_err(|_| Error::Binding)?,
+        })
+    }
+    /// Per-ID lookup only. Failure/drift pauses and is sticky until owner resumes.
+    /// Old expected and current observed values remain separately visible.
+    pub fn refresh(&mut self, id: &str, now: i64) -> Result<(), Error> {
+        if now < 0 {
+            return Err(Error::Binding);
+        }
+        let expected = self.view(id)?.binding;
+        let observed = self.mailbox.metadata(id).ok();
+        let reason = match &observed {
+            None => "metadata_unavailable",
+            Some(o)
+                if o.agent_id != id || o.workspace_id != self.workspace || o.kind != "command" =>
+            {
+                "identity_mismatch"
+            }
+            Some(o) if o.path.as_deref() != Some(expected.expected_path.as_str()) => "path_changed",
+            Some(o)
+                if o.cwd != expected.expected_cwd || o.server_id != expected.expected_server_id =>
+            {
+                "placement_changed"
+            }
+            Some(_) => "matched",
+        };
+        let text = observed
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()
+            .map_err(|_| Error::Binding)?;
+        let tx = self.store.db.transaction()?;
+        tx.execute(
+            "UPDATE hub_bindings SET observed=?2,checked_at=?3 WHERE endpoint=?1",
+            params![id, text, now],
+        )?;
+        if reason != "matched" {
+            tx.execute("UPDATE endpoints SET paused=1 WHERE id=?1", [id])?;
+            tx.execute("UPDATE hub_bindings SET revision=revision+CASE WHEN reason=?2 THEN 0 ELSE 1 END,reason=?2 WHERE endpoint=?1",params![id,reason])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    /// HTTP wiring must authenticate owner, CSRF, revision and confirmation first.
+    /// This performs a NEW readback but never interprets status as authorization.
+    pub fn resume(&mut self, id: &str, revision: i64, now: i64) -> Result<(), Error> {
+        if self.blocked()? {
+            return Err(Error::FailureBudget);
+        }
+        if self.view(id)?.revision != revision {
+            return Err(Error::Revision);
+        }
+        self.refresh(id, now)?;
+        let view = self.view(id)?;
+        if view.revision != revision {
+            return Err(Error::Revision);
+        }
+        let o = view.observed.ok_or(Error::Binding)?;
+        if o.agent_id != id
+            || o.workspace_id != self.workspace
+            || o.kind != "command"
+            || o.path.as_deref() != Some(view.binding.expected_path.as_str())
+            || o.cwd != view.binding.expected_cwd
+            || o.server_id != view.binding.expected_server_id
+        {
+            return Err(Error::Binding);
+        }
+        let tx = self.store.db.transaction()?;
+        tx.execute("UPDATE endpoints SET paused=0 WHERE id=?1", [id])?;
+        tx.execute(
+            "UPDATE hub_bindings SET revision=revision+1,reason='active' WHERE endpoint=?1",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    pub fn pause(&mut self, id: &str, revision: i64) -> Result<(), Error> {
+        if self.view(id)?.revision != revision {
+            return Err(Error::Revision);
+        }
+        let tx = self.store.db.transaction()?;
+        tx.execute("UPDATE endpoints SET paused=1 WHERE id=?1", [id])?;
+        tx.execute(
+            "UPDATE hub_bindings SET revision=revision+1,reason='owner_paused' WHERE endpoint=?1",
+            [id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    fn blocked(&self) -> Result<bool, Error> {
+        Ok(self.store.db.query_row(
+            "SELECT blocked FROM hub_identity WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?)
+    }
+    fn reject_unknown(&mut self, delivery: &Delivery, now: i64) -> Result<(), Error> {
+        // Bounded receipts, no body, body digest or arbitrary error strings.
+        let tx = self.store.db.transaction()?;
+        tx.execute(
+            "DELETE FROM hub_rejections WHERE created_at<?1",
+            [now - crate::transfers::TOMBSTONE_TTL],
+        )?;
+        let known: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hub_rejections WHERE delivery=?1)",
+            [&delivery.delivery_id],
+            |r| r.get(0),
+        )?;
+        if !known {
+            let count: i64 =
+                tx.query_row("SELECT COUNT(*) FROM hub_rejections", [], |r| r.get(0))?;
+            if count >= UNKNOWN_BUDGET {
+                tx.execute("UPDATE hub_identity SET blocked=1 WHERE singleton=1", [])?;
+                tx.commit()?;
+                return Err(Error::FailureBudget);
+            }
+            tx.execute("INSERT INTO hub_rejections(delivery,reason,created_at) VALUES(?1,'unbound_sender',?2)",params![delivery.delivery_id,now])?;
+        }
+        tx.commit()?;
+        self.mailbox.ack(&delivery.delivery_id)?;
+        Ok(())
+    }
+    fn active(&self, id: &str, now: i64) -> Result<View, Error> {
+        let view = self.view(id)?;
+        if view.paused
+            || view
+                .checked_at
+                .is_none_or(|t| t > now || now - t > READBACK_TTL)
+        {
+            return Err(Error::Binding);
+        }
+        Ok(view)
+    }
+    /// Persist first, ack second. Paused/stale bindings retain unacked deliveries.
+    pub fn receive_once(&mut self, now: i64) -> Result<(), Error> {
+        self.store.recheck_private_storage()?;
+        self.store.cleanup_transfers(now)?;
+        self.store.prune_completed(now)?;
+        if self.blocked()? {
+            return Err(Error::FailureBudget);
+        }
+        let mut failed = None;
+        for delivery in self.mailbox.receive(1000)? {
+            if let Err(error) = self.handle(&delivery, now) {
+                if matches!(error, Error::FailureBudget) {
+                    return Err(error);
+                }
+                if failed.is_none() {
+                    failed = Some(error);
+                }
+            }
+        }
+        if let Some(error) = failed {
+            return Err(error);
+        }
+        Ok(())
+    }
+    fn handle(&mut self, delivery: &Delivery, now: i64) -> Result<(), Error> {
+        let id = &delivery.message.sender.id;
+        let bound: bool = self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hub_bindings WHERE endpoint=?1)",
+            [id],
+            |r| r.get(0),
+        )?;
+        if delivery.message.sender.kind != SenderKind::Agent || !bound {
+            return self.reject_unknown(delivery, now);
+        }
+        let view = self.view(id)?;
+        // Status is display-only even for paused bindings. One stored update per
+        // minute per binding prevents repeated untrusted diagnostics growing state.
+        if delivery.message.body.len() <= 1024 {
+            if let Ok(status) = serde_json::from_str::<Status>(&delivery.message.body) {
+                if status.valid(view.binding.generation) {
+                    let text = serde_json::to_string(&status).map_err(|_| Error::Binding)?;
+                    self.store.db.execute("UPDATE hub_bindings SET diagnostic=?2,diagnostic_at=?3 WHERE endpoint=?1 AND (diagnostic_at IS NULL OR diagnostic_at<=?4)",params![id,text,now,now-STATUS_INTERVAL])?;
+                    self.mailbox.ack(&delivery.delivery_id)?;
+                    return Ok(());
+                }
+            }
+        }
+        self.active(id, now)?;
+        match self.store.save_fragment(
+            id,
+            view.binding.generation,
+            Direction::Outbound,
+            &delivery.message.body,
+            now,
+        ) {
+            Ok(FragmentReceipt::Expired) => self.record_rejection(
+                id,
+                view.binding.generation,
+                delivery,
+                FailureReason::TransferExpired,
+                now,
+            )?,
+            Ok(_) => {}
+            Err(StorageError::Invalid | StorageError::Conflict) => self.record_rejection(
+                id,
+                view.binding.generation,
+                delivery,
+                FailureReason::InvalidEnvelope,
+                now,
+            )?,
+            Err(error) => return Err(error.into()),
+        }
+        self.mailbox.ack(&delivery.delivery_id)?;
+        Ok(())
+    }
+    fn record_rejection(
+        &mut self,
+        id: &str,
+        generation: i64,
+        delivery: &Delivery,
+        reason: FailureReason,
+        now: i64,
+    ) -> Result<(), Error> {
+        match self.store.record_failure(
+            id,
+            generation,
+            &delivery.delivery_id,
+            delivery.message.body.as_bytes(),
+            reason,
+            now,
+        ) {
+            Err(StorageError::Full) => {
+                self.store
+                    .db
+                    .execute("UPDATE hub_identity SET blocked=1 WHERE singleton=1", [])?;
+                Err(Error::FailureBudget)
+            }
+            result => Ok(result?),
+        }
+    }
+    /// Transport worker owns these jobs until downstream acceptance, including
+    /// ambiguous sends. It must never mark a job delivered merely after Core ack.
+    pub fn ready_outbound(&self, id: &str, now: i64) -> Result<Vec<(String, Envelope)>, Error> {
+        if self.blocked()? {
+            return Err(Error::FailureBudget);
+        }
+        let binding = self.active(id, now)?.binding;
+        self.store
+            .ready_transfers(id, binding.generation, Direction::Outbound)?
+            .into_iter()
+            .map(|transfer| {
+                let payload = self.store.transfer_payload(
+                    id,
+                    binding.generation,
+                    Direction::Outbound,
+                    &transfer,
+                )?;
+                Ok((transfer, payload))
+            })
+            .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::{Message, Principal};
+    use crate::protocol::Sender;
+    use crate::store::Limits;
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    const NOW: i64 = 1_800_000_000;
+    #[derive(Clone, Default)]
+    struct Fake {
+        metadata: Rc<RefCell<Option<AgentMetadata>>>,
+        calls: Rc<RefCell<Vec<String>>>,
+        deliveries: Rc<RefCell<Vec<Delivery>>>,
+        acks: Rc<RefCell<Vec<String>>>,
+        fail_ack: Rc<RefCell<bool>>,
+    }
+    impl Directory for Fake {
+        fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error> {
+            self.calls.borrow_mut().push(id.into());
+            self.metadata
+                .borrow()
+                .clone()
+                .ok_or(crate::core::Error::Unavailable)
+        }
+    }
+    impl Mailbox for Fake {
+        fn receive(&self, _: u32) -> Result<Vec<Delivery>, crate::core::Error> {
+            Ok(self.deliveries.borrow_mut().drain(..).collect())
+        }
+        fn ack(&self, id: &str) -> Result<(), crate::core::Error> {
+            if *self.fail_ack.borrow() {
+                return Err(crate::core::Error::Unavailable);
+            }
+            self.acks.borrow_mut().push(id.into());
+            Ok(())
+        }
+        fn send(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            _: Option<serde_json::Value>,
+        ) -> Result<String, crate::core::Error> {
+            panic!("hub receiver must not send as another identity")
+        }
+    }
+    fn binding() -> Binding {
+        Binding {
+            endpoint_id: "ag_endpoint".into(),
+            generation: 1,
+            recipient: "ag_recipient".into(),
+            expected_path: "/team/endpoints/channel".into(),
+            expected_cwd: "/workspace/endpoint".into(),
+            expected_server_id: "machine_target".into(),
+        }
+    }
+    fn metadata() -> AgentMetadata {
+        AgentMetadata {
+            agent_id: "ag_endpoint".into(),
+            workspace_id: "ws_test".into(),
+            server_id: "machine_target".into(),
+            kind: "command".into(),
+            cwd: "/workspace/endpoint".into(),
+            status: "running".into(),
+            path: Some("/team/endpoints/channel".into()),
+        }
+    }
+    fn fixture() -> (Hub<Fake>, Fake) {
+        let fake = Fake::default();
+        *fake.metadata.borrow_mut() = Some(metadata());
+        let mut hub = Hub::new(
+            Store::memory(Limits::default()).unwrap(),
+            fake.clone(),
+            "app_hub",
+            "ws_test",
+        )
+        .unwrap();
+        hub.add_binding(binding()).unwrap();
+        (hub, fake)
+    }
+    fn activate(hub: &mut Hub<Fake>) {
+        hub.resume("ag_endpoint", 1, NOW).unwrap();
+    }
+    fn delivery(id: &str, sender: &str, body: &str) -> Delivery {
+        Delivery {
+            delivery_id: id.into(),
+            recipient: Principal {
+                kind: SenderKind::Agent,
+                id: "app_hub".into(),
+            },
+            message: Message {
+                message_id: format!("msg_{id}"),
+                sender: Principal {
+                    kind: SenderKind::Agent,
+                    id: sender.into(),
+                },
+                body: body.into(),
+                context_ids: vec![],
+            },
+        }
+    }
+    fn outbound(body: &str) -> Vec<String> {
+        Envelope::Outbound {
+            delivery_id: "del_original".into(),
+            message_id: "msg_original".into(),
+            original_sender: Sender {
+                kind: SenderKind::Agent,
+                id: "ag_origin".into(),
+            },
+            body: body.into(),
+            context_ids: vec![],
+        }
+        .fragments("ag_endpoint", 1)
+        .unwrap()
+    }
+    #[test]
+    fn owner_activation_is_revision_checked_and_readback_never_auto_resumes() {
+        let (mut hub, fake) = fixture();
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        hub.refresh("ag_endpoint", NOW).unwrap();
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        activate(&mut hub);
+        assert!(!hub.view("ag_endpoint").unwrap().paused);
+        assert!(matches!(hub.pause("ag_endpoint", 1), Err(Error::Revision)));
+        hub.pause("ag_endpoint", 2).unwrap();
+        hub.refresh("ag_endpoint", NOW + 1).unwrap();
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        assert!(fake.calls.borrow().iter().all(|id| id == "ag_endpoint"));
+    }
+    #[test]
+    fn drift_displays_old_and_new_path_and_requires_explicit_resume_after_restoration() {
+        let (mut hub, fake) = fixture();
+        activate(&mut hub);
+        fake.metadata.borrow_mut().as_mut().unwrap().path = Some("/other/channel".into());
+        hub.refresh("ag_endpoint", NOW + 1).unwrap();
+        let view = hub.view("ag_endpoint").unwrap();
+        assert!(view.paused);
+        assert_eq!(view.reason, "path_changed");
+        assert_eq!(view.binding.expected_path, "/team/endpoints/channel");
+        assert_eq!(
+            view.observed.unwrap().path.as_deref(),
+            Some("/other/channel")
+        );
+        assert!(hub.resume("ag_endpoint", view.revision, NOW + 2).is_err());
+        *fake.metadata.borrow_mut() = Some(metadata());
+        hub.refresh("ag_endpoint", NOW + 3).unwrap();
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        hub.resume(
+            "ag_endpoint",
+            hub.view("ag_endpoint").unwrap().revision,
+            NOW + 3,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn missing_metadata_wrong_workspace_kind_cwd_machine_or_hidden_path_pause() {
+        for case in 0..6 {
+            let (mut hub, fake) = fixture();
+            activate(&mut hub);
+            let mut observed = metadata();
+            match case {
+                0 => {
+                    *fake.metadata.borrow_mut() = None;
+                }
+                1 => observed.workspace_id = "ws_other".into(),
+                2 => observed.kind = "app".into(),
+                3 => observed.cwd = "/other".into(),
+                4 => observed.server_id = "machine_other".into(),
+                _ => observed.path = None,
+            }
+            if case != 0 {
+                *fake.metadata.borrow_mut() = Some(observed);
+            }
+            hub.refresh("ag_endpoint", NOW + 1).unwrap();
+            assert!(hub.view("ag_endpoint").unwrap().paused);
+            assert!(hub
+                .resume(
+                    "ag_endpoint",
+                    hub.view("ag_endpoint").unwrap().revision,
+                    NOW + 2
+                )
+                .is_err());
+        }
+    }
+    #[test]
+    fn bound_fragments_commit_before_ack_and_replay_without_duplicate_jobs() {
+        let (mut hub, fake) = fixture();
+        activate(&mut hub);
+        let wire = outbound(&"body".repeat(8000));
+        assert!(wire.len() > 1);
+        for (n, body) in wire.iter().enumerate() {
+            fake.deliveries
+                .borrow_mut()
+                .push(delivery(&format!("del_{n}"), "ag_endpoint", body));
+        }
+        *fake.fail_ack.borrow_mut() = true;
+        assert!(hub.receive_once(NOW).is_err());
+        assert!(fake.acks.borrow().is_empty());
+        assert_eq!(hub.ready_outbound("ag_endpoint", NOW).unwrap().len(), 1);
+        *fake.fail_ack.borrow_mut() = false;
+        for (n, body) in wire.iter().enumerate() {
+            fake.deliveries
+                .borrow_mut()
+                .push(delivery(&format!("del_{n}"), "ag_endpoint", body));
+        }
+        hub.receive_once(NOW + 1).unwrap();
+        assert_eq!(hub.ready_outbound("ag_endpoint", NOW + 1).unwrap().len(), 1);
+        assert_eq!(fake.acks.borrow().len(), wire.len());
+    }
+    #[test]
+    fn paused_or_stale_binding_never_acks_work_and_unknown_sender_cannot_route() {
+        let (mut hub, fake) = fixture();
+        let wire = outbound("body").remove(0);
+        fake.deliveries
+            .borrow_mut()
+            .push(delivery("del_paused", "ag_endpoint", &wire));
+        assert!(hub.receive_once(NOW).is_err());
+        assert!(fake.acks.borrow().is_empty());
+        activate(&mut hub);
+        fake.deliveries
+            .borrow_mut()
+            .push(delivery("del_stale", "ag_endpoint", &wire));
+        assert!(hub.receive_once(NOW + READBACK_TTL + 1).is_err());
+        assert!(fake.acks.borrow().is_empty());
+        fake.deliveries
+            .borrow_mut()
+            .push(delivery("del_unknown", "ag_unknown", &wire));
+        hub.receive_once(NOW + 1).unwrap();
+        assert_eq!(*fake.acks.borrow(), vec!["del_unknown"]);
+        assert!(hub
+            .ready_outbound("ag_endpoint", NOW + 1)
+            .unwrap()
+            .is_empty());
+        let count: i64 = hub
+            .store
+            .db
+            .query_row("SELECT COUNT(*) FROM hub_rejections", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1);
+        let mut human = delivery("del_human", "ag_endpoint", &wire);
+        human.message.sender.kind = SenderKind::Human;
+        fake.deliveries.borrow_mut().push(human);
+        hub.receive_once(NOW + 1).unwrap();
+        assert!(hub
+            .ready_outbound("ag_endpoint", NOW + 1)
+            .unwrap()
+            .is_empty());
+    }
+    #[test]
+    fn status_is_rate_limited_diagnostic_and_cannot_activate_or_repin() {
+        let (mut hub, fake) = fixture();
+        let status = |hash: &str| {
+            serde_json::json!({"protocol":"treer.endpoint.status/v1","generation":1,"release_sha256":"a".repeat(64),"actual_sha256":hash,"version":"0.1.0","state":"running"}).to_string()
+        };
+        fake.deliveries.borrow_mut().push(delivery(
+            "del_status",
+            "ag_endpoint",
+            &status(&"a".repeat(64)),
+        ));
+        hub.receive_once(NOW).unwrap();
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        fake.deliveries.borrow_mut().push(delivery(
+            "del_status2",
+            "ag_endpoint",
+            &status(&"b".repeat(64)),
+        ));
+        hub.receive_once(NOW + 1).unwrap();
+        assert_eq!(
+            hub.view("ag_endpoint")
+                .unwrap()
+                .diagnostic
+                .unwrap()
+                .actual_sha256,
+            "a".repeat(64)
+        );
+        fake.deliveries.borrow_mut().push(delivery(
+            "del_status3",
+            "ag_endpoint",
+            &status(&"b".repeat(64)),
+        ));
+        hub.receive_once(NOW + 61).unwrap();
+        assert_eq!(
+            hub.view("ag_endpoint")
+                .unwrap()
+                .diagnostic
+                .unwrap()
+                .actual_sha256,
+            "b".repeat(64)
+        );
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        assert_eq!(hub.view("ag_endpoint").unwrap().revision, 1);
+    }
+    #[test]
+    fn poison_is_committed_without_body_and_full_budget_blocks_without_ack() {
+        let (mut hub, fake) = fixture();
+        activate(&mut hub);
+        fake.deliveries.borrow_mut().push(delivery(
+            "del_poison",
+            "ag_endpoint",
+            "not a fragment secret",
+        ));
+        hub.receive_once(NOW).unwrap();
+        assert_eq!(
+            hub.store
+                .recent_failures("ag_endpoint", 1, 100)
+                .unwrap()
+                .len(),
+            1
+        );
+        let tx = hub.store.db.transaction().unwrap();
+        for i in 0..UNKNOWN_BUDGET {
+            tx.execute(
+                "INSERT INTO hub_rejections VALUES(?1,'unbound_sender',?2)",
+                params![format!("del_unknown_{i}"), NOW],
+            )
+            .unwrap();
+        }
+        tx.commit().unwrap();
+        fake.deliveries
+            .borrow_mut()
+            .push(delivery("del_full", "ag_unknown", "secret"));
+        assert!(matches!(
+            hub.receive_once(NOW + 1),
+            Err(Error::FailureBudget)
+        ));
+        assert!(!fake.acks.borrow().contains(&"del_full".into()));
+        assert!(hub.blocked().unwrap());
+    }
+    #[test]
+    fn restart_keeps_partial_fragments_pins_and_pause_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = std::fs::canonicalize(temporary.path()).unwrap().join("hub");
+        let fake = Fake::default();
+        *fake.metadata.borrow_mut() = Some(metadata());
+        let mut hub = Hub::new(
+            Store::open(&dir, Limits::default()).unwrap(),
+            fake.clone(),
+            "app_hub",
+            "ws_test",
+        )
+        .unwrap();
+        hub.add_binding(binding()).unwrap();
+        activate(&mut hub);
+        let wire = outbound(&"body".repeat(8000));
+        fake.deliveries
+            .borrow_mut()
+            .push(delivery("del_first", "ag_endpoint", &wire[0]));
+        hub.receive_once(NOW).unwrap();
+        drop(hub);
+        let mut hub = Hub::new(
+            Store::open(&dir, Limits::default()).unwrap(),
+            fake.clone(),
+            "app_hub",
+            "ws_test",
+        )
+        .unwrap();
+        for (i, body) in wire.iter().enumerate().skip(1) {
+            fake.deliveries.borrow_mut().push(delivery(
+                &format!("del_next_{i}"),
+                "ag_endpoint",
+                body,
+            ));
+        }
+        hub.receive_once(NOW + 1).unwrap();
+        assert_eq!(hub.ready_outbound("ag_endpoint", NOW + 1).unwrap().len(), 1);
+        hub.pause("ag_endpoint", 2).unwrap();
+        drop(hub);
+        let store = Store::open(&dir, Limits::default()).unwrap();
+        assert!(Hub::new(store, fake.clone(), "app_other", "ws_test").is_err());
+        let hub = Hub::new(
+            Store::open(&dir, Limits::default()).unwrap(),
+            fake,
+            "app_hub",
+            "ws_test",
+        )
+        .unwrap();
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+    }
+}

@@ -164,6 +164,17 @@ impl<M: Mailbox> Relay<M> {
             serde_json::to_string(&json!({"endpoint":config.endpoint_id,"hub":config.hub_id,
             "generation":config.generation,"recipients":config.recipients}))
             .map_err(|_| Error::Configuration)?;
+        let hub: bool = store
+            .db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='hub_identity')",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from)?;
+        if hub {
+            return Err(Error::Configuration);
+        }
         let transaction = store.db.transaction().map_err(StoreError::from)?;
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS relay_pins (singleton INTEGER PRIMARY KEY CHECK(singleton=1), pins TEXT NOT NULL); CREATE TABLE IF NOT EXISTS relay_status (singleton INTEGER PRIMARY KEY CHECK(singleton=1), failure_budget_exhausted INTEGER NOT NULL DEFAULT 0); INSERT OR IGNORE INTO relay_status(singleton) VALUES(1)").map_err(StoreError::from)?;
         let existing: Option<String> = transaction
