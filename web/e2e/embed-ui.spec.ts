@@ -773,14 +773,14 @@ for (const width of [1360, 390]) {
     await page.setViewportSize({ width, height: 900 })
     await page.goto('/')
     await browseTreeOnMobile(page)
-    const link = page.locator('aside').getByRole('link', { name: /^dashboard / })
+    const link = page.locator('aside').getByRole('link', { name: /^dashboard(?: |$)/ })
     const href = await link.getAttribute('href')
     const url = new URL(href!)
     expect(url.pathname).toBe('/api/workspaces/ws-1/agents/ag-ui/interface/ui/')
     expect(url.searchParams.get('embed_origin')).toBe(new URL(page.url()).origin)
     expect([...url.searchParams.keys()].sort()).toEqual(['embed_origin', 'lang', 'theme'])
     await expect(link).toHaveAttribute('rel', 'noopener noreferrer')
-    await expect(page.locator('aside').getByRole('link', { name: /^plain-tty / })).toHaveAttribute('href', '/orgs/org-1/workspaces/ws-1/workloads/ag-tty')
+    await expect(page.locator('aside').getByRole('link', { name: /^plain-tty(?: |$)/ })).toHaveAttribute('href', '/orgs/org-1/workspaces/ws-1/workloads/ag-tty')
     await page.evaluate(() => {
       (window as unknown as { opened: unknown[] }).opened = []
       window.open = ((...args: unknown[]) => { (window as unknown as { opened: unknown[] }).opened.push(args); return null }) as typeof window.open
