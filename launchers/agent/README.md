@@ -711,9 +711,20 @@ never steer. The launcher commits the message ID and pending acknowledgment in
 the queue journal before acknowledging the delivery. Pending acknowledgments
 are retried first after restart with a stable operation ID; their receipts stay
 pinned until confirmed. Full queues leave messages unacknowledged. CLI/network
-errors retry with exponential backoff (1–60 seconds); shutdown cancels polling.
+errors retry with jittered exponential backoff (1–60 seconds); shutdown cancels polling.
+Diagnostics expose only fixed network/authentication/other categories, never raw
+CLI output. Confirmed authentication failures stop polling until credentials are
+corrected and the launcher is restarted. An unclassified exit code alone does not
+prove an authentication failure.
 Queued messages survive restart; an already running turn follows the queue's
 existing interrupted-on-restart rule rather than executing uncertain work twice.
+
+After a terminal Codex provider error, the next queued or new prompt can start
+without a restart once native state confirms there is no active turn. Failed
+prompts are never replayed automatically; their failed receipts and history
+remain. Authentication/configuration failures keep subsequent prompts queued.
+The current provider error clears after a successful turn, without erasing
+historical failed turns. The existing queue limit is unchanged.
 
 Pending messages merge into one message-only prompt at the queue tail, including
 messages received in later polls while the Agent is busy. Ordinary queued prompts

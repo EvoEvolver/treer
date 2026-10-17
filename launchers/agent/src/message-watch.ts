@@ -13,22 +13,38 @@ export function wrapMessage(message: MessageDelivery["message"]) {
   return messagePrompt([messageSection(message.sender.path || message.sender.name || message.sender.id, message.body)], [message.message_id]);
 }
 
+export class MessageCommandError extends Error {
+  constructor(readonly kind: "network" | "auth" | "other") { super(`message_${kind}: ${kind === "auth" ? "Message authentication needs attention; restart after correcting credentials" : kind === "network" ? "Controller or Proxy unavailable" : "Message operation failed"}`); }
+}
+
+/** Only fixed categories escape the bounded CLI diagnostic buffer. */
+export function messageFailure(text: string) {
+  if (/(?:^|\n)(?:treer: )?(?:authentication_required|invalid_credentials|workload_credential_invalid)(?=[:\s]|$)|"code"\s*:\s*"(?:authentication_required|invalid_credentials|workload_credential_invalid|unauthorized|forbidden)"|\bHTTP(?:\/\d(?:\.\d)?)?(?: error)?[\s:=]+(?:401|403)\b/i.test(text)) return new MessageCommandError("auth");
+  if (/\b(?:proxy_unavailable|controller_unavailable|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND)\b|failed to connect|connection refused/i.test(text)) return new MessageCommandError("network");
+  return new MessageCommandError("other");
+}
+
+export function messageRetryDelay(failures: number, base = 1000, random = Math.random) {
+  return Math.min(60_000, base * 2 ** Math.min(failures, 6) * (1 + random() * 0.2));
+}
+
 /** Own inherited Agent credentials only; no shell interpolation or message contents in logs. */
 export function messageCommand(args: string[], signal: AbortSignal): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const child = spawn("treer", ["message", ...args], { stdio: ["ignore", "pipe", "pipe"], signal });
     const chunks: Buffer[] = []; let size = 0, exceeded = false;
+    let diagnostic = "";
     const timeout = setTimeout(() => child.kill("SIGKILL"), 45_000);
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > 16 * 1024 * 1024) { exceeded = true; child.kill("SIGKILL"); }
       else chunks.push(chunk);
     });
-    child.stderr.resume();
-    child.on("error", reject);
+    child.stderr.on("data", (chunk: Buffer) => { if (diagnostic.length < 16_384) diagnostic += chunk.toString("utf8").slice(0, 16_384 - diagnostic.length); });
+    child.on("error", error => { clearTimeout(timeout); reject(messageFailure("code" in error ? String(error.code) : "")); });
     child.on("close", (code) => {
       clearTimeout(timeout);
-      if (code !== 0 || exceeded) reject(new Error(`Treer message ${args[0]} failed (${exceeded ? "response too large" : code})`));
+      if (code !== 0 || exceeded) reject(messageFailure(diagnostic + "\n" + Buffer.concat(chunks).toString("utf8").slice(0, 16_384)));
       else {
         try { const text = Buffer.concat(chunks).toString("utf8"); resolve(text.trim() ? JSON.parse(text) : null); }
         catch { reject(new Error("Invalid Treer message JSON response")); }
@@ -97,8 +113,10 @@ export class MessageWatch {
         if (!result.deliveries.length) await delay(250, undefined, { signal: this.abort.signal });
       } catch (error) {
         if (this.abort.signal.aborted) break;
-        this.log(`Message watcher failed; retrying: ${error instanceof Error ? error.message : "unknown error"}`);
-        try { await delay(Math.min(60_000, this.retryMs * 2 ** Math.min(failures++, 6)), undefined, { signal: this.abort.signal }); }
+        const failure = error instanceof MessageCommandError ? error : new MessageCommandError("other");
+        if (failure.kind === "auth") { this.log(`Message watcher stopped: ${failure.message}`); break; }
+        this.log(`Message watcher failed; retrying: ${failure.message}`);
+        try { await delay(messageRetryDelay(failures++, this.retryMs), undefined, { signal: this.abort.signal }); }
         catch { break; }
       }
     }

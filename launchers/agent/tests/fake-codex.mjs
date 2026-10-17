@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import readline from "node:readline";
+import assert from "node:assert/strict";
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -17,6 +18,12 @@ if (process.env.FAKE_CODEX_IMAGES) {
   try { turns.push(...JSON.parse(readFileSync(join(process.cwd(), ".fake-image-turns.json"), "utf8"))); } catch { /* new sealed image fixture */ }
 }
 let threadId = `new-${process.pid}`;
+let relayTurn = 0;
+let recoveryRead = false;
+if (process.env.FAKE_CODEX_OLD_ERROR) {
+  turns[0].status = "failed";
+  turns[0].error = { message: "Historical 502 Bad Gateway" };
+}
 // A turn cut off by a restart is left "inProgress" in the persisted history.
 if (process.env.FAKE_CODEX_STALE) turns[0].status = "inProgress";
 if (process.env.FAKE_CODEX_LIVE) turns.push({ id: "turn-live", status: "inProgress", items: [{ id: "u-live", type: "userMessage", content: [{ type: "text", text: "working" }] }] });
@@ -75,7 +82,20 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     { id: "gpt-a", model: "gpt-a", displayName: "GPT A", description: "", isDefault: true, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "" }, { reasoningEffort: "high", description: "" }], defaultReasoningEffort: "low" },
     { id: "gpt-b", model: "gpt-b", displayName: "GPT B", description: "", isDefault: false, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "medium", description: "" }], defaultReasoningEffort: "medium" },
   ] : [] };
-  if (request.method === "turn/start") result = { turn: { id: "turn-new" } };
+  if (request.method === "turn/start") {
+    if (process.env.FAKE_CODEX_RELAY_RECOVERY) {
+      assert.ok(!turns.some(turn => turn.status === "inProgress"), "recovery must not start concurrent turns");
+      const turn = { id: `relay-${++relayTurn}`, status: "inProgress", items: [{ id: `relay-user-${relayTurn}`, type: "userMessage", content: request.params.input }] };
+      turns.push(turn);
+      result = { turn: { id: turn.id } };
+      setTimeout(() => {
+        turn.status = turn.id === "relay-1" ? "failed" : "completed";
+        if (turn.status === "failed") turn.error = { message: process.env.FAKE_CODEX_RELAY_ERROR || "502 Bad Gateway (sealed relay fixture)" };
+        else turn.items.push({ id: `answer-${turn.id}`, type: "agentMessage", text: "Relay recovered" });
+        console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn } }));
+      }, 40);
+    } else result = { turn: { id: "turn-new" } };
+  }
   if (request.method === "thread/resume") {
     if (request.params.threadId === "missing") {
       console.log(JSON.stringify({ id: request.id, error: { message: "thread does not exist" } }));
@@ -84,13 +104,25 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     threadId = request.params.threadId;
   }
   if (["thread/start", "thread/resume", "thread/read"].includes(request.method)) {
+    const failed = turns.find(turn => turn.id === "relay-1" && turn.status === "failed");
+    if (request.method === "thread/read" && failed && process.env.FAKE_CODEX_RECOVERY_STATE === "not-materialized") {
+      console.log(JSON.stringify({ id: request.id, error: { message: "thread not materialized" } })); continue;
+    }
+    if (request.method === "thread/read" && process.env.FAKE_CODEX_RECOVERY_ACTIVE && failed && !recoveryRead) {
+      recoveryRead = true; failed.status = "inProgress";
+      setTimeout(() => {
+        failed.status = "failed";
+        console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn: failed } }));
+      }, 150);
+    }
     // Exercise resume history even if the optional subsequent read fails.
     if (request.method === "thread/read" && process.env.FAKE_READ_FAIL) {
       console.log(JSON.stringify({ id: request.id, error: { message: "read unavailable" } }));
       continue;
     }
-    const status = process.env.FAKE_CODEX_STATUS ? { type: process.env.FAKE_CODEX_STATUS } : undefined;
-    result = { thread: { id: threadId, cwd: process.cwd(), turns, ...(status ? { status } : {}) }, model: "test" };
+    const recoveryState = failed ? process.env.FAKE_CODEX_RECOVERY_STATE_FILE ? readFileSync(process.env.FAKE_CODEX_RECOVERY_STATE_FILE, "utf8") : process.env.FAKE_CODEX_RECOVERY_STATE : undefined;
+    const status = recoveryState?.startsWith("systemError") ? { type: "systemError" } : recoveryState === "unknown" ? { type: "unknown" } : recoveryState === "idle" ? { type: turns.some(turn => turn.status === "inProgress") ? "active" : "idle" } : process.env.FAKE_CODEX_STATUS ? { type: process.env.FAKE_CODEX_STATUS } : undefined;
+    result = { thread: { id: threadId, cwd: process.cwd(), turns: recoveryState === "missing-turns" ? undefined : recoveryState === "systemError-empty" ? [] : turns, ...(status ? { status } : {}) }, model: "test" };
   }
   if (request.method === "turn/steer" && request.params.expectedTurnId !== "turn-live") {
     console.log(JSON.stringify({ id: request.id, error: { message: `expected active turn id \`${request.params.expectedTurnId}\` but found \`turn-live\`` } }));

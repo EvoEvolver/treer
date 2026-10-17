@@ -5,6 +5,7 @@ import { readGoalState, writeGoalState } from "../goal-storage.js";
 import { randomUUID } from "node:crypto";
 
 import { JsonRpcClient } from "../jsonrpc.js";
+import { providerError } from "./provider-error.js";
 import { withHistoryLimit, type HarnessImage, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
 import { loadThreadId, saveThreadId } from "../thread-state.js";
 import type { Goal, GoalUpdate } from "../model.js";
@@ -199,7 +200,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       return;
     }
     const input = [...(text ? [{ type: "text", text, text_elements: [] }] : []), ...images.map((image) => ({ type: "localImage", path: image.path }))];
-    if (this.thread.status === "running" && this.thread.activeTurnId) {
+    if (this.thread.activeTurnId) {
       const steer = (expectedTurnId: string) => this.client!.request<{ turnId: string }>(
         "turn/steer",
         { threadId: this.thread!.id, expectedTurnId, input },
@@ -235,6 +236,17 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     await this.refresh().catch((error) => {
       this.emit("log", `post-prompt refresh deferred: ${error}`);
     });
+  }
+
+  async preparePromptDispatch() {
+    if (!this.ready || !this.thread) return false;
+    const recoverable = (error: string | null) => !error || ["provider_unavailable:", "provider_rate_limited:"].some(code => error.startsWith(code));
+    if ((this.thread.status === "error" && !this.thread.lastError) || !recoverable(this.thread.lastError)) return false;
+    // Native state is authoritative. Never turn a stale error notification into
+    // a second concurrent turn, and never retry terminal authentication errors.
+    if (this.thread.lastError && !await this.refresh()) return false;
+    return this.ready && this.thread !== null && this.thread.status !== "running" &&
+      !this.thread.activeTurnId && recoverable(this.thread.lastError);
   }
 
   async interrupt() {
@@ -481,7 +493,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
 
   private async refresh() {
     if (!this.client || !this.thread) {
-      return;
+      return false;
     }
     try {
       const response = await this.client.request<{ thread: Record<string, unknown> }>("thread/read", {
@@ -497,7 +509,13 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
         preview?: string;
       };
       const statusType = record.status && typeof record.status === "object" ? record.status.type : null;
-      if (Array.isArray(record.turns)) this.fullTurns = record.turns.map((turn) => mapTurn(turn));
+      if (statusType != null && !["idle", "active"].includes(statusType)) {
+        // An unusable native snapshot must not erase the last confirmed error
+        // or failed history while it also cannot authorize a recovery turn.
+        this.thread.status = "error"; this.emit("state"); return false;
+      }
+      if (!Array.isArray(record.turns)) return false;
+      this.fullTurns = record.turns.map((turn) => mapTurn(turn));
       // A turn cut off by a restart stays "inProgress" in the persisted history
       // forever. Only the newest turn can be live, and only while the thread is
       // active (or its status is unknown); every other stale turn was interrupted.
@@ -518,20 +536,25 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
         cwd: record.cwd || this.thread.cwd,
         model: this.thread.model,
         reasoningEffort: this.thread.reasoningEffort,
-        status: running ? "running" : statusType === "systemError" ? "error" : "idle",
+        status: running ? "running" : newest?.status === "failed" ? "error" : "idle",
         activeTurnId,
-        lastError: this.fullTurns.find((turn) => turn.error)?.error ?? null,
+        // Historical failed turns remain in the transcript, not runtime.error.
+        lastError: newest?.status === "failed" ? providerError(newest.error) : newest?.status === "inProgress" ? this.thread.lastError : null,
         updatedAt: new Date().toISOString(),
         turns: [],
         hasOlderItems: false,
       };
       this.thread.turns = this.mergedTurns();
       this.emit("state");
+      // systemError, unknown native states and absent turn data cannot attest
+      // dispatchability. Missing status is supported by older app-servers only
+      // when their returned turn history confirms there is no active turn.
+      return !running && (statusType == null || statusType === "idle");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("not materialized")) {
         this.emit("state");
-        return;
+        return false;
       }
       throw error;
     }
@@ -582,6 +605,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       return;
     }
     if (method === "turn/started" && params.turn && typeof params.turn === "object") {
+      if (params.threadId !== this.thread?.id) return;
       const turn = params.turn as CodexTurn;
       const turnId = typeof turn.id === "string" ? turn.id : null;
       if (turnId && this.thread) {
@@ -593,6 +617,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       return;
     }
     if (method === "turn/completed" && params.turn && typeof params.turn === "object") {
+      if (params.threadId !== this.thread?.id) return;
       const turn = params.turn as CodexTurn;
       const turnId = typeof turn.id === "string" ? turn.id : null;
       if (turnId && this.goal?.status === "active" && !this.goalTurnsSeen.has(turnId)) {
@@ -603,8 +628,16 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       }
       if (turnId && this.thread) {
         for (const item of turn.items ?? []) this.upsertLiveItem(turnId, item);
+        // Publish the native terminal status before the queue observes it;
+        // otherwise an earlier thread/read can leave this turn inProgress.
+        const terminal = mapTurn(turn);
+        const index = this.fullTurns.findIndex((entry) => entry.id === turnId);
+        if (index < 0) this.fullTurns.push(terminal);
+        else this.fullTurns[index] = terminal;
+        if (this.thread.activeTurnId && this.thread.activeTurnId !== turnId) { this.publishLiveHistory(); return; }
         this.thread.status = turn.status === "failed" ? "error" : "idle";
         this.thread.activeTurnId = null;
+        this.thread.lastError = terminal.status === "failed" ? providerError(terminal.error) : null;
         this.publishLiveHistory();
       }
       return;
