@@ -23,7 +23,14 @@ function Activity({ event }: { event: ActivityEvent }) {
     <article className="activity">
       <div className="meta">{displayName(people, event.actor)} · {new Date(event.at).toLocaleString()}</div>
       <p>{event.summary}</p>
-      {event.body && <p className="comment-body">{event.body}</p>}
+      {event.title && event.body ? (
+        <details className="comment-titled"><summary>{event.title}</summary><p className="comment-body">{event.body}</p></details>
+      ) : (
+        <>
+          {event.title && <p className="comment-title">{event.title}</p>}
+          {event.body && <p className="comment-body">{event.body}</p>}
+        </>
+      )}
       {changes.map(([key, value]) => <div key={key} className="meta description">{CHANGE_TITLES[key] ?? key}: {display(key, value)}</div>)}
       {["disabled", "unavailable", "pending"].includes(event.notification.status) && (
         <p className="warning">Notification {event.notification.status}{event.notification.code ? ": " + event.notification.code : ""}</p>
@@ -70,12 +77,16 @@ function Children({ id, first }: { id: number; first: IssueDetailResult }) {
 
 function CommentForm({ id }: { id: number }) {
   const { mutate, busy } = useApp();
-  const [body, setBody] = useState("");
+  const [body, setBody] = useState(""), [title, setTitle] = useState("");
   return (
     <form className="form" onSubmit={async (e) => {
       e.preventDefault();
-      if (await mutate(`v1/issues/${id}/comment`, "POST", { body })) setBody("");
+      const trimmed = title.trim();
+      if (await mutate(`v1/issues/${id}/comment`, "POST", trimmed ? { title: trimmed, body } : { body })) { setBody(""); setTitle(""); }
     }}>
+      <Field text="Title (optional, one line: readers can skim titles and open the text)">
+        <input aria-label="Comment title (optional)" maxLength={64} value={title} onChange={(e) => setTitle(e.target.value.replace(/[\r\n]+/g, " "))} />
+      </Field>
       <Field text="Comment (text / Markdown source)">
         <textarea aria-label="Comment (text / Markdown source)" required maxLength={8192} value={body} onChange={(e) => setBody(e.target.value)}></textarea>
       </Field>

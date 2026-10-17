@@ -36,6 +36,31 @@ class IssuesTest(unittest.TestCase):
         except urllib.error.HTTPError as exc:return exc.code,json.load(exc)
     def create(self,**values):
         status,result=self.req('v1/issues','POST',dict(title='Test issue',**values));self.assertEqual(status,201,result);return result['issue']['id']
+    def test_comment_titles_titles_only_reads_and_single_activity(self):
+        id=self.create()
+        self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'body':'Plain comment'})[0],200)
+        status,result=self.req(f'v1/issues/{id}/comment','POST',{'title':'Decision: use SQLite','body':'Long reasoning\nline two'});self.assertEqual(status,200,result)
+        full=self.req(f'v1/issues/{id}')[1]['activity']
+        titled=next(e for e in full if e.get('title'));self.assertEqual(titled['body'],'Long reasoning\nline two')
+        short=self.req(f'v1/issues/{id}?comments=titles')[1]['activity']
+        short_titled=next(e for e in short if e.get('title'));plain=next(e for e in short if e['kind']=='comment' and not e.get('title'))
+        self.assertNotIn('body',short_titled);self.assertEqual(short_titled['title'],'Decision: use SQLite');self.assertEqual(short_titled['body_bytes'],len(titled['body'].encode()))
+        self.assertNotIn('body',plain);self.assertEqual(plain['body_bytes'],len('Plain comment'))
+        self.assertTrue(all('body' not in e for e in short),'no comment text in a titles-only read')
+        status,one=self.req(f"v1/issues/{id}/activity/{titled['id']}");self.assertEqual(status,200);self.assertEqual(one['event']['body'],titled['body'])
+        other=self.create()
+        self.assertEqual(self.req(f"v1/issues/{other}/activity/{titled['id']}")[0],404,'an activity id from another issue is not readable here')
+        self.assertEqual(self.req(f'v1/issues/{id}/activity/999999')[0],404)
+        self.assertEqual(self.req(f'v1/issues/{id}?comments=bogus')[0],400)
+        self.assertEqual(self.req(f'v1/issues/{id}/children?comments=titles')[0],400)
+        self.assertEqual(self.req(f'v1/issues/{id}/activity/1','POST',{})[0],404)
+    def test_comment_titles_are_validated(self):
+        id=self.create()
+        for title in ('', ' padded ', 'two\nlines', 'x'*201, 5):
+            self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':title,'body':'b'})[0],400,repr(title))
+        self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':'t'})[0],400,'a title never replaces the text')
+        self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':'标题'*30,'body':'b'})[0],200,'200 bytes, not characters')
+
     def test_directory_reports_paths_without_guessing_missing_ones(self):
         status,result=self.req('v1/directory');self.assertEqual(status,200)
         self.assertEqual(result['paths'],'supported');self.assertEqual(result['capabilities'],['app.directory-paths.v1'])

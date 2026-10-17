@@ -26,6 +26,9 @@ def fields(body, allowed):
         fail('invalid_fields', 'Unknown fields or non-object JSON')
 
 
+COMMENT_TITLE_BYTES = 200
+
+
 def text(value, name, maximum, empty=False):
     if not isinstance(value, str) or len(value.encode()) > maximum or (not empty and not value.strip()):
         fail('invalid_field', f'{name} must be text, at most {maximum} bytes')
@@ -148,7 +151,25 @@ class Store:
         return {'issues': [self.view(i, items) for i in result[offset:offset+limit]],
                 'total': len(result), 'next_offset': offset+limit if offset+limit < len(result) else None}
 
-    def show(self, issue_id, offset=0, limit=50):
+    @staticmethod
+    def titles_only(event):
+        """A comment without its text: `title` (when the author wrote one) and `body_bytes` say what is there; the text
+        is read on demand with `event()`. Other activity (changes, summaries) is small and unchanged."""
+        if event.get('kind') != 'comment' or 'body' not in event:
+            return event
+        short = {k: v for k, v in event.items() if k != 'body'}
+        short['body_bytes'] = len(event['body'].encode())
+        return short
+
+    def event(self, issue_id, event_id):
+        with self.connect() as db:
+            self.get(self.all(db), issue_id)
+            row = db.execute('SELECT id,data FROM activity WHERE id=? AND issue_id=?', (event_id, issue_id)).fetchone()
+        if row is None:
+            fail('event_not_found', 'No such activity on this issue', 404)
+        return dict(json.loads(row['data']), id=row['id'])
+
+    def show(self, issue_id, offset=0, limit=50, titles=False):
         if type(offset) is not int or offset < 0 or not 1 <= limit <= 100:
             fail('invalid_pagination', 'limit 1..100; offset >=0')
         with self.connect() as db:
@@ -158,7 +179,7 @@ class Store:
                               (issue_id, limit+1, offset)).fetchall()
         return {'issue': issue, 'children': [self.view(i, items) for i in items.values() if i['parent_id'] == issue_id][:100],
                 'children_total': sum(i['parent_id'] == issue_id for i in items.values()),
-                'activity': [dict(json.loads(r['data']), id=r['id']) for r in rows[:limit]],
+                'activity': [(self.titles_only if titles else (lambda e: e))(dict(json.loads(r['data']), id=r['id'])) for r in rows[:limit]],
                 'next_activity_offset': offset+limit if len(rows)>limit else None}
 
     def children(self, issue_id, offset=0, limit=50):
@@ -218,7 +239,7 @@ class Store:
     def mutate(self, issue_id, action, body, actor, directory, paths=None):
         allowed = ('title', 'description', 'status', 'priority', 'labels', 'assignee', 'parent_id', 'blocked_by')
         fields(body, allowed if action == 'create' else (*allowed, 'version') if action == 'update'
-               else ('body',) if action == 'comment' else ('action', 'seconds'))
+               else ('body', 'title') if action == 'comment' else ('action', 'seconds'))
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             now = self.clock()
@@ -251,6 +272,10 @@ class Store:
                     summary = 'Issue updated: ' + ', '.join(k for k in body if k != 'version')
                 elif action == 'comment':
                     text(body.get('body'), 'comment', 8192)
+                    if body.get('title') is not None:
+                        title = text(body['title'], 'comment title', COMMENT_TITLE_BYTES)
+                        if title != title.strip() or '\n' in title or '\r' in title:
+                            fail('invalid_field', 'comment title must be one trimmed line')
                     summary = 'New comment'
                 elif action == 'claim':
                     operation = body.get('action', 'acquire')
@@ -291,6 +316,8 @@ class Store:
                      'notification': {'status': 'pending' if action in ('create', 'update', 'comment') else 'not_requested'}}
             if action == 'comment':
                 event['body'] = body['body']
+                if body.get('title') is not None:
+                    event['title'] = body['title']
             if mentions:
                 event['mentions'] = mentions
             db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(issue), issue_id))

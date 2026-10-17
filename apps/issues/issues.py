@@ -77,7 +77,7 @@ class Application:
         if not notify_enabled() or not isinstance(body, dict):
             return {}
         if action == 'comment':
-            text = body.get('body')
+            text = '\n'.join(v for v in (body.get('title'), body.get('body')) if isinstance(v, str))
         elif action in ('create', 'update'):
             text = '\n'.join(v for v in (body.get('title'), body.get('description')) if isinstance(v, str))
         else:
@@ -274,14 +274,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.json(201, app.mutation(None, 'create', self.body(), actor, directory, token))
             else:
                 parts = path.strip('/').split('/')
-                if len(parts) not in (3, 4) or parts[:2] != ['v1', 'issues'] or not parts[2].isdigit() or int(parts[2]) < 1:
+                if len(parts) not in (3, 4, 5) or parts[:2] != ['v1', 'issues'] or not parts[2].isdigit() or int(parts[2]) < 1:
                     fail('route_not_found', 'Route not found', 404)
                 issue_id = int(parts[2])
+                if len(parts) == 5:
+                    if method != 'GET' or parts[3] != 'activity' or not parts[4].isdigit():
+                        fail('route_not_found', 'Route not found', 404)
+                    self.json(200, {'event': app.store.event(issue_id, int(parts[4]))})
+                    return
                 action = parts[3] if len(parts) == 4 else ''
                 if method == 'GET' and action in ('', 'children'):
-                    fields(query, ('offset', 'limit'))
+                    fields(query, ('offset', 'limit', 'comments'))
+                    if query.get('comments', 'full') not in ('full', 'titles') or (action and 'comments' in query):
+                        fail('invalid_field', 'comments must be full or titles (issue reads only)')
                     try:
-                        result = (app.store.children if action else app.store.show)(issue_id, int(query.get('offset', 0)), int(query.get('limit', 50)))
+                        result = (app.store.children(issue_id, int(query.get('offset', 0)), int(query.get('limit', 50))) if action
+                                  else app.store.show(issue_id, int(query.get('offset', 0)), int(query.get('limit', 50)), query.get('comments') == 'titles'))
                     except ValueError:
                         fail('invalid_pagination', 'Invalid pagination')
                     self.json(200, result)

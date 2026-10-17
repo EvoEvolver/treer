@@ -13,7 +13,7 @@ export interface Issue {
 export interface Notification { status: string; code?: string; message?: string; unresolved_mentions?: string[]; mention_candidates?: Record<string, string[]> }
 export interface ActivityEvent {
   id: number; actor: string; kind: string; at: string; summary: string;
-  changes?: Record<string, unknown>; body?: string; notification: Notification;
+  changes?: Record<string, unknown>; body?: string; title?: string; body_bytes?: number; notification: Notification;
 }
 export interface IssueDetailResult {
   issue: Issue; children: Issue[]; children_total: number; activity: ActivityEvent[]; next_activity_offset: number | null;

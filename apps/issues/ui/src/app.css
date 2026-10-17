@@ -208,3 +208,7 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0;position:relati
   .form{max-width:none}
 }
 @media(hover:none){.row-close{opacity:1}}
+
+.comment-title, .comment-titled > summary { font-weight: 600; margin: 0; }
+.comment-titled > summary { cursor: pointer; }
+.comment-titled > .comment-body { margin-top: 6px; }
