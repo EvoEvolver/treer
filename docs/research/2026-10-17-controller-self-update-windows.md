@@ -243,8 +243,14 @@ caller's Job; KILL_ON_JOB_CLOSE is required and both breakaway flags refused.
 This is **not proof that the caller is the Controller daemon rather than an
 Agent PTY process**. Only the future daemon-owned coordinator may call it;
 no CLI/request-handler call is wired. A five-second deadline is not renewed
-after launch; synchronous native filesystem/hash calls cannot be preempted,
-but expiry is rechecked before returning any connection proof. A bad client
+after launch. Image opening, launch-time pin checks and post-connect image
+verification use Tokio `block_in_place` on an explicitly required multithread
+runtime; a single-thread runtime is refused before work starts. Other tasks and
+timers can progress on a replacement worker. Native filesystem/hash calls cannot
+be preempted, but expiry is rechecked before returning any connection proof.
+Ownership stays on the calling task throughout the blocking section: cancellation
+is observed at the next yield, with no detached worker that could spawn a child
+after cancellation or outlive its cleanup guard. A bad client
 PID, timeout or cancellation terminates/waits the actual owned child handle.
 Drop cleanup is best effort, not a receipt; explicit abort confirms cleanup
 or returns a fixed failure. No PID is reopened for cleanup.

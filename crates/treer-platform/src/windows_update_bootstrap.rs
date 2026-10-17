@@ -37,6 +37,18 @@ fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "update_bootstrap_refused")
 }
 
+// Blocking native operations retain ownership in this task: unlike detaching a
+// spawn_blocking launch, cancellation cannot leave a worker spawning a child
+// after the caller has gone away. Tokio hands other runnable tasks/timers to a
+// replacement worker. Single-thread runtimes are refused, never panicked.
+fn blocking_phase<T>(work: impl FnOnce() -> io::Result<T>) -> io::Result<T> {
+    let runtime = tokio::runtime::Handle::try_current().map_err(|_| denied())?;
+    if runtime.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+        return Err(denied());
+    }
+    tokio::task::block_in_place(work)
+}
+
 // All errors are fixed internal codes, never paths, argv or OS exception text.
 fn check(value: i32) -> io::Result<()> {
     if value == 0 {
@@ -146,7 +158,11 @@ pub struct PinnedImage {
 }
 
 impl PinnedImage {
-    pub fn open(path: &Path, expected_digest: [u8; 32]) -> io::Result<Self> {
+    pub async fn open(path: &Path, expected_digest: [u8; 32]) -> io::Result<Self> {
+        blocking_phase(|| Self::open_blocking(path, expected_digest))
+    }
+
+    fn open_blocking(path: &Path, expected_digest: [u8; 32]) -> io::Result<Self> {
         // Only a local absolute disk path; no UNC, device namespace, aliases,
         // traversal, embedded NUL or alternate data streams.
         let components: Vec<_> = path.components().collect();
@@ -444,7 +460,7 @@ impl Endpoint {
 
     pub async fn launch(self, image: PinnedImage) -> io::Result<AuthenticatedConnection> {
         let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
-        let child = OwnedBootstrap::spawn(image, &self)?;
+        let child = blocking_phase(|| OwnedBootstrap::spawn(image, &self))?;
         self.accept_owned(child, deadline).await
     }
 
@@ -469,8 +485,10 @@ impl Endpoint {
         if pid != child.pid {
             return Err(denied());
         }
-        child.verify()?;
-        current_job_contains(child.pid)?;
+        blocking_phase(|| {
+            child.verify()?;
+            current_job_contains(child.pid)
+        })?;
         if tokio::time::Instant::now() >= deadline {
             return Err(denied());
         }
@@ -499,6 +517,30 @@ impl AuthenticatedConnection {
 mod tests {
     use super::*;
     use tokio::net::windows::named_pipe::ClientOptions;
+
+    #[tokio::test]
+    async fn blocking_phase_refuses_single_thread_runtime_without_running_work() {
+        assert!(blocking_phase(|| -> io::Result<()> {
+            panic!("must refuse before running blocking work")
+        })
+        .is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn blocking_phase_yields_worker_to_other_tasks() {
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        let task = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            sender.send(()).unwrap();
+        });
+        blocking_phase(|| {
+            receiver
+                .recv_timeout(Duration::from_secs(5))
+                .map_err(|_| denied())
+        })
+        .unwrap();
+        task.await.unwrap();
+    }
 
     fn selector() -> String {
         // Test-only uniqueness; production uses the coordinator's job identity.
@@ -545,13 +587,13 @@ mod tests {
     fn pinned_image_rejects_digest_conflict_and_keeps_the_file_unwritable() {
         let path = std::env::current_exe().unwrap();
         let expected = digest(&File::open(&path).unwrap()).unwrap();
-        let image = PinnedImage::open(&path, expected).unwrap();
+        let image = PinnedImage::open_blocking(&path, expected).unwrap();
         image.verify().unwrap();
         assert!(OpenOptions::new().write(true).open(&path).is_err());
         let mut conflict = expected;
         conflict[0] ^= 1;
-        assert!(PinnedImage::open(&path, conflict).is_err());
-        assert!(PinnedImage::open(Path::new("relative.exe"), expected).is_err());
+        assert!(PinnedImage::open_blocking(&path, conflict).is_err());
+        assert!(PinnedImage::open_blocking(Path::new("relative.exe"), expected).is_err());
     }
 
     #[tokio::test]
@@ -574,7 +616,7 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "disposable Windows worker outside ambient Jobs; never win_native"]
     async fn native_owner_round_trip() {
         let mut in_job = 0;
@@ -603,7 +645,7 @@ mod tests {
         let expected = digest(&File::open(&path).unwrap()).unwrap();
         let id = format!("f{}", &selector()[1..]);
         let endpoint = Endpoint::bind(&id).unwrap();
-        let image = PinnedImage::open(&path, expected).unwrap();
+        let image = PinnedImage::open(&path, expected).await.unwrap();
         let connection = endpoint.launch(image).await.unwrap();
         connection.child.verify().unwrap();
         connection.abort().unwrap();
@@ -611,7 +653,7 @@ mod tests {
         for rogue in [true, false] {
             let id = format!("0{}", &selector()[1..]);
             let endpoint = Endpoint::bind(&id).unwrap();
-            let image = PinnedImage::open(&path, expected).unwrap();
+            let image = PinnedImage::open(&path, expected).await.unwrap();
             let child = OwnedBootstrap::spawn(image, &endpoint).unwrap();
             let mut duplicate = ptr::null_mut();
             check(unsafe {
