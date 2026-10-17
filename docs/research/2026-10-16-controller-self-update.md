@@ -797,14 +797,25 @@ attempt per wrapper and requires pending arbitration. Identity/read failures
 pending arbitration; terminal decisions remain unchanged. This connects the
 existing peer verifier to raw framing, not to execution: success leaves
 arbitration pending and returns only the raw observation borrowing the receiver.
-There is no post-EOF live-peer check that could mistake peer exit for writer
-closure, no attempt/digest attestation, and no all-writers-gone or noexec proof.
+After a successful raw read it now checks the retained process creation
+identity/image again (security2748); the receiver's exclusive borrow prevents
+descriptor replacement and its connection UID/PID credentials were checked
+before reading. Same-PID exec or peer exit makes this check fail and invalidates
+pending arbitration rather than returning the observation. Peer exit is never
+interpreted as writer closure: the raw drain remains separately available for
+the future sealed death/writer-proof path. There is no attempt/digest
+attestation and no all-writers-gone or noexec proof.
 The supervisor's private endpoint, cancellation ownership and lifecycle caller
 remain unimplemented. Socketpair regressions cover malformed framing, timeout,
 cancellation, non-retry and raw empty EOF. The real owned Rust peer fixture
 leaves a byte buffered before exiting: identity rejection leaves that byte
 unconsumed and invalidates pending arbitration. A real OS read-error injection
 is not covered by these integration fixtures.
+The same real exited-peer fixture separately drains raw empty EOF and applies
+the post-read image guard: it must return `update_handoff_peer_changed` and
+invalidate pending arbitration. This checks the guard with real stale OS
+identity, not a deterministic same-PID exec during the integrated read; that
+exec/binding-window fixture remains required for the real lifecycle caller.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the

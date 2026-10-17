@@ -219,7 +219,8 @@ impl AuthenticatedPeer {
             .map_err(|_| anyhow::anyhow!("update_handoff_peer_changed"))
     }
 
-    /// Revalidate this exact connected peer before a single raw launcher read.
+    /// Revalidate this exact connected peer before a single raw launcher read,
+    /// and its creation identity/image again before returning successful input.
     /// Every failure invalidates pending arbitration, including cancellation and
     /// repeat reads. Success does not accept a permit or establish authenticated
     /// EOF/all-writers-gone evidence; the peer may die while the read drains.
@@ -242,7 +243,15 @@ impl AuthenticatedPeer {
             return Err(error);
         }
         match transport::read(&mut self.stream, cancellation) {
-            Ok(observation) => Ok(observation),
+            Ok(observation) => {
+                // The exclusive stream borrow prevents descriptor replacement;
+                // UID/PID are connection credentials already checked above.
+                // Recheck the independent image field while the observation
+                // borrows the receiver: a same-PID exec during reading must
+                // not turn raw input into a successfully verified observation.
+                revalidate_launcher_image(&self.image, arbitration)?;
+                Ok(observation)
+            }
             Err(error) => {
                 arbitration.invalidate();
                 Err(error)
@@ -265,6 +274,17 @@ impl AuthenticatedPeer {
         self.verify()?;
         Ok(locks)
     }
+}
+
+fn revalidate_launcher_image(
+    image: &ProcessImage,
+    arbitration: &mut super::launcher_arbitration::Arbitration,
+) -> Result<()> {
+    if image.verify_current().is_err() {
+        arbitration.invalidate();
+        bail!("update_handoff_peer_changed");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -490,5 +510,24 @@ mod tests {
         let mut unread = [0];
         assert_eq!(retained.read(&mut unread).unwrap(), 1);
         assert_eq!(unread, [b'E']);
+        // Exercise the post-read guard separately with real stale OS identity:
+        // even a successful raw EOF drain cannot make a dead peer current.
+        let raw =
+            super::super::launcher_arbitration::transport::read(&mut retained, &cancel).unwrap();
+        assert_eq!(
+            raw.kind(),
+            super::super::launcher_arbitration::transport::Kind::EmptyEof
+        );
+        let mut post_read = pending();
+        assert_eq!(
+            revalidate_launcher_image(&image, &mut post_read)
+                .unwrap_err()
+                .to_string(),
+            "update_handoff_peer_changed"
+        );
+        assert_eq!(
+            post_read.decision(),
+            super::super::launcher_arbitration::Decision::Uncertain
+        );
     }
 }
