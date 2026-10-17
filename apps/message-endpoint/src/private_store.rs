@@ -275,7 +275,7 @@ mod tests {
     fn reject_unrelated_database_or_unknown_schema_version() {
         for sql in [
             "CREATE TABLE unrelated(secret TEXT)",
-            "PRAGMA application_id=1413828168; PRAGMA user_version=2",
+            "PRAGMA application_id=1413828168; PRAGMA user_version=3",
         ] {
             let (_temporary, path) = fixture();
             drop(Store::open(&path, Limits::default()).unwrap());

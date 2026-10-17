@@ -224,8 +224,14 @@ hash tombstones for 30 days, then prunes them. Completed payloads are removed
 after downstream durable acceptance; their hashes still reject conflicting
 replays. Reopen tests cover partial-set recovery and completed-set deduplication.
 The daemon must invoke cleanup and drain ready transfers after restart; no daemon
-currently exists to do that automatically. Regular queue-row pruning, durable
-poison-message failure+ack and actual relay startup reporting remain P2 work. None may be
+currently exists to do that automatically. The store also provides durable
+terminal rejection receipts (fixed reason, Core delivery ID, timestamp, body hash;
+no rejected plaintext) and a bounded recent-failure view. The receiver must save
+that receipt before acknowledging poison; storage/full errors prohibit ack.
+Failure receipts have a separate 1000/endpoint, 10000/global budget so a full
+pending queue can still record poison without unbounded growth. Queue completions
+and failure receipts prune after 30 days; pending/leased work is never pruned.
+Actual receive/ack integration and relay startup reporting remain P2 work. None may be
 inferred as complete from the current in-memory queue tests.
 
 The Unix persistent store opener creates only the final dedicated state directory
@@ -240,6 +246,12 @@ nonblocking lock excludes another cooperating hub writer. SQLite opens the
 database with NOFOLLOW, uses WAL/FULL synchronization and checks sidecar permissions.
 Unknown database application/schema versions are rejected. This slice currently
 supports Unix only; Windows storage provisioning is not implemented.
+
+Schema v2 adds terminal queue timestamps and rejection receipts; existing scaffold
+v1 state upgrades in one SQLite transaction without deleting bindings, pending
+work or fragment state. Back up the stopped complete state directory before any
+upgrade; to roll back, stop the new process and restore that private backup with
+the corresponding old executable. Never open upgraded v2 state with older code.
 
 State is plaintext, including message bodies. Keep state and backups on encrypted
 storage. Stop this App before copying its complete state directory (including any

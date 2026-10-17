@@ -103,7 +103,7 @@ impl Store {
             |r| r.get(0),
         )?;
         if !((application == 0 && version == 0 && tables == 0)
-            || (application == 1413828168 && version == 1))
+            || (application == 1413828168 && (version == 1 || version == 2)))
         {
             return Err(Error::PrivateStorage);
         }
@@ -142,9 +142,22 @@ impl Store {
                 FOREIGN KEY(endpoint,generation,direction,transfer)
                   REFERENCES transfers(endpoint,generation,direction,transfer) ON DELETE CASCADE);
              PRAGMA application_id=1413828168;
-             PRAGMA user_version=1;
              COMMIT;",
         )?;
+        if version < 2 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE inbound ADD COLUMN terminal_at INTEGER;
+                 ALTER TABLE outbound ADD COLUMN terminal_at INTEGER;
+                 CREATE TABLE failures (
+                    endpoint TEXT NOT NULL REFERENCES endpoints(id), generation INTEGER NOT NULL,
+                    delivery TEXT NOT NULL, digest BLOB NOT NULL, reason INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY(endpoint,generation,delivery));
+                 PRAGMA user_version=2;
+                 COMMIT;",
+            )?;
+        }
         Ok(Self {
             db,
             limits,
@@ -371,7 +384,7 @@ impl Store {
             };
         }
         transaction.execute(
-            "UPDATE inbound SET pending=0,core_id=?1 WHERE id=?2",
+            "UPDATE inbound SET pending=0,core_id=?1,terminal_at=unixepoch() WHERE id=?2",
             params![core_id, job],
         )?;
         transaction.commit()?;
@@ -379,7 +392,7 @@ impl Store {
     }
 }
 
-fn valid_id(id: &str) -> bool {
+pub(crate) fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
 }
 pub(crate) fn available(
