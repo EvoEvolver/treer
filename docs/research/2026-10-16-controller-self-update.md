@@ -350,6 +350,34 @@ Node version/image retention, durable child-start/identity and recovery, actual
 env-clear/spawn/completion enforcement and final live health remain executor
 work; no real installation or whole-P1 acceptance is claimed here.
 
+Executor review requirements (security2527): create a per-job private 0700
+temporary directory through the retained job-directory handle and add its exact
+physical path as TMPDIR. Keep that directory and its identity through child
+quiescence/recovery; do not adopt a pre-existing unverified directory or fall
+back to shared `/tmp`. The current eight-entry recipe does not yet provide this
+directory or permit installation. Retain Node's checked file descriptor and
+physical identity (device/inode), accepting only root/current-account ownership
+and no group/other write permissions on the file and trusted ancestor chain.
+Recheck identity, permissions and the selected path before spawn and after
+strict completion; a same-bytes inode replacement must fail. This OS dependency
+does not acquire a release-artifact digest pin merely by residing at a fixed
+path. Preserve the separate Controller/CLI receipt-digest checks.
+
+Static package-manager audit: the Rust launcher uses `install.mjs
+--controller-request`, which dispatches directly to `controller-install.mjs`,
+not the legacy git/npm installer `main()`. Its fixed self-update argv omits
+`--allow-network` and `--npm-cli`; Rust rejects a source-only install before
+starting the JS installer, and controller-install also refuses non-portable
+payloads without explicit network permission. Its sole npm branch requires a
+non-portable payload and explicit permission; portable install copies verified
+bundled assets, while status returns before that branch. Profile operations and
+contract queries still invoke the selected CLI and may use the authenticated
+control plane: this is not a claim of zero network traffic. Actual executor
+acceptance must assert no npm/git/package-manager child or dependency-network
+access on install/status (including refusal of a source-only payload), using
+isolated HOME/configuration and process/network evidence. This source audit
+does not replace those execution tests or prove that no user config was read.
+
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
 modes/current bytes and executable stages before recording Activating or making
