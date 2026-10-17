@@ -174,6 +174,26 @@ impl AppState {
         }
     }
 
+    /// Capabilities of the live connection, for pre-checks that must happen
+    /// before a durable side effect such as consuming a confirmation token.
+    pub async fn server_capabilities(
+        &self,
+        workspace_id: &str,
+        server_id: &str,
+    ) -> Result<HashSet<String>, ProtocolError> {
+        let key = ServerKey {
+            workspace_id: workspace_id.to_string(),
+            server_id: server_id.to_string(),
+        };
+        self.inner
+            .connections
+            .read()
+            .await
+            .get(&key)
+            .map(|connection| connection.capabilities.iter().cloned().collect())
+            .ok_or_else(|| ProtocolError::new("server_offline", server_id))
+    }
+
     pub(crate) async fn handle_cluster_command(
         &self,
         workspace_id: &str,
@@ -247,6 +267,8 @@ impl AppState {
                     pending.server == key
                         && pending.required_capability.is_some_and(|required| {
                             required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER
+                                || required
+                                    == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
                                 || !capabilities.contains(required)
                         })
                 })
@@ -277,6 +299,13 @@ impl AppState {
             let required = pending.required_capability.unwrap_or("unknown");
             let error = if required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER {
                 ProtocolError::new("machine_transfer_stale", "Controller connection changed; transfer commands are not replayed, inspect the destination before retrying")
+            } else if required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL {
+                // An installation is never replayed to a replacement Controller:
+                // its outcome is ambiguous and the operation record says so.
+                ProtocolError::new(
+                    "provider_cli_dispatch_stale",
+                    "Controller connection changed; provider CLI commands are not replayed",
+                )
             } else {
                 ProtocolError::new(
                     "unsupported_command",

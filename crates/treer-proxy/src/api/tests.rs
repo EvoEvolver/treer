@@ -2747,7 +2747,7 @@ async fn app_update_policy_denies_before_preflight_or_persistence() {
     }
 }
 
-async fn next_lifecycle_command(
+pub(super) async fn next_lifecycle_command(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
 ) -> treer_protocol::CommandEnvelope {
     let frame = tokio::time::timeout(Duration::from_secs(5), rx.recv())

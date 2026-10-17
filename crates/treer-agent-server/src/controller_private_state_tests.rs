@@ -190,6 +190,7 @@ impl Fixture {
             interface_cache_path: self.root.join("interfaces.json"),
             startup_store_path: self.root.join("startup.json"),
             private_state_root,
+            provider_cli_root: self.root.join("provider-cli"),
             root: self.root.clone(),
         }
     }

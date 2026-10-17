@@ -587,6 +587,35 @@ fixed text and records the failed creation without PATH, argv or output. A
 missing provider inside an already running launcher is a separate launcher
 status, not inferred from terminal output. This error contract installs nothing.
 
+Provider CLI installation (#123 part 2) is a human-session feature under
+`/api/workspaces/{ws}/machines/{machine}/provider-clis` (`GET recipes`,
+`POST prepare`, `POST install`, `POST check`, `GET operations/{id}`), gated by
+current workspace membership, Policy `machine.exec` on the machine and the
+`machine.provider-cli-install.v1` capability that both the Proxy health document
+and a Controller advertise (old peers fail with 501). The recipe table is
+release data (`launchers/agent/provider-recipes.json`, schema
+`treer.provider-recipes/v1`) embedded by `treer-protocol` and validated at
+Controller start: typed `npm-global` installs with exact version, SHA-512
+`integrity`, allowlisted registry, `ignore_scripts` or an inline lifecycle
+review, `check` restricted to the recipe's `binary_names` and `--version`;
+any violation withholds the capability. The Controller owns one expansion
+function that produces the plan shown at `recipes`/`prepare` and executed on
+`install`: `npm pack` into a private job directory, SHA-512 verification of the
+single tarball, `npm install --global <local tarball>`, `npm prefix --global`,
+then the probe from that prefix's `bin` (never PATH). The Proxy binds the hash
+of the displayed plan into the 120-second single-use confirmation token (hashed
+at rest, bound to workspace, machine, user, session, recipe triple, table hash
+and Controller build); `install` refuses a busy machine or an old/offline
+Controller before consuming the token, then consumes it and inserts the single
+active operation per machine (PostgreSQL partial unique index) in one
+transaction before dispatching exactly once. Provider CLI commands are never
+replayed to a replacement Controller; a lost dispatch, a silent Controller past
+a ten-minute grace or a missing Controller record ends as `unknown`, which only
+the machine's own later report may resolve. Output lives only in the
+Controller's private store (24 hours, 64 results, refusal when full); the Proxy
+keeps scope, status, recipe hashes and argv hash, and audit rows carry no
+token, output or path. See [security](security.md#provider-cli-installation).
+
 New human Agent creations also atomically record their original human creator,
 workspace and machine in `agent_creation_reservations`; legacy and non-human
 creations are not backfilled. Only that human's current workspace session can

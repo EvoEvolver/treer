@@ -387,6 +387,22 @@ pub enum AgentCommand {
         request: ReplaceAgentStartupRequest,
         revision: u64,
     },
+    /// Provider CLI installation (#123): recipe table for this machine, exact
+    /// recipe check, token-confirmed install dispatch and operation polling.
+    ProviderCliRecipes {},
+    ProviderCliCheck {
+        recipe: crate::ProviderCliRecipeRef,
+    },
+    ProviderCliInstall {
+        operation_id: String,
+        recipe: crate::ProviderCliRecipeRef,
+        table_hash: String,
+        /// Hash of the plan the user confirmed; a fresh expansion must match.
+        argv_hash: String,
+    },
+    ProviderCliOperation {
+        operation_id: String,
+    },
     StartupAdminGet {
         agent_id: String,
     },
@@ -552,6 +568,12 @@ impl AgentCommand {
                 Some(CAPABILITY_AGENT_STARTUP)
             }
             Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
+            Self::ProviderCliRecipes {}
+            | Self::ProviderCliCheck { .. }
+            | Self::ProviderCliInstall { .. }
+            | Self::ProviderCliOperation { .. } => {
+                Some(crate::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL)
+            }
             Self::FileTransfer { .. } | Self::FileTransferInfo {} => {
                 Some(CAPABILITY_MACHINE_FILE_TRANSFER)
             }

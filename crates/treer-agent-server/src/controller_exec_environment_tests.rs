@@ -46,6 +46,7 @@ async fn runtime_for_exec(root: &Path) -> (ControllerRuntime, tokio::task::JoinH
             interface_cache_path: root.join("interfaces.json"),
             startup_store_path: root.join("startup.json"),
             private_state_root: root.join("agent-private"),
+            provider_cli_root: root.join("provider-cli"),
             root: root.to_path_buf(),
         },
     )

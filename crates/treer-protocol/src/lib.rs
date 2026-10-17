@@ -12,6 +12,8 @@ mod workload_tree;
 pub use workload_tree::*;
 mod policy_path;
 pub use policy_path::*;
+mod provider_cli;
+pub use provider_cli::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
