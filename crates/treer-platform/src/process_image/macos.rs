@@ -1,9 +1,38 @@
-//! The only new FFI is fixed-size libproc output into initialized owned storage.
+//! Fixed-size libproc/sysctl output into initialized owned storage.
 use std::{ffi::OsStr, io, mem::size_of, os::unix::ffi::OsStrExt, path::PathBuf};
 
 use super::{invalid, Identity};
 
+fn boot_time() -> io::Result<libc::timeval> {
+    let mut boot = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+    let mut length = size_of::<libc::timeval>();
+    // SAFETY: the name is NUL-terminated static storage; boot and length are
+    // initialized writable objects of the advertised size. Null newp/zero
+    // newlen requests a read only. Reject failed/short output before use.
+    let result = unsafe {
+        libc::sysctlbyname(
+            c"kern.boottime".as_ptr(),
+            (&mut boot as *mut libc::timeval).cast(),
+            &mut length,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if result != 0
+        || length != size_of::<libc::timeval>()
+        || boot.tv_sec <= 0
+        || !(0..1_000_000).contains(&boot.tv_usec)
+    {
+        return Err(invalid());
+    }
+    Ok(boot)
+}
+
 pub(super) fn creation(pid: u32) -> io::Result<Identity> {
+    let boot = boot_time()?;
     // SAFETY: proc_bsdinfo is a C integer/char-array POD; all-zero is valid. The
     // initialized output object has exactly the size passed to proc_pidinfo.
     let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
@@ -27,7 +56,10 @@ pub(super) fn creation(pid: u32) -> io::Result<Identity> {
         return Err(invalid());
     }
     Ok(Identity {
-        creation: format!("macos:{}:{}", info.pbi_start_tvsec, info.pbi_start_tvusec),
+        creation: format!(
+            "macos:{}:{}:{}:{}",
+            boot.tv_sec, boot.tv_usec, info.pbi_start_tvsec, info.pbi_start_tvusec
+        ),
         parent: info.pbi_ppid,
     })
 }

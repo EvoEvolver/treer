@@ -299,6 +299,34 @@ mod tests {
     }
 
     #[test]
+    fn different_boot_component_rejects_same_pid_start_time_and_image() {
+        let mut image = ProcessImage::capture(std::process::id()).unwrap();
+        image.verify_current().unwrap();
+        let original = image.creation.clone();
+        let mut parts: Vec<_> = original.split(':').collect();
+        #[cfg(target_os = "linux")]
+        {
+            assert_eq!(parts.len(), 3);
+            parts[1] = if parts[1] == "00000000-0000-0000-0000-000000000000" {
+                "11111111-1111-1111-1111-111111111111"
+            } else {
+                "00000000-0000-0000-0000-000000000000"
+            };
+        }
+        #[cfg(target_os = "macos")]
+        {
+            assert_eq!(parts.len(), 5);
+            parts[1] = if parts[1] == "1" { "2" } else { "1" };
+        }
+        // Keep PID, process start fields and retained executable unchanged;
+        // only the saved boot component is forged, never the machine clock.
+        image.creation = parts.join(":");
+        assert!(image.verify_current().is_err());
+        image.creation = original;
+        image.verify_current().unwrap();
+    }
+
+    #[test]
     fn self_identity_uses_a_real_opened_image_and_rejects_invalid_pids() {
         let image = ProcessImage::capture(std::process::id()).unwrap();
         assert_eq!(image.pid(), std::process::id());

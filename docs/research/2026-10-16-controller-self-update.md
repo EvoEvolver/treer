@@ -494,7 +494,24 @@ an authenticated connection: the caller must supply the coordinator's owned
 child image. No gate is created and no permit/noexec/ACK or installer execution
 is authorized. The supervisor entry, authenticated connection, exclusive gate
 ownership and recovery/death matrix remain future work; sync-failure/crash-point
-injection for registration is also still required.
+injection for registration is also still required. Creation identity includes
+Linux kernel boot_id plus process start ticks, or macOS kern.boottime plus the
+libproc process start seconds/microseconds. Missing/invalid OS boot data fails
+closed. A regression forges only the retained boot component while preserving
+the real PID/start fields/image and verifies rejection. This is not cryptographic
+boot attestation; an equal OS-reported boot identifier is trusted within the
+existing local trust model, and clock changes may conservatively invalidate it.
+
+Lifecycle wiring must enforce this hard ordering: durable intent, spawn with
+birth-lock inheritance, capture ProcessImage from the owned Child, complete
+exclusive registration sync/readback, then permit authenticated connection
+reading or permit issuance. Any failed/interrupted registration after spawn is
+registered-needs-quiescence/recovery_required, never evidence of not-started;
+partial files must not be removed to retry. RegisteredSupervisor::verify and
+binding currently perform a full image hash on every call as the safe default.
+Use these at bounded lifecycle transitions, not a polling hot path; frequency
+and cost must be assessed during wiring. No inode/mtime/size-only hash cache is
+implemented or sufficient for this check.
 
 Status intent policy (security2596): this is the updater's one-shot post-install
 status verification, not an intent requirement for ordinary `treer launcher
