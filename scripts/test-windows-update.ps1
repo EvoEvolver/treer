@@ -26,6 +26,24 @@ try {
     Assert-UpdateTest (Test-UpdateCommit ('a' * 7) ('a' * 40)) 'rollback-full-health-match'
     Assert-UpdateTest (!(Test-UpdateCommit ('a' * 40) '')) 'empty-health-commit-refused'
     Assert-UpdateTest (!(Test-UpdateCommit ('a' * 40) ('b' * 40))) 'different-health-commit-refused'
+    # Agent preservation (#96): live rows exact; exited rows and arrivals tolerated.
+    $live = "ag_a:10:1`nag_b:20:3"; $exited = "ag_x::2"
+    Assert-UpdateTest (Test-UpdateAgentsPreserved ($live + "`n" + $exited) $live) 'exited-not-relisted-tolerated'
+    Assert-UpdateTest (Test-UpdateAgentsPreserved $live ($live + "`nag_new:30:1")) 'new-arrival-tolerated'
+    Assert-UpdateTest (!(Test-UpdateAgentsPreserved $live 'ag_a:10:1')) 'live-missing-refused'
+    Assert-UpdateTest (!(Test-UpdateAgentsPreserved $live "ag_a:11:1`nag_b:20:3")) 'pid-change-refused'
+    Assert-UpdateTest (!(Test-UpdateAgentsPreserved $live "ag_a:10:2`nag_b:20:3")) 'generation-change-refused'
+    $verdict = Get-UpdateAgentVerdict ($live + "`n" + $exited) ($live + "`nag_new:30:1")
+    Assert-UpdateTest ($verdict.live_preserved -eq 2 -and $verdict.stopped_before -eq 1 -and $verdict.stopped_not_relisted_count -eq 1 -and $verdict.stopped_not_relisted[0] -ceq 'ag_x' -and $verdict.appeared_count -eq 1 -and $verdict.appeared[0] -ceq 'ag_new') 'verdict-shape'
+    $many = @(0..39 | ForEach-Object { 'ag_' + $_.ToString('000') + '::1' }) -join "`n"
+    $capped = Get-UpdateAgentVerdict ($live + "`n" + $many) $live
+    Assert-UpdateTest ($capped.stopped_not_relisted_count -eq 40 -and $capped.stopped_not_relisted.Count -eq 32) 'verdict-cap'
+    $null -eq (Get-UpdateAgentFailure ($live + "`n" + $exited) $live) | Out-Null
+    Assert-UpdateTest ($null -eq (Get-UpdateAgentFailure ($live + "`n" + $exited) $live)) 'no-failure-for-exited'
+    $changedFailure = Get-UpdateAgentFailure $live "ag_a:11:1`nag_b:20:3"
+    Assert-UpdateTest ($changedFailure.code -ceq 'agent_process_changed' -and $changedFailure.agent_ids[0] -ceq 'ag_a' -and $changedFailure.agent_count -eq 1) 'failure-ids-changed'
+    $missingFailure = Get-UpdateAgentFailure $live 'ag_b:20:3'
+    Assert-UpdateTest ($missingFailure.code -ceq 'live_agent_missing' -and $missingFailure.agent_ids[0] -ceq 'ag_a') 'failure-ids-missing'
     $sum = Join-Path $temporary 'SHA256SUMS'
     $digest = 'a' * 64
     [IO.File]::WriteAllText($sum, "$digest  treer`n$digest  treer-agent-server`n$digest  treer-agent-host`n")

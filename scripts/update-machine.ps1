@@ -194,6 +194,21 @@ function Test-UpdateAgentsPreserved($Before, $After) {
     }
     return $true
 }
+function Get-UpdateAgentFailure($Before, $After) {
+    # Fixed code plus a bounded, ids-only diagnostic for a live-Agent regression.
+    $afterLines = @($After -split "`n")
+    $afterIds = @($afterLines | ForEach-Object { ($_ -split ':')[0] })
+    $missing = @(); $changed = @()
+    foreach ($line in @($Before -split "`n")) {
+        if ($line -eq '' -or $line -match '^[^:]+::[0-9]+$') { continue }
+        $id = ($line -split ':')[0]
+        if ($afterIds -cnotcontains $id) { $missing += $id }
+        elseif ($afterLines -cnotcontains $line) { $changed += $id }
+    }
+    if ($missing.Count -gt 0) { return @{ code='live_agent_missing'; agent_ids=@($missing | Sort-Object | Select-Object -First 32); agent_count=$missing.Count } }
+    if ($changed.Count -gt 0) { return @{ code='agent_process_changed'; agent_ids=@($changed | Sort-Object | Select-Object -First 32); agent_count=$changed.Count } }
+    return $null
+}
 function Get-UpdateAgentVerdict($Before, $After) {
     $afterLines = @($After -split "`n"); $beforeLines = @($Before -split "`n")
     $stopped = @($beforeLines | Where-Object { $_ -match '^[^:]+::[0-9]+$' })
@@ -290,7 +305,7 @@ function Invoke-UpdateTransaction($Job, $Stage) {
         [IO.File]::Copy($startup, (Join-Path $backup 'agent-startup.json'), $false)
     }
     Write-UpdateJson (Join-Path $Stage 'progress.json') @{ status='activating'; backup=$backup }
-    $changed = New-Object 'Collections.Generic.List[string]'; $activated = $false
+    $changed = New-Object 'Collections.Generic.List[string]'; $activated = $false; $agentFailure = $null
     try {
         $changed.Add('treer-agent-server')
         Set-UpdateBinary (Join-Path $Stage 'treer-agent-server.exe') $controller $hashes['treer-agent-server'] $Job.commit
@@ -304,10 +319,17 @@ function Invoke-UpdateTransaction($Job, $Stage) {
             if ((Get-FileHash -LiteralPath (Join-Path $bin ($name + '.exe')) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hashes[$name]) { throw 'installed_checksum_mismatch' }
         }
         $after = Get-UpdateAgents $config
-        if (!(Test-UpdateAgentsPreserved $agents $after)) { throw 'agent_process_changed' }
-        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status='complete'; commit=$Job.commit; backup=$backup; host_changed=$false; host_commit=$hostCommit; agents_preserved=$true; inventory=(Get-UpdateAgentVerdict $agents $after) }
+        $agentFailure = Get-UpdateAgentFailure $agents $after
+        if ($agentFailure) { throw $agentFailure.code }
+        $verdict = Get-UpdateAgentVerdict $agents $after
+        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status='complete'; commit=$Job.commit; backup=$backup; host_changed=$false; host_commit=$hostCommit; agents_preserved=$true; inventory=$verdict; warnings=@(if ($verdict.stopped_not_relisted_count -gt 0) { 'exited_records_not_relisted' }) }
     } catch {
-        $failure = 'activation_failed'; $rollback = 'rolled_back'; $rollbackError = $null
+        # Receipts carry fixed codes only; the primary failure code is kept when
+        # the thrown value is one, and ids-only diagnostics come from the check.
+        $failure = if ($_.Exception.Message -match '^[a-z_]{1,80}$') { $_.Exception.Message } else { 'activation_failed' }
+        $failureIds = @(); $failureCount = 0
+        if ($agentFailure) { $failureIds = $agentFailure.agent_ids; $failureCount = $agentFailure.agent_count }
+        $rollback = 'rolled_back'; $rollbackError = $null
         try {
             for ($index=$changed.Count-1; $index -ge 0; $index--) {
                 $name = $changed[$index]
@@ -319,10 +341,22 @@ function Invoke-UpdateTransaction($Job, $Stage) {
                 Invoke-UpdateRestart $controller $config.workspace $Stage
                 $null = Wait-UpdateController $config $epoch $oldCommit $agents $Job.timeout
             }
-        } catch { $rollback = 'rollback_failed'; $rollbackError = [string]$_.Exception.Message }
+        } catch {
+            $rollback = 'rollback_failed'
+            $code = if ($_.Exception.Message -match '^[a-z_]{1,80}$') { $_.Exception.Message } else { 'rollback_exception' }
+            $rollbackError = @{ code=$code; message='see_private_error_log' }
+            try { [IO.File]::AppendAllText((Join-Path $Stage 'error.log'), ('rollback: ' + $_.Exception.Message + "`n")) } catch { }
+        }
         $verification = $null
-        if ($rollback -eq 'rolled_back') { try { $verification = Get-UpdateAgentVerdict $agents (Get-UpdateAgents $config) } catch { } }
-        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status=$rollback; error=$failure; rollback_error=$rollbackError; verification=$verification; backup=$backup; host_changed=$false; host_commit=$hostCommit }
+        if ($rollback -eq 'rolled_back') {
+            try {
+                $afterRollback = Get-UpdateAgents $config
+                $rollbackFailure = Get-UpdateAgentFailure $agents $afterRollback
+                if ($rollbackFailure) { $rollback = 'rollback_failed'; $rollbackError = @{ code=$rollbackFailure.code; message='live_agent_not_preserved_after_rollback'; agent_ids=$rollbackFailure.agent_ids; agent_count=$rollbackFailure.agent_count } }
+                else { $verification = Get-UpdateAgentVerdict $agents $afterRollback }
+            } catch { }
+        }
+        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status=$rollback; error=$failure; error_agent_ids=$failureIds; error_agent_count=$failureCount; rollback_error=$rollbackError; verification=$verification; backup=$backup; host_changed=$false; host_commit=$hostCommit }
         throw 'update_activation_failed_inspect_receipt'
     }
 }

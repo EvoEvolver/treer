@@ -2134,9 +2134,15 @@ Controller. `result.json` distinguishes `rolled_back` from `rollback_failed`;
 reactivation or live-Agent verification step that failed, and a verified rollback
 includes `verification` (live Agents preserved, exited records not relisted,
 Agents that appeared). Retain the backup and investigate any rollback failure.
-The Agent check covers Agents that had a process before the update: a Controller
-restart, new or old build, does not relist exited Agents it only held in
-memory, so those are reported in `inventory`/`verification`, never a failure. An interrupted caller
+The Agent check covers Agents that had a process before the update, plus stopped
+Agents persisted in the selected startup store (they must still be listed): a
+Controller restart, new or old build, does not relist exited Agents it only held
+in memory, so those are reported in `inventory`/`verification` with a top-level
+`warnings` entry (`exited_records_not_relisted`), never a failure. Receipts
+carry fixed codes, hashes, counts and at most 32 Agent IDs per list; the full
+exception text stays in the private job directory's `error.log`. The Windows
+updater applies the same live-row rule and warnings but has no startup-store
+persistence check. An interrupted caller
 can resume polling with the printed job path:
 
 ```sh

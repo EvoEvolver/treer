@@ -191,14 +191,64 @@ def inventory(config_path):
 
 
 MAX_RECEIPT_IDS = 32
+UNSAFE_RECEIPT_TEXT = "operation_failed_see_private_error_log"
 
 
 class InventoryError(RuntimeError):
-    """A preservation check failed; `code` is a fixed receipt token."""
+    """A preservation check failed; `code` and `message` are fixed receipt
+    tokens and `agent_ids` is a bounded, ids-only diagnostic."""
 
-    def __init__(self, code, message):
+    def __init__(self, code, message, agent_ids=()):
         super().__init__(message)
         self.code = code
+        self.agent_ids = sorted(agent_ids)[:MAX_RECEIPT_IDS]
+        self.agent_count = len(agent_ids)
+
+
+def safe_receipt_text(text):
+    """Receipts on real machines carry fixed codes, hashes and ids only. Any
+    text that could embed a path, host, URL or account is replaced."""
+    text = str(text)
+    if "\n" in text or len(text) > 200 or re.search(r"(^|[\s:=,'\"(])/|\\\\|~|[A-Za-z]:\\|https?://|@|\x1b", text):
+        return UNSAFE_RECEIPT_TEXT
+    return text
+
+
+def receipt_error(error):
+    """Fixed-text receipt entry for an exception; the raw text is for error.log."""
+    if isinstance(error, InventoryError):
+        return {"code": error.code, "message": str(error),
+                "agent_ids": error.agent_ids, "agent_count": error.agent_count}
+    return {"code": type(error).__name__, "message": safe_receipt_text(error)}
+
+
+def write_private_error_log(job, stage, error):
+    """Full exception text stays in the private (0700) job directory only."""
+    try:
+        path = Path(job) / "error.log"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        with os.fdopen(descriptor, "a") as handle:
+            handle.write(f"{stage}: {type(error).__name__}: {error}\n")
+    except OSError:
+        pass
+
+
+def persisted_agent_ids(startup_store):
+    """Agents persisted in the selected startup store: a Controller restores
+    them, so a stopped one that disappears is a regression, not an exited
+    in-memory record. Missing or unreadable store: nothing is persisted."""
+    if not startup_store:
+        return frozenset()
+    try:
+        document = json.loads(Path(startup_store).read_text())
+    except (OSError, ValueError):
+        return frozenset()
+    ids = set()
+    for entry in document.get("entries", []) if isinstance(document, dict) else []:
+        agent_id = entry.get("agent_id") or entry.get("spec", {}).get("agent_id")
+        if isinstance(agent_id, str):
+            ids.add(agent_id)
+    return frozenset(ids)
 
 
 def wait_ready(config_path, timeout, before_epoch=None):
@@ -215,12 +265,12 @@ def wait_ready(config_path, timeout, before_epoch=None):
     raise RuntimeError("Controller did not reconnect with a fresh epoch before the deadline")
 
 
-def wait_agents(config_path, before, timeout, cold=False):
+def wait_agents(config_path, before, timeout, cold=False, persisted=frozenset()):
     end = time.monotonic() + timeout
     while True:
         try:
             after = inventory(config_path)
-            return check_agents(before, after, cold)
+            return check_agents(before, after, cold, persisted)
         except (OSError, ValueError, RuntimeError):
             if time.monotonic() >= end:
                 raise
@@ -238,29 +288,36 @@ def replace_file(source, destination):
         temporary.unlink(missing_ok=True)
 
 
-def check_agents(before, after, cold=False):
+def check_agents(before, after, cold=False, persisted=frozenset()):
     """Preservation verdict for the Agents that were LIVE before the update.
 
     A Controller restart (new or old binary) only relists Agents that still have
     a process or a startup-store entry; exited records it held in memory are
     gone afterwards and are not a regression. Live Agents must be present with
-    the same pid/generation (hot) or recreated (cold). Agents created during
-    the window are reported, never fatal. The verdict goes into the receipt.
+    the same pid/generation (hot) or recreated (cold); stopped Agents persisted
+    in the startup store must still be listed. Agents created during the window
+    are reported, never fatal. The verdict (bounded ids) goes into the receipt.
     """
     live = {key: row for key, row in before.items() if row["pid"] is not None}
     missing = sorted(key for key in live if key not in after)
     if missing:
         raise InventoryError("live_agent_missing",
-                             f"Agent inventory changed during update: {len(missing)} live Agent(s) missing")
-    for key, row in live.items():
-        current = after[key]
-        if not cold and current != row:
-            raise InventoryError("agent_process_changed", "Agent PID/generation changed during hot update")
-        if cold and (current["pid"] is None or current["pid"] == row["pid"]
-                     or current["generation"] <= row["generation"]):
+                             "Agent inventory changed during update: live Agent(s) missing", missing)
+    changed = sorted(key for key, row in live.items() if (
+        (not cold and after[key] != row) or
+        (cold and (after[key]["pid"] is None or after[key]["pid"] == row["pid"]
+                   or after[key]["generation"] <= row["generation"]))))
+    if changed:
+        if cold:
             raise InventoryError("cold_recovery_incomplete",
-                                 "cold recovery did not recreate a previously live Agent")
+                                 "cold recovery did not recreate a previously live Agent", changed)
+        raise InventoryError("agent_process_changed", "Agent PID/generation changed during hot update", changed)
     stopped = [key for key in before if key not in live]
+    persisted_missing = sorted(key for key in stopped if key in persisted and key not in after)
+    if persisted_missing:
+        raise InventoryError("persisted_agent_missing",
+                             "Agent inventory changed during update: persisted stopped Agent(s) missing",
+                             persisted_missing)
     not_relisted = sorted(key for key in stopped if key not in after)
     appeared = sorted(key for key in after if key not in before)
     # Receipts stay bounded: counts are exact, id lists are capped.
@@ -269,7 +326,8 @@ def check_agents(before, after, cold=False):
             "stopped_not_relisted_count": len(not_relisted),
             "stopped_not_relisted": not_relisted[:MAX_RECEIPT_IDS],
             "appeared_count": len(appeared),
-            "appeared": appeared[:MAX_RECEIPT_IDS]}
+            "appeared": appeared[:MAX_RECEIPT_IDS],
+            "warnings": (["exited_records_not_relisted"] if not_relisted else [])}
 
 
 def transaction(job, config):
@@ -336,6 +394,7 @@ def transaction(job, config):
                                        "agents": before, "host_changed": config["host"]})
     changed = []
     activation_attempted = False
+    persisted = persisted_agent_ids(config.get("startup_store"))
     controller = str(bindir / "treer-agent-server")
     action = "restart" if config["host"] else "restart-controller"
     command = [controller, "service", "--workspace", service["workspace"], action]
@@ -348,7 +407,7 @@ def transaction(job, config):
         activation_attempted = True
         run(command, home, timeout=config["timeout"], bin_dir=bindir, config_dir=config["config_dir"])
         ready = wait_ready(config_path, config["timeout"], health["controller_epoch"])
-        verdict = wait_agents(config_path, before, config["timeout"], config["host"])
+        verdict = wait_agents(config_path, before, config["timeout"], config["host"], persisted)
         reported = ready.get("controller_build", {}).get("git_commit", "")
         if not reported or not (reported.startswith(candidate) or candidate.startswith(reported)):
             raise RuntimeError("running Controller build differs from staged candidate")
@@ -361,7 +420,7 @@ def transaction(job, config):
             raise RuntimeError("new Controller does not advertise path-target capability")
         replace_file(stage / "treer", destinations["treer"])
         changed.append("treer")
-        verdict = wait_agents(config_path, before, config["timeout"], config["host"])
+        verdict = wait_agents(config_path, before, config["timeout"], config["host"], persisted)
         for name in names:
             if digest(destinations[name]) != published[name] or version(destinations[name], home) != staged_versions[name]:
                 raise RuntimeError("installed binary verification failed")
@@ -371,6 +430,7 @@ def transaction(job, config):
         # relisted; `rollback_failed` always carries a fixed code and message.
         rollback_error = None
         verification = None
+        write_private_error_log(job, "activation", error)
         try:
             for name in reversed(changed):
                 replace_file(backup / name, destinations[name])
@@ -383,18 +443,21 @@ def transaction(job, config):
                 run(command, home, timeout=config["timeout"], bin_dir=bindir, config_dir=config["config_dir"])
                 wait_ready(config_path, config["timeout"], epoch)
             if not config["host"]:
-                verification = check_agents(before, inventory(config_path))
+                verification = check_agents(before, inventory(config_path), False, persisted)
         except Exception as rollback:
-            rollback_error = {"code": getattr(rollback, "code", None) or type(rollback).__name__,
-                              "message": str(rollback)[:200]}
+            write_private_error_log(job, "rollback", rollback)
+            rollback_error = receipt_error(rollback)
+        failure = receipt_error(error)
         write_json(job / "result.json", {"status": "rollback_failed" if rollback_error else "rolled_back",
-                    "error": str(error), "error_code": getattr(error, "code", None),
-                    "rollback_error": rollback_error, "verification": verification, "backup": str(backup),
+                    "error": failure["message"], "error_code": failure["code"],
+                    "error_agent_ids": failure.get("agent_ids", []), "error_agent_count": failure.get("agent_count", 0),
+                    "rollback_error": rollback_error, "verification": verification,
+                    "warnings": (verification or {}).get("warnings", []), "backup": str(backup),
                     "cold_restart_cannot_restore_original_processes": config["host"]})
         raise
     return {"status": "complete", "commit": candidate, "backup": str(backup),
             "versions": staged_versions, "agents": inventory(config_path), "inventory": verdict,
-            "host_changed": config["host"]}
+            "warnings": verdict["warnings"], "host_changed": config["host"]}
 
 
 def worker(job):
@@ -412,8 +475,11 @@ def worker(job):
         write_json(job / "result.json", result)
         return 0
     except Exception as error:
+        write_private_error_log(job, "worker", error)
         if not (job / "result.json").exists():
-            write_json(job / "result.json", {"status": "failed", "error": str(error)})
+            failure = receipt_error(error)
+            write_json(job / "result.json", {"status": "failed", "error": failure["message"],
+                                             "error_code": failure["code"]})
         return 1
     finally:
         lock.rmdir()

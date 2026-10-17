@@ -256,7 +256,8 @@ else:
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["inventory"], {"live_preserved": 1, "stopped_before": 2,
             "stopped_not_relisted_count": 2, "stopped_not_relisted": ["ag_exited_old_shape", "app_exited_new_shape"],
-            "appeared_count": 0, "appeared": []})
+            "appeared_count": 0, "appeared": [], "warnings": ["exited_records_not_relisted"]})
+        self.assertEqual(result["warnings"], ["exited_records_not_relisted"])
         self.assertEqual(result["agents"], {"ag_fixture": {"pid": 444, "generation": 3}})
 
     def test_agents_created_during_the_window_are_reported_not_fatal(self):
@@ -272,7 +273,14 @@ else:
         gone = {"x": {"pid": None, "generation": 2}}
         self.assertEqual(update.check_agents({**live, **gone}, live),
                          {"live_preserved": 1, "stopped_before": 1, "stopped_not_relisted_count": 1,
-                          "stopped_not_relisted": ["x"], "appeared_count": 0, "appeared": []})
+                          "stopped_not_relisted": ["x"], "appeared_count": 0, "appeared": [],
+                          "warnings": ["exited_records_not_relisted"]})
+        self.assertEqual(update.check_agents(live, live)["warnings"], [])
+        # A stopped Agent that the startup store persists must still be listed.
+        with self.assertRaises(update.InventoryError) as persisted:
+            update.check_agents({**live, **gone}, live, persisted=frozenset({"x"}))
+        self.assertEqual((persisted.exception.code, persisted.exception.agent_ids), ("persisted_agent_missing", ["x"]))
+        self.assertEqual(update.check_agents({**live, **gone}, {**live, **gone}, persisted=frozenset({"x"}))["stopped_not_relisted"], [])
         many = {f"ag_{index:03d}": {"pid": None, "generation": 1} for index in range(40)}
         bounded = update.check_agents({**live, **many}, live)
         self.assertEqual((bounded["stopped_not_relisted_count"], len(bounded["stopped_not_relisted"])), (40, 32))
@@ -281,7 +289,12 @@ else:
         with self.assertRaises(update.InventoryError) as missing:
             update.check_agents(live, gone)
         self.assertEqual(missing.exception.code, "live_agent_missing")
+        self.assertEqual((missing.exception.agent_ids, missing.exception.agent_count), (["a"], 1))
         self.assertIn("Agent inventory changed during update", str(missing.exception))
+        many_live = {f"ag_{index:03d}": {"pid": index + 1, "generation": 1} for index in range(40)}
+        with self.assertRaises(update.InventoryError) as bounded_missing:
+            update.check_agents(many_live, {})
+        self.assertEqual((len(bounded_missing.exception.agent_ids), bounded_missing.exception.agent_count), (32, 40))
         with self.assertRaises(update.InventoryError) as changed:
             update.check_agents(live, {"a": {"pid": 1, "generation": 2}})
         self.assertEqual(changed.exception.code, "agent_process_changed")
@@ -289,6 +302,48 @@ else:
             update.check_agents(live, {"a": {"pid": 2, "generation": 1}}, cold=True)
         self.assertEqual(cold.exception.code, "cold_recovery_incomplete")
         self.assertEqual(update.check_agents(live, {"a": {"pid": 2, "generation": 2}}, cold=True)["live_preserved"], 1)
+
+    def test_persisted_stopped_agent_missing_after_restart_fails_and_rolls_back(self):
+        store = self.home / "startup.json"
+        store.write_text(json.dumps({"version": 1, "entries": [{"spec": {"agent_id": "ag_persisted"}}]}))
+        self.config["startup_store"] = str(store)
+        state = json.loads(self.state.read_text())
+        state["agents"].append({"agent_id": "ag_persisted", "pid": None, "run_generation": 2})
+        self.state.write_text(json.dumps(state))
+        code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["error_code"], "persisted_agent_missing")
+        self.assertEqual(result["error_agent_ids"], ["ag_persisted"])
+        self.assertIn(self.old, (self.bindir / "treer-agent-server").read_text())
+        self.assertEqual(update.persisted_agent_ids(str(store)), frozenset({"ag_persisted"}))
+        self.assertEqual(update.persisted_agent_ids(str(self.home / "absent.json")), frozenset())
+        self.assertEqual(update.persisted_agent_ids(None), frozenset())
+
+    def test_receipts_carry_fixed_text_only_and_keep_detail_in_the_private_log(self):
+        for unsafe in ["multiple local installs; select --workspace explicitly. Candidates:\n/Users/x/.config",
+                       "failed to start /usr/local/bin/treer-agent-server",
+                       "C:\\Users\\x\\treer.exe missing", "see https://proxy.example/x",
+                       "user@host unreachable", "x" * 201]:
+            self.assertEqual(update.safe_receipt_text(unsafe), update.UNSAFE_RECEIPT_TEXT, unsafe)
+        for safe in ["Agent PID/generation changed during hot update", "another update holds the binary lock",
+                     "treer-agent-server operation failed (exit 4)", "SHA256SUMS differs from the canary_passed release receipt"]:
+            self.assertEqual(update.safe_receipt_text(safe), safe)
+        entry = update.receipt_error(update.InventoryError("live_agent_missing", "fixed", ["b", "a"]))
+        self.assertEqual(entry, {"code": "live_agent_missing", "message": "fixed", "agent_ids": ["a", "b"], "agent_count": 2})
+        self.assertEqual(update.receipt_error(OSError("/private/path"))["message"], update.UNSAFE_RECEIPT_TEXT)
+        # A worker failure with path-bearing text: receipt fixed, detail private.
+        (self.configdir / "second-controller.json").write_text(json.dumps({"workspace": "ws_other",
+            "server_id": "srv_other", "listen": "127.0.0.1:1", "install_hostname": socket.gethostname(),
+            "operator_credential": "test-only-secret"}))
+        self.config["workspace"] = None
+        code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["error"], update.UNSAFE_RECEIPT_TEXT)
+        self.assertNotIn(str(self.configdir), json.dumps(result))
+        log = (self.job / "error.log").read_text()
+        self.assertIn("Candidates", log)
+        self.assertEqual(oct((self.job / "error.log").stat().st_mode & 0o777), "0o600")
 
     def test_rollback_after_exited_records_vanish_is_rolled_back_with_a_verdict(self):
         state = json.loads(self.state.read_text())
@@ -322,7 +377,9 @@ else:
         self.assertEqual(result["status"], "rollback_failed")
         self.assertIn("PID/generation", result["error"])
         self.assertEqual(result["error_code"], "agent_process_changed")
+        self.assertEqual(result["error_agent_ids"], ["ag_fixture"])
         self.assertEqual(result["rollback_error"]["code"], "agent_process_changed")
+        self.assertEqual(result["rollback_error"]["agent_ids"], ["ag_fixture"])
         self.assertIn("PID/generation", result["rollback_error"]["message"])
         self.assertIn(self.old, (self.bindir / "treer-agent-server").read_text())
 
