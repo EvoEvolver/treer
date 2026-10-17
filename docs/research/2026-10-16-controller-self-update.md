@@ -567,6 +567,38 @@ Mac handles check local temp storage and reject devfs, and Linux rejects procfs.
 No network mounts are created. The lifecycle must still invoke this preflight
 for every retained state/job/lock storage handle before relying on its evidence;
 that production integration remains unfinished.
+
+Storage compatibility for the replacement updater (not enabled in production):
+
+| Filesystem | Storage preflight |
+| --- | --- |
+| macOS APFS/HFS with `MNT_LOCAL` | Accepted prerequisite |
+| Linux ext2/3/4, XFS, Btrfs | Accepted prerequisite |
+| NFS/SMB, virtiofs/9p/FUSE | Rejected |
+| overlayfs/container writable root, tmpfs, device/proc filesystems | Rejected |
+| F2FS, ZFS, bcachefs, unknown types | Rejected pending separate flock/fsync review |
+
+Failures use fixed code `update_storage_unsupported_filesystem` with a fixed
+instruction to place Treer state on a supported local volume. Prefer a local
+ext4/XFS/Btrfs/APFS volume; for Linux containers a dedicated named volume backed
+by an accepted filesystem can avoid overlayfs. Volume names do not attest the
+driver or underlying filesystem, so every retained handle must still be checked.
+Do not widen the allowlist without reviewing each filesystem's flock/fsync
+semantics and adding evidence.
+
+Static container-default audit: `service::state_dir` selects `TREER_STATE_DIR`,
+then `$XDG_STATE_HOME/treer`, otherwise `$HOME/.local/state/treer`; job storage is
+its `self-update/jobs` child. That path policy does **not** ensure an accepted
+filesystem in arbitrary Linux containers: without a dedicated mount it can be
+on overlayfs. The Apple container setup skill uses guest `HOME=/home/<user>`
+and keeps Treer state out of the Mac's `/Users/<user>` virtiofs share; this avoids
+that specific shared-directory default, but the image and skill do not attest
+the guest disk's filesystem type. Thus supported default storage is **not
+confirmed** for every container deployment. Production preflight must check it;
+no running guest, real enrollment or mount was inspected or changed for this
+audit. Operators must arrange accepted local storage before an authorized setup
+or maintenance, rather than bypassing a rejection or relocating live state.
+
 The single-use adapters consume either a standard `Command` or Tokio's
 `Command`; the latter preserves the callback through `as_std_mut`. Isolated
 tests cover both paths through the same Rust test supervisor, which restores

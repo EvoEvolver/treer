@@ -25,7 +25,7 @@ pub fn verify(file: &File) -> io::Result<()> {
 fn denied() -> io::Error {
     io::Error::new(
         io::ErrorKind::Unsupported,
-        "update storage requires a supported local filesystem",
+        "update_storage_unsupported_filesystem: place Treer state on a supported local volume",
     )
 }
 
@@ -106,7 +106,7 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::Unsupported);
         assert_eq!(
             error.to_string(),
-            "update storage requires a supported local filesystem"
+            "update_storage_unsupported_filesystem: place Treer state on a supported local volume"
         );
     }
 }
