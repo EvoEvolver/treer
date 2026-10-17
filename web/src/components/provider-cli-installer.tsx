@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react"
 import { AlertTriangle } from "lucide-react"
 import { api, ApiError, machineName, type Machine } from "@/lib/api"
-import { matchingProviderRecipe, PROVIDER_CLI_CAPABILITY, providerCliBase, providerCliNeedsAcknowledgement, providerCliOperation, providerCliPrepared, providerCliRecipes, providerCliRef, providerCliTerminal,
+import { matchingProviderRecipe, providerCliAvailableRecipes, PROVIDER_CLI_CAPABILITY, providerCliBase, providerCliNeedsAcknowledgement, providerCliOperation, providerCliPrepared, providerCliRecipes, providerCliRef, providerCliTerminal,
   type ProviderCliObservation, type ProviderCliObservedSummary, type ProviderCliOperation, type ProviderCliPrepared, type ProviderCliRecipe, type ProviderCliRecipes } from "@/lib/provider-cli"
 import { t } from "@/i18n"
 import { Button } from "@/components/ui/button"
@@ -18,6 +18,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
   const [prepared, setPrepared] = useState<Omit<ProviderCliPrepared, "confirmation_token"> | null>(null)
   const [acknowledged, setAcknowledged] = useState(false)
   const [confirmedObservation, setConfirmedObservation] = useState<ProviderCliObservation | null>(null)
+  const capabilities = useRef<string[]>([])
   const token = useRef<string | null>(null)
   const confirmationHeading = useRef<HTMLHeadingElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -42,7 +43,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
         if (!config.capabilities?.includes(PROVIDER_CLI_CAPABILITY)) return
         const result = providerCliRecipes(await api<unknown>(`${base}/recipes`, { signal: controller.signal, cache: "no-store" }), machine.server_id)
         if (!result) throw new Error("invalid_response")
-        if (current) { setCatalog(result); setAvailable(true) }
+        if (current) { capabilities.current = config.capabilities; setCatalog(providerCliAvailableRecipes(result, config.capabilities)); setAvailable(true) }
       } catch (reason) {
         if (current && !(reason instanceof ApiError && [404, 501].includes(reason.status))) setError(t("cli.unavailable"))
       }
@@ -67,7 +68,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
     async function poll() {
       try {
         const result = providerCliOperation(await api<unknown>(`${base}/operations/${encodeURIComponent(tracked!.operation_id)}`, { signal: controller.signal, cache: "no-store" }),
-          { ...providerCliRef(tracked!.recipe), operation_id: tracked!.operation_id, machine_id: machine.server_id })
+          { ...providerCliRef(tracked!.recipe), operation_id: tracked!.operation_id, machine_id: machine.server_id, max_steps: tracked!.recipe.plan?.length, verified_pin: tracked!.recipe.native_binary })
         if (!result) throw new Error("invalid_response")
         if (!active) return
         setOperation(result)
@@ -87,7 +88,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
       const result = providerCliRecipes(await api<unknown>(`${base}/recipes`, { cache: "no-store" }), machine.server_id)
       if (!live.current) return
       if (!result) throw new Error("invalid_response")
-      setCatalog(result)
+      setCatalog(providerCliAvailableRecipes(result, capabilities.current))
     } catch (reason) { if (live.current) setError(failureText(reason)) }
     finally { pending.current = false; if (live.current) setBusy(false) }
   }
@@ -102,7 +103,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
     try {
       const result = providerCliPrepared(await api<unknown>(`${base}/prepare`, { method: "POST", body: JSON.stringify(providerCliRef(recipe)) }), catalog, recipe)
       if (!live.current || generation.current !== epoch) return
-      if (!result) throw new Error("invalid_response")
+      if (!result || result.recipe.plan?.length === 9 && !capabilities.current.includes("machine.provider-cli-plan.v2")) throw new Error("invalid_response")
       const { confirmation_token, ...display } = result
       token.current = confirmation_token ?? null
       // The server's DB clock owns token expiry. A local wall-clock offset
@@ -145,7 +146,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
     pending.current = true; setBusy(true); setError("")
     try {
       const result = providerCliOperation(await api<unknown>(`${base}/operations/${encodeURIComponent(tracked.operation_id)}`, { cache: "no-store" }),
-        { ...providerCliRef(tracked.recipe), operation_id: tracked.operation_id, machine_id: machine.server_id })
+        { ...providerCliRef(tracked.recipe), operation_id: tracked.operation_id, machine_id: machine.server_id, max_steps: tracked!.recipe.plan?.length, verified_pin: tracked!.recipe.native_binary })
       if (!live.current) return
       if (!result) throw new Error("invalid_response")
       setOperation(result); setUnconfirmed(false)
@@ -154,8 +155,11 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
     finally { pending.current = false; if (live.current) setBusy(false) }
   }
 
+  const canProbe = !operation?.prefix_modified && operation?.error_code !== "provider_cli_binary_mismatch" &&
+    (!tracked?.recipe.native_binary || !!operation?.verified_file && !operation.verified_file.failure &&
+      operation.verified_file.sha256 === tracked.recipe.native_binary.sha256 && operation.verified_file.size === tracked.recipe.native_binary.size)
   async function check() {
-    if (!tracked || pending.current) return
+    if (!tracked || pending.current || !canProbe) return
     pending.current = true; setBusy(true); setError("")
     try {
       const result = await api<{ installed: boolean; found_in_prefix: boolean; version?: string; executable?: string; exit_code: number | null; timed_out: boolean }>(`${base}/check`, { method: "POST", body: JSON.stringify(providerCliRef(tracked.recipe)) })
@@ -197,12 +201,23 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
             </div>}
             <p>{t("cli.warning", { registry: prepared.recipe.package!.registry })}</p>
             <p>{t("cli.npm_config")}</p>
-            <p>{t("cli.transitive")}</p>
-            {prepared.recipe.lifecycle_scripts!.enabled && <p className="font-semibold">{t("cli.scripts")}</p>}
+            <p>{t(prepared.recipe.native_binary ? "cli.pinned_native" : "cli.transitive")}</p>
+            {prepared.recipe.node_arch && <p>{t("cli.node_arch", { arch: prepared.recipe.node_arch })}</p>}
+            {prepared.recipe.expected_version && <p>{t("cli.expected_version", { version: prepared.recipe.expected_version })}</p>}
+            <p>{t("cli.deadline", { seconds: prepared.recipe.deadline_seconds ?? 300 })}</p>
+            {prepared.recipe.lifecycle_scripts!.enabled && <div className="space-y-2 rounded-md border border-destructive/50 p-3 [overflow-wrap:anywhere]">
+              <p role="alert" className="font-semibold">{t("cli.reviewed_postinstall")}</p>
+              <p>{t("cli.review_scope")}</p>
+              {prepared.recipe.lifecycle_scripts!.review && <><p>{prepared.recipe.lifecycle_scripts!.review.reviewed_at} · {prepared.recipe.lifecycle_scripts!.review.reviewer}</p>
+                {prepared.recipe.lifecycle_scripts!.review.files.map(file => <p key={file.member} className="font-mono text-xs">{file.member}: {file.sha256}</p>)}
+                {prepared.recipe.lifecycle_scripts!.review.runs.map(name => <p key={name} className="font-mono text-xs">{name}: {prepared.recipe.lifecycle_scripts!.review!.scripts[name]}</p>)}
+              </>}
+            </div>}
             <ol className="space-y-2" aria-label={t("cli.plan")}>{prepared.recipe.plan!.map(item => <li key={item.step} className="min-w-0 rounded-md border bg-muted/30 p-3">
               <span className="font-medium">{t("cli.step", { step: item.step })} · {purposeLabel(item.purpose)}</span>
               {item.kind === "command" ? <div className="mt-1 space-y-1 [overflow-wrap:anywhere] font-mono text-xs"><p>{breakable(item.executable)}</p>{item.args.map((arg, i) => <p key={i}>{breakable(JSON.stringify(arg))}</p>)}</div>
                 : item.kind === "verify" ? <p className="mt-1 break-all font-mono text-xs">{item.algorithm}: {item.expected}</p>
+                : item.kind === "verify_file" ? <div className="mt-1 space-y-1 break-all font-mono text-xs"><p>{item.rule}</p><p>{item.relative_path}</p><p>{t("cli.file_pin", { size: item.expected_size, hash: item.expected_sha256 })}</p></div>
                 : <p className="mt-1 break-all font-mono text-xs">{item.rule}</p>}
             </li>)}</ol>
             {providerCliNeedsAcknowledgement(prepared.version_relation) && <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md border p-3"><input type="checkbox" className="mt-1 size-5 shrink-0 accent-primary" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /><span>{t(`cli.ack_${prepared.version_relation}`)}</span></label>}
@@ -218,6 +233,9 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
               <div><h4 className="font-medium">{t("cli.observed_now")}</h4>{operation.observed_before ? <ObservationView observation={operation.observed_before} /> : <p>{t("cli.observation_unavailable")}</p>}</div>
               <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void prepare(tracked!.recipe, true)}>{t("cli.prepare_again")}</Button>
             </div>}
+            {operation?.prefix_modified && <p role="alert" className="rounded-md border border-destructive/50 p-3">{t("cli.prefix_modified")}</p>}
+            {operation?.error_code && nativeFailureKey(operation.error_code) && <p role="alert">{t(nativeFailureKey(operation.error_code)!)}</p>}
+            {operation?.verified_file?.sha256 && !operation.verified_file.failure && <p className="break-all">{t("cli.file_verified", { size: operation.verified_file.size ?? 0, hash: operation.verified_file.sha256 })}</p>}
             {probe && <code className="block break-all">{probe.executable}</code>}
             {(probe || operation?.status === "succeeded") && <><p>{t("cli.path_warning")}</p><p className="whitespace-pre-wrap break-words">{tracked?.recipe.login_hint}</p></>}
             {tracked && <details className="min-w-0 rounded-md border p-3 text-muted-foreground"><summary className="cursor-pointer py-1 text-sm">{t("cli.details")}</summary><code className="mt-3 block break-all text-xs">{tracked.operation_id}</code>
@@ -227,7 +245,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
               {(operation.steps ?? [{ step: operation.step ?? 1, stdout: operation.stdout, stderr: operation.stderr, truncated: operation.truncated }]).map(item => <div key={item.step} className="min-w-0 space-y-1"><h4>{t("cli.step", { step: item.step })}</h4><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/30 p-3 text-xs">{visibleOutput(item.stdout)}{item.stderr ? `\n${visibleOutput(item.stderr)}` : ""}</pre>{item.truncated && <p>{t("cli.truncated")}</p>}</div>)}
             </div>}</details>}
             {tracked && (unconfirmed || operation?.status === "unknown") && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void refreshResult()}>{t("cli.refresh_result")}</Button>}
-            {tracked && operation?.error_code !== "provider_cli_state_changed" && (unconfirmed || operation && providerCliTerminal(operation.status)) && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void check()}>{t("cli.check")}</Button>}
+            {tracked && canProbe && operation?.error_code !== "provider_cli_state_changed" && (unconfirmed || operation && providerCliTerminal(operation.status)) && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void check()}>{t("cli.check")}</Button>}
             <p className="text-xs text-muted-foreground">{t("cli.close_hint")}</p>
           </> : <div className="space-y-3">{recipes.map(recipe => <div key={recipe.recipe_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"><div className="min-w-0"><h3 className="font-medium">{recipe.provider_id}</h3><p className="break-words text-xs text-muted-foreground">{recipe.supported ? `${recipe.package!.version} · Node ≥ ${recipe.node_min}` : unsupportedText(recipe.unsupported_reason)}</p></div>{recipe.supported && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void prepare(recipe)}>{t("cli.install_provider", { provider: recipe.provider_id })}</Button>}</div>)}</div>}
         </div>
@@ -252,6 +270,7 @@ function visibleOutput(value: string) {
 function failureText(reason: unknown) {
   if (reason instanceof ApiError) {
     if (["provider_cli_acknowledgement_required", "provider_cli_acknowledgement_mismatch"].includes(reason.code ?? "")) return t("cli.ack_refused")
+    if (reason.code && nativeFailureKey(reason.code)) return t(nativeFailureKey(reason.code)!)
     if (reason.code === "provider_cli_controller_outdated") return t("cli.controller_outdated")
     if (reason.code === "provider_cli_state_unobservable") return t("cli.observation_unavailable")
     if (reason.status === 403) return t("cli.denied")
@@ -268,8 +287,21 @@ function unsupportedText(reason?: string) {
   return t("cli.unsupported")
 }
 
+function nativeFailureKey(code: string) {
+  switch (code) {
+    case "provider_cli_binary_mismatch": return "cli.binary_mismatch" as const
+    case "provider_cli_version_mismatch": return "cli.version_mismatch" as const
+    case "provider_cli_node_arch_mismatch": return "cli.arch_mismatch" as const
+    case "provider_cli_space_insufficient": return "cli.space_insufficient" as const
+    default: return null
+  }
+}
 function purposeLabel(purpose: string) {
   switch (purpose) {
+    case "node-arch": return t("cli.arch_step")
+    case "pack-native": return t("cli.pack_native")
+    case "integrity-native": return t("cli.integrity_native")
+    case "verify-file": return t("cli.verify_file")
     case "pack": return t("cli.pack")
     case "integrity": return t("cli.integrity")
     case "install": return t("cli.install")
