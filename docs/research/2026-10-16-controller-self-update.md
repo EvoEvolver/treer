@@ -872,6 +872,10 @@ module declarations into that leaf. This is a grep-style tripwire, not a Rust
 parser or a full compile-fail test: the private-field compiler boundary enforces
 external construction refusal. Source spelling tricks or new construction APIs
 still require code review.
+Lifecycle integration review must retain both construction-site and leaf-module
+checks together. Outside handoff, imports/references to the private
+`launcher_frame` module must not introduce non-type access; consumers use the
+re-exported frame type and the authenticated reader/acceptance boundaries.
 
 A real owned Rust child fixture sends a valid matching frame, half-closes its
 socket and blocks on stdin. The parent authenticates and successfully reads
