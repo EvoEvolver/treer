@@ -177,6 +177,16 @@ pub const PROVIDER_CLI_PROBE_ERROR_CODES: [&str; 9] = [
 /// Longest executable path a Controller may report.
 pub const PROVIDER_CLI_EXECUTABLE_MAX: usize = 4096;
 
+/// `/...` or `<ASCII drive letter>:\...`; nothing else is absolute here.
+fn absolute_path_text(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.first() == Some(&b'/')
+        || (bytes.len() > 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && bytes[2] == b'\\')
+}
+
 impl ProviderCliObservation {
     /// Shape and consistency rules the Proxy enforces before an observation
     /// is stored, audited or shown: bounded, control-free strings, a known
@@ -199,11 +209,7 @@ impl ProviderCliObservation {
         }
         if let Some(executable) = &self.executable {
             if executable.len() > PROVIDER_CLI_EXECUTABLE_MAX
-                || !(executable.starts_with('/')
-                    || executable
-                        .as_bytes()
-                        .get(1..3)
-                        .is_some_and(|rest| rest == b":\\"))
+                || !absolute_path_text(executable)
                 || executable.chars().any(char::is_control)
             {
                 return Err("executable is not a bounded absolute path");
@@ -1006,6 +1012,19 @@ mod tests {
             ..installed.clone()
         };
         assert_eq!(windows.validate(), Ok(()));
+        for bad_path in [
+            "1:\\prefix\\codex.cmd",
+            ":\\codex",
+            "C:/prefix/codex",
+            "C:\\",
+            "\\\\server\\share",
+        ] {
+            let bad = ProviderCliObservation {
+                executable: Some(bad_path.into()),
+                ..installed.clone()
+            };
+            assert!(bad.validate().is_err(), "{bad_path}");
+        }
         let mut unconfirmed = unknown.clone();
         unconfirmed.probe.cleanup_confirmed = false;
         unconfirmed.probe.error_code = Some("cleanup_unconfirmed".into());
