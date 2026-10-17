@@ -160,6 +160,7 @@ fn peer(stream: &UnixStream) -> Result<(u32, u32)> {
 pub struct AuthenticatedPeer {
     stream: UnixStream,
     image: ProcessImage,
+    launcher_read_started: bool,
 }
 
 impl AuthenticatedPeer {
@@ -198,7 +199,11 @@ impl AuthenticatedPeer {
         {
             bail!("update_handoff_peer_mismatch");
         }
-        let result = Self { stream, image };
+        let result = Self {
+            stream,
+            image,
+            launcher_read_started: false,
+        };
         result.verify()?;
         Ok(result)
     }
@@ -212,6 +217,37 @@ impl AuthenticatedPeer {
         self.image
             .verify_current()
             .map_err(|_| anyhow::anyhow!("update_handoff_peer_changed"))
+    }
+
+    /// Revalidate this exact connected peer before a single raw launcher read.
+    /// Every failure invalidates pending arbitration, including cancellation and
+    /// repeat reads. Success does not accept a permit or establish authenticated
+    /// EOF/all-writers-gone evidence; the peer may die while the read drains.
+    /// The future supervisor must privately own both cancellation endpoints and
+    /// keep the write end exclusively inside its signal/shutdown handling.
+    pub fn read_launcher_frame<'a>(
+        &'a mut self,
+        arbitration: &mut super::launcher_arbitration::Arbitration,
+        cancellation: &UnixStream,
+    ) -> Result<super::launcher_arbitration::transport::Observation<'a>> {
+        use super::launcher_arbitration::{transport, Decision};
+
+        if self.launcher_read_started || arbitration.decision() != Decision::Pending {
+            arbitration.invalidate();
+            bail!("update_recovery_required");
+        }
+        self.launcher_read_started = true;
+        if let Err(error) = self.verify() {
+            arbitration.invalidate();
+            return Err(error);
+        }
+        match transport::read(&mut self.stream, cancellation) {
+            Ok(observation) => Ok(observation),
+            Err(error) => {
+                arbitration.invalidate();
+                Err(error)
+            }
+        }
     }
 
     /// This is NOT an ownership ACK. The parent retains locks until a durable
@@ -256,6 +292,87 @@ mod tests {
         }
     }
 
+    fn pending() -> super::super::launcher_arbitration::Arbitration {
+        super::super::launcher_arbitration::Arbitration::new(
+            super::super::launcher_arbitration::Binding::new(
+                uuid::Uuid::new_v4(),
+                &"a".repeat(64),
+                &"b".repeat(64),
+            )
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn launcher_read_failures_invalidate_and_cannot_be_retried_as_empty_eof() {
+        use super::super::launcher_arbitration::Decision;
+        use std::net::Shutdown;
+
+        for mode in ["invalid", "timeout", "cancelled"] {
+            let (stream, mut writer) = UnixStream::pair().unwrap();
+            // Same-PID socket fixtures exercise verification and arbitration;
+            // exact child authentication is covered by the real-process test.
+            let mut peer = AuthenticatedPeer {
+                stream,
+                image: ProcessImage::capture(std::process::id()).unwrap(),
+                launcher_read_started: false,
+            };
+            let (cancel, mut cancel_writer) = UnixStream::pair().unwrap();
+            let expected = match mode {
+                "invalid" => {
+                    writer.write_all(&[b'x'; 152]).unwrap();
+                    writer.shutdown(Shutdown::Write).unwrap();
+                    "update_launcher_permit_frame_invalid"
+                }
+                "timeout" => "update_launcher_permit_read_timeout",
+                _ => {
+                    cancel_writer.write_all(b"C").unwrap();
+                    "update_launcher_permit_read_cancelled"
+                }
+            };
+            let mut arbitration = pending();
+            assert_eq!(
+                peer.read_launcher_frame(&mut arbitration, &cancel)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                expected
+            );
+            assert_eq!(arbitration.decision(), Decision::Uncertain);
+            if mode != "invalid" {
+                writer.shutdown(Shutdown::Write).unwrap();
+            }
+            assert_eq!(
+                peer.read_launcher_frame(&mut arbitration, &cancel)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "update_recovery_required"
+            );
+            assert_eq!(arbitration.decision(), Decision::Uncertain);
+        }
+    }
+
+    #[test]
+    fn launcher_empty_eof_is_only_raw_data_and_the_connection_is_single_use() {
+        use super::super::launcher_arbitration::{transport::Kind, Decision};
+        let (stream, writer) = UnixStream::pair().unwrap();
+        let mut peer = AuthenticatedPeer {
+            stream,
+            image: ProcessImage::capture(std::process::id()).unwrap(),
+            launcher_read_started: false,
+        };
+        let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+        writer.shutdown(std::net::Shutdown::Write).unwrap();
+        let mut arbitration = pending();
+        let observation = peer.read_launcher_frame(&mut arbitration, &cancel).unwrap();
+        assert_eq!(observation.kind(), Kind::EmptyEof);
+        drop(observation);
+        assert_eq!(arbitration.decision(), Decision::Pending);
+        assert!(peer.read_launcher_frame(&mut arbitration, &cancel).is_err());
+        assert_eq!(arbitration.decision(), Decision::Uncertain);
+    }
+
     #[test]
     #[ignore = "owned subprocess helper, actually invoked by the outer peer test"]
     fn peer_child() {
@@ -263,6 +380,7 @@ mod tests {
         let mut socket = UnixStream::connect(path).unwrap();
         socket.write_all(b"R").unwrap();
         let _ = std::io::stdin().read(&mut [0]);
+        socket.write_all(b"E").unwrap();
     }
 
     #[test]
@@ -348,11 +466,29 @@ mod tests {
             &digest,
         )
         .is_err());
-        let authenticated =
+        let mut authenticated =
             AuthenticatedPeer::authenticate(stream, &image, image.executable(), &digest).unwrap();
         authenticated.verify().unwrap();
         drop(child.0.stdin.take());
         assert!(child.0.wait().unwrap().success());
         assert!(authenticated.verify().is_err());
+        // Identity revalidation fails before the reader can consume bytes.
+        // A clone is a test-only view of the same accepted socket; production
+        // exposes no stream accessor or duplicate.
+        let mut retained = authenticated.stream.try_clone().unwrap();
+        retained.set_nonblocking(true).unwrap();
+        let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+        let mut arbitration = pending();
+        assert!(authenticated
+            .read_launcher_frame(&mut arbitration, &cancel)
+            .is_err());
+        assert_eq!(
+            arbitration.decision(),
+            super::super::launcher_arbitration::Decision::Uncertain
+        );
+        assert!(authenticated.launcher_read_started);
+        let mut unread = [0];
+        assert_eq!(retained.read(&mut unread).unwrap(), 1);
+        assert_eq!(unread, [b'E']);
     }
 }

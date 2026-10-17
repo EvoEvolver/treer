@@ -790,6 +790,22 @@ A complete permit may still be buffered after cancellation; cancellation can
 never justify `ClosedWithoutPermit`. These are required integration guards,
 not guarantees implemented by the current raw reader.
 
+The separate `AuthenticatedPeer::read_launcher_frame` entry now revalidates the
+same connected socket's OS peer identity before reading, allows only one read
+attempt per wrapper and requires pending arbitration. Identity/read failures
+(including cancellation), repeated reads and non-pending input invalidate any
+pending arbitration; terminal decisions remain unchanged. This connects the
+existing peer verifier to raw framing, not to execution: success leaves
+arbitration pending and returns only the raw observation borrowing the receiver.
+There is no post-EOF live-peer check that could mistake peer exit for writer
+closure, no attempt/digest attestation, and no all-writers-gone or noexec proof.
+The supervisor's private endpoint, cancellation ownership and lifecycle caller
+remain unimplemented. Socketpair regressions cover malformed framing, timeout,
+cancellation, non-retry and raw empty EOF. The real owned Rust peer fixture
+leaves a byte buffered before exiting: identity rejection leaves that byte
+unconsumed and invalidates pending arbitration. A real OS read-error injection
+is not covered by these integration fixtures.
+
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the
 authenticated transport/drain module. Tie it to the actual still-open receiver

@@ -303,7 +303,14 @@ mod tests {
     fn connection() -> (AuthenticatedPeer, UnixStream) {
         let (stream, other) = UnixStream::pair().unwrap();
         let image = ProcessImage::capture(std::process::id()).unwrap();
-        (AuthenticatedPeer { stream, image }, other)
+        (
+            AuthenticatedPeer {
+                stream,
+                image,
+                launcher_read_started: false,
+            },
+            other,
+        )
     }
 
     #[test]

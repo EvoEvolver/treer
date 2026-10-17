@@ -83,6 +83,7 @@ mod tests {
             peer: AuthenticatedPeer {
                 stream,
                 image: ProcessImage::capture(std::process::id()).unwrap(),
+                launcher_read_started: false,
             },
             prepared: stale,
         };
