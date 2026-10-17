@@ -120,9 +120,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       console.log(JSON.stringify({ id: request.id, error: { message: "read unavailable" } }));
       continue;
     }
-    const recoveryState = failed ? process.env.FAKE_CODEX_RECOVERY_STATE : undefined;
-    const status = recoveryState?.startsWith("systemError") ? { type: "systemError" } : process.env.FAKE_CODEX_STATUS ? { type: process.env.FAKE_CODEX_STATUS } : undefined;
-    result = { thread: { id: threadId, cwd: process.cwd(), turns: recoveryState === "systemError-empty" ? [] : turns, ...(status ? { status } : {}) }, model: "test" };
+    const recoveryState = failed ? process.env.FAKE_CODEX_RECOVERY_STATE_FILE ? readFileSync(process.env.FAKE_CODEX_RECOVERY_STATE_FILE, "utf8") : process.env.FAKE_CODEX_RECOVERY_STATE : undefined;
+    const status = recoveryState?.startsWith("systemError") ? { type: "systemError" } : recoveryState === "unknown" ? { type: "unknown" } : process.env.FAKE_CODEX_STATUS ? { type: process.env.FAKE_CODEX_STATUS } : undefined;
+    result = { thread: { id: threadId, cwd: process.cwd(), turns: recoveryState === "missing-turns" ? undefined : recoveryState === "systemError-empty" ? [] : turns, ...(status ? { status } : {}) }, model: "test" };
   }
   if (request.method === "turn/steer" && request.params.expectedTurnId !== "turn-live") {
     console.log(JSON.stringify({ id: request.id, error: { message: `expected active turn id \`${request.params.expectedTurnId}\` but found \`turn-live\`` } }));

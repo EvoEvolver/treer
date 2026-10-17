@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { CodexRuntime } from "../src/harness/codex.js";
@@ -129,5 +129,31 @@ test("authoritative active turn prevents recovery dispatch despite a cached term
     assert.equal(queue.submission(second.id)?.state, "queued");
     await until(() => queue.submission(second.id)?.state === "done");
     assert.equal(queue.submission(first.id)?.state, "failed");
+  } finally { queue.close(); await runtime.stop(); process.env = previous; rmSync(root, { recursive: true, force: true }); }
+});
+
+for (const state of ["unknown", "missing-turns"]) test(`repeated triggers cannot bypass ${state}, and later confirmed idle recovers`, async () => {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), "relay-repeat-"));
+  const stateFile = join(root, "state"); writeFileSync(stateFile, state);
+  const previous = process.env;
+  process.env = hermeticEnv({ FAKE_CODEX_RELAY_RECOVERY: "1", FAKE_CODEX_RECOVERY_STATE_FILE: stateFile, FAKE_CODEX_CALLS: join(root, "calls") });
+  const runtime = new CodexRuntime(resolve(import.meta.dirname, "fake-codex.mjs"), root);
+  const queue = new PromptQueue(runtime, () => {}, { file: join(root, "queue.json") });
+  const calls = () => readFileSync(join(root, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+  try {
+    await runtime.start();
+    const first = await queue.submit("first", "queue", { operationId: "first" });
+    const second = await queue.submit("second", "queue", { operationId: "second" });
+    await until(() => queue.submission(first.id)?.state === "failed");
+    await new Promise(done => setTimeout(done, 40));
+    const third = await queue.submit("third", "queue"); runtime.emit("state");
+    await new Promise(done => setTimeout(done, 40));
+    assert.equal(queue.submission(second.id)?.state, "queued"); assert.equal(queue.submission(third.id)?.state, "queued");
+    assert.equal(calls().filter(call => call.method === "turn/start").length, 1);
+    assert.equal((await queue.submit("second", "queue", { operationId: "second" })).id, second.id);
+    writeFileSync(stateFile, "idle"); runtime.emit("state");
+    await until(() => queue.submission(third.id)?.state === "done");
+    assert.equal(queue.submission(second.id)?.state, "done"); assert.equal(queue.submission(first.id)?.state, "failed");
+    assert.deepEqual(calls().filter(call => call.method === "turn/start").map(call => call.params.input[0].text), ["first", "second", "third"]);
   } finally { queue.close(); await runtime.stop(); process.env = previous; rmSync(root, { recursive: true, force: true }); }
 });
