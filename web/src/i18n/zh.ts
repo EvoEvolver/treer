@@ -364,6 +364,7 @@ export const zh: Messages = {
   "resizer.resize_tree_sidebar": "调整树侧栏宽度",
   "resizer.expand_tree_sidebar": "展开树侧栏",
   "resizer.collapse_tree_sidebar": "收起树侧栏",
+  "resizer.drag_hint": "拖动调整宽度 · {shortcut} 隐藏侧边栏",
   "traffic.range_6h": "最近 6 小时",
   "traffic.range_24h": "最近 24 小时",
   "traffic.range_7d": "最近 7 天",

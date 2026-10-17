@@ -391,6 +391,86 @@ test.describe('resizable tree sidebar', () => {
     expect(thumb).not.toBe('rgba(0, 0, 0, 0)')
     expect(thumb).not.toBe('transparent')
   })
+  async function platform(page: Page, name: 'MacIntel' | 'Win32') {
+    // userAgentData.platform wins over navigator.platform in the app, so hide it to make the override effective.
+    await page.addInitScript((value) => { Object.defineProperty(navigator, 'platform', { get: () => value }); Object.defineProperty(navigator, 'userAgentData', { get: () => undefined }) }, name)
+  }
+  // Records whether the page's own keydown handling called preventDefault, i.e. whether the Console claimed the key.
+  async function claimed(page: Page, press: string) {
+    await page.evaluate(() => { (window as unknown as { __claimed: boolean[] }).__claimed = []; window.addEventListener('keydown', (event) => queueMicrotask(() => (window as unknown as { __claimed: boolean[] }).__claimed.push(event.defaultPrevented))) })
+    await page.keyboard.press(press)
+    return page.evaluate(() => (window as unknown as { __claimed: boolean[] }).__claimed.at(-1) ?? false)
+  }
+  const sidebarHidden = (page: Page) => expect(page.locator('#tree-sidebar')).toBeHidden()
+  const sidebarShown = (page: Page) => expect(page.locator('#tree-sidebar')).toBeVisible()
+  for (const [name, key, other] of [['MacIntel', 'Meta+b', 'Control+b'], ['Win32', 'Control+b', 'Meta+b']] as const) test(`${key} toggles the sidebar like the collapse button on ${name}; the other modifier does nothing`, async ({ page }) => {
+    await platform(page, name)
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    await page.waitForTimeout(300)
+    expect(await claimed(page, other)).toBe(false)
+    await sidebarShown(page)
+    expect(await claimed(page, key)).toBe(true)
+    await sidebarHidden(page)
+    await expect(page.getByRole('button', { name: 'Expand tree sidebar', exact: true })).toBeVisible()
+    expect(await page.evaluate(() => localStorage.getItem('treer:tree-collapsed:v1:u1'))).toBe('true')
+    // Persists like the button: a reload stays collapsed; the shortcut brings it back.
+    await page.reload()
+    await expect(page.getByRole('button', { name: 'Expand tree sidebar', exact: true })).toBeVisible()
+    await page.keyboard.press(key)
+    await sidebarShown(page)
+    expect(await page.evaluate(() => localStorage.getItem('treer:tree-collapsed:v1:u1'))).toBe('false')
+    // Extra modifiers and other keys are not ours.
+    expect(await claimed(page, key.replace('+b', '+Shift+b'))).toBe(false)
+    await sidebarShown(page)
+  })
+  test('the shortcut is not captured inside a terminal or a rich-text editable, and does not steal focus from the page', async ({ page }) => {
+    await platform(page, 'Win32')
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    await page.getByRole('link', { name: /^api-server(\s|$)/ }).click()
+    await expect(page.locator('.xterm')).toBeVisible()
+    await page.locator('.xterm-helper-textarea').focus()
+    expect(await claimed(page, 'Control+b')).toBe(false)
+    await sidebarShown(page)
+    // A contenteditable (bold shortcut) keeps the key too.
+    await page.evaluate(() => { const editor = document.createElement('div'); editor.id = 'rich'; editor.contentEditable = 'true'; editor.tabIndex = 0; editor.textContent = 'x'; document.body.appendChild(editor); editor.focus() })
+    expect(await claimed(page, 'Control+b')).toBe(false)
+    await sidebarShown(page)
+    // Focus outside the sidebar stays where it is when the shortcut collapses it.
+    await page.evaluate(() => { document.getElementById('rich')!.remove(); (document.querySelector('[role=tablist] [role=tab]') as HTMLElement).focus() })
+    const tab = await page.evaluate(() => document.activeElement?.getAttribute('role'))
+    expect(tab).toBe('tab')
+    expect(await claimed(page, 'Control+b')).toBe(true)
+    await sidebarHidden(page)
+    expect(await page.evaluate(() => document.activeElement?.getAttribute('role'))).toBe('tab')
+  })
+  for (const [lang, name, text] of [['en', 'MacIntel', 'Drag to resize · ⌘B to hide sidebar'], ['en', 'Win32', 'Drag to resize · Ctrl+B to hide sidebar'], ['zh', 'MacIntel', '拖动调整宽度 · ⌘B 隐藏侧边栏']] as const) test(`the resize handle teaches the shortcut (${lang}, ${name})`, async ({ page }, info) => {
+    await platform(page, name)
+    await page.addInitScript((value) => localStorage.setItem('treer-lang', value), lang)
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    const handle = page.getByRole('separator')
+    await handle.hover()
+    await expect(page.getByRole('tooltip')).toHaveText(text)
+    await page.screenshot({ path: info.outputPath(`shortcut-hint-${lang}-${name}.png`) })
+    // Dragging closes the hint; the collapse button names the shortcut too.
+    const box = (await handle.boundingBox())!
+    await page.mouse.down(); await page.mouse.move(box.x + box.width / 2 + 20, box.y + 200, { steps: 4 })
+    await expect(page.getByRole('tooltip')).toHaveCount(0)
+    await page.mouse.up()
+    const collapse = page.locator('#tree-sidebar button[aria-keyshortcuts]')
+    await expect(collapse).toHaveAttribute('aria-keyshortcuts', name === 'MacIntel' ? 'Meta+B' : 'Control+B')
+    await expect(collapse).toHaveAttribute('title', new RegExp(name === 'MacIntel' ? '⌘B\\)$' : 'Ctrl\\+B\\)$'))
+  })
+  test('on a phone the shortcut is ignored (no sidebar to toggle, key not claimed)', async ({ page }) => {
+    await platform(page, 'Win32')
+    await page.setViewportSize({ width: 390, height: 844 })
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    expect(await claimed(page, 'Control+b')).toBe(false)
+    await expect(page.locator('#tree-sidebar')).toBeVisible()
+  })
   test('the tree scrollbar is hidden until it scrolls, then fades', async ({ page }) => {
     await page.goto('/')
     await browseTreeOnMobile(page)
