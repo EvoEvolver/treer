@@ -128,8 +128,13 @@ pub enum PrivateStateStatus {
     Unsafe,
     /// Missing (never started or purged) or an I/O failure.
     Unavailable,
-    /// The directory would be inside the workload cwd; nothing is injected.
+    /// The directory would be inside the workload cwd on a non-hidden path;
+    /// nothing is injected.
     InsideCwd,
+    /// The directory would be inside the workload cwd within a version-
+    /// controlled tree (marker at the directory, the cwd, between them or at a
+    /// cwd ancestor); nothing is injected.
+    InsideVcsWorktree,
     /// Windows: the Controller does not run under an Administrators-group
     /// account; private state is not served at all (product rule).
     RequiresAdministrator,
@@ -142,7 +147,21 @@ impl PrivateStateStatus {
             Self::Unsafe => "agent_private_state_unsafe",
             Self::Unavailable => "agent_private_state_unavailable",
             Self::InsideCwd => "agent_private_state_inside_cwd",
+            Self::InsideVcsWorktree => "agent_private_state_inside_vcs_worktree",
             Self::RequiresAdministrator => crate::private_state::WINDOWS_REQUIRES_ADMINISTRATOR,
+        }
+    }
+
+    /// Fixed, actionable operator text; never an absolute path.
+    pub fn hint(&self) -> Option<&'static str> {
+        match self {
+            Self::InsideCwd => Some(
+                "The Agent's working directory contains the Treer private state directory on a non-hidden path; set the Agent's cwd to a project folder outside the Treer state directory.",
+            ),
+            Self::InsideVcsWorktree => Some(
+                "The Treer private state directory would be inside a version-controlled tree that contains the Agent's working directory; set the Agent's cwd to a project folder outside that repository.",
+            ),
+            _ => None,
         }
     }
 }
@@ -150,6 +169,8 @@ impl PrivateStateStatus {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct PrivateStateReport {
     pub status: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub hint: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub usage: Option<crate::private_state::AgentUsage>,
 }
@@ -2150,8 +2171,17 @@ impl ControllerRuntime {
             return Ok(PrivateStateStatus::Unavailable);
         }
         if let Ok(workload_cwd) = std::fs::canonicalize(self.inner.root.join(cwd.trim())) {
-            if resolved.starts_with(&workload_cwd) {
-                return Ok(PrivateStateStatus::InsideCwd);
+            // Evaluated afresh on every start/restart/report: a repository
+            // initialised later flips the verdict (#133).
+            match crate::private_state::private_directory_placement(&workload_cwd, &resolved) {
+                crate::private_state::Placement::Outside
+                | crate::private_state::Placement::HiddenOutsideVcs => {}
+                crate::private_state::Placement::InsideCwd => {
+                    return Ok(PrivateStateStatus::InsideCwd)
+                }
+                crate::private_state::Placement::InsideVcsWorktree => {
+                    return Ok(PrivateStateStatus::InsideVcsWorktree)
+                }
             }
         }
         if create {
@@ -2248,6 +2278,7 @@ impl ControllerRuntime {
         if self.private_state_ledger()?.is_purged(agent_id) {
             return Ok(PrivateStateReport {
                 status: PrivateStateStatus::Unavailable.code(),
+                hint: None,
                 usage: None,
             });
         }
@@ -2261,6 +2292,7 @@ impl ControllerRuntime {
         };
         Ok(PrivateStateReport {
             status: status.code(),
+            hint: status.hint(),
             usage,
         })
     }

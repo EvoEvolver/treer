@@ -133,6 +133,15 @@ or configuration contents. Failed launch retains the newly saved specification.
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
   output, and file content.
+- Agent private state (attachments) is never placed where tools scan or
+  commit: the Controller refuses a private directory that lies in any
+  version-controlled tree (a VCS marker of any file type at the directory or
+  any ancestor up to the filesystem root, `lstat` only, fail closed, regardless
+  of the cwd) and a private directory below or equal to the Agent's cwd unless
+  the relative path starts with a dot directory; cwd = HOME with hidden `~/.local/state` is
+  allowed, a repository containing the state directory is refused with a fixed
+  hint, and the agent-private root carries `.gitignore`/`.ignore` as defence in
+  depth. Launchers mirror the predicate.
 - When the Proxy serves the browser App itself (`TREER_APP_DIST_DIR`), it does
   so only for the App public URL's host, only from files inside the canonical
   build directory, never for reserved Core prefixes, with the nginx image's
