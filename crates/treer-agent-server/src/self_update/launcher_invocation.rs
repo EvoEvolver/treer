@@ -188,8 +188,9 @@ impl<'a> Invocation<'a> {
         Ok(())
     }
 
-    /// Probe only the retained interpreter's fixed --version operation. This
-    /// grants no reusable execution authority and does not advance the journal.
+    /// Compatibility check of the retained interpreter's self-reported version,
+    /// not authentication of its contents. Grants no reusable execution
+    /// authority and does not advance the journal.
     pub async fn check_node_version(&self) -> Result<()> {
         self.check_node_until(tokio::time::Instant::now() + std::time::Duration::from_secs(10))
             .await
@@ -376,7 +377,7 @@ mod tests {
         let (selected, owned, journal) = bind(&f, "ws_a");
         let before = journal.read().unwrap();
         let node = NodeFixture::new();
-        node.script("[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 2\n[ \"$LANG\" = C ] && [ \"$LC_ALL\" = C ] || exit 3\n[ -z \"${HOME+x}${XDG_CONFIG_HOME+x}${TREER_WORKSPACE_ID+x}${TREER_WORKLOAD_CREDENTIAL+x}${NODE_OPTIONS+x}\" ] || exit 4\nprintf 'v22.14.0\\n'");
+        node.script("[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 2\n[ \"$LANG\" = C ] && [ \"$LC_ALL\" = C ] || exit 3\n[ -z \"${HOME+x}${XDG_CONFIG_HOME+x}${TREER_WORKSPACE_ID+x}${TREER_WORKLOAD_CREDENTIAL+x}${NODE_OPTIONS+x}${TMPDIR+x}\" ] || exit 4\nprintf 'v22.14.0\\n'");
         let plan = Invocation::with_context(
             &selected,
             &owned,

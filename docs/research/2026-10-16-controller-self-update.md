@@ -425,6 +425,14 @@ preservation, wrong version, nonzero exit, excessive output, timeout and a
 replacement of the retained executable before successful output are covered.
 These are version-probe tests, not a real Node or installer acceptance test.
 The call does not advance a receipt or return reusable installation authority.
+Version output is the executable's own claim: this is a compatibility check,
+not authentication of interpreter contents or release provenance. Neither
+receipts nor diagnostics may label the interpreter authenticated based on this
+probe. Retained uid/mode/inode checks remain distinct from a digest/signature.
+The no-file-write version probe deliberately receives no TMPDIR; its isolated
+environment test asserts that absence. Actual installer execution must instead
+receive the revalidated job-private TMPDIR. Executor acceptance must assert
+these two environments separately; installer-side enforcement/tests are pending.
 
 The future executor must still enforce Node and Controller/CLI checks directly
 at installer spawn and after proven completion, integrate expected phase
