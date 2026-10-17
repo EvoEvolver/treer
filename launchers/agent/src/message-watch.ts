@@ -19,7 +19,7 @@ export class MessageCommandError extends Error {
 
 /** Only fixed categories escape the bounded CLI diagnostic buffer. */
 export function messageFailure(text: string) {
-  if (/\b(?:authentication_required|invalid_credentials|workload_credential_invalid|unauthorized|forbidden|401|403)\b/i.test(text)) return new MessageCommandError("auth");
+  if (/(?:^|\n)(?:treer: )?(?:authentication_required|invalid_credentials|workload_credential_invalid)(?=[:\s]|$)|"code"\s*:\s*"(?:authentication_required|invalid_credentials|workload_credential_invalid|unauthorized|forbidden)"|\bHTTP(?:\/\d(?:\.\d)?)?(?: error)?[\s:=]+(?:401|403)\b/i.test(text)) return new MessageCommandError("auth");
   if (/\b(?:proxy_unavailable|controller_unavailable|ECONNREFUSED|ECONNRESET|ETIMEDOUT|ENOTFOUND)\b|failed to connect|connection refused/i.test(text)) return new MessageCommandError("network");
   return new MessageCommandError("other");
 }

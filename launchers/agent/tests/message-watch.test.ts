@@ -209,12 +209,14 @@ test("watcher diagnostics are fixed, retries jitter within the cap, and auth sto
     assert.equal(failure.kind, kind); assert.ok(!failure.message.includes("synthetic"));
   }
   assert.equal(messageFailure("exit 1").kind, "other");
+  for (const text of ["listener port 403", "operation id 401", "forbidden word in unrelated output"]) assert.equal(messageFailure(text).kind, "other");
+  assert.equal(messageFailure('{"error":{"code":"unauthorized","message":"synthetic-secret"}}').kind, "auth");
   assert.equal(messageRetryDelay(0, 1000, () => 0), 1000);
   assert.equal(messageRetryDelay(1, 1000, () => 0.5), 2200);
   assert.equal(messageRetryDelay(20, 1000, () => 1), 60_000);
   const queue = new PromptQueue(runtime(new Fake()), () => {}), logs: string[] = [];
   let calls = 0;
-  const watch = new MessageWatch(queue, "ag_test", text => logs.push(text), async () => { calls++; throw messageFailure(`unauthorized ${secret}`); }, 1);
+  const watch = new MessageWatch(queue, "ag_test", text => logs.push(text), async () => { calls++; throw messageFailure(`authentication_required ${secret}`); }, 1);
   watch.start(); await new Promise(done => setTimeout(done, 30)); await watch.stop();
   assert.equal(calls, 1); assert.match(logs[0], /stopped: message_auth:/);
   assert.ok(!logs.join().includes(secret)); queue.close();

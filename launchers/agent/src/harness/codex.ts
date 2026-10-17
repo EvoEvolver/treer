@@ -244,7 +244,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
     if ((this.thread.status === "error" && !this.thread.lastError) || !recoverable(this.thread.lastError)) return false;
     // Native state is authoritative. Never turn a stale error notification into
     // a second concurrent turn, and never retry terminal authentication errors.
-    if (this.thread.lastError) await this.refresh();
+    if (this.thread.lastError && !await this.refresh()) return false;
     return this.ready && this.thread !== null && this.thread.status !== "running" &&
       !this.thread.activeTurnId && recoverable(this.thread.lastError);
   }
@@ -493,7 +493,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
 
   private async refresh() {
     if (!this.client || !this.thread) {
-      return;
+      return false;
     }
     try {
       const response = await this.client.request<{ thread: Record<string, unknown> }>("thread/read", {
@@ -540,11 +540,15 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       };
       this.thread.turns = this.mergedTurns();
       this.emit("state");
+      // systemError, unknown native states and absent turn data cannot attest
+      // dispatchability. Missing status is supported by older app-servers only
+      // when their returned turn history confirms there is no active turn.
+      return !running && Array.isArray(record.turns) && (statusType == null || statusType === "idle");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("not materialized")) {
         this.emit("state");
-        return;
+        return false;
       }
       throw error;
     }

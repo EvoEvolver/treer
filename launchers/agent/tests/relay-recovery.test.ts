@@ -89,6 +89,29 @@ test("provider error classification never returns supplier text", () => {
   for (const text of ["502", "429 rate limit", "401", "403", "configuration", "unknown"]) {
     assert.ok(!providerError(`${text} synthetic-secret`).includes("synthetic"));
   }
+  for (const text of ["500 tokens exceeded", "model unavailable in this configuration", "port 502", "connection setting invalid"]) assert.ok(!providerError(text).startsWith("provider_unavailable:"));
+  assert.match(providerError({ message: "synthetic-secret", codexErrorInfo: { httpConnectionFailed: { httpStatusCode: 502 } } }), /^provider_unavailable:/);
+  assert.match(providerError({ message: "502 Bad Gateway", httpStatusCode: 401 }), /^provider_auth_required:/);
+});
+
+for (const state of ["systemError", "systemError-empty", "not-materialized"]) test(`unconfirmed native ${state} never dispatches recovery`, async () => {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), "relay-unconfirmed-"));
+  const previous = process.env;
+  process.env = hermeticEnv({ FAKE_CODEX_RELAY_RECOVERY: "1", FAKE_CODEX_RECOVERY_STATE: state, FAKE_CODEX_CALLS: join(root, "calls") });
+  const runtime = new CodexRuntime(resolve(import.meta.dirname, "fake-codex.mjs"), root);
+  const queue = new PromptQueue(runtime, () => {}, { file: join(root, "queue.json") });
+  try {
+    await runtime.start();
+    const first = await queue.submit("first", "queue", { operationId: "first" });
+    const second = await queue.submit("second", "queue", { operationId: "second" });
+    await until(() => queue.submission(first.id)?.state === "failed");
+    await new Promise(done => setTimeout(done, 80));
+    assert.equal(queue.submission(second.id)?.state, "queued");
+    assert.equal((await queue.submit("second", "queue", { operationId: "second" })).id, second.id);
+    assert.equal(queue.submission(first.id)?.state, "failed");
+    const calls = readFileSync(join(root, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(calls.filter(call => call.method === "turn/start").length, 1);
+  } finally { queue.close(); await runtime.stop(); process.env = previous; rmSync(root, { recursive: true, force: true }); }
 });
 
 test("authoritative active turn prevents recovery dispatch despite a cached terminal error", async () => {

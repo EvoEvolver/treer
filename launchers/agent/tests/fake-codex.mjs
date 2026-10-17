@@ -105,6 +105,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
   }
   if (["thread/start", "thread/resume", "thread/read"].includes(request.method)) {
     const failed = turns.find(turn => turn.id === "relay-1" && turn.status === "failed");
+    if (request.method === "thread/read" && failed && process.env.FAKE_CODEX_RECOVERY_STATE === "not-materialized") {
+      console.log(JSON.stringify({ id: request.id, error: { message: "thread not materialized" } })); continue;
+    }
     if (request.method === "thread/read" && process.env.FAKE_CODEX_RECOVERY_ACTIVE && failed && !recoveryRead) {
       recoveryRead = true; failed.status = "inProgress";
       setTimeout(() => {
@@ -117,8 +120,9 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
       console.log(JSON.stringify({ id: request.id, error: { message: "read unavailable" } }));
       continue;
     }
-    const status = process.env.FAKE_CODEX_STATUS ? { type: process.env.FAKE_CODEX_STATUS } : undefined;
-    result = { thread: { id: threadId, cwd: process.cwd(), turns, ...(status ? { status } : {}) }, model: "test" };
+    const recoveryState = failed ? process.env.FAKE_CODEX_RECOVERY_STATE : undefined;
+    const status = recoveryState?.startsWith("systemError") ? { type: "systemError" } : process.env.FAKE_CODEX_STATUS ? { type: process.env.FAKE_CODEX_STATUS } : undefined;
+    result = { thread: { id: threadId, cwd: process.cwd(), turns: recoveryState === "systemError-empty" ? [] : turns, ...(status ? { status } : {}) }, model: "test" };
   }
   if (request.method === "turn/steer" && request.params.expectedTurnId !== "turn-live") {
     console.log(JSON.stringify({ id: request.id, error: { message: `expected active turn id \`${request.params.expectedTurnId}\` but found \`turn-live\`` } }));

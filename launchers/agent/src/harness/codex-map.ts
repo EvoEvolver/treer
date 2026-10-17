@@ -167,7 +167,7 @@ export function mapTurn(turn: CodexTurn): TurnDto {
     id,
     startedAt: null,
     status,
-    error: turn.error ? providerError(turn.error.message) : null,
+    error: turn.error ? providerError(turn.error) : null,
     items: (turn.items ?? []).map((item, index) => mapItem(item, id, index)),
   };
 }
