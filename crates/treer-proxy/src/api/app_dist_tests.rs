@@ -36,10 +36,13 @@ impl Drop for Dist {
 }
 
 async fn app_router(dist: &Dist, app_url: &str, proxy_url: &str) -> Router {
-    let auth = AuthStore::for_test("admin-password").await;
-    let messages = MessageStore::open(auth.pool()).await.unwrap();
     let proxy = Url::parse(proxy_url).unwrap();
     let app = Url::parse(app_url).unwrap();
+    // The CSRF/Origin checks compare against the store's own public URLs.
+    let auth = AuthStore::for_test("admin-password")
+        .await
+        .with_public_urls(app.clone(), proxy.clone());
+    let messages = MessageStore::open(auth.pool()).await.unwrap();
     let identity = IdentityIssuer::load(&auth, &proxy).await.unwrap();
     let bootstrap = BootstrapConfig::new(
         proxy.clone(),
@@ -366,4 +369,125 @@ fn app_dist_configuration_requires_an_index_and_reports_the_origin_rule() {
     assert!(AppDistConfig::new(&empty, &proxy, &proxy).is_err());
     assert!(AppDistConfig::new(&empty.join("absent"), &proxy, &proxy).is_err());
     std::fs::remove_dir_all(empty).unwrap();
+}
+
+/// Security 2511 (1): with Console and Proxy on the same site, SameSite does
+/// nothing for cross-origin requests, so writes must be accepted only from the
+/// Console origin, refused from any other origin of the same site even with a
+/// valid cookie, and CORS must grant credentials to no other origin.
+#[tokio::test]
+async fn same_site_isolation_rests_on_origin_checks_not_samesite() {
+    let dist = Dist::new();
+    let app = app_router(
+        &dist,
+        "http://console.treer.localhost:8080/",
+        "http://proxy.treer.localhost:8080/",
+    )
+    .await;
+    let proxy = "proxy.treer.localhost:8080";
+    let console = "http://console.treer.localhost:8080";
+    let third = "http://app.treer.localhost:8080";
+    let login = |origin: &'static str| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/api/admin/login")
+                    .header(header::HOST, proxy)
+                    .header(header::ORIGIN, origin)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(r#"{"password":"admin-password"}"#))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    // (b) a same-site third origin cannot even log in.
+    assert_eq!(login(third).await.status(), StatusCode::FORBIDDEN);
+    // (a) the Console origin can, and receives a host-only Strict cookie.
+    let response = login(console).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let set_cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert!(set_cookie.contains("SameSite=Strict"), "{set_cookie}");
+    assert!(
+        !set_cookie.to_ascii_lowercase().contains("domain="),
+        "{set_cookie}"
+    );
+    let cookie = set_cookie.split(';').next().unwrap().to_owned();
+    let write = |origin: Option<&'static str>, cookie: String| {
+        let app = app.clone();
+        async move {
+            let mut builder = Request::builder()
+                .method(Method::POST)
+                .uri("/api/admin/logout")
+                .header(header::HOST, proxy)
+                .header(header::COOKIE, cookie)
+                .header("sec-fetch-site", "same-site")
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(origin) = origin {
+                builder = builder.header(header::ORIGIN, origin);
+            }
+            app.oneshot(builder.body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+                .status()
+        }
+    };
+    // (b) the valid cookie from a same-site third origin, or without an Origin,
+    // is refused before any handler runs.
+    assert_eq!(
+        write(Some(third), cookie.clone()).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        write(Some("http://proxy.treer.localhost:8080"), cookie.clone()).await,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(write(None, cookie.clone()).await, StatusCode::FORBIDDEN);
+    // (c) CORS: no credentials for a third origin, credentials for the Console.
+    let preflight = |origin: &'static str| {
+        let app = app.clone();
+        async move {
+            app.oneshot(
+                Request::builder()
+                    .method(Method::OPTIONS)
+                    .uri("/api/admin/me")
+                    .header(header::HOST, proxy)
+                    .header(header::ORIGIN, origin)
+                    .header("access-control-request-method", "GET")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+        }
+    };
+    // The exact-origin CORS layer only ever names the Console origin, so a
+    // same-site third origin never receives an Access-Control-Allow-Origin
+    // matching itself and the browser refuses the credentialed response.
+    let denied = preflight(third).await;
+    let allowed_origin = denied
+        .headers()
+        .get("access-control-allow-origin")
+        .map(|value| value.to_str().unwrap().to_owned());
+    assert_ne!(allowed_origin.as_deref(), Some(third), "{denied:?}");
+    assert!(
+        allowed_origin
+            .as_deref()
+            .is_none_or(|origin| origin == console),
+        "{denied:?}"
+    );
+    let allowed = preflight(console).await;
+    assert_eq!(allowed.headers()["access-control-allow-origin"], console);
+    assert_eq!(
+        allowed.headers()["access-control-allow-credentials"],
+        "true"
+    );
+    // (a) the same write from the Console origin is accepted with the cookie.
+    assert_eq!(write(Some(console), cookie).await, StatusCode::OK);
 }
