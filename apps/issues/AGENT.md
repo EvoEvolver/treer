@@ -37,7 +37,7 @@ chmod +x /tmp/issues
 /tmp/issues assign 1 ag_STABLE_ID_FROM_DIRECTORY
 /tmp/issues status 1 in_progress
 /tmp/issues comment 1 'Reproduced; investigating compiler output.' --title 'Reproduced on main'
-/tmp/issues show 1 --titles          # activity with comment titles only (body_bytes shows the text size)
+/tmp/issues show 1 --titles          # comments as title (or a 160-char excerpt when untitled) + body_bytes
 /tmp/issues activity 1 42            # read one comment's full text when its title is not enough
 /tmp/issues claim 1 --seconds 900
 /tmp/issues claim 1 --action renew --seconds 900
@@ -109,7 +109,7 @@ All successful data responses and errors are JSON. Errors use
 | GET `/v1/me` | — | principal, notification note |
 | GET `/v1/directory` | — | principals (stable human/Agent IDs) |
 | GET `/v1/issues` | status, assignee, label, parent_id, limit=50, offset=0 | issues, total, next_offset |
-| GET `/v1/issues/ID` | limit=50, offset=0 (activity paging), comments=full\|titles | issue, children, activity, next_activity_offset (`comments=titles`: comments carry `title`/`body_bytes`, no text) |
+| GET `/v1/issues/ID` | limit=50, offset=0 (activity paging), comments=full\|titles | issue, children, activity, next_activity_offset (`comments=titles`: comments carry `title` or an `excerpt` (untitled ones, first 160 chars on one line) and `body_bytes`, no text) |
 | GET `/v1/issues/ID/activity/EVENT` | — | event (one activity entry in full, comment text included) |
 | GET `/v1/issues/ID/children` | limit=50, offset=0 | issues, total, next_offset (direct children with subtree progress) |
 | POST `/v1/issues` | title, description, status, priority, labels, assignee, parent_id, blocked_by | detail + notification |

@@ -27,6 +27,7 @@ def fields(body, allowed):
 
 
 COMMENT_TITLE_BYTES = 200
+EXCERPT_CHARS = 160
 
 
 def text(value, name, maximum, empty=False):
@@ -153,12 +154,15 @@ class Store:
 
     @staticmethod
     def titles_only(event):
-        """A comment without its text: `title` (when the author wrote one) and `body_bytes` say what is there; the text
-        is read on demand with `event()`. Other activity (changes, summaries) is small and unchanged."""
+        """A comment without its text: `title` (when the author wrote one, else a one-line `excerpt` of the first 160
+        characters) and `body_bytes` say what is there; the text is read on demand with `event()`. Other activity (changes, summaries) is small and unchanged."""
         if event.get('kind') != 'comment' or 'body' not in event:
             return event
         short = {k: v for k, v in event.items() if k != 'body'}
         short['body_bytes'] = len(event['body'].encode())
+        if not event.get('title'):
+            line = ' '.join(event['body'].split())    # one line, runs of whitespace squeezed
+            short['excerpt'] = line if len(line) <= EXCERPT_CHARS else line[:EXCERPT_CHARS - 1].rstrip() + '\u2026'
         return short
 
     def event(self, issue_id, event_id):
