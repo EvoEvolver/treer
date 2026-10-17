@@ -216,9 +216,16 @@ and recompute transfer identity from the reassembled source ID. Inbound Core
 idempotency keys derive from endpoint/generation/external ID, never SQLite row IDs;
 a rebuild can reorder rows without changing the key. Relay startup must report
 its own binary hash to hub status (diagnostic only, never trust/authorization).
-Incomplete-transfer expiry/cleanup and capacity accounting, completed tombstone
-pruning, durable poison-message failure+ack and actual relay startup reporting
-remain P2 work. None may be
+Durable fragment sets now count against the shared pending count/byte limits.
+Incomplete sets expire 600 seconds after their first part (duplicates never
+extend it); ready complete sets remain pending until downstream acceptance.
+Periodic cleanup removes expired plaintext, retains completed/expired per-part
+hash tombstones for 30 days, then prunes them. Completed payloads are removed
+after downstream durable acceptance; their hashes still reject conflicting
+replays. Reopen tests cover partial-set recovery and completed-set deduplication.
+The daemon must invoke cleanup and drain ready transfers after restart; no daemon
+currently exists to do that automatically. Regular queue-row pruning, durable
+poison-message failure+ack and actual relay startup reporting remain P2 work. None may be
 inferred as complete from the current in-memory queue tests.
 
 The Unix persistent store opener creates only the final dedicated state directory

@@ -42,8 +42,8 @@ impl Default for Limits {
 }
 
 pub struct Store {
-    db: Connection,
-    limits: Limits,
+    pub(crate) db: Connection,
+    pub(crate) limits: Limits,
     #[cfg(unix)]
     _private_files: Option<crate::private_store::PrivateFiles>,
 }
@@ -128,6 +128,19 @@ impl Store {
                 digest BLOB NOT NULL, pending INTEGER NOT NULL DEFAULT 1,
                 lease_token TEXT, lease_until INTEGER, core_id TEXT,
                 UNIQUE(endpoint,generation,external_id));
+             CREATE TABLE IF NOT EXISTS transfers (
+                endpoint TEXT NOT NULL REFERENCES endpoints(id), generation INTEGER NOT NULL,
+                direction INTEGER NOT NULL, transfer TEXT NOT NULL, digest TEXT NOT NULL,
+                parts INTEGER NOT NULL, state INTEGER NOT NULL DEFAULT 0,
+                expires INTEGER NOT NULL, terminal_at INTEGER,
+                PRIMARY KEY(endpoint,generation,direction,transfer));
+             CREATE TABLE IF NOT EXISTS fragments (
+                endpoint TEXT NOT NULL, generation INTEGER NOT NULL,
+                direction INTEGER NOT NULL, transfer TEXT NOT NULL, part INTEGER NOT NULL,
+                wire TEXT, digest BLOB NOT NULL,
+                PRIMARY KEY(endpoint,generation,direction,transfer,part),
+                FOREIGN KEY(endpoint,generation,direction,transfer)
+                  REFERENCES transfers(endpoint,generation,direction,transfer) ON DELETE CASCADE);
              PRAGMA application_id=1413828168;
              PRAGMA user_version=1;
              COMMIT;",
@@ -210,7 +223,7 @@ impl Store {
             }
             return Ok(id);
         }
-        capacity(&transaction, self.limits, endpoint, payload.len())?;
+        capacity(&transaction, self.limits, endpoint, payload.len(), 1)?;
         transaction.execute(
             "INSERT INTO outbound(endpoint,generation,delivery,message,payload,digest)
              VALUES (?1,?2,?3,?4,?5,?6)",
@@ -242,7 +255,7 @@ impl Store {
             }
             return Ok(id);
         }
-        capacity(&transaction, self.limits, item.endpoint, item.body.len())?;
+        capacity(&transaction, self.limits, item.endpoint, item.body.len(), 1)?;
         transaction.execute(
             "INSERT INTO inbound(endpoint,generation,external_id,recipient,body,digest)
              VALUES (?1,?2,?3,?4,?5,?6)",
@@ -369,7 +382,7 @@ impl Store {
 fn valid_id(id: &str) -> bool {
     !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
 }
-fn available(
+pub(crate) fn available(
     transaction: &Transaction<'_>,
     endpoint: &str,
     generation: i64,
@@ -383,22 +396,26 @@ fn available(
         .optional()?
         .ok_or(Error::Unavailable)
 }
-fn capacity(
+pub(crate) fn capacity(
     transaction: &Transaction<'_>,
     limits: Limits,
     endpoint: &str,
     added: usize,
+    added_count: i64,
 ) -> Result<(), Error> {
     let (count,bytes,local_count,local_bytes) = transaction.query_row(
         "SELECT COUNT(*),COALESCE(SUM(size),0),COALESCE(SUM(endpoint=?1),0),
          COALESCE(SUM(CASE WHEN endpoint=?1 THEN size ELSE 0 END),0)
          FROM (SELECT endpoint,length(payload) AS size FROM outbound WHERE pending=1
-               UNION ALL SELECT endpoint,length(CAST(body AS BLOB)) AS size FROM inbound WHERE pending=1)",
+               UNION ALL SELECT endpoint,length(CAST(body AS BLOB)) AS size FROM inbound WHERE pending=1
+               UNION ALL SELECT t.endpoint,COALESCE(SUM(length(CAST(f.wire AS BLOB))),0) AS size
+                 FROM transfers t LEFT JOIN fragments f USING(endpoint,generation,direction,transfer)
+                 WHERE t.state IN (0,1) GROUP BY t.endpoint,t.generation,t.direction,t.transfer)",
         [endpoint], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?,r.get::<_,i64>(2)?,r.get::<_,i64>(3)?)),
     )?;
     let added = i64::try_from(added).map_err(|_| Error::Invalid)?;
-    if count >= limits.global_count
-        || local_count >= limits.endpoint_count
+    if count + added_count > limits.global_count
+        || local_count + added_count > limits.endpoint_count
         || bytes + added > limits.global_bytes
         || local_bytes + added > limits.endpoint_bytes
     {
