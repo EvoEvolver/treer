@@ -26,8 +26,16 @@
     for (const listener of listeners) listener(state);
   }
   media.addEventListener("change", () => { if (!override && mode === "system") apply(); });
-  addEventListener("message", (event) => {
-    if (event.source !== parent || event.data?.type !== "treer:embed-theme" || !okTheme(event.data.theme)) return;
+  // Standalone pages never inherit appearance from another window. In a frame,
+  // the Console supplies its own origin explicitly (appearance only, not auth).
+  let parentOrigin = null;
+  try {
+    const configured = params.get("embed_origin") || location.origin;
+    const candidate = new URL(configured);
+    if (["http:", "https:"].includes(candidate.protocol) && candidate.origin === configured) parentOrigin = configured;
+  } catch { /* malformed configuration disables parent messages */ }
+  if (window.top !== window && parentOrigin) addEventListener("message", (event) => {
+    if (event.source !== parent || event.origin !== parentOrigin || event.data?.type !== "treer:embed-theme" || !okTheme(event.data.theme)) return;
     override = event.data.theme;
     const sent = okLook(event.data.look);
     if (sent) look = sent; // session-only: the console's look is not written to the launcher's own storage
