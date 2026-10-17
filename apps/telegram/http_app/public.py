@@ -2,7 +2,6 @@
 import argparse
 import collections
 import contextlib
-from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -12,22 +11,12 @@ import threading
 import time
 import urllib.parse
 
-from .common import Error, Limiter, MAX_REQUEST, fields, invalid, strict_json, write_backoff
+from .common import Error, Limiter, MAX_REQUEST, fields, invalid, strict_json, write_backoff, wire
 from . import ipc
 from .store import QueueStore, PublicQueues
 
 ROUTES = {("POST", "/v1/pair"), ("POST", "/v1/inbox"), ("GET", "/v1/outbox"), ("POST", "/v1/outbox/ack")}
 
-
-def wire(value):
-    """Keep epoch arithmetic private and expose UTC RFC 3339 on the wire."""
-    if isinstance(value, list):
-        return [wire(item) for item in value]
-    if isinstance(value, dict):
-        return {key: datetime.fromtimestamp(item, timezone.utc).isoformat().replace("+00:00", "Z")
-                if key in ("at", "created_at", "expires_at", "failed_at", "last_at") and type(item) in (int, float)
-                else wire(item) for key, item in value.items()}
-    return value
 
 
 class Application:
@@ -76,16 +65,16 @@ class Application:
 
     def poll(self, client, token, after, wait):
         deadline = time.monotonic() + wait
+        started_at = time.time()
         with self.polling(client, wait):
             while True:
                 # Every iteration closes its SQLite connections, including empty polls.
                 self.queues.authenticate(token)
                 result = self.queues.poll(client, after)
-                if result["items"] or result["failures"] or time.monotonic() >= deadline:
+                new_failure = any(item['failed_at'] > started_at for item in result['failures'])
+                if result["items"] or new_failure or time.monotonic() >= deadline:
                     self.queues.authenticate(token)  # rotation/revocation while waiting
                     self.queues.available(client)
-                    for item in result["items"]:
-                        item["created_at"] = datetime.fromtimestamp(item["created_at"], timezone.utc).isoformat().replace("+00:00", "Z")
                     return result
                 time.sleep(min(0.2, max(0, deadline - time.monotonic())))
 
@@ -154,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def body(self, limit=MAX_REQUEST):
         lengths = self.headers.get_all("Content-Length") or []
-        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or self.headers.get("Transfer-Encoding"):
+        if len(lengths) != 1 or not lengths[0].isascii() or not lengths[0].isdigit() or "Transfer-Encoding" in self.headers:
             raise Error(400, "invalid_request", "One Content-Length required")
         length = int(lengths[0])
         if not 0 < length <= limit:

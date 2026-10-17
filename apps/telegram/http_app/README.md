@@ -153,7 +153,9 @@ Pairing cooldown is visible as `pair_backoff` in state and on the page; the
 public/bridge processes write at most one small private non-secret diagnostic
 file per cooldown window, never anonymous-failure rows in SQLite. Sustained
 anonymous pairing traffic can keep legitimate redemption cooling down; no
-issued codes are destroyed because of it.
+issued codes are destroyed because of it. These files are display-only diagnostics
+and never authorize requests or control admission; real cooldown is enforced by
+the public/bridge processes in bounded memory.
 State changes also require a trusted configured App/Proxy Origin,
 `X-Http-Settings: 1`, and non-cross-site Fetch Metadata. No public management API.
 
@@ -185,7 +187,12 @@ never write SQLite or invalidate issued codes. Anonymous failures have a separat
 60/min response budget; no client budget is spent. Restart resets RAM counters.
 
 Long polls: two/client, 16 globally, authenticated before admission, 30 seconds
-maximum, no open SQLite transaction while waiting. Pause/revoke rechecked every
+maximum, no open SQLite transaction while waiting. Previously seen failures do
+not wake a new long poll; only a failure created after that poll starts wakes
+it early (old diagnostics remain included at timeout). Poll JSON including
+escaped bodies, timestamps and the latest 100 failures is capped at 256 KiB;
+only returned item sequences become ackable. Private drop summaries have at
+most 32 fixed reasons and stay below 16 KiB. Pause/revoke rechecked every
 200 ms and before response; the listener caps all connections at 40. Body read
 has a five-second deadline; header reads use a five-second **idle**, not total,
 timeout. Slow headers can occupy all 40 slots until the Core ingress protection

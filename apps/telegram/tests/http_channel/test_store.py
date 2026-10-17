@@ -174,3 +174,15 @@ class StoreTests(unittest.TestCase):
         other=self.a.redeem(self.a.issue('human:owner','ag_poc','Active')['code'])['client_id']
         expected=self.q.enqueue(other,{'body':'active','idempotency_key':'active'})
         self.assertEqual(self.q.lease()['message_id'],expected)
+
+    def test_entire_poll_json_is_bounded_and_unreturned_items_cannot_be_acked(self):
+        from http_app.common import wire
+        for index in range(100):
+            message=self.q.enqueue(self.client,{'body':'failure','idempotency_key':'failed-'+str(index)})
+            self.q.fail_inbound(message,'context_unavailable')
+        for index in range(5):self.q.outbound(self.client,'core-'+str(index),'delivery-'+str(index),'"'*60000)
+        result=self.q.poll(self.client,0)
+        self.assertEqual(len(result['failures']),100)
+        self.assertLessEqual(len(json.dumps(wire(result),ensure_ascii=False).encode()),256*1024)
+        self.assertLess(len(result['items']),5)
+        with self.assertRaises(Error):self.q.ack(self.client,result['next_after']+1)

@@ -161,3 +161,4 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(len(notices),1,'drop notices are bounded per client, not per message')
         self.assertEqual(notices[0][0][notices[0][0].index('--to')+1],'ag_poc')
         self.assertIn('--stdin-envelope',notices[0][0])
+        self.assertEqual(notices[0][0][notices[0][0].index('--context')+1],'msg_full_0')

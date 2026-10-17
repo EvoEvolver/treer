@@ -152,7 +152,8 @@ class PublicTests(unittest.TestCase):
                 s.sendall(('POST /v1/inbox HTTP/1.1\r\nHost: fixture\r\n' + auth + headers + '\r\n').encode() + body)
                 return s.recv(4096).split(b'\r\n')[0]
         for headers in ('Content-Length: 2\r\nContent-Length: 2\r\n',
-                        'Content-Length: 2\r\nTransfer-Encoding: chunked\r\n'):
+                        'Content-Length: 2\r\nTransfer-Encoding: chunked\r\n',
+                        'Content-Length: 2\r\nTransfer-Encoding:\r\nTransfer-Encoding: chunked\r\n'):
             self.assertIn(b'400', raw(headers,b'{}'))
         for body in (b'{"body":"one","body":"two","idempotency_key":"one"}',
                      b'{"body":"one","idempotency_key":NaN}', b'\xff'):
@@ -216,3 +217,19 @@ class PublicTests(unittest.TestCase):
                 self.assertIn(b'408',connection.recv(4096).split(b'\r\n')[0])
                 self.assertLess(time.monotonic()-started,7)
             finally:stop.set();thread.join(1)
+
+    def test_old_failures_do_not_busy_poll_but_new_failures_wake_waiters(self):
+        old=self.q.enqueue(self.client,{'body':'old','idempotency_key':'old'})
+        self.q.fail_inbound(old,'context_unavailable')
+        started=time.monotonic()
+        result=self.request('GET','/v1/outbox?timeout=1')
+        self.assertEqual(result[0],200)
+        self.assertGreaterEqual(time.monotonic()-started,.9)
+        self.assertEqual(result[1]['failures'][0]['message_id'],old)
+        pending=self.q.enqueue(self.client,{'body':'new','idempotency_key':'new'})
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+            result=pool.submit(self.request,'GET','/v1/outbox?timeout=30')
+            deadline=time.monotonic()+2
+            while self.app.poll_counts[self.client]<1 and time.monotonic()<deadline:time.sleep(.01)
+            self.q.fail_inbound(pending,'context_unavailable')
+            self.assertEqual(result.result(timeout=3)[0],200)

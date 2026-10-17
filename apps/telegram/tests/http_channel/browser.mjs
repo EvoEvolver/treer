@@ -10,8 +10,8 @@ const require=createRequire(import.meta.url);
 const {chromium}=require(process.env.TELEGRAM_PLAYWRIGHT_MODULE||'playwright');
 const screenshots=process.env.HTTP_SCREENSHOT_DIR||'/tmp/treer-http-142-screenshots';
 const clean=()=>Object.fromEntries(Object.entries(process.env).filter(([k])=>!/^(TREER_|AGENT_UI_|CODEX_UI_|CODEX_)/.test(k)&&!/^(http_proxy|https_proxy|all_proxy|no_proxy)$/i.test(k)));
-async function start(){
- const fixture=spawn('python3',['-I',fileURLToPath(new URL('./browser_fixture.py',import.meta.url))],{env:clean(),stdio:['ignore','pipe','pipe']});
+async function start({oldFailure=false}={}){
+ const fixture=spawn('python3',['-I',fileURLToPath(new URL('./browser_fixture.py',import.meta.url))],{env:{...clean(),HTTP_FIXTURE_OLD_FAILURE:oldFailure?'1':'0'},stdio:['ignore','pipe','pipe']});
  let stderr='';fixture.stderr.on('data',v=>stderr+=v);const lines=createInterface({input:fixture.stdout});
  const [line]=await once(lines,'line');return {...JSON.parse(line),fixture,lines,stderr:()=>stderr};
 }
@@ -53,14 +53,14 @@ for(const width of [1280,390])for(const tunnel of [false,true])test(`HTTP settin
  }finally{await browser.close();f.fixture.kill('SIGTERM');await once(f.fixture,'exit');f.lines.close();}
 });
 
-test('public forwarding fixture preserves a real 30-second poll and pause interrupts it',async()=>{
- const f=await start();
+test('public forwarding fixture preserves a real 30-second poll with old failures and pause interrupts it',async()=>{
+ const f=await start({oldFailure:true});
  try{
   const control=(path,body)=>fetch(f.url+'/workspace/'+path,{method:'POST',headers:{'Content-Type':'application/json','X-Http-Settings':'1',Origin:f.url},body:JSON.stringify(body)});
   const made=await (await control('v1/pairings',{label:'30-second poll',poc:'ag_poc'})).json();
   const pair=await (await fetch(f.url+'/public/v1/pair',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({code:made.code})})).json();
   const headers={Authorization:'Bearer '+pair.token};const started=Date.now();
-  const r=await fetch(f.url+'/public/v1/outbox?timeout=30',{headers});assert.equal(r.status,200);assert.deepEqual((await r.json()).items,[]);
+  const r=await fetch(f.url+'/public/v1/outbox?timeout=30',{headers});assert.equal(r.status,200);const result=await r.json();assert.deepEqual(result.items,[]);assert.equal(result.failures.length,1);
   assert(Date.now()-started>=29500);assert(Date.now()-started<35000);
   const waiting=fetch(f.url+'/public/v1/outbox?timeout=30',{headers});
   await new Promise(resolve=>setTimeout(resolve,300));

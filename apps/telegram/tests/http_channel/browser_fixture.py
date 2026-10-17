@@ -2,6 +2,7 @@
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import signal
 import sys
@@ -44,6 +45,13 @@ class Gateway(BaseHTTPRequestHandler):
         c=http.client.HTTPConnection(*target.server_address,timeout=35)
         try:
             c.request(self.command,path,body=body,headers=headers);r=c.getresponse();raw=r.read()
+            # Test-only seed: the long-poll regression starts with an OLD failure,
+            # before its token response reaches the caller. No extra API route.
+            if not human and path=='/v1/pair' and r.status==200 and self.server.seed_failure:
+                client=json.loads(raw)['client_id']
+                with self.server.queues._lock:
+                    failed=self.server.queues.enqueue(client,{'body':'synthetic expired context','idempotency_key':'old-failure'})
+                    self.server.queues.fail_inbound(failed,'context_unavailable')
             self.send_response(r.status)
             for k,v in r.headers.items():
                 if k.lower()=='content-security-policy' and human and self.path.startswith(PREFIX):v=v.replace("frame-ancestors 'none'","frame-ancestors 'self'")
@@ -66,6 +74,7 @@ def main():
         pair=PairServer(root/'pair.sock',a)
         data=public.Server(('127.0.0.1',0),public.Handler,public.Application(q,root/'pair.sock'))
         gateway.settings,gateway.data=control,data
+        gateway.queues=q;gateway.seed_failure=os.environ.get("HTTP_FIXTURE_OLD_FAILURE")=="1"
         servers=(proxy,control,pair,data,gateway)
         threads=[]
         for s in servers:

@@ -132,5 +132,10 @@ class SettingsTests(unittest.TestCase):
         for _ in range(3):self.a.unroutable('drop-fixture',99,'undeliverable_queue_full')
         state=json.loads(self.request()[1])
         self.assertEqual(state['drops']['total'],1)
+        self.assertLessEqual(len(json.dumps(state['drops']).encode()),16384)
         self.assertEqual(state['drops']['by_reason'][0]['reason'],'undeliverable_queue_full')
         self.assertTrue(state['drops']['by_reason'][0]['last_at'].endswith('Z'))
+        # Even a future bug inserting oversized diagnostic metadata stays bounded.
+        with self.a._connect() as db:
+            db.execute('INSERT INTO http_drop_counts VALUES (?,1,?)',('z'*20000,self.a.clock()))
+        self.assertLessEqual(len(json.dumps(self.a.drop_summary(),ensure_ascii=False).encode()),16384)

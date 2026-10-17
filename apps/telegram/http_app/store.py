@@ -12,7 +12,7 @@ import time
 
 from telegram_app.registry import REGISTRY_SCHEMA, RegistryMixin, PAIR_ALPHABET
 from .common import (Error, ID, TOKEN, MAX_BODY, MAX_ITEMS, MAX_CLIENT_BYTES,
-                     MAX_TOTAL_BYTES, digest, fields, invalid, text, write_backoff)
+                     MAX_TOTAL_BYTES, digest, fields, invalid, text, write_backoff, wire)
 
 
 class Database:
@@ -251,18 +251,21 @@ class QueueStore(Database):
             self.available(db, client)
             rows = db.execute("SELECT seq,message_id,body,created_at FROM outbox WHERE client_id=? AND seq>? AND acked_at IS NULL ORDER BY seq LIMIT 20",
                               (client, after)).fetchall()
-        items, size = [], 0
-        for row in rows:
-            if items and size + len(row["body"].encode()) > 256000:
-                break
-            items.append(dict(row)); size += len(row["body"].encode())
-        if items:
-            with self._connect() as db:
-                db.execute("UPDATE clients SET served_seq=max(served_seq,?) WHERE id=?", (items[-1]["seq"], client))
         with self._connect() as db:
             failures = [dict(row) for row in db.execute("""SELECT message_id,failure_code AS code,created_at,failed_at FROM inbox
-                WHERE client_id=? AND state='failed' ORDER BY created_at DESC LIMIT 100""", (client,))]
-        return {"items": items, "failures": failures, "next_after": items[-1]["seq"] if items else after}
+                WHERE client_id=? AND state='failed' ORDER BY failed_at DESC LIMIT 100""", (client,))]
+        result = {"items": [], "failures": failures, "next_after": after}
+        for row in rows:
+            candidate = {**result, "items": result['items'] + [dict(row)], "next_after": row['seq']}
+            # Account for JSON escaping, timestamps and diagnostics, not just
+            # raw body bytes. An unseen sequence cannot become ackable.
+            if len(json.dumps(wire(candidate), ensure_ascii=False).encode()) > 256 * 1024:
+                break
+            result = candidate
+        if result['items']:
+            with self._connect() as db:
+                db.execute("UPDATE clients SET served_seq=max(served_seq,?) WHERE id=?", (result['next_after'], client))
+        return result
 
     def ack(self, client, up_to, expected_generation=None):
         if type(up_to) is not int or up_to < 0:
@@ -462,7 +465,10 @@ class AdminStore(Database, RegistryMixin):
     def drop_summary(self):
         with self._connect() as db:
             rows = [dict(row) for row in db.execute('SELECT reason,count,last_at FROM http_drop_counts ORDER BY reason LIMIT 32')]
-        return {'total': sum(row['count'] for row in rows), 'by_reason': rows}
+        result = {'total': sum(row['count'] for row in rows), 'by_reason': rows}
+        while result['by_reason'] and len(json.dumps(wire(result), ensure_ascii=False).encode()) > 16 * 1024:
+            result['by_reason'].pop()
+        return result
 
     def claim_drop_notice(self, client):
         # One per client/minute and twenty globally; reserve before CLI send.
