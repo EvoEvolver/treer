@@ -674,7 +674,7 @@ async fn hidden_private_state_under_a_plain_home_is_injected_until_a_repository_
     let report = runtime.private_state_report("ag_home").unwrap();
     assert_eq!(report.status, "agent_private_state_inside_vcs_worktree");
     let hint = report.hint.expect("actionable hint");
-    assert!(hint.contains("set the Agent's cwd"), "{hint}");
+    assert!(hint.contains("version-controlled tree"), "{hint}");
     assert!(!hint.contains('/'), "hints never carry paths: {hint}");
     assert_eq!(
         runtime

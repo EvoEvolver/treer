@@ -159,7 +159,7 @@ impl PrivateStateStatus {
                 "The Agent's working directory contains the Treer private state directory on a non-hidden path; set the Agent's cwd to a project folder outside the Treer state directory.",
             ),
             Self::InsideVcsWorktree => Some(
-                "The Treer private state directory would be inside a version-controlled tree that contains the Agent's working directory; set the Agent's cwd to a project folder outside that repository.",
+                "The Treer private state directory lies inside a version-controlled tree, so attachments could be committed; move the repository or the Treer state directory apart (for example do not keep the home directory itself as a repository), or use a state directory outside any repository.",
             ),
             _ => None,
         }

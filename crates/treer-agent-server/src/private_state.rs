@@ -951,11 +951,7 @@ mod placement_tests {
 
     #[cfg(unix)]
     fn rustix_like_not_root() -> bool {
-        std::process::Command::new("id")
-            .arg("-u")
-            .output()
-            .map(|output| String::from_utf8_lossy(&output.stdout).trim() != "0")
-            .unwrap_or(false)
+        !nix::unistd::geteuid().is_root()
     }
 }
 
