@@ -16,6 +16,15 @@ fn refused(_: ()) -> io::Error {
 pub(super) struct TickDeadline {
     window: Window,
     deadline: Deadline,
+    pub(super) refusal: Option<Refusal>,
+}
+
+// Fixture diagnostics only. Public errors remain the fixed refusal string.
+#[derive(Debug, PartialEq)]
+pub(super) enum Refusal {
+    Clock,
+    Timer,
+    Io,
 }
 
 impl TickDeadline {
@@ -25,19 +34,30 @@ impl TickDeadline {
         let deadline = window
             .accept(sampled, Some(window.expiry))
             .map_err(refused)?;
-        Ok(Self { window, deadline })
+        Ok(Self {
+            window,
+            deadline,
+            refusal: None,
+        })
     }
 
     pub(super) fn accept(window: Window, owner_original: Option<u64>) -> io::Result<Self> {
         let deadline = window.accept(now(), owner_original).map_err(refused)?;
-        Ok(Self { window, deadline })
+        Ok(Self {
+            window,
+            deadline,
+            refusal: None,
+        })
     }
 
     pub(super) fn remaining(&mut self) -> io::Result<Duration> {
-        self.deadline
-            .remaining_ms(now())
-            .map(Duration::from_millis)
-            .map_err(refused)
+        match self.deadline.remaining_ms(now()) {
+            Ok(ms) => Ok(Duration::from_millis(ms)),
+            Err(()) => {
+                self.refusal.get_or_insert(Refusal::Clock);
+                Err(super::denied())
+            }
+        }
     }
 
     // Tokio bounds waiting, but its timer is not evidence that Windows' clock
@@ -51,8 +71,13 @@ impl TickDeadline {
         self.remaining()?;
         match result {
             Ok(Ok(value)) => Ok(value),
-            _ => {
+            failed => {
                 self.deadline.refuse();
+                self.refusal.get_or_insert(if failed.is_err() {
+                    Refusal::Timer
+                } else {
+                    Refusal::Io
+                });
                 Err(super::denied())
             }
         }

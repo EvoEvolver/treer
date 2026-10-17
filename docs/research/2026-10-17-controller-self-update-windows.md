@@ -461,7 +461,13 @@ earlier local timeout checks; they do not grant completion or authority.
 A separate ordinary native test uses an actual private named pipe between peers
 in the same test process, delaying Reply and ACK past the owner's short window
 while the child's longer window remains valid. The owner must fail in both
-cases. This tests transport/clock refusal, not cross-process authentication;
+cases. This tests transport/clock refusal, not cross-process authentication.
+The child's actual window validity is recorded inside the delayed verification,
+before writing to the pipe closed by the owner. That write must cause an I/O
+refusal and poison the child's attempt; the test must not expect that poisoned
+attempt to remain usable. Private fixture diagnostics preserve the first refusal
+category, allowing the test to distinguish the owner's clock/timer refusal from
+the child's I/O refusal while outward errors remain fixed.
 `native_owner_round_trip` remains the hosted actual-process proof test. All such
 changes require their own exact-SHA native evidence; the prior clock-adapter run
 does not cover this integration.

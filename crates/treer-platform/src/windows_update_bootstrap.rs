@@ -673,7 +673,7 @@ mod tests {
         registration: &[u8; 56],
         owner: bool,
         clock: &mut TickDeadline,
-        verify: impl Fn() -> io::Result<()>,
+        verify: impl Fn(&mut TickDeadline) -> io::Result<()>,
     ) -> io::Result<()> {
         use crate::update_binding::{Binding, Exchange, FRAME_SIZE};
         let deadline = tokio::time::Instant::now() + clock.remaining()?;
@@ -695,7 +695,7 @@ mod tests {
         for _ in 0..2 {
             let mut bytes = [0; FRAME_SIZE];
             clock.run(pipe.read_exact(&mut bytes)).await?;
-            blocking_phase(&verify)?;
+            blocking_phase(|| verify(clock))?;
             clock.remaining()?;
             let response = exchange
                 .receive(&bytes, tokio::time::Instant::now().into_std())
@@ -719,7 +719,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn native_pipe_refuses_late_reply_and_ack_with_child_window_valid() {
         use crate::update_deadline::Window;
-        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
         use windows_sys::Win32::System::SystemInformation::GetTickCount64;
 
         // Transport/deadline regression only: these peers are in one process;
@@ -738,6 +738,7 @@ mod tests {
             };
             let mut owner_clock = TickDeadline::accept(window, Some(window.expiry)).unwrap();
             let mut child_clock = TickDeadline::begin().unwrap();
+            let child_valid_before_write = AtomicBool::new(false);
             let count = AtomicUsize::new(0);
             let registration = [7; 56];
             let owner = async {
@@ -747,7 +748,7 @@ mod tests {
                     &registration,
                     true,
                     &mut owner_clock,
-                    || Ok(()),
+                    |_| Ok(()),
                 )
                 .await;
                 drop(endpoint);
@@ -760,19 +761,37 @@ mod tests {
                     &registration,
                     false,
                     &mut child_clock,
-                    || {
+                    |clock| {
                         if count.fetch_add(1, Ordering::SeqCst) == delayed_receive {
                             std::thread::sleep(Duration::from_millis(350));
+                            // Observe the actual child's clock before a closed-
+                            // pipe I/O refusal poisons its local attempt.
+                            child_valid_before_write
+                                .store(clock.remaining().is_ok(), Ordering::SeqCst);
                         }
                         Ok(())
                     },
                 )
                 .await
             };
-            let (owner_result, _) = tokio::join!(owner, child);
-            assert!(owner_result.is_err());
+            let (owner_result, child_result) = tokio::join!(owner, child);
+            assert_eq!(
+                owner_result.unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert!(unsafe { GetTickCount64() } >= window.expiry);
+            assert!(matches!(
+                owner_clock.refusal,
+                Some(tick_deadline::Refusal::Clock | tick_deadline::Refusal::Timer)
+            ));
             assert!(owner_clock.remaining().is_err());
-            assert!(child_clock.remaining().is_ok());
+            assert!(child_valid_before_write.load(Ordering::SeqCst));
+            assert_eq!(
+                child_result.unwrap_err().kind(),
+                io::ErrorKind::PermissionDenied
+            );
+            assert_eq!(child_clock.refusal, Some(tick_deadline::Refusal::Io));
+            assert!(child_clock.remaining().is_err());
             assert!(count.load(Ordering::SeqCst) > delayed_receive);
         }
     }
@@ -990,7 +1009,7 @@ mod tests {
             }
             clock.remaining().unwrap();
             clock.run(pipe.write_all(&[1])).await.unwrap();
-            fixture_binding_exchange(pipe, id, &registration, false, &mut clock, || {
+            fixture_binding_exchange(pipe, id, &registration, false, &mut clock, |_| {
                 parent.verify_registration(&registration)
             })
             .await
@@ -1054,7 +1073,7 @@ mod tests {
             &registration,
             true,
             &mut clock,
-            || child.verify(),
+            |_| child.verify(),
         )
         .await
         .unwrap();
