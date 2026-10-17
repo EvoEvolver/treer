@@ -74,12 +74,11 @@ publish SSH or local service ports.
 The hosted canary is the current place to try Treer. Self-hosting is covered in
 the [operator guide](docs/operator-guide.md).
 
-The single-container central server has passed native amd64/arm64 CI tests;
-its GHCR image is **not published yet**. You can
-[build it locally](deploy/README.md#build-and-verify-the-single-image). Once image
-publishing is enabled, use
-`docker run -d --name treer --stop-timeout 65 -p 127.0.0.1:8080:8080 -v treer-data:/data ghcr.io/evoevolver/treer:vX.Y.Z`
-with a published version tag. Open `http://console.treer.localhost:8080`; retrieve the generated
+Build a single-container central server from a clean checkout with
+`./scripts/build-single-image.sh` (Git and Docker with Buildx required). It builds
+`treer-single:<commit>` locally and prints the `docker run` command; it never
+publishes an image or starts/replaces a running server. Open
+`http://console.treer.localhost:8080`; retrieve the generated
 admin password with `docker exec treer cat /data/private/admin-password` in a
 private terminal. Machines enroll separately. See
 [Single container](deploy/README.md#single-container) for hardened flags,

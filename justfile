@@ -171,3 +171,8 @@ artifacts-verify version:
 
 artifacts-test:
     node --test scripts/release-r2.test.mjs
+
+# Local source compilation plus disposable-container health, serialized with
+# release/author gates. Never publishes or replaces a real Treer service.
+single-image-smoke:
+    python3 scripts/gate-lock.py --name "single-image build smoke" -- python3 -I deploy/single-container/tests/build-smoke.py

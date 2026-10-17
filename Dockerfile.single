@@ -7,6 +7,39 @@ RUN pnpm install --frozen-lockfile
 COPY web ./
 RUN pnpm build
 
+# Optional local source producer. CI's final image path never depends on this
+# stage: CI continues to consume its own trusted, exact-SHA native artifacts.
+FROM --platform=$BUILDPLATFORM node:22-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8 AS local-launcher
+ARG TREER_BUILD_COMMIT
+WORKDIR /source
+COPY launchers/agent ./launchers/agent
+COPY scripts/prepare-launcher-release.mjs ./scripts/prepare-launcher-release.mjs
+RUN npm --prefix launchers/agent ci --ignore-scripts \
+    && node scripts/prepare-launcher-release.mjs --output /launcher-payload --source-commit "$TREER_BUILD_COMMIT"
+
+FROM rust:1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS local-native-builder
+RUN apt-get update && apt-get install -y --no-install-recommends python3 \
+    && rm -rf /var/lib/apt/lists/*
+ARG TREER_BUILD_COMMIT
+ARG TREER_VERSION
+ARG TARGETARCH
+ENV TREER_BUILD_COMMIT=$TREER_BUILD_COMMIT TREER_LAUNCHER_PAYLOAD_DIR=/launcher-payload TREER_REQUIRE_LAUNCHER_BUNDLE=1 \
+    CARGO_TARGET_DIR=/native-target CARGO_BUILD_JOBS=2
+WORKDIR /source
+COPY --from=local-launcher /launcher-payload /launcher-payload
+COPY Cargo.toml Cargo.lock ./
+COPY crates ./crates
+COPY launchers/agent/profiles.json launchers/agent/provider-recipes.json ./launchers/agent/
+COPY skills ./skills
+COPY scripts/install.ps1 ./scripts/install.ps1
+COPY apps/policy/AGENT.md apps/policy/policy.py apps/policy/treer-policy ./apps/policy/
+COPY apps/policy/web ./apps/policy/web
+COPY deploy/single-container/local-inputs.py deploy/single-container/verify-inputs.py ./deploy/single-container/
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/native-target \
+    cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli \
+    && python3 -I deploy/single-container/local-inputs.py /native-target/release /local-app "$TREER_BUILD_COMMIT" "$TREER_VERSION" "$TARGETARCH"
+
 # Pin the index (both amd64 and arm64) and its PG major/minor, not a floating apt PG.
 FROM postgres:17.11-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826 AS runtime-base
 RUN apt-get update \
@@ -36,6 +69,28 @@ COPY --from=verified /verified /app
 RUN cd /app && sha256sum -c SHA256SUMS \
     && ln -s /app/bin/treer-proxy /usr/local/bin/treer-proxy
 COPY --from=web /web/dist /app/web
+
+# Optional source-build target: only the Docker engine's native machine artifacts.
+# The default final target below keeps the CI trusted-input path unchanged.
+FROM runtime-base AS local-assembled
+COPY --from=local-native-builder /local-app /app
+COPY --from=web /web/dist /app/web
+RUN cd /app && sha256sum -c SHA256SUMS \
+    && ln -s /app/bin/treer-proxy /usr/local/bin/treer-proxy
+FROM scratch AS local
+COPY --from=local-assembled / /
+ARG TREER_VERSION
+ARG TREER_BUILD_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/EvoEvolver/treer"
+LABEL org.opencontainers.image.version="${TREER_VERSION}"
+LABEL org.opencontainers.image.revision="${TREER_BUILD_COMMIT}"
+LABEL io.treer.provenance="local-build"
+VOLUME ["/data"]
+ENV PATH=/usr/local/bin:/usr/lib/postgresql/17/bin:/usr/bin:/bin LANG=C.UTF-8
+EXPOSE 8080
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=3 CMD ["python3", "-I", "/usr/local/lib/treer/healthcheck.py"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/python3", "-I", "/usr/local/lib/treer/supervisor.py"]
 
 # Reset inherited postgres entrypoint and VOLUME: /data is the ONLY volume.
 FROM scratch
