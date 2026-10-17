@@ -404,6 +404,168 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "owned same-PID exec helper, invoked twice by the outer exec test"]
+    fn peer_exec_child() {
+        use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let path = std::env::var_os("TREER_TEST_HANDOFF_SOCKET").unwrap();
+        let mut socket = UnixStream::connect(&path).unwrap();
+        require_cloexec(&socket).unwrap();
+        if std::env::var_os("TREER_TEST_EXEC_TARGET").is_some() {
+            let inherited: i32 = std::env::var("TREER_TEST_EXEC_FD")
+                .unwrap()
+                .parse()
+                .unwrap();
+            // Only this owned test child deliberately inherits its own socket.
+            // Restore CLOEXEC immediately; safe raw-fd send/shutdown avoid
+            // manufacturing Rust ownership of an inherited descriptor.
+            fcntl(inherited, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).unwrap();
+            let mut frame = Vec::from(&b"TRLP\x01\0\0\0"[..]);
+            frame.extend_from_slice(&[1; 16]);
+            frame.extend_from_slice(&[b'a'; 64]);
+            frame.extend_from_slice(&[b'b'; 64]);
+            while !frame.is_empty() {
+                let sent =
+                    nix::sys::socket::send(inherited, &frame, nix::sys::socket::MsgFlags::empty())
+                        .unwrap();
+                assert!(sent > 0);
+                frame.drain(..sent);
+            }
+            nix::sys::socket::shutdown(inherited, nix::sys::socket::Shutdown::Write).unwrap();
+            socket.write_all(b"X").unwrap();
+            let _ = std::io::stdin().read(&mut [0]);
+            return;
+        }
+        socket.write_all(b"R").unwrap();
+        std::io::stdin().read_exact(&mut [0]).unwrap();
+        let image = std::env::var_os("TREER_TEST_EXEC_IMAGE").unwrap();
+        fcntl(socket.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
+        let error = Command::new(image)
+            .args([
+                "--exact",
+                "self_update::handoff::tests::peer_exec_child",
+                "--ignored",
+            ])
+            .env_clear()
+            .env("TREER_TEST_HANDOFF_SOCKET", path)
+            .env("TREER_TEST_EXEC_TARGET", "1")
+            .env("TREER_TEST_EXEC_FD", socket.as_raw_fd().to_string())
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .exec();
+        panic!("owned fixture exec failed: {error}");
+    }
+
+    #[test]
+    fn same_pid_exec_after_read_entry_invalidates_the_observation() {
+        use nix::fcntl::{fcntl, FcntlArg, OFlag};
+        use std::os::fd::AsRawFd;
+
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+            "te-{}",
+            &uuid::Uuid::new_v4().simple().to_string()[..16]
+        ));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&root)
+            .unwrap();
+        let fixture = Fixture(root);
+        let alternate = fixture.0.join("image");
+        std::fs::copy(std::env::current_exe().unwrap(), &alternate).unwrap();
+        let alternate_file = File::open(&alternate).unwrap();
+        let path = fixture.0.join("s");
+        let listener = UnixListener::bind(&path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut child = OwnedChild(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "self_update::handoff::tests::peer_exec_child",
+                    "--ignored",
+                ])
+                .env_clear()
+                .env("TREER_TEST_HANDOFF_SOCKET", &path)
+                .env("TREER_TEST_EXEC_IMAGE", &alternate)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        let accept = || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        let mut ready = [0];
+                        stream.read_exact(&mut ready).unwrap();
+                        return (stream, ready[0]);
+                    }
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "owned exec peer did not connect");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            }
+        };
+        let (stream, ready) = accept();
+        assert_eq!(ready, b'R');
+        let original = ProcessImage::capture(child.0.id()).unwrap();
+        let digest = digest_file(original.executable()).unwrap();
+        let mut authenticated =
+            AuthenticatedPeer::authenticate(stream, &original, original.executable(), &digest)
+                .unwrap();
+        // A test-only duplicate shares O_NONBLOCK with the reader. Only raw
+        // read changes that flag, after the authenticated entry's pre-check.
+        // This is a kernel-visible barrier, not a sleep-based exec race or a
+        // production callback capable of bypassing verification.
+        let observer = authenticated.stream.try_clone().unwrap();
+        let flags =
+            || OFlag::from_bits_truncate(fcntl(observer.as_raw_fd(), FcntlArg::F_GETFL).unwrap());
+        assert!(!flags().contains(OFlag::O_NONBLOCK));
+        let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+        let reader = std::thread::spawn(move || {
+            let mut arbitration = pending();
+            let error = authenticated
+                .read_launcher_frame(&mut arbitration, &cancel)
+                .err()
+                .map(|error| error.to_string());
+            (error, arbitration.decision())
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !flags().contains(OFlag::O_NONBLOCK) {
+            assert!(
+                Instant::now() < deadline,
+                "reader did not pass authentication"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        child.0.stdin.as_mut().unwrap().write_all(b"E").unwrap();
+        let (_target_connection, ready) = accept();
+        assert_eq!(ready, b'X');
+        assert!(child.0.try_wait().unwrap().is_none());
+        let changed = ProcessImage::capture(child.0.id()).unwrap();
+        assert_eq!(changed.pid(), original.pid());
+        assert!(changed.matches_file(&alternate_file).unwrap());
+        assert!(original.verify_current().is_err());
+        let (error, decision) = reader.join().unwrap();
+        assert_eq!(error.as_deref(), Some("update_handoff_peer_changed"));
+        assert_eq!(
+            decision,
+            super::super::launcher_arbitration::Decision::Uncertain
+        );
+        drop(child.0.stdin.take());
+        assert!(child.0.wait().unwrap().success());
+    }
+
+    #[test]
     fn exact_connected_child_rejects_other_pid_image_digest_and_exited_peer() {
         let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
             "th-{}-{:x}",

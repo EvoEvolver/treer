@@ -814,8 +814,25 @@ is not covered by these integration fixtures.
 The same real exited-peer fixture separately drains raw empty EOF and applies
 the post-read image guard: it must return `update_handoff_peer_changed` and
 invalidate pending arbitration. This checks the guard with real stale OS
-identity, not a deterministic same-PID exec during the integrated read; that
-exec/binding-window fixture remains required for the real lifecycle caller.
+identity and separately tests the post-read guard; it does not test exec during
+the integrated read.
+
+An additional owned Rust subprocess regression now covers same-PID exec during
+the integrated read. It authenticates the original image on a unique private
+Unix socket. A test-only duplicate observes the shared `O_NONBLOCK` flag change
+performed by raw read after pre-verification, before releasing the child's
+stdin barrier. The child then execs a copied test image with a different inode,
+deliberately retaining its own socket across exec; the target restores CLOEXEC
+and sends a complete valid frame on that same socket, half-closes writes and
+remains alive. A separate connection confirms target readiness; OS evidence
+confirms the same PID and changed executable inode. The actual authenticated
+reader must return `update_handoff_peer_changed` and leave arbitration
+`Uncertain`, with no observation returned. No production test callback, unsafe
+descriptor ownership conversion, external CLI, installer or fixed port is used.
+Existing nix `fs` support is enabled only as a Unix dev dependency for fixture
+descriptor flags. This establishes the image-change read-window regression;
+attempt/intent/registered-identity binding and sealed lifecycle integration
+remain unimplemented and require their own combined tests.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the
