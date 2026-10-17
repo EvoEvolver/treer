@@ -16,6 +16,7 @@ WORKDIR /app
 COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 COPY launchers/agent/profiles.json ./launchers/agent/profiles.json
+COPY launchers/agent/provider-recipes.json ./launchers/agent/provider-recipes.json
 COPY skills ./skills
 COPY scripts/install.ps1 ./scripts/install.ps1
 COPY apps/policy/AGENT.md apps/policy/policy.py apps/policy/treer-policy ./apps/policy/
