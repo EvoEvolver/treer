@@ -36,6 +36,9 @@ export function interfaceFrameKey(
 export function withEmbedTheme(src: string, theme: Theme, appearance: EmbedAppearance = {}): string {
   const url = new URL(src, typeof window === "undefined" ? "http://localhost/" : window.location.href)
   url.searchParams.set("theme", theme)
+  // A public appearance hint, never an identity token. Framed UIs require this
+  // exact parent origin before accepting appearance messages.
+  if (typeof window !== "undefined") url.searchParams.set("embed_origin", window.location.origin)
   const look = asLook(appearance.look)
   if (look) url.searchParams.set("look", look)
   const lang = EMBED_LANGS.find((item) => item === appearance.lang)

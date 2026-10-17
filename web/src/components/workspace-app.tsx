@@ -2,6 +2,7 @@ import { useWorkspacePins } from "@/components/use-workspace-pins"
 import { agentCreationFailure, type AgentCreationFailure } from "@/lib/agent-creation-failure"
 import { WorkloadSurface } from "@/components/workload-surface"
 import { appOwnUrl } from "@/lib/app-url"
+import { readEmbedAppearance, withEmbedTheme } from "@/lib/embed-ui"
 import { WorkloadFocusBar } from "@/components/workload-focus-bar"
 import { WorkspaceTabBar, type TabLabel, type TabAction, type TabActions } from "@/components/workspace-tab-bar"
 import { OVERVIEW_TAB, useWorkspaceTabs } from "@/components/use-workspace-tabs"
@@ -259,17 +260,21 @@ function WorkspaceAppContent() {
     if (!inventoryReady || !routeMatchesWorkspace || preview || deepLinkWorkspace.current !== workspaceId) return
     if (selectedWorkloadId !== routeWorkloadId) replaceWorkloadRoute(selectedWorkloadId)
   }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute])
-  // An App with a routed ingress URL opens on that URL in a new browser tab; Agents and other Apps use the Console deep link.
+  // Registered Agent UIs and routed Apps open directly; other workloads retain
+  // the Console deep link. Never use a descriptor's ui_path as a navigation URL.
   const appOwnUrls = useMemo(() => {
     const blocked = [window.location.origin, proxyUrl("/")].map((value) => { try { return new URL(value).origin } catch { return value } })
     return new Map(apps.flatMap((app) => { const url = appOwnUrl(app, blocked); return url ? [[app.runtime_agent_id ?? app.app_id, url] as const] : [] }))
   }, [apps])
-  const workloadHref = (id: string) => appOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id)
-  // Synchronous so it keeps the click gesture. Same-origin Console pages carry no token; an App's own URL is opened with noopener.
+  const interfaceWorkspace = workspaceId ? encodeURIComponent(workspaceId) : null
+  const agentOwnUrls = new Map(interfaceWorkspace ? workloads.filter((agent) => agent.kind !== "app" && agent.interface?.ui_path && !apps.some((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id)).map((agent) => [agent.agent_id,
+    withEmbedTheme(proxyUrl(`/api/workspaces/${interfaceWorkspace}/agents/${encodeURIComponent(agent.agent_id)}/interface/ui/`), theme, readEmbedAppearance())]) : [])
+  const workloadHref = (id: string) => appOwnUrls.get(id) ?? agentOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id)
+  // Synchronous to preserve the user gesture; session authentication stays in
+  // cookies. No credential or caller-supplied navigation URL is added.
   const openInNewTab = (id: string) => {
-    const own = appOwnUrls.get(id)
-    // noreferrer for another origin: the Console URL (org/workspace/workload IDs) is not sent to the App.
-    window.open(own ?? workloadPath(organizationId, workspaceId, id, true), "_blank", own ? "noopener,noreferrer" : "noopener")
+    const own = appOwnUrls.get(id) ?? agentOwnUrls.get(id)
+    window.open(own ?? workloadPath(organizationId, workspaceId, id, true), "_blank", "noopener,noreferrer")
   }
   const focusedId = focusMode && selectedWorkloadId ? selectedWorkloadId : null
   const tabLabels = new Map<string, TabLabel>(workloads.map((agent) => {
