@@ -10,6 +10,8 @@ pub enum Error {
     Storage(#[from] rusqlite::Error),
     #[error("private storage unavailable")]
     PrivateStorage,
+    #[error("private storage busy")]
+    Busy,
     #[error("binding unavailable")]
     Unavailable,
     #[error("idempotency conflict")]
@@ -113,7 +115,7 @@ impl Store {
             |r| r.get(0),
         )?;
         if !((application == 0 && version == 0 && tables == 0)
-            || (application == 1413828168 && (version == 1 || version == 2)))
+            || (application == 1413828168 && (1..=3).contains(&version)))
         {
             return Err(Error::PrivateStorage);
         }
@@ -165,6 +167,22 @@ impl Store {
                     created_at INTEGER NOT NULL,
                     PRIMARY KEY(endpoint,generation,delivery));
                  PRAGMA user_version=2;
+                 COMMIT;",
+            )?;
+        }
+        if version < 3 {
+            db.execute_batch(
+                "BEGIN IMMEDIATE;
+                 ALTER TABLE failures RENAME TO failures_v2;
+                 CREATE TABLE failures (
+                    endpoint TEXT NOT NULL REFERENCES endpoints(id), generation INTEGER NOT NULL,
+                    delivery TEXT NOT NULL, payload_bytes INTEGER NOT NULL, reason INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    PRIMARY KEY(endpoint,generation,delivery));
+                 INSERT INTO failures(endpoint,generation,delivery,payload_bytes,reason,created_at)
+                    SELECT endpoint,generation,delivery,-1,reason,created_at FROM failures_v2;
+                 DROP TABLE failures_v2;
+                 PRAGMA user_version=3;
                  COMMIT;",
             )?;
         }

@@ -45,7 +45,7 @@ fn check_directory(directory: &OwnedFd, leaf: bool) -> Result<(), Error> {
     vcs_free(directory)
 }
 
-fn open_directory(path: &Path) -> Result<OwnedFd, Error> {
+fn open_directory(path: &Path, create_leaf: bool) -> Result<OwnedFd, Error> {
     if !path.is_absolute() {
         return Err(Error::PrivateStorage);
     }
@@ -64,7 +64,7 @@ fn open_directory(path: &Path) -> Result<OwnedFd, Error> {
         let name = component.as_os_str();
         let next = match fs::openat(&directory, name, directory_flags(), Mode::empty()) {
             Ok(next) => next,
-            Err(Errno::NOENT) if leaf => {
+            Err(Errno::NOENT) if leaf && create_leaf => {
                 // Only the final dedicated state directory may be newly created.
                 denied(fs::mkdirat(&directory, name, Mode::from_raw_mode(0o700)))?;
                 denied(fs::fsync(&directory))?;
@@ -113,9 +113,15 @@ fn check_file(file: &OwnedFd) -> Result<(), Error> {
 }
 
 pub(crate) fn open(path: &Path) -> Result<(Connection, PrivateFiles), Error> {
-    let directory = open_directory(path)?;
+    let directory = open_directory(path, true)?;
     let lock = private_file(&directory, "hub.lock")?;
-    denied(fs::flock(&lock, FlockOperation::NonBlockingLockExclusive))?;
+    fs::flock(&lock, FlockOperation::NonBlockingLockExclusive).map_err(|error| {
+        if error == Errno::WOULDBLOCK {
+            Error::Busy
+        } else {
+            Error::PrivateStorage
+        }
+    })?;
     for name in [
         "hub.sqlite3",
         "hub.sqlite3-wal",
@@ -147,7 +153,7 @@ pub(crate) fn enable_wal(db: &Connection, path: &Path) -> Result<(), Error> {
         return Err(Error::PrivateStorage);
     }
     denied(db.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;"))?;
-    let directory = open_directory(path)?;
+    let directory = open_directory(path, false)?;
     for name in ["hub.sqlite3", "hub.sqlite3-wal", "hub.sqlite3-shm"] {
         let file = denied(fs::openat(
             &directory,
@@ -186,6 +192,31 @@ pub(crate) fn recheck(files: &PrivateFiles) -> Result<(), Error> {
         }
     }
     Ok(())
+}
+
+/// Strict local provisioning input, never an HTTP upload or a hub-supplied file.
+pub(crate) fn read_config(path: &Path) -> Result<Vec<u8>, Error> {
+    use std::io::Read;
+    let parent = path.parent().ok_or(Error::PrivateStorage)?;
+    let name = path.file_name().ok_or(Error::PrivateStorage)?;
+    let directory = open_directory(parent, false)?;
+    let file = denied(fs::openat(
+        &directory,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+        Mode::empty(),
+    ))?;
+    check_file(&file)?;
+    let mut bytes = Vec::new();
+    denied(
+        std::fs::File::from(file)
+            .take(16 * 1024 + 1)
+            .read_to_end(&mut bytes),
+    )?;
+    if bytes.len() > 16 * 1024 {
+        return Err(Error::PrivateStorage);
+    }
+    Ok(bytes)
 }
 
 #[cfg(test)]
@@ -315,7 +346,7 @@ mod tests {
     fn reject_unrelated_database_or_unknown_schema_version() {
         for sql in [
             "CREATE TABLE unrelated(secret TEXT)",
-            "PRAGMA application_id=1413828168; PRAGMA user_version=3",
+            "PRAGMA application_id=1413828168; PRAGMA user_version=4",
         ] {
             let (_temporary, path) = fixture();
             drop(Store::open(&path, Limits::default()).unwrap());

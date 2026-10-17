@@ -6,5 +6,7 @@ pub mod failures;
 #[cfg(unix)]
 mod private_store;
 pub mod protocol;
+#[cfg(unix)]
+pub mod relay;
 pub mod store;
 pub mod transfers;

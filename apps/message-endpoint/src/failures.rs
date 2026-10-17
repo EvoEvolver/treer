@@ -3,7 +3,6 @@ use crate::store::{valid_id, Error, Store};
 use crate::transfers::TOMBSTONE_TTL;
 use rusqlite::{params, OptionalExtension};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 #[derive(Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -70,12 +69,12 @@ impl Store {
         if !binding {
             return Err(Error::Unavailable);
         }
-        let digest = Sha256::digest(body).to_vec();
+        let payload_bytes = body.len() as i64;
         let previous=transaction.query_row(
-            "SELECT digest,reason FROM failures WHERE endpoint=?1 AND generation=?2 AND delivery=?3",
-            params![endpoint,generation,delivery], |r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).optional()?;
+            "SELECT payload_bytes,reason FROM failures WHERE endpoint=?1 AND generation=?2 AND delivery=?3",
+            params![endpoint,generation,delivery], |r|Ok((r.get::<_,i64>(0)?,r.get::<_,i64>(1)?))).optional()?;
         if let Some((old, code)) = previous {
-            return if old == digest && code == reason.code() {
+            return if (old == -1 || old == payload_bytes) && code == reason.code() {
                 Ok(())
             } else {
                 Err(Error::Conflict)
@@ -92,8 +91,8 @@ impl Store {
             return Err(Error::Full);
         }
         transaction.execute(
-            "INSERT INTO failures(endpoint,generation,delivery,digest,reason,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
-            params![endpoint,generation,delivery,digest,reason.code(),now])?;
+            "INSERT INTO failures(endpoint,generation,delivery,payload_bytes,reason,created_at) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![endpoint,generation,delivery,payload_bytes,reason.code(),now])?;
         transaction.commit()?;
         Ok(())
     }
@@ -163,7 +162,7 @@ mod tests {
         store
     }
     #[test]
-    fn rejection_is_durable_idempotent_namespaced_and_contains_no_plaintext() {
+    fn rejection_is_durable_idempotent_namespaced_and_contains_no_body_digest() {
         let mut store = fixture();
         // Fill pending quota first; terminal failure has its own bounded budget.
         store
@@ -321,7 +320,7 @@ mod tests {
                 .db
                 .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
                 .unwrap(),
-            2
+            3
         );
         store
             .record_failure(
@@ -336,5 +335,49 @@ mod tests {
         drop(store);
         let store = Store::open(&path, Limits::default()).unwrap();
         assert_eq!(store.recent_failures("ag_one", 1, 10).unwrap().len(), 1);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn schema_two_replaces_rejection_digests_with_unknown_legacy_length() {
+        use std::os::unix::fs::PermissionsExt;
+        let temporary = tempfile::tempdir().unwrap();
+        let base = temporary.path().canonicalize().unwrap();
+        std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let path = base.join("state");
+        let mut store = Store::open(&path, Limits::default()).unwrap();
+        store.register_paused("ag_one", 1, "ag_target").unwrap();
+        store
+            .db
+            .execute_batch(
+                "DROP TABLE failures; CREATE TABLE failures (
+            endpoint TEXT NOT NULL, generation INTEGER NOT NULL,delivery TEXT NOT NULL,
+            digest BLOB NOT NULL,reason INTEGER NOT NULL,created_at INTEGER NOT NULL,
+            PRIMARY KEY(endpoint,generation,delivery));
+            INSERT INTO failures VALUES('ag_one',1,'del_legacy',X'1234',0,5000000);
+            PRAGMA user_version=2;",
+            )
+            .unwrap();
+        drop(store);
+        let mut store = Store::open(&path, Limits::default()).unwrap();
+        assert_eq!(store.recent_failures("ag_one", 1, 10).unwrap().len(), 1);
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT payload_bytes FROM failures", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            -1
+        );
+        assert!(store.db.prepare("SELECT digest FROM failures").is_err());
+        store
+            .record_failure(
+                "ag_one",
+                1,
+                "del_legacy",
+                b"body",
+                FailureReason::InvalidEnvelope,
+                NOW,
+            )
+            .unwrap();
     }
 }

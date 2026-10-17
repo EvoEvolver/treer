@@ -201,8 +201,9 @@ No author push/deploy/restart. Cross-owner packaging/CI requests go to owners.
 The active protocol library now contains Core Message envelopes/fragments, not
 sockets/HMAC. Queue tests cover in-memory and private on-disk SQLite, including
 committed WAL recovery after an unclean child-process exit. This does not prove
-power-loss durability on every filesystem. Core relay, transports and UI remain
-unfinished; there is no production daemon entry point yet.
+power-loss durability on every filesystem. The Unix relay executable is now implemented and tested only with synthetic
+mailboxes/fake CLI. The hub, transports, settings UI, reviewed install profile and
+full-system activation checks remain unfinished.
 Offline focused checks: `python3 apps/message-endpoint/tests/run.py` (stripped
 Treer/harness environment, private HOME/temp, private worktree target). Independent
 Cargo.lock pinned; review/audit dependencies and build scripts. No root Core gate.
@@ -214,7 +215,7 @@ output at 1 MiB, uses nonblocking stdin/stdout/stderr and a 15-second deadline,
 and kills/reaps only its own exact child on failure. Responses must identify the
 expected receiver/sender runtime. Errors are fixed codes without raw output.
 Fake CLI tests validate each operation against the repository's real clap snapshot.
-This adapter is not yet a running relay or a hub transport implementation.
+The relay uses this adapter; hub transport implementation remains unfinished.
 
 The separate [App-runtime smoke procedure](tests/RUNTIME-SMOKE.md) is a disposable
 Python test helper for verifying the existing App-kind Core messaging path before
@@ -234,13 +235,15 @@ after downstream durable acceptance; their hashes still reject conflicting
 replays. Reopen tests cover partial-set recovery and completed-set deduplication.
 The daemon must invoke cleanup and drain ready transfers after restart; no daemon
 currently exists to do that automatically. The store also provides durable
-terminal rejection receipts (fixed reason, Core delivery ID, timestamp, body hash;
+terminal rejection receipts (fixed reason, Core delivery ID, timestamp, body length;
 no rejected plaintext) and a bounded recent-failure view. The receiver must save
 that receipt before acknowledging poison; storage/full errors prohibit ack.
 Failure receipts have a separate 1000/endpoint, 10000/global budget so a full
 pending queue can still record poison without unbounded growth. Queue completions
 and failure receipts prune after 30 days; pending/leased work is never pruned.
-Actual receive/ack integration and relay startup reporting remain P2 work. None may be
+Relay receive/ack and startup hash reporting are implemented; the hub settings
+view, owner clear/resume action and executable isolation template tests remain
+activation gates. None may be
 inferred as complete from the current in-memory queue tests.
 
 The Unix persistent store opener creates only the final dedicated state directory
@@ -259,11 +262,18 @@ a failed check pauses admissions and is reported as a fixed storage error.
 Unknown database application/schema versions are rejected. This slice currently
 supports Unix only; Windows storage provisioning is not implemented.
 
-Schema v2 adds terminal queue timestamps and rejection receipts; existing scaffold
-v1 state upgrades in one SQLite transaction without deleting bindings, pending
-work or fragment state. Back up the stopped complete state directory before any
+Schema v3 retains terminal queue timestamps and rejection receipts, replacing
+scaffold v2 rejection digests with body lengths to avoid confirming guesses of
+short rejected content. Legacy receipts preserve IDs/reasons with unknown length
+(-1); Core delivery IDs are immutable, so these rows deduplicate by ID/reason.
+Same-length content changes cannot be detected by rejection receipts; only
+Core-authenticated, receiver-derived delivery IDs may be recorded. New rows never
+store rejected plaintext or its digest. Old database pages/WAL/backups may retain
+the previous digests; this migration does not promise forensic erasure. Scaffold
+v1/v2 state upgrades transactionally without deleting bindings, pending work or
+fragment state. Back up the stopped complete state directory before any
 upgrade; to roll back, stop the new process and restore that private backup with
-the corresponding old executable. Never open upgraded v2 state with older code.
+the corresponding old executable. Never open upgraded v3 state with older code.
 
 State is plaintext, including message bodies. Keep state and backups on encrypted
 storage. Stop this App before copying its complete state directory (including any
@@ -276,3 +286,41 @@ elevated privileges. Lifecycle APIs require Unix epoch seconds (at least 30 days
 after epoch for cleanup); a bad clock must surface a visible cleanup error.
 Paused bindings retain unacked Core deliveries and their visible backlog until
 the human resumes them; a pause is not successful delivery.
+
+
+## Development relay executable (Unix)
+
+`treer-endpoint --config /absolute/private/endpoint.json` runs indefinitely; invalid
+startup exits nonzero and transient Core/storage failures use fixed errors and a
+bounded retry delay. There is no voluntary successful completion after draining.
+No real endpoint has been activated by the author. The test suite launches only
+this executable against a private fake CLI which checks the real command contract.
+
+The human-provisioned JSON file must be 0600, effective-UID owned, single-link,
+regular and no-follow in a 0700 physical directory outside a repository (16 KiB
+maximum, unknown/duplicate fields rejected). Required fields are `endpoint_id`
+(the injected own `TREER_AGENT_ID`), `hub_id`, positive `generation`, `recipients`
+(1–32 unique stable Agent/App runtime IDs, no names/paths), absolute `cli` and
+`state_directory`, and `release_sha256` (reviewed relay binary's lowercase hex
+SHA-256). It contains no other Agent's credentials. State pins hub/endpoint IDs,
+generation and recipient list; changing them requires a human-controlled drain
+and fresh state, never a message-driven re-pin.
+
+Each loop checks storage, runs both cleanup APIs, drains bounded ready inbound
+work, receives up to ten Core deliveries, then drains again. Failed inbound sends
+leave their durable jobs ready while ordinary outward messages can still proceed.
+Non-hub content is always outward, even if it imitates inbound control JSON.
+Outbound originals are acked only after every identical-key fragment is accepted
+by Core; inbound fragments only after durable storage, and recipient sends use
+stable transfer-derived keys. Poison is committed as a terminal failure before
+ack. Per-database lifetime dedup/retention limits still apply.
+
+Startup sends `treer.endpoint.status/v1` to the pinned hub with generation, pinned
+release hash, actual own-executable hash, version and a fixed state. The hub must
+use the outer authenticated sender to associate it; hashes are diagnostics only,
+not proof of running command/profile integrity. A full failure-receipt budget
+persists `failure_budget_exhausted`, stops further mailbox work without acking,
+and reports that state. It does not silently resume after pruning. Owner viewing,
+explicit receipt clearing/resume and hub-side status/backlog presentation are
+still to implement before activation. The hub must make Policy/command-integrity
+limitations visible alongside those states.
