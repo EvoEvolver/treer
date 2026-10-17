@@ -61,6 +61,8 @@ struct Inner {
     // Production construction always supplies the shared PostgreSQL store.
     // Only explicitly in-memory test fixtures omit it.
     tombstone_pool: Option<sqlx::PgPool>,
+    /// Bounded streamed-upload admission per user, workspace and instance (#166).
+    upload_gate: std::sync::Arc<crate::upload_gate::UploadGate>,
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]

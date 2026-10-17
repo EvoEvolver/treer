@@ -61,3 +61,12 @@ uuid = { version = "1", features = ["serde", "v4"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+
+# Hashing and base64 are on the hot path of the upload tests (hundreds of
+# megabytes per run); optimizing only these crates keeps debug test runs short.
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.base64]
+opt-level = 3
+[profile.dev.package.serde_json]
+opt-level = 3

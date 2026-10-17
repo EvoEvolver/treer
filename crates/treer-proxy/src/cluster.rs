@@ -1006,6 +1006,7 @@ mod tests {
             status: ServerStatus::Online,
             connected_at: now,
             last_seen_at: now,
+            capabilities: vec![],
         };
         let connection_id = Uuid::new_v4();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
@@ -1193,6 +1194,7 @@ mod tests {
                     status: ServerStatus::Online,
                     connected_at: now,
                     last_seen_at: now,
+                    capabilities: vec![],
                 },
                 agents: Vec::new(),
             },

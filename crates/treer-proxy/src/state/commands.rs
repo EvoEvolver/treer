@@ -174,6 +174,11 @@ impl AppState {
         }
     }
 
+    /// Admission gate for streamed machine uploads (#166).
+    pub fn upload_gate(&self) -> std::sync::Arc<crate::upload_gate::UploadGate> {
+        self.inner.upload_gate.clone()
+    }
+
     /// Capabilities of the live connection, for pre-checks that must happen
     /// before a durable side effect such as consuming a confirmation token.
     pub async fn server_capabilities(

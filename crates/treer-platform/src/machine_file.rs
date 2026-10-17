@@ -275,7 +275,8 @@ mod unix {
         /// Only a recorded random staging name can be removed by recovery.
         pub fn cleanup_staging(&self, path: &str, temporary_name: &str) -> io::Result<()> {
             if validate_relative_path(temporary_name)?.len() != 1
-                || !temporary_name.starts_with(".treer-transfer-xfer_")
+                || !(temporary_name.starts_with(".treer-transfer-xfer_")
+                    || temporary_name.starts_with(".treer-transfer-upl_"))
             {
                 return Err(protected());
             }
@@ -487,16 +488,47 @@ mod unix {
                     self.name.as_str(),
                 )?;
             } else {
-                // Atomic no-replace on Linux/macOS, without exists()+rename race.
-                sys::linkat(
+                // Atomic no-replace without an exists()+rename race. Linux
+                // tries renameat2(RENAME_NOREPLACE) first (one name at every
+                // instant); kernels or filesystems that reject the flag, and
+                // other platforms, use linkat + unlinkat, where a failed unlink
+                // after a successful link is a published file with its staging
+                // name still present (publication_uncertain).
+                #[cfg(target_os = "linux")]
+                let renamed = match sys::renameat_with(
                     &self.parent,
                     self.temporary_name.as_str(),
                     &self.parent,
                     self.name.as_str(),
-                    AtFlags::empty(),
-                )?;
-                sys::unlinkat(&self.parent, self.temporary_name.as_str(), AtFlags::empty())
-                    .map_err(|_| publication_uncertain())?;
+                    sys::RenameFlags::NOREPLACE,
+                ) {
+                    Ok(()) => true,
+                    Err(error)
+                        if matches!(
+                            error,
+                            rustix::io::Errno::NOSYS
+                                | rustix::io::Errno::INVAL
+                                | rustix::io::Errno::NOTSUP
+                                | rustix::io::Errno::OPNOTSUPP
+                        ) =>
+                    {
+                        false
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                #[cfg(not(target_os = "linux"))]
+                let renamed = false;
+                if !renamed {
+                    sys::linkat(
+                        &self.parent,
+                        self.temporary_name.as_str(),
+                        &self.parent,
+                        self.name.as_str(),
+                        AtFlags::empty(),
+                    )?;
+                    sys::unlinkat(&self.parent, self.temporary_name.as_str(), AtFlags::empty())
+                        .map_err(|_| publication_uncertain())?;
+                }
             }
             self.installed = true;
             self.parent

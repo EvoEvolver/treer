@@ -1867,7 +1867,7 @@ fn status_detector_prefers_blockers() {
 
 #[test]
 fn upload_names_reject_path_traversal() {
-    assert!(validate_upload_file_name("notes.txt").is_ok());
+    assert!(crate::machine_upload::validate_file_name("notes.txt").is_ok());
     for name in [
         "",
         ".",
@@ -1877,7 +1877,7 @@ fn upload_names_reject_path_traversal() {
         "dir\\notes.txt",
     ] {
         assert!(
-            validate_upload_file_name(name).is_err(),
+            crate::machine_upload::validate_file_name(name).is_err(),
             "accepted {name:?}"
         );
     }
@@ -2141,4 +2141,361 @@ fn host_stop_errors_keep_absent_target_codes() {
     ] {
         assert_eq!(host_stop_error(other).code, "host_error", "{other}");
     }
+}
+
+/// A runtime over a fake Host that answers every request with an empty,
+/// synced inventory: enough for the upload staging paths, which only touch
+/// the machine root (#166).
+async fn upload_fixture() -> (ControllerRuntime, PathBuf, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt;
+    use treer_host_protocol::{
+        decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
+    };
+    let temp = std::env::temp_dir().join(format!("trr-upload-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&temp).unwrap();
+    // The socket keeps the short, non-canonical path (sockaddr_un length);
+    // the machine root is compared canonically (macOS temp dirs live under
+    // /private), so the configured root must be canonical.
+    #[cfg(unix)]
+    let socket = temp.join("host.sock");
+    let root = std::fs::canonicalize(&temp).unwrap();
+    #[cfg(windows)]
+    let socket = treer_platform::endpoint_name(
+        &Uuid::new_v4().to_string(),
+        &treer_platform::current_user_sid().unwrap(),
+    );
+    let mut listener = treer_platform::LocalListener::bind(&socket).unwrap();
+    let initial = HostResponse::Synced {
+        host_epoch: "upload-host".into(),
+        host_build: HostBuildInfo {
+            version: "test".into(),
+            git_commit: "test".into(),
+        },
+        processes: vec![],
+        replay: vec![],
+    };
+    let inventory = initial.clone();
+    let task = tokio::spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        while let Ok(length) = stream.read_u32().await {
+            let mut bytes = vec![0; length as usize];
+            stream.read_exact(&mut bytes).await.unwrap();
+            let request: HostRequest = decode_message(&bytes).unwrap();
+            let encoded = encode_message(&HostMessage::Response {
+                request_id: request.request_id,
+                response: Some(inventory.clone()),
+                error: None,
+            })
+            .unwrap();
+            stream.write_u32(encoded.len() as u32).await.unwrap();
+            stream.write_all(&encoded).await.unwrap();
+        }
+    });
+    let (host, events) = HostClient::connect(&socket).await.unwrap();
+    let config = ControllerConfig {
+        protected_paths: vec![],
+        workspace_id: "workspace".into(),
+        server_id: "server".into(),
+        agent_server_url: "http://127.0.0.1:1".into(),
+        proxy_public_url: "https://proxy.example/".into(),
+        treer_binary: None,
+        interface_cache_path: root.join("interfaces.json"),
+        startup_store_path: root.join("startup.json"),
+        private_state_root: root.join("agent-private"),
+        provider_cli_root: root.join("provider-cli"),
+        root: root.clone(),
+    };
+    let (runtime, _) = ControllerRuntime::from_sync(host, initial, events, config).unwrap();
+    (runtime, root, task)
+}
+
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn sha(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    format!("{:x}", sha2::Sha256::digest(bytes))
+}
+
+fn staging_files(root: &Path) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(root)
+        .unwrap()
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".treer-transfer-upl_"))
+        .collect();
+    names.sort();
+    names
+}
+
+#[tokio::test]
+async fn chunked_upload_commits_only_verified_parts_and_cleans_staging() {
+    let (runtime, root, host_task) = upload_fixture().await;
+    std::fs::create_dir_all(root.join("inbox")).unwrap();
+    let inbox = root.join("inbox");
+    // Over the cap: refused before any staging file exists.
+    let error = runtime
+        .begin_upload(
+            "upl_cap00001",
+            "inbox",
+            "huge.bin",
+            false,
+            Some(treer_protocol::MACHINE_UPLOAD_MAX_BYTES + 1),
+        )
+        .unwrap_err();
+    assert_eq!(error.code, "machine_upload_too_large");
+    assert!(staging_files(&inbox).is_empty());
+    // A six-byte upload in two parts, with one bad part in between.
+    runtime
+        .begin_upload("upl_ok000001", "inbox", "ok.bin", false, Some(6))
+        .unwrap();
+    assert_eq!(
+        staging_files(&inbox),
+        vec![".treer-transfer-upl_ok000001".to_string()]
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(inbox.join(".treer-transfer-upl_ok000001"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "staging file is owner-only");
+    }
+    assert_eq!(
+        runtime
+            .append_upload_chunk("upl_ok000001", None, &b64(b"abc"))
+            .unwrap_err()
+            .code,
+        "machine_upload_mode_mismatch",
+        "declared-size uploads need offsets"
+    );
+    assert_eq!(
+        runtime
+            .append_upload_chunk("upl_ok000001", Some(0), &b64(b"abc"))
+            .unwrap(),
+        3
+    );
+    let committed = runtime
+        .commit_upload_part("upl_ok000001", 0, 3, &sha(b"abc"))
+        .unwrap();
+    assert_eq!(committed["committed_offset"], 3);
+    assert_eq!(
+        runtime
+            .append_upload_chunk("upl_ok000001", Some(3), &b64(b"de"))
+            .unwrap(),
+        5
+    );
+    let error = runtime
+        .commit_upload_part("upl_ok000001", 3, 2, &sha(b"xx"))
+        .unwrap_err();
+    assert_eq!(error.code, "upload_part_hash_mismatch");
+    let state = runtime.upload_result("upl_ok000001").unwrap();
+    assert_eq!(state["state"], "active");
+    assert_eq!(state["committed_offset"], 3);
+    assert_eq!(state["written_offset"], 3, "the bad part was discarded");
+    assert_eq!(
+        runtime
+            .append_upload_chunk("upl_ok000001", Some(2), &b64(b"d"))
+            .unwrap_err()
+            .code,
+        "machine_upload_offset"
+    );
+    assert_eq!(
+        runtime
+            .append_upload_chunk("upl_ok000001", Some(3), &b64(b"def"))
+            .unwrap(),
+        6
+    );
+    assert_eq!(
+        runtime
+            .commit_upload_part("upl_ok000001", 3, 3, &sha(b"def"))
+            .unwrap()["committed_offset"],
+        6
+    );
+    // Idempotent and conflicting replays of a committed part.
+    assert_eq!(
+        runtime
+            .commit_upload_part("upl_ok000001", 0, 3, &sha(b"abc"))
+            .unwrap()["idempotent"],
+        true
+    );
+    assert_eq!(
+        runtime
+            .commit_upload_part("upl_ok000001", 0, 3, &sha(b"zzz"))
+            .unwrap_err()
+            .code,
+        "upload_part_conflict"
+    );
+    let receipt = runtime.commit_upload("upl_ok000001").unwrap();
+    assert_eq!(receipt.bytes_written, 6);
+    assert_eq!(receipt.path, "inbox/ok.bin");
+    assert_eq!(receipt.sha256.as_deref(), Some(sha(b"abcdef").as_str()));
+    assert_eq!(std::fs::read(inbox.join("ok.bin")).unwrap(), b"abcdef");
+    assert!(staging_files(&inbox).is_empty());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(inbox.join("ok.bin"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600);
+    }
+    // The receipt is remembered: a repeated commit and the result query agree.
+    assert_eq!(runtime.commit_upload("upl_ok000001").unwrap(), receipt);
+    let state = runtime.upload_result("upl_ok000001").unwrap();
+    assert_eq!(state["state"], "committed");
+    assert_eq!(state["result"]["sha256"], sha(b"abcdef"));
+    assert!(!runtime.abort_upload("upl_ok000001").unwrap());
+    // Incomplete uploads cannot be committed; abort removes the staging file.
+    runtime
+        .begin_upload("upl_short0001", "inbox", "short.bin", false, Some(5))
+        .unwrap();
+    runtime
+        .append_upload_chunk("upl_short0001", Some(0), &b64(b"abc"))
+        .unwrap();
+    runtime
+        .commit_upload_part("upl_short0001", 0, 3, &sha(b"abc"))
+        .unwrap();
+    assert_eq!(
+        runtime.commit_upload("upl_short0001").unwrap_err().code,
+        "machine_upload_size_mismatch"
+    );
+    assert!(runtime.abort_upload("upl_short0001").unwrap());
+    assert!(staging_files(&inbox).is_empty());
+    assert!(!inbox.join("short.bin").exists());
+    // A chunk past the declaration is discarded and the part rewinds.
+    runtime
+        .begin_upload("upl_long00001", "inbox", "long.bin", false, Some(2))
+        .unwrap();
+    assert_eq!(
+        runtime
+            .append_upload_chunk("upl_long00001", Some(0), &b64(b"abc"))
+            .unwrap_err()
+            .code,
+        "machine_upload_too_large"
+    );
+    assert_eq!(
+        runtime.upload_result("upl_long00001").unwrap()["written_offset"],
+        0
+    );
+    assert!(runtime.abort_upload("upl_long00001").unwrap());
+    // Publishing never replaces an existing file unless asked.
+    std::fs::write(inbox.join("taken.bin"), b"old").unwrap();
+    for (id, overwrite) in [("upl_taken0001", false), ("upl_taken0002", true)] {
+        runtime
+            .begin_upload(id, "inbox", "taken.bin", overwrite, Some(3))
+            .unwrap();
+        runtime
+            .append_upload_chunk(id, Some(0), &b64(b"new"))
+            .unwrap();
+        runtime.commit_upload_part(id, 0, 3, &sha(b"new")).unwrap();
+        let outcome = runtime.commit_upload(id);
+        if overwrite {
+            assert_eq!(outcome.unwrap().bytes_written, 3);
+            assert_eq!(std::fs::read(inbox.join("taken.bin")).unwrap(), b"new");
+        } else {
+            assert_eq!(outcome.unwrap_err().code, "machine_file_exists");
+            assert_eq!(std::fs::read(inbox.join("taken.bin")).unwrap(), b"old");
+        }
+        assert!(staging_files(&inbox).is_empty());
+    }
+    // Legacy (undeclared) uploads append and publish under the cap.
+    runtime
+        .begin_upload("upl_legacy001", "inbox", "legacy.bin", false, None)
+        .unwrap();
+    assert_eq!(
+        runtime
+            .append_upload_chunk("upl_legacy001", Some(0), &b64(b"xy"))
+            .unwrap_err()
+            .code,
+        "machine_upload_mode_mismatch"
+    );
+    runtime
+        .append_upload_chunk("upl_legacy001", None, &b64(b"xy"))
+        .unwrap();
+    let legacy = runtime.commit_upload("upl_legacy001").unwrap();
+    assert_eq!(legacy.bytes_written, 2);
+    assert_eq!(legacy.sha256.as_deref(), Some(sha(b"xy").as_str()));
+    host_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn chunked_upload_bounds_active_uploads_reaps_idle_ones_and_sweeps_after_restart() {
+    let (runtime, root, host_task) = upload_fixture().await;
+    for index in 0..treer_protocol::MACHINE_UPLOAD_MAX_ACTIVE {
+        runtime
+            .begin_upload(
+                &format!("upl_active{index:03}"),
+                ".",
+                &format!("file-{index}.bin"),
+                false,
+                Some(1024),
+            )
+            .unwrap();
+    }
+    let error = runtime
+        .begin_upload("upl_extra0001", ".", "extra.bin", false, Some(1024))
+        .unwrap_err();
+    assert_eq!(error.code, "machine_upload_busy");
+    assert_eq!(
+        staging_files(&root).len(),
+        treer_protocol::MACHINE_UPLOAD_MAX_ACTIVE
+    );
+    assert_eq!(runtime.reap_uploads(), 0);
+    runtime.inner.uploads.age_for_test(
+        "upl_active000",
+        Duration::from_secs(treer_protocol::MACHINE_UPLOAD_IDLE_SECONDS + 1),
+        Duration::from_secs(0),
+    );
+    runtime.inner.uploads.age_for_test(
+        "upl_active001",
+        Duration::from_secs(0),
+        Duration::from_secs(treer_protocol::MACHINE_UPLOAD_MAX_LIFETIME_SECONDS + 1),
+    );
+    assert_eq!(runtime.reap_uploads(), 2);
+    let remaining = staging_files(&root);
+    assert_eq!(
+        remaining.len(),
+        treer_protocol::MACHINE_UPLOAD_MAX_ACTIVE - 2
+    );
+    assert!(!remaining.contains(&".treer-transfer-upl_active000".to_string()));
+    assert_eq!(
+        runtime
+            .append_upload_chunk("upl_active000", Some(0), &b64(b"late"))
+            .unwrap_err()
+            .code,
+        "machine_upload_not_found"
+    );
+    runtime
+        .begin_upload("upl_extra0001", ".", "extra.bin", false, Some(1024))
+        .unwrap();
+    assert_eq!(
+        staging_files(&root).len(),
+        treer_protocol::MACHINE_UPLOAD_MAX_ACTIVE - 1
+    );
+    // A replacement Controller sweeps exactly the staging names its
+    // predecessor recorded, and nothing else.
+    std::fs::write(root.join(".treer-transfer-upl_unrecorded"), b"not ours").unwrap();
+    let replacement = crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
+    replacement
+        .begin("upl_fresh00001", ".", "fresh.bin", false, Some(8))
+        .unwrap();
+    let after = staging_files(&root);
+    assert_eq!(
+        after,
+        vec![
+            ".treer-transfer-upl_fresh00001".to_string(),
+            ".treer-transfer-upl_unrecorded".to_string()
+        ],
+        "recorded intents swept, unrecorded names untouched"
+    );
+    assert!(replacement.abort("upl_fresh00001").unwrap());
+    std::fs::remove_file(root.join(".treer-transfer-upl_unrecorded")).unwrap();
+    host_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
 }

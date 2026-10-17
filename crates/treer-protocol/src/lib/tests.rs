@@ -293,6 +293,7 @@ fn machine_supervision_is_optional_for_older_controllers() {
         status: ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     };
 
     let encoded = serde_json::to_value(&server).expect("serialize server info");
@@ -1013,6 +1014,7 @@ fn machine_exec_and_upload_commands_round_trip() {
     let upload = AgentCommand::UploadChunk {
         upload_id: "upl_test".to_string(),
         content_base64: "aGVsbG8=".to_string(),
+        offset: None,
     };
     let encoded = serde_json::to_value(&upload).expect("serialize upload chunk");
     assert_eq!(encoded["action"], "upload_chunk");
@@ -1058,4 +1060,68 @@ fn treer_header_names_fold_underscores_and_case() {
     ] {
         assert!(!is_treer_header_name(name), "{name}");
     }
+}
+
+#[test]
+fn streamed_upload_capability_and_limits() {
+    let begin = |size: Option<u64>| AgentCommand::UploadBegin {
+        upload_id: "upl_1".into(),
+        directory: ".".into(),
+        file_name: "f.bin".into(),
+        overwrite: false,
+        size,
+    };
+    assert_eq!(
+        begin(None).required_capability(),
+        Some(CAPABILITY_MACHINE_UPLOAD),
+        "legacy uploads keep the v1 requirement"
+    );
+    assert_eq!(
+        begin(Some(1)).required_capability(),
+        Some(CAPABILITY_MACHINE_UPLOAD_V3)
+    );
+    let json = serde_json::to_value(begin(None)).unwrap();
+    assert!(json.get("size").is_none(), "absent size stays off the wire");
+    let chunk = |offset: Option<u64>| AgentCommand::UploadChunk {
+        upload_id: "upl_1".into(),
+        content_base64: String::new(),
+        offset,
+    };
+    assert_eq!(
+        chunk(None).required_capability(),
+        Some(CAPABILITY_MACHINE_UPLOAD)
+    );
+    assert_eq!(
+        chunk(Some(0)).required_capability(),
+        Some(CAPABILITY_MACHINE_UPLOAD_V3)
+    );
+    assert!(serde_json::to_value(chunk(None))
+        .unwrap()
+        .get("offset")
+        .is_none());
+    assert_eq!(
+        AgentCommand::UploadPartCommit {
+            upload_id: "upl_1".into(),
+            offset: 0,
+            length: 1,
+            sha256: "00".into(),
+        }
+        .required_capability(),
+        Some(CAPABILITY_MACHINE_UPLOAD_V3)
+    );
+    assert_eq!(
+        AgentCommand::UploadResult {
+            upload_id: "upl_1".into(),
+        }
+        .required_capability(),
+        Some(CAPABILITY_MACHINE_UPLOAD_V3)
+    );
+    assert!(CONTROLLER_CAPABILITIES.contains(&CAPABILITY_MACHINE_UPLOAD_V3));
+    assert_eq!(MACHINE_UPLOAD_PART_MAX_BYTES, 8 * 1024 * 1024);
+    assert!(
+        MACHINE_UPLOAD_PART_MIN_BYTES * MACHINE_UPLOAD_MAX_PARTS as u64 >= MACHINE_UPLOAD_MAX_BYTES
+    );
+    assert_eq!(MACHINE_UPLOAD_MAX_BYTES, 128 * 1024 * 1024);
+    assert_eq!(MACHINE_TRANSFER_DEFAULT_LIMIT, 128 * 1024 * 1024);
+    assert_eq!(MACHINE_TRANSFER_HARD_LIMIT, 1024 * 1024 * 1024);
 }

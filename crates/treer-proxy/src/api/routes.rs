@@ -28,6 +28,7 @@ pub fn router(
         policy: policy.clone(),
         config: ingress.clone(),
     };
+    let upload_store = crate::upload_store::UploadStore::new(auth_store.pool());
     let agent_control = Router::new()
         .registered_route(
             "/agent/workspaces/{workspace_id}/workload-tree",
@@ -582,6 +583,25 @@ pub fn router(
             "/api/workspaces/{workspace_id}/machines/{server_id}/files",
             post(upload_machine_file).layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_BODY_BYTES)),
         )
+        // Chunked, resumable upload (#166). Parts carry at most 8 MiB; the
+        // handler checks Content-Length before reading a byte.
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/uploads",
+            post(begin_machine_upload).get(list_machine_uploads),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/uploads/{upload_id}",
+            get(machine_upload_status).delete(abort_machine_upload),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/uploads/{upload_id}/parts",
+            axum::routing::put(put_machine_upload_part)
+                .layer(DefaultBodyLimit::max(MAX_MACHINE_UPLOAD_PART_BODY_BYTES)),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/machines/{server_id}/uploads/{upload_id}/commit",
+            post(commit_machine_upload),
+        )
         .registered_route(
             "/api/workspaces/{workspace_id}/machines/{server_id}/file-transfer",
             get(machine_file_transfer_info)
@@ -812,6 +832,7 @@ pub fn router(
         .layer(Extension(workload_identity))
         .layer(Extension(provider_store))
         .layer(Extension(service_ingress))
+        .layer(Extension(upload_store))
         .layer(Extension(auth_store))
         .layer(Extension(browser))
         .layer(Extension(ingress))

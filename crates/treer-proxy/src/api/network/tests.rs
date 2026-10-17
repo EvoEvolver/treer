@@ -43,6 +43,7 @@ async fn relay_fixture(
                 status: treer_protocol::ServerStatus::Online,
                 connected_at: Utc::now(),
                 last_seen_at: Utc::now(),
+                capabilities: vec![],
             },
             connection,
             sender,

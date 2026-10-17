@@ -560,6 +560,7 @@ fn test_server() -> ServerInfo {
         status: ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     }
 }
 
@@ -2095,6 +2096,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
         status: ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     };
     state_a
         .register_server(source, source_connection, source_tx)
@@ -2122,6 +2124,7 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
         status: ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     };
     state_b
         .register_server(destination.clone(), destination_connection, destination_tx)

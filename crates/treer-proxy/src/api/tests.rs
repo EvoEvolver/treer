@@ -1718,6 +1718,7 @@ pub(super) async fn state_with_managed_agent() -> AppState {
         status: treer_protocol::ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     };
     let agent = treer_protocol::AgentInfo {
         path: None,
@@ -4444,6 +4445,7 @@ async fn voice_command_turns_asr_text_into_agent_prompt() {
         status: ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     };
     let agent = treer_protocol::AgentInfo {
         path: None,
@@ -5284,6 +5286,7 @@ async fn browser_tunnel_forwards_http_without_leaking_gateway_credentials() {
         status: treer_protocol::ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     };
     let connection_id = Uuid::new_v4();
     let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -5437,6 +5440,7 @@ async fn public_ingress_preserves_application_auth_and_strips_treer_headers() {
         status: treer_protocol::ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     };
     let connection_id = Uuid::new_v4();
     let (server_tx, mut server_rx) = tokio::sync::mpsc::unbounded_channel();
