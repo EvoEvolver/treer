@@ -472,6 +472,15 @@ the child's I/O refusal while outward errors remain fixed.
 changes require their own exact-SHA native evidence; the prior clock-adapter run
 does not cover this integration.
 
+The actual-process native fixture also keeps its original raw-cancellation case
+and adds native-clock cancellation while connect is pending and after an owned
+future overruns its short budget in `block_in_place`. On the next await, refusal
+must drop the owned child and a retained SYNCHRONIZE duplicate of that child's
+original process handle must be signaled. The blocking call itself is not
+preempted; this fixture proves cleanup at the subsequent cancellation boundary,
+not interruption of an arbitrary synchronous Windows API. These short deadlines
+are cancellation-test inputs, not newly authorized transaction budgets.
+
 Integration must not treat the child's local window as evidence of the owner's
 remaining budget. A corrupted but internally valid record can leave the child
 unexpired after the owner's original deadline. Every owner-side ACK/permit

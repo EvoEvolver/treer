@@ -1102,7 +1102,7 @@ mod tests {
             connection.abort().unwrap();
         }
 
-        for rogue in [true, false] {
+        for cancellation_case in 0..4 {
             let id = format!("0{}", &selector()[1..]);
             let endpoint = Endpoint::bind(&id).unwrap();
             let image = PinnedImage::open(&path, expected).await.unwrap();
@@ -1121,7 +1121,7 @@ mod tests {
             })
             .unwrap();
             let observed = unsafe { OwnedHandle::from_raw_handle(duplicate) };
-            if rogue {
+            if cancellation_case == 0 {
                 // Current process has the correct SID and knows the pipe name,
                 // but its kernel PID is not the owned child's PID.
                 let _rogue = ClientOptions::new()
@@ -1131,12 +1131,41 @@ mod tests {
                     .accept_owned(child, tokio::time::Instant::now() + CONNECT_BUDGET)
                     .await
                     .is_err());
-            } else {
+            } else if cancellation_case == 1 {
                 let future =
                     endpoint.accept_owned(child, tokio::time::Instant::now() + CONNECT_BUDGET);
                 assert!(tokio::time::timeout(Duration::from_millis(50), future)
                     .await
                     .is_err());
+            } else {
+                use crate::update_deadline::Window;
+                use windows_sys::Win32::System::SystemInformation::GetTickCount64;
+                let sampled = unsafe { GetTickCount64() };
+                let window = Window {
+                    start: sampled,
+                    expiry: sampled.checked_add(50).unwrap(),
+                };
+                // Own the actual child before constructing the future. Both a
+                // pending connect and a blocking phase that overruns the budget
+                // must drop that same child on cancellation at the next await.
+                let mut clock = TickDeadline::accept(window, Some(window.expiry)).unwrap();
+                let future = async move {
+                    if cancellation_case == 3 {
+                        blocking_phase(|| {
+                            std::thread::sleep(Duration::from_millis(100));
+                            Ok(())
+                        })?;
+                    }
+                    endpoint
+                        .accept_owned(child, tokio::time::Instant::now() + CONNECT_BUDGET)
+                        .await
+                };
+                assert!(clock.run(future).await.is_err());
+                assert!(matches!(
+                    clock.refusal,
+                    Some(tick_deadline::Refusal::Clock | tick_deadline::Refusal::Timer)
+                ));
+                assert!(clock.remaining().is_err());
             }
             assert_eq!(
                 unsafe { WaitForSingleObject(observed.as_raw_handle(), 0) },
