@@ -501,6 +501,32 @@ artifacts or re-sign them to force equality. Reproducible Windows builds (pinned
 timestamp and a stripped debug identifier) are possible future work and would
 change the binaries, so they need their own gated release.
 
+## Single-container image input and smoke
+
+The native workflow (`Build release artifacts`) also produces the inputs of the
+single-container image (`Dockerfile.single`) and proves them on the same run:
+
+- The two Linux `build` jobs additionally build `treer-proxy` and upload it as
+  `treer-proxy-linux-x86_64` / `treer-proxy-linux-aarch64`
+  (`scripts/stage-proxy-artifact.sh`: binary, `SHA256SUMS`, `build-metadata.json`
+  schema 1). The machine artifacts, their checksums and the reuse rules are
+  unchanged.
+- `single-container-input` checks out the exact revision, downloads only that
+  run's Linux artifacts, arranges `.single-container-input/` with
+  `scripts/assemble-single-container-input.py` and publishes its digest, the
+  40-hex commit and the version as job outputs. That job is the trust anchor.
+- `single-container-image` (one native runner per architecture) rebuilds nothing
+  in Rust: it passes the job-output digest to the image build as
+  `TREER_NATIVE_INPUT_SHA256` (the image recomputes the input digest and refuses
+  a mismatch), checks the image `org.opencontainers.image.revision` label against
+  the checkout, and runs `node deploy/single-container/smoke.mjs` on the
+  runner's own Docker daemon. No registry push happens in this workflow.
+
+Publishing the single-container image (a `v*` tag job beside `Publish GHCR
+images`, with the same tag policy: `vX.Y.Z` and `sha-<commit>`, never `latest`)
+is a separate change. Until it exists the image is built and smoke-tested but
+not distributed.
+
 ## GHCR images for self-host
 
 After Canary passes, tag the same commit `vX.Y.Z` matching `Cargo.toml` and

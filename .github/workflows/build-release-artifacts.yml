@@ -260,3 +260,134 @@ jobs:
           path: release-artifacts/${{ matrix.platform }}/
           if-no-files-found: error
           retention-days: 14
+
+      # The single-container image consumes the native Proxy of THIS run. It is a separate artifact so
+      # the machine artifact layout, checksums and reuse rules stay exactly as they are.
+      - name: Build native Proxy (Linux image input)
+        if: startsWith(matrix.platform, 'linux-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --locked --release -p treer-proxy
+          sh scripts/stage-proxy-artifact.sh \
+            "${{ matrix.platform }}" \
+            "release-artifacts-proxy/${{ matrix.platform }}"
+
+      - name: Upload native Proxy artifact
+        if: startsWith(matrix.platform, 'linux-')
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: treer-proxy-${{ matrix.platform }}
+          path: release-artifacts-proxy/${{ matrix.platform }}/
+          if-no-files-found: error
+          retention-days: 14
+
+  single-container-input:
+    name: Single-container native input
+    needs: build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    outputs:
+      input_sha256: ${{ steps.assemble.outputs.input_sha256 }}
+      commit: ${{ steps.assemble.outputs.commit }}
+      version: ${{ steps.assemble.outputs.version }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Download native artifacts of this run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: treer-*linux-*
+          path: native-artifacts
+
+      - name: Assemble the exact-SHA input and publish its digest
+        id: assemble
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit=$(git rev-parse HEAD)
+          test "${#commit}" -eq 40
+          version=$(awk '/^\[workspace\.package\]/{f=1;next} /^\[/{f=0} f && /^version *=/{gsub(/[" ]/,"",$0); sub(/^version=/,"",$0); print; exit}' Cargo.toml)
+          ls native-artifacts
+          digest=$(python3 -I scripts/assemble-single-container-input.py native-artifacts .single-container-input)
+          echo "input_sha256=$digest" >> "$GITHUB_OUTPUT"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Upload the staged input
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: single-container-input
+          path: .single-container-input/
+          if-no-files-found: error
+          retention-days: 14
+
+  single-container-image:
+    name: Single-container image and smoke ${{ matrix.platform }}
+    needs: single-container-input
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+            docker_platform: linux/amd64
+            architecture: x86_64
+          - platform: linux-aarch64
+            runner: ubuntu-22.04-arm
+            docker_platform: linux/arm64
+            architecture: aarch64
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+          ref: ${{ inputs.revision || github.sha }}
+
+      - name: Verify checkout and native runner
+        shell: bash
+        env:
+          EXPECTED_COMMIT: ${{ needs.single-container-input.outputs.commit }}
+          EXPECTED_ARCHITECTURE: ${{ matrix.architecture }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
+          test "$(uname -s)" = Linux
+          test "$(uname -m)" = "$EXPECTED_ARCHITECTURE"
+
+      - name: Download the staged input
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: single-container-input
+          path: .single-container-input
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+
+      - name: Build the image from the staged native input (no push)
+        shell: bash
+        env:
+          TREER_BUILD_COMMIT: ${{ needs.single-container-input.outputs.commit }}
+          TREER_VERSION: ${{ needs.single-container-input.outputs.version }}
+          TREER_NATIVE_INPUT_SHA256: ${{ needs.single-container-input.outputs.input_sha256 }}
+        run: |
+          set -euo pipefail
+          docker buildx build --load --platform "${{ matrix.docker_platform }}" \
+            -f Dockerfile.single \
+            --build-arg TREER_BUILD_COMMIT="$TREER_BUILD_COMMIT" \
+            --build-arg TREER_VERSION="$TREER_VERSION" \
+            --build-arg TREER_NATIVE_INPUT_SHA256="$TREER_NATIVE_INPUT_SHA256" \
+            -t treer-single:ci .
+          revision=$(docker image inspect treer-single:ci --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+          test "$revision" = "$TREER_BUILD_COMMIT"
+
+      - name: Real image smoke (server, machine, Host rules, first start, enroll, create, restart)
+        shell: bash
+        run: node deploy/single-container/smoke.mjs treer-single:ci
