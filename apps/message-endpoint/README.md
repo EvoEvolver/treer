@@ -530,12 +530,20 @@ fairness or successful recovery by itself.
 Valid bound fragments for a paused/stale binding, or for a full active queue,
 commit to a separate hold before ack. Holds are capped at 20 fragments/256 KiB
 per endpoint and 400 fragments/5 MiB globally; they do not consume active queue
-or failure-ledger quotas. Duplicate deliveries retain their original one-hour
+or failure-ledger quotas. One maximum-size 256 KiB transfer can fill an endpoint
+hold (the serialized fragments also carry framing overhead). A readback older
+than 30 seconds is stale, even if the owner did not pause the binding: the
+runtime must refresh well inside that window, targeting every ten seconds, and
+show stale readback separately from an explicit pause. Slow refresh can exhaust
+the hold and cause the explicit body drops described below.
+Duplicate deliveries retain their original one-hour
 expiry. Promotion requires a current active/fresh binding, revalidates generation
 and hashes through the normal fragment store, processes at most ten rows FIFO,
 and deletes only after its durable commit. Accepted state replay is deduplicated
 after a crash between commit and deletion. Expired or old-generation holds turn
 into metadata rejection receipts before plaintext is removed, never into work.
+Promotion can place held work behind newer live transfers; cross-transfer
+ordering is not guaranteed.
 
 At capacity, the hub **drops the fragment body by design** after durably recording
 its rejection, then permits Core ack. Metadata receipts contain Core delivery ID,

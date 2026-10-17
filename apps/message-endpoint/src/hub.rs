@@ -497,7 +497,15 @@ impl<M: Mailbox + Directory> Hub<M> {
                 }
             }
         }
-        if self.active(id, now).is_err() {
+        // Only an unavailable/paused/stale binding permits the hold path.
+        // Storage failures must propagate: a worker must not acknowledge Core
+        // after a failed database read, even if a later hold write could work.
+        let inactive = match self.active(id, now) {
+            Ok(_) => false,
+            Err(Error::Binding) => true,
+            Err(error) => return Err(error),
+        };
+        if inactive {
             return match self.hold_delivery(delivery, now) {
                 Err(Error::Binding) => self.record_rejection(
                     id,
@@ -878,6 +886,28 @@ mod tests {
         hub.receive_once(NOW + 1).unwrap();
         assert_eq!(hub.ready_outbound("ag_endpoint", NOW + 1).unwrap().len(), 1);
         assert_eq!(fake.acks.borrow().len(), wire.len());
+    }
+    #[test]
+    fn storage_read_failure_never_commits_a_hold_or_permits_ack() {
+        let (mut hub, fake) = fixture();
+        let delivery = delivery("del_storage", "ag_endpoint", &outbound("body")[0]);
+        // A damaged binding projection is a storage fault, not a stale or
+        // owner-paused binding. Even the paused path must leave Core unacked.
+        hub.store
+            .db
+            .execute("UPDATE hub_bindings SET checked_at='invalid_integer'", [])
+            .unwrap();
+        assert!(matches!(
+            hub.admit_core_delivery(&delivery, NOW),
+            Err(Error::Storage(_))
+        ));
+        assert!(fake.acks.borrow().is_empty());
+        let count: i64 = hub
+            .store
+            .db
+            .query_row("SELECT COUNT(*) FROM hub_holds", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
     }
     #[test]
     fn paused_or_stale_binding_holds_before_ack_and_unknown_sender_cannot_route() {
