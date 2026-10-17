@@ -26,19 +26,22 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha512};
+use sha2::{Digest, Sha256, Sha512};
 use tokio::io::AsyncReadExt;
 use tracing::warn;
 use treer_protocol::{
-    plan_argv_hash, provider_cli_version_from_output, provider_cli_version_text, ProtocolError,
+    plan_argv_hash, provider_cli_expected_node_arch, provider_cli_version_from_output,
+    provider_cli_version_text, provider_cli_version_token_matches, NativeBinaryPin, ProtocolError,
     ProviderCheck, ProviderCliAction, ProviderCliCheckResponse, ProviderCliConsent,
     ProviderCliInstallAccepted, ProviderCliLifecycleScripts, ProviderCliObservation,
     ProviderCliObservationSummary, ProviderCliObservedState, ProviderCliOperationReport,
     ProviderCliOperationStatus, ProviderCliPackage, ProviderCliPlanStep, ProviderCliProbe,
     ProviderCliRecipeRef, ProviderCliRecipeView, ProviderCliRecipesResponse, ProviderCliStepResult,
-    ValidatedProviderRecipe, ValidatedProviderTable, PROVIDER_CLI_CHECK_TIMEOUT_SECONDS,
+    ProviderCliVerifiedFile, ValidatedProviderRecipe, ValidatedProviderTable,
+    PROVIDER_CLI_CHECK_TIMEOUT_SECONDS, PROVIDER_CLI_OFFLINE_REGISTRY,
     PROVIDER_CLI_OPERATION_DEADLINE_SECONDS, PROVIDER_CLI_OUTPUT_TAIL_BYTES,
     PROVIDER_CLI_RETAINED_OPERATIONS, PROVIDER_CLI_RETENTION_SECONDS,
+    PROVIDER_CLI_SPACE_FLOOR_BYTES,
 };
 use uuid::Uuid;
 
@@ -49,6 +52,9 @@ const STORE_VERSION: u32 = 1;
 const JOBS_DIRECTORY: &str = "jobs";
 const CHECKS_DIRECTORY: &str = "checks";
 const PACK_DIRECTORY: &str = "pack";
+/// Native-binary entries (#131) pack the platform package into its own
+/// directory so each integrity step still hashes exactly one tarball.
+const PACK_NATIVE_DIRECTORY: &str = "pack-native";
 const USER_CONFIG: &str = "npmrc";
 const GLOBAL_CONFIG: &str = "npmrc-global";
 const PROJECT_MANIFEST: &str = "package.json";
@@ -147,9 +153,18 @@ fn tarball_name(package: &str, version: &str) -> String {
 
 /// The single expansion of a supported recipe for one job directory. Display
 /// and execution call this same function; tests compare them item for item.
+///
+/// Plain entries expand to five steps. A native-binary entry (#131) adds a
+/// Node architecture probe first, packs and verifies the platform's native
+/// package tarball too, installs both verified local tarballs in one
+/// `--offline` command pinned to a registry that answers nothing (so the
+/// reviewed postinstall can only use what was verified), and proves the
+/// placed binary against the pinned bytes before the version probe.
 pub(crate) fn expand_plan(
     recipe: &ValidatedProviderRecipe,
     npm: &str,
+    node: Option<&str>,
+    platform: &str,
     job: &Path,
 ) -> Result<Vec<ProviderCliPlanStep>, ProtocolError> {
     let install = recipe.recipe.install.as_ref().ok_or_else(|| {
@@ -161,16 +176,76 @@ pub(crate) fn expand_plan(
     let check = recipe.recipe.check.as_ref().ok_or_else(|| {
         ProtocolError::new("provider_cli_recipe_unsupported", "recipe has no check")
     })?;
-    let spec = format!("{}@{}", install.package, install.version);
-    let mut pack = vec!["pack".to_owned(), spec];
-    pack.extend(registry_flags(&install.package, &install.registry));
-    pack.extend(config_flags(job));
-    pack.push("--ignore-scripts".to_owned());
-    pack.extend(QUIET_FLAGS.iter().map(|flag| (*flag).to_owned()));
-    pack.push(format!(
-        "--pack-destination={}",
-        job.join(PACK_DIRECTORY).display()
-    ));
+    let native = match &recipe.recipe.native_binaries {
+        Some(pins) => Some(pins.get(platform).ok_or_else(|| {
+            ProtocolError::new(
+                "provider_cli_recipe_unsupported",
+                "recipe pins no native binary for this platform",
+            )
+        })?),
+        None => None,
+    };
+    let mut steps = Vec::new();
+    if native.is_some() {
+        let node = node.ok_or_else(|| {
+            ProtocolError::new(
+                "provider_cli_node_unavailable",
+                "node was not found on this machine's PATH",
+            )
+        })?;
+        if provider_cli_expected_node_arch(platform).is_none() {
+            return Err(ProtocolError::new(
+                "provider_cli_recipe_unsupported",
+                "platform has no Node architecture rule",
+            ));
+        }
+        steps.push(ProviderCliPlanStep::Command {
+            step: 1,
+            purpose: "node-arch".into(),
+            executable: node.to_owned(),
+            args: vec!["-p".to_owned(), "process.arch".to_owned()],
+        });
+    }
+    let pack_args = |package: &str, version: &str, destination: &str| {
+        let mut pack = vec!["pack".to_owned(), format!("{package}@{version}")];
+        pack.extend(registry_flags(package, &install.registry));
+        pack.extend(config_flags(job));
+        pack.push("--ignore-scripts".to_owned());
+        pack.extend(QUIET_FLAGS.iter().map(|flag| (*flag).to_owned()));
+        pack.push(format!(
+            "--pack-destination={}",
+            job.join(destination).display()
+        ));
+        pack
+    };
+    steps.push(ProviderCliPlanStep::Command {
+        step: steps.len() as u32 + 1,
+        purpose: "pack".into(),
+        executable: npm.to_owned(),
+        args: pack_args(&install.package, &install.version, PACK_DIRECTORY),
+    });
+    if let Some(pin) = native {
+        steps.push(ProviderCliPlanStep::Command {
+            step: steps.len() as u32 + 1,
+            purpose: "pack-native".into(),
+            executable: npm.to_owned(),
+            args: pack_args(&pin.package, &pin.version, PACK_NATIVE_DIRECTORY),
+        });
+    }
+    steps.push(ProviderCliPlanStep::Verify {
+        step: steps.len() as u32 + 1,
+        purpose: "integrity".into(),
+        algorithm: "sha512".into(),
+        expected: install.integrity.clone(),
+    });
+    if let Some(pin) = native {
+        steps.push(ProviderCliPlanStep::Verify {
+            step: steps.len() as u32 + 1,
+            purpose: "integrity-native".into(),
+            algorithm: "sha512".into(),
+            expected: pin.integrity.clone(),
+        });
+    }
     let mut install_args = vec![
         "install".to_owned(),
         "--global".to_owned(),
@@ -179,57 +254,84 @@ pub(crate) fn expand_plan(
             .display()
             .to_string(),
     ];
-    install_args.extend(registry_flags(&install.package, &install.registry));
+    if let Some(pin) = native {
+        install_args.push(
+            job.join(PACK_NATIVE_DIRECTORY)
+                .join(tarball_name(&pin.package, &pin.version))
+                .display()
+                .to_string(),
+        );
+        // Nothing may be fetched while scripts run: every registry points at
+        // a closed port and npm is told it is offline.
+        install_args.extend(registry_flags(
+            &install.package,
+            PROVIDER_CLI_OFFLINE_REGISTRY,
+        ));
+        install_args.push("--offline".to_owned());
+    } else {
+        install_args.extend(registry_flags(&install.package, &install.registry));
+    }
     install_args.extend(config_flags(job));
+    if install.omit_optional == Some(true) {
+        install_args.push("--omit=optional".to_owned());
+    }
     if install.ignore_scripts {
         install_args.push("--ignore-scripts".to_owned());
     }
     install_args.extend(QUIET_FLAGS.iter().map(|flag| (*flag).to_owned()));
+    steps.push(ProviderCliPlanStep::Command {
+        step: steps.len() as u32 + 1,
+        purpose: "install".into(),
+        executable: npm.to_owned(),
+        args: install_args,
+    });
     let mut prefix = vec!["prefix".to_owned(), "--global".to_owned()];
     prefix.extend(config_flags(job).into_iter().take(2));
-    Ok(vec![
-        ProviderCliPlanStep::Command {
-            step: 1,
-            purpose: "pack".into(),
-            executable: npm.to_owned(),
-            args: pack,
-        },
-        ProviderCliPlanStep::Verify {
-            step: 2,
-            purpose: "integrity".into(),
-            algorithm: "sha512".into(),
-            expected: install.integrity.clone(),
-        },
-        ProviderCliPlanStep::Command {
-            step: 3,
-            purpose: "install".into(),
-            executable: npm.to_owned(),
-            args: install_args,
-        },
-        ProviderCliPlanStep::Command {
-            step: 4,
-            purpose: "prefix".into(),
-            executable: npm.to_owned(),
-            args: prefix,
-        },
-        ProviderCliPlanStep::Resolve {
-            step: 5,
-            purpose: "check".into(),
+    let prefix_step = steps.len() as u32 + 1;
+    steps.push(ProviderCliPlanStep::Command {
+        step: prefix_step,
+        purpose: "prefix".into(),
+        executable: npm.to_owned(),
+        args: prefix,
+    });
+    if let Some(pin) = native {
+        let relative_path = format!(
+            "lib/node_modules/{}/{}",
+            install.package,
+            recipe.recipe.binary_path.as_deref().unwrap_or_default()
+        );
+        steps.push(ProviderCliPlanStep::VerifyFile {
+            step: steps.len() as u32 + 1,
+            purpose: "verify-file".into(),
             rule: format!(
-                "<npm prefix --global>/bin/{} {}",
-                check.executable,
-                check.args.join(" ")
+                "<npm prefix --global>/{relative_path} is a regular file of {} bytes with sha256 {}; <npm prefix --global>/bin/{} is a symlink to it",
+                pin.size, pin.sha256, check.executable
             ),
-            binary: check.executable.clone(),
-            args: check.args.clone(),
-            prefix_from_step: 4,
-        },
-    ])
+            relative_path,
+            entry: check.executable.clone(),
+            expected_size: pin.size,
+            expected_sha256: pin.sha256.clone(),
+            prefix_from_step: prefix_step,
+        });
+    }
+    steps.push(ProviderCliPlanStep::Resolve {
+        step: steps.len() as u32 + 1,
+        purpose: "check".into(),
+        rule: format!(
+            "<npm prefix --global>/bin/{} {}",
+            check.executable,
+            check.args.join(" ")
+        ),
+        binary: check.executable.clone(),
+        args: check.args.clone(),
+        prefix_from_step: prefix_step,
+    });
+    Ok(steps)
 }
 
-fn check_step(prefix: &Path, executable: &str, args: &[String]) -> ProviderCliPlanStep {
+fn check_step(prefix: &Path, executable: &str, args: &[String], step: u32) -> ProviderCliPlanStep {
     ProviderCliPlanStep::Command {
-        step: 5,
+        step,
         purpose: "check".into(),
         executable: prefix.join("bin").join(executable).display().to_string(),
         args: args.to_vec(),
@@ -264,6 +366,12 @@ struct StoredOperation {
     /// Latest observation compared against the consent, path-free.
     #[serde(default)]
     observed_before: Option<ProviderCliObservationSummary>,
+    /// #131: outcome of the plan's verify-file step, when it has one.
+    #[serde(default)]
+    verified_file: Option<ProviderCliVerifiedFile>,
+    /// #131: the install step started and the operation did not succeed.
+    #[serde(default)]
+    prefix_modified: bool,
 }
 
 impl StoredOperation {
@@ -306,6 +414,9 @@ impl StoredOperation {
                 .as_ref()
                 .map(|consent| consent.observation_hash.clone()),
             observed_before: self.observed_before.clone(),
+            // Step data, like `steps` and `plan`, is reported once terminal.
+            verified_file: terminal.then(|| self.verified_file.clone()).flatten(),
+            prefix_modified: self.prefix_modified,
         }
     }
 }
@@ -436,9 +547,10 @@ struct Inner {
     /// machine exec allowlist's PATH. Tests point it at a fixture npm.
     search_path: Option<OsString>,
     store: Mutex<Store>,
-    /// Operation budget; production uses the protocol constant, tests shrink
-    /// it to prove that nothing spawns once it is spent.
-    operation_budget: Mutex<Duration>,
+    /// Operation budget override; production derives the budget from the
+    /// recipe (#131), tests shrink it to prove that nothing spawns once it
+    /// is spent.
+    operation_budget: Mutex<Option<Duration>>,
 }
 
 /// Controller-owned provider CLI service; cheap to clone, one per Controller.
@@ -504,19 +616,27 @@ impl ProviderCliService {
                 table,
                 search_path,
                 store: Mutex::new(store),
-                operation_budget: Mutex::new(Duration::from_secs(
-                    PROVIDER_CLI_OPERATION_DEADLINE_SECONDS,
-                )),
+                operation_budget: Mutex::new(None),
             }),
         }
     }
 
-    fn operation_budget(&self) -> Duration {
-        *self
+    /// The recipe's own `deadline_seconds` (validated within the protocol
+    /// bounds) or the default; a test override wins.
+    fn operation_budget(&self, recipe: &ValidatedProviderRecipe) -> Duration {
+        let override_budget = *self
             .inner
             .operation_budget
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
+            .unwrap_or_else(|poison| poison.into_inner());
+        override_budget.unwrap_or_else(|| {
+            Duration::from_secs(
+                recipe
+                    .recipe
+                    .deadline_seconds
+                    .unwrap_or(PROVIDER_CLI_OPERATION_DEADLINE_SECONDS),
+            )
+        })
     }
 
     #[cfg(test)]
@@ -525,7 +645,7 @@ impl ProviderCliService {
             .inner
             .operation_budget
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = budget;
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(budget);
     }
 
     /// Advertised only when the embedded table validated on a known platform.
@@ -569,6 +689,21 @@ impl ProviderCliService {
         })
     }
 
+    /// Absolute node from the same PATH directories as npm (#131); required
+    /// only by native-binary entries, whose first step reads its architecture.
+    fn resolve_node(&self) -> Result<String, ProtocolError> {
+        let mut environment = BTreeMap::new();
+        if let Some(path) = self.search_path() {
+            environment.insert("PATH".to_owned(), path.to_string_lossy().into_owned());
+        }
+        crate::controller::resolve_machine_command("node", &environment).map_err(|_| {
+            ProtocolError::new(
+                "provider_cli_node_unavailable",
+                "node was not found on this machine's PATH",
+            )
+        })
+    }
+
     fn job_directory(&self, kind: &str, recipe_id: &str) -> PathBuf {
         self.inner.root.join(kind).join(recipe_id)
     }
@@ -578,6 +713,7 @@ impl ProviderCliService {
         entry: &ValidatedProviderRecipe,
         platform: &str,
         npm: Option<&str>,
+        node: Option<&str>,
     ) -> ProviderCliRecipeView {
         let recipe = &entry.recipe;
         let mut view = ProviderCliRecipeView {
@@ -595,6 +731,10 @@ impl ProviderCliService {
             lifecycle_scripts: None,
             package: None,
             plan: None,
+            expected_version: None,
+            deadline_seconds: None,
+            node_arch: None,
+            native_binary: None,
         };
         if !recipe.supported {
             return view;
@@ -604,10 +744,16 @@ impl ProviderCliService {
             return view;
         };
         let job = self.job_directory(JOBS_DIRECTORY, &recipe.recipe_id);
-        match expand_plan(entry, npm, &job) {
+        match expand_plan(entry, npm, node, platform, &job) {
             Ok(plan) => {
                 let install = recipe.install.as_ref();
                 view.supported = true;
+                view.expected_version = recipe.expected_version.clone();
+                view.deadline_seconds = recipe.deadline_seconds;
+                if let Some(pins) = &recipe.native_binaries {
+                    view.native_binary = pins.get(platform).cloned();
+                    view.node_arch = provider_cli_expected_node_arch(platform).map(str::to_owned);
+                }
                 view.lifecycle_scripts = Some(ProviderCliLifecycleScripts {
                     enabled: install.is_some_and(|install| !install.ignore_scripts),
                     review: recipe.lifecycle_review.clone(),
@@ -628,6 +774,7 @@ impl ProviderCliService {
     pub fn recipes(&self) -> Result<ProviderCliRecipesResponse, ProtocolError> {
         let (table, platform) = self.table()?;
         let npm = self.resolve_npm().ok();
+        let node = self.resolve_node().ok();
         Ok(ProviderCliRecipesResponse {
             schema_version: treer_protocol::PROVIDER_RECIPES_SCHEMA_VERSION,
             machine_id: self.inner.server_id.clone(),
@@ -636,7 +783,7 @@ impl ProviderCliService {
             table_hash: table.table_hash.clone(),
             recipes: table
                 .for_platform(platform)
-                .map(|entry| self.view(entry, platform, npm.as_deref()))
+                .map(|entry| self.view(entry, platform, npm.as_deref(), node.as_deref()))
                 .collect(),
         })
     }
@@ -675,7 +822,8 @@ impl ProviderCliService {
             CHECKS_DIRECTORY,
             &format!("{}-{}", entry.recipe.recipe_id, Uuid::new_v4().simple()),
         );
-        let plan = expand_plan(entry, &npm, &job)?;
+        let node = self.resolve_node().ok();
+        let plan = expand_plan(entry, &npm, node.as_deref(), platform, &job)?;
         let job_dir = JobDirectory::create(&job).map_err(|error| {
             warn!(%error, "provider CLI check directory unavailable");
             ProtocolError::new(
@@ -769,8 +917,9 @@ impl ProviderCliService {
             ));
         }
         let npm = self.resolve_npm()?;
+        let node = self.resolve_node().ok();
         let job = self.job_directory(JOBS_DIRECTORY, &entry.recipe.recipe_id);
-        let plan = expand_plan(entry, &npm, &job)?;
+        let plan = expand_plan(entry, &npm, node.as_deref(), platform, &job)?;
         let fresh_hash = plan_argv_hash(&plan);
         if fresh_hash != argv_hash {
             return Err(ProtocolError::new(
@@ -823,6 +972,8 @@ impl ProviderCliService {
                 plan: plan.clone(),
                 consent: Some(consent.clone()),
                 observed_before: None,
+                verified_file: None,
+                prefix_modified: false,
             });
             if let Err(error) = store.persist() {
                 store.operations.pop();
@@ -831,11 +982,21 @@ impl ProviderCliService {
         }
         let service = self.clone();
         let spawned_id = operation_id.to_owned();
-        let check = entry
-            .recipe
-            .check
-            .clone()
-            .expect("supported entry has check");
+        let spec = OperationSpec {
+            check: entry
+                .recipe
+                .check
+                .clone()
+                .expect("supported entry has check"),
+            expected_version: entry.recipe.expected_version.clone().unwrap_or_default(),
+            native: entry
+                .recipe
+                .native_binaries
+                .as_ref()
+                .and_then(|pins| pins.get(platform).cloned()),
+            expected_node_arch: provider_cli_expected_node_arch(platform),
+            budget: self.operation_budget(entry),
+        };
         let target = ConsentTarget {
             consent: consent.clone(),
             recipe_hash: entry.recipe_hash.clone(),
@@ -848,7 +1009,7 @@ impl ProviderCliService {
         };
         tokio::spawn(async move {
             service
-                .run_operation(&spawned_id, plan, job, check, target)
+                .run_operation(&spawned_id, plan, job, spec, target)
                 .await;
         });
         Ok(ProviderCliInstallAccepted {
@@ -899,7 +1060,11 @@ impl ProviderCliService {
     /// The remaining window is a TOCTOU between this observation and npm
     /// writing the prefix, bounded by the operation budget, not by a
     /// millisecond promise.
-    async fn consent_gate(&self, operation_id: &str, gate: &GateContext<'_>) -> ConsentGate {
+    async fn consent_gate(
+        &self,
+        operation_id: &str,
+        gate: &GateContext<'_>,
+    ) -> (ConsentGate, Option<PathBuf>) {
         let GateContext {
             plan,
             check,
@@ -909,7 +1074,7 @@ impl ProviderCliService {
             deadline,
         } = *gate;
         if Instant::now() >= deadline {
-            return ConsentGate::Expired;
+            return (ConsentGate::Expired, None);
         }
         let observed = observe(plan, check, environment, job, deadline).await;
         let summary = observed
@@ -918,16 +1083,20 @@ impl ProviderCliService {
         self.update(operation_id, |record| {
             record.observed_before = Some(summary);
         });
+        // The observed global prefix (resolved whether or not anything is
+        // installed there) lets a native entry check its volume before the
+        // install step writes it.
+        let prefix = observed.prefix.clone();
         if !observed.observation.probe.cleanup_confirmed {
-            return ConsentGate::Unconfirmed;
+            return (ConsentGate::Unconfirmed, prefix);
         }
         // Only the operation budget expires the operation; a single probe
         // that hung within budget is an unknown observation and fails the
         // comparison below as a state change.
         if Instant::now() >= deadline {
-            return ConsentGate::Expired;
+            return (ConsentGate::Expired, prefix);
         }
-        if target.consent.matches(
+        let gate = if target.consent.matches(
             &observed.observation,
             &target.recipe_hash,
             &target.target_version,
@@ -935,7 +1104,8 @@ impl ProviderCliService {
             ConsentGate::Holds
         } else {
             ConsentGate::Changed
-        }
+        };
+        (gate, prefix)
     }
 
     async fn run_operation(
@@ -943,11 +1113,11 @@ impl ProviderCliService {
         operation_id: &str,
         plan: Vec<ProviderCliPlanStep>,
         job: PathBuf,
-        check: ProviderCheck,
+        spec: OperationSpec,
         target: ConsentTarget,
     ) {
         let started = Instant::now();
-        let deadline = started + self.operation_budget();
+        let deadline = started + spec.budget;
         let job_dir = match JobDirectory::create(&job) {
             Ok(dir) => dir,
             Err(error) => {
@@ -968,17 +1138,34 @@ impl ProviderCliService {
             &job,
             self.search_path().as_deref(),
         );
+        let first_command = plan.iter().find_map(|step| match step {
+            ProviderCliPlanStep::Command { step, .. } => Some(*step),
+            _ => None,
+        });
+        // Native entries need room for the tarballs, the unpacked package and
+        // the placed copy: a floor plus twice the unpacked native size.
+        let required_space = spec.native.as_ref().map(|pin| {
+            PROVIDER_CLI_SPACE_FLOOR_BYTES.saturating_add(pin.unpacked_size.saturating_mul(2))
+        });
         let mut prefix: Option<PathBuf> = None;
         let mut final_status = ProviderCliOperationStatus::Succeeded;
         let mut error_code: Option<&'static str> = None;
         let mut last_exit: Option<i32> = None;
         let mut timed_out = false;
+        let mut install_started = false;
         for step in &plan {
             let number = step.step();
             self.update(operation_id, |record| record.step = Some(number));
             match step {
-                ProviderCliPlanStep::Verify { expected, .. } => {
-                    if !verify_pack(&job.join(PACK_DIRECTORY), expected) {
+                ProviderCliPlanStep::Verify {
+                    purpose, expected, ..
+                } => {
+                    let directory = if purpose == "integrity-native" {
+                        PACK_NATIVE_DIRECTORY
+                    } else {
+                        PACK_DIRECTORY
+                    };
+                    if !verify_pack(&job.join(directory), expected) {
                         final_status = ProviderCliOperationStatus::Failed;
                         error_code = Some("provider_cli_integrity_mismatch");
                         break;
@@ -997,13 +1184,13 @@ impl ProviderCliService {
                 ProviderCliPlanStep::Command { purpose, .. } => {
                     // The consent gate: once before anything runs and once
                     // right before the step that rewrites the global prefix.
-                    if purpose == "pack" || purpose == "install" {
-                        let gate = self
+                    if Some(number) == first_command || purpose == "install" {
+                        let (gate, observed_prefix) = self
                             .consent_gate(
                                 operation_id,
                                 &GateContext {
                                     plan: &plan,
-                                    check: &check,
+                                    check: &spec.check,
                                     environment: &environment,
                                     job: &job,
                                     target: &target,
@@ -1031,6 +1218,28 @@ impl ProviderCliService {
                             timed_out |= status == ProviderCliOperationStatus::TimedOut;
                             break;
                         }
+                        // The prefix volume is checked before it is written.
+                        if purpose == "install"
+                            && required_space.is_some_and(|required| {
+                                observed_prefix
+                                    .as_deref()
+                                    .is_some_and(|prefix| !space_available(prefix, required))
+                            })
+                        {
+                            final_status = ProviderCliOperationStatus::Failed;
+                            error_code = Some("provider_cli_space_insufficient");
+                            break;
+                        }
+                    }
+                    if purpose == "pack"
+                        && required_space.is_some_and(|required| !space_available(&job, required))
+                    {
+                        final_status = ProviderCliOperationStatus::Failed;
+                        error_code = Some("provider_cli_space_insufficient");
+                        break;
+                    }
+                    if purpose == "install" {
+                        install_started = true;
                     }
                     let outcome = run_step(step, &environment, &job, deadline).await;
                     let (status, code) = classify(&outcome, purpose);
@@ -1040,16 +1249,88 @@ impl ProviderCliService {
                     if purpose == "prefix" {
                         prefix = parse_prefix(&outcome);
                     }
+                    // The Node that will run the postinstall must be the
+                    // platform's native architecture, or npm would select a
+                    // different native package than the one pinned.
+                    let arch_ok = purpose != "node-arch"
+                        || single_token(&outcome).as_deref() == spec.expected_node_arch;
                     self.update(operation_id, |record| record.steps.push(result));
                     if status != ProviderCliOperationStatus::Succeeded {
                         final_status = status;
                         error_code = code;
                         break;
                     }
-                    if purpose == "prefix" && prefix.is_none() {
+                    if !arch_ok {
+                        final_status = ProviderCliOperationStatus::Failed;
+                        error_code = Some("provider_cli_node_arch_mismatch");
+                        break;
+                    }
+                    if purpose == "prefix" {
+                        let Some(prefix_path) = prefix.as_deref() else {
+                            final_status = ProviderCliOperationStatus::Failed;
+                            error_code = Some("provider_cli_prefix_unresolved");
+                            break;
+                        };
+                        if required_space
+                            .is_some_and(|required| !space_available(prefix_path, required))
+                        {
+                            final_status = ProviderCliOperationStatus::Failed;
+                            error_code = Some("provider_cli_space_insufficient");
+                            break;
+                        }
+                    }
+                }
+                ProviderCliPlanStep::VerifyFile {
+                    relative_path,
+                    entry,
+                    expected_size,
+                    expected_sha256,
+                    ..
+                } => {
+                    let Some(prefix_path) = prefix.clone() else {
                         final_status = ProviderCliOperationStatus::Failed;
                         error_code = Some("provider_cli_prefix_unresolved");
                         break;
+                    };
+                    let (relative, entry, size, digest) = (
+                        relative_path.clone(),
+                        entry.clone(),
+                        *expected_size,
+                        expected_sha256.clone(),
+                    );
+                    let verified = tokio::task::spawn_blocking(move || {
+                        verify_file(&prefix_path, &relative, &entry, size, &digest)
+                    })
+                    .await
+                    .unwrap_or(Err("path_refused"));
+                    match verified {
+                        Ok((size, sha256)) => self.update(operation_id, |record| {
+                            record.verified_file = Some(ProviderCliVerifiedFile {
+                                size: Some(size),
+                                sha256: Some(sha256),
+                                failure: None,
+                            });
+                            record.steps.push(ProviderCliStepResult {
+                                step: number,
+                                exit_code: Some(0),
+                                stdout: String::new(),
+                                stderr: String::new(),
+                                truncated: false,
+                                duration_ms: 0,
+                            });
+                        }),
+                        Err(failure) => {
+                            self.update(operation_id, |record| {
+                                record.verified_file = Some(ProviderCliVerifiedFile {
+                                    size: None,
+                                    sha256: None,
+                                    failure: Some(failure.to_owned()),
+                                });
+                            });
+                            final_status = ProviderCliOperationStatus::Failed;
+                            error_code = Some("provider_cli_binary_mismatch");
+                            break;
+                        }
                     }
                 }
                 ProviderCliPlanStep::Resolve { .. } => {
@@ -1058,9 +1339,12 @@ impl ProviderCliService {
                         error_code = Some("provider_cli_prefix_unresolved");
                         break;
                     };
-                    let Some(check_command) =
-                        resolve_check(prefix_path, &check.executable, &check.args)
-                    else {
+                    let Some(check_command) = resolve_check(
+                        prefix_path,
+                        &spec.check.executable,
+                        &spec.check.args,
+                        number,
+                    ) else {
                         final_status = ProviderCliOperationStatus::Failed;
                         error_code = Some("provider_cli_binary_not_found");
                         break;
@@ -1088,10 +1372,27 @@ impl ProviderCliService {
                         error_code = code;
                         break;
                     }
+                    // Exit 0 is not success: the probe must print the pinned
+                    // version as a complete token.
+                    if outcome.truncated
+                        || !provider_cli_version_token_matches(
+                            &outcome.stdout,
+                            &spec.expected_version,
+                        )
+                    {
+                        final_status = ProviderCliOperationStatus::Failed;
+                        error_code = Some("provider_cli_version_mismatch");
+                        break;
+                    }
                 }
             }
         }
         drop(job_dir);
+        let prefix_modified =
+            install_started && final_status != ProviderCliOperationStatus::Succeeded;
+        self.update(operation_id, |record| {
+            record.prefix_modified = prefix_modified
+        });
         self.finish(
             operation_id,
             started,
@@ -1143,6 +1444,18 @@ fn consent_shape_ok(consent: &ProviderCliConsent) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Recipe facts one operation runs with besides its plan (#131).
+struct OperationSpec {
+    check: ProviderCheck,
+    /// Complete token the probe's first line must carry.
+    expected_version: String,
+    /// This platform's pinned native member for native-binary entries.
+    native: Option<NativeBinaryPin>,
+    /// Node `process.arch` the native entry's first step must print.
+    expected_node_arch: Option<&'static str>,
+    budget: Duration,
+}
+
 /// What a running operation compares fresh observations against.
 struct ConsentTarget {
     consent: ProviderCliConsent,
@@ -1178,6 +1491,9 @@ struct Observed {
     /// Probe outcome when the probe ran, else the prefix step's outcome.
     outcome: StepOutcome,
     probed: bool,
+    /// The resolved global prefix when `npm prefix --global` answered, also
+    /// for an empty prefix (#131: the install gate checks its volume).
+    prefix: Option<PathBuf>,
 }
 
 fn probe_of(outcome: &StepOutcome, error_code: Option<&str>) -> ProviderCliProbe {
@@ -1210,6 +1526,16 @@ async fn observe(
     // Each process gets at most the probe budget and never outlives the
     // caller's deadline; `run_step` refuses to spawn once that has passed.
     let step_deadline = || deadline.min(Instant::now() + probe_timeout);
+    // Native entries (#131) also report the selected Node's architecture so
+    // the Proxy can refuse `prepare` before anything is fetched.
+    let mut node_arch = None;
+    if let Some(arch_step) = plan
+        .iter()
+        .find(|step| matches!(step, ProviderCliPlanStep::Command { purpose, .. } if purpose == "node-arch"))
+    {
+        node_arch = single_token(&run_step(arch_step, environment, job, step_deadline()).await);
+    }
+    let check_number = check_step_number(plan);
     let prefix = run_step(&prefix_step, environment, job, step_deadline()).await;
     // A truncated prefix answer has no trustworthy first line.
     let prefix_path = (!prefix.truncated && prefix.cleanup_confirmed)
@@ -1229,12 +1555,14 @@ async fn observe(
                 executable: None,
                 found_in_prefix: false,
                 probe: probe_of(&prefix, Some(code)),
+                node_arch: node_arch.clone(),
             },
             outcome: StepOutcome {
                 stdout: String::new(),
                 ..prefix
             },
             probed: false,
+            prefix: None,
         };
     };
     let candidate = prefix_path.join("bin").join(&check.executable);
@@ -1252,9 +1580,11 @@ async fn observe(
                 cleanup_confirmed: true,
                 error_code: Some(code.to_owned()),
             },
+            node_arch: node_arch.clone(),
         },
         outcome,
         probed: false,
+        prefix: Some(prefix_path.clone()),
     };
     let silent = StepOutcome {
         stdout: String::new(),
@@ -1281,7 +1611,8 @@ async fn observe(
         }
         Ok(_) => {}
     }
-    let Some(step) = resolve_check(&prefix_path, &check.executable, &check.args) else {
+    let Some(step) = resolve_check(&prefix_path, &check.executable, &check.args, check_number)
+    else {
         // Something occupies the slot but is not a regular file inside the
         // prefix (an escaping symlink, a directory): never executed.
         return unprobed(
@@ -1323,9 +1654,11 @@ async fn observe(
             executable,
             found_in_prefix: true,
             probe: probe_of(&probe, error_code),
+            node_arch,
         },
         outcome: probe,
         probed: true,
+        prefix: Some(prefix_path),
     }
 }
 
@@ -1348,14 +1681,213 @@ fn parse_prefix(outcome: &StepOutcome) -> Option<PathBuf> {
 
 /// The probe binary must live in the installed prefix's `bin`; a symlink is
 /// allowed only when its target stays inside that prefix. PATH is never used.
-fn resolve_check(prefix: &Path, executable: &str, args: &[String]) -> Option<ProviderCliPlanStep> {
+fn resolve_check(
+    prefix: &Path,
+    executable: &str,
+    args: &[String],
+    step: u32,
+) -> Option<ProviderCliPlanStep> {
     let candidate = prefix.join("bin").join(executable);
     let target = fs::canonicalize(&candidate).ok()?;
     let prefix_real = fs::canonicalize(prefix).ok()?;
     if !target.starts_with(&prefix_real) || !target.is_file() {
         return None;
     }
-    Some(check_step(prefix, executable, args))
+    Some(check_step(prefix, executable, args, step))
+}
+
+/// Step number of the plan's resolve (probe) step.
+fn check_step_number(plan: &[ProviderCliPlanStep]) -> u32 {
+    plan.iter()
+        .find_map(|step| match step {
+            ProviderCliPlanStep::Resolve { step, .. } => Some(*step),
+            _ => None,
+        })
+        .unwrap_or(5)
+}
+
+/// First non-empty line of an untruncated, successful step, trimmed.
+fn single_token(outcome: &StepOutcome) -> Option<String> {
+    if outcome.exit_code != Some(0) || outcome.truncated || !outcome.cleanup_confirmed {
+        return None;
+    }
+    outcome
+        .stdout
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .filter(|line| line.len() <= treer_protocol::PROVIDER_CLI_NODE_ARCH_MAX)
+        .map(str::to_owned)
+}
+
+/// An unknown answer fails closed where a native pin requires space.
+fn space_available(path: &Path, required: u64) -> bool {
+    treer_platform::available_disk_bytes(path).is_ok_and(|free| free >= required)
+}
+
+/// Read-only proof that `<prefix>/<relative>` is exactly the pinned native
+/// binary (#131): the canonical prefix is opened once, every component below
+/// it is opened with `O_NOFOLLOW`, each directory and the file are owned by
+/// root or this account and not group/world-writable, the file is regular,
+/// its size and streaming SHA-256 equal the pin, and `<prefix>/bin/<entry>`
+/// is a symlink that resolves to that same inode. The hard link the package's
+/// postinstall prefers (nlink 2) is expected and not checked. Returns the
+/// measured size and digest, or the failed check's category.
+#[cfg(unix)]
+fn verify_file(
+    prefix: &Path,
+    relative: &str,
+    entry: &str,
+    expected_size: u64,
+    expected_sha256: &str,
+) -> Result<(u64, String), &'static str> {
+    use rustix::fs::{self as sys, AtFlags, FileType, Mode, OFlags};
+    const REFUSED: &str = "path_refused";
+    let prefix_real = fs::canonicalize(prefix).map_err(|_| REFUSED)?;
+    let components: Vec<&str> = relative.split('/').collect();
+    let (last, dirs) = components.split_last().ok_or(REFUSED)?;
+    if components
+        .iter()
+        .any(|part| part.is_empty() || *part == "." || *part == "..")
+    {
+        return Err(REFUSED);
+    }
+    let euid = rustix::process::geteuid().as_raw();
+    let owned_and_private =
+        |stat: &sys::Stat| (stat.st_uid == 0 || stat.st_uid == euid) && (stat.st_mode & 0o022) == 0;
+    let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    // The prefix root may itself be reached through symlinks (canonicalized
+    // above); everything below it is opened without following.
+    let root: fs::File = sys::open(
+        &prefix_real,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| REFUSED)?
+    .into();
+    if !owned_and_private(&sys::fstat(&root).map_err(|_| REFUSED)?) {
+        return Err(REFUSED);
+    }
+    let mut dir = root.try_clone().map_err(|_| REFUSED)?;
+    for name in dirs {
+        let next: fs::File = sys::openat(&dir, *name, directory_flags, Mode::empty())
+            .map_err(|_| REFUSED)?
+            .into();
+        if !owned_and_private(&sys::fstat(&next).map_err(|_| REFUSED)?) {
+            return Err(REFUSED);
+        }
+        dir = next;
+    }
+    let mut file: fs::File = sys::openat(
+        &dir,
+        *last,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .map_err(|_| REFUSED)?
+    .into();
+    let stat = sys::fstat(&file).map_err(|_| REFUSED)?;
+    if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+        return Err("not_regular");
+    }
+    if !owned_and_private(&stat) {
+        return Err(REFUSED);
+    }
+    let size = u64::try_from(stat.st_size).map_err(|_| "native_content")?;
+    if size != expected_size {
+        return Err("native_content");
+    }
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = io::Read::read(&mut file, &mut buffer).map_err(|_| "native_content")?;
+        if read == 0 {
+            break;
+        }
+        total = total.saturating_add(read as u64);
+        if total > expected_size {
+            return Err("native_content");
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let digest = format!("{:x}", hasher.finalize());
+    if total != expected_size || digest != expected_sha256 {
+        return Err("native_content");
+    }
+    // The user-facing entry must be a symlink that leads to this very file:
+    // `bin` is opened below the prefix under the same ownership rules (a
+    // symlinked or group-writable `bin` is refused), the link is read without
+    // following, its target must normalize against the prefix to exactly the
+    // verified path, and opening through it must reach the same inode.
+    const ENTRY: &str = "entry_link";
+    let bin: fs::File = sys::openat(&root, "bin", directory_flags, Mode::empty())
+        .map_err(|_| ENTRY)?
+        .into();
+    if !owned_and_private(&sys::fstat(&bin).map_err(|_| ENTRY)?) {
+        return Err(ENTRY);
+    }
+    let link = sys::statat(&bin, entry, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| ENTRY)?;
+    if FileType::from_raw_mode(link.st_mode) != FileType::Symlink {
+        return Err(ENTRY);
+    }
+    let target = sys::readlinkat(&bin, entry, Vec::new()).map_err(|_| ENTRY)?;
+    let target = target.to_str().map_err(|_| ENTRY)?;
+    if entry_target_within(target, &prefix_real).as_deref() != Some(relative) {
+        return Err(ENTRY);
+    }
+    let through: fs::File = sys::openat(
+        &bin,
+        entry,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| ENTRY)?
+    .into();
+    let target_stat = sys::fstat(&through).map_err(|_| ENTRY)?;
+    if target_stat.st_dev != stat.st_dev || target_stat.st_ino != stat.st_ino {
+        return Err(ENTRY);
+    }
+    Ok((size, digest))
+}
+
+/// Lexically resolves a symlink target read from `<prefix>/bin` to a path
+/// relative to the prefix: `..` pops, nothing may escape the prefix, and an
+/// absolute target must start inside it. `None` when it escapes.
+fn entry_target_within(target: &str, prefix_real: &Path) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let rest = if let Some(stripped) = target.strip_prefix('/') {
+        let prefix = prefix_real.to_str()?.trim_end_matches('/');
+        let inside = format!("/{stripped}");
+        inside
+            .strip_prefix(prefix)?
+            .strip_prefix('/')
+            .map(str::to_owned)?
+    } else {
+        parts.push("bin");
+        target.to_owned()
+    };
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            name => parts.push(name),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
+}
+
+#[cfg(not(unix))]
+fn verify_file(
+    _prefix: &Path,
+    _relative: &str,
+    _entry: &str,
+    _expected_size: u64,
+    _expected_sha256: &str,
+) -> Result<(u64, String), &'static str> {
+    Err("path_refused")
 }
 
 /// SHA-512 of the single packed tarball must equal the recipe's integrity.
@@ -1458,7 +1990,13 @@ impl JobDirectory {
         }
         fs::create_dir(path)?;
         treer_platform::secure_directory(path)?;
-        for sub in ["home", "tmp", "cache", PACK_DIRECTORY] {
+        for sub in [
+            "home",
+            "tmp",
+            "cache",
+            PACK_DIRECTORY,
+            PACK_NATIVE_DIRECTORY,
+        ] {
             fs::create_dir(path.join(sub))?;
             treer_platform::secure_directory(&path.join(sub))?;
         }

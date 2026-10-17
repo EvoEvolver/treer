@@ -248,13 +248,53 @@ What Core does promise:
   Agent creation finds the binary: the probe reports the absolute path inside
   the prefix for a profile, or the user adds that `bin` directory to the
   service environment themselves.
-- A lifecycle-enabled entry runs the npm lifecycle scripts of the whole
-  resolved dependency closure, not just the top-level package, whose tarball is
-  the only thing the SHA-512 integrity pins. Such an entry requires a review
-  covering that closure; the first table has none and Claude stays unsupported.
-  The packed tarball is verified and installed by the same account in the same
-  private directory; a same-account process replacing it between steps 2 and 3
-  is inside the trust domain Core already grants that account.
+- A lifecycle-enabled entry runs npm lifecycle scripts, so the table allows
+  it only for a native-binary entry (#131): the one whose reviewed postinstall
+  places a platform binary that the recipe pins. Such an entry carries the
+  review (file hashes, the script map, which scripts npm runs, the expected
+  closure of root plus exactly one native package), `omit_optional: false`,
+  `binary_path` and one `native_binaries` pin per supported platform (native
+  package, version, tarball SHA-512, member, size, SHA-256, unpacked size).
+  Scripts without a pin or a pin without scripts invalidate the whole table.
+  Its plan has nine steps: `node -p process.arch` from the allowlisted PATH
+  must print the platform's native architecture (an x64 Node under Rosetta
+  would select another native package; `provider_cli_node_arch_mismatch`,
+  also refused at `prepare` from the observation), `npm pack` of the root and
+  of the native package, SHA-512 verification of both tarballs, one
+  `npm install --global` of both verified local tarballs with `--offline`, an
+  empty private cache and every registry pinned to a closed port (nothing
+  fetched during scripts can succeed, so a missing native fails closed), the
+  prefix resolution, a read-only verify-file step and the version probe.
+  Verify-file opens the canonical prefix once and every component below it
+  with `O_NOFOLLOW`, requires each directory and the file to be owned by root
+  or the account and not group/world-writable, the file to be regular with
+  exactly the pinned size and SHA-256 (the postinstall's hard link makes it the
+  same inode as the native package's member; nlink is not checked), and
+  `<prefix>/bin/<binary>` to be a symlink resolving inside the prefix to that
+  inode. Any mismatch is `provider_cli_binary_mismatch` with the failed check's
+  category in the report, the probe never runs, and the report's
+  `prefix_modified` tells the user to remove the package through the existing
+  uninstall path; nothing retries. The probe's first line must carry
+  `expected_version` as a complete token (`2.1.302`, not `2.1.3020` or
+  `v2.1.302`) or the operation fails as `provider_cli_version_mismatch`; this
+  rule applies to every supported entry. Native entries also require free
+  space of 1 GiB plus twice the unpacked native size on the job and prefix
+  volumes (`provider_cli_space_insufficient`) and may carry their own
+  `deadline_seconds` within 60 to 900 seconds. Residuals: the native bytes
+  are proven against the pin before anything runs them, but the reviewed
+  postinstall itself runs as the account inside the scrubbed job environment;
+  its placement is not atomic (verify-file catches partial results);
+  same-account processes can race between verify-file and the probe; musl
+  Linux is unsupported because npm would select a different native package.
+  The unit tests prove the plan shape and the fail-closed checks against
+  fixtures; that the offline install really satisfies the root's optional
+  dependency with a single copy of the verified native package, refuses an
+  injected native and uninstalls back to baseline is proven only by the
+  release-owned sealed acceptance in a disposable environment.
+  The packed tarballs are verified and installed by the same account in the
+  same private directory; a same-account process replacing them between the
+  verification and install steps is inside the trust domain Core already
+  grants that account.
 - The install step overwrites whatever lives in npm's global prefix, so the
   consent names what it replaces (#134). `prepare` first has the Controller
   observe the prefix with the same constraints as `check` (cleared

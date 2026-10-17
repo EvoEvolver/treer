@@ -30,6 +30,19 @@ pub const PROVIDER_CLI_VERSION_TOKEN_MAX: usize = 64;
 /// Numeric components are bounded before parsing so no output can overflow.
 pub const PROVIDER_CLI_VERSION_SEGMENT_DIGITS: usize = 10;
 pub const PROVIDER_CLI_VERSION_PRERELEASE_IDENTIFIERS: usize = 8;
+/// A `process.arch` token longer than this is not an architecture.
+pub const PROVIDER_CLI_NODE_ARCH_MAX: usize = 16;
+
+/// Node `process.arch` a native-binary recipe requires on a release platform
+/// (#131): an x64 Node under Rosetta on an arm64 Mac would select the wrong
+/// native package, so the Controller refuses before anything is fetched.
+pub fn provider_cli_expected_node_arch(platform: &str) -> Option<&'static str> {
+    Some(match platform {
+        "darwin-aarch64" | "linux-aarch64" => "arm64",
+        "darwin-x86_64" | "linux-x86_64" => "x64",
+        _ => return None,
+    })
+}
 
 /// What the Controller found in the global prefix, decided from evidence only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -159,6 +172,12 @@ pub struct ProviderCliObservation {
     pub executable: Option<String>,
     pub found_in_prefix: bool,
     pub probe: ProviderCliProbe,
+    /// #131: Node's `process.arch` as the recipe's Node printed it, reported
+    /// for native-binary entries only. Not part of the consent hash: a
+    /// mismatch refuses `prepare` outright and the operation's first step
+    /// repeats the check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_arch: Option<String>,
 }
 
 /// Every probe error code a Controller may report; anything else is a
@@ -218,6 +237,16 @@ impl ProviderCliObservation {
         if let Some(code) = &self.probe.error_code {
             if !PROVIDER_CLI_PROBE_ERROR_CODES.contains(&code.as_str()) {
                 return Err("probe.error_code is unknown");
+            }
+        }
+        if let Some(arch) = &self.node_arch {
+            if arch.is_empty()
+                || arch.len() > PROVIDER_CLI_NODE_ARCH_MAX
+                || !arch
+                    .bytes()
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                return Err("node_arch is not a bounded lowercase token");
             }
         }
         // Process cleanup is a fact of its own: unconfirmed cleanup is always
@@ -602,6 +631,7 @@ mod tests {
                 cleanup_confirmed: true,
                 error_code: None,
             },
+            node_arch: None,
         }
     }
 

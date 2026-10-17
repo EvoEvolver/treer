@@ -23,7 +23,7 @@ test("release recipe bytes and canonical hashes match the cross-language golden 
 test("known providers cover all five platforms with explicit unsupported entries and matching reviewed metadata", () => {
   const review = JSON.parse(readFileSync(new URL("../provider-review.json", import.meta.url), "utf8"));
   providerRecipes(bytes);
-  assert.equal(source.recipes.filter((recipe: any) => recipe.supported).length, 2);
+  assert.equal(source.recipes.filter((recipe: any) => recipe.supported).length, 3);
   for (const recipe of source.recipes) {
     if (!recipe.supported) {
       assert.equal(recipe.install, undefined); assert.equal(recipe.check, undefined); continue;
@@ -32,15 +32,23 @@ test("known providers cover all five platforms with explicit unsupported entries
     const snapshot = review.packages.find((p: any) => p.name === recipe.install.package);
     assert.equal(recipe.install.version, snapshot.version);
     assert.equal(recipe.install.integrity, snapshot.integrity);
-    assert.equal(recipe.install.ignore_scripts, true);
-    assert.deepEqual(snapshot.scripts, {});
+    assert.equal(recipe.expected_version, recipe.install.version);
+    if (recipe.provider_id === "claude") {
+      assert.equal(recipe.install.ignore_scripts, false);
+      assert.equal(recipe.install.omit_optional, false);
+      assert.deepEqual(recipe.lifecycle_review.scripts, snapshot.scripts);
+      assert.equal(recipe.lifecycle_review.files.find((f: any) => f.member === snapshot.lifecycle.member).sha256, snapshot.lifecycle.sha256);
+    } else {
+      assert.equal(recipe.install.ignore_scripts, true);
+      assert.deepEqual(snapshot.scripts, {});
+    }
   }
 });
 
 test("invalid release data fails closed before payload construction", () => {
   const mutations: Array<(table: any) => void> = [
     t => { t.recipes[0] = null; },
-    t => { t.schema_version = 2; },
+    t => { t.schema_version = 1; },
     t => { t.recipes[0].provider_id = "constructor"; },
     t => { t.recipes[0].platforms.push("windows-x86_64"); },
     t => { t.recipes[0].platforms[0] = "unknown"; },
@@ -66,11 +74,69 @@ test("invalid release data fails closed before payload construction", () => {
   }
 });
 
-test("lifecycle opt-in requires a bounded review record and changes the consent hash", () => {
-  const changed = structuredClone(source), recipe = changed.recipes[0];
-  recipe.install.ignore_scripts = false;
-  recipe.lifecycle_review = { reviewed_at: "2026-10-16", reviewer: "fixture-reviewer", files: [{ member: "package/install.cjs", sha256: "a".repeat(64) }] };
-  assert.notEqual(providerRecipes(encode(changed)).recipe_hashes[recipe.recipe_id], providerRecipes(bytes).recipe_hashes[recipe.recipe_id]);
-  recipe.lifecycle_review.files[0].member = "package/../escape";
-  assert.throws(() => providerRecipes(encode(changed)), /provider_cli_table_invalid/);
+test("Claude has complete native pins and only the reviewed postinstall enabled", () => {
+  const recipe = source.recipes.find((r: any) => r.provider_id === "claude" && r.supported);
+  assert.deepEqual(Object.keys(recipe.native_binaries).sort(), [...recipe.platforms].sort());
+  assert.equal(recipe.binary_path, "bin/claude.exe");
+  assert.deepEqual(recipe.lifecycle_review.runs, ["postinstall"]);
+  assert.deepEqual(recipe.lifecycle_review.closure, { packages: 2, with_scripts: [recipe.install.package] });
+  assert.equal(recipe.deadline_seconds, undefined, "release must measure before increasing the 300s default");
+  assert.deepEqual(source.recipes.find((r: any) => r.recipe_id === "claude-native-unavailable").platforms, ["darwin-x86_64", "windows-x86_64"]);
+  for (const mutate of [
+    (r: any) => { r.native_binaries["darwin-aarch64"].sha256 = "b".repeat(64); },
+    (r: any) => { r.install.ignore_scripts = true; },
+    (r: any) => { r.install.omit_optional = true; },
+    (r: any) => { r.expected_version = "2.1.303"; },
+  ]) {
+    const changed = structuredClone(recipe); mutate(changed);
+    assert.notEqual(recipeHash(changed), recipeHash(recipe));
+  }
+});
+
+test("native and lifecycle metadata reject incomplete, mismatched and unsafe inputs", () => {
+  const mutations: Array<(recipe: any) => void> = [
+    r => { delete r.expected_version; },
+    r => { r.expected_version = "v2.1.302"; },
+    r => { r.expected_version = "2.1.3020"; },
+    r => { r.deadline_seconds = 59; },
+    r => { r.deadline_seconds = 901; },
+    r => { r.deadline_seconds = 60.5; },
+    r => { r.binary_path = "../claude"; },
+    r => { r.binary_path = "/bin/claude.exe"; },
+    r => { delete r.native_binaries; },
+    r => { delete r.native_binaries["linux-x86_64"]; },
+    r => { r.native_binaries["windows-x86_64"] = r.native_binaries["linux-x86_64"]; },
+    r => { r.native_binaries["linux-x86_64"].package = "@untrusted/native"; },
+    r => { r.native_binaries["linux-x86_64"].version = "2.1.301"; },
+    r => { r.native_binaries["linux-x86_64"].integrity = "sha512-invalid"; },
+    r => { r.native_binaries["linux-x86_64"].member = "package/../claude"; },
+    r => { r.native_binaries["linux-x86_64"].sha256 = "A".repeat(64); },
+    r => { r.native_binaries["linux-x86_64"].size = 0; },
+    r => { r.native_binaries["linux-x86_64"].size = 1.5; },
+    r => { r.native_binaries["linux-x86_64"].unpacked_size = 1; },
+    r => { r.native_binaries["linux-x86_64"].unpacked_size = 1024 ** 3 + 1; },
+    r => { r.native_binaries["linux-x86_64"].unknown = true; },
+    r => { delete r.install.omit_optional; },
+    r => { r.install.omit_optional = true; },
+    r => { r.install.ignore_scripts = true; },
+    r => { delete r.lifecycle_review; },
+    r => { r.lifecycle_review.files[0].member = "package/../escape"; },
+    r => { r.lifecycle_review.files.pop(); },
+    r => { r.lifecycle_review.files[1] = r.lifecycle_review.files[0]; },
+    r => { r.lifecycle_review.scripts.postinstall = "node arbitrary.cjs"; },
+    r => { r.lifecycle_review.scripts.install = "unreviewed"; },
+    r => { r.lifecycle_review.runs.push("prepare"); },
+    r => { r.lifecycle_review.closure.packages = 3; },
+    r => { r.lifecycle_review.closure.with_scripts.push("@untrusted/native"); },
+  ];
+  for (const mutate of mutations) {
+    const changed = structuredClone(source);
+    mutate(changed.recipes.find((r: any) => r.provider_id === "claude" && r.supported));
+    assert.throws(() => providerRecipes(encode(changed)), /^Error: provider_cli_table_invalid$/);
+  }
+  for (const deadline of [60, 300, 900]) {
+    const changed = structuredClone(source);
+    changed.recipes[0].deadline_seconds = deadline;
+    providerRecipes(encode(changed));
+  }
 });

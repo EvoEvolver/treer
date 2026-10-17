@@ -3665,6 +3665,7 @@ dependencies = [
  "percent-encoding",
  "ratatui",
  "reqwest",
+ "rustix",
  "serde",
  "serde_json",
  "sha2",
