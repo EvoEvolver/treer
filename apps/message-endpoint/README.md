@@ -881,8 +881,10 @@ fixed error codes, never raw configuration or credentials. A changed CLI hash
 requires a human-reviewed config update. Confirmed owner configuration writes
 can create paused bindings, pin Telegram targets, and pause bindings. Transport
 account workers and resume are not connected, so **this is a development preview,
-not ready for activation/migration**. The React page remains read-only until its
-configuration forms are connected.
+not ready for activation/migration**. The React page supports these confirmed configuration writes only on its
+configured dedicated root URL. Embedded tunnels, forwarded preview origins and
+other direct origins stay read-only and link to that URL; they never widen the
+CSRF origin allowlist.
 
 The React page follows the initial injected identity automatically, keeps OAuth
 as the no-identity fallback on the dedicated App URL, and treats invalid supplied
@@ -977,3 +979,14 @@ expiry is rechecked after Core queries and mutex waits before committing. These
 routes do not expose resume, retarget, deletion, generation replacement, transport
 secret writes, receipt refetch or audit erasure. Owner role is checked once per
 request through Proxy; there is no cross-system transaction with role revocation.
+
+
+The owner forms provide stable endpoint/recipient IDs and generation for paused
+creation, immutable Telegram target metadata, and pause at the displayed revision.
+Each action needs an explicit confirmation checkbox; no implicit browser confirm
+or optimistic activation is used. Target IDs are exact safe integers, and sender
+IDs must be positive and distinct. Inputs/errors are rendered as text, labels
+remain visible, and forms wrap at 390px. A stale save shows the fixed conflict
+error and requires refresh/reconfirmation rather than silently retrying. The UI
+never accepts a bot token. Account setup, channel readiness and resume controls
+are still absent; these forms do not claim a functioning channel.

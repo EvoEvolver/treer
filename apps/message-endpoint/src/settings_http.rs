@@ -573,7 +573,7 @@ fn dispatch(
     if method == Method::GET && path == "/api/auth/config" {
         return response(
             StatusCode::OK,
-            json!({"login_url":app.auth.settings_url().join("api/auth/start").map(|v|v.to_string()).ok()}),
+            json!({"login_url":app.auth.settings_url().join("api/auth/start").map(|v|v.to_string()).ok(), "settings_url":app.auth.settings_url().as_str()}),
         );
     }
     if method == Method::GET && matches!(path, "/assets/app.js" | "/assets/app.css") {
