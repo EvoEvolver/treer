@@ -93,6 +93,16 @@ print(json.dumps(result))
         self.assertEqual(result, {'status': 'failed', 'checks': [],
                                   'failure': 'cli_unavailable', 'step': 'send'})
 
+    def test_unexpected_exception_never_escapes_health_or_discloses_text(self):
+        with patch.object(smoke, 'cli', side_effect=RuntimeError('sensitive stderr')):
+            result = smoke.report('/unused', 'app_synthetic', 'synthetic123')
+        self.assertEqual(result, {'status': 'failed', 'checks': [],
+                                  'failure': 'cli_invalid_json', 'step': 'send'})
+        with patch.object(smoke, 'exercise', side_effect=RuntimeError('sensitive path')):
+            result = smoke.report('/unused', 'app_synthetic', 'synthetic123')
+        self.assertEqual(result, {'status': 'failed', 'checks': [],
+                                  'failure': 'cli_invalid_json', 'step': 'configuration'})
+
 
 if __name__ == '__main__':
     unittest.main()

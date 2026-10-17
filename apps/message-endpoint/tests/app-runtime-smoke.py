@@ -126,7 +126,7 @@ def exercise(executable, own_id, nonce):
                 'receive_from_app', 'redelivery_before_ack', 'ack_replay', 'no_redelivery_after_ack']
     except SmokeError as error:
         raise SmokeError(error.code, step) from None
-    except (KeyError, TypeError, IndexError):
+    except Exception:
         raise SmokeError('cli_invalid_json', step) from None
 
 
@@ -136,6 +136,9 @@ def report(executable, own_id, nonce):
         return {'status': 'passed', 'checks': checks}
     except SmokeError as error:
         return {'status': 'failed', 'checks': [], 'failure': error.code, 'step': error.step}
+    except Exception:
+        return {'status': 'failed', 'checks': [], 'failure': 'cli_invalid_json',
+                'step': 'configuration'}
 
 
 def main():
