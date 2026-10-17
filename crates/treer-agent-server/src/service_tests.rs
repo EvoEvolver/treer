@@ -531,6 +531,37 @@ async fn windows_wait_controller_epoch(config: &ServiceConfig, previous: Option<
     }
 }
 
+/// #127: the state directory is reserved for file transfer, so a root equal
+/// to it or inside it is refused with a fixed actionable error; a root that
+/// merely contains the state directory (HOME) stays valid.
+#[test]
+fn roots_equal_to_or_inside_the_state_directory_are_refused() {
+    let home = env::temp_dir().join(format!("treer-root-state-{}", Uuid::new_v4().simple()));
+    let state = home.join(".local/state/treer");
+    fs::create_dir_all(state.join("work")).unwrap();
+    fs::create_dir_all(home.join("projects")).unwrap();
+    for inside in [state.clone(), state.join("work"), state.join("missing-yet")] {
+        let error = root_outside_state_dir(&inside, &state)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.starts_with("root_inside_treer_state_directory"),
+            "{error}"
+        );
+        assert!(error.contains("choose another --root"), "{error}");
+    }
+    root_outside_state_dir(&home, &state).unwrap();
+    root_outside_state_dir(&home.join("projects"), &state).unwrap();
+    // A sibling whose name merely extends the state path is not inside it.
+    fs::create_dir_all(home.join(".local/state/treer-other")).unwrap();
+    root_outside_state_dir(&home.join(".local/state/treer-other"), &state).unwrap();
+    // An absent state directory is still a boundary (compared by path).
+    let absent = home.join("absent-state");
+    root_outside_state_dir(&absent.join("x"), &absent).unwrap_err();
+    assert!(new_enrollment_root(Some(&home.join("projects"))).is_ok());
+    fs::remove_dir_all(home).unwrap();
+}
+
 #[test]
 fn root_relocation_preserves_identity_and_rejects_live_hosts_or_partial_state() {
     #[cfg(unix)]

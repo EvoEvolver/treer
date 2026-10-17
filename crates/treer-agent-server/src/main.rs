@@ -291,6 +291,8 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
     let workspace = args.workspace.clone().expect("workspace defaulted");
     let root = std::fs::canonicalize(&args.root)
         .with_context(|| format!("invalid workspace root {}", args.root.display()))?;
+    // Fail closed before touching anything: the state directory is reserved.
+    service::ensure_root_outside_state_dir(&root)?;
     let server_id = match args.server_id {
         Some(server_id) => server_id,
         None => load_or_create_server_id(&root)?,
