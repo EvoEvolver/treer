@@ -373,6 +373,53 @@ remain subsequent reviewed work. The additional directory negatives, atomic
 production preparation and daemon-only construction gate in security3281 remain
 required before exposing any caller.
 
+## Increment 2b2: test-only challenge and frame state
+
+Security3291 accepts the sharing-mode correction subject to exact native evidence.
+Release3293 and the checked logs show `9f683383` passing eight ordinary tests and
+the outside-Job native round trip on Server 2022/20348 and Server 2025/26100.
+This satisfies that development-only condition; final product gaps remain.
+
+`update_binding` is private and compiled only for tests on all platforms. It
+models a fixed 113-byte frame: one tag, 16-byte attempt, 32-byte intent digest,
+32-byte registration digest, 16-byte owner challenge and 16-byte child challenge.
+The ordered exchange is owner Hello, child Reply, owner Finish, child Ack.
+Both sides require exact attempt/intent/registration binding on every frame;
+Reply echoes the owner's challenge, and Finish/Ack echo both. The first Hello
+requires an empty child challenge. Zero challenges and reflection of one side's
+challenge back as the other's are refused. Each modeled exchange receives an
+absolute monotonic deadline once, never renewed by a valid frame. Wrong-length,
+unknown, duplicate, out-of-order, mismatched or expired input permanently refuses
+the exchange, including an extra frame after completion. Completion is only a
+diagnostic state; it grants no permit or transaction authority.
+
+The Windows fixture runs this exchange after the 56-byte parent observation and
+success marker from 2b1. Each side obtains a fresh 128-bit nonce from
+`BCryptGenRandom` using the system-preferred RNG; failure or all-zero output
+refuses without retry. The same primitive generates private endpoint selectors.
+The fixture uses fixed-size reads/writes and one absolute five-second budget for
+the whole four-frame exchange. Parent/child handle and image verification runs
+again on each received frame before responding. Registration observation and
+launch retain their own existing fixture phase budgets; no production total
+transaction deadline is claimed by this test helper.
+
+Crucially, fixture attempt/intent/registration inputs are synthetic: the attempt
+comes from the test selector, intent is a fixed fixture digest, and registration
+is the digest of the checked 56-byte parent observation. They are not durable
+preparation records, and nothing may promote the model's `complete` state into
+authority. A subsequent slice must independently read and validate the exact
+durable attempt/intent/registration before constructing a production exchange,
+tie the authenticated process proofs to that record, and specify the final
+parent/child rechecks at permit acceptance and before ACK. No locks, journal,
+once-only permit, durable decision, installer or daemon caller exists here.
+
+Pure state-machine tests run locally on macOS and in Windows test builds. They
+cover the ordered exchange, every mutated byte of the initial frame (a mutated
+first owner challenge is detected when echoed back), wrong lengths, duplicate
+frames, reordering, cross-session replay and deadline expiry without recovery.
+The Windows native fixture needs a fresh exact-SHA hosted run for the real pipe
+exchange; the prior `9f683383` results do not cover this new protocol model.
+
 ## Authority contract for the subsequent implementation review
 
 - Owner/supervisor communication uses a local private named pipe, restrictive

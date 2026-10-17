@@ -46,6 +46,23 @@ fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "update_bootstrap_refused")
 }
 
+fn random_nonce() -> io::Result<[u8; 16]> {
+    let mut bytes = [0u8; 16];
+    if unsafe {
+        BCryptGenRandom(
+            ptr::null_mut(),
+            bytes.as_mut_ptr(),
+            bytes.len() as u32,
+            BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        )
+    } < 0
+        || bytes == [0; 16]
+    {
+        return Err(denied());
+    }
+    Ok(bytes)
+}
+
 // Blocking native operations retain ownership in this task: unlike detaching a
 // spawn_blocking launch, cancellation cannot leave a worker spawning a child
 // after the caller has gone away. Tokio hands other runnable tasks/timers to a
@@ -559,18 +576,7 @@ pub struct Endpoint {
 
 impl Endpoint {
     pub fn bind_random() -> io::Result<Self> {
-        let mut bytes = [0u8; 16];
-        if unsafe {
-            BCryptGenRandom(
-                ptr::null_mut(),
-                bytes.as_mut_ptr(),
-                bytes.len() as u32,
-                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
-            )
-        } < 0
-        {
-            return Err(denied());
-        }
+        let bytes = random_nonce()?;
         let selector: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
         Self::bind(&selector)
     }
@@ -658,6 +664,55 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::ClientOptions;
+
+    async fn fixture_binding_exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+        pipe: &mut S,
+        selector: &str,
+        registration: &[u8; 56],
+        owner: bool,
+        verify: impl Fn() -> io::Result<()>,
+    ) -> io::Result<()> {
+        use crate::update_binding::{Binding, Exchange, FRAME_SIZE};
+        let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
+        // These are synthetic fixture inputs, not durable preparation records.
+        let attempt_hash = Sha256::digest(selector.as_bytes());
+        let binding = Binding {
+            attempt: attempt_hash[..16].try_into().map_err(|_| denied())?,
+            intent: Sha256::digest(b"inert-parent-proof-fixture-v1").into(),
+            registration: Sha256::digest(registration).into(),
+        };
+        let mut exchange = Exchange::new(binding, random_nonce()?, owner, deadline.into_std());
+        if owner {
+            let hello = exchange
+                .start(tokio::time::Instant::now().into_std())
+                .map_err(|_| denied())?;
+            tokio::time::timeout_at(deadline, pipe.write_all(&hello))
+                .await
+                .map_err(|_| denied())?
+                .map_err(|_| denied())?;
+        }
+        for _ in 0..2 {
+            let mut bytes = [0; FRAME_SIZE];
+            tokio::time::timeout_at(deadline, pipe.read_exact(&mut bytes))
+                .await
+                .map_err(|_| denied())?
+                .map_err(|_| denied())?;
+            blocking_phase(&verify)?;
+            let response = exchange
+                .receive(&bytes, tokio::time::Instant::now().into_std())
+                .map_err(|_| denied())?;
+            if let Some(response) = response {
+                tokio::time::timeout_at(deadline, pipe.write_all(&response))
+                    .await
+                    .map_err(|_| denied())?
+                    .map_err(|_| denied())?;
+            }
+        }
+        if !exchange.complete() || tokio::time::Instant::now() >= deadline {
+            return Err(denied());
+        }
+        Ok(())
+    }
 
     struct PrivateImage {
         directory: PathBuf,
@@ -881,6 +936,11 @@ mod tests {
                 .await
                 .unwrap()
                 .unwrap();
+            fixture_binding_exchange(pipe, id, &registration, false, || {
+                parent.verify_registration(&registration)
+            })
+            .await
+            .unwrap();
             Some(parent)
         } else {
             None
@@ -933,6 +993,12 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(ack, [1]);
+        let child = &connection.child;
+        fixture_binding_exchange(&mut connection._pipe, &id, &registration, true, || {
+            child.verify()
+        })
+        .await
+        .unwrap();
         connection.abort().unwrap();
 
         // A legitimate kernel parent cannot substitute a different registration

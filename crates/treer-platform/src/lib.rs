@@ -24,6 +24,8 @@ pub mod private_directory;
 pub mod process_image;
 #[cfg(unix)]
 pub mod retained_executable;
+#[cfg(test)]
+mod update_binding;
 pub use environment::{
     clean_process_environment_before_threads, inherited_environment, inherited_variable_allowed,
     machine_exec_environment, machine_exec_variable_allowed,
