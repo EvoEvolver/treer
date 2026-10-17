@@ -1082,16 +1082,10 @@ impl ProviderCliService {
         self.update(operation_id, |record| {
             record.observed_before = Some(summary);
         });
-        // The observed prefix (`<prefix>/bin/<binary>` minus two components)
-        // lets a native entry check the prefix volume before the install.
-        let prefix = observed
-            .observation
-            .executable
-            .as_deref()
-            .map(Path::new)
-            .and_then(Path::parent)
-            .and_then(Path::parent)
-            .map(Path::to_path_buf);
+        // The observed global prefix (resolved whether or not anything is
+        // installed there) lets a native entry check its volume before the
+        // install step writes it.
+        let prefix = observed.prefix.clone();
         if !observed.observation.probe.cleanup_confirmed {
             return (ConsentGate::Unconfirmed, prefix);
         }
@@ -1496,6 +1490,9 @@ struct Observed {
     /// Probe outcome when the probe ran, else the prefix step's outcome.
     outcome: StepOutcome,
     probed: bool,
+    /// The resolved global prefix when `npm prefix --global` answered, also
+    /// for an empty prefix (#131: the install gate checks its volume).
+    prefix: Option<PathBuf>,
 }
 
 fn probe_of(outcome: &StepOutcome, error_code: Option<&str>) -> ProviderCliProbe {
@@ -1564,6 +1561,7 @@ async fn observe(
                 ..prefix
             },
             probed: false,
+            prefix: None,
         };
     };
     let candidate = prefix_path.join("bin").join(&check.executable);
@@ -1585,6 +1583,7 @@ async fn observe(
         },
         outcome,
         probed: false,
+        prefix: Some(prefix_path.clone()),
     };
     let silent = StepOutcome {
         stdout: String::new(),
@@ -1658,6 +1657,7 @@ async fn observe(
         },
         outcome: probe,
         probed: true,
+        prefix: Some(prefix_path),
     }
 }
 
@@ -1835,10 +1835,14 @@ fn verify_file(
     if entry_target_within(target, &prefix_real).as_deref() != Some(relative) {
         return Err(ENTRY);
     }
-    let through: fs::File =
-        sys::openat(&bin, entry, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
-            .map_err(|_| ENTRY)?
-            .into();
+    let through: fs::File = sys::openat(
+        &bin,
+        entry,
+        OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    )
+    .map_err(|_| ENTRY)?
+    .into();
     let target_stat = sys::fstat(&through).map_err(|_| ENTRY)?;
     if target_stat.st_dev != stat.st_dev || target_stat.st_ino != stat.st_ino {
         return Err(ENTRY);
