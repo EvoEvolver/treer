@@ -12,11 +12,12 @@ test("attachment HTTP routes retain guards, expose only IDs and fail closed with
   const root = mkdtempSync(join(realpathSync.native(tmpdir()), "attachments-http-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const app = resolve(import.meta.dirname, "..");
-  for (const mode of ["missing", "available", "unsafe", "inside", "old", "administrator"] as const) {
-    const enabled = mode === "available";
+  for (const mode of ["missing", "available", "home", "unsafe", "inside", "vcs", "old", "administrator"] as const) {
+    const enabled = mode === "available" || mode === "home";
     const controller = await fakePrivateState("ag_image_http", "fixture-only", { status: mode === "administrator" ? "windows_requires_administrator" : mode === "unsafe" ? "agent_private_state_unsafe" : mode === "old" ? "old-unsupported" : "available" });
-    const cwd = join(root, `cwd-${mode}`), privateRoot = join(root, `private-${mode}`), portFile = join(root, `port-${mode}`);
-    mkdirSync(cwd); mkdirSync(privateRoot);
+    const cwd = join(root, `cwd-${mode}`), privateRoot = mode === "home" ? join(cwd, ".state", "agent") : join(root, `private-${mode}`), portFile = join(root, `port-${mode}`);
+    mkdirSync(cwd); mkdirSync(privateRoot, { recursive: true });
+    if (mode === "vcs") mkdirSync(join(privateRoot, ".git"));
     const options = { cwd: app, stdio: "pipe" as const, env: hermeticEnv({ AGENT_UI_CWD: cwd, AGENT_UI_PORT_FILE: portFile, CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_IMAGES: "1", TREER_AGENT_ID: "ag_image_http", TREER_AGENT_SERVER_URL: controller.url, TREER_WORKLOAD_CREDENTIAL: "fixture-only", AGENT_UI_MESSAGE_WATCH: "0", ...(mode !== "missing" ? { TREER_AGENT_PRIVATE_STATE_DIR: mode === "inside" ? cwd : privateRoot } : {}) }) };
     let child = spawn(process.execPath, ["--import", "tsx", join(app, "src/index.ts")], options);
     let log = ""; child.stderr!.on("data", bytes => { log += bytes; });
@@ -31,7 +32,7 @@ test("attachment HTTP routes retain guards, expose only IDs and fail closed with
       assert.ok(base);
       const storageState = await (await localFetch(`${base}/api/state`)).json();
       assert.equal(storageState.attachmentsAvailable, enabled);
-      assert.equal(storageState.attachmentStorageStatus, enabled ? "available" : mode === "administrator" ? "windows_requires_administrator" : mode === "inside" ? "agent_private_state_inside_cwd" : mode === "unsafe" ? "agent_private_state_unsafe" : "agent_private_state_unavailable");
+      assert.equal(storageState.attachmentStorageStatus, enabled ? "available" : mode === "administrator" ? "windows_requires_administrator" : mode === "inside" ? "agent_private_state_inside_cwd" : mode === "vcs" ? "agent_private_state_inside_vcs_worktree" : mode === "unsafe" ? "agent_private_state_unsafe" : "agent_private_state_unavailable");
       assert.ok(!JSON.stringify(storageState).includes(privateRoot), "private filesystem root never enters browser state");
       // localFetch uses node:http (and accepts Buffer); its shared declaration
       // has RequestInit's browser BodyInit spelling.
@@ -86,6 +87,21 @@ test("attachment HTTP routes retain guards, expose only IDs and fail closed with
       }
       assert.equal(restored, true, log);
       assert.equal((await localFetch(`${base}/api/attachments/${retained.id}`)).status, 200);
+      // Keep the fake Controller available to prove the launcher's independent
+      // mirror checks again after startup, rather than relying on Core refusal.
+      const eventsBefore = controller.events.length;
+      const filesBefore = readdirSync(join(privateRoot, "images"));
+      const marker = join(privateRoot, ".git"); mkdirSync(marker);
+      const changed = await (await localFetch(`${base}/api/state`)).json();
+      assert.equal(changed.attachmentsAvailable, false);
+      assert.equal(changed.attachmentStorageStatus, "agent_private_state_inside_vcs_worktree");
+      assert.ok(!JSON.stringify(changed).includes(privateRoot));
+      const refused = await post(GIF);
+      assert.equal(refused.status, 503);
+      assert.equal(controller.events.length, eventsBefore, "mirror refuses before Core reservation");
+      assert.deepEqual(readdirSync(join(privateRoot, "images")), filesBefore, "no files created during refused upload");
+      rmSync(marker, { recursive: true });
+      assert.equal((await (await localFetch(`${base}/api/state`)).json()).attachmentsAvailable, true, "recovery is not cached");
     } finally {
       const stopped = child.exitCode === null ? new Promise(resolve => child.once("exit", resolve)) : Promise.resolve();
       child.kill("SIGTERM"); await stopped;

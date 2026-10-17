@@ -6,8 +6,8 @@ export interface AttachmentAdmission {
   commit(id: string): Promise<void>;
   release(id: string): Promise<void>;
 }
-export type PrivateStateStatus = "available" | "agent_private_state_unsafe" | "agent_private_state_inside_cwd" | "agent_private_state_unavailable" | "windows_requires_administrator";
-const statuses = new Set<PrivateStateStatus>(["available", "agent_private_state_unsafe", "agent_private_state_inside_cwd", "agent_private_state_unavailable", "windows_requires_administrator"]);
+export type PrivateStateStatus = "available" | "agent_private_state_unsafe" | "agent_private_state_inside_cwd" | "agent_private_state_inside_vcs_worktree" | "agent_private_state_unavailable" | "windows_requires_administrator";
+const statuses = new Set<PrivateStateStatus>(["available", "agent_private_state_unsafe", "agent_private_state_inside_cwd", "agent_private_state_inside_vcs_worktree", "agent_private_state_unavailable", "windows_requires_administrator"]);
 const errors = new Set(["invalid_private_state_reservation", "private_state_agent_quota_exceeded", "private_state_global_quota_exceeded", "private_state_too_many_reservations", "private_state_disk_space_low", "private_state_reservation_expired", ...statuses]);
 
 /** Workload credentials go only to the explicitly bound loopback Controller,
