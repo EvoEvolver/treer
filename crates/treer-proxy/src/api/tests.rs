@@ -2979,16 +2979,26 @@ async fn app_lifecycle_delete_stops_even_a_cached_terminal_workload_before_revoc
 
 #[tokio::test]
 async fn app_lifecycle_delete_accepts_already_exited_or_missing_processes() {
-    for code in [
-        "agent_not_found",
-        "process_not_running",
-        "process_not_found",
+    for (code, message) in [
+        ("agent_not_found", "target process is already absent"),
+        ("process_not_running", "target process is already absent"),
+        ("process_not_found", "target process is already absent"),
+        // Controllers before #150 flattened the Host's code into host_error:
+        // an App whose launch never spawned must still be deletable.
+        (
+            "host_error",
+            "process_not_found: process app_x was not found",
+        ),
+        (
+            "host_error",
+            "process_not_running: process app_x is not running",
+        ),
     ] {
-        assert_app_deletion_after_stop(Some(code)).await;
+        assert_app_deletion_after_stop(Some((code, message))).await;
     }
 }
 
-async fn assert_app_deletion_after_stop(stop_error: Option<&str>) {
+async fn assert_app_deletion_after_stop(stop_error: Option<(&str, &str)>) {
     let (auth, state, app, mut rx) = app_lifecycle_fixture().await;
     auth.rotate_agent_credential("default", "machine-a", &app.app_id)
         .await
@@ -3019,10 +3029,9 @@ async fn assert_app_deletion_after_stop(stop_error: Option<&str>) {
         .await
         .is_ok());
     let result = match stop_error {
-        Some(code) => CommandResult::failure(
-            stop.command_id,
-            ProtocolError::new(code, "target process is already absent"),
-        ),
+        Some((code, message)) => {
+            CommandResult::failure(stop.command_id, ProtocolError::new(code, message))
+        }
         None => CommandResult::success(stop.command_id, json!({})),
     };
     state.complete_command(result).await;
@@ -3040,6 +3049,49 @@ async fn assert_app_deletion_after_stop(stop_error: Option<&str>) {
         .is_err());
     assert!(state.resolve_agent("default", &app.app_id).await.is_err());
     assert!(rx.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn app_creation_rejects_absolute_cwd_before_storing_anything() {
+    let auth = AuthStore::for_test("admin-password").await;
+    auth.seed_test_workspace("default").await;
+    let request = |name: &str, cwd: &str| CreateAppDeploymentRequest {
+        folder_id: None,
+        server_id: Some("machine-a".into()),
+        name: name.into(),
+        command: "python3".into(),
+        args: vec!["-m".into(), "http.server".into()],
+        cwd: cwd.into(),
+        port: 8080,
+        hostname: String::new(),
+        public: false,
+    };
+    // #150: the Host refuses absolute working directories at launch; refusing
+    // them at creation leaves no stopped record behind.
+    for cwd in ["/", "/srv/app", "\\\\share\\app", "C:\\apps", "d:"] {
+        let error = auth
+            .create_app_deployment("default", "owner", "machine-a".into(), request("Docs", cwd))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "invalid_launch_profile", "{cwd}");
+    }
+    assert!(auth
+        .list_app_deployments("default")
+        .await
+        .unwrap()
+        .is_empty());
+    for (index, cwd) in ["", ".", "repo/site", "../shared"].iter().enumerate() {
+        let app = auth
+            .create_app_deployment(
+                "default",
+                "owner",
+                "machine-a".into(),
+                request(&format!("Site {index}"), cwd),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("{cwd:?}: {error:?}"));
+        assert_eq!(app.cwd, if cwd.is_empty() { "." } else { cwd });
+    }
 }
 
 #[tokio::test]

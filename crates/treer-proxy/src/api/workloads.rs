@@ -21,10 +21,22 @@ impl WorkloadAction {
 // transport, authorization, and terminal errors fatal so deletion cannot orphan
 // a process whose state is unknown. Accept Host codes from older Controllers too.
 pub(super) fn stop_target_is_absent(error: &ProtocolError) -> bool {
-    matches!(
-        error.code.as_str(),
-        "agent_not_found" | "process_not_found" | "process_not_running"
-    )
+    const ABSENT: [&str; 3] = [
+        "agent_not_found",
+        "process_not_found",
+        "process_not_running",
+    ];
+    ABSENT.contains(&error.code.as_str())
+        // Controllers before #150 flattened Host codes into `host_error` with
+        // the Host code as the message prefix; an App whose launch never
+        // spawned a process must still be stoppable and deletable through them.
+        || (error.code == "host_error"
+            && ABSENT.iter().any(|code| {
+                error
+                    .message
+                    .strip_prefix(code)
+                    .is_some_and(|rest| rest.starts_with(':'))
+            }))
 }
 
 pub(super) fn app_workload_agent(app: &AppDeployment) -> AgentInfo {

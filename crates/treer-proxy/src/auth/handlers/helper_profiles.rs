@@ -21,7 +21,24 @@ pub(crate) fn validate_launch_profile_cwd(value: &str) -> Result<String, AuthFai
             "launch profile working directory is too long or contains a NUL byte",
         ));
     }
+    // The Host resolves every working directory below the machine root and
+    // refuses absolute paths at launch; refusing them here keeps a bad launch
+    // declaration from being stored at all (#150).
+    if absolute_path_text(value) {
+        return Err(AuthFailure::bad_request(
+            "invalid_launch_profile",
+            "launch profile working directory must be relative to the machine root",
+        ));
+    }
     Ok(value.to_string())
+}
+
+/// `/x`, `\\x` or `C:...` on any platform; the Host's own check is authoritative.
+fn absolute_path_text(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    value.starts_with('/')
+        || value.starts_with('\\')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
 }
 
 pub(crate) fn validate_launch_profile_command(value: &str) -> Result<String, AuthFailure> {
@@ -206,5 +223,26 @@ mod default_profile_tests {
             defaults.len()
         );
         assert!(defaults.iter().all(|profile| profile.name != "Pi"));
+    }
+
+    #[test]
+    fn launch_profile_cwd_must_be_relative() {
+        for cwd in ["/", "/srv/app", "\\\\share\\app", "C:\\apps", "c:", "\\"] {
+            assert_eq!(
+                validate_launch_profile_cwd(cwd).unwrap_err().code(),
+                "invalid_launch_profile",
+                "{cwd}"
+            );
+        }
+        assert_eq!(validate_launch_profile_cwd("").unwrap(), ".");
+        assert_eq!(
+            validate_launch_profile_cwd(" repo/site ").unwrap(),
+            "repo/site"
+        );
+        assert_eq!(
+            validate_launch_profile_cwd("../shared").unwrap(),
+            "../shared"
+        );
+        assert_eq!(validate_launch_profile_cwd("c").unwrap(), "c");
     }
 }

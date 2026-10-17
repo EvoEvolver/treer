@@ -794,6 +794,13 @@ same Host process runtime as command Agents, under the installing machine
 account. Externally managed Apps inherit their supervisor's authority.
 Both managed kinds share a stable workload identity and lifecycle. Stop keeps
 that identity and its credential while disabling recovery; deletion revokes it.
+Stop is idempotent: a workload whose launch failed before the Host spawned a
+process (for example an App created with a working directory the Host refuses)
+is reported as exited from its saved declaration, a Host answer that the target
+process is absent completes the stop, and deletion then proceeds, so a failed
+launch never leaves an undeletable record (#150). App creation and update
+refuse absolute working directories up front; the Host's own check below the
+machine root remains authoritative at launch.
 Start requires `agent.create` on the owning machine, stop requires `agent.stop`
 on the workload, and restart requires both. Legacy App routes use these same
 checks. Reconnect adopts active legacy identities without rotating live secrets;
