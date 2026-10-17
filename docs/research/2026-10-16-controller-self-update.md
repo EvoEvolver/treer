@@ -404,6 +404,11 @@ the production walker to start at `/` without changing system installations.
 They cover identical-byte replacement, repeated refusal without adoption,
 wrong-path proof binding, symlink/missing/non-regular paths and permissions
 changed between proof creation and binding. No fixture interpreter is executed.
+The existing trusted-location resolver canonicalizes package-manager symlinks
+before retention. A regression uses that same resolver with an isolated symlink,
+then retargets the link: the existing recipe still names and verifies the
+original physical target, while replacing that target's inode is refused.
+No test changes `/opt/homebrew`, `/usr/local` or `/usr`.
 The future executor must still invoke these checks immediately before spawn
 and after proven completion; no actual execution-boundary wiring, Node22 probe
 or durable child-start authority is supplied by this recipe integration.

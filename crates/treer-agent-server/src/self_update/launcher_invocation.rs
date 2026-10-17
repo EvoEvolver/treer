@@ -255,6 +255,49 @@ mod tests {
     }
 
     #[test]
+    fn trusted_node_symlink_resolves_before_retention_and_is_not_resolved_again() {
+        use std::os::unix::fs::symlink;
+        let f = Fixture::standard_config();
+        f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+        let (selected, owned, journal) = bind(&f, "ws_a");
+        let node = NodeFixture::new();
+        let alias = node.0.join("package-manager-node");
+        symlink(node.node(), &alias).unwrap();
+        // Explicit fixture input reaches the exact trusted_executable helper
+        // used by fixed-location resolution, without changing an OS location.
+        let resolved = crate::launcher::node_executable(Some(alias.clone())).unwrap();
+        assert_eq!(resolved, node.node().canonicalize().unwrap());
+        let proof = retain_node(&resolved).unwrap();
+        let plan = Invocation::with_context(
+            &selected,
+            &owned,
+            &journal,
+            Operation::Status,
+            &f.path,
+            proof.executable(),
+        )
+        .unwrap()
+        .bind_node(proof)
+        .unwrap();
+        assert_eq!(plan.arguments()[2], resolved.as_os_str());
+        let other = node.write("other-node");
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&other, &alias).unwrap();
+        assert_eq!(
+            crate::launcher::node_executable(Some(alias)).unwrap(),
+            other
+        );
+        plan.verify_binding().unwrap(); // Still verifies the original physical path.
+        assert_eq!(plan.arguments()[2], resolved.as_os_str());
+        std::fs::rename(node.node(), node.0.join("old-node")).unwrap();
+        node.write("node");
+        assert_eq!(
+            plan.verify_binding().unwrap_err().to_string(),
+            "update_launcher_node_changed"
+        );
+    }
+
+    #[test]
     fn retained_node_rejects_identical_replacement_and_never_adopts_it() {
         let f = Fixture::standard_config();
         f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
