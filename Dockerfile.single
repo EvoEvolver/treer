@@ -1,52 +1,4 @@
-# Central server only. Build from the repository root, with an exact source SHA.
-FROM node:22-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8 AS launcher
-ARG TREER_BUILD_COMMIT
-WORKDIR /app
-COPY launchers/agent ./launchers/agent
-COPY scripts/prepare-launcher-release.mjs ./scripts/prepare-launcher-release.mjs
-RUN npm --prefix launchers/agent ci --ignore-scripts \
-    && node scripts/prepare-launcher-release.mjs --output /launcher-payload --source-commit "$TREER_BUILD_COMMIT"
-
-FROM rust:1-bookworm@sha256:e12566d5abc17a0da741628782cdb504b68b8961f5bfcf677936bf3e8b32de29 AS builder
-ARG TREER_BUILD_COMMIT=unknown
-ARG TREER_VERSION
-ENV TREER_BUILD_COMMIT=$TREER_BUILD_COMMIT
-ENV TREER_LAUNCHER_PAYLOAD_DIR=/launcher-payload TREER_REQUIRE_LAUNCHER_BUNDLE=1
-COPY --from=launcher /launcher-payload /launcher-payload
-
-WORKDIR /app
-COPY Cargo.toml Cargo.lock ./
-COPY crates ./crates
-COPY launchers/agent/profiles.json ./launchers/agent/profiles.json
-COPY skills ./skills
-COPY scripts/install.ps1 ./scripts/install.ps1
-COPY apps/policy/AGENT.md apps/policy/policy.py apps/policy/treer-policy ./apps/policy/
-COPY apps/policy/web ./apps/policy/web
-RUN test "${#TREER_BUILD_COMMIT}" = 40 \
-    && printf '%s' "$TREER_BUILD_COMMIT" | grep -Eq '^[0-9a-f]{40}$' \
-    && printf '%s' "$TREER_VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' \
-    && test "$TREER_VERSION" = "$(sed -n 's/^version = "\([0-9.]*\)"$/\1/p' Cargo.toml | head -1)"
-RUN set -eu; \
-    cargo build --locked --release -p treer-proxy -p treer-agent-host -p treer-agent-server -p treer-cli; \
-    case "$(uname -m)" in \
-      x86_64|amd64) platform=linux-x86_64 ;; \
-      aarch64|arm64) platform=linux-aarch64 ;; \
-      *) echo "unsupported build architecture $(uname -m)" >&2; exit 1 ;; \
-    esac; \
-    mkdir -p /out/bin; \
-    mkdir -p "/out/dist/$platform"; \
-    cp target/release/treer-proxy /out/bin/treer-proxy; \
-    cp target/release/treer "/out/dist/$platform/treer"; \
-    cp target/release/treer-agent-host "/out/dist/$platform/treer-agent-host"; \
-    cp target/release/treer-agent-server "/out/dist/$platform/treer-agent-server"
-
-
-# Native machine artifacts and Proxy are built together, never fetched from latest.
-RUN cd /out \
-    && find bin dist -type f -exec sha256sum {} \; > SHA256SUMS \
-    && sha256sum -c SHA256SUMS \
-    && printf '{"schema_version":1,"git_commit":"%s","version":"%s"}\n' "$TREER_BUILD_COMMIT" "$TREER_VERSION" > build.json
-
+# Central server only. Native inputs must come from the exact-SHA release job.
 FROM node:22-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8 AS web
 WORKDIR /web
 RUN corepack enable
@@ -65,9 +17,22 @@ RUN apt-get update \
     && mkdir -p /app /data
 COPY deploy/single-container/supervisor.py /usr/local/lib/treer/supervisor.py
 COPY deploy/single-container/healthcheck.py /usr/local/lib/treer/healthcheck.py
+# No setuid/setgid programs are needed: the fixed supervisor drops users itself.
+RUN find / -xdev -type f -perm /6000 -exec chmod a-s {} + \
+    && dpkg-query -W > /app/system-packages.txt
+
+FROM runtime-base AS verified
+ARG TREER_BUILD_COMMIT
+ARG TREER_VERSION
+ARG TARGETARCH
+ARG TREER_NATIVE_INPUT_SHA256
+COPY .single-container-input /input
+COPY Cargo.toml /Cargo.toml
+COPY deploy/single-container/verify-inputs.py /verify-inputs.py
+RUN python3 -I /verify-inputs.py /input /verified "$TREER_BUILD_COMMIT" "$TREER_VERSION" "$TARGETARCH" /Cargo.toml "$TREER_NATIVE_INPUT_SHA256"
 
 FROM runtime-base AS assembled
-COPY --from=builder /out /app
+COPY --from=verified /verified /app
 RUN cd /app && sha256sum -c SHA256SUMS \
     && ln -s /app/bin/treer-proxy /usr/local/bin/treer-proxy
 COPY --from=web /web/dist /app/web

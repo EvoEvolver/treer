@@ -133,6 +133,7 @@ class ProcessTests(unittest.TestCase):
         calls = supervisor.stop_child.call_args_list
         self.assertEqual(calls[0].args, (supervisor.proxy, "Proxy", signal.SIGTERM, 20))
         self.assertEqual(calls[1].args, (supervisor.pg, "PostgreSQL", signal.SIGINT, 40))
+        self.assertEqual(calls[1].kwargs, {"group": False})
 
     def test_restore_maintenance_never_starts_proxy(self):
         supervisor = self.new_supervisor()

@@ -291,12 +291,12 @@ class Supervisor:
                                       **self.child_options(self.proxy_user, self.proxy_env))
 
     @staticmethod
-    def stop_child(child, name, sig, timeout):
+    def stop_child(child, name, sig, timeout, *, group=True):
         if child is None or child.poll() is not None:
             return
         log("stopping " + name)
         try:
-            os.killpg(child.pid, sig)
+            (os.killpg if group else os.kill)(child.pid, sig)
         except ProcessLookupError:
             pass
         try:
@@ -309,7 +309,7 @@ class Supervisor:
     def shutdown(self):
         self.stop_child(self.proxy, "Proxy", signal.SIGTERM, 20)
         # SIGINT is PostgreSQL fast shutdown: abort connections and checkpoint.
-        self.stop_child(self.pg, "PostgreSQL", signal.SIGINT, 40)
+        self.stop_child(self.pg, "PostgreSQL", signal.SIGINT, 40, group=False)
 
     def supervise(self):
         if self.env.get("TREER_SINGLE_MAINTENANCE") == "restore":

@@ -76,6 +76,8 @@ print(json.dumps([hashlib.sha256((Path('/data/private')/n).read_bytes()).hexdige
                 role = docker("exec", "-u", "postgres", name, "psql", "-h", "/data/socket", "-U", "postgres", "-Atc",
                               "SELECT rolsuper,rolcreaterole,rolcreatedb,rolreplication FROM pg_roles WHERE rolname='treer'")
                 assert role == "f|f|f|f"
+                docker("exec", "-u", "postgres", name, "psql", "-h", "/data/socket", "-U", "postgres", "-d", "treer",
+                       "-v", "ON_ERROR_STOP=1", "-c", "SET ROLE treer; CREATE TABLE smoke_proof(value text); INSERT INTO smoke_proof VALUES ('survives');")
                 proc_check = '''import os,pwd
 from pathlib import Path
 uid=pwd.getpwnam('treer').pw_uid
@@ -90,6 +92,16 @@ else: raise AssertionError('Proxy process missing')
                 proxy_pid = docker("exec", "-u", "treer", name, "python3", "-I", "-c", proc_check)
                 docker("exec", "-u", "postgres", name, "python3", "-I", "-c",
                        f"from pathlib import Path\np=Path('/proc/{proxy_pid}/environ')\ntry: p.read_bytes()\nexcept PermissionError: pass\nelse: raise AssertionError('PG can read Proxy environment')")
+                # Kill only this disposable PG postmaster, then require Proxy stop
+                # before crash recovery and a new Proxy start. No process-name kill.
+                docker("exec", name, "python3", "-I", "-c",
+                       "import os,signal; from pathlib import Path; os.kill(int(Path('/data/pg/postmaster.pid').read_text().splitlines()[0]),signal.SIGKILL)")
+                wait(lambda: docker("logs", name).count("FAKE_PROXY_READY") == 3)
+                logs = docker("logs", name)
+                restart = logs.rsplit("stopping Proxy", 1)[1]
+                assert restart.index("starting PostgreSQL") < restart.index("starting Proxy")
+                proof = docker("exec", "-u", "postgres", name, "psql", "-h", "/data/socket", "-U", "postgres", "-d", "treer", "-Atc", "SELECT value FROM smoke_proof")
+                assert proof == "survives"
                 docker("stop", "-t", "65", name)
                 docker("run", "--rm", "--mount", f"type=volume,src={volume},dst=/data", "--entrypoint", "python3", image,
                        "-I", "-c", "from pathlib import Path; Path('/data/pg/PG_VERSION').write_text('18\\n')")
@@ -97,11 +109,21 @@ else: raise AssertionError('Proxy process missing')
                 wait(lambda: docker("inspect", "-f", "{{.State.Running}}", name) == "false")
                 assert "major mismatch" in docker("logs", name)
                 assert docker("inspect", "-f", "{{.State.ExitCode}}", name) == "1"
+                for change, expected in [
+                    ("Path('/data/pg/PG_VERSION').write_text('17\\n'); Path('/data/private/initialized').write_text('storage-v999\\n')", "unsupported data storage"),
+                    ("Path('/data/private/initialized').write_text('storage-v1-pg17\\n'); Path('/data/private/database-password').unlink()", "persisted database password missing"),
+                ]:
+                    docker("run", "--rm", "--mount", f"type=volume,src={volume},dst=/data", "--entrypoint", "python3", image,
+                           "-I", "-c", "from pathlib import Path; " + change)
+                    docker("start", name)
+                    wait(lambda: docker("inspect", "-f", "{{.State.Running}}", name) == "false")
+                    assert expected in docker("logs", name)
+                    assert docker("logs", name).count("FAKE_PROXY_READY") == 3
             else:
                 assert all(a != b for a, b in zip(first_hashes, hashes))
                 logs = docker("logs", name)
                 assert "postgres://" not in logs and "PASSWORD" not in logs
-        print("PASS real PG init/restart/least-privilege role/private credentials/randomness/ordered shutdown/wrong-major refusal")
+        print("PASS real PG init/restart/crash recovery/private credentials/ordered shutdown/major+storage+lost-secret refusal")
 finally:
     for name in reversed(containers):
         docker("rm", "-f", "-v", name)

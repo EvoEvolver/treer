@@ -86,6 +86,19 @@ Explicit empty secrets, unsafe files and partial initialization fail closed.
 contain one nonempty UTF-8 line. Secrets supplied directly as environment
 variables are visible to Docker administrators through `docker inspect`;
 prefer read-only secret mounts and `*_FILE`. No secret is printed on startup.
+Docker/Compose secrets with their default `0444` permissions are deliberately
+rejected. On a Linux Docker host, create a root-owned private bind file:
+
+```bash
+python3 -c 'import secrets; print(secrets.token_urlsafe(48))' | \
+  sudo install -o root -g root -m 0600 /dev/stdin ./treer-admin.secret
+```
+
+Add `--mount type=bind,src="$PWD/treer-admin.secret",dst=/run/secrets/treer-admin,readonly`
+and `-e ADMIN_PASSWORD_FILE=/run/secrets/treer-admin` to the run command. The
+input file is a secret, not a config example: never commit it or send its bytes
+in an issue, log or shell argument. Its read-only mount does not change its
+required owner/mode.
 The HTTP listener and artifact/static directories are fixed by this image;
 external `DATABASE_URL` and disabled authentication are refused. Updater
 configuration is ignored: this image never mounts `docker.sock`.
@@ -101,6 +114,10 @@ This is **not a fully rootless image**. Do not use `--privileged`, share its
 PID namespace or place other workloads in this container. The Proxy UID and
 root can access Proxy credentials; PG cannot read their files or process
 environment. A Docker administrator still controls all of them.
+Do not put unrelated files in `/data`: startup scans the volume for external
+symlinks, which can take longer on large databases. Debian setuid/setgid bits
+are removed in the image; `/app/system-packages.txt` records the installed
+package versions (the apt security repository itself is not snapshotted).
 
 ### Single-container updates and backups
 
@@ -169,16 +186,44 @@ backup volume**, not just changing the image tag.
 Compared with Compose: one replica, no internal NATS/JetStream durable event
 history or multi-Proxy coordination, no socket updater, and shared container
 lifecycle for PG/Proxy. Committed Core Messages remain in PostgreSQL. Each
-architecture's image bundles its native Linux machine artifacts; missing
+image bundles both Linux machine architectures; missing non-Linux
 platforms fail closed instead of downloading `latest`. For other machine
 platforms provide an explicitly trusted, matching release artifact base URL.
 
 ### Build and verify the single image
 
-From the repository root, with a clean exact-SHA checkout:
+From the repository root, with a clean exact-SHA checkout, stage the trusted
+native release artifacts under `.single-container-input/` before building:
+
+```text
+.single-container-input/
+  machines/linux-x86_64/{treer,treer-agent-host,treer-agent-server,SHA256SUMS,build-metadata.json}
+  machines/linux-aarch64/{treer,treer-agent-host,treer-agent-server,SHA256SUMS,build-metadata.json}
+  proxy/linux-aarch64/{treer-proxy,SHA256SUMS,build-metadata.json}
+```
+
+Use `proxy/linux-x86_64` for an amd64 image; the input may contain both Proxy
+platforms. Metadata uses the native release schema: `schema_version:1`,
+`git_commit` (40 lowercase hex), `version` (Cargo release version), `platform`.
+Checksum rows are lowercase SHA256, two spaces, then the exact binary name.
+Inputs must come from the trusted native release job for **the same SHA**,
+including the Proxy; metadata/checksums alone do not authenticate their producer.
+The Dockerfile verifies both machine platforms and the native Proxy's metadata,
+checksums, regular-file types and ELF architecture before copying any binaries.
+It does not compile Rust or fetch release binaries. GitHub artifact downloads
+can lose executable bits; verified output gets executable bits restored.
+The staging directory is ignored by Git. CI downloads exact-SHA artifacts,
+never a moving latest or a previous release's binaries.
+The trusted native job also supplies `TREER_NATIVE_INPUT_SHA256`: SHA256 of
+UTF-8 rows `sha256  relative/path\n`, sorted by relative path, covering every
+input file except `.gitignore`. Pass this upstream digest separately; do not
+treat a digest recomputed from untrusted downloaded bytes as provenance. The
+build rejects a missing/mismatched digest and records both it and every input
+file's hash in `/app/build.json`. The version must also equal `Cargo.toml`.
 
 ```bash
 docker build -f Dockerfile.single --build-arg TREER_BUILD_COMMIT="$(git rev-parse HEAD)" \
+  --build-arg TREER_NATIVE_INPUT_SHA256="$TRUSTED_NATIVE_INPUT_SHA256" \
   --build-arg TREER_VERSION=0.1.14 -t treer-single:local .
 env -i PATH="$PATH" python3 -I -m unittest discover -s deploy/single-container/tests
 node deploy/single-container/smoke.mjs treer-single:local
