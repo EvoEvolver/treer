@@ -166,3 +166,11 @@ class StoreTests(unittest.TestCase):
     def test_duplicate_json_keys_and_nonfinite_rejected(self):
         for raw in (b'{"body":"a","body":"b"}', b'{"value":NaN}', b'\xff'):
             with self.assertRaises(Error): strict_json(raw)
+
+    def test_paused_old_backlog_cannot_starve_other_clients(self):
+        for index in range(25):
+            self.q.enqueue(self.client,{'body':'paused backlog','idempotency_key':str(index)})
+        self.q.control(self.client,paused=True)
+        other=self.a.redeem(self.a.issue('human:owner','ag_poc','Active')['code'])['client_id']
+        expected=self.q.enqueue(other,{'body':'active','idempotency_key':'active'})
+        self.assertEqual(self.q.lease()['message_id'],expected)

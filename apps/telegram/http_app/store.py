@@ -168,7 +168,15 @@ class QueueStore(Database):
     def lease(self):
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            rows = db.execute("SELECT * FROM inbox WHERE state!='delivered' AND lease_until<=? ORDER BY created_at LIMIT 20", (self.clock(),)).fetchall()
+            paused = db.execute("SELECT value FROM settings WHERE key='paused'").fetchone()
+            if paused is not None and paused[0] == '1':
+                return None
+            # Exclude unavailable clients BEFORE the batch limit: twenty old
+            # paused rows must not starve a different active client's queue.
+            rows = db.execute("""SELECT i.* FROM inbox i JOIN clients c ON c.id=i.client_id
+                WHERE i.state!='delivered' AND i.lease_until<=? AND c.revoked=0 AND c.paused=0
+                AND (c.expires_at IS NULL OR c.expires_at>?) ORDER BY i.created_at LIMIT 20""",
+                              (self.clock(), self.clock())).fetchall()
             for row in rows:
                 try:
                     self.available(db, row["client_id"])
