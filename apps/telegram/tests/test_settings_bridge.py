@@ -269,6 +269,10 @@ class SupervisorTest(unittest.TestCase):
         if not db.exists():
             return None
         with sqlite3.connect(db) as connection:
+            # The supervisor creates the file before its schema; existence is
+            # not readiness, particularly while a release gate loads the Mac.
+            if connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='settings'").fetchone() is None:
+                return None
             row = connection.execute("SELECT value FROM settings WHERE key='bridge_state'").fetchone()
         return row[0] if row else None
 

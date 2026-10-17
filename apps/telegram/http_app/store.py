@@ -12,7 +12,7 @@ import time
 
 from telegram_app.registry import REGISTRY_SCHEMA, RegistryMixin, PAIR_ALPHABET
 from .common import (Error, ID, TOKEN, MAX_BODY, MAX_ITEMS, MAX_CLIENT_BYTES,
-                     MAX_TOTAL_BYTES, digest, fields, invalid, text)
+                     MAX_TOTAL_BYTES, digest, fields, invalid, text, write_backoff)
 
 
 class Database:
@@ -76,6 +76,11 @@ class QueueStore(Database):
                 CREATE INDEX IF NOT EXISTS inbox_client ON inbox(client_id, state);
                 CREATE INDEX IF NOT EXISTS outbox_client ON outbox(client_id, seq);
             """)
+            db.execute("BEGIN IMMEDIATE")
+            columns = {row[1] for row in db.execute('PRAGMA table_info(inbox)')}
+            for name, kind in (('failure_code', 'TEXT'), ('failed_at', 'REAL')):
+                if name not in columns:
+                    db.execute(f'ALTER TABLE inbox ADD COLUMN {name} {kind}')
 
     def prepare_pair(self, client, handle):
         with self._lock, self._connect() as db:
@@ -124,11 +129,12 @@ class QueueStore(Database):
             else:
                 if revoke:
                     db.execute("UPDATE clients SET revoked=1,generation=generation+1,pair_hash=NULL WHERE id=?", (client,))
+                    db.execute("UPDATE inbox SET state='failed',failure_code='client_disabled',failed_at=?,body='',lease_until=0 WHERE client_id=? AND state IN ('accepted','leased')", (self.clock(), client))
                 if paused is not None:
                     db.execute("UPDATE clients SET paused=? WHERE id=?", (int(paused), client))
 
     def _capacity(self, db, client, table, size):
-        clause = "state!='delivered'" if table == "inbox" else "acked_at IS NULL"
+        clause = "state IN ('accepted','leased')" if table == "inbox" else "acked_at IS NULL"
         row = db.execute(f"SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM {table} WHERE client_id=? AND {clause}", (client,)).fetchone()
         total_count = sum(db.execute(f"SELECT count(*) FROM {name}").fetchone()[0] for name in ("inbox", "outbox"))
         total = sum(db.execute(f"SELECT coalesce(sum(length(CAST(body AS BLOB))),0) FROM {name}").fetchone()[0]
@@ -149,11 +155,13 @@ class QueueStore(Database):
             current = self.available(db, client)
             if expected_generation is not None and current['generation'] != expected_generation:
                 raise invalid()
-            existing = db.execute("SELECT message_id,content_hash FROM inbox WHERE client_id=? AND idem_hash=?",
+            existing = db.execute("SELECT message_id,content_hash,state,failure_code FROM inbox WHERE client_id=? AND idem_hash=?",
                                   (client, digest(key))).fetchone()
             if existing:
                 if not hmac.compare_digest(existing["content_hash"], hashed):
                     raise Error(409, "idempotency_conflict", "Key already used with different content")
+                if existing['state'] == 'failed':
+                    raise Error(409, existing['failure_code'], 'Previously accepted message could not be delivered; use a new key without the expired context')
                 return existing["message_id"]
             if context is not None and db.execute("SELECT 1 FROM maps WHERE public_id=? AND client_id=?", (context, client)).fetchone() is None:
                 raise Error(404, "context_unavailable", "Context unavailable")
@@ -176,7 +184,7 @@ class QueueStore(Database):
             # Exclude unavailable clients BEFORE the batch limit: twenty old
             # paused rows must not starve a different active client's queue.
             rows = db.execute("""SELECT i.* FROM inbox i JOIN clients c ON c.id=i.client_id
-                WHERE i.state!='delivered' AND i.lease_until<=? AND c.revoked=0 AND c.paused=0
+                WHERE i.state IN ('accepted','leased') AND i.lease_until<=? AND c.revoked=0 AND c.paused=0
                 AND (c.expires_at IS NULL OR c.expires_at>?) ORDER BY i.created_at LIMIT 20""",
                               (self.clock(), self.clock())).fetchall()
             for row in rows:
@@ -187,6 +195,13 @@ class QueueStore(Database):
                 db.execute("UPDATE inbox SET state='leased',lease_until=? WHERE message_id=?", (self.clock() + 60, row["message_id"]))
                 return dict(row)
         return None
+
+    def fail_inbound(self, message_id, code):
+        if code not in ('context_unavailable', 'client_disabled', 'delivery_expired'):
+            raise ValueError('invalid failure code')
+        with self._connect() as db:
+            db.execute("UPDATE inbox SET state='failed',failure_code=?,failed_at=?,body='',lease_until=0 WHERE message_id=? AND state IN ('accepted','leased')",
+                       (code, self.clock(), message_id))
 
     def mapped(self, public_id, client):
         with self._connect() as db:
@@ -244,7 +259,10 @@ class QueueStore(Database):
         if items:
             with self._connect() as db:
                 db.execute("UPDATE clients SET served_seq=max(served_seq,?) WHERE id=?", (items[-1]["seq"], client))
-        return {"items": items, "next_after": items[-1]["seq"] if items else after}
+        with self._connect() as db:
+            failures = [dict(row) for row in db.execute("""SELECT message_id,failure_code AS code,created_at,failed_at FROM inbox
+                WHERE client_id=? AND state='failed' ORDER BY created_at DESC LIMIT 100""", (client,))]
+        return {"items": items, "failures": failures, "next_after": items[-1]["seq"] if items else after}
 
     def ack(self, client, up_to, expected_generation=None):
         if type(up_to) is not int or up_to < 0:
@@ -262,13 +280,13 @@ class QueueStore(Database):
     def cleanup(self):
         with self._connect() as db:
             db.execute("DELETE FROM outbox WHERE acked_at<?", (self.clock() - 7 * 86400,))
-            db.execute("DELETE FROM inbox WHERE state='delivered' AND created_at<?", (self.clock() - 86400,))
+            db.execute("DELETE FROM inbox WHERE state='delivered' AND created_at<? OR state='failed' AND failed_at<?", (self.clock() - 86400, self.clock() - 86400))
             db.execute("DELETE FROM maps WHERE created_at<?", (self.clock() - 30 * 86400,))
 
     def summaries(self):
         with self._connect() as db:
             return [dict(row) for row in db.execute("""SELECT id,revoked,paused,expires_at,generation,
-                (SELECT count(*) FROM inbox WHERE client_id=c.id AND state!='delivered') AS inbound,
+                (SELECT count(*) FROM inbox WHERE client_id=c.id AND state IN ('accepted','leased')) AS inbound,
                 (SELECT count(*) FROM outbox WHERE client_id=c.id AND acked_at IS NULL) AS outbound
                 FROM clients c ORDER BY id LIMIT 1000""")]
 
@@ -355,6 +373,7 @@ class AdminStore(Database, RegistryMixin):
                 delay = min(180, 60 * 2 ** min(2, self.backoff_steps))
                 self.backoff_steps += 1
                 self.cooldown_until = now + delay
+                write_backoff(self.path.parent, 'pair-bridge-backoff.json', self.cooldown_until)
                 raise Error(429, "pair_backoff", "Pairing temporarily cooling down", delay)
             if not isinstance(code, str) or len(code) != 43 or code[32] != "." or not ID.fullmatch(code[:32]) or any(ch not in PAIR_ALPHABET for ch in code[33:]):
                 raise invalid()
@@ -414,7 +433,7 @@ class AdminStore(Database, RegistryMixin):
         self.audit(actor, "http", operation, "http", self.ACCOUNT, client,
                    new_target=f"bytes:{size}", outcome=reason, delivery_id=delivery)
 
-    def unroutable(self, delivery, size, reason):
+    def unroutable(self, delivery, size, reason, grace=0):
         """No body retention. Defer three attempts, then audit+ack; cap at 128 IDs."""
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -423,7 +442,7 @@ class AdminStore(Database, RegistryMixin):
             row = db.execute("SELECT * FROM http_undeliverable WHERE delivery_id=?", (delivery,)).fetchone()
             count = db.execute("SELECT count(*) FROM http_undeliverable").fetchone()[0]
             attempts = row["attempts"] + 1 if row else 1
-            should_ack = count >= 128 and row is None or attempts >= 3 or row is not None and self.clock() - row["first_at"] >= 86400
+            should_ack = count >= 128 and row is None or (attempts >= 3 and (not grace or row is not None and self.clock() - row["first_at"] >= grace)) or row is not None and self.clock() - row["first_at"] >= 86400
             if should_ack:
                 db.execute("DELETE FROM http_undeliverable WHERE delivery_id=?", (delivery,))
                 self._audit(db, self.clock(), "drop:" + delivery, "bridge", "http", "undeliverable", "http", self.ACCOUNT,
@@ -432,3 +451,15 @@ class AdminStore(Database, RegistryMixin):
                 db.execute("INSERT INTO http_undeliverable VALUES (?,?,?,?,?) ON CONFLICT(delivery_id) DO UPDATE SET attempts=excluded.attempts",
                            (delivery, self.clock(), attempts, reason, size))
             return should_ack
+
+
+class PublicQueues:
+    """Narrow code-facing data capability; same-UID OS isolation is separate."""
+    __slots__ = ('_queues',)
+    def __init__(self, queues): self._queues = queues
+    def authenticate(self, token): return self._queues.authenticate(token)
+    def enqueue(self, *args, **kwargs): return self._queues.enqueue(*args, **kwargs)
+    def poll(self, client, after): return self._queues.poll(client, after)
+    def ack(self, *args, **kwargs): return self._queues.ack(*args, **kwargs)
+    def available(self, client):
+        with self._queues._connect() as db: self._queues.available(db, client)

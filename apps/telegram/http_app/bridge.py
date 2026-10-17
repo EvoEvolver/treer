@@ -2,6 +2,7 @@
 import argparse
 import json
 import os
+import sqlite3
 from pathlib import Path
 import sys
 import threading
@@ -23,7 +24,14 @@ class Bridge:
         if item is None:
             return False
         client = item['client_id']
-        binding, label = self.admin.client(client)
+        try:
+            binding, label = self.admin.client(client)
+        except Error:
+            self.fail(item, 'client_disabled')
+            return False
+        if self.queues.clock() - item['created_at'] >= 86400:
+            self.fail(item, 'delivery_expired')
+            return False
         limited = self.admin.admit_inbound('http', self.admin.ACCOUNT, client, client,
                                            per_user_per_hour=60, per_conversation_per_minute=20, max_unreplied=100)
         if limited:
@@ -32,6 +40,7 @@ class Bridge:
         if item['context']:
             context = self.queues.mapped(item['context'], client)
             if context is None:
+                self.fail(item, 'context_unavailable')
                 return False
             arguments.extend(['--context', context])
         arguments.extend(['--idempotency-key', 'http-' + digest(self.admin.ACCOUNT + '/' + item['message_id']), '--stdin-envelope'])
@@ -48,6 +57,11 @@ class Bridge:
         self.admin.record_inbound('http', self.admin.ACCOUNT, client, client)
         self.admin.notice('bridge', 'inbound', client, size=len(item['body'].encode()), delivery='in:' + item['message_id'])
         return True
+
+    def fail(self, item, reason):
+        self.admin.notice('bridge', 'inbound.failed', item['client_id'], size=len(item['body'].encode()),
+                          delivery='fail:' + item['message_id'], reason=reason)
+        self.queues.fail_inbound(item['message_id'], reason)
 
     def ack(self, delivery):
         self.cli.run(['message', 'ack', delivery, '--operation-id', 'http-ack-' + digest(self.admin.ACCOUNT + '/' + delivery)])
@@ -88,6 +102,11 @@ class Bridge:
             self.queues.outbound(client, core_id, delivery_id, body)
         except Error as error:
             if error.code in ('queue_full', 'mapping_capacity', 'paused'):
+                # A permanently full client cannot occupy Core's entire receive
+                # window forever. Keep already queued items; bound retries of
+                # replies that have NOT entered the outbox, with metadata audit.
+                if self.admin.unroutable(delivery_id, size, 'undeliverable_' + error.code, grace=60):
+                    self.ack(delivery_id)
                 return False
             if self.admin.unroutable(delivery_id, size, 'undeliverable_client'):
                 self.ack(delivery_id)
@@ -104,7 +123,7 @@ class Bridge:
         for delivery in response.get('deliveries', []):
             try:
                 completed += int(self.delivery(delivery))
-            except (Error, BridgeError, OSError, ValueError, KeyError, TypeError):
+            except (Error, BridgeError, OSError, ValueError, KeyError, TypeError, sqlite3.Error):
                 # No raw exception/argv/body/credential is logged. Another
                 # failed delivery must not block the rest of the inbox batch.
                 continue
@@ -134,7 +153,7 @@ def main():
                 if time.monotonic() - last_cleanup >= 60:
                     queues.cleanup()
                     last_cleanup = time.monotonic()
-            except (Error, BridgeError, OSError, ValueError, KeyError, TypeError):
+            except (Error, BridgeError, OSError, ValueError, KeyError, TypeError, sqlite3.Error):
                 print('HTTP bridge: delivery deferred', file=sys.stderr, flush=True)
                 time.sleep(1)
     finally:

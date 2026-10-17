@@ -12,9 +12,9 @@ import threading
 import time
 import urllib.parse
 
-from .common import Error, Limiter, MAX_REQUEST, fields, invalid, strict_json
+from .common import Error, Limiter, MAX_REQUEST, fields, invalid, strict_json, write_backoff
 from . import ipc
-from .store import QueueStore
+from .store import QueueStore, PublicQueues
 
 ROUTES = {("POST", "/v1/pair"), ("POST", "/v1/inbox"), ("GET", "/v1/outbox"), ("POST", "/v1/outbox/ack")}
 
@@ -25,17 +25,20 @@ def wire(value):
         return [wire(item) for item in value]
     if isinstance(value, dict):
         return {key: datetime.fromtimestamp(item, timezone.utc).isoformat().replace("+00:00", "Z")
-                if key in ("at", "created_at", "expires_at") and type(item) in (int, float)
+                if key in ("at", "created_at", "expires_at", "failed_at") and type(item) in (int, float)
                 else wire(item) for key, item in value.items()}
     return value
 
 
 class Application:
     def __init__(self, queues, pair_socket):
-        self.queues, self.pair_socket = queues, pair_socket
+        self.queues, self.pair_socket = PublicQueues(queues), pair_socket
         self.limits = Limiter()
         self.poll_counts = collections.Counter()
         self.poll_lock = threading.Lock()
+        self.pair_lock = threading.Lock()
+        self.pair_backoff_until = 0
+        self.diagnostic_root = queues.path.parent
         self.poll_slots = threading.BoundedSemaphore(16)
 
     def authenticate(self, headers):
@@ -78,10 +81,9 @@ class Application:
                 # Every iteration closes its SQLite connections, including empty polls.
                 self.queues.authenticate(token)
                 result = self.queues.poll(client, after)
-                if result["items"] or time.monotonic() >= deadline:
+                if result["items"] or result["failures"] or time.monotonic() >= deadline:
                     self.queues.authenticate(token)  # rotation/revocation while waiting
-                    with self.queues._connect() as db:
-                        self.queues.available(db, client)
+                    self.queues.available(client)
                     for item in result["items"]:
                         item["created_at"] = datetime.fromtimestamp(item["created_at"], timezone.utc).isoformat().replace("+00:00", "Z")
                     return result
@@ -189,6 +191,10 @@ class Handler(BaseHTTPRequestHandler):
                 if url.query:
                     raise Error(400, "invalid_request", "Unexpected query")
                 if not app.limits.take("pair", 10, 60):
+                    with app.pair_lock:
+                        if time.time() >= app.pair_backoff_until:
+                            app.pair_backoff_until = time.time() + 60
+                            write_backoff(app.diagnostic_root, 'pair-public-backoff.json', app.pair_backoff_until)
                     raise Error(429, "pair_backoff", "Pairing temporarily cooling down", 60)
                 body = fields(self.body(2048), ("code",))
                 if not isinstance(body["code"], str) or len(body["code"]) != 43:

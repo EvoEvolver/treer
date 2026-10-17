@@ -81,3 +81,40 @@ class Limiter:
             while len(self.rows) > self.capacity:
                 self.rows.popitem(last=False)
             return allowed
+
+
+def write_backoff(root, name, until):
+    """Bounded non-secret diagnostics; at most one file per admission window."""
+    import os
+    from pathlib import Path
+    import tempfile
+    path = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=root, prefix='.http-backoff-', delete=False) as stream:
+            path = Path(stream.name)
+            stream.write(json.dumps({'expires_at': until}))
+        os.replace(path, Path(root) / name)
+    except OSError:
+        pass  # Telemetry cannot make pairing fail or expose raw paths.
+    finally:
+        if path is not None: path.unlink(missing_ok=True)
+
+
+def read_backoff(root):
+    import os
+    from pathlib import Path
+    import stat
+    until = 0
+    for name in ('pair-public-backoff.json', 'pair-bridge-backoff.json'):
+        try:
+            fd = os.open(Path(root) / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd) as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077 or info.st_size > 128:
+                    continue
+                value = json.loads(stream.read(129))['expires_at']
+                if type(value) in (int, float) and 0 <= value <= time.time() + 180:
+                    until = max(until, value)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return {'active': until > time.time(), 'expires_at': until or None}

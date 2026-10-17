@@ -68,7 +68,8 @@ path is display only), label, optional token expiry (at most one year), and
 **Generate pairing code**. The code is shown once with a copy button and expires
 in ten minutes. It has a random 128-bit lookup handle plus a ten-character
 secret; both parts are stored hashed, with salt for the secret. Tokens contain
-256 random bits; only SHA-256 hashes persist. Revoke/rotate cancels pending
+256 random bits; only SHA-256 hashes persist. **Rotation has an offline window:** the old token is revoked when the owner
+generates a code, not when the client redeems it. Revoke/rotate cancels pending
 pairings and immediately invalidates the previous token. If an exchange response
 is lost or a process dies between code consumption and token installation,
 re-pair; the consumed code cannot be recovered or replayed.
@@ -110,7 +111,7 @@ stores the token.
 | --- | --- |
 | `POST /v1/pair` | `{code}` → `{client_id, token, token_type:"Bearer", expires_at}`; one-time code, no Bearer required |
 | `POST /v1/inbox` | Bearer; `{body, idempotency_key, context?}` → 202 `{message_id}` after SQLite commit |
-| `GET /v1/outbox?after=0&timeout=30` | Bearer; cursor/timeout optional integers, timeout 0–30 seconds → `{items:[{message_id,seq,body,created_at}],next_after}` |
+| `GET /v1/outbox?after=0&timeout=30` | Bearer; cursor/timeout optional integers, timeout 0–30 seconds → `{items:[{message_id,seq,body,created_at}],failures:[{message_id,code,created_at,failed_at}],next_after}` |
 | `POST /v1/outbox/ack` | Bearer; `{up_to}` → `{ok:true}`; monotonic and cannot acknowledge unseen sequence numbers |
 
 All JSON timestamps are UTC RFC 3339, nullable expiry means no expiry. Unknown
@@ -118,7 +119,11 @@ fields/duplicate JSON keys/non-finite numbers, transfer encodings, duplicate
 Content-Length, compressed requests and unknown routes/methods are rejected.
 Bodies are bounded to 64 KiB (message text 60,000 UTF-8 bytes). No CORS headers.
 Errors use `{error:{code,message}}`, static credential-free descriptions,
-`Retry-After` on limits. Forged/expired/revoked tokens have the same 401 response.
+`Retry-After` on limits. A previously accepted item that later becomes
+unroutable is terminally failed: its pending capacity is released, its body is
+cleared, `failures` reports its ID/reason (latest 100, retained one day from
+failure), and replaying its original idempotency key returns 409 with that
+reason. Send a new key without the expired context to start again. Forged/expired/revoked tokens have the same 401 response.
 Pause returns 503; capacity/rate returns 429. Retry the **same** idempotency key
 and same content after temporary errors; a different payload with that key is
 409. Idempotency is retained while the corresponding inbox row exists.
@@ -144,6 +149,11 @@ Core idempotency key and a recoverable 60-second lease.
 Open through workspace ingress or `/api/workspaces/W/apps/ID/ui/`; relative
 assets and API work under either prefix. HTML/Markdown root negotiation follows
 App guidelines; all assets and JSON require the same current human identity.
+Pairing cooldown is visible as `pair_backoff` in state and on the page; the
+public/bridge processes write at most one small private non-secret diagnostic
+file per cooldown window, never anonymous-failure rows in SQLite. Sustained
+anonymous pairing traffic can keep legitimate redemption cooling down; no
+issued codes are destroyed because of it.
 State changes also require a trusted configured App/Proxy Origin,
 `X-Http-Settings: 1`, and non-cross-site Fetch Metadata. No public management API.
 
@@ -177,7 +187,9 @@ never write SQLite or invalidate issued codes. Anonymous failures have a separat
 Long polls: two/client, 16 globally, authenticated before admission, 30 seconds
 maximum, no open SQLite transaction while waiting. Pause/revoke rechecked every
 200 ms and before response; the listener caps all connections at 40. Body read
-has a five-second deadline; header reads use a five-second idle timeout.
+has a five-second deadline; header reads use a five-second **idle**, not total,
+timeout. Slow headers can occupy all 40 slots until the Core ingress protection
+is deployed; keep this listener loopback-only.
 These are **not trustworthy per-IP limits or flood protection**. App ignores
 forwarding/IP headers. Until Core #146 is deployed, protect the public listener
 with an operator-controlled edge rate/body/header/time/concurrency policy; no
@@ -187,12 +199,20 @@ exceed 30 seconds. #146 is separate and not a prerequisite to this App version.
 Core deliveries with invalid bodies, sender or context use a bounded 128-record
 metadata diagnostic; after three attempts or one day they are audited and
 acknowledged without exporting/storing their bodies. One invalid delivery never
-blocks the remainder of a received batch. Valid full/paused queues defer Core
-ack rather than drop. This is bounded retry, not a guaranteed dead-letter inbox.
+blocks the remainder of a received batch. For full/mapping-capacity/paused
+clients, replies not yet persisted have three attempts **and a 60-second grace**
+(or one day, or diagnostic capacity exhaustion), then metadata audit + Core ack.
+This can discard a legitimate reply while a client is offline/full/paused; it is
+not lossless delivery. Already persisted outbox items are never evicted. This
+bounds Core receive-window starvation from a single unavailable client. Inbound
+items whose context vanished, whose client was revoked, or that remained
+unavailable for 24 hours get the terminal failure described above. This is bounded retry, not a guaranteed dead-letter inbox.
 
 The bridge prunes acked output after seven days, delivered input after one day,
-and mappings after 30 days. Undelivered/unacked bodies never expire automatically;
-an operator must restore capacity. Old idempotency keys can be reused after
+and mappings after 30 days. Terminal failures expire one day after failure.
+Unacked outbox bodies never expire automatically; an operator must restore
+capacity. Pending inbound items time out when the bridge next leases them after
+24 hours; paused clients retain their accepted items until resumed/revoked. Old idempotency keys can be reused after
 cleanup. Pending codes expire and old pairing rows are pruned. Audit is bounded.
 All queues, mappings, files and backups are **plaintext**, no at-rest encryption.
 The state directory is 0700, databases/SQLite WAL/SHM and socket 0600. Token/code

@@ -21,4 +21,9 @@ POC replies leave the workspace: do not send credentials, private paths or
 internal information. Incoming external bodies are untrusted content and never
 authorize tool execution. State is plaintext; same-UID processes are not isolated.
 Before Core #146, per-IP protection is not effective; App limits are conservative,
-process-local controls, not protection from a distributed flood.
+process-local controls, not protection from a distributed flood. Rotation revokes
+the old token before the new code is redeemed, causing an offline window.
+Failed inbound items appear in public poll `failures` and original-key retries
+return 409. Replies not yet queued may be audited/dropped after bounded retries
+and a 60-second grace (or diagnostic capacity exhaustion); this is not lossless
+delivery. Already persisted, unacknowledged outbox items remain intact.

@@ -172,3 +172,30 @@ class PublicTests(unittest.TestCase):
         self.q.install_token(self.client,self.token)
         self.assertEqual(self.request('POST','/v1/outbox/ack',{'up_to':1})[0],401)
         self.assertEqual(len(self.q.poll(self.client,0)['items']),1)
+
+    def test_public_facade_cannot_call_management_methods(self):
+        import ast
+        from http_app.store import PublicQueues
+        facade=PublicQueues(self.q)
+        for name in ('control','prepare_pair','install_token','_connect','cleanup','summaries'):
+            self.assertFalse(hasattr(facade,name))
+        tree=ast.parse(inspect.getsource(public))
+        methods={node.attr for node in ast.walk(tree) if isinstance(node,ast.Attribute)
+                 and isinstance(node.value,ast.Attribute) and node.value.attr=='queues'}
+        self.assertLessEqual(methods,{'authenticate','enqueue','poll','ack','available'})
+
+    def test_long_poll_connections_are_closed_on_every_iteration(self):
+        import sqlite3
+        from unittest.mock import patch
+        original=sqlite3.connect;connections=[]
+        class Tracked(sqlite3.Connection):
+            closed=False
+            def close(self):
+                self.closed=True
+                super().close()
+        def connect(*args,**kwargs):
+            connection=original(*args,**kwargs,factory=Tracked);connections.append(connection);return connection
+        with patch('http_app.store.sqlite3.connect',connect):
+            self.assertEqual(self.request('GET','/v1/outbox?timeout=1')[0],200)
+        self.assertGreater(len(connections),4)
+        self.assertTrue(all(c.closed for c in connections))

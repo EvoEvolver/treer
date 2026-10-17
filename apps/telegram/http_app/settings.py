@@ -9,7 +9,7 @@ import urllib.parse
 
 from settings_app.auth import Auth, Error as IdentityError
 from telegram_app.clients import TreerCli
-from .common import Error, ID, Limiter, fields
+from .common import Error, ID, Limiter, fields, read_backoff
 from .public import Handler as DataHandler, Server
 from .store import AdminStore, QueueStore
 
@@ -89,6 +89,7 @@ class Settings:
         return {'me': {k: principal.get(k) for k in ('id','name','role')}, 'endpoint_url': self.endpoint_url,
                 'paused': bool(row and row[0] == '1'), 'clients': list(clients.values()),
                 'agents': [{k: p.get(k) for k in ('id','name','path')} for p in directory if p.get('kind') == 'agent'],
+                'pair_backoff': read_backoff(self.admin.path.parent),
                 'audit': self.admin.audit_list('http', self.admin.ACCOUNT, 50), 'per_ip_effective': False}
 
     def issue(self, principal, directory, body, client=None):

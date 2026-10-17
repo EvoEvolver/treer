@@ -116,3 +116,14 @@ class SettingsTests(unittest.TestCase):
                 self.assertFalse(self.pair.verify_request(s,None))
             with patch('http_app.ipc.peer_uid',side_effect=OSError()):
                 self.assertFalse(self.pair.verify_request(s,None))
+
+    def test_pair_cooldown_diagnostic_is_visible_without_database_failure_writes(self):
+        with self.a._connect() as db:before='\n'.join(db.iterdump())
+        for _ in range(11):
+            try:self.a.redeem('f'*32+'.XXXXXXXXXX')
+            except Exception:pass
+        with self.a._connect() as db:self.assertEqual('\n'.join(db.iterdump()),before)
+        state=json.loads(self.request()[1])
+        self.assertTrue(state['pair_backoff']['active'])
+        self.assertTrue(state['pair_backoff']['expires_at'].endswith('Z'))
+        self.assertNotIn('XXXXXXXXXX',str(state))

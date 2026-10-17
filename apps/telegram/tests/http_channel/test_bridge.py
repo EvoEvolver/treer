@@ -112,3 +112,46 @@ class BridgeTests(unittest.TestCase):
         rows = self.a.audit_list('http',self.a.ACCOUNT)
         self.assertNotIn('private body',json.dumps(rows))
         self.assertEqual(rows[0]['outcome'],'undeliverable_unmapped')
+
+    def test_expired_context_is_terminal_visible_and_releases_pending_capacity(self):
+        parent=self.inbound()
+        self.q.max_items=1
+        value={'body':'cannot route','idempotency_key':'expired','context':parent}
+        child=self.q.enqueue(self.client,value)
+        with self.q._connect() as db:db.execute('DELETE FROM maps')
+        self.assertFalse(self.bridge.inbound_once())
+        self.assertEqual(self.q.poll(self.client,0)['failures'][0]['message_id'],child)
+        from http_app.common import Error
+        with self.assertRaises(Error) as error:self.q.enqueue(self.client,value)
+        self.assertEqual(error.exception.code,'context_unavailable')
+        self.assertEqual(error.exception.status,409)
+        self.q.enqueue(self.client,{'body':'fresh','idempotency_key':'fresh'})
+        self.assertTrue(self.bridge.inbound_once())
+        self.assertNotIn('cannot route',json.dumps(self.a.audit_list('http',self.a.ACCOUNT)))
+
+    def test_full_client_cannot_permanently_occupy_core_receive_window(self):
+        self.inbound()
+        other=self.a.redeem(self.a.issue('human:owner','ag_poc','Other')['code'])['client_id']
+        other_message=self.q.enqueue(other,{'body':'other','idempotency_key':'other'})
+        self.q.delivered(other_message,'msg_other')
+        self.q.outbound(self.client,'oldest','oldest-delivery','oldest stays')
+        self.q.max_items=1
+        waiting=[self.delivery(delivery='full-'+str(n),core='msg_full_'+str(n)) for n in range(20)]
+        waiting.append(self.delivery(contexts=['msg_other'],delivery='other-delivery',core='msg_other_reply'))
+        original=self.cli.run
+        def paged(arguments,**kwargs):
+            result=original(arguments,**kwargs)
+            if arguments[:2]==['message','receive']:return {'deliveries':waiting[:20]}
+            if arguments[:2]==['message','ack']:waiting[:]=[d for d in waiting if d['delivery_id']!=arguments[2]]
+            return result
+        self.cli.run=paged
+        now=[self.a.clock()];self.a.clock=lambda:now[0]
+        self.assertEqual(self.bridge.outbound_once(wait=0),0)
+        self.assertEqual(self.bridge.outbound_once(wait=0),0)
+        self.assertEqual(len(waiting),21,'backpressure grace preserves new replies temporarily')
+        now[0]+=61
+        self.bridge.outbound_once(wait=0)
+        self.assertEqual(self.bridge.outbound_once(wait=0),1)
+        self.assertEqual([i['body'] for i in self.q.poll(self.client,0)['items']],['oldest stays'])
+        self.assertEqual([i['body'] for i in self.q.poll(other,0)['items']],['reply'])
+        self.assertTrue(any(a['outcome']=='undeliverable_queue_full' for a in self.a.audit_list('http',self.a.ACCOUNT,100)))
