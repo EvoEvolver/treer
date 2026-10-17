@@ -68,15 +68,16 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
     await engine.current.start(file, directory, overwrite, mode === 'legacy')
   }
   const message = view.phase === 'succeeded' && view.result
-    ? t('app.uploaded', { path: view.result.path, size: formatBytes(view.result.bytes_written) })
+    ? t('app.uploaded', { path: view.result.path, size: uploadBytes(view.result.bytes_written) })
     : view.phase === 'cleanup_pending' ? t('upload.cleanup_pending')
     : view.phase === 'cancelled' ? t('upload.cancelled')
     : view.phase === 'finishing' ? t('upload.finishing')
     : view.phase === 'cancelling' ? t('upload.cancelling')
     : view.phase === 'waiting' ? t('upload.waiting')
     : view.phase === 'preparing' ? t('upload.preparing')
-    : view.phase === 'uploading' ? t('upload.progress', { sent: formatBytes(view.loaded), total: formatBytes(view.total) }) : ''
-  const problem = error || (view.phase === 'paused' ? view.uncertain ? t('upload.outcome_unknown') : uploadErrorMessage(view.error) : '')
+    : view.phase === 'uploading' ? t('upload.progress', { sent: uploadBytes(view.loaded), total: uploadBytes(view.total) }) : ''
+  const tooLarge = Boolean(file && file.size > max)
+  const problem = error || (tooLarge ? t(mode === 'legacy' ? 'upload.upgrade_limit' : 'upload.too_large') : '') || (view.phase === 'paused' ? view.uncertain ? t('upload.outcome_unknown') : uploadErrorMessage(view.error) : '')
   const percentage = view.phase === 'succeeded' ? 100 : view.total ? Math.min(100, Math.floor(view.loaded / view.total * 100)) : 0
   return <Dialog open onOpenChange={(open) => { if (!open && !busy && !retained) onClose() }}>
     <DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); const input = directoryInput.current; input?.focus(); input?.setSelectionRange(input.value.length, input.value.length) }} className={`max-h-[calc(100dvh-2rem)] overflow-y-auto ${busy || retained ? '[&>button]:hidden' : ''}`}>
@@ -88,7 +89,7 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
         <p className="text-xs text-muted-foreground">{t(mode === 'legacy' ? 'upload.legacy_limit' : 'upload.limit')}</p>
         {mode === 'unknown' && <p role="status" className="text-xs text-muted-foreground">{t(discoveryError ? 'upload.discovery_failed' : 'upload.checking')}</p>}
         {view.phase !== 'idle' && <div className="space-y-2">
-          <div className="flex items-center gap-2"><div role="progressbar" aria-label={t('upload.progress_label')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percentage} aria-valuetext={`${formatBytes(view.loaded)} / ${formatBytes(view.total)}`} className="h-2 flex-1 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${percentage}%` }} /></div><span aria-hidden="true" className="text-xs tabular-nums text-muted-foreground">{percentage}%</span></div>
+          <div className="flex items-center gap-2"><div role="progressbar" aria-label={t('upload.progress_label')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percentage} aria-valuetext={`${uploadBytes(view.loaded)} / ${uploadBytes(view.total)}`} className="h-2 flex-1 overflow-hidden rounded-full bg-muted"><div className={`h-full ${view.uncertain || view.phase === 'paused' || view.phase === 'cleanup_pending' ? 'bg-muted-foreground' : 'bg-primary'}`} style={{ width: `${percentage}%` }} /></div><span aria-hidden="true" className="text-xs tabular-nums text-muted-foreground">{percentage}%</span></div>
           <p role="status" className="break-words text-xs text-foreground">{message}</p>
         </div>}
         {problem && <p role="alert" className="break-words text-xs text-status-attention">{problem}</p>}
@@ -98,7 +99,7 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
           {canCancel && <Button type="button" variant="outline" className="min-h-11" onClick={() => void engine.current?.cancel()}>{t('upload.cancel')}</Button>}
           {discoveryError && <Button type="button" className="min-h-11" onClick={() => setDiscoverRevision((value) => value + 1)}>{t('upload.retry_discovery')}</Button>}
           {view.phase === 'paused' ? view.resumable && <Button type="button" className="min-h-11" disabled={busy || machine.status !== 'online'} onClick={() => void engine.current?.resume()}>{t(view.uncertain ? 'upload.check_result' : 'upload.resume')}</Button>
-            : (!busy || mode !== 'resumable') && <Button type="submit" className="min-h-11" disabled={!file || busy || mode === 'unknown' || machine.status !== 'online'}><Upload />{busy ? t('dialogs.uploading') : t('dialogs.upload')}</Button>}
+            : (!busy || mode !== 'resumable') && <Button type="submit" className="min-h-11" disabled={!file || tooLarge || busy || mode === 'unknown' || machine.status !== 'online'}><Upload />{busy ? t('dialogs.uploading') : t('dialogs.upload')}</Button>}
         </DialogFooter>
       </form>
     </DialogContent>
@@ -112,3 +113,5 @@ function uploadErrorMessage(code?: string) {
   if (code === 'idle_expired' || code === 'lifetime_expired' || code === 'upload_expired') return t('upload.expired')
   return t('upload.failed')
 }
+
+function uploadBytes(value: number) { return formatBytes(value).replace(/\b([KMGT])B\b/g, '$1iB') }

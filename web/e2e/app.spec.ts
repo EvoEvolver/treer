@@ -3182,7 +3182,7 @@ test.describe('resumable machine upload', () => {
     const { calls, ready } = fixture(page); await ready
     const dialog = await open(page, 128 * mib)
     await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
-    await expect(dialog.getByText('Uploaded repo/payload.bin (128.0 MB).')).toBeVisible({ timeout: 45_000 })
+    await expect(dialog.getByText('Uploaded repo/payload.bin (128.0 MiB).')).toBeVisible({ timeout: 45_000 })
     expect(calls.lengths.reduce((a, b) => a + b, 0)).toBe(128 * mib)
     expect(calls.lengths[0]).toBe(mib)
     expect(calls.lengths.some((length) => length > mib)).toBe(true)
@@ -3194,7 +3194,7 @@ test.describe('resumable machine upload', () => {
     await support(page)
     const { calls, ready } = fixture(page); await ready
     const dialog = await open(page, 128 * mib + 1)
-    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled()
     await expect(dialog.getByRole('alert')).toHaveText('Files must be 128 MiB or smaller.')
     expect(calls.begin).toHaveLength(0)
   })
@@ -3215,7 +3215,7 @@ test.describe('resumable machine upload', () => {
     const { calls, ready } = fixture(page, { dropPart: true }); await ready
     const dialog = await open(page)
     await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
-    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MB).')).toBeVisible()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MiB).')).toBeVisible()
     expect(calls.offsets.slice(0, 2)).toEqual([0, mib])
     expect(calls.statuses).toBeGreaterThanOrEqual(2)
   })
@@ -3229,7 +3229,7 @@ test.describe('resumable machine upload', () => {
     expect(calls.offsets).toHaveLength(4)
     await expect(dialog.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0')
     await dialog.getByRole('button', { name: 'Resume upload' }).click()
-    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MB).')).toBeVisible()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MiB).')).toBeVisible()
     expect(calls.begin).toHaveLength(1)
   })
   test('Policy refusal is not retried or downgraded', async ({ page }) => {
@@ -3252,7 +3252,7 @@ test.describe('resumable machine upload', () => {
     await expect(dialog.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0)
     await expect(dialog.getByRole('button', { name: 'Close', exact: true })).toBeDisabled()
     release()
-    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MB).')).toBeVisible()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MiB).')).toBeVisible()
     expect(calls.commits).toBe(1)
     expect(calls.statuses).toBeGreaterThanOrEqual(2)
   })
@@ -3276,7 +3276,7 @@ test.describe('resumable machine upload', () => {
     const dialog = await open(page)
     await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
     await expect(dialog.getByText('Waiting to reconnect or retry…')).toBeVisible()
-    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MB).')).toBeVisible()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MiB).')).toBeVisible()
     expect(calls.offsets.slice(0, 2)).toEqual([0, 0])
     expect(calls.begin).toHaveLength(1)
   })
@@ -3312,7 +3312,7 @@ test.describe('resumable machine upload', () => {
       await expect(dialog.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0)
       await expect(dialog.getByText('Cancelling and removing the temporary file…')).toBeVisible()
     }
-    await expect(dialog.getByText(committed ? 'Uploaded repo/payload.bin (3.00 MB).' : 'Upload cancelled. The temporary file was removed.')).toBeVisible()
+    await expect(dialog.getByText(committed ? 'Uploaded repo/payload.bin (3.00 MiB).' : 'Upload cancelled. The temporary file was removed.')).toBeVisible()
     expect(calls.aborts).toBe(committed ? 1 : 2)
     release()
   })
@@ -3402,7 +3402,7 @@ test.describe('resumable machine upload', () => {
     const { calls, ready } = fixture(page, { rateLimit: scenario === 'waiting', rateAfter: '10', commitFailure: scenario === 'unknown', abortPending: scenario === 'pending', partHold: scenario === 'pending' ? hold : undefined, denied: scenario === 'failure' }); await ready
     const dialog = await open(page, scenario === 'too-large' ? 128 * mib + 1 : 3 * mib)
     await page.evaluate(async (locale) => { const { setLocale } = await import('/src/i18n/index.ts'); setLocale(locale as 'en' | 'zh') }, lang)
-    await dialog.getByRole('button', { name: lang === 'en' ? 'Upload' : '上传', exact: true }).click()
+    if (scenario !== 'too-large') await dialog.getByRole('button', { name: lang === 'en' ? 'Upload' : '上传', exact: true }).click()
     if (scenario === 'pending') {
       await expect.poll(() => calls.offsets.length).toBe(1)
       await dialog.getByRole('button', { name: lang === 'en' ? 'Cancel upload' : '取消上传' }).click()
@@ -3412,7 +3412,7 @@ test.describe('resumable machine upload', () => {
       unknown: ['The upload result is not yet confirmed.', '上传结果尚未确认。'],
       pending: ['Upload stopped. Temporary file cleanup is pending on the machine.', '上传已停止，机器上的临时文件待清理。'],
       'too-large': ['Files must be 128 MiB or smaller.', '文件不能超过 128 MiB。'],
-      success: ['Uploaded repo/payload.bin (3.00 MB).', '已上传 repo/payload.bin(3.00 MB)。'],
+      success: ['Uploaded repo/payload.bin (3.00 MiB).', '已上传 repo/payload.bin(3.00 MiB)。'],
       failure: ['Upload is not permitted.', '没有上传权限。'],
     }
     await expect(dialog.getByText(copy[scenario][lang === 'en' ? 0 : 1], { exact: false })).toBeVisible()
@@ -3424,7 +3424,7 @@ test.describe('resumable machine upload', () => {
     await page.route('**/api/auth/config', (route) => ok(route, {}))
     const { calls, ready } = fixture(page); await ready
     const dialog = await open(page, 17 * mib, 'payload.bin', '16')
-    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled()
     await expect(dialog.getByRole('alert')).toContainText('needs a newer Proxy and Controller')
     expect(calls.begin).toHaveLength(0)
   })
