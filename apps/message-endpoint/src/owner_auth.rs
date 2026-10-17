@@ -25,13 +25,21 @@ pub enum Error {
     Proxy,
     #[error("owner_auth_configuration_invalid")]
     Configuration,
+    #[error("owner_oauth_state_invalid")]
+    OAuthState,
+    #[error("owner_login_capacity_exceeded")]
+    LoginCapacity,
 }
 pub struct Owner {
     id: String,
+    expires_at: i64,
 }
 impl Owner {
     pub fn id(&self) -> &str {
         &self.id
+    }
+    pub(crate) fn expires_at(&self) -> i64 {
+        self.expires_at
     }
 }
 pub struct OwnerAuth {
@@ -40,6 +48,7 @@ pub struct OwnerAuth {
     service: String,
     workspace: String,
     origins: BTreeSet<String>,
+    public_url: Url,
 }
 fn configured_url(value: &str) -> Result<Url, Error> {
     let url = Url::parse(value).map_err(|_| Error::Configuration)?;
@@ -117,7 +126,7 @@ impl OwnerAuth {
         }
         let proxy = configured_url(proxy)?;
         let public = configured_url(public_url)?;
-        if proxy.path() != "/" {
+        if proxy.path() != "/" || !public.path().ends_with('/') {
             return Err(Error::Configuration);
         }
         let origins = [
@@ -140,6 +149,7 @@ impl OwnerAuth {
             service: service.into(),
             workspace: workspace.into(),
             origins,
+            public_url: public,
         })
     }
     fn read(&self, response: Response) -> Result<Value, Error> {
@@ -225,7 +235,62 @@ impl OwnerAuth {
         if matches.len() != 1 || matches[0].get("role").and_then(Value::as_str) != Some("owner") {
             return Err(Error::OwnerRequired);
         }
-        Ok(Owner { id: id.into() })
+        Ok(Owner {
+            id: id.into(),
+            expires_at: c["exp"].as_i64().ok_or(Error::InvalidIdentity)?,
+        })
+    }
+    pub(crate) fn callback_url(&self) -> Result<String, Error> {
+        Ok(self
+            .public_url
+            .join("api/auth/callback")
+            .map_err(|_| Error::Configuration)?
+            .into())
+    }
+    pub(crate) fn authorization_url(&self, state: &str, challenge: &str) -> Result<String, Error> {
+        let mut url = self
+            .proxy
+            .join("api/apps/oauth/authorize")
+            .map_err(|_| Error::Configuration)?;
+        url.query_pairs_mut().extend_pairs([
+            ("response_type", "code"),
+            ("client_id", self.service.as_str()),
+            ("redirect_uri", self.callback_url()?.as_str()),
+            ("state", state),
+            ("code_challenge", challenge),
+            ("code_challenge_method", "S256"),
+        ]);
+        Ok(url.into())
+    }
+    pub(crate) fn exchange_code(&self, code: &str, verifier: &str) -> Result<String, Error> {
+        let url = self
+            .proxy
+            .join("api/apps/oauth/token")
+            .map_err(|_| Error::Configuration)?;
+        let callback = self.callback_url()?;
+        let result = self.read(
+            self.client
+                .post(url)
+                .form(&[
+                    ("grant_type", "authorization_code"),
+                    ("client_id", self.service.as_str()),
+                    ("redirect_uri", callback.as_str()),
+                    ("code", code),
+                    ("code_verifier", verifier),
+                ])
+                .send()
+                .map_err(|_| Error::Proxy)?,
+        )?;
+        if result.get("token_type").and_then(Value::as_str) != Some("Bearer")
+            || result.get("audience").and_then(Value::as_str) != Some(self.service.as_str())
+        {
+            return Err(Error::InvalidIdentity);
+        }
+        result
+            .get("access_token")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .ok_or(Error::InvalidIdentity)
     }
     /// All management mutations are human-browser operations. Require explicit
     /// Origin even for curl, a non-simple custom header, and same-site metadata.

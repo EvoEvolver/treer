@@ -651,7 +651,7 @@ owner recovery service.
 ## Development owner authentication (`hub` Cargo feature)
 
 `owner_auth::OwnerAuth` now implements the outbound identity verification for
-the settings service. This is not yet an HTTP router or an OAuth flow. Every
+the settings service. This is not yet an HTTP router. Every
 request checks `verify_app` at the configured Proxy for this service audience,
 workspace, active human subject and unexpired token, then fetches the current
 App directory and requires exactly one matching human with role `owner`.
@@ -662,9 +662,9 @@ The service must preserve all repeated header values when constructing the
 input: injected identity header first, explicit Bearer second, otherwise a token
 resolved from its own opaque OAuth session store. Empty, duplicate, malformed,
 expired, forged or wrong-audience supplied identities fail without falling back
-to a different cookie user. OAuth sessions, state/PKCE and browser cookies still
-need implementation and tests; callers must never supply a raw token cookie or
-actor ID to bypass this selection.
+to a different cookie user. Callers must never supply a raw token cookie or
+actor ID to bypass this selection. The OAuth primitives below still need HTTP
+cookie handling and route integration.
 
 Management mutations require an exact configured App/Proxy `Origin`,
 `X-Endpoint-Request: 1`, and, when present, `Sec-Fetch-Site` of `same-origin` or
@@ -684,6 +684,38 @@ Tests use a private fake Proxy for per-request owner revocation, bad/Agent token
 directory membership, CSRF, duplicate headers, no redirect and response caps.
 They do not establish real embedded-browser/OAuth acceptance or an authenticated
 settings server; those remain activation requirements.
+
+`oauth::OAuthVault` now implements the standard fallback's state, PKCE and
+sessions around that verifier. OS randomness generates state and a separate
+browser nonce (256 bits each), PKCE verifier and opaque session secrets (384 bits
+each). State is hashed in process memory, expires after ten minutes, binds to
+the hashed HttpOnly browser nonce and is consumed before token exchange. A
+mismatched browser/state does not consume a valid flow or request deletion of
+its nonce cookie. A matched expired or consumed flow requests cookie deletion,
+including exchange failure, to prevent replay. Only fixed registered callback
+and authorization/token paths are used; no caller-supplied next/redirect URL.
+
+The callback exchanges with S256 PKCE, then verifies the resulting human's
+current owner status before storing a session. Token exchange and verification
+hold neither the vault nor SQLite mutex. The browser receives only an opaque
+session secret; its hash indexes an in-memory token with expiry capped by both
+the verified signed claims and twelve hours. Injected Proxy tokens are never
+stored by this vault. Every subsequent request still re-verifies the OAuth
+token and current directory membership. There are at most 100 pending flows
+and 100 sessions, expired entries are removed, full capacity refuses a new login
+without evicting others, and restart deliberately signs all OAuth sessions out.
+There is no session file, token in localStorage, local account, refresh-token
+flow or credential-zeroization claim. Dedicated-user/container isolation and
+host memory/swap protection remain necessary.
+
+The future router must reject duplicate callback query/cookie values, set
+HttpOnly/SameSite=Lax cookies (Secure except deliberate loopback development),
+use the actual App mount path for cookie scope, and honor the callback's
+`clear_browser_cookie` flag. It must also keep callbacks, cookies, access tokens,
+codes and verifier bodies out of logs/HTML/JSON, run blocking Proxy calls outside
+the async and state actors, and preserve header-first authentication. Library
+tests with a private fake Proxy verify the actual PKCE exchange and current-owner
+check; they do not replace desktop/390px or real embedded browser acceptance.
 
 ## Development Bot API adapter (`hub` Cargo feature)
 

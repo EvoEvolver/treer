@@ -26,6 +26,8 @@ pub mod telegram;
 pub mod transfers;
 
 #[cfg(all(unix, feature = "hub"))]
+pub mod oauth;
+#[cfg(all(unix, feature = "hub"))]
 pub mod owner_auth;
 #[cfg(all(unix, feature = "hub"))]
 pub mod telegram_http;
