@@ -504,7 +504,6 @@ test.describe('workload deep links and new-tab entry points', () => {
 
 test.describe('workload rows are real links: modifier-click and middle-click open a new browser tab natively', () => {
   const expected = '/api/workspaces/map-workspace/agents/tab-1/interface/ui/'
-  const where = (url: string) => new URL(url).pathname
   for (const how of ['ctrl', 'middle'] as const) {
     test(`overview rows and tree rows have the deep-link href and open natively (${how})`, async ({ page, context }) => {
       await page.setViewportSize({ width: 1360, height: 900 })
@@ -513,7 +512,7 @@ test.describe('workload rows are real links: modifier-click and middle-click ope
       const click = (locator: import('@playwright/test').Locator) => how === 'ctrl' ? locator.click({ modifiers: ['ControlOrMeta'] }) : locator.click({ button: 'middle' })
       for (const target of [page.getByRole('link', { name: 'Open /Alpha', exact: true }), page.getByRole('tree').getByRole('link', { name: /^Alpha/ })]) {
         const [popup] = await Promise.all([context.waitForEvent('page'), click(target)])
-        await expect.poll(() => where(popup.url())).toBe(expected)
+        await popup.waitForURL(url => url.pathname === expected, { waitUntil: 'commit' })
         await popup.close()
         // The current page did not navigate in place.
         await expect(page.getByRole('tab', { name: 'Tab Overview', exact: true })).toHaveAttribute('aria-selected', 'true')
@@ -537,7 +536,7 @@ test.describe('workload rows are real links: modifier-click and middle-click ope
     const block = page.getByRole('dialog').getByRole('link', { name: /Alpha/ }).first()
     expect(new URL((await block.getAttribute('href'))!).pathname).toBe(expected)
     const [popup] = await Promise.all([context.waitForEvent('page'), block.click({ modifiers: ['ControlOrMeta'] })])
-    await expect.poll(() => where(popup.url())).toBe(expected)
+    await popup.waitForURL(url => url.pathname === expected, { waitUntil: 'commit' })
     await popup.close()
     await expect(page.getByRole('dialog')).toBeVisible()
   })
