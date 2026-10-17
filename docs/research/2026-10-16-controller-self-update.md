@@ -477,6 +477,25 @@ replaced Node and moved temporary directory. These are verification snapshots,
 not atomic protection from a trusted same-account writer, supervisor registration,
 single-gate ownership or installer execution authority; those remain unwired.
 
+`RecordedIntent::register_supervisor` now consumes that fresh intent and writes
+one exclusive install/status supervisor record through the retained job directory.
+It binds schema/job/operation/attempt, exact intent SHA256 and dev/inode, plus
+OS-captured PID/creation identity, private SID/PGID, image dev/inode and SHA256.
+It revalidates the intent and private process session immediately before writing
+and after file/directory sync, then checks bounded exact-byte readback and the
+registration inode. Existing entries, nil attempts and non-private sessions fail
+closed without replacement. `RegisteredSupervisor` retains the intent, process
+image and record FD; verification and binding access recheck those records and
+live image/session. Drop preserves evidence. Isolated Rust subprocess tests cover
+valid registration, replacement/mutation, changed intent, child exit, existing
+entries and refusal to replace a registration even with a fresh intent/attempt.
+This is durable identity metadata, not attestation of owned-child provenance or
+an authenticated connection: the caller must supply the coordinator's owned
+child image. No gate is created and no permit/noexec/ACK or installer execution
+is authorized. The supervisor entry, authenticated connection, exclusive gate
+ownership and recovery/death matrix remain future work; sync-failure/crash-point
+injection for registration is also still required.
+
 Status intent policy (security2596): this is the updater's one-shot post-install
 status verification, not an intent requirement for ordinary `treer launcher
 status`. Its conservative marker is intentional: a supposedly read-only command

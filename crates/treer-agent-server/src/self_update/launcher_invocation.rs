@@ -17,7 +17,7 @@ use super::{
 };
 
 mod start;
-pub use start::RecordedIntent;
+pub use start::{RecordedIntent, RegisteredSupervisor};
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -410,6 +410,205 @@ mod tests {
             assert_eq!(journal.read().unwrap(), before);
             drop(plan);
             assert_eq!(std::fs::read(path).unwrap(), bytes); // Recovery evidence remains.
+        }
+    }
+
+    #[test]
+    #[ignore = "owned subprocess helper, invoked by registration fixture"]
+    fn supervisor_registration_child() {
+        treer_platform::process_image::enter_private_session().unwrap();
+        std::fs::write(
+            std::env::var_os("TREER_TEST_REGISTRATION_READY").unwrap(),
+            b"ready",
+        )
+        .unwrap();
+        use std::io::Read;
+        let mut byte = [0];
+        let _ = std::io::stdin().read(&mut byte);
+    }
+
+    #[test]
+    fn supervisor_registration_binds_durable_intent_and_rejects_changed_evidence() {
+        use std::{
+            io::Write,
+            os::unix::fs::{symlink, MetadataExt, PermissionsExt},
+            process::{Command, Stdio},
+            time::{Duration, Instant},
+        };
+        use treer_platform::process_image::ProcessImage;
+        struct Child(std::process::Child);
+        impl Drop for Child {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        for fault in [
+            "ok",
+            "replacement",
+            "mutation",
+            "intent",
+            "second_attempt",
+            "exit",
+            "existing_empty",
+            "existing_corrupt",
+            "existing_symlink",
+            "nil",
+            "not_private",
+        ] {
+            let f = Fixture::standard_config();
+            f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+            let (selected, owned, journal) = bind(&f, "ws_a");
+            let before = journal.read().unwrap();
+            let job = f.path.join("jobs").join(before.job_id.to_string());
+            let temporary = LauncherTemporary::create(&selected, &owned, &journal, &job).unwrap();
+            let node = NodeFixture::new();
+            let plan = Invocation::with_context(
+                &selected,
+                &owned,
+                &journal,
+                Operation::Install,
+                &f.path,
+                &node.node(),
+            )
+            .unwrap()
+            .bind_node(retain_node(&node.node()).unwrap())
+            .unwrap()
+            .bind_temporary(&temporary)
+            .unwrap();
+            let intent = plan.record_start_intent().unwrap();
+            let intent_path = job.join("launcher-install-intent.json");
+            let intent_digest = intent.sha256().unwrap().to_owned();
+            let intent_metadata = std::fs::metadata(&intent_path).unwrap();
+            let ready = job.join("test-ready");
+            let mut child = Child(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "self_update::launcher_invocation::tests::supervisor_registration_child",
+                        "--ignored",
+                    ])
+                    .env_clear()
+                    .env("TREER_TEST_REGISTRATION_READY", &ready)
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready.exists() {
+                assert!(Instant::now() < deadline);
+                assert!(child.0.try_wait().unwrap().is_none());
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            let image = ProcessImage::capture(if fault == "not_private" {
+                std::process::id()
+            } else {
+                child.0.id()
+            })
+            .unwrap();
+            let path = job.join("launcher-install-supervisor.json");
+            match fault {
+                "existing_empty" => std::fs::write(&path, b"").unwrap(),
+                "existing_corrupt" => std::fs::write(&path, b"partial private evidence").unwrap(),
+                "existing_symlink" => symlink(&intent_path, &path).unwrap(),
+                _ => (),
+            }
+            let attempt = if fault == "nil" {
+                uuid::Uuid::nil()
+            } else {
+                uuid::Uuid::new_v4()
+            };
+            let result = intent.register_supervisor(attempt, image);
+            if fault.starts_with("existing") || matches!(fault, "nil" | "not_private") {
+                assert_eq!(
+                    result.err().unwrap().to_string(),
+                    "update_recovery_required",
+                    "{fault}"
+                );
+                if fault == "existing_corrupt" {
+                    assert_eq!(std::fs::read(&path).unwrap(), b"partial private evidence");
+                }
+                if matches!(fault, "nil" | "not_private") {
+                    assert!(!path.exists());
+                }
+                continue;
+            }
+            let registered = result.unwrap();
+            registered.binding().unwrap();
+            let bytes = std::fs::read(&path).unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(value["intent_sha256"], intent_digest);
+            assert_eq!(value["intent_device"], intent_metadata.dev());
+            assert_eq!(value["intent_inode"], intent_metadata.ino());
+            assert_eq!(value["attempt"], attempt.to_string());
+            assert_eq!(value["pid"], child.0.id());
+            assert_eq!(value["session"], child.0.id());
+            assert_eq!(value["process_group"], child.0.id());
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            assert!(!String::from_utf8_lossy(&bytes).contains(f.path.to_str().unwrap()));
+            match fault {
+                "replacement" => {
+                    let inode = std::fs::metadata(&path).unwrap().ino();
+                    std::fs::rename(&path, job.join("saved-registration")).unwrap();
+                    std::fs::write(&path, &bytes).unwrap();
+                    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                        .unwrap();
+                    assert_ne!(std::fs::metadata(&path).unwrap().ino(), inode);
+                }
+                "mutation" | "intent" => {
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(if fault == "intent" {
+                            &intent_path
+                        } else {
+                            &path
+                        })
+                        .unwrap()
+                        .write_all(b"\n")
+                        .unwrap();
+                }
+                "second_attempt" => {
+                    // Even a fresh intent and a new UUID cannot supersede an
+                    // existing registration for this operation.
+                    std::fs::rename(&intent_path, job.join("saved-intent")).unwrap();
+                    let next = plan.record_start_intent().unwrap();
+                    let result = next.register_supervisor(
+                        uuid::Uuid::new_v4(),
+                        ProcessImage::capture(child.0.id()).unwrap(),
+                    );
+                    assert_eq!(
+                        result.err().unwrap().to_string(),
+                        "update_recovery_required"
+                    );
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                }
+                "exit" => {
+                    child.0.stdin.take();
+                    assert!(child.0.wait().unwrap().success());
+                }
+                "ok" => (),
+                _ => unreachable!(),
+            }
+            if fault != "ok" {
+                assert_eq!(
+                    registered.verify().unwrap_err().to_string(),
+                    "update_recovery_required",
+                    "{fault}"
+                );
+                assert_eq!(
+                    registered.binding().err().unwrap().to_string(),
+                    "update_recovery_required",
+                    "{fault}"
+                );
+            }
+            drop(registered);
+            assert!(path.exists()); // Drop preserves recovery evidence.
+            assert_eq!(journal.read().unwrap(), before);
         }
     }
 
