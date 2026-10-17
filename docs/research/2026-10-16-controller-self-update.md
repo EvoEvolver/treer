@@ -757,6 +757,19 @@ This reader has no production caller, peer authentication, writer-disappearance
 proof, arbitration transition, ACK or persistent record. It does not satisfy the
 sealed authenticated proof requirement below or authorize installer execution.
 
+Additional wiring prerequisites (security2685): attempt and digest fields are
+public metadata without a MAC. Production code must reject unauthenticated
+connections before calling `read`. Authenticate the same accepted connection
+that is subsequently read, using the private 0700 endpoint, OS peer credentials
+and creation-time/image evidence; authenticating a pathname or another connection
+does not satisfy this requirement. Any read failure, including timeout, I/O error
+or invalid framing, must call `invalidate()` on the pending arbitration, making
+it `Uncertain`. Never retry ambiguous input as `Pending` or as empty EOF. Add
+integration tests for all three failure classes and for rejection before reading
+an unauthenticated connection when this wiring exists; current raw fixtures do
+not establish those guarantees. Replace the bounded 1ms polling with cancellable
+poll/event waiting at integration, retaining the same absolute deadline.
+
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the
 authenticated transport/drain module. Tie it to the actual still-open receiver

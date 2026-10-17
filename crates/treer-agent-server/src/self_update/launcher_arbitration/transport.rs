@@ -51,6 +51,11 @@ impl Observation<'_> {
 /// Errors leave the receiver open and never synthesize an empty-EOF observation.
 /// Leaves the private receiver nonblocking; callers must not retry ambiguous
 /// input on this receiver.
+/// Production integration must authenticate this exact accepted connection
+/// before calling read: frame contents are public metadata, not a MAC. It must
+/// invalidate the pending arbitration on every read error (including timeout or
+/// invalid framing), never retry it as Pending. These integration guards are
+/// not implemented here; raw unit fixtures confer no authority.
 pub fn read(receiver: &mut UnixStream) -> Result<Observation<'_>> {
     read_until(receiver, Instant::now() + BUDGET)
 }
