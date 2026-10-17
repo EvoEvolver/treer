@@ -936,13 +936,17 @@ future billing rules remain explainable; workspace members can read those
 aggregates. It does not store payload content, request paths, headers, or NATS
 control-plane traffic in the usage ledger.
 
-The authenticated Managed App UI tunnel requires current workspace access and
-resolves the App within that workspace before forwarding. It replaces only CSP
-`frame-ancestors` with the configured control-plane origin and `'self'`, and
-removes conflicting `X-Frame-Options`, so the control plane can embed the human
-interface. Other CSP directives remain enforced; direct App origins and ordinary
-virtual-host tunnels retain their embedding policies. Embedded App content is
-trusted workspace code, not an isolation boundary.
+The authenticated Managed App and Agent interface UI tunnels require current
+workspace access and resolve the target within that workspace before forwarding.
+They replace only CSP `frame-ancestors` with the configured control-plane origin
+and `'self'`, and remove conflicting `X-Frame-Options`, so the control plane can
+embed the human interface. Other CSP directives, Permissions-Policy and
+Referrer-Policy remain
+enforced; direct App origins and ordinary virtual-host/service tunnels retain
+their embedding policies. Top-level Agent UI navigation is unaffected. This
+limits same-site sibling origins from framing the authenticated Agent UI, but
+does not isolate Agent JavaScript from the Proxy authority described above.
+Embedded content remains trusted workspace code, not an isolation boundary.
 
 For Workspace ingress authenticated with an ingress session, and for the
 workspace-authenticated Managed App UI tunnel, the Proxy issues a fresh

@@ -78,12 +78,12 @@ async fn proxy_app_ui(
     Ok(response)
 }
 
-fn allow_control_plane_frame(
+pub(super) fn allow_control_plane_frame(
     headers: &mut HeaderMap,
     browser: &BrowserAccess,
 ) -> Result<(), ApiFailure> {
-    // Only the explicit, authenticated App UI tunnel overrides embedding policy.
-    // Keep all other App CSP directives and each separately enforced policy.
+    // Only explicit, authenticated App/Agent UI tunnels override embedding
+    // policy. Keep all other CSP directives and each separately enforced policy.
     let ancestors = format!("frame-ancestors 'self' {}", browser.origin_text);
     let mut policies = Vec::new();
     for value in headers.get_all(header::CONTENT_SECURITY_POLICY) {

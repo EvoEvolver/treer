@@ -3557,6 +3557,17 @@ async fn trailing_slash_browser_tunnel_route_is_registered() {
             .await
             .expect("route response");
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED, "{uri}");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "application/json",
+            "{uri}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .unwrap();
+        let error: ApiError =
+            serde_json::from_slice(&body).expect("JSON error, never launcher HTML");
+        assert_eq!(error.error.code, "authentication_required", "{uri}");
     }
 }
 
