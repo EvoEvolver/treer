@@ -241,6 +241,17 @@ pub struct PolicyBatchDenial {
     pub error: ProtocolError,
 }
 
+/// What an evaluator knows about the workspace Policy revision it would apply.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PolicyRevision {
+    /// No revisioned document here (fixed engines, or no Policy published).
+    Unrevisioned,
+    Known(u64),
+    /// The document could not be loaded right now; decisions keyed on a
+    /// revision must not be remembered or reused in this state.
+    Unavailable,
+}
+
 pub trait PolicyEvaluator: Send + Sync {
     fn explain<'a>(
         &'a self,
@@ -258,8 +269,8 @@ pub trait PolicyEvaluator: Send + Sync {
     fn revision<'a>(
         &'a self,
         _workspace_id: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Option<u64>> + Send + 'a>> {
-        Box::pin(async { None })
+    ) -> Pin<Box<dyn Future<Output = PolicyRevision> + Send + 'a>> {
+        Box::pin(async { PolicyRevision::Unrevisioned })
     }
 
     fn evaluate_batch<'a>(&'a self, requests: &'a [PolicyRequest]) -> PolicyBatchFuture<'a> {
@@ -428,17 +439,19 @@ impl PolicyEngine {
         }
     }
 
-    /// The first evaluator-reported workspace Policy revision (#143 Phase 2):
-    /// callers that remember a decision key it with this value so a published
-    /// revision is seen as soon as the evaluators themselves see it. `None`
-    /// for engines without a revisioned document (fixed test engines).
-    pub async fn policy_revision(&self, workspace_id: &str) -> Option<u64> {
+    /// The workspace Policy revision of the first evaluator that has one
+    /// (#143 Phase 2), in the same order `authorize` consults them, so it is
+    /// the revision that decides. Callers that remember a decision key it with
+    /// this value; `Unavailable` means the document cannot be loaded now and
+    /// nothing may be remembered or reused.
+    pub async fn policy_revision(&self, workspace_id: &str) -> PolicyRevision {
         for evaluator in self.evaluators.iter() {
-            if let Some(revision) = evaluator.revision(workspace_id).await {
-                return Some(revision);
+            match evaluator.revision(workspace_id).await {
+                PolicyRevision::Unrevisioned => continue,
+                known_or_unavailable => return known_or_unavailable,
             }
         }
-        None
+        PolicyRevision::Unrevisioned
     }
 
     pub async fn invalidate_provider(&self, workspace_id: &str) {
@@ -995,13 +1008,13 @@ impl PolicyEvaluator for ProviderPolicyEvaluator {
     fn revision<'a>(
         &'a self,
         workspace_id: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Option<u64>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = PolicyRevision> + Send + 'a>> {
         Box::pin(async move {
-            self.compiled(workspace_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|policy| policy.revision)
+            match self.compiled(workspace_id).await {
+                Ok(Some(policy)) => PolicyRevision::Known(policy.revision),
+                Ok(None) => PolicyRevision::Unrevisioned,
+                Err(_) => PolicyRevision::Unavailable,
+            }
         })
     }
     fn explain<'a>(
@@ -1132,13 +1145,13 @@ impl PolicyEvaluator for DurablePolicyEvaluator {
     fn revision<'a>(
         &'a self,
         workspace_id: &'a str,
-    ) -> Pin<Box<dyn Future<Output = Option<u64>> + Send + 'a>> {
+    ) -> Pin<Box<dyn Future<Output = PolicyRevision> + Send + 'a>> {
         Box::pin(async move {
-            self.compiled(workspace_id)
-                .await
-                .ok()
-                .flatten()
-                .map(|policy| policy.revision)
+            match self.compiled(workspace_id).await {
+                Ok(Some(policy)) => PolicyRevision::Known(policy.revision),
+                Ok(None) => PolicyRevision::Unrevisioned,
+                Err(_) => PolicyRevision::Unavailable,
+            }
         })
     }
     fn explain<'a>(

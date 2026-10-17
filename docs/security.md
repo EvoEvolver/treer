@@ -1118,7 +1118,8 @@ re-registering in a loop cannot turn every member's Console refetch into
 unbounded Policy evaluation. The revision is the one the Policy evaluators
 would apply now, so a published Policy is re-evaluated as soon as the engine
 sees it; one member's result is never served to another; allowed and denied
-results share the window and a failed evaluation is never remembered. The
+results share the window, a failed evaluation is never remembered, and when
+the Policy document cannot be loaded the cache is bypassed entirely. The
 authorize step, every request on the origin and the Proxy-origin tunnel
 evaluate the gate uncached.
 

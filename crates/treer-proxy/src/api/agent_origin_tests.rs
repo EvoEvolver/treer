@@ -1150,6 +1150,30 @@ async fn agent_origin_url_is_hydrated_only_for_members_passing_the_gate() {
         None,
         "another member is evaluated afresh"
     );
+    // Revision reporting: a durable engine reports the published revision, a
+    // fixed engine has none, and an engine whose store cannot be reached
+    // reports Unavailable, which bypasses the window entirely.
+    use crate::policy::PolicyRevision;
+    assert_eq!(
+        PolicyEngine::durable(store.clone())
+            .policy_revision("default")
+            .await,
+        PolicyRevision::Known(3)
+    );
+    assert_eq!(
+        allow().policy_revision("default").await,
+        PolicyRevision::Unrevisioned
+    );
+    let unreachable = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://127.0.0.1:1/unreachable")
+        .unwrap();
+    assert_eq!(
+        PolicyEngine::durable(WorkspacePolicyStore::new(unreachable))
+            .policy_revision("default")
+            .await,
+        PolicyRevision::Unavailable
+    );
     let Json(health) = super::health().await;
     assert!(health["capabilities"]
         .as_array()

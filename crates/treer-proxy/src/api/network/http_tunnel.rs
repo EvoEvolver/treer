@@ -120,7 +120,8 @@ pub(in crate::api) async fn require_agent_interface_access(
 /// The revision in the key is the one the evaluators would apply now, so a
 /// published Policy is re-evaluated as soon as the engine itself sees it;
 /// allowed and denied results share the window, a failed evaluation is never
-/// remembered, and the authorize step and every request on the origin
+/// remembered, an unavailable revision (Policy document not loadable) bypasses
+/// the cache entirely, and the authorize step and every request on the origin
 /// evaluate the gate uncached.
 const ORIGIN_GATE_WINDOW: Duration = Duration::from_secs(5);
 const ORIGIN_GATE_CACHE_CAP: usize = 10_000;
@@ -195,13 +196,23 @@ pub(in crate::api) async fn hydrate_agent_interface_origin(
     let Some(origin_url) = config.agent_interface_origin_url(&agent.agent_id) else {
         return Ok(());
     };
-    let key = (
-        workspace_id.to_owned(),
-        user_id.clone(),
-        agent.agent_id.clone(),
-        policy.policy_revision(workspace_id).await,
-    );
-    let allowed = match origin_gate_cached(&key) {
+    let key = match policy.policy_revision(workspace_id).await {
+        crate::policy::PolicyRevision::Known(revision) => Some((
+            workspace_id.to_owned(),
+            user_id.clone(),
+            agent.agent_id.clone(),
+            Some(revision),
+        )),
+        crate::policy::PolicyRevision::Unrevisioned => Some((
+            workspace_id.to_owned(),
+            user_id.clone(),
+            agent.agent_id.clone(),
+            None,
+        )),
+        crate::policy::PolicyRevision::Unavailable => None,
+    };
+    let cached = key.as_ref().and_then(origin_gate_cached);
+    let allowed = match cached {
         Some(allowed) => allowed,
         None => {
             let allowed =
@@ -210,7 +221,9 @@ pub(in crate::api) async fn hydrate_agent_interface_origin(
                     Err(error) if error.error.code == "policy_denied" => false,
                     Err(error) => return Err(error),
                 };
-            origin_gate_remember(key, allowed);
+            if let Some(key) = key {
+                origin_gate_remember(key, allowed);
+            }
             allowed
         }
     };
