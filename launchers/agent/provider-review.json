@@ -1,0 +1,62 @@
+{
+  "schema": "treer.provider-review/v1",
+  "reviewed_at": "2026-10-16",
+  "reviewer": "launcher-dev",
+  "registry": "https://registry.npmjs.org/",
+  "purpose": "Candidate metadata snapshots and read-only lifecycle inspection; not runtime approval or a transitive dependency audit.",
+  "packages": [
+    {
+      "name": "@openai/codex",
+      "version": "0.163.0",
+      "integrity": "sha512-HNd7vR9oTK6M2ikxFnvNDCdYUgAsyo9VVnd5KnEd2ON0GYI++7MiX9XNPUkhtdgGKFPsWS+CEppQ1UU63uVhUw==",
+      "tarball": "https://registry.npmjs.org/@openai/codex/-/codex-0.163.0.tgz",
+      "scripts": {},
+      "bin": { "codex": "bin/codex.js" },
+      "node": ">=16",
+      "disposition": "candidate-ignore-scripts"
+    },
+    {
+      "name": "@anthropic-ai/claude-code",
+      "version": "2.1.302",
+      "integrity": "sha512-+5GARMH0vX8a+o8xGrmx67KH+aDI5aYVO2qFustRhUJrSMdxzb4LtUmF2rL+PyaxCpHfXYZz38vfIuT2irg/Cg==",
+      "tarball": "https://registry.npmjs.org/@anthropic-ai/claude-code/-/claude-code-2.1.302.tgz",
+      "scripts": {
+        "prepare": "node -e \"if (!process.env.AUTHORIZED) { console.error('ERROR: Direct publishing is not allowed.\\nPlease see the release workflow documentation to publish this package.'); process.exit(1); }\"",
+        "postinstall": "node install.cjs"
+      },
+      "bin": { "claude": "bin/claude.exe" },
+      "node": ">=22.0.0",
+      "lifecycle": {
+        "member": "package/install.cjs",
+        "sha256": "32a7b2429d7447c5aa043e383bcf9a72e0b233dff66336ea4b5b32531da981ad",
+        "tarball_integrity_verified": true
+      },
+      "disposition": "requires-explicit-lifecycle-review-and-consent"
+    },
+    {
+      "name": "@google/gemini-cli",
+      "version": "0.64.0",
+      "integrity": "sha512-FHrZ1NPf9QszyVMaa/BP3SsPy40ogBLnbZNWkv/PMi1Uz2zoDNMLGiBzBGmx4Bl7iLRq01K9PY/5kmloXFTpsA==",
+      "tarball": "https://registry.npmjs.org/@google/gemini-cli/-/gemini-cli-0.64.0.tgz",
+      "scripts": {},
+      "bin": { "gemini": "bundle/gemini.js" },
+      "node": ">=20",
+      "disposition": "candidate-ignore-scripts"
+    },
+    {
+      "name": "opencode-ai",
+      "version": "1.19.3",
+      "integrity": "sha512-wDRcUlMDibaLzecIGvVGUA9naghXVqzCWcUE7N3qagpGiLSUlU4VbixI+bpsErwJp+AAuSO2lhSr/XxJl7XbrQ==",
+      "tarball": "https://registry.npmjs.org/opencode-ai/-/opencode-ai-1.19.3.tgz",
+      "scripts": { "postinstall": "node ./postinstall.mjs" },
+      "bin": { "opencode": "bin/opencode.exe" },
+      "node": null,
+      "lifecycle": {
+        "member": "package/postinstall.mjs",
+        "sha256": "5a7c990fe552e76b16422cdba3f4b0550590c7a487f7932c773362f74317c87b",
+        "tarball_integrity_verified": true
+      },
+      "disposition": "unsupported-lifecycle-unrestricted-npm-fallback"
+    }
+  ]
+}
