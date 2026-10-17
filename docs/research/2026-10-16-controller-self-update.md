@@ -600,6 +600,81 @@ Use these at bounded lifecycle transitions, not a polling hot path; frequency
 and cost must be assessed during wiring. No inode/mtime/size-only hash cache is
 implemented or sufficient for this check.
 
+### Process placement before supervisor lifecycle wiring
+
+Design checkpoint after security3124; proposed integration contract, not an
+implemented handshake or approval to start an installer.
+
+The existing registration capability is created in the process which owns the
+`Child`. Its Rust borrows and non-Clone gate remain in that process. The socket
+fixtures exercise the validation rules there; they do not transfer that value
+through exec into the supervisor. A production implementation must not pretend
+that serializing its Binding, reopening its record, inheriting an environment
+string or receiving an ACK transfers its in-memory gate.
+
+Separate two process roles before adding a production caller:
+
+| Process | Retains | Must not do |
+| --- | --- | --- |
+| Activation worker / permit owner | Original job and installation ownership, actual supervisor Child, fresh intent and durable child-registration proof | Accept its own permit or reconstruct a supervisor gate from storage |
+| Trusted Rust supervisor | Inherited birth lock, private parent-authenticated connection, fresh closed bootstrap session, then its sole permit arbitration | Start Node before a verified permit and durable decision, or adopt an old registration/session |
+
+The proposed refactor separates the parent's child-registration proof from the
+child's acceptance capability. The current `RegisteredSupervisor` bundles both
+for the isolated validation checkpoint; that bundle is not the eventual
+cross-process API. Keep the parent-side proof incapable of accepting a permit.
+Mint the child's gate only inside a private bootstrap/registration leaf after
+both the fresh live session and exact synced registration have been checked.
+This requires an explicit reviewed change to the current sole-constructor
+tripwire, not a second public constructor or an exception for a disk reader.
+No two processes may retain an accept-capable gate for the same attempt.
+
+Proposed handshake order, all over the same retained authenticated connection:
+
+1. The owner persists intent and spawns the verified Rust supervisor with birth
+   lock inheritance. The supervisor restores descriptor CLOEXEC before any
+   threads/forks, establishes its private session and authenticates its actual
+   OS parent and fixed bootstrap. It creates a fresh one-shot session challenge
+   in memory while the execution gate remains closed. No Node child exists.
+2. A bounded ready message binds that fresh challenge to the attempt and exact
+   intent digest. The owner authenticates the connected peer against its owned
+   live Child and expected image, then exclusively writes/syncs/reads back the
+   schema-2 child registration. A self-reported PID or ready message alone
+   cannot replace those checks.
+3. A registration response binds the same challenge and the exact durable
+   registration digest. The supervisor independently verifies the record,
+   including schema, receipt/intent, its own image/session and the OS-attested
+   parent identity and owner image digest. The private fresh-session capability
+   is consumed to construct its single arbitration gate. A storage read, even
+   of valid schema-2 bytes, cannot construct that capability after restart.
+4. A registration-ready confirmation tells the owner only that the child has
+   completed this bootstrap. It is neither an execution permit nor a durable
+   execution-decision ACK. The owner rechecks registration, actual child/image
+   and original ownership before its one-shot permit write and write-half-close.
+5. The supervisor authenticates/drains that same owner connection, validates
+   the complete binding and arbitrates once. A successful in-memory decision
+   must be durably synced/read back before a distinct bound decision ACK or
+   installer dispatch. ACK durability and all-writers-gone/cancellation proofs
+   remain separate prerequisites; this proposal implements neither.
+
+Every missing, duplicate, malformed, stale-challenge or out-of-order message
+terminates the fresh session, never retries startup or falls through to ordinary
+Controller execution. Parent death before permit does not by itself prove
+noexec: buffered input, duplicate writers and sealed cancellation still need
+their existing proofs. Death after permit but before decision ACK is unresolved
+until durable decision and actual descendant quiescence are reconciled; neither
+side resends the permit. A restarted process cannot receive a new challenge for
+an existing registration or reuse a previous challenge as recovery authority.
+
+Before this refactor is accepted, require real macOS/Linux subprocess tests at
+each handshake boundary: pre-exec failure, forged ready/parent/image, schema-1 or
+changed owner fields, foreign/replayed challenge, registration sync/readback
+failure, owner death before/after each response, and supervisor death before/after
+decision sync/ACK. Check that no installer starts while the gate is closed,
+birth ownership survives the spawn window, evidence is preserved, and no crash
+path constructs a second gate. This is in addition to, not a replacement for,
+the existing full-P1 death matrix and real isolated-upgrade acceptance.
+
 Status intent policy (security2596): this is the updater's one-shot post-install
 status verification, not an intent requirement for ordinary `treer launcher
 status`. Its conservative marker is intentional: a supposedly read-only command
