@@ -283,3 +283,22 @@ test('Core omits a deleted pin author rather than serializing null', async ({pag
   await expect(pinned(page).getByRole('button',{name:'Actions for /coordinator',exact:true})).toHaveAttribute('title',/Unknown member/)
   await expect(page.getByRole('alert')).toHaveCount(0)
 })
+
+
+test.describe('coarse pointer pins', () => {
+  test.use({hasTouch:true})
+  test('new pin controls remain 44px on a wide touchscreen', async ({page}) => {
+    await page.setViewportSize({width:1024,height:900})
+    await backend(page)
+    await page.goto('/')
+    const trigger = overview(page).getByRole('button',{name:'Actions for /coordinator',exact:true})
+    await trigger.click()
+    const item = page.getByRole('menuitem',{name:'Pin to Overview',exact:true})
+    await expect(item).toBeVisible()
+    const box = (await item.boundingBox())!
+    expect(box.height).toBeGreaterThanOrEqual(44)
+    expect(box.width).toBeGreaterThanOrEqual(44)
+    await item.click()
+    await expect(pinned(page)).toBeVisible()
+  })
+})
