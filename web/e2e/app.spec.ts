@@ -3125,7 +3125,7 @@ test.describe('resumable machine upload', () => {
     }, { size, name })
     return dialog
   }
-  function fixture(page: Page, options: { dropPart?: boolean; failures?: number; commitDrop?: boolean; commitHold?: Promise<void>; partHold?: Promise<void>; abortPending?: boolean; denied?: boolean; beginDrop?: boolean; unreconciled?: boolean; rateLimit?: boolean; abortBusy?: boolean; abortCommitted?: boolean; hashConflict?: boolean } = {}) {
+  function fixture(page: Page, options: { dropPart?: boolean; failures?: number; commitDrop?: boolean; commitHold?: Promise<void>; partHold?: Promise<void>; abortPending?: boolean; denied?: boolean; beginDrop?: boolean; unreconciled?: boolean; rateLimit?: boolean; abortBusy?: boolean; abortCommitted?: boolean; hashConflict?: boolean; sizeMismatch?: boolean; unknownFailure?: boolean; commitFailure?: boolean } = {}) {
     const calls = { begin: [] as string[], offsets: [] as number[], lengths: [] as number[], hashes: [] as string[], statuses: 0, commits: 0, aborts: 0 }
     let size = 0, committed = 0, state = 'active', dropped = false, attempts = 0
     const receipt = () => ({ server_id: 'srv-a', path: 'repo/payload.bin', bytes_written: size, sha256: '0'.repeat(64), committed_at: new Date().toISOString() })
@@ -3138,7 +3138,11 @@ test.describe('resumable machine upload', () => {
         if (options.beginDrop && calls.begin.length === 1) return route.abort('connectionreset')
         return ok(route, status())
       }
-      if (method === 'GET') { calls.statuses++; return ok(route, url.pathname.endsWith('/uploads') ? { uploads: [status()] } : status()) }
+      if (method === 'GET') {
+        calls.statuses++
+        const value = { ...status(), ...(options.sizeMismatch ? { size: size + 1 } : {}), ...(options.unknownFailure ? { state: 'failed', failure_code: 'untrusted server path /private/secret' } : {}), ...(options.commitFailure && calls.commits ? { state: 'failed', failure_code: 'machine_file_exists' } : {}) }
+        return ok(route, url.pathname.endsWith('/uploads') ? { uploads: [value] } : value)
+      }
       if (method === 'DELETE') {
         calls.aborts++
         if (options.abortBusy && calls.aborts === 1) return route.fulfill({ status: 409, headers: { 'Retry-After': '1' }, json: { error: { code: 'upload_busy' } } })
@@ -3163,6 +3167,7 @@ test.describe('resumable machine upload', () => {
       if (method === 'POST' && url.pathname.endsWith('/commit')) {
         calls.commits++
         await options.commitHold
+        if (options.commitFailure) return route.fulfill({ status: 409, json: { error: { code: 'machine_file_exists' } } })
         state = 'committed'
         if (options.commitDrop && calls.commits === 1) return route.abort('connectionreset')
         return ok(route, receipt())
@@ -3367,5 +3372,26 @@ test.describe('resumable machine upload', () => {
     await page.keyboard.press('Enter')
     await expect(dialog.getByText(lang === 'en' ? 'Upload cancelled. The temporary file was removed.' : '上传已取消，临时文件已移除。')).toBeVisible()
     release()
+  })
+  for (const kind of ['sizeMismatch', 'unknownFailure'] as const) test(`invalid status fails closed with a fixed message (${kind})`, async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { [kind]: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toHaveText('Upload paused or failed. Retry to resume if available, or cancel before starting again.')
+    await expect(dialog.getByText('untrusted server path', { exact: false })).toHaveCount(0)
+    expect(calls.offsets).toHaveLength(0)
+    expect(calls.commits).toBe(0)
+  })
+  test('existing destination after commit refusal never implies successful publication', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { commitFailure: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('result is not yet confirmed')
+    await dialog.getByRole('button', { name: 'Check result' }).click()
+    await expect(dialog.getByRole('alert')).toContainText('A file with this name already exists')
+    await expect(dialog.getByText('Uploaded repo/payload.bin', { exact: false })).toHaveCount(0)
+    expect(calls.commits).toBe(1)
   })
 })

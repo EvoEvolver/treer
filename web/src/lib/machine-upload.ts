@@ -119,7 +119,10 @@ export class MachineUpload {
       this.update({ phase: 'succeeded', loaded: this.file.size, result: status.result, error: undefined, resumable: false, uncertain: false })
       return true
     }
-    if (['aborted', 'expired', 'failed'].includes(status.state)) throw new UploadError(400, status.failure_code ?? `upload_${status.state}`)
+    if (['aborted', 'expired', 'failed'].includes(status.state)) {
+      this.commitStarted = false // An authoritative terminal refusal resolves uncertainty.
+      throw new UploadError(400, status.failure_code ?? `upload_${status.state}`)
+    }
     if (!status.reconciled) throw new UploadError(503, 'controller_unavailable')
     this.committed = status.committed_offset
     if (status.state === 'committing') this.commitStarted = true
@@ -144,7 +147,7 @@ export class MachineUpload {
     this.update({ phase: this.commitStarted ? 'finishing' : 'preparing', error: undefined, uncertain: this.commitStarted, resumable: false })
     this.running = this.run(this.control.signal).catch((error: unknown) => {
       if (isAbort(error) || this.disposed) return
-      this.update({ phase: 'paused', loaded: this.committed, error: error instanceof ApiError ? error.code ?? 'upload_failed' : 'upload_failed', resumable: !this.legacy && (transient(error) || error instanceof UploadError && ['upload_busy', 'upload_committing', 'controller_unavailable'].includes(error.code ?? '')), uncertain: this.commitStarted || this.legacy })
+      this.update({ phase: 'paused', loaded: this.committed, error: error instanceof ApiError ? error.code ?? 'upload_failed' : 'upload_failed', resumable: !this.legacy && (this.commitStarted || transient(error) || error instanceof UploadError && ['upload_busy', 'upload_committing', 'controller_unavailable'].includes(error.code ?? '')), uncertain: this.commitStarted || this.legacy })
     }).finally(() => { this.running = null })
     return this.running
   }
