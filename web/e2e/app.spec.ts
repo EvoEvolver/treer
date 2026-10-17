@@ -2727,6 +2727,9 @@ for (const width of [1280, 390]) for (const theme of ['light', 'dark']) for (con
   await expect(confirm).toBeDisabled()
   await page.screenshot({ path: info.outputPath(`consent-${width}-${theme}-${locale}.png`) })
   await dialog.getByRole('checkbox').scrollIntoViewIfNeeded()
+  await expect(dialog.getByRole('checkbox')).not.toBeChecked()
+  await expect(dialog.getByText(locale === 'en' ? 'Tick the box to enable installation.' : '勾选确认后才能安装。')).toBeVisible()
+  await page.screenshot({ path: info.outputPath(`consent-unchecked-${width}-${theme}-${locale}.png`) })
   await dialog.getByRole('checkbox').focus(); await page.keyboard.press('Space')
   await expect(confirm).toBeEnabled()
   await page.screenshot({ path: info.outputPath(`consent-ack-${width}-${theme}-${locale}.png`) })
@@ -2742,7 +2745,7 @@ for (const relation of ['upgrade', 'unknown', 'incomparable']) test(`provider co
   await page.getByRole('button', { name: 'Install codex', exact: true }).click()
   const confirm = page.getByRole('button', { name: 'Confirm and install', exact: true })
   if (relation === 'upgrade') await expect(page.getByRole('checkbox')).toHaveCount(0)
-  else { await expect(confirm).toBeDisabled(); await page.getByRole('checkbox').check() }
+  else { await expect(confirm).toBeDisabled(); await page.locator('label').filter({ has: page.getByRole('checkbox') }).click({ position: { x: 80, y: 20 } }); await expect(page.getByRole('checkbox')).toBeChecked() }
   await confirm.click()
   await expect.poll(() => backend.requests.filter(item => item.path.endsWith('/install')).length).toBe(1)
   expect(backend.requests.filter(item => item.path.endsWith('/install'))[0].body).toEqual({ confirmation_token: 'fixture-confirmation-token', ...(relation === 'upgrade' ? {} : { acknowledged_relation: relation }) })
@@ -2816,4 +2819,21 @@ test('provider consent outdated Controller explains update without fallback', as
   await expect(page.getByRole('alert')).not.toContainText('raw server details')
   await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
   expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})
+
+for (const code of ['provider_cli_acknowledgement_required', 'provider_cli_acknowledgement_mismatch']) test(`provider consent ${code} asks for fresh consent without replay`, async ({ page }) => {
+  await mockProviderApi(page, { consent: { action: 'replace', version_relation: 'downgrade', observation: installedObservation('2.0.0') } })
+  let installs = 0
+  await page.route('**/provider-clis/install', route => {
+    installs++
+    return route.fulfill({ status: 400, json: { error: { code, message: 'Do not echo raw server details' } } })
+  })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await page.getByRole('checkbox').check()
+  await page.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText('Installation was not accepted. Review a new plan and tick the required acknowledgement before confirming.')
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
+  expect(installs).toBe(1)
 })

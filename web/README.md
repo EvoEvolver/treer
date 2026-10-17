@@ -559,6 +559,8 @@ incomparable versions. The last three require an extra explicit checkbox;
 installation sends only the token and its matching `acknowledged_relation`.
 Cancellation or a new preparation resets that acknowledgement. Core remains
 responsible for version comparison and binding the observation into consent.
+Web does not independently classify downgrades or compare semver; it gates
+acknowledgement exclusively on Core's authoritative `version_relation`.
 
 For a mutation, prepare fetches a fresh, 120-second confirmation. The database clock owns expiry; the browser uses a relative display timeout so local wall-clock skew does not reject a fresh token. The dialog displays
 Core's complete ordered plan, integrity digest, target machine/platform and

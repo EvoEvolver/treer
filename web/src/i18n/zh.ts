@@ -16,6 +16,8 @@ export const zh: Messages = {
   "cli.replace_unknown": "已存在安装，但无法读取版本。替换可能导致降级。",
   "cli.replace_incomparable": "无法可靠比较这些版本。替换可能导致降级，或改变预发布/构建变体。",
   "cli.ack_downgrade": "我理解此操作将降级并替换现有安装。",
+  "cli.ack_hint": "勾选确认后才能安装。",
+  "cli.ack_refused": "安装请求未被接受。请重新查看计划，勾选所需确认后再提交。",
   "cli.ack_unknown": "我同意替换版本不明的安装，包括可能的降级。",
   "cli.ack_incomparable": "我同意替换无法比较的版本，包括可能的降级。",
   "cli.controller_outdated": "请更新此机器的 Controller，以支持基于现有状态的安装确认。不会回退到未观测状态的安装。",

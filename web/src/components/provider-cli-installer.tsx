@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react"
+import { AlertTriangle } from "lucide-react"
 import { api, ApiError, machineName, type Machine } from "@/lib/api"
 import { matchingProviderRecipe, PROVIDER_CLI_CAPABILITY, providerCliBase, providerCliNeedsAcknowledgement, providerCliOperation, providerCliPrepared, providerCliRecipes, providerCliRef, providerCliTerminal,
   type ProviderCliObservation, type ProviderCliObservedSummary, type ProviderCliOperation, type ProviderCliPrepared, type ProviderCliRecipe, type ProviderCliRecipes } from "@/lib/provider-cli"
@@ -190,7 +191,10 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
               <p>{t("cli.target_version", { version: prepared.target_version })}</p>
             </div>
             {prepared.action === "noop" ? <><p role="status">{t("cli.noop_hint")}</p><Button type="button" variant="outline" className="max-md:min-h-11" onClick={cancel}>{t("org.close")}</Button></> : <>
-            {prepared.action === "replace" && <p role="alert" className="rounded-md border p-3 font-semibold">{t(`cli.replace_${prepared.version_relation ?? "unknown"}`)}</p>}
+            {prepared.action === "replace" && <div role="alert" className={`flex items-start gap-2 rounded-md border p-3 font-semibold ${providerCliNeedsAcknowledgement(prepared.version_relation) ? "border-destructive/50 bg-destructive/10 text-foreground" : ""}`}>
+              {providerCliNeedsAcknowledgement(prepared.version_relation) && <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-status-attention" />}
+              <p>{t(`cli.replace_${prepared.version_relation ?? "unknown"}`)}</p>
+            </div>}
             <p>{t("cli.warning", { registry: prepared.recipe.package!.registry })}</p>
             <p>{t("cli.npm_config")}</p>
             <p>{t("cli.transitive")}</p>
@@ -202,6 +206,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
                 : <p className="mt-1 break-all font-mono text-xs">{item.rule}</p>}
             </li>)}</ol>
             {providerCliNeedsAcknowledgement(prepared.version_relation) && <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md border p-3"><input type="checkbox" className="mt-1 size-5 shrink-0 accent-primary" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /><span>{t(`cli.ack_${prepared.version_relation}`)}</span></label>}
+            {providerCliNeedsAcknowledgement(prepared.version_relation) && !acknowledged && <p className="text-sm text-muted-foreground">{t("cli.ack_hint")}</p>}
             <p className="text-xs text-muted-foreground">{t("cli.expires", { time: new Date(prepared.expires_at!).toLocaleTimeString() })}</p>
             <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="max-md:min-h-11" onClick={cancel}>{t("common.cancel")}</Button><Button type="button" className="max-md:min-h-11" disabled={busy || now >= expires.current || providerCliNeedsAcknowledgement(prepared.version_relation) && !acknowledged} onClick={() => void install()}>{t("cli.confirm_install")}</Button></div>
             </>}
@@ -246,6 +251,7 @@ function visibleOutput(value: string) {
 }
 function failureText(reason: unknown) {
   if (reason instanceof ApiError) {
+    if (["provider_cli_acknowledgement_required", "provider_cli_acknowledgement_mismatch"].includes(reason.code ?? "")) return t("cli.ack_refused")
     if (reason.code === "provider_cli_controller_outdated") return t("cli.controller_outdated")
     if (reason.code === "provider_cli_state_unobservable") return t("cli.observation_unavailable")
     if (reason.status === 403) return t("cli.denied")

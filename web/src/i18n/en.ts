@@ -15,6 +15,8 @@ export const en = {
   "cli.replace_unknown": "An installation exists, but its version is unreadable. Replacement may downgrade it.",
   "cli.replace_incomparable": "These versions cannot be safely ordered. Replacement may downgrade or change prerelease/build variants.",
   "cli.ack_downgrade": "I understand this will downgrade and replace the existing installation.",
+  "cli.ack_hint": "Tick the box to enable installation.",
+  "cli.ack_refused": "Installation was not accepted. Review a new plan and tick the required acknowledgement before confirming.",
   "cli.ack_unknown": "I accept replacing the unreadable version, including a possible downgrade.",
   "cli.ack_incomparable": "I accept replacing incomparable versions, including a possible downgrade.",
   "cli.controller_outdated": "Update this machine’s Controller to support observed installation consent. No unobserved fallback is used.",
