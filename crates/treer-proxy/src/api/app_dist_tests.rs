@@ -267,39 +267,51 @@ async fn app_build_is_served_only_for_the_app_host_with_the_nginx_contract() {
     );
 }
 
+/// The documented zero-DNS local default: two `*.treer.localhost` names on one
+/// port are the same site (Strict cookies unchanged) but different origins.
 #[tokio::test]
-async fn zero_dns_pair_gives_two_origins_on_one_port() {
+async fn local_default_names_give_two_origins_on_one_port() {
     let dist = Dist::new();
-    let app = app_router(&dist, "http://localhost:8080/", "http://127.0.0.1:8080/").await;
-    let (status, _, body) = get(&app, "localhost:8080", "/").await;
+    let app = app_router(
+        &dist,
+        "http://console.treer.localhost:8080/",
+        "http://proxy.treer.localhost:8080/",
+    )
+    .await;
+    let (status, _, body) = get(&app, "console.treer.localhost:8080", "/").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<title>treer</title>"));
-    let (status, _, body) = get(&app, "localhost:8080", "/config.json").await;
+    let (status, _, body) = get(&app, "console.treer.localhost:8080", "/config.json").await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         serde_json::from_str::<Value>(&body).unwrap()["proxy_url"],
-        "http://127.0.0.1:8080/"
+        "http://proxy.treer.localhost:8080/"
     );
-    let (status, _, _) = get(&app, "127.0.0.1:8080", "/api/health").await;
+    let (status, _, _) = get(&app, "proxy.treer.localhost:8080", "/api/health").await;
     assert_eq!(status, StatusCode::OK);
-    let (status, _, _) = get(&app, "127.0.0.1:8080", "/").await;
+    let (status, _, _) = get(&app, "proxy.treer.localhost:8080", "/").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, _, _) = get(&app, "localhost:8080", "/api/health").await;
+    let (status, _, _) = get(&app, "console.treer.localhost:8080", "/api/health").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+    // Same site is not same origin: a third name, bare localhost, the loopback
+    // literal or another port are not configured and get the fixed 421.
     for host in [
-        "localhost",
-        "localhost:80",
-        "127.0.0.1",
+        "app.treer.localhost:8080",
+        "treer.localhost:8080",
+        "localhost:8080",
+        "127.0.0.1:8080",
+        "console.treer.localhost",
+        "console.treer.localhost:80",
         "[::1]:8080",
-        "localhost.:8081",
+        "proxy.treer.localhost.:8081",
     ] {
         let (status, _, _) = get(&app, host, "/").await;
         assert_eq!(status, StatusCode::MISDIRECTED_REQUEST, "{host}");
     }
-    // Two different hosts: embedded interfaces stay available on the Proxy host.
+    // Two different origins: embedded interfaces stay available on the Proxy host.
     let (_, _, body) = get(
         &app,
-        "127.0.0.1:8080",
+        "proxy.treer.localhost:8080",
         "/api/workspaces/ws_x/agents/ag_x/interface/ui",
     )
     .await;

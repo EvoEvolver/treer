@@ -982,10 +982,21 @@ URL, the Proxy URL and the configured ingress suffix; any other host receives a
 fixed 421 `host_not_configured`, which also defends `docker run -p` setups
 against DNS rebinding. Core routes never execute on the App host (JSON 404),
 and the Proxy host never returns the Console. Forwarded headers are not
-consulted: a TLS terminator must pass the original Host. A zero-DNS pair such
-as Console `http://localhost:8080` and Proxy `http://127.0.0.1:8080` already
-gives two origins on one port; public deployments use two DNS names (or a
-wildcard) on the same port with a certificate covering both. When the App public
+consulted: a TLS terminator must pass the original Host. The local zero-DNS
+default is Console `http://console.treer.localhost:8080` and Proxy
+`http://proxy.treer.localhost:8080`: two origins on one port that share a
+site, so the Strict session cookie keeps working while the Console stays a
+separate origin (`*.localhost` resolves to loopback in Chromium; add one
+`/etc/hosts` line for browsers that do not). Public deployments use two HTTPS
+names under one registrable domain (for example `console.example.com` and
+`api.example.com`) on the same port with a certificate covering both; the two
+names must share a site for the Strict cookie. Same site is not same origin:
+isolation between Console, API and App content relies on the Host routing and
+on the Origin/CSRF checks (writes are accepted only from the Console origin and
+CORS grants credentials to no other origin), not on SameSite. Put App-UI and
+service-ingress names under a different registrable domain where you can;
+other local services on the same hostname and another port can read host-only
+cookies, so do not run untrusted services on `*.treer.localhost`. When the App public
 URL equals the Proxy public URL, embedded App interfaces and virtual-host
 tunnels answer `embedded_ui_requires_separate_app_origin` (503): App content
 must never share the Console origin, so configure a separate App hostname to
