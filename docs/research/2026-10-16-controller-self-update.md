@@ -499,6 +499,14 @@ to replace a registration even with a fresh intent/attempt.
 This narrows supervisor identity provenance to an owned Child at registration;
 it is not approval of its executable, authenticated IPC, proof of the permit
 owner's parent relationship or an all-descendants containment guarantee.
+Before lifecycle wiring, extend registration to require the expected trusted
+supervisor executable's retained file identity (dev/inode and exact SHA256),
+and compare the captured child's executable against that identity. Invoke this
+only after the supervisor's ready barrier confirms its intended image is running;
+owning a live Child or observing a private session alone does not establish that.
+Add isolated wrong-image Child and pre-ready/exec-transition regressions, requiring
+fixed refusal without creating execution authority. A later image mismatch
+failing closed is not a substitute for this initial expected-image check.
 Registration alone authorizes no permit/noexec/ACK or installer
 execution. Its private in-memory gate is described below; the real supervisor
 entry, authenticated lifecycle connection and recovery/death matrix remain
