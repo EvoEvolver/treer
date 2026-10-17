@@ -424,6 +424,14 @@ exchange; the prior `9f683383` results do not cover this new protocol model.
 
 ## Proposed next slice: independent durable binding in disposable fixtures
 
+The first implementation substep is the private `cfg(test)` model in
+`crates/treer-platform/src/update_deadline.rs`: a fixed five-second window,
+independent reader validation, original-owner expiry ceiling and permanently
+refusing backward/expired samples. Its tests supply synthetic millisecond
+readings, including a suspension-sized jump; they do not acquire or validate the
+Windows clock, publish records, or wire the existing pipe exchange to this model.
+Native clock acquisition and the full fixture integration remain subsequent work.
+
 This is a design checkpoint, not an implementation or authority grant. The
 existing Unix registration writer in
 `crates/treer-agent-server/src/self_update/launcher_invocation/start/registration.rs`
