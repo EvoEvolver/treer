@@ -144,6 +144,61 @@ API basis: [creation flags](https://learn.microsoft.com/en-us/windows/win32/proc
 [TerminateProcess](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-terminateprocess).
 Termination is asynchronous; waiting for the owned handle is mandatory.
 
+## Accepted lifetime scope; first test increment
+
+Leader3236 and security3237/3238 select a supervisor **inside the stable Host
+Job**, launched by the Controller daemon rather than an Agent PTY process.
+The bounded deployed probe3230 refused breakaway (Win32 error 5, root limit
+0x2000); its same-Job control succeeded and was cleaned up. That diagnostic is
+complete, not permission to repeat it or change Host policy. No BREAKAWAY_OK,
+SILENT_BREAKAWAY_OK, WMI/CIM production fallback or Host upgrade is needed for
+the selected scope: replacement of Controller/CLI only. Host updates remain
+separate, user-approved operations. A transaction requiring survival of Host
+exit is ineligible for this path.
+
+Controller-only restart must leave the supervisor in the existing root Job.
+Host exit intentionally kills the supervisor and installer writers. After Host
+or OS loss, startup must classify the durable journal (no consumed permit,
+synced decision, or partial publication), preserve evidence and never resume an
+installer automatically. Death is not a rollback receipt. Publication still
+requires individually atomic, staged and checked replacement steps and a
+Host-death-at-each-phase acceptance matrix; none is implemented by this increment.
+
+The test-only integration target
+`crates/treer-platform/tests/windows_host_job_lifetime.rs` models a disposable
+Host owning the root KILL_ON_JOB_CLOSE Job. It kills/waits only its Controller
+child and starts a replacement, matching the current Host restart ordering.
+It checks retained supervisor/installer process handles remain alive and the
+installer continues writing. Separate cases then terminate the fake Host or
+supervisor: root closure must kill both descendants; supervisor closure must
+kill its nested installer while Host remains alive. Installer creation is
+suspended, nested Job assignment precedes resume, and membership checks verify
+root membership and exclusion from a sibling Agent PTY Job. Inheritable Job,
+pipe and file sentinels exercise `bInheritHandles=false`; Controller death must
+leave pipe EOF and release its exclusive file handle while supervisor lives.
+The file sentinel represents a handle suitable for stdio; this is not a real
+Console/PTY stdio integration test. All roles use CREATE_NO_WINDOW, no inherited
+environment except three fixture inputs, and bounded lifetimes.
+
+Only actual CreateProcess process handles are duplicated into the outer
+observer; no descendant is reopened by PID for cleanup. The fixture opens its
+observer PID solely for DuplicateHandle instrumentation, not production
+authentication. The observer owns no Job handles, and short-lived membership
+query handles close before the termination phase. Temporary files coordinate
+only these owned test roles; they are not updater IPC or identity evidence.
+This fixture models the Host ordering; it does not execute the real Host RPC
+handler, and future Host tree-kill changes require renewed coverage.
+
+Run explicitly on a disposable native Windows worker outside every ambient Job:
+`cargo test --locked -p treer-platform --test windows_host_job_lifetime native_host_job_lifetime -- --ignored --exact --nocapture`.
+Do not run it on win_native. A disposable Windows 11 build 22631 worker and the
+oldest supported Windows must provide native evidence before acceptance;
+cross-target checks and Server 2022 evidence alone cannot claim that coverage.
+The operator guide currently names Windows 11 x64 as the initial native target.
+This increment changes no production launch path, permit, lock or transaction
+behavior. Security reviews its lifetime scope and native evidence before the
+second increment wires launch/handoff.
+
 ## Authority contract for the subsequent implementation review
 
 - Owner/supervisor communication uses a local private named pipe, restrictive
@@ -152,7 +207,8 @@ Termination is asynchronous; waiting for the owned handle is mandatory.
   times, plus image file identity/hash. A pipe name or message PID is no proof.
   Keep bInheritHandles false; do not add anonymous inherited handles casually.
 - The owner retains CreateProcess's process handle for lifetime identity. The
-  supervisor starts inert and outside the Host Job before any transaction
+  supervisor starts inert inside the stable Host Job, outside every Agent PTY
+  Job, before any transaction
   mutation. It acquires installation then enrollment locks itself before staging;
   the owner must not claim that duplicating a mutex transfers thread ownership.
   Moving Windows lock acquisition into the supervisor requires review before
