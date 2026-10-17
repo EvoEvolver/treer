@@ -114,7 +114,7 @@ All successful data responses and errors are JSON. Errors use
 | GET `/v1/issues/ID/children` | limit=50, offset=0 | issues, total, next_offset (direct children with subtree progress) |
 | POST `/v1/issues` | title, description, status, priority, labels, assignee, parent_id, blocked_by | detail + notification |
 | PATCH `/v1/issues/ID` | mutable fields above, optional version for optimistic concurrency | detail + notification |
-| POST `/v1/issues/ID/comment` | body (text), optional title (one trimmed line, <= 200 bytes) | detail + notification |
+| POST `/v1/issues/ID/comment` | body (text), optional title (one trimmed line without control characters, <= 200 bytes; the web form allows 64 characters) | detail + notification |
 | POST `/v1/issues/ID/claim` | action=acquire/renew/release, seconds=900 | detail + notification |
 
 Write a comment title whenever the comment is longer than a line or two: readers skim

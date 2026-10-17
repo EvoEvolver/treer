@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import time
+import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -161,7 +162,7 @@ class Store:
         short = {k: v for k, v in event.items() if k != 'body'}
         short['body_bytes'] = len(event['body'].encode())
         if not event.get('title'):
-            line = ' '.join(event['body'].split())    # one line, runs of whitespace squeezed
+            line = ' '.join(''.join(' ' if unicodedata.category(c) in ('Cc', 'Zl', 'Zp') else c for c in event['body'][:4 * EXCERPT_CHARS]).split())
             short['excerpt'] = line if len(line) <= EXCERPT_CHARS else line[:EXCERPT_CHARS - 1].rstrip() + '\u2026'
         return short
 
@@ -278,8 +279,8 @@ class Store:
                     text(body.get('body'), 'comment', 8192)
                     if body.get('title') is not None:
                         title = text(body['title'], 'comment title', COMMENT_TITLE_BYTES)
-                        if title != title.strip() or '\n' in title or '\r' in title:
-                            fail('invalid_field', 'comment title must be one trimmed line')
+                        if title != title.strip() or any(unicodedata.category(c) in ('Cc', 'Zl', 'Zp') for c in title):
+                            fail('invalid_field', 'comment title must be one trimmed line without control characters')
                     summary = 'New comment'
                 elif action == 'claim':
                     operation = body.get('action', 'acquire')

@@ -49,6 +49,9 @@ class IssuesTest(unittest.TestCase):
         self.assertEqual(plain['excerpt'],'Plain comment');self.assertNotIn('excerpt',short_titled,'a title replaces the excerpt')
         self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'body':'  line one\n\n\tline   two '+'y'*400})[0],200)
         long_one=next(e for e in self.req(f'v1/issues/{id}?comments=titles')[1]['activity'] if e.get('excerpt','').startswith('line one'))
+        self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'body':'a\x00b\x1b[0m\u2028c'})[0],200)
+        ctl=next(e for e in self.req(f'v1/issues/{id}?comments=titles')[1]['activity'] if e.get('excerpt','').startswith('a b'))
+        self.assertEqual(ctl['excerpt'],'a b [0m c','control characters and line separators become single spaces')
         self.assertTrue(long_one['excerpt'].startswith('line one line two yyy'));self.assertLessEqual(len(long_one['excerpt']),160);self.assertTrue(long_one['excerpt'].endswith('\u2026'));self.assertNotIn('\n',long_one['excerpt'])
         self.assertTrue(all('body' not in e for e in short),'no comment text in a titles-only read')
         status,one=self.req(f"v1/issues/{id}/activity/{titled['id']}");self.assertEqual(status,200);self.assertEqual(one['event']['body'],titled['body'])
@@ -60,7 +63,7 @@ class IssuesTest(unittest.TestCase):
         self.assertEqual(self.req(f'v1/issues/{id}/activity/1','POST',{})[0],404)
     def test_comment_titles_are_validated(self):
         id=self.create()
-        for title in ('', ' padded ', 'two\nlines', 'x'*201, 5):
+        for title in ('', ' padded ', 'two\nlines', 'x'*201, 5, 'nul\x00byte', 'esc\x1b[31m', 'tab\there', 'sep\u2028x', 'para\u2029x', 'del\x7fx'):
             self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':title,'body':'b'})[0],400,repr(title))
         self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':'t'})[0],400,'a title never replaces the text')
         self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':'标题'*30,'body':'b'})[0],200,'200 bytes, not characters')

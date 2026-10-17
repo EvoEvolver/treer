@@ -84,7 +84,7 @@ function CommentForm({ id }: { id: number }) {
       const trimmed = title.trim();
       if (await mutate(`v1/issues/${id}/comment`, "POST", trimmed ? { title: trimmed, body } : { body })) { setBody(""); setTitle(""); }
     }}>
-      <Field text="Title (optional, one line: readers can skim titles and open the text)">
+      <Field text="Title (optional, one line, up to 64 characters: readers can skim titles and open the text)">
         <input aria-label="Comment title (optional)" maxLength={64} value={title} onChange={(e) => setTitle(e.target.value.replace(/[\r\n]+/g, " "))} />
       </Field>
       <Field text="Comment (text / Markdown source)">
