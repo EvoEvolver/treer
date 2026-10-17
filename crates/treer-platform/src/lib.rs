@@ -33,6 +33,9 @@ pub use environment::{
 #[allow(unsafe_code)]
 mod windows;
 #[cfg(windows)]
+#[allow(unsafe_code)]
+pub mod windows_update_bootstrap;
+#[cfg(windows)]
 pub use windows::{
     current_user_sid, process_created_at, terminate_process, LocalLock, ProcessTreeGuard,
 };

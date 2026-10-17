@@ -1,0 +1,613 @@
+//! Windows owner-side launch/connection primitives, not update authority.
+//! No Controller caller or worker entry is wired yet. A future caller must be
+//! the Controller daemon in the stable Host Job, never a CLI/Agent process.
+//! This module does not transfer permits/locks, write journals or run installers.
+use std::{
+    ffi::{OsStr, OsString},
+    fs::{File, OpenOptions},
+    io::{self, Read},
+    mem,
+    os::windows::{
+        ffi::{OsStrExt, OsStringExt},
+        fs::OpenOptionsExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    },
+    path::{Component, Path, PathBuf, Prefix},
+    ptr,
+    time::Duration,
+};
+
+use sha2::{Digest, Sha256};
+use tokio::net::windows::named_pipe::NamedPipeServer;
+use windows_sys::Win32::{
+    Foundation::*,
+    Storage::FileSystem::*,
+    System::{
+        JobObjects::*, Pipes::GetNamedPipeClientProcessId, Threading::*,
+        WindowsProgramming::DRIVE_FIXED,
+    },
+};
+
+const IMAGE_LIMIT: u64 = 128 * 1024 * 1024;
+const CONNECT_BUDGET: Duration = Duration::from_secs(5);
+const CLEANUP_MS: u32 = 5_000;
+
+fn denied() -> io::Error {
+    io::Error::new(io::ErrorKind::PermissionDenied, "update_bootstrap_refused")
+}
+
+// All errors are fixed internal codes, never paths, argv or OS exception text.
+fn check(value: i32) -> io::Result<()> {
+    if value == 0 {
+        Err(denied())
+    } else {
+        Ok(())
+    }
+}
+
+fn wide(value: &OsStr) -> Vec<u16> {
+    value.encode_wide().chain(Some(0)).collect()
+}
+
+fn identity(file: &File) -> io::Result<(u32, u64, u32, u32)> {
+    let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { mem::zeroed() };
+    check(unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) })?;
+    Ok((
+        info.dwVolumeSerialNumber,
+        (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+        info.nNumberOfLinks,
+        info.dwFileAttributes,
+    ))
+}
+
+fn open_pinned(path: &Path, directory: bool) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(if directory {
+            FILE_SHARE_READ | FILE_SHARE_WRITE
+        } else {
+            FILE_SHARE_READ
+        })
+        .custom_flags(
+            FILE_FLAG_OPEN_REPARSE_POINT
+                | if directory {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                } else {
+                    0
+                },
+        )
+        .open(path)
+        .map_err(|_| denied())?;
+    let (_, _, links, flags) = identity(&file)?;
+    if flags & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || (flags & FILE_ATTRIBUTE_DIRECTORY != 0) != directory
+        || (!directory && links != 1)
+    {
+        return Err(denied());
+    }
+    Ok(file)
+}
+
+fn final_path(file: &File) -> io::Result<PathBuf> {
+    let mut buffer = vec![0; 32_768];
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            0,
+        )
+    };
+    if length == 0 || length as usize >= buffer.len() {
+        return Err(denied());
+    }
+    Ok(PathBuf::from(OsString::from_wide(
+        &buffer[..length as usize],
+    )))
+}
+
+fn digest(mut file: &File) -> io::Result<[u8; 32]> {
+    // Reopened read-only handles get independent offsets; the pinned source is
+    // never cloned/seeking concurrently. No writable/delete-sharing image handle.
+    let size = file.metadata().map_err(|_| denied())?.len();
+    if size == 0 || size > IMAGE_LIMIT {
+        return Err(denied());
+    }
+    let mut hash = Sha256::new();
+    let mut total = 0u64;
+    let mut buffer = [0; 64 * 1024];
+    loop {
+        let count = file.read(&mut buffer).map_err(|_| denied())?;
+        if count == 0 {
+            break;
+        }
+        total += count as u64;
+        if total > IMAGE_LIMIT {
+            return Err(denied());
+        }
+        hash.update(&buffer[..count]);
+    }
+    if total != size {
+        return Err(denied());
+    }
+    Ok(hash.finalize().into())
+}
+
+/// Read-only pinned old-Controller copy. Digest authenticity, job directory ACL
+/// and installation/enrollment selection are the future coordinator's job.
+/// Neither a path nor an expected digest alone is an execution permit.
+pub struct PinnedImage {
+    path: PathBuf,
+    file: File,
+    _ancestors: Vec<File>,
+    id: (u32, u64, u32, u32),
+    digest: [u8; 32],
+}
+
+impl PinnedImage {
+    pub fn open(path: &Path, expected_digest: [u8; 32]) -> io::Result<Self> {
+        // Only a local absolute disk path; no UNC, device namespace, aliases,
+        // traversal, embedded NUL or alternate data streams.
+        let components: Vec<_> = path.components().collect();
+        if !matches!(components.first(), Some(Component::Prefix(p)) if matches!(p.kind(), Prefix::Disk(_)))
+            || components.get(1) != Some(&Component::RootDir)
+            || components.len() < 3
+            || components[2..].iter().any(|c| !matches!(c, Component::Normal(name) if !name.encode_wide().any(|n| matches!(n, 0 | 58))))
+        { return Err(denied()); }
+        let mut ancestors = Vec::new();
+        let mut current = PathBuf::new();
+        for (index, component) in components.iter().enumerate() {
+            current.push(component.as_os_str());
+            if index >= 1 && index < components.len() - 1 {
+                ancestors.push(open_pinned(&current, true)?);
+            }
+        }
+        let file = open_pinned(path, false)?;
+        let canonical = final_path(&file)?;
+        let drive = match canonical.components().next() {
+            Some(Component::Prefix(p)) => match p.kind() {
+                Prefix::VerbatimDisk(letter) => letter,
+                _ => return Err(denied()),
+            },
+            _ => return Err(denied()),
+        };
+        let root = wide(OsStr::new(&format!("{}:\\", char::from(drive))));
+        if unsafe { GetDriveTypeW(root.as_ptr()) } != DRIVE_FIXED {
+            return Err(denied());
+        }
+        let mut filesystem = [0u16; 32];
+        check(unsafe {
+            GetVolumeInformationByHandleW(
+                file.as_raw_handle(),
+                ptr::null_mut(),
+                0,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                ptr::null_mut(),
+                filesystem.as_mut_ptr(),
+                filesystem.len() as u32,
+            )
+        })?;
+        if !filesystem.starts_with(&[b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16, 0]) {
+            return Err(denied());
+        }
+        let actual_digest = digest(&file)?;
+        if actual_digest != expected_digest {
+            return Err(denied());
+        }
+        Ok(Self {
+            path: canonical,
+            id: identity(&file)?,
+            file,
+            _ancestors: ancestors,
+            digest: actual_digest,
+        })
+    }
+
+    fn verify(&self) -> io::Result<()> {
+        let current = open_pinned(&self.path, false)?;
+        if identity(&current)? != self.id
+            || identity(&self.file)? != self.id
+            || digest(&current)? != self.digest
+        {
+            return Err(denied());
+        }
+        Ok(())
+    }
+}
+
+fn creation(handle: HANDLE) -> io::Result<u64> {
+    let mut created: FILETIME = unsafe { mem::zeroed() };
+    let mut exit: FILETIME = unsafe { mem::zeroed() };
+    let mut kernel: FILETIME = unsafe { mem::zeroed() };
+    let mut user: FILETIME = unsafe { mem::zeroed() };
+    check(unsafe { GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user) })?;
+    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
+}
+
+fn current_job_contains(pid: u32) -> io::Result<()> {
+    let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+    check(unsafe {
+        QueryInformationJobObject(
+            ptr::null_mut(),
+            JobObjectExtendedLimitInformation,
+            (&mut limits as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+            mem::size_of_val(&limits) as u32,
+            ptr::null_mut(),
+        )
+    })?;
+    let flags = limits.BasicLimitInformation.LimitFlags;
+    if flags & JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE == 0
+        || flags & (JOB_OBJECT_LIMIT_BREAKAWAY_OK | JOB_OBJECT_LIMIT_SILENT_BREAKAWAY_OK) != 0
+    {
+        return Err(denied());
+    }
+    // Current Job enumeration proves membership in the caller's Job, not just
+    // an arbitrary Job. Bounded storage; an incomplete query refuses launch.
+    let mut storage = vec![0usize; 1026];
+    check(unsafe {
+        QueryInformationJobObject(
+            ptr::null_mut(),
+            JobObjectBasicProcessIdList,
+            storage.as_mut_ptr().cast(),
+            (storage.len() * mem::size_of::<usize>()) as u32,
+            ptr::null_mut(),
+        )
+    })?;
+    let list = unsafe { &*storage.as_ptr().cast::<JOBOBJECT_BASIC_PROCESS_ID_LIST>() };
+    if list.NumberOfAssignedProcesses != list.NumberOfProcessIdsInList
+        || list.NumberOfProcessIdsInList > 1024
+    {
+        return Err(denied());
+    }
+    // The variable-length member array starts at the offset of ProcessIdList.
+    let members = unsafe {
+        std::slice::from_raw_parts(
+            list.ProcessIdList.as_ptr(),
+            list.NumberOfProcessIdsInList as usize,
+        )
+    };
+    if !members.contains(&(pid as usize)) {
+        return Err(denied());
+    }
+    Ok(())
+}
+
+/// Actual CreateProcess handle, never adopted/reopened by PID. Drop attempts
+/// bounded cleanup; callers must call abort to confirm it, never infer success
+/// from Drop or from one process exit when installer writers could exist later.
+pub struct OwnedBootstrap {
+    process: OwnedHandle,
+    image: PinnedImage,
+    pid: u32,
+    created: u64,
+    cleanup_attempted: bool,
+}
+
+impl OwnedBootstrap {
+    fn spawn(image: PinnedImage, endpoint: &Endpoint) -> io::Result<Self> {
+        current_job_contains(unsafe { GetCurrentProcessId() })?;
+        image.verify()?;
+        let application = wide(image.path.as_os_str());
+        let mut command = wide(&command_line(&image.path, &endpoint.selector));
+        let environment = [0u16; 2];
+        let cwd = wide(image.path.parent().ok_or_else(denied)?.as_os_str());
+        let mut startup: STARTUPINFOW = unsafe { mem::zeroed() };
+        startup.cb = mem::size_of_val(&startup) as u32;
+        let mut info: PROCESS_INFORMATION = unsafe { mem::zeroed() };
+        check(unsafe {
+            CreateProcessW(
+                application.as_ptr(),
+                command.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0,
+                CREATE_SUSPENDED | CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                environment.as_ptr().cast(),
+                cwd.as_ptr(),
+                &startup,
+                &mut info,
+            )
+        })?;
+        let process = unsafe { OwnedHandle::from_raw_handle(info.hProcess) };
+        let thread = unsafe { OwnedHandle::from_raw_handle(info.hThread) };
+        let mut child = Self {
+            process,
+            image,
+            pid: info.dwProcessId,
+            created: 0,
+            cleanup_attempted: false,
+        };
+        // From here any failure drops/terminates the owned suspended child.
+        child.created = creation(child.process.as_raw_handle())?;
+        child.verify()?;
+        current_job_contains(child.pid)?;
+        if unsafe { ResumeThread(thread.as_raw_handle()) } != 1 {
+            return Err(denied());
+        }
+        Ok(child)
+    }
+
+    fn verify(&self) -> io::Result<()> {
+        let handle = self.process.as_raw_handle();
+        if unsafe { WaitForSingleObject(handle, 0) } != WAIT_TIMEOUT
+            || creation(handle)? != self.created
+        {
+            return Err(denied());
+        }
+        self.image.verify()?;
+        let mut buffer = vec![0; 32_768];
+        let mut length = buffer.len() as u32;
+        check(unsafe { QueryFullProcessImageNameW(handle, 0, buffer.as_mut_ptr(), &mut length) })?;
+        let path = PathBuf::from(OsString::from_wide(&buffer[..length as usize]));
+        let actual = open_pinned(&path, false)?;
+        if identity(&actual)? != self.image.id || digest(&actual)? != self.image.digest {
+            return Err(denied());
+        }
+        Ok(())
+    }
+
+    pub fn abort(mut self) -> io::Result<()> {
+        self.cleanup()
+    }
+
+    fn cleanup(&mut self) -> io::Result<()> {
+        if self.cleanup_attempted {
+            return Err(denied());
+        }
+        self.cleanup_attempted = true;
+        let handle = self.process.as_raw_handle();
+        match unsafe { WaitForSingleObject(handle, 0) } {
+            WAIT_TIMEOUT => check(unsafe { TerminateProcess(handle, 1) })?,
+            WAIT_OBJECT_0 => return Ok(()),
+            _ => return Err(denied()),
+        }
+        if unsafe { WaitForSingleObject(handle, CLEANUP_MS) } != WAIT_OBJECT_0 {
+            return Err(denied());
+        }
+        Ok(())
+    }
+}
+
+impl Drop for OwnedBootstrap {
+    fn drop(&mut self) {
+        if !self.cleanup_attempted {
+            let _ = self.cleanup();
+        }
+    }
+}
+
+fn command_line(path: &Path, selector: &str) -> OsString {
+    let mut value = OsString::from("\"");
+    value.push(path);
+    #[cfg(not(test))]
+    value.push("\" --self-update-supervisor ");
+    #[cfg(test)]
+    value.push("\" --exact windows_update_bootstrap::tests::bootstrap_child --ignored --skip ");
+    value.push(selector);
+    value
+}
+
+/// One endpoint, one launch, one accepted connection. No raw-stream accessor or
+/// reconnect API: a rogue connection, timeout, child death or cancellation aborts.
+pub struct Endpoint {
+    pipe: NamedPipeServer,
+    selector: String,
+}
+
+impl Endpoint {
+    pub fn bind(selector: &str) -> io::Result<Self> {
+        if selector.len() != 32
+            || !selector
+                .bytes()
+                .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        {
+            return Err(denied());
+        }
+        // Uses current-SID/SYSTEM-only DACL, FIRST_PIPE_INSTANCE, no remote
+        // clients and no inheritable handle. Never impersonates the client.
+        let pipe = super::windows::create_pipe(
+            Path::new(&format!(r"\\.\pipe\Treer-update-{selector}")),
+            true,
+        )
+        .map_err(|_| denied())?;
+        Ok(Self {
+            pipe,
+            selector: selector.to_owned(),
+        })
+    }
+
+    pub async fn launch(self, image: PinnedImage) -> io::Result<AuthenticatedConnection> {
+        let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
+        let child = OwnedBootstrap::spawn(image, &self)?;
+        self.accept_owned(child, deadline).await
+    }
+
+    async fn accept_owned(
+        self,
+        child: OwnedBootstrap,
+        deadline: tokio::time::Instant,
+    ) -> io::Result<AuthenticatedConnection> {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(denied());
+        }
+        // Fixed deadline, not renewed after spawn. A future
+        // dropped at await owns child, so cancellation triggers handle cleanup.
+        // Synchronous native file/hash calls cannot be preempted; expiry is
+        // rechecked before returning proof, never upgraded to late success.
+        tokio::time::timeout_at(deadline, self.pipe.connect())
+            .await
+            .map_err(|_| denied())?
+            .map_err(|_| denied())?;
+        let mut pid = 0;
+        check(unsafe { GetNamedPipeClientProcessId(self.pipe.as_raw_handle(), &mut pid) })?;
+        if pid != child.pid {
+            return Err(denied());
+        }
+        child.verify()?;
+        current_job_contains(child.pid)?;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(denied());
+        }
+        Ok(AuthenticatedConnection {
+            _pipe: self.pipe,
+            child,
+        })
+    }
+}
+
+/// Owner checked the connected client, NOT a mutual handoff proof. There is no
+/// permit send/ACK/dispatch API. The future child-side server/parent attestation,
+/// locks and durable decision must be reviewed before any authority is added.
+pub struct AuthenticatedConnection {
+    _pipe: NamedPipeServer,
+    child: OwnedBootstrap,
+}
+
+impl AuthenticatedConnection {
+    pub fn abort(self) -> io::Result<()> {
+        self.child.abort()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::windows::named_pipe::ClientOptions;
+
+    fn selector() -> String {
+        // Test-only uniqueness; production uses the coordinator's job identity.
+        format!(
+            "{:032x}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )
+    }
+
+    #[tokio::test]
+    async fn endpoint_refuses_invalid_selectors_and_an_existing_instance() {
+        for value in ["", "..", "0000000000000000000000000000000G", "../other"] {
+            assert!(Endpoint::bind(value).is_err());
+        }
+        let id = selector();
+        let first = Endpoint::bind(&id).unwrap();
+        assert!(
+            Endpoint::bind(&id).is_err(),
+            "must not attach to an existing pipe name"
+        );
+        drop(first);
+    }
+
+    #[test]
+    fn pinned_image_rejects_digest_conflict_and_keeps_the_file_unwritable() {
+        let path = std::env::current_exe().unwrap();
+        let expected = digest(&File::open(&path).unwrap()).unwrap();
+        let image = PinnedImage::open(&path, expected).unwrap();
+        image.verify().unwrap();
+        assert!(OpenOptions::new().write(true).open(&path).is_err());
+        let mut conflict = expected;
+        conflict[0] ^= 1;
+        assert!(PinnedImage::open(&path, conflict).is_err());
+        assert!(PinnedImage::open(Path::new("relative.exe"), expected).is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "owned child of native_owner_round_trip only"]
+    async fn bootstrap_child() {
+        let args: Vec<_> = std::env::args().collect();
+        let at = args.iter().position(|v| v == "--skip").unwrap();
+        let id = &args[at + 1];
+        // A fixed nonconnecting role lets the owner exercise a rogue peer and
+        // cancellation without timing races. No production argv/env override.
+        let _pipe = if id.starts_with('0') {
+            None
+        } else {
+            Some(
+                ClientOptions::new()
+                    .open(format!(r"\\.\pipe\Treer-update-{id}"))
+                    .unwrap(),
+            )
+        };
+        tokio::time::sleep(Duration::from_secs(10)).await;
+    }
+
+    #[tokio::test]
+    #[ignore = "disposable Windows worker outside ambient Jobs; never win_native"]
+    async fn native_owner_round_trip() {
+        let mut in_job = 0;
+        check(unsafe { IsProcessInJob(GetCurrentProcess(), ptr::null_mut(), &mut in_job) })
+            .unwrap();
+        assert_eq!(in_job, 0, "native fixture must start outside ambient Jobs");
+        let raw = unsafe { CreateJobObjectW(ptr::null(), ptr::null()) };
+        assert!(!raw.is_null());
+        let job = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { mem::zeroed() };
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        check(unsafe {
+            SetInformationJobObject(
+                raw,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                mem::size_of_val(&limits) as u32,
+            )
+        })
+        .unwrap();
+        check(unsafe { AssignProcessToJobObject(raw, GetCurrentProcess()) }).unwrap();
+        // This isolated test process is itself in the Job. Retain the root until
+        // process exit, so dropping it does not kill the harness before reporting.
+        mem::forget(job);
+        let path = std::env::current_exe().unwrap();
+        let expected = digest(&File::open(&path).unwrap()).unwrap();
+        let id = format!("f{}", &selector()[1..]);
+        let endpoint = Endpoint::bind(&id).unwrap();
+        let image = PinnedImage::open(&path, expected).unwrap();
+        let connection = endpoint.launch(image).await.unwrap();
+        connection.child.verify().unwrap();
+        connection.abort().unwrap();
+
+        for rogue in [true, false] {
+            let id = format!("0{}", &selector()[1..]);
+            let endpoint = Endpoint::bind(&id).unwrap();
+            let image = PinnedImage::open(&path, expected).unwrap();
+            let child = OwnedBootstrap::spawn(image, &endpoint).unwrap();
+            let mut duplicate = ptr::null_mut();
+            check(unsafe {
+                DuplicateHandle(
+                    GetCurrentProcess(),
+                    child.process.as_raw_handle(),
+                    GetCurrentProcess(),
+                    &mut duplicate,
+                    PROCESS_SYNCHRONIZE,
+                    0,
+                    0,
+                )
+            })
+            .unwrap();
+            let observed = unsafe { OwnedHandle::from_raw_handle(duplicate) };
+            if rogue {
+                // Current process has the correct SID and knows the pipe name,
+                // but its kernel PID is not the owned child's PID.
+                let _rogue = ClientOptions::new()
+                    .open(format!(r"\\.\pipe\Treer-update-{id}"))
+                    .unwrap();
+                assert!(endpoint
+                    .accept_owned(child, tokio::time::Instant::now() + CONNECT_BUDGET)
+                    .await
+                    .is_err());
+            } else {
+                let future =
+                    endpoint.accept_owned(child, tokio::time::Instant::now() + CONNECT_BUDGET);
+                assert!(tokio::time::timeout(Duration::from_millis(50), future)
+                    .await
+                    .is_err());
+            }
+            assert_eq!(
+                unsafe { WaitForSingleObject(observed.as_raw_handle(), 0) },
+                WAIT_OBJECT_0,
+                "rogue client/cancellation must clean up the actual owned child"
+            );
+        }
+    }
+}

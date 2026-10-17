@@ -199,6 +199,65 @@ This increment changes no production launch path, permit, lock or transaction
 behavior. Security reviews its lifetime scope and native evidence before the
 second increment wires launch/handoff.
 
+## Increment 2a: owner-side launch and connection primitives
+
+Leader3262 and security3259 accept the Server 2022/20348 and Server 2025/26100
+passes for `351bbc02` as development evidence. Build 22631, the supported-version
+floor, the real Host restart path and Console/PTY stdio remain final acceptance
+items before enabling activation, installer authority, deployment or retirement
+of the PowerShell updater. No new live-machine test is part of this slice.
+
+`treer-platform::windows_update_bootstrap` is an unwired platform adapter. It
+pins a non-reparse local fixed-drive NTFS image and every ancestor without delete sharing,
+refuses hardlinks/alternate data streams, checks the expected SHA256 and bounds
+the image to 128 MiB. The expected digest's authenticity, job-directory ACL,
+selected installation/enrollment and provenance of the old Controller copy must
+come from a future trusted preparation coordinator; this adapter cannot prove
+them from a path/hash supplied by a caller. It does not use a downloaded image
+or PATH implicitly.
+
+The owner endpoint derives one fixed private pipe name from a 32-character
+lowercase hex job selector. Existing pipe names fail (FIRST_PIPE_INSTANCE);
+the existing native pipe adapter supplies the current-SID/SYSTEM-only DACL,
+rejects remote clients and never impersonates them. The endpoint consumes
+itself on one launch/connection attempt, including refusal or cancellation.
+The fixed production child argv is `--self-update-supervisor SELECTOR`; there
+is **no such Controller entry point yet**. CreateProcess receives a fixed
+absolute image, its pinned parent as cwd, an empty Unicode environment,
+`bInheritHandles=false`, and CREATE_SUSPENDED/CREATE_NO_WINDOW. No breakaway,
+shell, WMI/CIM, inherited observer handle or temp-file handle publication exists
+in the adapter.
+
+Before resume, and again on connection, the owner checks the actual retained
+process handle's creation time, liveness, image volume/file identity and digest.
+Bounded current-Job membership enumeration proves that the child is in the
+caller's Job; KILL_ON_JOB_CLOSE is required and both breakaway flags refused.
+This is **not proof that the caller is the Controller daemon rather than an
+Agent PTY process**. Only the future daemon-owned coordinator may call it;
+no CLI/request-handler call is wired. A five-second deadline is not renewed
+after launch; synchronous native filesystem/hash calls cannot be preempted,
+but expiry is rechecked before returning any connection proof. A bad client
+PID, timeout or cancellation terminates/waits the actual owned child handle.
+Drop cleanup is best effort, not a receipt; explicit abort confirms cleanup
+or returns a fixed failure. No PID is reopened for cleanup.
+
+The connection proves only that the owner's pipe client is its exact launched
+image/process. It has no raw-stream, permit, ACK or dispatch accessor. Child-side
+server/OS-parent attestation, mutual job/receipt binding, supervisor-owned locks
+and synced once-only decision are still required before a complete handoff can
+exist. These are the next reviewed slice, not implied by this type's name.
+
+Windows native unit tests cover pipe-name squatting and image-digest conflict.
+The ignored `windows_update_bootstrap::tests::native_owner_round_trip` additionally
+exercises verified connection/abort, a same-SID wrong-PID pipe client, and
+cancellation while the actual owned child remains alive; retained duplicate
+observation handles must signal after refusal/cancellation. It creates its own
+root Job and must start outside ambient Jobs on a disposable worker, never
+win_native. Test-only child argv invokes a libtest helper via `--skip SELECTOR`
+with the same empty environment; that helper connects or waits, spawns no work,
+and exits within ten seconds. The test root Job is intentionally held until
+the isolated harness process exits. This models no production mutual handoff.
+
 ## Authority contract for the subsequent implementation review
 
 - Owner/supervisor communication uses a local private named pipe, restrictive
