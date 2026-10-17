@@ -192,29 +192,53 @@ It reconnects with jittered bounded backoff and never voluntarily exits zero.
 Human Stop/Delete remain authoritative. Auto-sleep/wake is not implemented;
 the hub must not use Start (`agent.create`) as a wake substitute.
 
-Human-installed schema-v2 Policy templates must restrict a stable endpoint ID,
-allow only its own `message.receive`/`message.ack` and `message.send` to approved
-folder recipients, then deny other actions for that ID at lower priority. Exact
-Core resource shapes/action names and the complete template are **review items**,
-not an untested JSON example. Stable ID guard survives rename/move; no broad
-message wildcard or App Policy write rights. Human controls Provider and enforce
-mode. Existing higher-priority rules can defeat this template; monitor/default
-allow is not isolation. Settings warns about residual full Agent authority.
+Human-installed schema-v2 Policy templates must restrict stable endpoint IDs and
+folder members. Core 3477 confirms the real message resource shapes:
 
-**Blocking Core clarification before activation code:** zero-Core E research
-requires periodic verification of current Policy/mode, placement and immutable
-command, pausing both directions when unverifiable/drifted. Existing documented
-Policy diagnostics are owner/current-Provider only. What existing least-authority
-API lets an ordinary hub do those readbacks without retaining an owner token or
-being the Policy Provider? Ask Core to confirm exact routes/credentials/resource
-shapes. Do not grant owner login, `agent.create`, Policy write, or Provider binding
-as a workaround. If Core change is necessary, stop and ask leader as #159 requires.
-Security3470 permits hermetic protocol/store/relay work after this contract
-revision, with fake transport only. Core/readback is still a blocker for live
-activation, real bots and migration; leader must decide any Core change first.
-A small App-scoped read-only route is a possible resolution, not an assumed
-existing API or an authorized Core modification. No owner-attested timestamp
-substitutes for ongoing verification.
+| Action | Policy resource | Additional store boundary |
+| --- | --- | --- |
+| `message.receive` | `message.mailbox`, ID = receiving principal | Only caller mailbox; selector JSON `"self":true` compares resource ID to subject ID |
+| `message.ack` | `message.delivery`, ID = delivery ID, no Tree facts | Store refuses deliveries not addressed to the caller |
+| `message.read` for send contexts | `message`, ID = context message ID, no Tree facts | Store requires the caller to have sent/received the context |
+| `message.send` | Each recipient's `message.mailbox`, with recipient Tree facts | Per-endpoint stable recipient ID allowlist; local relay allowlist is independent |
+
+Planned template: priority-100 allows for own receive, delivery ack, visible
+context reads, and fixed per-ID send recipients; priority-10 deny rules for all
+other supported actions, matching both the endpoint folder and every stable
+endpoint ID so moving out cannot remove the deny. Humans maintain it, hub never
+writes/publishes Policy. Higher-priority unrelated allows can defeat it;
+monitor/default allow is not isolation. Non-message command/Tree/creation rights
+remain denied, including for the hub except explicit read-only needs.
+
+**Do not use `actions:["*"]` as a catch-all:** at baseline `f43a4411`,
+`policy.rs` compiles/indexes actions by exact string and looks up only the request
+string. Syntax acceptance does not prove wildcard evaluation. Enumerating the
+existing actions leaves future actions default-allow unless the Core contract
+changes; final template and evaluation tests remain required before activation.
+
+**Blocking Core clarification before activation:** design E requires ongoing
+read-only verification of actual Policy/enforce mode, placement and immutable
+command, pausing both directions when unverifiable/drifted. Core 3476 confirms
+Policy and startup-command readback are unavailable to an ordinary hub runtime;
+placement can use `agent.tree.read`. Static checks at baseline `f43a4411` also
+show the App diagnostic bridge requires BOTH current human owner and bound
+Provider runtime (`api/policy_diagnostics.rs`, `app_owner_session`), so an ordinary
+hub's owner OAuth session cannot use it. The explain input accepts only
+agent/app/folder/agent.tree resources, not the message resources above. Substituting
+an Agent resource would test a different authorization request.
+
+Owner-session verification with a 24-hour fingerprint (Core's suggested option)
+is not adopted: security3470 rejects stale human attestations as a substitute
+for unattended verification; allow-more drift remains invisible. Likewise, denying
+Agents `agent.startup.manage` does not detect a human changing the declaration.
+No long-lived owner token, Provider binding or Policy-write grant is a workaround.
+Ask leader/Core/security to settle a minimal App-scoped read-only contract or
+explicitly approve changed guarantees; any Core change needs leader approval.
+
+Security3470 permits hermetic protocol/store/relay work with fake transport only.
+No live activation, real bot or migration until this boundary and the exact
+template are reviewed. A proposed read-only route is not an existing API. The
+hub does not invent Core facts from local policy files or signed-looking data.
 
 ## Integrated private settings
 
