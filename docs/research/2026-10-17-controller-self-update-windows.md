@@ -312,6 +312,48 @@ with the same empty environment; that helper connects or waits, spawns no work,
 and exits within ten seconds. The test root Job is intentionally held until
 the isolated harness process exits. This models no production mutual handoff.
 
+## Increment 2b1: inert child-side parent attestation
+
+Security3281 accepts the exact `a2196422` hosted results for development-only
+increment 2a. Leader3283 permits further inert, test-only increments on security
+acceptance plus hosted native evidence. Authority-bearing callers, activation,
+installer authority, a first live-machine run and deployment remain separate
+decision points. No production caller is exposed by this increment.
+
+The private child adapter queries `GetNamedPipeServerProcessId` and compares it
+with the current process's OS parent from one process-only ToolHelp snapshot.
+Enumeration is bounded to 65,536 entries and refuses failures without retry.
+It opens that OS-derived parent PID exactly once with query/synchronize rights,
+never a PID received in a frame. The opened parent's creation time must precede
+the child's creation time: a reused PID after the real parent's exit cannot pass.
+The parent handle and its non-reparse, read-pinned executable file remain owned
+by the proof. There is no PID reopen, process termination or impersonation on
+the child side.
+
+Registration comparison requires exact equality of parent PID, creation time,
+image volume/file identity and SHA256. It then rechecks the retained process's
+liveness and image identity/digest, including liveness after hashing. This proves
+only that registration fields match the kernel-attested parent at the check;
+it is not an authenticated transaction, mutual receipt or execution permit.
+ToolHelp parentage does not isolate other processes in the current account.
+
+The native fixture uses one fixed 56-byte registration observation and one-byte
+success marker, with absolute five-second deadlines, solely to exercise this
+adapter. It retains the proof during the inert child lifetime. Five rejection
+cases independently alter PID, creation time, volume, file identity and digest;
+each must disconnect without a success marker, after which the owner confirms
+cleanup using its original process handle. An ordinary test rejects a pipe
+server in the child's own process instead of its OS parent. These tests need
+new hosted native execution; cross compilation alone is not runtime evidence.
+
+This fixture transport is not a production protocol. The next sub-increment
+still needs attempt/intent/registration digest binding, fresh one-shot challenge,
+bounded typed frames and rejection of unknown/duplicate/out-of-order frames.
+Supervisor-owned locks, durable once-only permit/decision and installer Jobs
+remain subsequent reviewed work. The additional directory negatives, atomic
+production preparation and daemon-only construction gate in security3281 remain
+required before exposing any caller.
+
 ## Authority contract for the subsequent implementation review
 
 - Owner/supervisor communication uses a local private named pipe, restrictive

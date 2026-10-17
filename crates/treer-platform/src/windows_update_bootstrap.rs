@@ -40,6 +40,8 @@ const IMAGE_LIMIT: u64 = 128 * 1024 * 1024;
 const CONNECT_BUDGET: Duration = Duration::from_secs(5);
 const CLEANUP_MS: u32 = 5_000;
 
+mod parent_proof;
+
 fn denied() -> io::Error {
     io::Error::new(io::ErrorKind::PermissionDenied, "update_bootstrap_refused")
 }
@@ -644,7 +646,9 @@ impl AuthenticatedConnection {
 
 #[cfg(test)]
 mod tests {
+    use super::parent_proof::{OwnerIdentity, ParentProof};
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::ClientOptions;
 
     struct PrivateImage {
@@ -754,6 +758,18 @@ mod tests {
         drop(first);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn child_refuses_a_pipe_server_that_is_not_its_os_parent() {
+        let endpoint = Endpoint::bind_random().unwrap();
+        let client = ClientOptions::new()
+            .open(format!(r"\\.\pipe\Treer-update-{}", endpoint.selector))
+            .unwrap();
+        endpoint.pipe.connect().await.unwrap();
+        // Correct account and private endpoint, but the server is this process,
+        // not the process listed by the OS as its parent.
+        assert!(blocking_phase(|| ParentProof::attest(&client)).is_err());
+    }
+
     #[test]
     fn production_argv_has_only_the_fixed_entry_and_selector() {
         let path = Path::new(r"C:\Treer state\job\controller.exe");
@@ -804,7 +820,7 @@ mod tests {
         assert!(PinnedImage::open_blocking(&fixture.path, expected).is_ok());
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[ignore = "owned child of native_owner_round_trip only"]
     async fn bootstrap_child() {
         let args: Vec<_> = std::env::args().collect();
@@ -812,7 +828,7 @@ mod tests {
         let id = &args[at + 1];
         // A fixed nonconnecting role lets the owner exercise a rogue peer and
         // cancellation without timing races. No production argv/env override.
-        let _pipe = if id.starts_with('0') {
+        let mut pipe = if id.starts_with('0') {
             None
         } else {
             Some(
@@ -820,6 +836,27 @@ mod tests {
                     .open(format!(r"\\.\pipe\Treer-update-{id}"))
                     .unwrap(),
             )
+        };
+        // This bounded fixture exchange exercises kernel-parent attestation and
+        // registration comparison only; it is not a production handoff frame.
+        let _parent = if let Some(pipe) = pipe.as_mut() {
+            let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
+            let parent = blocking_phase(|| ParentProof::attest(pipe)).unwrap();
+            let mut registration = [0; 56];
+            tokio::time::timeout_at(deadline, pipe.read_exact(&mut registration))
+                .await
+                .unwrap()
+                .unwrap();
+            if blocking_phase(|| parent.verify_registration(&registration)).is_err() {
+                return;
+            }
+            tokio::time::timeout_at(deadline, pipe.write_all(&[1]))
+                .await
+                .unwrap()
+                .unwrap();
+            Some(parent)
+        } else {
+            None
         };
         tokio::time::sleep(Duration::from_secs(10)).await;
     }
@@ -855,9 +892,44 @@ mod tests {
         let id = format!("f{}", &selector()[1..]);
         let endpoint = Endpoint::bind(&id).unwrap();
         let image = PinnedImage::open(&path, expected).await.unwrap();
-        let connection = endpoint.launch(image).await.unwrap();
+        let mut connection = endpoint.launch(image).await.unwrap();
         connection.child.verify().unwrap();
+        let registration = blocking_phase(OwnerIdentity::current).unwrap().encode();
+        let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
+        tokio::time::timeout_at(deadline, connection._pipe.write_all(&registration))
+            .await
+            .unwrap()
+            .unwrap();
+        let mut ack = [0];
+        tokio::time::timeout_at(deadline, connection._pipe.read_exact(&mut ack))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(ack, [1]);
         connection.abort().unwrap();
+
+        // A legitimate kernel parent cannot substitute a different registration
+        // PID, creation time, volume/file identity or digest on this connection.
+        for offset in [0, 4, 12, 16, 24] {
+            let id = format!("e{}", &selector()[1..]);
+            let endpoint = Endpoint::bind(&id).unwrap();
+            let image = PinnedImage::open(&path, expected).await.unwrap();
+            let mut connection = endpoint.launch(image).await.unwrap();
+            let mut wrong = registration;
+            wrong[offset] ^= 1;
+            let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
+            tokio::time::timeout_at(deadline, connection._pipe.write_all(&wrong))
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                tokio::time::timeout_at(deadline, connection._pipe.read_exact(&mut ack))
+                    .await
+                    .unwrap()
+                    .is_err()
+            );
+            connection.abort().unwrap();
+        }
 
         for rogue in [true, false] {
             let id = format!("0{}", &selector()[1..]);
