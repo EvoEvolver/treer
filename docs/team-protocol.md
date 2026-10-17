@@ -2,8 +2,8 @@
 
 How the Treer development team coordinates work. [Team roles](team-roles.md)
 define who owns what; this protocol defines where state lives and how work is
-handed off. Source: Issues #20 (protocol v1, 2026-10-15) and #29 (tiered
-releases, v1.1). The Issues App is the source of truth; if this file and a
+handed off. Source: Issues #20 (protocol v1, 2026-10-15), #29 (tiered
+releases, v1.1) and #137 (comment titles, v1.2). The Issues App is the source of truth; if this file and a
 newer ticket comment disagree, the ticket wins and this file should be updated.
 
 ## Protocol v1
@@ -53,6 +53,28 @@ newer ticket comment disagree, the ticket wins and this file should be updated.
   when posting comments or messages.
 - Say what was not run or not verified. A check that could not start (for
   example a missing build output) is a finding to report, not a baseline.
+
+## Comment titles (v1.2)
+
+Tickets grow to many comments of several KB each, and reading all of them costs
+context. Since #137 an Issues comment can carry a one-line title, and readers can
+skim titles before opening any text.
+
+- **Write a title on every comment longer than about 5 lines.** Start with the
+  role tag, then the ticket, the SHA and the result, for example
+  `[freeze] #123 Core 1deda33: gate EXIT 0`, `[review] 0950a75 pass`,
+  `[release] ci 95ab3c1 passed`, `[decision]`, `[handoff]`. A title is one trimmed
+  line of at most 200 bytes (the web form allows 64 characters), without control
+  characters, and it never replaces the body. Short comments need no title.
+- **Read titles first.** `issues show N --titles` returns the activity with each
+  comment as its title (or, for untitled and older comments, a one-line
+  `excerpt` of the first 160 characters) plus `body_bytes`. Then read only the
+  comments you need in full with `issues activity N EVENT`. The default
+  `issues show N` still returns full text. Write a comment with
+  `issues comment N 'body' --title 'title'`.
+- Re-reading "the latest comments" before work (rule 4) means reading the latest
+  titles and then the full text of those that matter, not only the title: a
+  title is a pointer, and state still lives in the comment and the ticket status.
 
 ## Tiered releases (v1.1)
 
