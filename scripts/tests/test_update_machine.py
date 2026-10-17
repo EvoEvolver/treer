@@ -367,6 +367,32 @@ else:
         update.write_private_error_log(link_job, "test", RuntimeError("x"))
         self.assertFalse((self.home / "elsewhere.log").exists())
 
+    def test_update_error_messages_are_literals_or_fixed_binary_names(self):
+        # UpdateError text may reach receipts, so every call site must pass a
+        # string literal or text built only from the fixed binary set.
+        import ast
+        tree = ast.parse(SCRIPT.read_text())
+        source = SCRIPT.read_text()
+        allowed_dynamic = {
+            'f"{Path(argv[0]).name} operation failed (exit {result.returncode})"',
+            '"artifact SHA256 mismatch: " + name',
+        }
+        calls = [node for node in ast.walk(tree)
+                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "UpdateError"]
+        self.assertGreater(len(calls), 20)
+        for call in calls:
+            self.assertEqual(len(call.args), 1, ast.get_source_segment(source, call))
+            argument = call.args[0]
+            if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+                continue
+            self.assertIn(ast.get_source_segment(source, argument), allowed_dynamic)
+        # And the known dynamic-text failures stay plain exceptions.
+        plain = [ast.get_source_segment(source, node.exc.args[0]) for node in ast.walk(tree)
+                 if isinstance(node, ast.Raise) and isinstance(node.exc, ast.Call)
+                 and isinstance(node.exc.func, ast.Name) and node.exc.func.id == "RuntimeError"]
+        self.assertEqual(len(plain), 2, plain)
+        self.assertTrue(all("Candidates" in text or "selection" in text for text in plain), plain)
+
     def test_rollback_after_exited_records_vanish_is_rolled_back_with_a_verdict(self):
         state = json.loads(self.state.read_text())
         state["agents"].append({"agent_id": "ag_exited", "pid": None, "run_generation": 1})
