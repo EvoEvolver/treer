@@ -15,6 +15,7 @@ const LIMIT: usize = 64 * 1024;
 
 mod registration;
 pub use registration::RegisteredSupervisor;
+pub(in crate::self_update) use registration::RegistrationGate;
 
 #[derive(PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

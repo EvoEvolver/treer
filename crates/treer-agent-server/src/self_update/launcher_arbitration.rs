@@ -1,6 +1,8 @@
 //! Serialized in-memory permit arbitration only, NOT execution authority.
 //! The supervisor must authenticate inputs, prove writer closure, inspect EOF
-//! before closing its receiver, and durably register its identity separately.
+//! before closing its receiver, and durably register its identity. Production
+//! construction consumes the private single-use registration capability; its
+//! gate remains owned by the original RegisteredSupervisor.
 //! No production lifecycle caller, process launch, ACK, noexec record or receipt
 //! mutation is implemented here. Permit acceptance consumes a connection-bound
 //! authenticated read; its metadata is not proof of durable registration. The
@@ -67,9 +69,19 @@ pub struct Arbitration {
 }
 
 impl Arbitration {
+    /// Pure model/test fixtures only. Production gates require the single-use
+    /// capability minted by the exclusive durable registration writer.
+    #[cfg(test)]
     pub fn new(binding: Binding) -> Self {
         Self {
             binding,
+            decision: Decision::Pending,
+        }
+    }
+
+    pub(super) fn registered(registration: super::launcher_invocation::RegistrationGate) -> Self {
+        Self {
+            binding: registration.into_binding(),
             decision: Decision::Pending,
         }
     }

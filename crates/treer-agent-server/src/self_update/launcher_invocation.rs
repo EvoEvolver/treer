@@ -17,6 +17,7 @@ use super::{
 };
 
 mod start;
+pub(super) use start::RegistrationGate;
 pub use start::{RecordedIntent, RegisteredSupervisor};
 
 #[derive(Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -414,6 +415,39 @@ mod tests {
     }
 
     #[test]
+    fn production_gate_capability_is_minted_only_by_the_registration_leaf() {
+        fn visit(path: &Path, found: &mut Vec<PathBuf>) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let kind = entry.file_type().unwrap();
+                if kind.is_dir() {
+                    visit(&entry.path(), found);
+                } else if kind.is_file() && entry.path().extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(entry.path()).unwrap();
+                    let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
+                    for _ in text.match_indices(&["Registration", "Gate", "{"].concat()) {
+                        found.push(entry.path());
+                    }
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/self_update");
+        let mut found = Vec::new();
+        visit(&root, &mut found);
+        let leaf = root.join("launcher_invocation/start/registration.rs");
+        // Definition, impl and sole literal; source tripwire, not Rust parsing.
+        assert_eq!(found, [leaf.clone(), leaf.clone(), leaf.clone()]);
+        let text = std::fs::read_to_string(leaf).unwrap();
+        assert!(!text.lines().any(|line| {
+            let line = line.trim_start();
+            line.starts_with("mod ") || line.starts_with("pub mod ")
+        }));
+        let arbitration = include_str!("launcher_arbitration.rs");
+        let compact: String = arbitration.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(compact.contains("#[cfg(test)]pubfnnew(binding:Binding)"));
+    }
+
+    #[test]
     #[ignore = "owned subprocess helper, invoked by registration fixture"]
     fn supervisor_registration_child() {
         treer_platform::process_image::enter_private_session().unwrap();
@@ -535,7 +569,7 @@ mod tests {
                 }
                 continue;
             }
-            let registered = result.unwrap();
+            let mut registered = result.unwrap();
             registered.binding().unwrap();
             let bytes = std::fs::read(&path).unwrap();
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -551,6 +585,41 @@ mod tests {
                 0o600
             );
             assert!(!String::from_utf8_lossy(&bytes).contains(f.path.to_str().unwrap()));
+            use crate::self_update::{handoff::AuthenticatedPeer, launcher_arbitration::Decision};
+            use sha2::{Digest, Sha256};
+            use std::os::unix::net::UnixStream;
+            let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+            // Permit owner is the authenticated test parent; registered
+            // supervisor is the separate owned child. Their PIDs differ.
+            let mut connection = if matches!(fault, "ok" | "mutation") {
+                let (reader, writer) = UnixStream::pair().unwrap();
+                let owner = ProcessImage::capture(std::process::id()).unwrap();
+                let owner_digest =
+                    crate::self_update::images::digest_file(owner.executable()).unwrap();
+                let peer = AuthenticatedPeer::authenticate(
+                    reader,
+                    &owner,
+                    owner.executable(),
+                    &owner_digest,
+                )
+                .unwrap();
+                Some((peer, writer))
+            } else {
+                None
+            };
+            let frame = if let Some((peer, writer)) = connection.as_mut() {
+                let mut wire = b"TRLP\x01\0\0\0".to_vec();
+                wire.extend_from_slice(attempt.as_bytes());
+                wire.extend_from_slice(intent_digest.as_bytes());
+                wire.extend_from_slice(format!("{:x}", Sha256::digest(&bytes)).as_bytes());
+                writer.write_all(&wire).unwrap();
+                writer.shutdown(std::net::Shutdown::Write).unwrap();
+                let frame = registered.read_launcher_frame(peer, &cancel).unwrap();
+                assert_eq!(registered.decision(), Decision::Pending);
+                Some(frame)
+            } else {
+                None
+            };
             match fault {
                 "replacement" => {
                     let inode = std::fs::metadata(&path).unwrap().ino();
@@ -604,6 +673,35 @@ mod tests {
                     registered.binding().err().unwrap().to_string(),
                     "update_recovery_required",
                     "{fault}"
+                );
+            }
+            if let Some(frame) = frame {
+                if fault == "ok" {
+                    registered.accept_launcher_frame(frame).unwrap();
+                    assert_eq!(registered.decision(), Decision::Accepted);
+                } else {
+                    assert_eq!(
+                        registered
+                            .accept_launcher_frame(frame)
+                            .unwrap_err()
+                            .to_string(),
+                        "update_recovery_required"
+                    );
+                    assert_eq!(registered.decision(), Decision::Uncertain);
+                    // Restoring exact evidence cannot reopen the private gate.
+                    std::fs::write(&path, &bytes).unwrap();
+                    registered.verify().unwrap();
+                }
+                assert!(registered
+                    .read_launcher_frame(&mut connection.as_mut().unwrap().0, &cancel)
+                    .is_err());
+                assert_eq!(
+                    registered.decision(),
+                    if fault == "ok" {
+                        Decision::Accepted
+                    } else {
+                        Decision::Uncertain
+                    }
                 );
             }
             drop(registered);

@@ -491,9 +491,10 @@ valid registration, replacement/mutation, changed intent, child exit, existing
 entries and refusal to replace a registration even with a fresh intent/attempt.
 This is durable identity metadata, not attestation of owned-child provenance or
 an authenticated connection: the caller must supply the coordinator's owned
-child image. No gate is created and no permit/noexec/ACK or installer execution
-is authorized. The supervisor entry, authenticated connection, exclusive gate
-ownership and recovery/death matrix remain future work; sync-failure/crash-point
+child image. Registration alone authorizes no permit/noexec/ACK or installer
+execution. Its private in-memory gate is described below; the real supervisor
+entry, authenticated lifecycle connection and recovery/death matrix remain
+future work. Sync-failure/crash-point
 injection for registration is also still required. Creation identity includes
 Linux kernel boot_id plus process start ticks, or macOS kern.boottime plus the
 libproc process start seconds/microseconds. Missing/invalid OS boot data fails
@@ -501,6 +502,31 @@ closed. A regression forges only the retained boot component while preserving
 the real PID/start fields/image and verifies rejection. This is not cryptographic
 boot attestation; an equal OS-reported boot identifier is trusted within the
 existing local trust model, and clock changes may conservatively invalidate it.
+
+Fresh registration now owns one private `Arbitration`, constructed with a
+non-Clone `RegistrationGate` capability minted only inside the exclusive
+registration leaf. The ordinary `Arbitration::new(Binding)` constructor is
+test-only. No token, mutable gate, reset or gate-extraction API is returned;
+copying public Binding metadata cannot create another production gate. Existing
+registration files still prevent minting another gate after drop/restart, even
+with a fresh intent/attempt. A source tripwire checks the token's definition,
+impl and sole literal remain in the private leaf and that it has no child
+modules; this is not a Rust parser or a compile-fail test.
+
+`RegisteredSupervisor` reads an independently authenticated owner frame through
+its own gate and revalidates the durable supervisor registration again before
+acceptance. The permit owner and registered supervisor have separate identities;
+requiring equal PIDs would reject the intended protocol. Tests authenticate the
+test-parent owner while registering a different owned child's private session:
+valid binding reaches Accepted once, repeat reads cannot reset it, registration
+mutation after a successful read forces Uncertain, and restoring exact bytes
+cannot reopen that gate. The wrapper performs full image hashes at read and
+acceptance boundaries as well as metadata access; it is not for polling.
+This closes metadata-only gate construction for current production callers,
+but still supplies no real supervisor entry, owned-parent provenance proof,
+sealed cancellation/writer-closure evidence, durable ACK/decision or executor.
+An in-memory Accepted value alone must never dispatch the installer. Those
+lifecycle and crash/recovery acceptance gates remain outstanding.
 
 Lifecycle wiring must enforce this hard ordering: durable intent, spawn with
 birth-lock inheritance, capture ProcessImage from the owned Child, complete

@@ -1,5 +1,6 @@
-//! Durable identity metadata only. This does not authenticate a connection,
-//! mint a permit, create an arbitration gate or authorize installer execution.
+//! Durable identity and in-memory arbitration, not installer execution authority.
+//! Registration alone does not authenticate a connection. Each fresh
+//! registration; no gate can be reconstructed from copied Binding metadata.
 use std::{
     fs::File,
     io::{Read, Write},
@@ -13,7 +14,23 @@ use treer_platform::process_image::ProcessImage;
 use uuid::Uuid;
 
 use super::{RecordedIntent, LIMIT};
-use crate::self_update::{images::digest_file, launcher_arbitration::Binding};
+use crate::self_update::{
+    handoff::{AuthenticatedPeer, LauncherFrame},
+    images::digest_file,
+    launcher_arbitration::{Arbitration, Binding, Decision},
+};
+
+/// Only this leaf's exclusive registration writer can mint this non-Clone
+/// constructor capability. It is never returned to a caller or reconstructed.
+pub(in crate::self_update) struct RegistrationGate {
+    binding: Binding,
+}
+
+impl RegistrationGate {
+    pub(in crate::self_update) fn into_binding(self) -> Binding {
+        self.binding
+    }
+}
 
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -36,8 +53,9 @@ struct Registration {
 
 /// Fresh exclusive registration, retaining the original intent and OS image.
 /// No reconstruction, cloning, gate accessor or execution authority. Future
-/// supervisor code must additionally attest the actual connected peer and own
-/// exactly one gate; this value alone cannot select Accepted or noexec.
+/// supervisor code must additionally attest the actual connected peer and
+/// keep cancellation ownership sealed. Accepted below is an in-memory decision,
+/// not owner ACK, durable execution authority or proof of installer dispatch.
 pub struct RegisteredSupervisor<'plan, 'owner> {
     intent: RecordedIntent<'plan, 'owner>,
     image: ProcessImage,
@@ -46,6 +64,7 @@ pub struct RegisteredSupervisor<'plan, 'owner> {
     bytes: Vec<u8>,
     image_sha256: String,
     binding: Binding,
+    gate: Arbitration,
 }
 
 impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
@@ -108,6 +127,9 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
                 &self.sha256,
                 &format!("{:x}", Sha256::digest(&bytes)),
             )?;
+            let gate = Arbitration::registered(RegistrationGate {
+                binding: binding.clone(),
+            });
             let proof = RegisteredSupervisor {
                 intent: self,
                 image,
@@ -116,6 +138,7 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
                 bytes,
                 image_sha256,
                 binding,
+                gate,
             };
             proof.verify()?;
             Ok(proof)
@@ -157,9 +180,42 @@ impl RegisteredSupervisor<'_, '_> {
     }
 
     /// Verified metadata only. Copying it cannot copy the exclusive registration
-    /// or grant another gate authority; gate ownership remains to be wired.
+    /// or construct another gate. No gate reference or reset API is exposed.
     pub fn binding(&self) -> Result<&Binding> {
         self.verify()?;
         Ok(&self.binding)
+    }
+
+    pub fn decision(&self) -> Decision {
+        self.gate.decision()
+    }
+
+    fn verify_for_decision(&mut self) -> Result<()> {
+        if let Err(error) = self.verify() {
+            self.gate.invalidate();
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// The peer is the independently authenticated permit OWNER, not the
+    /// registered supervisor. The future lifecycle must derive its expected
+    /// image from the owned parent and keep cancellation endpoints private.
+    /// No caller-provided Binding/gate can replace the one owned here.
+    pub fn read_launcher_frame<'peer>(
+        &mut self,
+        peer: &'peer mut AuthenticatedPeer,
+        cancellation: &std::os::unix::net::UnixStream,
+    ) -> Result<LauncherFrame<'peer>> {
+        self.verify_for_decision()?;
+        peer.read_launcher_frame(&mut self.gate, cancellation)
+    }
+
+    /// Recheck the original durable registration at delayed acceptance, then
+    /// consume the authenticated owner frame. Any pending uncertainty remains
+    /// terminal even if evidence is subsequently restored.
+    pub fn accept_launcher_frame(&mut self, frame: LauncherFrame<'_>) -> Result<()> {
+        self.verify_for_decision()?;
+        self.gate.accept(frame)
     }
 }
