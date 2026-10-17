@@ -2130,7 +2130,13 @@ before creating an update job or replacing files.
 
 Failure after activation restores the saved binaries and reactivates the old
 Controller. `result.json` distinguishes `rolled_back` from `rollback_failed`;
-retain the backup and investigate any rollback failure. An interrupted caller
+`rollback_failed` carries `rollback_error.code`/`message` for the restore,
+reactivation or live-Agent verification step that failed, and a verified rollback
+includes `verification` (live Agents preserved, exited records not relisted,
+Agents that appeared). Retain the backup and investigate any rollback failure.
+The Agent check covers Agents that had a process before the update: a Controller
+restart, new or old build, does not relist exited Agents it only held in
+memory, so those are reported in `inventory`/`verification`, never a failure. An interrupted caller
 can resume polling with the printed job path:
 
 ```sh
@@ -2220,8 +2226,9 @@ old executables in a private `backup-<oldsha>-<unique-id>` directory, renames
 running exe files to unique `.old` names and installs the replacement. It replaces
 Controller first, requests only `service --workspace ... restart-controller`,
 then requires a fresh Controller epoch, matching machine/workspace/build,
-Proxy connection, path-aware capability and identical Agent IDs/PIDs/generations.
-Only then does it replace CLI. Failure restores saved binaries and verifies the
+Proxy connection, path-aware capability and preserved live Agents (identical
+PID/generation for every Agent that had a process; exited in-memory records are
+not relisted and are reported in the receipt). Only then does it replace CLI. Failure restores saved binaries and verifies the
 old Controller's readiness and Agent inventory; `rollback_failed` requires local
 operator repair. Preserve backups and `.old` images until verified and no
 process uses them. No automatic cleanup or root migration occurs. In particular,

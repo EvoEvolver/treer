@@ -117,6 +117,11 @@ else:
     state['capable']=COMMIT == {self.new!r}
     if {failure!r} == 'pid' and COMMIT == {self.new!r}: state['agents'][0]['pid']+=1
     if {failure!r} == 'capability': state['capable']=False
+    # Any Controller restart relists only Agents with a process (in-memory
+    # exited records are gone); a restart may also reveal a newly created one.
+    state['agents']=[a for a in state['agents'] if a.get('pid') is not None]
+    if {failure!r} == 'appear' and COMMIT == {self.new!r}:
+        state['agents'].append({{'agent_id':'ag_created_during_update','pid':777,'run_generation':1}})
     if sys.argv[-1]=='restart':
         state['agents'][0]['pid']+=1
         state['agents'][0]['run_generation']+=1
@@ -235,6 +240,64 @@ else:
         self.assertEqual(json.loads(self.state.read_text())["events"],
                          ["bbbbbbb:restart-controller", "aaaaaaa:restart-controller"])
 
+    def test_exited_records_vanish_on_restart_without_failing_the_update(self):
+        # Regression (#96 at 786700e): the old Controller listed 12 exited Agents
+        # with pid null that no restart relists; both passes and rollbacks failed.
+        state = json.loads(self.state.read_text())
+        state["agents"] += [{"agent_id": "ag_exited_old_shape", "run_generation": 4},
+                            {"agent_id": "app_exited_new_shape", "pid": None, "run_generation": 13,
+                             "private_state": {"status": "available"}, "path": "/x"}]
+        self.state.write_text(json.dumps(state))
+        before = update.inventory(self.configpath)
+        self.assertEqual(before["ag_exited_old_shape"], {"pid": None, "generation": 4})
+        self.assertEqual(before["app_exited_new_shape"], {"pid": None, "generation": 13})
+        code, result = self.invoke()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["inventory"], {"live_preserved": 1, "stopped_before": 2,
+            "stopped_not_relisted": ["ag_exited_old_shape", "app_exited_new_shape"], "appeared": []})
+        self.assertEqual(result["agents"], {"ag_fixture": {"pid": 444, "generation": 3}})
+
+    def test_agents_created_during_the_window_are_reported_not_fatal(self):
+        self.binary(self.artifacts / "treer-agent-server", self.new, "appear")
+        self.refresh_sums()
+        code, result = self.invoke()
+        self.assertEqual(code, 0, result)
+        self.assertEqual(result["inventory"]["appeared"], ["ag_created_during_update"])
+        self.assertEqual(result["inventory"]["live_preserved"], 1)
+
+    def test_check_agents_verdicts_and_codes(self):
+        live = {"a": {"pid": 1, "generation": 1}}
+        gone = {"x": {"pid": None, "generation": 2}}
+        self.assertEqual(update.check_agents({**live, **gone}, live),
+                         {"live_preserved": 1, "stopped_before": 1, "stopped_not_relisted": ["x"], "appeared": []})
+        self.assertEqual(update.check_agents(live, {**live, "n": {"pid": 9, "generation": 1}})["appeared"], ["n"])
+        with self.assertRaises(update.InventoryError) as missing:
+            update.check_agents(live, gone)
+        self.assertEqual(missing.exception.code, "live_agent_missing")
+        self.assertIn("Agent inventory changed during update", str(missing.exception))
+        with self.assertRaises(update.InventoryError) as changed:
+            update.check_agents(live, {"a": {"pid": 1, "generation": 2}})
+        self.assertEqual(changed.exception.code, "agent_process_changed")
+        with self.assertRaises(update.InventoryError) as cold:
+            update.check_agents(live, {"a": {"pid": 2, "generation": 1}}, cold=True)
+        self.assertEqual(cold.exception.code, "cold_recovery_incomplete")
+        self.assertEqual(update.check_agents(live, {"a": {"pid": 2, "generation": 2}}, cold=True)["live_preserved"], 1)
+
+    def test_rollback_after_exited_records_vanish_is_rolled_back_with_a_verdict(self):
+        state = json.loads(self.state.read_text())
+        state["agents"].append({"agent_id": "ag_exited", "pid": None, "run_generation": 1})
+        self.state.write_text(json.dumps(state))
+        self.binary(self.artifacts / "treer-agent-server", self.new, "capability")
+        self.refresh_sums()
+        code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["status"], "rolled_back", result)
+        self.assertIsNone(result["rollback_error"])
+        self.assertEqual(result["verification"]["stopped_not_relisted"], ["ag_exited"])
+        self.assertEqual(result["verification"]["live_preserved"], 1)
+        self.assertIn(self.old, (self.bindir / "treer-agent-server").read_text())
+
     def test_pid_change_and_missing_capability_reject_activation(self):
         self.binary(self.artifacts / "treer-agent-server", self.new, "capability")
         self.refresh_sums()
@@ -252,6 +315,9 @@ else:
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "rollback_failed")
         self.assertIn("PID/generation", result["error"])
+        self.assertEqual(result["error_code"], "agent_process_changed")
+        self.assertEqual(result["rollback_error"]["code"], "agent_process_changed")
+        self.assertIn("PID/generation", result["rollback_error"]["message"])
         self.assertIn(self.old, (self.bindir / "treer-agent-server").read_text())
 
     def test_existing_lock_is_preserved(self):

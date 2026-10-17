@@ -151,7 +151,9 @@ The platform updaters are reused, with a binary lock, checksummed staging and
 private backups of installed binaries plus the selected startup store. They
 replace the Controller first, invoke `service --workspace … restart-controller`
 with a clean environment, wait for a fresh matching Controller epoch/reconnection
-and unchanged Agent PID/generation inventory, then replace the CLI. Host bytes and
+and preserved live Agents (same PID/generation for every Agent that had a process
+before; exited records a Controller only held in memory are not relisted after
+any restart and are reported, not fatal), then replace the CLI. Host bytes and
 processes are preserved. Windows renames loaded images to `.prev-<commit>-<uuid>`
 instead of overwriting them. POSIX CLI and Controller may be in separate physical
 directories. Existing updater failure recovery restores changed binaries; it

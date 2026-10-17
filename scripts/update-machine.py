@@ -182,9 +182,20 @@ def local_document(config_path, route, operator=False):
 
 
 def inventory(config_path):
+    # Stable identity only: agent_id, pid (omitted or null means no process) and
+    # run_generation. Other fields differ between Controller versions and never
+    # take part in the comparison.
     rows = local_document(config_path, "/api/local/agents", operator=True)["agents"]
     return {row["agent_id"]: {"pid": row.get("pid"), "generation": row["run_generation"]}
             for row in rows}
+
+
+class InventoryError(RuntimeError):
+    """A preservation check failed; `code` is a fixed receipt token."""
+
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
 
 
 def wait_ready(config_path, timeout, before_epoch=None):
@@ -206,8 +217,7 @@ def wait_agents(config_path, before, timeout, cold=False):
     while True:
         try:
             after = inventory(config_path)
-            check_agents(before, after, cold)
-            return after
+            return check_agents(before, after, cold)
         except (OSError, ValueError, RuntimeError):
             if time.monotonic() >= end:
                 raise
@@ -226,15 +236,32 @@ def replace_file(source, destination):
 
 
 def check_agents(before, after, cold=False):
-    if set(before) != set(after):
-        raise RuntimeError("Agent inventory changed during update")
-    for key, row in before.items():
+    """Preservation verdict for the Agents that were LIVE before the update.
+
+    A Controller restart (new or old binary) only relists Agents that still have
+    a process or a startup-store entry; exited records it held in memory are
+    gone afterwards and are not a regression. Live Agents must be present with
+    the same pid/generation (hot) or recreated (cold). Agents created during
+    the window are reported, never fatal. The verdict goes into the receipt.
+    """
+    live = {key: row for key, row in before.items() if row["pid"] is not None}
+    missing = sorted(key for key in live if key not in after)
+    if missing:
+        raise InventoryError("live_agent_missing",
+                             f"Agent inventory changed during update: {len(missing)} live Agent(s) missing")
+    for key, row in live.items():
         current = after[key]
         if not cold and current != row:
-            raise RuntimeError("Agent PID/generation changed during hot update")
-        if cold and row["pid"] is not None and (current["pid"] is None or
-                current["pid"] == row["pid"] or current["generation"] <= row["generation"]):
-            raise RuntimeError("cold recovery did not recreate a previously live Agent")
+            raise InventoryError("agent_process_changed", "Agent PID/generation changed during hot update")
+        if cold and (current["pid"] is None or current["pid"] == row["pid"]
+                     or current["generation"] <= row["generation"]):
+            raise InventoryError("cold_recovery_incomplete",
+                                 "cold recovery did not recreate a previously live Agent")
+    stopped = [key for key in before if key not in live]
+    return {"live_preserved": len(live),
+            "stopped_before": len(stopped),
+            "stopped_not_relisted": sorted(key for key in stopped if key not in after),
+            "appeared": sorted(key for key in after if key not in before)}
 
 
 def transaction(job, config):
@@ -313,7 +340,7 @@ def transaction(job, config):
         activation_attempted = True
         run(command, home, timeout=config["timeout"], bin_dir=bindir, config_dir=config["config_dir"])
         ready = wait_ready(config_path, config["timeout"], health["controller_epoch"])
-        wait_agents(config_path, before, config["timeout"], config["host"])
+        verdict = wait_agents(config_path, before, config["timeout"], config["host"])
         reported = ready.get("controller_build", {}).get("git_commit", "")
         if not reported or not (reported.startswith(candidate) or candidate.startswith(reported)):
             raise RuntimeError("running Controller build differs from staged candidate")
@@ -326,12 +353,16 @@ def transaction(job, config):
             raise RuntimeError("new Controller does not advertise path-target capability")
         replace_file(stage / "treer", destinations["treer"])
         changed.append("treer")
-        wait_agents(config_path, before, config["timeout"], config["host"])
+        verdict = wait_agents(config_path, before, config["timeout"], config["host"])
         for name in names:
             if digest(destinations[name]) != published[name] or version(destinations[name], home) != staged_versions[name]:
                 raise RuntimeError("installed binary verification failed")
     except Exception as error:
+        # Restore, reactivate, then verify. Each stage reports its own reason:
+        # a verified rollback is `rolled_back` even when exited records were not
+        # relisted; `rollback_failed` always carries a fixed code and message.
         rollback_error = None
+        verification = None
         try:
             for name in reversed(changed):
                 replace_file(backup / name, destinations[name])
@@ -344,15 +375,18 @@ def transaction(job, config):
                 run(command, home, timeout=config["timeout"], bin_dir=bindir, config_dir=config["config_dir"])
                 wait_ready(config_path, config["timeout"], epoch)
             if not config["host"]:
-                check_agents(before, inventory(config_path))
+                verification = check_agents(before, inventory(config_path))
         except Exception as rollback:
-            rollback_error = type(rollback).__name__
+            rollback_error = {"code": getattr(rollback, "code", None) or type(rollback).__name__,
+                              "message": str(rollback)[:200]}
         write_json(job / "result.json", {"status": "rollback_failed" if rollback_error else "rolled_back",
-                    "error": str(error), "rollback_error": rollback_error, "backup": str(backup),
+                    "error": str(error), "error_code": getattr(error, "code", None),
+                    "rollback_error": rollback_error, "verification": verification, "backup": str(backup),
                     "cold_restart_cannot_restore_original_processes": config["host"]})
         raise
     return {"status": "complete", "commit": candidate, "backup": str(backup),
-            "versions": staged_versions, "agents": inventory(config_path), "host_changed": config["host"]}
+            "versions": staged_versions, "agents": inventory(config_path), "inventory": verdict,
+            "host_changed": config["host"]}
 
 
 def worker(job):

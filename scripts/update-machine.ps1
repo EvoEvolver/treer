@@ -182,6 +182,30 @@ function Get-UpdateAgents($Config) {
         $_.agent_id + ':' + $agentPid + ':' + $_.run_generation
     } | Sort-Object) -join "`n")
 }
+function Test-UpdateAgentsPreserved($Before, $After) {
+    # Only Agents that were LIVE before must survive with the same pid and
+    # generation. A Controller restart (new or old binary) does not relist the
+    # exited records it held in memory, and an Agent created during the window
+    # is not a regression; both are reported in the receipt, never fatal.
+    $afterLines = @($After -split "`n")
+    foreach ($line in @($Before -split "`n")) {
+        if ($line -eq '') { continue }
+        if ($line -notmatch '^[^:]+::[0-9]+$' -and $afterLines -cnotcontains $line) { return $false }
+    }
+    return $true
+}
+function Get-UpdateAgentVerdict($Before, $After) {
+    $afterLines = @($After -split "`n"); $beforeLines = @($Before -split "`n")
+    $stopped = @($beforeLines | Where-Object { $_ -match '^[^:]+::[0-9]+$' })
+    $afterIds = @($afterLines | ForEach-Object { ($_ -split ':')[0] })
+    $beforeIds = @($beforeLines | ForEach-Object { ($_ -split ':')[0] })
+    return @{
+        live_preserved = @($beforeLines | Where-Object { $_ -ne '' -and $_ -notmatch '^[^:]+::[0-9]+$' }).Count
+        stopped_before = $stopped.Count
+        stopped_not_relisted = @($stopped | ForEach-Object { ($_ -split ':')[0] } | Where-Object { $afterIds -cnotcontains $_ } | Sort-Object)
+        appeared = @($afterIds | Where-Object { $_ -ne '' -and $beforeIds -cnotcontains $_ } | Sort-Object)
+    }
+}
 function Test-UpdateCommit($Expected, $Reported) {
     return ($Expected -match '^[0-9a-f]{7,40}$' -and $Reported -match '^[0-9a-f]{7,40}$' -and
         ($Expected.StartsWith($Reported) -or $Reported.StartsWith($Expected)))
@@ -194,7 +218,7 @@ function Wait-UpdateController($Config, $Epoch, $Expected, $Agents, $Timeout) {
             if ($health.proxy_connected -eq $true -and $health.controller_epoch -and $health.controller_epoch -ne $Epoch -and
                 (Test-UpdateCommit $Expected $health.controller_build.git_commit) -and
                 @($health.cli_capabilities) -contains 'agent.path-targets.v1' -and
-                (Get-UpdateAgents $Config) -ceq $Agents) { return $health }
+                (Test-UpdateAgentsPreserved $Agents (Get-UpdateAgents $Config))) { return $health }
         } catch { } # A disconnect is expected; only a fresh verified health receipt succeeds.
         Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $end)
@@ -274,10 +298,11 @@ function Invoke-UpdateTransaction($Job, $Stage) {
         foreach ($name in @('treer-agent-server','treer')) {
             if ((Get-FileHash -LiteralPath (Join-Path $bin ($name + '.exe')) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hashes[$name]) { throw 'installed_checksum_mismatch' }
         }
-        if ((Get-UpdateAgents $config) -cne $agents) { throw 'agent_process_changed' }
-        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status='complete'; commit=$Job.commit; backup=$backup; host_changed=$false; host_commit=$hostCommit; agents_preserved=$true }
+        $after = Get-UpdateAgents $config
+        if (!(Test-UpdateAgentsPreserved $agents $after)) { throw 'agent_process_changed' }
+        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status='complete'; commit=$Job.commit; backup=$backup; host_changed=$false; host_commit=$hostCommit; agents_preserved=$true; inventory=(Get-UpdateAgentVerdict $agents $after) }
     } catch {
-        $failure = 'activation_failed'; $rollback = 'rolled_back'
+        $failure = 'activation_failed'; $rollback = 'rolled_back'; $rollbackError = $null
         try {
             for ($index=$changed.Count-1; $index -ge 0; $index--) {
                 $name = $changed[$index]
@@ -289,8 +314,10 @@ function Invoke-UpdateTransaction($Job, $Stage) {
                 Invoke-UpdateRestart $controller $config.workspace $Stage
                 $null = Wait-UpdateController $config $epoch $oldCommit $agents $Job.timeout
             }
-        } catch { $rollback = 'rollback_failed' }
-        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status=$rollback; error=$failure; backup=$backup; host_changed=$false; host_commit=$hostCommit }
+        } catch { $rollback = 'rollback_failed'; $rollbackError = [string]$_.Exception.Message }
+        $verification = $null
+        if ($rollback -eq 'rolled_back') { try { $verification = Get-UpdateAgentVerdict $agents (Get-UpdateAgents $config) } catch { } }
+        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status=$rollback; error=$failure; rollback_error=$rollbackError; verification=$verification; backup=$backup; host_changed=$false; host_commit=$hostCommit }
         throw 'update_activation_failed_inspect_receipt'
     }
 }
