@@ -629,6 +629,48 @@ This requires an explicit reviewed change to the current sole-constructor
 tripwire, not a second public constructor or an exception for a disk reader.
 No two processes may retain an accept-capable gate for the same attempt.
 
+Production-wiring requirements from security3133:
+
+- **Inherited channel:** create an anonymous Unix socketpair in the owner,
+  retaining its own end with CLOEXEC and inheriting only the intended child end
+  atomically at fork/exec, with the same descriptor discipline as the birth
+  lock. The child restores CLOEXEC before threads/forks. Do not use a named
+  socket or let the supervisor reconnect by path. Close opposite ends and
+  bootstrap duplicates; an FD number is only a locator, never identity proof.
+  Verify the intended endpoint using OS credentials and independently observed
+  parent/owned-Child identities. The platform implementation and real tests must
+  establish what credentials a pre-fork socketpair actually reports; do not
+  assume its creation-time peer PID becomes the post-exec child's PID. If the
+  platform evidence cannot bind the expected peer, fail closed rather than
+  replacing it with a message-supplied PID.
+- **Independent child observations:** capture the actual OS parent using
+  getppid and ProcessImage, including creation identity, image dev/inode and
+  SHA256, and capture the supervisor's own image/session. Compare every
+  registration owner field to those observations, not just to other fields in
+  the owner's claim or a matching response digest. Read the registration through
+  bounded, no-follow opens under retained physical directory handles; require
+  the expected owner UID and no group/world write access. Hash the exact bytes
+  actually read and compare that digest to the session-bound response.
+- **Acceptance continuity:** immediately before accepting a permit, recheck
+  actual OS parent identity/image and re-read/verify the original registration,
+  in addition to the checks made before registration-ready. A changed, missing
+  or unverifiable parent/record makes the gate Uncertain permanently; neither
+  replacement nor restoration permits retry.
+- **Freshness and bounds:** generate at least 128 random challenge bits from
+  the OS CSPRNG, once per fresh session. Bind them to attempt, exact intent
+  digest and the supervisor's own PID/creation identity/SID/PGID, valid only on
+  this retained connection. A second ready, second registration response or
+  any out-of-order frame consumes the challenge and terminates the session.
+  Every message has a fixed maximum length and an absolute read deadline,
+  including complete-frame/EOF handling; byte-by-byte traffic cannot reset it.
+- **Construction/API tests:** replace the sole-constructor tripwire with one
+  naming the single private fresh-session leaf, and obtain a separate review
+  of that implementation diff. Assert that the parent proof exposes no accept,
+  gate or capability methods. The child capability is non-Clone,
+  non-Serialize and non-Default, with no construction from bytes or paths and
+  no constructor reachable outside the fresh-session leaf. Include compiler/API
+  boundary tests as well as the source tripwire.
+
 Proposed handshake order, all over the same retained authenticated connection:
 
 1. The owner persists intent and spawns the verified Rust supervisor with birth
@@ -670,7 +712,10 @@ Before this refactor is accepted, require real macOS/Linux subprocess tests at
 each handshake boundary: pre-exec failure, forged ready/parent/image, schema-1 or
 changed owner fields, foreign/replayed challenge, registration sync/readback
 failure, owner death before/after each response, and supervisor death before/after
-decision sync/ACK. Check that no installer starts while the gate is closed,
+decision sync/ACK. Include an unrelated same-UID process attempting to connect,
+guess or substitute the channel/end, and an inherited endpoint whose credential
+semantics cannot establish the expected peer. Check that no installer starts
+while the gate is closed,
 birth ownership survives the spawn window, evidence is preserved, and no crash
 path constructs a second gate. This is in addition to, not a replacement for,
 the existing full-P1 death matrix and real isolated-upgrade acceptance.
