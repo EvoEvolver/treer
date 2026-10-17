@@ -29,14 +29,14 @@ export function parseWorkspacePins(value: unknown): WorkspacePins {
     if (!pin || !['agent', 'app', 'folder'].includes(pin.kind)
       || typeof pin.id !== 'string' || !idPattern.test(pin.id)
       || typeof pin.pinned_at !== 'string' || !timestampPattern.test(pin.pinned_at) || !Number.isFinite(Date.parse(pin.pinned_at))
-      || (pin.pinned_by !== null && (typeof pin.pinned_by !== 'string' || !idPattern.test(pin.pinned_by)))
+      || (pin.pinned_by != null && (typeof pin.pinned_by !== 'string' || !idPattern.test(pin.pinned_by)))
       || seen.has(`${pin.kind}:${pin.id}`)) {
       throw new Error('Invalid pin')
     }
     seen.add(`${pin.kind}:${pin.id}`)
   }
   return {
-    pins: data.pins.map(({ kind, id, pinned_at, pinned_by }) => ({ kind, id, pinned_at, pinned_by })),
+    pins: data.pins.map(({ kind, id, pinned_at, pinned_by }) => ({ kind, id, pinned_at, pinned_by: pinned_by ?? null })),
     limit: 50,
     can_pin: data.can_pin,
     revision: data.revision,

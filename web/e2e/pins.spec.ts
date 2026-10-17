@@ -262,6 +262,7 @@ for (const mobile of [false,true]) test(`pins menu and error state gallery ${mob
     await actions().click()
     await page.getByRole('menuitem',{name:'Unpin',exact:true}).click()
     await expect(page.getByRole('alert').first()).toContainText(status === 409 ? '50-pin limit':'Unable to change')
+    await page.locator('#workspace-panel-overview').getByRole('alert').scrollIntoViewIfNeeded()
     await shot(`error-${status}`)
   }
   api.setWriteFailure(0);api.setCanPin(false)
@@ -272,4 +273,13 @@ for (const mobile of [false,true]) test(`pins menu and error state gallery ${mob
   api.snapshot({...mapSnapshot,revision:10,agents:mapSnapshot.agents.filter((a) => a.agent_id !== 'leader')})
   await expect(pinned(page)).toHaveCount(0)
   await shot('deleted')
+})
+
+
+test('Core omits a deleted pin author rather than serializing null', async ({page}) => {
+  await backend(page)
+  await page.route('**/pins', (route) => route.fulfill({json:{pins:[{kind:'agent',id:'leader',pinned_at:'2026-10-17T12:00:00Z'}],limit:50,can_pin:true,revision:1}}))
+  await page.goto('/')
+  await expect(pinned(page).getByRole('button',{name:'Actions for /coordinator',exact:true})).toHaveAttribute('title',/Unknown member/)
+  await expect(page.getByRole('alert')).toHaveCount(0)
 })
