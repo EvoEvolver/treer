@@ -17,17 +17,28 @@ Its only child is the same verified helper image. No shell/CIM/PowerShell fallba
 Proposed fixed interface: `treer-breakaway-probe.exe --probe`. Its private child
 mode is exactly `--probe-child`; other arguments fail before spawning. There are
 no executable, command, path, PID, duration or creation-flag overrides. The runner
-installs the frozen helper and records its SHA256 in one explicitly approved
-Treer-owned temporary directory. The helper itself writes no files. The runner
+installs the frozen helper and records its SHA256 in the explicitly approved
+`%LOCALAPPDATA%\Treer\self-update-probe-111` temporary directory. The helper
+derives LocalAppData through the native Known Folder API, ignoring environment
+overrides, and refuses images outside that fixed directory. It retains open
+non-reparse ancestor directories and its own image without delete sharing,
+rejects image hardlinks and compares final handle paths, size and SHA256. After
+spawn it opens only the kernel-reported child image path matching its own path
+and requires identical volume serial/file index to the pinned image. Same-account
+replacement before the approved run remains a residual; the runner checks the
+reviewed artifact hash. The helper itself writes no files. The runner
 records the actual Host binary version separately before running it through the
 real exec-origin Job; a terminal run cannot establish that Job's breakaway policy.
 
 The parent queries its own Job membership, resolves its own image and starts that
 exact absolute application with CreateProcessW, fixed child argv, no inherited
-handles and no inherited workload environment. Request only
+handles and an explicit empty Unicode environment block, with
+CREATE_UNICODE_ENVIRONMENT. No workload environment is inherited. Request
+CREATE_BREAKAWAY_FROM_JOB first, then in a second fixed attempt
 CREATE_BREAKAWAY_FROM_JOB | DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP; no
 CREATE_NEW_CONSOLE, shell launch or Job-policy changes. The flags are a request,
-not proof. The child only waits for ten seconds and exits; it spawns nothing,
+not proof. Stop at the first failure; this is a diagnostic sequence, never a
+policy-changing retry. The child only waits for ten seconds and exits; it spawns nothing,
 prints nothing and never enters updater code. There is no child-ready assertion
 from a message or PID file.
 
@@ -55,6 +66,46 @@ nullable numeric Win32 error. No paths, argv, environment, credentials, raw chil
 output or exception strings. Only `breakaway_observed` with confirmed cleanup
 exits zero; all other results exit nonzero. Freeze the precise field/result
 whitelists with the implementation before live use.
+
+Development implementation: standalone example
+`crates/treer-platform/examples/treer-breakaway-probe.rs`, with Win32 FFI isolated
+under its `support` module. This is not linked into a Controller command. The
+runner records Host version using the existing read-only Host query and joins
+that evidence with the helper report; the helper emits `host_version: null` and
+`host_version_source: runner_existing_host_query`, not a fabricated version or
+an ambient-environment value. The report also includes this helper's own SHA256
+and size. Parent Job member enumeration is bounded to 1024 entries; an incomplete
+query fails closed and no other process IDs are output. A failed parent limit
+query has the fixed `parent_job_limits_unavailable` stage with null flags. Access
+denied at CreateProcess is `breakaway_denied`; other creation errors are
+`child_create`. Termination failure or an unconfirmed wait is
+`cleanup_unconfirmed`, never retried through another API. The current Job may be
+one level of a nested tree, so its limit flags are not claimed to enumerate all
+ancestor limits; the independent child query still checks membership in any Job.
+
+The implementation report keys are fixed: `schema`, `result`, `parent_pid`,
+`host_version_source`, `host_version`, `windows_build`, `helper_sha256`,
+`helper_size`, `parent_in_job`, `parent_job_limit_flags`, `attempts`,
+`error_stage`, `win32_error`. Each attempt has `flags`, `child_pid`,
+`child_creation_time`, `child_in_job`, `child_in_parent_job`, `cleanup_confirmed`,
+`result`, `error_stage`, `win32_error`. Results are `failed` or
+`breakaway_observed`; diagnostic failures are distinguished by fixed error stage
+(including `not_exec_job_evidence`). Output is below 8192 bytes; stdout failure
+returns nonzero without a raw error message. Invalid argv fails before hashing
+or spawning. A Windows build and native tests remain mandatory before live use.
+
+Development verification commands (use the one agent-owned Cargo target and
+DEBUG=0): `cargo test -p treer-platform --example treer-breakaway-probe` runs the
+portable report whitelist tests on macOS/Linux and additionally exercises native
+owned-child cleanup/create failure on Windows. On a native Windows worker
+outside any ambient Job, explicitly run
+`cargo test -p treer-platform --example treer-breakaway-probe windows::tests::native_job_matrix -- --ignored --exact`
+for the isolated no-Job/allow/deny fixtures. These fixtures can change their own
+test Job only; their code is absent from the production example. The production
+build is `cargo build -p treer-platform --example treer-breakaway-probe --release`;
+live argv is only `treer-breakaway-probe.exe --probe`. A native artifact hash,
+full author gate, reviewed source SHA and exact #98 paths are still required
+before any live run; cross-compilation checking alone is insufficient.
 
 Validate on native Windows with no Job, a synthetic Job allowing breakaway and
 a synthetic Job refusing it; synthetic fixtures may create their own Jobs, but
