@@ -17,7 +17,7 @@ class Fake extends EventEmitter {
   prompts: string[] = [];
   updates = 0;
   failPrompt = false;
-  snapshot() { return { ready: true, goal: this.goal, thread: { status: this.status, activeTurnId: "turn-current", turns: [] } }; }
+  snapshot() { return { ready: true, goal: this.goal, thread: { status: this.status, activeTurnId: this.status === "running" ? "turn-current" : null, turns: [] } }; }
   async updateGoal(input: GoalUpdate) { this.updates++; this.goal = { ...this.goal!, ...input }; this.emit("state"); }
   async prompt(text: string) { if (this.failPrompt) throw new Error("temporary prompt error"); this.prompts.push(text); this.status = "running"; }
 }
