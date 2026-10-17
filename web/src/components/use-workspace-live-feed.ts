@@ -1,3 +1,4 @@
+import { interfaceInventory, inventoryWithOrigins, interfaceSignature } from "@/lib/agent-origin"
 import { PINS_EVENT } from "@/lib/workspace-pins"
 import { api,websocketUrl,type Agent,type AppDeployment,type Snapshot,type Workspace } from "@/lib/api"
 import { replaceWorkspace,visibleWorkspaceSnapshot } from "@/lib/control-plane"
@@ -5,6 +6,8 @@ import { useCallback,useEffect,useRef,useState,type Dispatch,type RefObject,type
 
 interface WorkspaceLiveFeedOptions {
   preview: boolean
+  userId?: string
+  isolatedAgentOrigins: boolean
   workspaceId: string | null
   workspaceIdRef: RefObject<string | null>
   snapshot: Snapshot | null
@@ -18,7 +21,12 @@ interface WorkspaceLiveFeedOptions {
 
 // Core snapshots and App metadata share one refresh/lifecycle boundary. Keep
 // the existing mutation fencing, debounce windows and event ordering intact.
-export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, snapshot, setSnapshot, setWorkspaces, setSelectedAgentId, setSelectedMachineId, syncWorkspaces, showError }: WorkspaceLiveFeedOptions) {
+export function useWorkspaceLiveFeed({ preview, userId, isolatedAgentOrigins, workspaceId, workspaceIdRef, snapshot, setSnapshot, setWorkspaces, setSelectedAgentId, setSelectedMachineId, syncWorkspaces, showError }: WorkspaceLiveFeedOptions) {
+  const originScope = `${userId ?? ''}:${workspaceId ?? ''}`
+  const readModel = useRef<{ scope: string; agents: Agent[]; signature: string }>({ scope: originScope, agents: [], signature: '' })
+  if (readModel.current.scope !== originScope) readModel.current = { scope: originScope, agents: [], signature: '' }
+  const snapshotRequest = useRef(0)
+  const originRefresh = useRef<() => void>(() => {})
   const [apps, setAppsState] = useState<AppDeployment[]>([])
   const appsRef = useRef(apps)
   appsRef.current = apps
@@ -87,11 +95,14 @@ export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, sna
   const refreshSnapshot = useCallback(async () => {
     if (preview || !workspaceId) return
     const requestedWorkspaceId = workspaceId
+    const request = ++snapshotRequest.current
+    const requestedScope = originScope
     const data = visibleWorkspaceSnapshot(await api<Snapshot>(`/api/workspaces/${encodeURIComponent(requestedWorkspaceId)}/snapshot`))
-    if (workspaceIdRef.current !== requestedWorkspaceId || data.workspace.workspace_id !== requestedWorkspaceId) return
+    if (workspaceIdRef.current !== requestedWorkspaceId || data.workspace.workspace_id !== requestedWorkspaceId || readModel.current.scope !== requestedScope || request !== snapshotRequest.current) return
+    readModel.current = { scope: requestedScope, agents: data.agents, signature: interfaceInventory(data) }
     setSnapshot(data)
     setWorkspaces((items) => replaceWorkspace(items, data.workspace))
-  }, [preview, workspaceId])
+  }, [preview, workspaceId, originScope])
 
   useEffect(() => {
     if (preview) return
@@ -103,6 +114,47 @@ export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, sna
     let disposed = false
     let socket: WebSocket | null = null
     let timer: number | undefined
+    let originTimer: ReturnType<typeof setTimeout> | undefined
+    let originMaxTimer: ReturnType<typeof setTimeout> | undefined
+    let originLastRefresh: number | undefined
+    let originLastSignal: number | undefined
+    let originRefreshFloor = 5000
+    let originConsecutiveRefreshes = 0
+    const scheduleOriginRefresh = () => {
+      if (!isolatedAgentOrigins) return
+      const now = Date.now()
+      // Churning Controller registrations must not turn every Console into an
+      // unbounded Policy/read-model client. Quiet periods restore prompt updates.
+      if (originLastSignal !== undefined && now - originLastSignal >= 30000) {
+        originRefreshFloor = 5000
+        originConsecutiveRefreshes = 0
+      }
+      originLastSignal = now
+      const floor = originLastRefresh === undefined ? 0 : Math.max(0, originLastRefresh + originRefreshFloor - now)
+      const refresh = () => {
+        clearTimeout(originTimer); clearTimeout(originMaxTimer)
+        originTimer = originMaxTimer = undefined
+        if (disposed) return
+        if (originConsecutiveRefreshes++ > 0) originRefreshFloor = Math.min(originRefreshFloor * 2, 60000)
+        originLastRefresh = Date.now()
+        void refreshSnapshot().catch(showError)
+      }
+      clearTimeout(originTimer)
+      originTimer = setTimeout(refresh, Math.max(200, floor))
+      originMaxTimer ??= setTimeout(refresh, Math.max(2000, floor))
+    }
+    originRefresh.current = scheduleOriginRefresh
+    const reconcileInventory = (next: Snapshot) => {
+      const signature = interfaceInventory(next)
+      if (signature !== readModel.current.signature) {
+        ++snapshotRequest.current
+        readModel.current.signature = signature
+        const interfaces = new Map(next.agents.map((agent) => [agent.agent_id, interfaceSignature(agent)]))
+        readModel.current.agents = readModel.current.agents.filter((old) => interfaces.get(old.agent_id) === interfaceSignature(old))
+        scheduleOriginRefresh()
+      }
+      return inventoryWithOrigins(next, readModel.current.agents)
+    }
     setSnapshot((current) => current?.workspace.workspace_id === workspaceId ? current : null)
     refreshSnapshot().catch(showError)
     const connect = () => {
@@ -115,8 +167,9 @@ export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, sna
         if (message.event === "workspace.pins.changed") {
           window.dispatchEvent(new CustomEvent(PINS_EVENT, {detail:workspaceId}))
         } else if (message.event === "workspace.snapshot" && message.data) {
-          const next = visibleWorkspaceSnapshot(message.data as Snapshot)
-          if (next.workspace.workspace_id !== workspaceId) return
+          const inventory = visibleWorkspaceSnapshot(message.data as Snapshot)
+          if (inventory.workspace.workspace_id !== workspaceId) return
+          const next = reconcileInventory(inventory)
           setSnapshot(next)
           setWorkspaces((items) => replaceWorkspace(items, next.workspace))
           scheduleAppsRefresh()
@@ -134,7 +187,7 @@ export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, sna
             const agents = current.agents.some((agent) => agent.agent_id === updated.agent_id)
               ? current.agents.map((agent) => agent.agent_id === updated.agent_id ? updated : agent)
               : [...current.agents, updated]
-            return { ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents }
+            return reconcileInventory({ ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents })
           })
         } else if (message.event === "agent.deleted" && message.data) {
           const removed = message.data as Agent
@@ -144,7 +197,7 @@ export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, sna
           }
           setSnapshot((current) => {
             if (!current || current.workspace.workspace_id !== workspaceId) return current
-            return { ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents: current.agents.filter((agent) => agent.agent_id !== removed.agent_id) }
+            return reconcileInventory({ ...current, revision: Math.max(current.revision, message.revision ?? current.revision), agents: current.agents.filter((agent) => agent.agent_id !== removed.agent_id) })
           })
         } else if (message.event === "workspace.deleted" && message.data) {
           const removed = message.data as Workspace
@@ -168,8 +221,15 @@ export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, sna
       }
     }
     connect()
-    return () => { disposed = true; window.clearTimeout(timer); socket?.close() }
-  }, [preview, workspaceId, refreshSnapshot, syncWorkspaces, showError, scheduleAppsRefresh, setApps])
+    return () => { disposed = true; ++snapshotRequest.current; window.clearTimeout(timer); clearTimeout(originTimer); clearTimeout(originMaxTimer); originRefresh.current = () => {}; socket?.close() }
+  }, [preview, workspaceId, refreshSnapshot, syncWorkspaces, showError, scheduleAppsRefresh, setApps, isolatedAgentOrigins])
+
+  useEffect(() => {
+    const refresh = () => { if (!document.hidden) originRefresh.current() }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', refresh)
+    return () => { window.removeEventListener('focus', refresh); document.removeEventListener('visibilitychange', refresh) }
+  }, [])
 
   const appRuntimeSignature = useRef("")
   useEffect(() => {
@@ -180,5 +240,5 @@ export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, sna
     if (runtimes.length) scheduleAppsRefresh()
   }, [snapshot, workspaceId, scheduleAppsRefresh])
 
-  return { apps, setApps, appsLoading, loadApps, refreshSnapshot }
+  return { apps, setApps, appsLoading, loadApps, refreshSnapshot, originReadAgents: readModel.current.agents }
 }

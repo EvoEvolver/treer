@@ -571,7 +571,22 @@ the Console. The server fills `public_url` only for the platform-hosted ingress 
 base domain (it is not user-settable), so the Console does not pin the host to a domain itself; the checks above are
 defense in depth. Menu opens use `noopener,noreferrer` so the Console URL is not sent as a referrer.
 
-An Agent with a registered `interface.ui_path` opens its UI directly in a new tab at the fixed Proxy route
+When the Proxy advertises `agent.interface-origin.v1`, Agent native links and new-tab menus use its
+authorized snapshot `interface.origin_url` synchronously (`https://ag-<id>.<apps domain>/`). The URL must
+be an HTTPS origin root without credentials, query or fragment, distinct from the Console and Proxy;
+its `ag-<32 hex>` hostname label must match the selected Agent ID.
+Missing/invalid URLs and unavailable capability discovery keep the Console detail destination. Origin
+failures never silently downgrade to the Proxy UI. The standalone host owns its fixed error/retry page;
+the Console's embedded iframe stays on the Proxy tunnel (embedded isolation is tracked separately).
+Inventory events cannot supply origin grants: ordinary updates retain a read-model URL only for the
+same registered interface. Interface appearance/replacement triggers a 200ms debounced snapshot refresh
+(maximum debounce wait 2s), subject to a 5s floor between origin-driven reads. Sustained churn doubles
+that floor up to 60s; 30s without signals resets it to 5s. Returning to the page uses the same bounded refresh. Removed/replaced interfaces drop their old URL
+immediately; a fresh authorized snapshot can also revoke a URL. No high-frequency polling or persisted
+origin cache is used, and account/workspace changes discard the grants.
+
+Only when the capability is confirmed absent (including an older Proxy's config 404),
+an Agent with a registered `interface.ui_path` opens its UI directly in a new tab at the fixed Proxy route
 `/api/workspaces/{workspace_id}/agents/{agent_id}/interface/ui/`, without a Console shell. The descriptor path
 is never used as an external URL; IDs are encoded. Agent interfaces without a UI retain the Console deep link.
 Plain clicks still open in place. Native links and menu opens use `noopener,noreferrer`, even when Console
@@ -692,3 +707,10 @@ Installation results show the outcome and latest version check first, with recov
 
 Pin errors are announced with `role="alert"` and the existing error theme. Retry pins is a read-only
 refresh offered for network/server failures and transient HTTP 408/425/429, never for 403 permission denial or the 409 pin limit.
+
+Agent-origin browser coverage uses an exclusive loopback HTTPS server with a public test-only
+self-signed identity (`e2e/fixtures/synthetic-tls.ts`), ignored certificate errors only inside the
+disposable test browser, and a browser-only DNS mapping for the synthetic Agent host. It exercises
+actual native middle/modifier-click navigation without relying on interception of a popup's first
+request. That spec uses bundled full Chromium because the macOS headless shell crashes on this
+cross-site navigation in a minimal reproduction. No system trust or production settings change.

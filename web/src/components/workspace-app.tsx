@@ -1,3 +1,5 @@
+import { useAgentOriginCapability } from "@/components/use-agent-origin-capability"
+import { agentOriginUrl, interfaceSignature } from "@/lib/agent-origin"
 import { agentUiIsRefused, useAgentUiFallback } from "@/components/use-agent-ui-fallback"
 import { useWorkspacePins } from "@/components/use-workspace-pins"
 import { agentCreationFailure, type AgentCreationFailure } from "@/lib/agent-creation-failure"
@@ -70,6 +72,7 @@ function WorkspaceAppContent() {
   const [pendingInviteCheckedFor, setPendingInviteCheckedFor] = useState<string | null>(null)
   const preview = firstRunTourMode() === "preview"
   const [user, setUser] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
+  const agentOriginMode = useAgentOriginCapability(user?.user_id, preview)
   const pendingInviteChecked = preview || pendingInvite !== null || Boolean(user && pendingInviteCheckedFor === user.user_id)
   const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
   const [organizationId, setOrganizationId] = useState<string | null>(preview ? PREVIEW_ORG.organization_id : null)
@@ -223,8 +226,8 @@ function WorkspaceAppContent() {
     void syncWorkspaces().catch(showError)
   }, [organizationId, preview, syncWorkspaces, showError])
 
-  const { apps, setApps, appsLoading, loadApps, refreshSnapshot } = useWorkspaceLiveFeed({
-    preview, workspaceId, workspaceIdRef, snapshot, setSnapshot, setWorkspaces,
+  const { apps, setApps, appsLoading, loadApps, refreshSnapshot, originReadAgents } = useWorkspaceLiveFeed({
+    preview, userId: user?.user_id, isolatedAgentOrigins: agentOriginMode === "isolated", workspaceId, workspaceIdRef, snapshot, setSnapshot, setWorkspaces,
     setSelectedAgentId, setSelectedMachineId, syncWorkspaces, showError,
   })
 
@@ -267,17 +270,23 @@ function WorkspaceAppContent() {
     const blocked = [window.location.origin, proxyUrl("/")].map((value) => { try { return new URL(value).origin } catch { return value } })
     return new Map(apps.flatMap((app) => { const url = appOwnUrl(app, blocked); return url ? [[app.runtime_agent_id ?? app.app_id, url] as const] : [] }))
   }, [apps])
+  const authorizedOriginAgents = new Map(originReadAgents.map((agent) => [agent.agent_id, agent]))
+  const blockedAgentOrigins = [window.location.origin, new URL(proxyUrl("/")).origin]
   const interfaceWorkspace = workspaceId ? encodeURIComponent(workspaceId) : null
-  const agentOwnUrls = new Map(interfaceWorkspace ? workloads.filter((agent) => agent.kind !== "app" && agent.interface?.ui_path && !apps.some((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id)).map((agent) => [agent.agent_id,
-    withEmbedTheme(proxyUrl(`/api/workspaces/${interfaceWorkspace}/agents/${encodeURIComponent(agent.agent_id)}/interface/ui/`), theme, readEmbedAppearance())]) : [])
-  const probeAgent = mainView === "terminal" ? workloads.find((agent) => agent.agent_id === selectedAgentId && agentOwnUrls.has(agent.agent_id) &&
+  const agentOwnUrls = new Map<string, string>(interfaceWorkspace ? workloads.filter((agent) => agent.kind !== "app" && agent.interface?.ui_path && !apps.some((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id)).flatMap((agent) => {
+    const authorized = authorizedOriginAgents.get(agent.agent_id)
+    const isolatedUrl = authorized && interfaceSignature(authorized) === interfaceSignature(agent) ? agentOriginUrl(authorized, blockedAgentOrigins) : null
+    const url = agentOriginMode === "isolated" ? isolatedUrl : agentOriginMode === "legacy" ? withEmbedTheme(proxyUrl(`/api/workspaces/${interfaceWorkspace}/agents/${encodeURIComponent(agent.agent_id)}/interface/ui/`), theme, readEmbedAppearance()) : null
+    return url ? [[agent.agent_id, url] as const] : []
+  }) : [])
+  const probeAgent = agentOriginMode === "legacy" && mainView === "terminal" ? workloads.find((agent) => agent.agent_id === selectedAgentId && agentOwnUrls.has(agent.agent_id) &&
     snapshot?.servers.some((machine) => machine.server_id === agent.server_id && machine.status === "online")) : undefined
   const probePath = probeAgent && interfaceWorkspace
     ? proxyUrl(`/api/workspaces/${interfaceWorkspace}/agents/${encodeURIComponent(probeAgent.agent_id)}/interface/ui/`) : undefined
   const uiProbeScope = JSON.stringify([user?.user_id, workspaceId, proxyUrl("/"), preview]) + ":"
   useAgentUiFallback(`${uiProbeScope}${probeAgent?.agent_id}`,
     preview ? undefined : probePath, user?.user_id)
-  for (const id of agentOwnUrls.keys()) if (agentUiIsRefused(`${uiProbeScope}${id}`)) agentOwnUrls.delete(id)
+  for (const id of agentOwnUrls.keys()) if (agentOriginMode === "legacy" && agentUiIsRefused(`${uiProbeScope}${id}`)) agentOwnUrls.delete(id)
   const workloadHref = (id: string) => appOwnUrls.get(id) ?? agentOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id)
   // Synchronous to preserve the user gesture; session authentication stays in
   // cookies. No credential or caller-supplied navigation URL is added.

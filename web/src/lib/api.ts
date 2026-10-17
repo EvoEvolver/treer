@@ -100,6 +100,8 @@ export interface Agent {
 }
 
 export interface AgentInterface {
+  // Proxy-authorized read models only; absent from runtime inventory events.
+  origin_url?: string
   protocol: string
   instance_id: string
   port: number
@@ -256,7 +258,8 @@ export interface MachineService {
 
 export interface ServiceIngress {
   ingress_id: string
-  service_id: string
+  target?: { kind: "service"; service_id: string } | { kind: "agent_interface"; agent_id: string }
+  service_id: string | null
   hostname: string
   url: string
   access: "public" | "workspace"
