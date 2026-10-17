@@ -12,6 +12,13 @@ pub(super) struct OwnerIdentity {
     digest: [u8; 32],
 }
 
+pub(super) fn open_parent_image(path: &Path) -> io::Result<File> {
+    // This is the parent's installed executable, not the immutable job copy.
+    // Retaining its identity must not prevent publication renaming the old
+    // Controller. Still deny write sharing; reparse and hardlink checks remain.
+    open_checked(path, false, FILE_SHARE_READ | FILE_SHARE_DELETE)
+}
+
 fn image_for_process(handle: HANDLE) -> io::Result<File> {
     let mut buffer = vec![0; 32_768];
     let mut length = buffer.len() as u32;
@@ -19,10 +26,9 @@ fn image_for_process(handle: HANDLE) -> io::Result<File> {
     if length == 0 || length as usize >= buffer.len() {
         return Err(denied());
     }
-    open_pinned(
-        &PathBuf::from(OsString::from_wide(&buffer[..length as usize])),
-        false,
-    )
+    open_parent_image(&PathBuf::from(OsString::from_wide(
+        &buffer[..length as usize],
+    )))
 }
 
 impl OwnerIdentity {

@@ -83,13 +83,21 @@ fn identity(file: &File) -> io::Result<(u32, u64, u32, u32)> {
 }
 
 fn open_pinned(path: &Path, directory: bool) -> io::Result<File> {
-    let file = OpenOptions::new()
-        .read(true)
-        .share_mode(if directory {
+    open_checked(
+        path,
+        directory,
+        if directory {
             FILE_SHARE_READ | FILE_SHARE_WRITE
         } else {
             FILE_SHARE_READ
-        })
+        },
+    )
+}
+
+fn open_checked(path: &Path, directory: bool, sharing: u32) -> io::Result<File> {
+    let file = OpenOptions::new()
+        .read(true)
+        .share_mode(sharing)
         .custom_flags(
             FILE_FLAG_OPEN_REPARSE_POINT
                 | if directory {
@@ -701,6 +709,7 @@ mod tests {
         fn drop(&mut self) {
             // Exact fixture files only, no recursive deletion or glob cleanup.
             let _ = std::fs::remove_file(self.directory.join("unexpected.dll"));
+            let _ = std::fs::remove_file(self.directory.join("controller.prev.exe"));
             let _ = std::fs::remove_file(&self.path);
             let _ = std::fs::remove_dir(&self.directory);
         }
@@ -818,6 +827,24 @@ mod tests {
         assert!(PinnedImage::open_blocking(&fixture.path, expected).is_err());
         set_fixture_security(&fixture.path, "");
         assert!(PinnedImage::open_blocking(&fixture.path, expected).is_ok());
+    }
+
+    #[test]
+    fn parent_image_pin_allows_rename_but_denies_writes_to_the_retained_file() {
+        let fixture = PrivateImage::new();
+        let parent_image = parent_proof::open_parent_image(&fixture.path).unwrap();
+        let before = identity(&parent_image).unwrap();
+        let expected = digest(&parent_image).unwrap();
+        let renamed = fixture.directory.join("controller.prev.exe");
+        std::fs::rename(&fixture.path, &renamed).unwrap();
+        assert_eq!(identity(&parent_image).unwrap(), before);
+        assert!(OpenOptions::new().write(true).open(&renamed).is_err());
+        let fresh = parent_proof::open_parent_image(&renamed).unwrap();
+        assert_eq!(identity(&fresh).unwrap(), before);
+        assert_eq!(digest(&fresh).unwrap(), expected);
+        drop(fresh);
+        drop(parent_image);
+        std::fs::rename(renamed, &fixture.path).unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

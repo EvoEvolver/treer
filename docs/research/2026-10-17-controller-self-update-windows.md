@@ -330,12 +330,27 @@ The parent handle and its non-reparse, read-pinned executable file remain owned
 by the proof. There is no PID reopen, process termination or impersonation on
 the child side.
 
+The parent's **installed** image handle permits `FILE_SHARE_READ |
+FILE_SHARE_DELETE`, while continuing to deny write sharing. It must not block
+the later publication rename of the installed Controller. The immutable job-copy
+handle still denies delete sharing. A native ordinary fixture renames a separate
+disposable image while the parent-image handle remains open, checks the retained
+file identity and digest through the renamed path, and verifies that writing to
+the renamed file still fails. This is file-sharing evidence, not a real running
+Controller publication test. A removed/replaced lookup path during later
+registration re-verification still refuses; this primitive does not reconstruct
+a session after publication or authorize retries.
+
 Registration comparison requires exact equality of parent PID, creation time,
 image volume/file identity and SHA256. It then rechecks the retained process's
 liveness and image identity/digest, including liveness after hashing. This proves
 only that registration fields match the kernel-attested parent at the check;
 it is not an authenticated transaction, mutual receipt or execution permit.
 ToolHelp parentage does not isolate other processes in the current account.
+It records the creator-selected parent PID: a creator with the necessary process
+rights can set a parent-process attribute. The trusted Controller creation path
+and private image directory are therefore essential; parentage alone is not
+stronger isolation from the current account.
 
 The native fixture uses one fixed 56-byte registration observation and one-byte
 success marker, with absolute five-second deadlines, solely to exercise this
@@ -349,6 +364,10 @@ new hosted native execution; cross compilation alone is not runtime evidence.
 This fixture transport is not a production protocol. The next sub-increment
 still needs attempt/intent/registration digest binding, fresh one-shot challenge,
 bounded typed frames and rejection of unknown/duplicate/out-of-order frames.
+The production registration must match the exact durable registration record
+and its digest, not just an owner's report over the pipe. Parent liveness and
+identity must be verified again at permit acceptance and immediately before ACK;
+the state-machine fixtures must test both points.
 Supervisor-owned locks, durable once-only permit/decision and installer Jobs
 remain subsequent reviewed work. The additional directory negatives, atomic
 production preparation and daemon-only construction gate in security3281 remain
