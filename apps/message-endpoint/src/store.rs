@@ -1,6 +1,5 @@
 //! Transactional queue slice. No public activation API exists: endpoints start
-//! paused until the separate Core verification contract is implemented/reviewed.
-//! Production file opening/permissions and daemon ownership are not implemented.
+//! paused until owner provisioning and runtime readback are implemented/reviewed.
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -9,6 +8,8 @@ use thiserror::Error;
 pub enum Error {
     #[error("queue unavailable")]
     Storage(#[from] rusqlite::Error),
+    #[error("private storage unavailable")]
+    PrivateStorage,
     #[error("binding unavailable")]
     Unavailable,
     #[error("idempotency conflict")]
@@ -43,6 +44,8 @@ impl Default for Limits {
 pub struct Store {
     db: Connection,
     limits: Limits,
+    #[cfg(unix)]
+    _private_files: Option<crate::private_store::PrivateFiles>,
 }
 
 /// One unique transport item, with stable IDs supplied by the trusted adapter.
@@ -63,9 +66,23 @@ pub struct Leased {
 }
 
 impl Store {
-    /// In-memory construction for hermetic development. A production opener is
-    /// intentionally absent until private-file and activation gates are reviewed.
+    /// In-memory construction for hermetic development.
     pub fn memory(limits: Limits) -> Result<Self, Error> {
+        Self::from_connection(Connection::open_in_memory()?, limits)
+    }
+
+    /// Unix-only private persistent store; never creates missing parent paths.
+    /// No runtime activation is implied by opening storage.
+    #[cfg(unix)]
+    pub fn open(directory: &std::path::Path, limits: Limits) -> Result<Self, Error> {
+        let (db, files) = crate::private_store::open(directory)?;
+        let mut store = Self::from_connection(db, limits)?;
+        crate::private_store::enable_wal(&store.db, directory)?;
+        store._private_files = Some(files);
+        Ok(store)
+    }
+
+    fn from_connection(db: Connection, limits: Limits) -> Result<Self, Error> {
         let max = Limits::default();
         if limits.endpoint_count <= 0
             || limits.endpoint_count > max.endpoint_count
@@ -78,29 +95,49 @@ impl Store {
         {
             return Err(Error::Invalid);
         }
-        let db = Connection::open_in_memory()?;
+        let application: i64 = db.query_row("PRAGMA application_id", [], |r| r.get(0))?;
+        let version: i64 = db.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+        let tables: i64 = db.query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table'",
+            [],
+            |r| r.get(0),
+        )?;
+        if !((application == 0 && version == 0 && tables == 0)
+            || (application == 1413828168 && version == 1))
+        {
+            return Err(Error::PrivateStorage);
+        }
         db.execute_batch(
             "PRAGMA foreign_keys=ON;
              PRAGMA synchronous=FULL;
-             CREATE TABLE endpoints (
+             BEGIN IMMEDIATE;
+             CREATE TABLE IF NOT EXISTS endpoints (
                 id TEXT PRIMARY KEY, generation INTEGER NOT NULL CHECK(generation>0),
                 paused INTEGER NOT NULL DEFAULT 1 CHECK(paused IN (0,1)),
                 recipient TEXT NOT NULL);
-             CREATE TABLE outbound (
+             CREATE TABLE IF NOT EXISTS outbound (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 endpoint TEXT NOT NULL REFERENCES endpoints(id), generation INTEGER NOT NULL,
                 delivery TEXT NOT NULL, message TEXT NOT NULL, payload BLOB NOT NULL,
                 digest BLOB NOT NULL, pending INTEGER NOT NULL DEFAULT 1,
                 UNIQUE(endpoint,generation,delivery), UNIQUE(endpoint,generation,message));
-             CREATE TABLE inbound (
+             CREATE TABLE IF NOT EXISTS inbound (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 endpoint TEXT NOT NULL REFERENCES endpoints(id), generation INTEGER NOT NULL,
                 external_id TEXT NOT NULL, recipient TEXT NOT NULL, body TEXT NOT NULL,
                 digest BLOB NOT NULL, pending INTEGER NOT NULL DEFAULT 1,
                 lease_token TEXT, lease_until INTEGER, core_id TEXT,
-                UNIQUE(endpoint,generation,external_id));",
+                UNIQUE(endpoint,generation,external_id));
+             PRAGMA application_id=1413828168;
+             PRAGMA user_version=1;
+             COMMIT;",
         )?;
-        Ok(Self { db, limits })
+        Ok(Self {
+            db,
+            limits,
+            #[cfg(unix)]
+            _private_files: None,
+        })
     }
 
     pub fn register_paused(

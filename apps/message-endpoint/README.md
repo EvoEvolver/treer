@@ -199,8 +199,10 @@ Retire old Apps only after acceptance. Backups include SQLite/config/secrets,
 No author push/deploy/restart. Cross-owner packaging/CI requests go to owners.
 
 The active protocol library now contains Core Message envelopes/fragments, not
-sockets/HMAC. Queue tests use in-memory SQLite, not production crash-durability proof.
-Production DB opener/WAL recovery, Core relay, transports and UI are unfinished.
+sockets/HMAC. Queue tests cover in-memory and private on-disk SQLite, including
+committed WAL recovery after an unclean child-process exit. This does not prove
+power-loss durability on every filesystem. Core relay, transports and UI remain
+unfinished; there is no production daemon entry point yet.
 Offline focused checks: `python3 apps/message-endpoint/tests/run.py` (stripped
 Treer/harness environment, private HOME/temp, private worktree target). Independent
 Cargo.lock pinned; review/audit dependencies and build scripts. No root Core gate.
@@ -215,6 +217,26 @@ idempotency keys derive from endpoint/generation/external ID, never SQLite row I
 a rebuild can reorder rows without changing the key. Relay startup must report
 its own binary hash to hub status (diagnostic only, never trust/authorization).
 Incomplete-transfer expiry/cleanup and capacity accounting, completed tombstone
-pruning, durable poison-message failure+ack, production no-follow/effective-UID
-storage opener and actual relay startup reporting remain P2 work. None may be
+pruning, durable poison-message failure+ack and actual relay startup reporting
+remain P2 work. None may be
 inferred as complete from the current in-memory queue tests.
+
+The Unix persistent store opener creates only the final dedicated state directory
+(0700); all parents must exist. Configure an absolute physical path with no
+symlink components, outside any `.git`/`.hg`/`.svn` ancestor. Existing state
+directories must already be 0700 and owned by the effective UID; unsafe permissions
+fail closed rather than silently changing a shared directory. Ancestors must be
+root/current-UID owned and not group/world-writable unless sticky. New database,
+lock and SQLite sidecar files are exclusively created at 0600; existing files
+must be regular, single-link, 0600 and owned by the effective UID. A lifetime
+nonblocking lock excludes another cooperating hub writer. SQLite opens the
+database with NOFOLLOW, uses WAL/FULL synchronization and checks sidecar permissions.
+Unknown database application/schema versions are rejected. This slice currently
+supports Unix only; Windows storage provisioning is not implemented.
+
+State is plaintext, including message bodies. Keep state and backups on encrypted
+storage. Stop this App before copying its complete state directory (including any
+WAL/SHM files); preserve private permissions and test recovery in isolation. Do
+not copy only the main database while it is running. These checks do not defend
+against another process running under the same OS UID; use a dedicated user or
+container. Do not run the App with elevated privileges.
