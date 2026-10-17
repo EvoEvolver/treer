@@ -980,7 +980,10 @@ not configured, every client would share the front's address, so when the peer
 is a private, loopback or link-local address and no trusted range is set, the
 per-client limit is not enforced (the service limit still is) and the Proxy
 logs a fixed warning once; per-client limits are effective only with a public
-peer or a configured front, which #142 must state.
+peer or a configured front, which #142 must state. Private, loopback and
+link-local peers are therefore always "front or internal" to the Proxy: a
+Proxy exposed directly to untrusted clients on a private network relies on the
+per-service limits and the global connection budget alone.
 
 Workspace ingress gets the time bounds (body idle, response header, response
 idle) and the framing check but no rate limits and no default body cap:
