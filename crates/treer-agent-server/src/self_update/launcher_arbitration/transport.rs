@@ -58,9 +58,13 @@ impl Observation<'_> {
 /// invalid framing), never retry it as Pending. These integration guards are
 /// not implemented here; raw unit fixtures confer no authority.
 /// The caller exclusively owns a private cancellation socket's read endpoint;
+/// only supervisor-internal signal/shutdown handling may hold its write endpoint,
+/// never the owner or another untrusted party. Integration must test that boundary.
 /// data, write-half-close, peer disappearance or a socket error cancels reading.
 /// Cancellation wins when both descriptors are ready in the same poll. It is
 /// an interruption signal, not evidence about the permit peer or its writers.
+/// A cancelled read must invalidate Pending to Uncertain like every read error:
+/// a complete unread permit may remain buffered, so it cannot prove no permit.
 pub fn read<'a>(
     receiver: &'a mut UnixStream,
     cancellation: &UnixStream,

@@ -781,6 +781,15 @@ not establish those guarantees. Wire the existing cancellable poll wait to the
 supervisor's exclusively owned cancellation channel, retaining the same absolute
 deadline and fail-closed arbitration requirement.
 
+Cancellation wiring prerequisites (security2706): the cancellation write endpoint
+must remain exclusively inside supervisor signal/shutdown handling; neither the
+owner nor another untrusted party may hold or write it. Test endpoint ownership
+when the real caller is added. `update_launcher_permit_read_cancelled` must
+invalidate pending arbitration to `Uncertain`, just like other read failures.
+A complete permit may still be buffered after cancellation; cancellation can
+never justify `ClosedWithoutPermit`. These are required integration guards,
+not guarantees implemented by the current raw reader.
+
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the
 authenticated transport/drain module. Tie it to the actual still-open receiver
