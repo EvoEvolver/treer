@@ -55,6 +55,12 @@ pub struct Binding {
     pub expected_cwd: String,
     pub expected_server_id: String,
 }
+/// Internal worker observation: capture requested_at BEFORE querying Core.
+/// Never deserialize this object from an owner/browser API request.
+pub struct Readback {
+    pub observed: Option<AgentMetadata>,
+    pub requested_at: i64,
+}
 #[derive(Serialize)]
 pub struct View {
     pub binding: Binding,
@@ -220,7 +226,15 @@ impl<M: Mailbox + Directory> Hub<M> {
     pub fn refresh(&mut self, id: &str, now: i64) -> Result<(), Error> {
         let revision = self.view(id)?.revision;
         let observed = self.mailbox.metadata(id).ok();
-        self.record_readback(id, revision, observed, now)
+        self.record_readback(
+            id,
+            revision,
+            Readback {
+                observed,
+                requested_at: now,
+            },
+            now,
+        )
     }
     /// State-only completion of a Core per-ID query. The runtime, never browser
     /// JSON, supplies `observed`; revision fencing rejects an obsolete query.
@@ -228,16 +242,23 @@ impl<M: Mailbox + Directory> Hub<M> {
         &mut self,
         id: &str,
         revision: i64,
-        observed: Option<AgentMetadata>,
+        readback: Readback,
         now: i64,
     ) -> Result<(), Error> {
-        if now < 0 {
+        if readback.requested_at < 0
+            || now < readback.requested_at
+            || now - readback.requested_at > READBACK_TTL
+        {
             return Err(Error::Binding);
         }
         let view = self.view(id)?;
         if view.revision != revision {
             return Err(Error::Revision);
         }
+        if view.checked_at.is_some_and(|at| at > readback.requested_at) {
+            return Err(Error::Binding);
+        }
+        let observed = readback.observed;
         let expected = view.binding;
         let reason = match &observed {
             None => "metadata_unavailable",
@@ -262,7 +283,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         let tx = self.store.db.transaction()?;
         tx.execute(
             "UPDATE hub_bindings SET observed=?2,checked_at=?3 WHERE endpoint=?1",
-            params![id, text, now],
+            params![id, text, readback.requested_at],
         )?;
         if reason != "matched" {
             tx.execute("UPDATE endpoints SET paused=1 WHERE id=?1", [id])?;
@@ -276,7 +297,15 @@ impl<M: Mailbox + Directory> Hub<M> {
     #[cfg(test)]
     pub fn resume(&mut self, id: &str, revision: i64, now: i64) -> Result<(), Error> {
         let observed = self.mailbox.metadata(id).ok();
-        self.resume_after_readback(id, revision, observed, now)
+        self.resume_after_readback(
+            id,
+            revision,
+            Readback {
+                observed,
+                requested_at: now,
+            },
+            now,
+        )
     }
     /// Owner-service internal API: authenticate owner/CSRF/confirmation first,
     /// fetch Core metadata outside state access, then submit this exact revision.
@@ -284,13 +313,13 @@ impl<M: Mailbox + Directory> Hub<M> {
         &mut self,
         id: &str,
         revision: i64,
-        observed: Option<AgentMetadata>,
+        readback: Readback,
         now: i64,
     ) -> Result<(), Error> {
         if self.blocked()? {
             return Err(Error::FailureBudget);
         }
-        self.record_readback(id, revision, observed, now)?;
+        self.record_readback(id, revision, readback, now)?;
         let view = self.view(id)?;
         if view.revision != revision {
             return Err(Error::Revision);
@@ -1025,8 +1054,16 @@ mod tests {
         )
         .unwrap();
         hub.add_binding(binding()).unwrap();
-        hub.resume_after_readback("ag_endpoint", 1, Some(metadata()), NOW)
-            .unwrap();
+        hub.resume_after_readback(
+            "ag_endpoint",
+            1,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW,
+            },
+            NOW,
+        )
+        .unwrap();
         hub.maintenance(NOW).unwrap();
         let wire = outbound("body").remove(0);
         hub.admit_core_delivery(&delivery("del_state", "ag_endpoint", &wire), NOW)
@@ -1037,17 +1074,97 @@ mod tests {
         // Ack intentionally stays with the worker AFTER these commits.
     }
     #[test]
+    fn delayed_readback_does_not_extend_freshness_or_resume_and_cannot_replace_newer_query() {
+        let (mut hub, _) = fixture();
+        assert!(hub
+            .resume_after_readback(
+                "ag_endpoint",
+                1,
+                Readback {
+                    observed: Some(metadata()),
+                    requested_at: NOW
+                },
+                NOW + 31
+            )
+            .is_err());
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        hub.resume_after_readback(
+            "ag_endpoint",
+            1,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW,
+            },
+            NOW + 10,
+        )
+        .unwrap();
+        assert_eq!(hub.view("ag_endpoint").unwrap().checked_at, Some(NOW));
+        assert!(hub.active("ag_endpoint", NOW + 31).is_err());
+        hub.record_readback(
+            "ag_endpoint",
+            2,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW + 20,
+            },
+            NOW + 21,
+        )
+        .unwrap();
+        let mut older = metadata();
+        older.path = Some("/stale/path".into());
+        assert!(hub
+            .record_readback(
+                "ag_endpoint",
+                2,
+                Readback {
+                    observed: Some(older),
+                    requested_at: NOW + 19
+                },
+                NOW + 22
+            )
+            .is_err());
+        assert!(!hub.view("ag_endpoint").unwrap().paused);
+        assert_eq!(hub.view("ag_endpoint").unwrap().checked_at, Some(NOW + 20));
+        assert!(hub
+            .record_readback(
+                "ag_endpoint",
+                2,
+                Readback {
+                    observed: Some(metadata()),
+                    requested_at: NOW + 23
+                },
+                NOW + 22
+            )
+            .is_err());
+    }
+    #[test]
     fn stale_metadata_completion_cannot_override_newer_owner_pause() {
         let (mut hub, _) = fixture();
         activate(&mut hub);
         let revision = hub.view("ag_endpoint").unwrap().revision;
         hub.pause("ag_endpoint", revision).unwrap();
         assert!(matches!(
-            hub.record_readback("ag_endpoint", revision, Some(metadata()), NOW + 1),
+            hub.record_readback(
+                "ag_endpoint",
+                revision,
+                Readback {
+                    observed: Some(metadata()),
+                    requested_at: NOW + 1
+                },
+                NOW + 1
+            ),
             Err(Error::Revision)
         ));
         assert!(matches!(
-            hub.resume_after_readback("ag_endpoint", revision, Some(metadata()), NOW + 1),
+            hub.resume_after_readback(
+                "ag_endpoint",
+                revision,
+                Readback {
+                    observed: Some(metadata()),
+                    requested_at: NOW + 1
+                },
+                NOW + 1
+            ),
             Err(Error::Revision)
         ));
         let view = hub.view("ag_endpoint").unwrap();

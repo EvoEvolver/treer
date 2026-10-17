@@ -163,7 +163,7 @@ mod tests {
     use super::*;
     use crate::{
         core::{AgentMetadata, Delivery},
-        hub::Binding,
+        hub::{Binding, Readback},
         protocol::{Direction, Envelope, Fragment, Sender, SenderKind},
         store::{Limits, Store},
         telegram::{Error as TransportError, Target},
@@ -226,8 +226,16 @@ mod tests {
             },
         )
         .unwrap();
-        hub.resume_after_readback("ag_endpoint", 2, Some(metadata()), NOW)
-            .unwrap();
+        hub.resume_after_readback(
+            "ag_endpoint",
+            2,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW,
+            },
+            NOW,
+        )
+        .unwrap();
         let env = Envelope::Outbound {
             delivery_id: "del_source".into(),
             message_id: "msg_source".into(),
@@ -347,8 +355,16 @@ mod tests {
             )
             .unwrap();
         assert_eq!(unsent, (0, None));
-        hub.resume_after_readback("ag_endpoint", 5, Some(metadata()), NOW + 1)
-            .unwrap();
+        hub.resume_after_readback(
+            "ag_endpoint",
+            5,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW + 1,
+            },
+            NOW + 1,
+        )
+        .unwrap();
         let next = hub
             .prepare_telegram_chunk("ag_endpoint", NOW + 1, &"4".repeat(64))
             .unwrap()
@@ -400,8 +416,16 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM telegram_chunks", [], |r| r.get(0))
             .unwrap();
         assert_eq!(chunks, 0);
-        hub.resume_after_readback("ag_endpoint", 5, Some(metadata()), NOW)
-            .unwrap();
+        hub.resume_after_readback(
+            "ag_endpoint",
+            5,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW,
+            },
+            NOW,
+        )
+        .unwrap();
         assert_eq!(
             hub.store
                 .save_fragment("ag_endpoint", 1, Direction::Outbound, &wire, NOW)
@@ -432,8 +456,16 @@ mod tests {
             hub.recover_parked("ag_endpoint", 3, &id, Recovery::Retry, "human_owner", NOW),
             Err(Error::Revision)
         ));
-        hub.resume_after_readback("ag_endpoint", 4, Some(metadata()), NOW)
-            .unwrap();
+        hub.resume_after_readback(
+            "ag_endpoint",
+            4,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW,
+            },
+            NOW,
+        )
+        .unwrap();
         assert!(hub
             .recover_parked("ag_endpoint", 5, &id, Recovery::Retry, "human_owner", NOW)
             .is_err());

@@ -417,6 +417,10 @@ allows independent channel tasks; actual scheduler/UI stall tests remain pending
 The Core receive/readback side follows the same boundary. Workers fetch current
 metadata outside state access, then submit `record_readback` with the binding
 revision; stale completions cannot override a newer owner pause or mutation.
+`Readback.requested_at` is captured before the Core query, retained as
+`checked_at`, and must be no more than 30 seconds old at completion. Delayed
+results cannot extend freshness or replace a newer observation, and future
+timestamps are rejected. This struct is never accepted from browser JSON.
 `resume_after_readback` is an internal owner-service operation, never a browser
 metadata upload. `admit_core_delivery` commits state without network calls; only
 its successful return permits the worker to acknowledge Core. Ack failures replay
