@@ -254,6 +254,15 @@ the caller. This is not containment of another same-account actor or an escaping
 or credential-changing installer. Permission errors still fail, except for the
 existing narrow Darwin exited-singleton exception.
 
+Linux also enumerates every matching process's `/proc/<pid>/task/<tid>/stat`:
+a zombie thread-group leader alone is insufficient, because sibling threads may
+still run after the main thread exits. Every observed thread must be Z/X with
+matching TID and process group; empty, vanished or unavailable task inventory
+never grants a witness. A deterministic procfs fixture covers a zombie main
+thread with R/D/S/T/I siblings, then Z/X siblings, missing inventory and identity
+mismatches. This tests the observation boundary without inducing real stuck
+threads or relying on a scheduler race after SIGKILL.
+
 The original execution deadline also covers quiescence; failed, cancelled or
 expired observation returns no witness and cannot authorize rollback or lock
 release. A slow synchronous inventory cannot return a late successful witness;

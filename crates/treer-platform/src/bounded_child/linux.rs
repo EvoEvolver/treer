@@ -3,6 +3,7 @@
 use std::{
     fs::File,
     io::{self, Read},
+    path::Path,
 };
 
 fn invalid() -> io::Error {
@@ -32,8 +33,58 @@ fn state(bytes: &[u8], expected: u32) -> io::Result<(u32, bool)> {
     Ok((group, matches!(state, "Z" | "X")))
 }
 
+fn read_state(path: &Path, pid: u32) -> io::Result<(u32, bool)> {
+    let mut bytes = Vec::new();
+    File::open(path)?
+        .take(8193)
+        .read_to_end(&mut bytes)
+        .map_err(|_| invalid())?;
+    if bytes.len() > 8192 {
+        return Err(invalid());
+    }
+    state(&bytes, pid)
+}
+
+fn threads_quiescent(process: &Path, group: u32) -> io::Result<bool> {
+    let mut observed = false;
+    let entries = match std::fs::read_dir(process.join("task")) {
+        Ok(entries) => entries,
+        // In particular, Linux can make task inventory unavailable after the
+        // main thread exits while siblings still execute. Never infer death.
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(invalid()),
+    };
+    for (count, entry) in entries.enumerate() {
+        if count >= 65536 {
+            return Err(invalid());
+        }
+        let entry = entry.map_err(|_| invalid())?;
+        let tid = entry
+            .file_name()
+            .to_str()
+            .and_then(|s| s.parse::<u32>().ok())
+            .ok_or_else(invalid)?;
+        let (thread_group, dead) = match read_state(&entry.path().join("stat"), tid) {
+            Ok(state) => state,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(_) => return Err(invalid()),
+        };
+        if thread_group != group {
+            return Err(invalid());
+        }
+        if !dead {
+            return Ok(false);
+        }
+        observed = true;
+    }
+    Ok(observed)
+}
+
 pub(super) fn quiescent(group: rustix::process::Pid) -> io::Result<bool> {
-    let group = group.as_raw_nonzero().get() as u32;
+    quiescent_at(Path::new("/proc"), group.as_raw_nonzero().get() as u32)
+}
+
+fn quiescent_at(root: &Path, group: u32) -> io::Result<bool> {
     let mut leader = false;
     // Procfs has no atomic per-group inventory API. SIGKILL was submitted first
     // while the leader stays reserved. Cooperating members must stay in their
@@ -43,10 +94,7 @@ pub(super) fn quiescent(group: rustix::process::Pid) -> io::Result<bool> {
     // kill_something_info/__kill_pgrp_info; kernel/fork.c copy_process. This is
     // not an atomic procfs snapshot or containment of uncooperative children.
     // Missing/changed/denied metadata is never used as proof of exit.
-    for (count, entry) in std::fs::read_dir("/proc")
-        .map_err(|_| invalid())?
-        .enumerate()
-    {
+    for (count, entry) in std::fs::read_dir(root).map_err(|_| invalid())?.enumerate() {
         if count >= 65536 {
             return Err(invalid());
         }
@@ -55,23 +103,17 @@ pub(super) fn quiescent(group: rustix::process::Pid) -> io::Result<bool> {
         let Some(pid) = name.to_str().and_then(|s| s.parse::<u32>().ok()) else {
             continue;
         };
-        let mut bytes = Vec::new();
-        let file = match File::open(entry.path().join("stat")) {
-            Ok(file) => file,
+        let (member_group, dead) = match read_state(&entry.path().join("stat"), pid) {
+            Ok(state) => state,
             // Unrelated processes can disappear; their missing stat is not
             // used to attest our group. Require the owned leader below.
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             Err(_) => return Err(invalid()),
         };
-        file.take(8193)
-            .read_to_end(&mut bytes)
-            .map_err(|_| invalid())?;
-        if bytes.len() > 8192 {
-            return Err(invalid());
-        }
-        let (member_group, dead) = state(&bytes, pid)?;
         if member_group == group {
-            if !dead {
+            // /proc/<tgid>/stat describes only its leader thread. A zombie
+            // leader can coexist with a live sibling; inspect EVERY task.
+            if !dead || !threads_quiescent(&entry.path(), group)? {
                 return Ok(false);
             }
             leader |= pid == group;
@@ -83,6 +125,49 @@ pub(super) fn quiescent(group: rustix::process::Pid) -> io::Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zombie_leader_with_live_sibling_never_grants_quiescence() {
+        struct Fixture(std::path::PathBuf);
+        impl Drop for Fixture {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
+            }
+        }
+        let root =
+            std::env::temp_dir().join(format!("treer-task-inventory-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let fixture = Fixture(root);
+        let process = fixture.0.join("123");
+        let leader = process.join("task/123");
+        let sibling = process.join("task/124");
+        std::fs::create_dir_all(&leader).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        std::fs::write(process.join("stat"), b"123 (leader) Z 1 123").unwrap();
+        std::fs::write(leader.join("stat"), b"123 (leader) Z 1 123").unwrap();
+        // Fixed procfs fixture for pthread_exit(main) with a surviving sibling.
+        // Also represents the post-SIGKILL window before that sibling exits;
+        // no dependence on a scheduler race or uninterruptible real process.
+        for status in ["R", "D", "S", "T", "I"] {
+            std::fs::write(sibling.join("stat"), format!("124 (worker) {status} 1 123")).unwrap();
+            assert!(!quiescent_at(&fixture.0, 123).unwrap());
+        }
+        for status in ["Z", "X"] {
+            std::fs::write(sibling.join("stat"), format!("124 (worker) {status} 1 123")).unwrap();
+            assert!(quiescent_at(&fixture.0, 123).unwrap());
+        }
+        std::fs::write(sibling.join("stat"), b"124 (worker) Z 1 999").unwrap();
+        assert!(quiescent_at(&fixture.0, 123).is_err());
+        std::fs::write(sibling.join("stat"), b"123 (worker) Z 1 123").unwrap();
+        assert!(quiescent_at(&fixture.0, 123).is_err());
+        std::fs::remove_file(sibling.join("stat")).unwrap();
+        assert!(!quiescent_at(&fixture.0, 123).unwrap());
+        std::fs::remove_dir_all(process.join("task")).unwrap();
+        std::fs::create_dir(process.join("task")).unwrap();
+        assert!(!quiescent_at(&fixture.0, 123).unwrap());
+        std::fs::remove_dir(process.join("task")).unwrap();
+        assert!(!quiescent_at(&fixture.0, 123).unwrap());
+    }
 
     #[test]
     fn stat_parser_handles_opaque_comm_and_rejects_bad_identity_or_fields() {
