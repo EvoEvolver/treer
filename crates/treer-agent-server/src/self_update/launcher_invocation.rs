@@ -458,6 +458,8 @@ mod tests {
         if std::env::var_os("TREER_TEST_REGISTRATION_NOT_PRIVATE").is_none() {
             treer_platform::process_image::enter_private_session().unwrap();
         }
+        let _owner_socket = std::env::var_os("TREER_TEST_REGISTRATION_OWNER_SOCKET")
+            .map(|path| std::os::unix::net::UnixStream::connect(path).unwrap());
         std::fs::write(
             std::env::var_os("TREER_TEST_REGISTRATION_READY").unwrap(),
             b"ready",
@@ -512,10 +514,15 @@ mod tests {
         supervisor_registration_cases(&["expected_replaced"]);
     }
 
+    #[test]
+    fn supervisor_registration_rejects_an_authenticated_child_as_permit_owner() {
+        supervisor_registration_cases(&["wrong_owner"]);
+    }
+
     fn supervisor_registration_cases(faults: &[&str]) {
         use std::{
             io::Write,
-            os::unix::fs::{symlink, MetadataExt, PermissionsExt},
+            os::unix::fs::{symlink, DirBuilderExt, MetadataExt, PermissionsExt},
             process::{Command, Stdio},
             time::{Duration, Instant},
         };
@@ -525,6 +532,12 @@ mod tests {
             fn drop(&mut self) {
                 let _ = self.0.kill();
                 let _ = self.0.wait();
+            }
+        }
+        struct SocketDirectory(std::path::PathBuf);
+        impl Drop for SocketDirectory {
+            fn drop(&mut self) {
+                std::fs::remove_dir_all(&self.0).unwrap();
             }
         }
         for &fault in faults {
@@ -578,6 +591,23 @@ mod tests {
                 &expected_digest,
             )
             .unwrap();
+            // A separate short private directory avoids sockaddr_un's limit
+            // even with a long macOS TMPDIR or deeply nested job directory.
+            let owner_directory = (fault == "wrong_owner").then(|| {
+                let path =
+                    std::path::Path::new("/tmp").join(format!("tu-{}", uuid::Uuid::new_v4()));
+                std::fs::DirBuilder::new()
+                    .mode(0o700)
+                    .create(&path)
+                    .unwrap();
+                SocketDirectory(path)
+            });
+            let owner_socket = owner_directory
+                .as_ref()
+                .map(|directory| directory.0.join("s"));
+            let owner_listener = (fault == "wrong_owner").then(|| {
+                std::os::unix::net::UnixListener::bind(owner_socket.as_ref().unwrap()).unwrap()
+            });
             let mut child = Child(
                 Command::new(if matches!(fault, "wrong_image" | "expected_replaced") {
                     &copied
@@ -591,6 +621,11 @@ mod tests {
                 ])
                 .env_clear()
                 .env("TREER_TEST_REGISTRATION_READY", &ready)
+                .envs(
+                    owner_socket
+                        .as_ref()
+                        .map(|path| ("TREER_TEST_REGISTRATION_OWNER_SOCKET", path)),
+                )
                 .envs((fault == "pre_exec").then_some(("TREER_TEST_REGISTRATION_EXEC", &copied)))
                 .env("TREER_TEST_REGISTRATION_EXEC_READY", &exec_ready)
                 .envs(
@@ -668,6 +703,35 @@ mod tests {
             let mut registered = result.unwrap();
             registered.binding().unwrap();
             let bytes = std::fs::read(&path).unwrap();
+            if let Some(listener) = owner_listener {
+                use crate::self_update::{
+                    handoff::AuthenticatedPeer, launcher_arbitration::Decision,
+                };
+                use std::os::unix::net::UnixStream;
+                let (stream, _) = listener.accept().unwrap();
+                let image = ProcessImage::capture(child.0.id()).unwrap();
+                let digest = crate::self_update::images::digest_file(image.executable()).unwrap();
+                let mut peer =
+                    AuthenticatedPeer::authenticate(stream, &image, image.executable(), &digest)
+                        .unwrap();
+                let (cancel, _writer) = UnixStream::pair().unwrap();
+                // Real authenticated peer, same UID/image, correct registered
+                // child: still not its retained parent. Refuse before reading.
+                assert_eq!(
+                    registered
+                        .read_launcher_frame(&mut peer, &cancel)
+                        .err()
+                        .unwrap()
+                        .to_string(),
+                    "update_recovery_required"
+                );
+                assert_eq!(registered.decision(), Decision::Uncertain);
+                assert!(registered.read_launcher_frame(&mut peer, &cancel).is_err());
+                assert_eq!(registered.decision(), Decision::Uncertain);
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(journal.read().unwrap(), before);
+                continue;
+            }
             if fault == "lost_gate" {
                 // Model loss of all in-memory registration authority, without
                 // claiming this is a real supervisor process-crash test.
@@ -698,6 +762,25 @@ mod tests {
             assert_eq!(value["intent_inode"], intent_metadata.ino());
             assert_eq!(value["attempt"], attempt.to_string());
             assert_eq!(value["pid"], child.0.id());
+            assert_eq!(value["schema_version"], 2);
+            assert_eq!(value["owner_pid"], std::process::id());
+            let owner_image = ProcessImage::capture(std::process::id()).unwrap();
+            assert_eq!(
+                value["owner_creation_identity"],
+                owner_image.creation_identity()
+            );
+            assert_eq!(
+                value["owner_image_device"],
+                owner_image.executable().metadata().unwrap().dev()
+            );
+            assert_eq!(
+                value["owner_image_inode"],
+                owner_image.executable().metadata().unwrap().ino()
+            );
+            assert_eq!(
+                value["owner_image_sha256"],
+                crate::self_update::images::digest_file(owner_image.executable()).unwrap()
+            );
             assert_eq!(value["session"], child.0.id());
             assert_eq!(value["process_group"], child.0.id());
             assert_eq!(

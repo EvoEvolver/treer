@@ -223,6 +223,11 @@ impl AuthenticatedPeer {
             .map_err(|_| anyhow::anyhow!("update_handoff_peer_changed"))
     }
 
+    pub(in crate::self_update) fn verify_launcher_owner(&self, owner: &ProcessImage) -> Result<()> {
+        self.verify()?;
+        verify_launcher_owner(&self.image, owner)
+    }
+
     /// This is NOT an ownership ACK. The parent retains locks until a durable
     /// job-bound ACK has been checked by the future coordinator.
     pub fn send_locks(&self, locks: &SelectionLocks) -> Result<()> {
@@ -238,6 +243,22 @@ impl AuthenticatedPeer {
         self.verify()?;
         Ok(locks)
     }
+}
+
+fn verify_launcher_owner(image: &ProcessImage, owner: &ProcessImage) -> Result<()> {
+    let result = (|| -> Result<()> {
+        owner.verify_current()?;
+        image.verify_current()?;
+        if image.pid() != owner.pid()
+            || image.creation_identity() != owner.creation_identity()
+            || !image.matches_file(owner.executable())?
+        {
+            bail!("update_recovery_required");
+        }
+        owner.verify_current()?;
+        Ok(())
+    })();
+    result.map_err(|_| anyhow::anyhow!("update_recovery_required"))
 }
 
 fn revalidate_launcher_image(
@@ -596,6 +617,9 @@ mod tests {
             let frame = peer.read_launcher_frame(&mut arbitration, &cancel).unwrap();
             assert_eq!(arbitration.decision(), Decision::Pending);
             assert!(child.0.try_wait().unwrap().is_none());
+            frame.verify_launcher_owner(&image).unwrap();
+            let parent = ProcessImage::capture(std::process::id()).unwrap();
+            assert!(frame.verify_launcher_owner(&parent).is_err());
             if killed {
                 child.0.kill().unwrap();
             } else {
@@ -604,6 +628,7 @@ mod tests {
             let status = child.0.wait().unwrap();
             assert_eq!(status.success(), !killed);
             assert!(image.verify_current().is_err());
+            assert!(frame.verify_launcher_owner(&image).is_err());
             // The frame really passed the read boundary while the peer was
             // alive. Only the acceptance-time identity check can reject it.
             assert_eq!(
@@ -926,6 +951,10 @@ mod tests {
         let mut authenticated =
             AuthenticatedPeer::authenticate(stream, &image, image.executable(), &digest).unwrap();
         authenticated.verify().unwrap();
+        authenticated.verify_launcher_owner(&image).unwrap();
+        // Both are live, same UID and executable, but only the exact retained
+        // process is an owner; authenticated child cannot stand in for parent.
+        assert!(authenticated.verify_launcher_owner(&parent).is_err());
         drop(child.0.stdin.take());
         assert!(child.0.wait().unwrap().success());
         assert!(authenticated.verify().is_err());

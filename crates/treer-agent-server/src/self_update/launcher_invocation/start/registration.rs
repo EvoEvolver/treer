@@ -51,6 +51,11 @@ struct Registration {
     image_device: u64,
     image_inode: u64,
     image_sha256: String,
+    owner_pid: u32,
+    owner_creation_identity: String,
+    owner_image_device: u64,
+    owner_image_inode: u64,
+    owner_image_sha256: String,
 }
 
 /// Fresh exclusive registration, retaining the original intent and OS image.
@@ -61,6 +66,8 @@ struct Registration {
 pub struct RegisteredSupervisor<'plan, 'owner> {
     intent: RecordedIntent<'plan, 'owner>,
     image: ProcessImage,
+    owner: ProcessImage,
+    owner_image_sha256: String,
     expected: &'plan VerifiedImage<'plan>,
     file: File,
     name: &'static str,
@@ -98,13 +105,17 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             self.verify()?;
             require_live_child(child)?;
             let image = ProcessImage::capture(child.id())?;
+            let owner = ProcessImage::capture(std::process::id())?;
+            image.verify_parent(&owner)?;
+            let owner_metadata = owner.executable().metadata()?;
+            let owner_image_sha256 = digest_file(owner.executable())?;
             expected.verify_process(&image)?;
             require_live_child(child)?;
             let intent_metadata = self.file.metadata()?;
             let image_metadata = image.executable().metadata()?;
             let image_sha256 = digest_file(image.executable())?;
             let record = Registration {
-                schema_version: 1,
+                schema_version: 2,
                 job_id: self.invocation.receipt.job_id,
                 operation: self.invocation.operation,
                 attempt,
@@ -119,6 +130,11 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
                 image_device: image_metadata.dev(),
                 image_inode: image_metadata.ino(),
                 image_sha256: image_sha256.clone(),
+                owner_pid: owner.pid(),
+                owner_creation_identity: owner.creation_identity().to_owned(),
+                owner_image_device: owner_metadata.dev(),
+                owner_image_inode: owner_metadata.ino(),
+                owner_image_sha256: owner_image_sha256.clone(),
             };
             let bytes = serde_json::to_vec(&record)?;
             if bytes.len() > LIMIT {
@@ -132,6 +148,7 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             // than only an earlier preflight. All uncertainty preserves evidence.
             self.verify()?;
             expected.verify_process(&image)?;
+            image.verify_parent(&owner)?;
             require_live_child(child)?;
             let mut file = self.invocation.journal.directory.create_file(name)?;
             file.write_all(&bytes)?;
@@ -139,6 +156,7 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             self.invocation.journal.directory.sync()?;
             self.verify()?;
             expected.verify_process(&image)?;
+            image.verify_parent(&owner)?;
             require_live_child(child)?;
             let binding = Binding::new(
                 attempt,
@@ -151,6 +169,8 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             let proof = RegisteredSupervisor {
                 intent: self,
                 image,
+                owner,
+                owner_image_sha256,
                 expected,
                 file,
                 name,
@@ -182,6 +202,10 @@ impl RegisteredSupervisor<'_, '_> {
         let result = (|| -> Result<()> {
             self.intent.verify()?;
             self.expected.verify_process(&self.image)?;
+            self.image.verify_parent(&self.owner)?;
+            if digest_file(self.owner.executable())? != self.owner_image_sha256 {
+                bail!("update_recovery_required");
+            }
             if digest_file(self.image.executable())? != self.image_sha256 {
                 bail!("update_recovery_required");
             }
@@ -229,8 +253,8 @@ impl RegisteredSupervisor<'_, '_> {
     }
 
     /// The peer is the independently authenticated permit OWNER, not the
-    /// registered supervisor. The future lifecycle must derive its expected
-    /// image from the owned parent and keep cancellation endpoints private.
+    /// registered supervisor. Require the exact retained OS parent, not any
+    /// authenticated same-account process. Cancellation ownership is separate.
     /// No caller-provided Binding/gate can replace the one owned here.
     pub fn read_launcher_frame<'peer>(
         &mut self,
@@ -238,7 +262,13 @@ impl RegisteredSupervisor<'_, '_> {
         cancellation: &std::os::unix::net::UnixStream,
     ) -> Result<LauncherFrame<'peer>> {
         self.verify_for_decision()?;
-        peer.read_launcher_frame(&mut self.gate, cancellation)
+        if peer.verify_launcher_owner(&self.owner).is_err() {
+            self.gate.invalidate();
+            bail!("update_recovery_required");
+        }
+        let frame = peer.read_launcher_frame(&mut self.gate, cancellation)?;
+        self.verify_for_decision()?;
+        Ok(frame)
     }
 
     /// Recheck the original durable registration at delayed acceptance, then
@@ -246,6 +276,10 @@ impl RegisteredSupervisor<'_, '_> {
     /// terminal even if evidence is subsequently restored.
     pub fn accept_launcher_frame(&mut self, frame: LauncherFrame<'_>) -> Result<()> {
         self.verify_for_decision()?;
+        if frame.verify_launcher_owner(&self.owner).is_err() {
+            self.gate.invalidate();
+            bail!("update_recovery_required");
+        }
         self.gate.accept(frame)
     }
 }

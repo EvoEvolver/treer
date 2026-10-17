@@ -18,6 +18,10 @@ pub struct LauncherFrame<'a> {
 }
 
 impl LauncherFrame<'_> {
+    pub(in crate::self_update) fn verify_launcher_owner(&self, owner: &ProcessImage) -> Result<()> {
+        super::verify_launcher_owner(self.image, owner)
+    }
+
     pub fn kind(&self) -> transport::Kind {
         self.observation.kind()
     }

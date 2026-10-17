@@ -509,8 +509,18 @@ inode, its identity is no longer provable: fail closed with
 `update_recovery_required` and preserve evidence. Recovery must not treat this
 as a transient error to retry against the replacement image.
 This narrows identity to an owned Child running the expected executable; it is
-not authenticated IPC, proof of the permit owner's parent relationship or an
-all-descendants containment guarantee. Production lifecycle wiring must invoke this
+not application readiness or an all-descendants containment guarantee.
+Registration schema 2 additionally records and retains the registering process
+as the supervisor's OS-observed direct parent, including creation identity,
+executable inode and SHA256. Parent and child identities and their direct
+relationship are rechecked before/after publication and on later verification.
+The registered reader requires the authenticated permit peer to match that
+retained parent; delayed frame acceptance checks the same owner again. Another
+authenticated same-account process or sibling sharing its executable cannot
+substitute for it. These are live, point-in-time checks, not proof that every
+writer has disappeared or that cancellation endpoints are sealed. No record
+reconstruction or installer authority is introduced.
+Production lifecycle wiring must invoke this
 only after the supervisor's ready barrier confirms its intended image is running;
 owning a live Child or observing a private session alone does not establish that.
 The fixture ready markers are not production readiness authority. No production
@@ -557,8 +567,9 @@ mutation after a successful read forces Uncertain, and restoring exact bytes
 cannot reopen that gate. The wrapper performs full image hashes at read and
 acceptance boundaries as well as metadata access; it is not for polling.
 This closes metadata-only gate construction for current production callers,
-but still supplies no real supervisor entry, owned-parent provenance proof,
-sealed cancellation/writer-closure evidence, durable ACK/decision or executor.
+but still supplies no real supervisor entry or transfer of these retained
+parent/registration proofs into that process, sealed cancellation/writer-closure
+evidence, durable ACK/decision or executor.
 An in-memory Accepted value alone must never dispatch the installer. Those
 lifecycle and crash/recovery acceptance gates remain outstanding.
 

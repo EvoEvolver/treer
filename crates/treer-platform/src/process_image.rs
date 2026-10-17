@@ -120,6 +120,26 @@ impl ProcessImage {
         &self.image
     }
 
+    /// Re-observe the direct OS parent, with both retained process identities
+    /// still live. A saved PPID or an executable shared by siblings is not proof.
+    /// This is point-in-time provenance, not containment or writer quiescence.
+    pub fn verify_parent(&self, parent: &Self) -> io::Result<()> {
+        parent.verify_current()?;
+        for _ in 0..2 {
+            let current = Self::capture(self.pid)?;
+            if current.creation != self.creation
+                || current.device != self.device
+                || current.inode != self.inode
+                || current.parent != parent.pid
+                || self.pid == parent.pid
+            {
+                return Err(invalid());
+            }
+            parent.verify_current()?;
+        }
+        Ok(())
+    }
+
     /// Enumerate only this parent's direct children, not unrelated same-user
     /// processes. Recheck PPID on each captured candidate because process lists
     /// can race exit/reparenting. Exited/exec-racing candidates are not adopted.
@@ -245,6 +265,19 @@ mod tests {
                 std::thread::sleep(Duration::from_millis(5));
             }
             let image = ProcessImage::capture(child.0.id()).unwrap();
+            let parent = ProcessImage::capture(std::process::id()).unwrap();
+            image.verify_parent(&parent).unwrap();
+            assert!(image.verify_parent(&image).is_err());
+            assert!(parent.verify_parent(&image).is_err());
+            let mut stale_parent = ProcessImage::capture(std::process::id()).unwrap();
+            stale_parent.creation.push_str(":stale");
+            assert!(image.verify_parent(&stale_parent).is_err());
+            let mut sibling = Child(command.spawn().unwrap());
+            // A real live sibling has the same UID and executable but cannot
+            // be substituted for the parent. Keep its owned handle until done.
+            let sibling_image = ProcessImage::capture(sibling.0.id()).unwrap();
+            assert!(image.verify_parent(&sibling_image).is_err());
+            assert!(sibling.0.try_wait().unwrap().is_none());
             assert_eq!(image.verify_private_session().is_ok(), !group_only);
             std::fs::write(directory.0.join("release"), b"release").unwrap();
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -260,6 +293,7 @@ mod tests {
                 image.verify_private_session().is_err(),
                 "exited identity refused"
             );
+            assert!(image.verify_parent(&parent).is_err());
         }
     }
 
