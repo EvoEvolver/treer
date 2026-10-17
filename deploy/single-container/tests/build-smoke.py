@@ -23,6 +23,11 @@ def main():
     with tempfile.TemporaryDirectory(prefix="t132-build-smoke-", dir="/tmp") as temporary:
         root = Path(temporary)
         (root / "home").mkdir(); (root / "tmp").mkdir()
+        plugin = Path.home() / ".docker/cli-plugins/docker-buildx"
+        if plugin.is_file():
+            plugins = root / "home/.docker/cli-plugins"
+            plugins.mkdir(parents=True)
+            (plugins / "docker-buildx").symlink_to(plugin.resolve())
         env = {k: os.environ[k] for k in ("PATH", "LANG", "SHELL") if k in os.environ}
         env.update(HOME=str(root / "home"), TMPDIR=str(root / "tmp"), DOCKER_HOST=endpoint)
         result = subprocess.run(["sh", str(ROOT / "scripts/build-single-image.sh")],

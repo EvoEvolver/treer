@@ -21,11 +21,11 @@ From a clean checkout, with Git and Docker (including Buildx) installed:
 ./scripts/build-single-image.sh
 ```
 
-The script compiles the committed source in Docker, packages both Linux machine
-architectures, builds the Docker engine's amd64/arm64 server image, and loads it
+The script compiles the committed source in Docker, packages the Docker engine's native Linux machine
+architecture and server image, and loads it
 as `treer-single:<12-character commit>`. It prints the startup command and URLs
 without starting a server. The first build needs network access to fetch pinned
-base images and locked Rust/npm dependencies; compiling both architectures takes
+base images and locked Rust/npm dependencies; compiling the server and machine binaries takes
 time and uses Docker build cache for subsequent builds. Rust, Node and PostgreSQL
 do not need to be installed on the host. Uncommitted tracked changes are refused;
 ignored/untracked files and `.git` never enter the build context.

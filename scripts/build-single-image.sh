@@ -29,7 +29,12 @@ work=$(mktemp -d "${TMPDIR:-/tmp}/treer-single-build.XXXXXXXX")
 trap 'rm -rf -- "$work"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-mkdir "$work/home"
+mkdir -p "$work/home/.docker/cli-plugins"
+# Docker Desktop installs Buildx per user. Reuse only its executable, never
+# copy config.json, registry credentials or credential-helper configuration.
+if [ -x "$HOME/.docker/cli-plugins/docker-buildx" ]; then
+  ln -s "$HOME/.docker/cli-plugins/docker-buildx" "$work/home/.docker/cli-plugins/docker-buildx"
+fi
 docker() { env -i PATH="$PATH" HOME="$work/home" DOCKER_HOST="$endpoint" docker "$@"; }
 mkdir "$work/source"
 docker info >/dev/null 2>&1 || fail 'Docker daemon is unavailable; start Docker, then retry.'
