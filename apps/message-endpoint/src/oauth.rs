@@ -3,16 +3,22 @@
 use crate::owner_auth::{Error, OwnerAuth};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sha2::{Digest, Sha256};
-use std::{collections::HashMap, sync::Mutex};
-const FLOWS: usize = 100;
+use std::{
+    collections::HashMap,
+    net::IpAddr,
+    sync::Mutex,
+    time::{Duration, Instant},
+};
+const FLOWS: usize = 1000;
 const SESSIONS: usize = 100;
-const FLOW_TTL: i64 = 600;
+const FLOW_TTL: i64 = 300;
 const SESSION_TTL: i64 = 12 * 3600;
 struct Pending {
     verifier: String,
     browser: [u8; 32],
     created_at: i64,
     expires: i64,
+    source: IpAddr,
 }
 struct Session {
     token: String,
@@ -23,6 +29,12 @@ struct Session {
 struct Memory {
     flows: HashMap<[u8; 32], Pending>,
     sessions: HashMap<[u8; 32], Session>,
+    start_sources: HashMap<IpAddr, StartRate>,
+    start_global: Option<StartRate>,
+}
+struct StartRate {
+    window: Instant,
+    starts: u32,
 }
 #[derive(Default)]
 pub struct OAuthVault {
@@ -76,24 +88,83 @@ impl Memory {
     fn cleanup(&mut self, now: i64) {
         self.flows.retain(|_, flow| flow.expires > now);
         self.sessions.retain(|_, session| session.expires > now);
+        self.start_sources
+            .retain(|_, rate| rate.window.elapsed() < Duration::from_secs(60));
+    }
+    fn admit_start(&mut self, source: IpAddr, now: i64) -> Result<(), Error> {
+        let instant = Instant::now();
+        let global = self.start_global.get_or_insert(StartRate {
+            window: instant,
+            starts: 0,
+        });
+        if global.window.elapsed() >= Duration::from_secs(60) {
+            global.window = instant;
+            global.starts = 0;
+        }
+        if global.starts >= 100 {
+            return Err(Error::RateLimited);
+        }
+        if self
+            .flows
+            .values()
+            .filter(|flow| flow.source == source)
+            .count()
+            >= 5
+        {
+            return Err(Error::RateLimited);
+        }
+        if !self.start_sources.contains_key(&source) && self.start_sources.len() >= 2048 {
+            return Err(Error::LoginCapacity);
+        }
+        let rate = self.start_sources.entry(source).or_insert(StartRate {
+            window: instant,
+            starts: 0,
+        });
+        if rate.starts >= 5 {
+            return Err(Error::RateLimited);
+        }
+        // Before generating secrets or allocating a new pending flow. Only a
+        // different source may evict an old flow; never interrupt a fresh flow.
+        if self.flows.len() >= FLOWS {
+            let candidate = self
+                .flows
+                .iter()
+                .filter(|(_, flow)| {
+                    flow.source != source && flow.created_at <= now.saturating_sub(60)
+                })
+                .min_by_key(|(_, flow)| flow.created_at)
+                .map(|(key, _)| *key)
+                .ok_or(Error::LoginCapacity)?;
+            self.flows.remove(&candidate);
+        }
+        rate.starts += 1;
+        global.starts += 1;
+        Ok(())
     }
 }
 impl OAuthVault {
     pub fn start(&self, auth: &OwnerAuth, now: i64) -> Result<LoginStart, Error> {
+        self.start_from(auth, now, IpAddr::from([0, 0, 0, 0]))
+    }
+    /// Source is the router's socket peer, never an untrusted header or field.
+    pub fn start_from(
+        &self,
+        auth: &OwnerAuth,
+        now: i64,
+        source: IpAddr,
+    ) -> Result<LoginStart, Error> {
         if now < 0 {
             return Err(Error::OAuthState);
         }
         let expires = now.checked_add(FLOW_TTL).ok_or(Error::OAuthState)?;
+        let mut memory = self.state.lock().map_err(|_| Error::Proxy)?;
+        memory.cleanup(now);
+        memory.admit_start(source, now)?;
         let state = random(32)?;
         let browser_secret = random(32)?;
         let verifier = random(48)?;
         let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
         let location = auth.authorization_url(&state, &challenge)?;
-        let mut memory = self.state.lock().map_err(|_| Error::Proxy)?;
-        memory.cleanup(now);
-        if memory.flows.len() >= FLOWS {
-            return Err(Error::LoginCapacity);
-        }
         if memory.flows.contains_key(&hash(&state)) {
             return Err(Error::Proxy);
         }
@@ -104,6 +175,7 @@ impl OAuthVault {
                 browser: hash(&browser_secret),
                 created_at: now,
                 expires,
+                source,
             },
         );
         Ok(LoginStart {
@@ -273,7 +345,7 @@ mod tests {
             URL_SAFE_NO_PAD.encode(Sha256::digest(flow.verifier.as_bytes()))
         );
         assert!(!start.location.contains(&flow.verifier));
-        assert_eq!(flow.expires, NOW + 600);
+        assert_eq!(flow.expires, NOW + 300);
     }
     #[test]
     fn state_is_browser_bound_single_use_and_expiry_does_not_clear_unmatched_cookie() {
@@ -318,20 +390,98 @@ mod tests {
         assert!(vault.state.lock().unwrap().flows.is_empty());
     }
     #[test]
-    fn flows_are_bounded_random_and_expired_slots_can_be_reused_without_eviction() {
+    fn one_source_cannot_fill_the_table_and_expired_flows_release_pending_capacity() {
         let vault = OAuthVault::default();
         let auth = configured();
         let mut states = HashSet::new();
         let mut browsers = HashSet::new();
-        for _ in 0..FLOWS {
-            let start = vault.start(&auth, NOW).unwrap();
+        let source = IpAddr::from([127, 0, 0, 1]);
+        for _ in 0..5 {
+            let start = vault.start_from(&auth, NOW, source).unwrap();
             assert!(states.insert(query(&start)["state"].clone()));
             assert!(browsers.insert(start.browser_secret().to_owned()));
         }
-        assert!(matches!(vault.start(&auth, NOW), Err(Error::LoginCapacity)));
-        assert_eq!(vault.state.lock().unwrap().flows.len(), 100);
-        assert!(vault.start(&auth, NOW + 600).is_ok());
+        assert!(matches!(
+            vault.start_from(&auth, NOW, source),
+            Err(Error::RateLimited)
+        ));
+        assert_eq!(vault.state.lock().unwrap().flows.len(), 5);
+        assert!(vault
+            .start_from(&auth, NOW, IpAddr::from([127, 0, 0, 2]))
+            .is_ok());
+        {
+            let mut memory = vault.state.lock().unwrap();
+            // Model an elapsed monotonic minute without sleeping in a test.
+            memory.start_global.as_mut().unwrap().window = Instant::now() - Duration::from_secs(61);
+            for rate in memory.start_sources.values_mut() {
+                rate.window = Instant::now() - Duration::from_secs(61);
+            }
+        }
+        // Same source is still bounded by five pending flows until they expire.
+        assert!(matches!(
+            vault.start_from(&auth, NOW + 299, source),
+            Err(Error::RateLimited)
+        ));
+        assert!(vault.start_from(&auth, NOW + 300, source).is_ok());
         assert_eq!(vault.state.lock().unwrap().flows.len(), 1);
+    }
+    #[test]
+    fn global_start_rate_precedes_allocation_even_across_many_sources() {
+        let vault = OAuthVault::default();
+        let auth = configured();
+        for n in 1..=100 {
+            vault
+                .start_from(&auth, NOW, IpAddr::from([10, 0, 0, n]))
+                .unwrap();
+        }
+        assert!(matches!(
+            vault.start_from(&auth, NOW, IpAddr::from([10, 0, 0, 101])),
+            Err(Error::RateLimited)
+        ));
+        assert_eq!(vault.state.lock().unwrap().flows.len(), 100);
+    }
+    #[test]
+    fn full_table_evicts_oldest_different_source_flow_only_after_a_minute() {
+        let vault = OAuthVault::default();
+        let auth = configured();
+        let source = IpAddr::from([127, 0, 0, 1]);
+        let other = IpAddr::from([127, 0, 0, 2]);
+        {
+            let mut memory = vault.state.lock().unwrap();
+            for n in 0..FLOWS {
+                memory.flows.insert(
+                    hash(&format!("synthetic-state-{n}")),
+                    Pending {
+                        verifier: "synthetic verifier".into(),
+                        browser: hash("synthetic nonce"),
+                        created_at: NOW,
+                        expires: NOW + 300,
+                        source: other,
+                    },
+                );
+            }
+        }
+        assert!(matches!(
+            vault.start_from(&auth, NOW, source),
+            Err(Error::LoginCapacity)
+        ));
+        let own = hash("synthetic-state-0");
+        let oldest = hash("synthetic-state-1");
+        let newer = hash("synthetic-state-2");
+        {
+            let mut memory = vault.state.lock().unwrap();
+            memory.flows.get_mut(&own).unwrap().source = source;
+            memory.flows.get_mut(&own).unwrap().created_at = NOW - 90;
+            memory.flows.get_mut(&oldest).unwrap().created_at = NOW - 70;
+            memory.flows.get_mut(&newer).unwrap().created_at = NOW - 65;
+        }
+        let start = vault.start_from(&auth, NOW, source).unwrap();
+        let memory = vault.state.lock().unwrap();
+        assert_eq!(memory.flows.len(), 1000);
+        assert!(memory.flows.contains_key(&own));
+        assert!(!memory.flows.contains_key(&oldest));
+        assert!(memory.flows.contains_key(&newer));
+        assert!(memory.flows.contains_key(&hash(&query(&start)["state"])));
     }
     fn fake_proxy(role: &str) -> (OwnerAuth, OAuthVault, LoginStart, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();

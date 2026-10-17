@@ -717,7 +717,7 @@ settings server; those remain activation requirements.
 `oauth::OAuthVault` now implements the standard fallback's state, PKCE and
 sessions around that verifier. OS randomness generates state and a separate
 browser nonce (256 bits each), PKCE verifier and opaque session secrets (384 bits
-each). State is hashed in process memory, expires after ten minutes, binds to
+each). State is hashed in process memory, expires after five minutes, binds to
 the hashed HttpOnly browser nonce and is consumed before token exchange. A
 mismatched browser/state does not consume a valid flow or request deletion of
 its nonce cookie. A matched expired or consumed flow requests cookie deletion,
@@ -730,9 +730,18 @@ hold neither the vault nor SQLite mutex. The browser receives only an opaque
 session secret; its hash indexes an in-memory token with expiry capped by both
 the verified signed claims and twelve hours. Injected Proxy tokens are never
 stored by this vault. Every subsequent request still re-verifies the OAuth
-token and current directory membership. There are at most 100 pending flows
-and 100 sessions, expired entries are removed, full capacity refuses a new login
-without evicting others, and restart deliberately signs all OAuth sessions out.
+token and current directory membership. There are at most 1000 pending flows
+and 100 sessions. Login start checks limits before generating secrets/allocating
+a flow: at most five starts and five pending flows per socket source, and at most
+100 starts globally per monotonic minute. Start-source metadata is bounded at
+2048 entries and expires after a minute. At global flow capacity only a different
+source's oldest flow aged at least one minute may be evicted; fresh flows and
+the requesting source's own flows are preserved, otherwise start refuses.
+Full session capacity refuses without evicting existing sessions, and restart
+deliberately signs all OAuth sessions out. The HTTP start route must use
+`start_from` with the actual socket peer (not JSON/XFF); calls without a source
+share one stricter aggregate bucket. Proxy/NAT peers are deliberately aggregated,
+so this is a bounded load defense, not immunity from denial of service.
 There is no session file, token in localStorage, local account, refresh-token
 flow or credential-zeroization claim. Dedicated-user/container isolation and
 host memory/swap protection remain necessary.
