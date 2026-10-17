@@ -431,12 +431,36 @@ by a process crash. On exhaustion the hub saves a fixed-code failure receipt and
 parks the original transfer. Parked plaintext stays in the bounded pending queue
 for owner inspection/retry/discard, is not sent or pruned automatically, and does
 not block later transfers of that endpoint. A full bound-failure receipt budget
-still persistently blocks the hub without silently discarding work. Owner views,
-retry/discard and any routable failure callback are not implemented yet. Callbacks
+still persistently blocks the hub without silently discarding work. The state-only
+owner recovery operations are described below; authenticated UI wiring and any
+routable failure callback are not implemented yet. Callbacks
 must pass through the pinned endpoint and its recipient allowlist; an arbitrary
 body-provided original sender can never expand hub send authority. Chunk lease/
 retry columns migrate on hub reopen while preserving accepted results; restore a
 stopped private backup with the corresponding old executable to roll back.
+
+`recovery` provides internal owner-service operations, **not an authentication
+layer**. The HTTP service must verify the current owner, CSRF, explicit
+confirmation and derive the audit actor from that identity. A recovery requires a
+paused binding, exact revision and no live transport lease. Retry resets only
+unaccepted chunk attempts/backoff/capabilities and removes the park; already
+accepted chunks remain skipped. An ambiguous prior send may still duplicate.
+Discard atomically records a distinct discarded terminal state (4), erases wire
+plaintext and chunk metadata, removes the park and releases pending capacity.
+Per-part hashes suppress replay until the ordinary 30-day terminal pruning;
+discard is never marked delivered. Neither action resumes a binding or clears
+its circuit breaker. An explicit resume with fresh Core readback is still needed.
+
+Both operations atomically append a body-free audit event with verified actor ID,
+action, endpoint/transfer IDs, previous revision and time, and increment the
+binding revision. A failed audit write rolls the whole recovery back. Audit is
+bounded at 10000 records: further recovery fails without altering parked work;
+an authenticated export/archive/clear workflow is still required before
+activation. Parked-list metadata and paginated audit reads contain neither
+plaintext nor lease tokens. They are internal owner-service methods and must
+never be exposed without owner authorization. These changes add the audit table
+on demand; stop the App and restore a complete private pre-upgrade backup to
+roll back. Older draft binaries do not prune discarded-state tombstones.
 
 ## Development Bot API adapter (`hub` Cargo feature)
 

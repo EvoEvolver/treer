@@ -8,7 +8,7 @@ use crate::{
     store::{valid_id, Error as StorageError, Store},
     transfers::FragmentReceipt,
 };
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -533,14 +533,29 @@ impl<M: Mailbox + Directory> Hub<M> {
             self.store
                 .transfer_payload(id, generation, Direction::Outbound, transfer)?;
         let bytes = serde_json::to_vec(&envelope).map_err(|_| Error::Binding)?;
-        match self.store.record_failure(
-            id,
-            generation,
-            &format!("transport-{transfer}"),
-            &bytes,
-            reason,
-            now,
-        ) {
+        // A human retry may later park for a different reason. Preserve the
+        // first terminal receipt rather than overwriting it or conflicting with
+        // its fixed delivery key; hub_parked carries the current reason.
+        let previous: Option<i64> = self.store.db.query_row(
+            "SELECT payload_bytes FROM failures WHERE endpoint=?1 AND generation=?2 AND delivery=?3",
+            params![id,generation,format!("transport-{transfer}")], |r| r.get(0)
+        ).optional()?;
+        if previous.is_some_and(|n| n != -1 && n != bytes.len() as i64) {
+            return Err(StorageError::Conflict.into());
+        }
+        let receipt = if previous.is_some() {
+            Ok(())
+        } else {
+            self.store.record_failure(
+                id,
+                generation,
+                &format!("transport-{transfer}"),
+                &bytes,
+                reason,
+                now,
+            )
+        };
+        match receipt {
             Err(StorageError::Full) => {
                 self.store
                     .db

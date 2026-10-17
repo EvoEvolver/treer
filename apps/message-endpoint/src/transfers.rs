@@ -269,7 +269,7 @@ impl Store {
              (SELECT 1 FROM transfers t WHERE t.endpoint=fragments.endpoint AND t.generation=fragments.generation
                AND t.direction=fragments.direction AND t.transfer=fragments.transfer AND t.state=3)", [])?;
         let pruned = transaction.execute(
-            "DELETE FROM transfers WHERE state IN (2,3) AND terminal_at<=?1",
+            "DELETE FROM transfers WHERE state IN (2,3,4) AND terminal_at<=?1",
             [now - TOMBSTONE_TTL],
         )?;
         transaction.commit()?;

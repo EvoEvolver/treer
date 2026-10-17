@@ -9,6 +9,8 @@ pub mod hub;
 mod private_store;
 pub mod protocol;
 #[cfg(unix)]
+pub mod recovery;
+#[cfg(unix)]
 pub mod relay;
 pub mod store;
 #[cfg(unix)]
