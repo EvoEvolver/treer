@@ -84,7 +84,8 @@ fn open_directory(path: &Path) -> Result<OwnedFd, Error> {
 }
 
 fn private_file(directory: &OwnedFd, name: &str) -> Result<OwnedFd, Error> {
-    let common = OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK;
+    let common =
+        OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
     let file = match fs::openat(
         directory,
         name,
@@ -151,12 +152,39 @@ pub(crate) fn enable_wal(db: &Connection, path: &Path) -> Result<(), Error> {
         let file = denied(fs::openat(
             &directory,
             OsStr::new(name),
-            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
             Mode::empty(),
         ))?;
         check_file(&file)?;
     }
     denied(fs::fsync(&directory))?;
+    Ok(())
+}
+
+pub(crate) fn recheck(files: &PrivateFiles) -> Result<(), Error> {
+    check_directory(&files._directory, true)?;
+    check_file(&files._lock)?;
+    for name in [
+        "hub.lock",
+        "hub.sqlite3",
+        "hub.sqlite3-wal",
+        "hub.sqlite3-shm",
+        "hub.sqlite3-journal",
+    ] {
+        match fs::openat(
+            &files._directory,
+            name,
+            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
+            Mode::empty(),
+        ) {
+            Ok(file) => check_file(&file)?,
+            Err(Errno::NOENT)
+                if name.ends_with("-wal")
+                    || name.ends_with("-shm")
+                    || name.ends_with("-journal") => {}
+            Err(_) => return Err(Error::PrivateStorage),
+        }
+    }
     Ok(())
 }
 
@@ -196,6 +224,18 @@ mod tests {
         drop(store);
         let mut reopened = Store::open(&path, Limits::default()).unwrap();
         assert!(reopened.register_paused("ag_test", 1, "ag_target").is_err());
+    }
+
+    #[test]
+    fn periodic_recheck_rejects_changed_sidecar_permissions() {
+        let (_temporary, path) = fixture();
+        let store = Store::open(&path, Limits::default()).unwrap();
+        store.recheck_private_storage().unwrap();
+        let shm = path.join("hub.sqlite3-shm");
+        stdfs::set_permissions(&shm, stdfs::Permissions::from_mode(0o644)).unwrap();
+        assert!(store.recheck_private_storage().is_err());
+        // Detection must not silently repair the changed mode.
+        assert_eq!(stdfs::metadata(shm).unwrap().mode() & 0o7777, 0o644);
     }
 
     #[test]

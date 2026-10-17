@@ -244,6 +244,9 @@ lock and SQLite sidecar files are exclusively created at 0600; existing files
 must be regular, single-link, 0600 and owned by the effective UID. A lifetime
 nonblocking lock excludes another cooperating hub writer. SQLite opens the
 database with NOFOLLOW, uses WAL/FULL synchronization and checks sidecar permissions.
+Special-file opens use NONBLOCK/NOCTTY before rejecting non-regular files. The
+periodic runtime status tick must recheck any sidecars SQLite later recreates;
+a failed check pauses admissions and is reported as a fixed storage error.
 Unknown database application/schema versions are rejected. This slice currently
 supports Unix only; Windows storage provisioning is not implemented.
 
@@ -258,4 +261,9 @@ storage. Stop this App before copying its complete state directory (including an
 WAL/SHM files); preserve private permissions and test recovery in isolation. Do
 not copy only the main database while it is running. These checks do not defend
 against another process running under the same OS UID; use a dedicated user or
-container. Do not run the App with elevated privileges.
+container. In particular, descriptor checks and SQLite's later path-based open
+are not atomic against same-UID path replacement. Do not run the App with
+elevated privileges. Lifecycle APIs require Unix epoch seconds (at least 30 days
+after epoch for cleanup); a bad clock must surface a visible cleanup error.
+Paused bindings retain unacked Core deliveries and their visible backlog until
+the human resumes them; a pause is not successful delivery.

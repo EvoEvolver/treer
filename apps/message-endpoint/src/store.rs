@@ -82,6 +82,16 @@ impl Store {
         Ok(store)
     }
 
+    /// Runtime must call this at its periodic status tick and stop admissions
+    /// on error, including after SQLite recreates a WAL/SHM sidecar.
+    #[cfg(unix)]
+    pub fn recheck_private_storage(&self) -> Result<(), Error> {
+        match &self._private_files {
+            Some(files) => crate::private_store::recheck(files),
+            None => Ok(()),
+        }
+    }
+
     fn from_connection(db: Connection, limits: Limits) -> Result<Self, Error> {
         let max = Limits::default();
         if limits.endpoint_count <= 0
