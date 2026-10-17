@@ -511,7 +511,17 @@ copying public Binding metadata cannot create another production gate. Existing
 registration files still prevent minting another gate after drop/restart, even
 with a fresh intent/attempt. A source tripwire checks the token's definition,
 impl and sole literal remain in the private leaf and that it has no child
-modules; this is not a Rust parser or a compile-fail test.
+modules, and that the only `Arbitration::registered` call remains in that leaf;
+this is not a Rust parser or a compile-fail test. Keep that sole caller on the
+lifecycle wiring review checklist.
+
+Loss of the in-memory gate while durable registration remains is always
+registered-needs-quiescence / recovery_required. Recovery must never recreate
+a gate from that file or resume accepting permits. A fixture drops the entire
+RegisteredSupervisor, retains its durable evidence, and verifies that both the
+original intent and a deliberately substituted fresh intent cannot construct
+another accept-capable value (even with the original attempt ID). This models
+loss of memory authority; it is not a real process-restart or death-matrix test.
 
 `RegisteredSupervisor` reads an independently authenticated owner frame through
 its own gate and revalidates the durable supervisor registration again before

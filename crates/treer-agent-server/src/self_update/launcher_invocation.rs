@@ -416,27 +416,32 @@ mod tests {
 
     #[test]
     fn production_gate_capability_is_minted_only_by_the_registration_leaf() {
-        fn visit(path: &Path, found: &mut Vec<PathBuf>) {
+        fn visit(path: &Path, found: &mut Vec<PathBuf>, constructors: &mut Vec<PathBuf>) {
             for entry in std::fs::read_dir(path).unwrap() {
                 let entry = entry.unwrap();
                 let kind = entry.file_type().unwrap();
                 if kind.is_dir() {
-                    visit(&entry.path(), found);
+                    visit(&entry.path(), found, constructors);
                 } else if kind.is_file() && entry.path().extension().is_some_and(|e| e == "rs") {
                     let text = std::fs::read_to_string(entry.path()).unwrap();
                     let text: String = text.chars().filter(|c| !c.is_whitespace()).collect();
                     for _ in text.match_indices(&["Registration", "Gate", "{"].concat()) {
                         found.push(entry.path());
                     }
+                    for _ in text.match_indices(&["Arbitration", "::registered", "("].concat()) {
+                        constructors.push(entry.path());
+                    }
                 }
             }
         }
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/self_update");
         let mut found = Vec::new();
-        visit(&root, &mut found);
+        let mut constructors = Vec::new();
+        visit(&root, &mut found, &mut constructors);
         let leaf = root.join("launcher_invocation/start/registration.rs");
         // Definition, impl and sole literal; source tripwire, not Rust parsing.
         assert_eq!(found, [leaf.clone(), leaf.clone(), leaf.clone()]);
+        assert_eq!(constructors.as_slice(), std::slice::from_ref(&leaf));
         let text = std::fs::read_to_string(leaf).unwrap();
         assert!(!text.lines().any(|line| {
             let line = line.trim_start();
@@ -483,6 +488,7 @@ mod tests {
             "mutation",
             "intent",
             "second_attempt",
+            "lost_gate",
             "exit",
             "existing_empty",
             "existing_corrupt",
@@ -572,6 +578,33 @@ mod tests {
             let mut registered = result.unwrap();
             registered.binding().unwrap();
             let bytes = std::fs::read(&path).unwrap();
+            if fault == "lost_gate" {
+                // Model loss of all in-memory registration authority, without
+                // claiming this is a real supervisor process-crash test.
+                drop(registered);
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(
+                    plan.record_start_intent().err().unwrap().to_string(),
+                    "update_recovery_required"
+                );
+                // Even deliberately substituting a fresh intent in this
+                // fixture cannot recover an accept-capable supervisor value.
+                std::fs::rename(&intent_path, job.join("saved-intent")).unwrap();
+                let next = plan.record_start_intent().unwrap();
+                assert_eq!(
+                    next.register_supervisor(
+                        attempt,
+                        ProcessImage::capture(child.0.id()).unwrap(),
+                    )
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                    "update_recovery_required"
+                );
+                assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                assert_eq!(journal.read().unwrap(), before);
+                continue;
+            }
             let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(value["intent_sha256"], intent_digest);
             assert_eq!(value["intent_device"], intent_metadata.dev());
