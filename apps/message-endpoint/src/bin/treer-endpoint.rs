@@ -1,10 +1,7 @@
 #[cfg(unix)]
 fn main() -> std::process::ExitCode {
-    use sha2::{Digest, Sha256};
     use std::{
         env,
-        fs::File,
-        io::Read,
         path::Path,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
@@ -17,28 +14,7 @@ fn main() -> std::process::ExitCode {
         let own_id = env::var("TREER_AGENT_ID")
             .map_err(|_| treer_message_endpoint::relay::Error::Configuration)?;
         let config = Config::load(Path::new(&arguments[1]), &own_id)?;
-        let mut relay = Relay::open(config, &own_id)?;
-        let mut binary = File::open(
-            env::current_exe().map_err(|_| treer_message_endpoint::relay::Error::Configuration)?,
-        )
-        .map_err(|_| treer_message_endpoint::relay::Error::Configuration)?;
-        let mut hash = Sha256::new();
-        let mut size = 0usize;
-        let mut buffer = [0u8; 65536];
-        loop {
-            let read = binary
-                .read(&mut buffer)
-                .map_err(|_| treer_message_endpoint::relay::Error::Configuration)?;
-            if read == 0 {
-                break;
-            }
-            size += read;
-            if size > 64 * 1024 * 1024 {
-                return Err(treer_message_endpoint::relay::Error::Configuration);
-            }
-            hash.update(&buffer[..read]);
-        }
-        let actual: String = hash.finalize().iter().map(|b| format!("{b:02x}")).collect();
+        let (mut relay, actual) = Relay::open(config, &own_id)?;
         let boot = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| treer_message_endpoint::relay::Error::Configuration)?
@@ -73,6 +49,9 @@ fn main() -> std::process::ExitCode {
     // No voluntary successful exit: command Agent exit 0 means completed.
     if let Err(error) = run() {
         eprintln!("{error}");
+        std::thread::sleep(Duration::from_secs(
+            treer_message_endpoint::relay::STARTUP_ERROR_BACKOFF_SECONDS,
+        ));
     }
     std::process::ExitCode::FAILURE
 }

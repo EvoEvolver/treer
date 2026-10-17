@@ -32,6 +32,7 @@ pub struct Config {
     pub cli: PathBuf,
     pub state_directory: PathBuf,
     pub release_sha256: String,
+    pub cli_sha256: String,
 }
 impl Config {
     pub fn load(path: &Path, own_id: &str) -> Result<Self, Error> {
@@ -39,6 +40,13 @@ impl Config {
         let config: Self = serde_json::from_slice(&bytes).map_err(|_| Error::Configuration)?;
         config.validate(own_id)?;
         Ok(config)
+    }
+    fn verify_binaries(&self, running_executable: &Path) -> Result<String, Error> {
+        let actual = hash_executable(running_executable)?;
+        if actual != self.release_sha256 || hash_executable(&self.cli)? != self.cli_sha256 {
+            return Err(Error::Configuration);
+        }
+        Ok(actual)
     }
     fn validate(&self, own_id: &str) -> Result<(), Error> {
         let ids = self
@@ -55,12 +63,35 @@ impl Config {
             || self.recipients.iter().collect::<HashSet<_>>().len() != self.recipients.len()
             || !ids.into_iter().all(|id| agent_id(id))
             || !valid_hash(&self.release_sha256)
+            || !valid_hash(&self.cli_sha256)
         {
             return Err(Error::Configuration);
         }
         Ok(())
     }
 }
+pub const STARTUP_ERROR_BACKOFF_SECONDS: u64 = 30;
+fn hash_executable(path: &Path) -> Result<String, Error> {
+    use sha2::{Digest, Sha256};
+    use std::{fs::File, io::Read};
+    let mut file = File::open(path).map_err(|_| Error::Configuration)?;
+    let mut hash = Sha256::new();
+    let mut size = 0usize;
+    let mut bytes = [0u8; 65536];
+    loop {
+        let read = file.read(&mut bytes).map_err(|_| Error::Configuration)?;
+        if read == 0 {
+            break;
+        }
+        size += read;
+        if size > 64 * 1024 * 1024 {
+            return Err(Error::Configuration);
+        }
+        hash.update(&bytes[..read]);
+    }
+    Ok(hash.finalize().iter().map(|b| format!("{b:02x}")).collect())
+}
+
 fn valid_hash(hash: &str) -> bool {
     hash.len() == 64
         && hash
@@ -118,11 +149,13 @@ pub struct Relay<M> {
     mailbox: M,
 }
 impl Relay<Core> {
-    pub fn open(config: Config, own_id: &str) -> Result<Self, Error> {
+    pub fn open(config: Config, own_id: &str) -> Result<(Self, String), Error> {
         config.validate(own_id)?;
+        let actual =
+            config.verify_binaries(&std::env::current_exe().map_err(|_| Error::Configuration)?)?;
         let mailbox = Core::new(&config.cli, own_id)?;
         let store = Store::open(&config.state_directory, Limits::default())?;
-        Self::provision(config, store, mailbox)
+        Ok((Self::provision(config, store, mailbox)?, actual))
     }
 }
 impl<M: Mailbox> Relay<M> {
@@ -235,6 +268,9 @@ impl<M: Mailbox> Relay<M> {
             return Err(Error::FailureBudget);
         }
         let mut failure = self.drain_ready(now).err();
+        if matches!(failure, Some(Error::FailureBudget)) {
+            return Err(Error::FailureBudget);
+        }
         let deliveries = self.mailbox.receive(1000)?;
         for delivery in deliveries {
             if let Err(error) = self.handle(delivery, now) {
@@ -499,6 +535,7 @@ mod tests {
             cli: "/fake/treer".into(),
             state_directory: "/fake/state".into(),
             release_sha256: "a".repeat(64),
+            cli_sha256: "c".repeat(64),
         }
     }
     fn fixture() -> Relay<Fake> {
@@ -708,7 +745,7 @@ mod tests {
         std::fs::set_permissions(&base, std::fs::Permissions::from_mode(0o700)).unwrap();
         let path = base.join("endpoint.json");
         let value = json!({"endpoint_id":"ag_endpoint","hub_id":"app_hub","generation":1,
-            "recipients":["ag_target"],"cli":"/fake/treer","state_directory":base.join("state"),"release_sha256":"a".repeat(64)});
+            "recipients":["ag_target"],"cli":"/fake/treer","state_directory":base.join("state"),"release_sha256":"a".repeat(64),"cli_sha256":"c".repeat(64)});
         std::fs::write(&path, value.to_string()).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
         Config::load(&path, "ag_endpoint").unwrap();
@@ -764,5 +801,73 @@ mod tests {
             .recent_failures("ag_endpoint", 1, 10)
             .unwrap()
             .is_empty());
+    }
+    #[test]
+    fn binary_pins_stop_accidental_relay_and_cli_drift_before_execution() {
+        let temporary = tempfile::tempdir().unwrap();
+        let binary = temporary.path().join("relay");
+        let cli = temporary.path().join("treer");
+        std::fs::write(&binary, b"synthetic relay bytes").unwrap();
+        std::fs::write(&cli, b"synthetic CLI bytes").unwrap();
+        let mut config = config();
+        config.cli = cli.clone();
+        config.release_sha256 = hash_executable(&binary).unwrap();
+        config.cli_sha256 = hash_executable(&cli).unwrap();
+        assert_eq!(
+            config.verify_binaries(&binary).unwrap(),
+            config.release_sha256
+        );
+        std::fs::write(&binary, b"drift").unwrap();
+        assert!(config.verify_binaries(&binary).is_err());
+        std::fs::write(&binary, b"synthetic relay bytes").unwrap();
+        std::fs::write(&cli, b"drift").unwrap();
+        assert!(config.verify_binaries(&binary).is_err());
+    }
+    #[test]
+    fn hundred_ready_inbound_jobs_do_not_starve_an_outbound_message() {
+        let mut relay = fixture();
+        for index in 0..100 {
+            let envelope = Envelope::Deliver {
+                job_id: format!("job_{index}"),
+                recipient: "ag_target".into(),
+                body: "external body".into(),
+                context_ids: vec![],
+                source: ExternalSource {
+                    channel: Channel::Http,
+                    account_id: "account".into(),
+                    conversation_id: "conversation".into(),
+                    message_id: format!("external_{index}"),
+                },
+            };
+            let wire = envelope.fragments("ag_endpoint", 1).unwrap().remove(0);
+            relay
+                .handle(
+                    delivery(&format!("del_inbound_{index}"), "app_hub", &wire),
+                    NOW,
+                )
+                .unwrap();
+        }
+        relay.mailbox.deliveries.borrow_mut().push(delivery(
+            "del_outbound",
+            "ag_sender",
+            "outbound body",
+        ));
+        relay.tick(NOW + 1).unwrap();
+        let sent = relay.mailbox.sent.borrow();
+        assert_eq!(sent.iter().filter(|s| s.0 == "ag_target").count(), 2);
+        assert_eq!(sent.iter().filter(|s| s.0 == "app_hub").count(), 1);
+        assert!(relay
+            .mailbox
+            .acked
+            .borrow()
+            .contains(&"del_outbound".into()));
+        assert_eq!(
+            relay
+                .store
+                .ready_transfers("ag_endpoint", 1, Direction::Inbound)
+                .unwrap()
+                .len(),
+            98
+        );
     }
 }

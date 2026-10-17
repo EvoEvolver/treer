@@ -1,6 +1,6 @@
 # Message endpoint (#159)
 
-**P1 revised contract; hermetic library work only, not runnable/deployed.**
+**Development implementation; relay is locally runnable, hub is unfinished. Not deployed.**
 User direction3479 supersedes the socket design and research's routing details.
 Core3485 confirms Managed App runtime Agents can send/receive/ack; security3483
 accepts the new boundary with the controls below. No Core change is requested.
@@ -233,8 +233,8 @@ Periodic cleanup removes expired plaintext, retains completed/expired per-part
 hash tombstones for 30 days, then prunes them. Completed payloads are removed
 after downstream durable acceptance; their hashes still reject conflicting
 replays. Reopen tests cover partial-set recovery and completed-set deduplication.
-The daemon must invoke cleanup and drain ready transfers after restart; no daemon
-currently exists to do that automatically. The store also provides durable
+The relay invokes cleanup and drains ready transfers after restart. Hub daemon
+integration is still pending. The store also provides durable
 terminal rejection receipts (fixed reason, Core delivery ID, timestamp, body length;
 no rejected plaintext) and a bounded recent-failure view. The receiver must save
 that receipt before acknowledging poison; storage/full errors prohibit ack.
@@ -295,8 +295,9 @@ the human resumes them; a pause is not successful delivery.
 ## Development relay executable (Unix)
 
 `treer-endpoint --config /absolute/private/endpoint.json` runs indefinitely; invalid
-startup exits nonzero and transient Core/storage failures use fixed errors and a
-bounded retry delay. There is no voluntary successful completion after draining.
+startup waits 30 seconds before exiting nonzero, limiting repeated configuration
+failures under Controller restart. Transient Core/storage failures use fixed errors
+and a two-second retry delay. There is no voluntary successful completion after draining.
 No real endpoint has been activated by the author. The test suite launches only
 this executable against a private fake CLI which checks the real command contract.
 
@@ -305,13 +306,19 @@ regular and no-follow in a 0700 physical directory outside a repository (16 KiB
 maximum, unknown/duplicate fields rejected). Required fields are `endpoint_id`
 (the injected own `TREER_AGENT_ID`), `hub_id`, positive `generation`, `recipients`
 (1–32 unique stable Agent/App runtime IDs, no names/paths), absolute `cli` and
-`state_directory`, and `release_sha256` (reviewed relay binary's lowercase hex
-SHA-256). It contains no other Agent's credentials. State pins hub/endpoint IDs,
+`state_directory`, `release_sha256` (reviewed relay binary's lowercase hex
+SHA-256), and `cli_sha256` (reviewed Core CLI binary hash). Before invoking any
+Core CLI operation, startup hashes both executables and refuses either mismatch.
+Use immutable versioned executable paths; startup checks are accidental-drift
+guards, not protection against same-UID replacement after checking. It contains no other Agent's credentials. State pins hub/endpoint IDs,
 generation and recipient list; changing them requires a human-controlled drain
 and fresh state, never a message-driven re-pin.
 
-Each loop checks storage, runs both cleanup APIs, drains bounded ready inbound
-work, receives up to ten Core deliveries, then drains again. Failed inbound sends
+Each loop checks storage, runs both cleanup APIs, drains at most one ready inbound
+job, receives up to ten Core deliveries, then drains at most one more inbound job.
+This is at most two completed inbound sends per tick; the receive wait is up to one
+second, and slow Core calls reduce throughput. A test starts with 100 ready inbound
+jobs and verifies an outbound message still forwards during the same tick. Failed inbound sends
 leave their durable jobs ready while ordinary outward messages can still proceed.
 Non-hub content is always outward, even if it imitates inbound control JSON.
 Outbound originals are acked only after every identical-key fragment is accepted

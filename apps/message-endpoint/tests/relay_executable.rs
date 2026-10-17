@@ -1,5 +1,6 @@
 #![cfg(unix)]
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::process::{Child, Command, Stdio};
@@ -67,7 +68,7 @@ print(json.dumps(result))
     fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
     let config = base.join("endpoint.json");
     fs::write(&config,json!({"endpoint_id":"ag_endpoint","hub_id":"app_hub","generation":1,
-        "recipients":["ag_target"],"cli":fake,"state_directory":base.join("state"),"release_sha256":"a".repeat(64)}).to_string()).unwrap();
+        "recipients":["ag_target"],"cli":fake,"state_directory":base.join("state"),"release_sha256":hex_hash(&fs::read(env!("CARGO_BIN_EXE_treer-endpoint")).unwrap()),"cli_sha256":hex_hash(&fs::read(&fake).unwrap())}).to_string()).unwrap();
     fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
     let child = Command::new(env!("CARGO_BIN_EXE_treer-endpoint"))
         .env_clear()
@@ -83,7 +84,7 @@ print(json.dumps(result))
         .spawn()
         .unwrap();
     let mut child = OwnChild(child);
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         assert!(
             child.0.try_wait().unwrap().is_none(),
@@ -106,15 +107,24 @@ print(json.dumps(result))
 
 #[test]
 fn invalid_startup_exits_nonzero_with_fixed_error_only() {
+    let started = Instant::now();
     let result = Command::new(env!("CARGO_BIN_EXE_treer-endpoint"))
         .env_clear()
         .arg("--invalid")
         .output()
         .unwrap();
     assert!(!result.status.success());
+    assert!(started.elapsed() >= Duration::from_secs(30));
     assert!(result.stdout.is_empty());
     assert_eq!(
         String::from_utf8(result.stderr).unwrap(),
         "relay_configuration_unavailable\n"
     );
+}
+
+fn hex_hash(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
