@@ -942,11 +942,15 @@ and must complete within 60 s in total (owner-adjustable), so a trickled body
 cannot hold an in-flight slot; the service must answer headers within 35 s
 (long polls up to 30 s work); a non-upgraded response body may not stall for
 300 s and its in-flight slot is leased for at most 300 s even if the client
-never reads the response (streams may continue without a slot; WebSocket
-upgrades hold their slot for the connection's lifetime). The HTTP/1 server
+never reads the response. Streams longer than 300 s therefore continue without
+counting against the in-flight cap; they remain bounded by the connection
+budget and the per-client rate. WebSocket upgrades hold their slot for the
+connection's lifetime. The HTTP/1 server
 itself enforces a 30 s header read timeout with 32 KiB / 100 headers per
-request and caps open connections (8192 in total, 256 per peer; excess
-connections are closed without a handshake). It speaks HTTP/1 only, as the
+request and caps open connections (8192 in total; 256 per peer for public,
+untrusted peers only — a configured trusted front or a private/loopback peer
+carries many clients on one address and is bounded by the global budget alone;
+excess connections are closed without a handshake). It speaks HTTP/1 only, as the
 Proxy did before (the HTTP/2 feature was never enabled, so no h2c was ever
 negotiated); TLS fronts talk HTTP/1 upstream. Requests carrying both
 `Content-Length` and `Transfer-Encoding` are refused. Ordinary API routes keep

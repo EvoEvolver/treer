@@ -142,6 +142,9 @@ pub(crate) struct GuardedResponseBody {
     idle: Duration,
     deadline: Pin<Box<tokio::time::Sleep>>,
     _permit: Option<Arc<Permit>>,
+    /// The lease task; aborted when the body ends so finished responses do
+    /// not leave sleeping tasks behind.
+    lease: Option<tokio::task::JoinHandle<()>>,
 }
 
 impl GuardedResponseBody {
@@ -151,17 +154,18 @@ impl GuardedResponseBody {
         lease: Duration,
         permit: Option<Arc<Permit>>,
     ) -> Self {
-        if let Some(permit) = permit.clone() {
+        let lease = permit.clone().map(|permit| {
             tokio::spawn(async move {
                 tokio::time::sleep(lease).await;
                 permit.release();
-            });
-        }
+            })
+        });
         Self {
             inner,
             idle,
             deadline: Box::pin(tokio::time::sleep(idle)),
             _permit: permit,
+            lease,
         }
     }
 }
@@ -169,9 +173,13 @@ impl GuardedResponseBody {
 impl Drop for GuardedResponseBody {
     fn drop(&mut self) {
         // The lease task also holds the permit; releasing here (idempotent)
-        // returns the slot as soon as the response ends or the client leaves.
+        // returns the slot as soon as the response ends or the client leaves,
+        // and the lease task is cancelled instead of sleeping on.
         if let Some(permit) = &self._permit {
             permit.release();
+        }
+        if let Some(lease) = self.lease.take() {
+            lease.abort();
         }
     }
 }
@@ -374,6 +382,28 @@ mod tests {
         );
         drop(body);
         assert_eq!(guard.in_flight("ing_y"), 0);
+
+        // A body that ends early cancels its lease task.
+        let admission = guard
+            .admit(
+                "ing_z",
+                &limits,
+                "203.0.113.1".parse().unwrap(),
+                &axum::http::HeaderMap::new(),
+            )
+            .unwrap();
+        let body = GuardedResponseBody::new(
+            Body::from("done"),
+            Duration::from_secs(300),
+            Duration::from_secs(120),
+            Some(Arc::new(admission.permit)),
+        );
+        let lease = body.lease.as_ref().unwrap().abort_handle();
+        assert!(!lease.is_finished());
+        drop(body);
+        tokio::task::yield_now().await;
+        assert!(lease.is_finished(), "lease task cancelled with the body");
+        assert_eq!(guard.in_flight("ing_z"), 0);
     }
 
     fn tokio_stream_from(

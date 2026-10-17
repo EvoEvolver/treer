@@ -28,14 +28,18 @@ pub const MAX_CONNECTIONS: usize = 8192;
 /// Open connections one peer address may hold at once.
 pub const MAX_CONNECTIONS_PER_PEER: usize = 256;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct ServerLimits {
     pub header_read_timeout: Duration,
     pub max_header_bytes: usize,
     pub max_headers: usize,
     pub shutdown_grace: Duration,
     pub max_connections: usize,
+    /// Applies only to public, untrusted peers: a front (trusted range) or a
+    /// private/loopback peer multiplexes many clients over one address and is
+    /// bounded by the global budget alone.
     pub max_connections_per_peer: usize,
+    pub trusted: std::sync::Arc<crate::ingress_guard::TrustedProxies>,
 }
 
 impl Default for ServerLimits {
@@ -47,7 +51,21 @@ impl Default for ServerLimits {
             shutdown_grace: SHUTDOWN_GRACE,
             max_connections: MAX_CONNECTIONS,
             max_connections_per_peer: MAX_CONNECTIONS_PER_PEER,
+            trusted: std::sync::Arc::new(crate::ingress_guard::TrustedProxies::none()),
         }
+    }
+}
+
+impl ServerLimits {
+    pub fn with_trusted(mut self, trusted: crate::ingress_guard::TrustedProxies) -> Self {
+        self.trusted = std::sync::Arc::new(trusted);
+        self
+    }
+
+    /// Peers exempt from the per-peer cap: anything that is not a direct
+    /// public client (fronts, load balancers, local tooling).
+    fn per_peer_exempt(&self, peer: std::net::IpAddr) -> bool {
+        crate::ingress_guard::is_private_or_local(peer) || self.trusted.trusts(peer)
     }
 }
 
@@ -83,7 +101,9 @@ fn take_slot(
 ) -> Option<ConnectionSlot> {
     let mut guard = budget.lock().unwrap_or_else(|p| p.into_inner());
     let per_peer = guard.per_peer.get(&peer).copied().unwrap_or(0);
-    if guard.total >= limits.max_connections || per_peer >= limits.max_connections_per_peer {
+    if guard.total >= limits.max_connections
+        || (!limits.per_peer_exempt(peer) && per_peer >= limits.max_connections_per_peer)
+    {
         return None;
     }
     guard.total += 1;
@@ -294,10 +314,52 @@ mod tests {
         handle.await.unwrap();
     }
 
-    #[tokio::test]
-    async fn connections_beyond_the_peer_budget_are_closed_at_once() {
+    #[test]
+    fn per_peer_cap_applies_to_public_untrusted_peers_only() {
+        let trusted = crate::ingress_guard::TrustedProxies::parse(
+            &["198.51.100.0/24".into()],
+            Some("X-Real-IP"),
+            false,
+        )
+        .unwrap();
         let limits = ServerLimits {
+            max_connections: 10,
             max_connections_per_peer: 2,
+            ..ServerLimits::default()
+        }
+        .with_trusted(trusted);
+        let budget = std::sync::Arc::new(std::sync::Mutex::new(ConnectionBudget::default()));
+        let public: std::net::IpAddr = "203.0.113.5".parse().unwrap();
+        let front: std::net::IpAddr = "198.51.100.9".parse().unwrap();
+        let lb: std::net::IpAddr = "10.0.0.4".parse().unwrap();
+        // A public client is capped per peer.
+        let a = take_slot(&budget, public, &limits).unwrap();
+        let _b = take_slot(&budget, public, &limits).unwrap();
+        assert!(take_slot(&budget, public, &limits).is_none());
+        drop(a);
+        let _c = take_slot(&budget, public, &limits).expect("slot freed by the drop");
+        // A trusted front and a private load balancer are not: they carry
+        // many clients on one address.
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            held.push(take_slot(&budget, front, &limits).unwrap());
+            held.push(take_slot(&budget, lb, &limits).unwrap());
+        }
+        // The global budget still bounds everything (2 public + 6 = 8 of 10).
+        held.push(take_slot(&budget, lb, &limits).unwrap());
+        held.push(take_slot(&budget, lb, &limits).unwrap());
+        assert!(take_slot(&budget, lb, &limits).is_none(), "global cap");
+        assert!(take_slot(&budget, front, &limits).is_none(), "global cap");
+        drop(held);
+        assert_eq!(budget.lock().unwrap().total, 2);
+    }
+
+    #[tokio::test]
+    async fn connections_beyond_the_global_budget_are_closed_at_once() {
+        // Loopback peers are exempt from the per-peer cap, so the global
+        // budget is what a local test can exercise over real sockets.
+        let limits = ServerLimits {
+            max_connections: 2,
             ..ServerLimits::default()
         };
         let (address, stop, handle) = start(limits).await;

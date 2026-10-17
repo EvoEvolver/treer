@@ -242,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
             "public ingress uses the TCP peer as the client address (no trusted front configured)"
         );
     }
+    let server_limits = server::ServerLimits::default().with_trusted(trusted_proxies.clone());
     let ingress =
         api::IngressConfig::new(args.ingress_public_url, &proxy_public_url, &app_public_url)?
             .with_guard(ingress_guard::IngressGuard::new(trusted_proxies));
@@ -420,7 +421,7 @@ async fn main() -> anyhow::Result<()> {
     // Served through hyper-util so header read timeouts and header size caps
     // apply to every connection (#146); ConnectInfo and graceful shutdown
     // behave as with axum::serve.
-    let server = server::serve(listener, app, server::ServerLimits::default(), async move {
+    let server = server::serve(listener, app, server_limits, async move {
         shutdown_signal().await;
         if let Err(error) = shutdown_traffic.flush_pending().await {
             warn!(%error, "failed to persist traffic usage counters during shutdown");

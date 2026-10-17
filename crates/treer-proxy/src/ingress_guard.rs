@@ -110,7 +110,7 @@ impl TrustedProxies {
         self.header.as_ref()
     }
 
-    fn trusts(&self, address: IpAddr) -> bool {
+    pub fn trusts(&self, address: IpAddr) -> bool {
         let address = normalize(address);
         self.ranges.iter().any(|net| net.contains(&address))
     }
@@ -402,6 +402,7 @@ struct Inner {
     trusted: TrustedProxies,
     services: Mutex<HashMap<String, ServiceState>>,
     peers: Mutex<HashMap<IpAddr, Bucket>>,
+    peers_last_evict: Mutex<Instant>,
     peers_overflow: Mutex<Bucket>,
     private_peer_warned: AtomicBool,
     started: chrono::DateTime<chrono::Utc>,
@@ -429,6 +430,7 @@ impl IngressGuard {
                 trusted,
                 services: Mutex::new(HashMap::new()),
                 peers: Mutex::new(HashMap::new()),
+                peers_last_evict: Mutex::new(now),
                 peers_overflow: Mutex::new(Bucket::new(GLOBAL_PEER_BURST, now)),
                 private_peer_warned: AtomicBool::new(false),
                 started: chrono::Utc::now(),
@@ -459,9 +461,20 @@ impl IngressGuard {
         let key = rate_key(client.address);
         let mut peers = self.inner.peers.lock().unwrap_or_else(|p| p.into_inner());
         if peers.len() >= GLOBAL_PEER_KEYS && !peers.contains_key(&key) {
-            peers.retain(|_, bucket| {
-                now.saturating_duration_since(bucket.last_used) < BUCKET_IDLE_TTL
-            });
+            // Sweep at most once per interval; in between, new keys share
+            // the overflow bucket instead of paying for a full scan.
+            let mut last_evict = self
+                .inner
+                .peers_last_evict
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if now.saturating_duration_since(*last_evict) >= EVICT_INTERVAL {
+                *last_evict = now;
+                peers.retain(|_, bucket| {
+                    now.saturating_duration_since(bucket.last_used) < BUCKET_IDLE_TTL
+                });
+            }
+            drop(last_evict);
             if peers.len() >= GLOBAL_PEER_KEYS {
                 drop(peers);
                 let mut overflow = self
@@ -945,6 +958,29 @@ mod tests {
             guard.admit_unknown_host(lb, &b).is_ok(),
             "clients behind the front are independent"
         );
+    }
+
+    #[test]
+    fn unknown_host_table_sweeps_are_throttled_too() {
+        let guard = IngressGuard::new(TrustedProxies::none());
+        let headers = HeaderMap::new();
+        for n in 0..GLOBAL_PEER_KEYS {
+            let address: IpAddr = format!("2001:db8:{:x}:{:x}::1", n / 65536, n % 65536)
+                .parse()
+                .unwrap();
+            guard.admit_unknown_host(address, &headers).unwrap();
+        }
+        let before = std::time::Instant::now();
+        for n in 0..2000 {
+            let address: IpAddr = format!("2001:db8:ffff:{n:x}::1").parse().unwrap();
+            let _ = guard.admit_unknown_host(address, &headers);
+        }
+        assert!(
+            before.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            before.elapsed()
+        );
+        assert_eq!(guard.inner.peers.lock().unwrap().len(), GLOBAL_PEER_KEYS);
     }
 
     #[test]
