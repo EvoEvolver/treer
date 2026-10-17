@@ -120,6 +120,18 @@ and stolen endpoint credentials with ordinary Agent reach on the machine. This
 is an explicitly accepted user risk (3479/3483), not equivalent to continuous
 verification. Command/argv/profile drift is not detectable through `agent show`.
 No owner token cache, fake Provider binding or long-lived verified-at guarantee.
+The command-integrity chain is therefore also unverified by the hub: preventing
+non-human command changes depends on the owner's Policy denial of
+`agent.startup.manage`, and that Policy is itself not checked. The human-created
+immutable profile and provisioning-time binary hash do not prove that a later
+declaration still points to that binary. Show this chain in settings as well as
+the Policy warning; never display a green continuously-verified-command badge.
+
+Activation checklist (human owner session, outside hub authority): inspect the
+actual enforce template, negative/positive message decisions and each endpoint's
+declared command/argv/cwd through the admin startup route; compare installed
+binary hashes to the release manifest; verify pinned hub/recipient IDs. These
+checks do not become unattended verification after the owner closes the page.
 
 Owner installs/checks schema-v2 enforce rules once, records a dated owner-attested
 note, and remains responsible for subsequent changes. The UI labels that note
