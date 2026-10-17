@@ -1,5 +1,9 @@
 # Treer Telegram App
 
+For the separate external-agent HTTP channel (public queues and private settings),
+see [HTTP channel deployment and API](http_app/README.md). Telegram deployments
+and their state do not change.
+
 Telegram bridges the official Bot API to Core Message. Run it inside a
 dedicated managed Agent: its nested `treer message` commands then use that
 Agent's normal identity and Policy. Telegram admission, polling offsets,
