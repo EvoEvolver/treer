@@ -334,6 +334,29 @@ pub(crate) async fn provider_cli_prepare(
     let target_version = package.version.clone();
     let (_, observation) =
         controller_observation(&state, &workspace_id, &server_id, &reference).await?;
+    // #131: a native-binary entry needs the platform's native Node; a wrong
+    // or unreadable architecture refuses before anything is fetched. The
+    // operation's first step repeats the check on the machine.
+    if let Some(expected) = recipe.node_arch.as_deref() {
+        if observation.node_arch.as_deref() != Some(expected) {
+            let mut payload = observation_payload(&observation);
+            payload["outcome"] = Value::String("node_arch_mismatch".into());
+            payload["node_arch"] = Value::from(observation.node_arch.clone());
+            if let Err(error) = auth
+                .provider_cli_audit_outcome(&scope, "provider_cli.prepare", &reference, payload)
+                .await
+            {
+                tracing::warn!(code = error.code(), %workspace_id, %server_id, "failed to record provider CLI prepare audit event");
+            }
+            return Err(ApiFailure {
+                status: StatusCode::CONFLICT,
+                error: ProtocolError::new(
+                    "provider_cli_node_arch_mismatch",
+                    "The machine's Node is not the platform's native architecture, so this recipe cannot be installed there",
+                ),
+            });
+        }
+    }
     let observation_hash = observation.hash(&reference.recipe_hash, &target_version);
     let Some(decision) = decide_provider_cli_action(&observation, &target_version) else {
         let unconfirmed = !observation.probe.cleanup_confirmed;

@@ -1799,6 +1799,8 @@ impl ControllerRuntime {
             // v2 (#134): installations are observed and consent-gated.
             capabilities
                 .push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2.to_string());
+            // Plan v2 (#131): verify-file steps and exact expected versions.
+            capabilities.push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2.to_string());
         }
         capabilities
     }

@@ -44,6 +44,7 @@ fn observation(version: Option<&str>, found: bool) -> ProviderCliObservation {
                 (None, false) => Some("provider_cli_binary_not_found".into()),
             },
         },
+        node_arch: None,
     }
 }
 
@@ -60,6 +61,7 @@ fn unobservable() -> ProviderCliObservation {
             cleanup_confirmed: true,
             error_code: Some("provider_cli_prefix_unresolved".into()),
         },
+        node_arch: None,
     }
 }
 
@@ -154,6 +156,10 @@ fn recipes_response() -> ProviderCliRecipesResponse {
                     registry: "https://registry.npmjs.org/".into(),
                 }),
                 plan: Some(plan()),
+                expected_version: Some(TARGET_VERSION.into()),
+                deadline_seconds: None,
+                node_arch: None,
+                native_binary: None,
             },
             ProviderCliRecipeView {
                 provider_id: "claude".into(),
@@ -171,6 +177,10 @@ fn recipes_response() -> ProviderCliRecipesResponse {
                 lifecycle_scripts: None,
                 package: None,
                 plan: None,
+                expected_version: None,
+                deadline_seconds: None,
+                node_arch: None,
+                native_binary: None,
             },
         ],
     }
@@ -290,6 +300,8 @@ fn report(
         error_code: None,
         steps: terminal.then(Vec::new),
         plan: terminal.then(plan),
+        verified_file: None,
+        prefix_modified: false,
         argv_hash: argv_hash.into(),
         action: Some(ProviderCliAction::Install),
         version_relation: None,

@@ -23,7 +23,11 @@ use crate::ProtocolError;
 /// table validates. Old peers fail explicitly with 501.
 pub const CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL: &str = "machine.provider-cli-install.v1";
 pub const PROVIDER_RECIPES_SCHEMA: &str = "treer.provider-recipes/v1";
-pub const PROVIDER_RECIPES_SCHEMA_VERSION: u64 = 1;
+pub const PROVIDER_RECIPES_SCHEMA_VERSION: u64 = 2;
+/// Advertised next to the install capabilities by Controllers whose plans may
+/// carry `verify_file` steps and whose recipes carry `expected_version` (#131).
+/// A Web validator that only knows the five-step plan fails closed on them.
+pub const CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2: &str = "machine.provider-cli-plan.v2";
 /// Exact release bytes; the launcher generates them and ships golden hashes.
 pub const PROVIDER_RECIPES_TABLE: &str =
     include_str!("../../../launchers/agent/provider-recipes.json");
@@ -43,6 +47,17 @@ pub const PROVIDER_CLI_TOKEN_TTL_SECONDS: i64 = 120;
 pub const PROVIDER_CLI_MAX_LIVE_TOKENS: i64 = 4;
 pub const PROVIDER_CLI_PREPARES_PER_MINUTE: i64 = 10;
 pub const PROVIDER_CLI_OPERATION_DEADLINE_SECONDS: u64 = 300;
+/// Bounds for a recipe's own `deadline_seconds` (#131).
+pub const PROVIDER_CLI_OPERATION_DEADLINE_MIN_SECONDS: u64 = 60;
+pub const PROVIDER_CLI_OPERATION_DEADLINE_MAX_SECONDS: u64 = 900;
+/// Largest native binary a recipe may pin, and the free-space floor the
+/// Controller requires on top of twice the unpacked native size.
+pub const PROVIDER_CLI_NATIVE_MAX_BYTES: u64 = 1024 * 1024 * 1024;
+pub const PROVIDER_CLI_SPACE_FLOOR_BYTES: u64 = 1024 * 1024 * 1024;
+/// Registry the scripted install step is pinned to: nothing answers there, so
+/// the step can only use the verified local tarballs and any fetch npm
+/// attempts fails closed instead of silently succeeding.
+pub const PROVIDER_CLI_OFFLINE_REGISTRY: &str = "http://127.0.0.1:1/";
 pub const PROVIDER_CLI_CHECK_TIMEOUT_SECONDS: u64 = 10;
 pub const PROVIDER_CLI_OUTPUT_TAIL_BYTES: usize = 32 * 1024;
 pub const PROVIDER_CLI_RETENTION_SECONDS: i64 = 24 * 60 * 60;
@@ -115,10 +130,42 @@ pub struct ProviderRecipe {
     pub check: Option<ProviderCheck>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lifecycle_review: Option<LifecycleReview>,
+    /// Exact version the probe must print as a complete token (#131);
+    /// required on supported entries and equal to `install.version`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+    /// Operation budget override, bounded by the protocol constants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_seconds: Option<u64>,
+    /// Native-binary entries only: the file the package's reviewed postinstall
+    /// places, relative to the installed root package directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binary_path: Option<String>,
+    /// Native-binary entries only: one pinned member per supported platform.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_binaries: Option<BTreeMap<String, NativeBinaryPin>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub unsupported_reason: Option<String>,
     pub official_docs: String,
     pub login_hint: String,
+}
+
+/// The platform-specific optional dependency a native-binary recipe installs
+/// from a verified local tarball, and the bytes its postinstall must place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeBinaryPin {
+    pub package: String,
+    pub version: String,
+    /// SHA-512 of the native package tarball, verified before any script runs.
+    pub integrity: String,
+    /// Tarball member the binary bytes come from (`package/...`).
+    pub member: String,
+    /// Exact size and SHA-256 the placed file must have.
+    pub size: u64,
+    pub sha256: String,
+    /// npm's unpacked size of the native package; drives the space check.
+    pub unpacked_size: u64,
 }
 
 /// Typed package data, never executable/argv input. Core alone composes the
@@ -132,6 +179,10 @@ pub struct NpmGlobalInstall {
     pub integrity: String,
     pub registry: String,
     pub ignore_scripts: bool,
+    /// Explicit on native-binary entries (always `false`): the optional
+    /// native dependency is installed, never omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub omit_optional: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -147,6 +198,23 @@ pub struct LifecycleReview {
     pub reviewed_at: String,
     pub reviewer: String,
     pub files: Vec<LifecycleReviewFile>,
+    /// Script name to the exact command from the pinned `package.json`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scripts: Option<BTreeMap<String, String>>,
+    /// The scripts npm runs on a tarball global install (`postinstall`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs: Option<Vec<String>>,
+    /// Expected installed closure: the root plus one native package, and only
+    /// the root carries scripts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closure: Option<LifecycleClosure>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LifecycleClosure {
+    pub packages: u64,
+    pub with_scripts: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -289,6 +357,10 @@ fn validate_recipe(
             || recipe.install.is_some()
             || recipe.check.is_some()
             || recipe.lifecycle_review.is_some()
+            || recipe.expected_version.is_some()
+            || recipe.deadline_seconds.is_some()
+            || recipe.binary_path.is_some()
+            || recipe.native_binaries.is_some()
         {
             return Err(invalid("unsupported entry fields"));
         }
@@ -318,16 +390,103 @@ fn validate_recipe(
     {
         return Err(invalid("check"));
     }
-    match (&install.ignore_scripts, &recipe.lifecycle_review) {
-        (true, None) => {}
-        (true, Some(_)) => return Err(invalid("lifecycle_review on ignore_scripts entry")),
-        (false, None) => return Err(invalid("lifecycle_review required")),
-        (false, Some(review)) => lifecycle_review(review)?,
+    // #131: the probe must print exactly this version; one canonical field.
+    if recipe.expected_version.as_deref() != Some(install.version.as_str()) {
+        return Err(invalid("expected_version"));
+    }
+    if let Some(deadline) = recipe.deadline_seconds {
+        if !(PROVIDER_CLI_OPERATION_DEADLINE_MIN_SECONDS
+            ..=PROVIDER_CLI_OPERATION_DEADLINE_MAX_SECONDS)
+            .contains(&deadline)
+        {
+            return Err(invalid("deadline_seconds"));
+        }
+    }
+    // Scripts run only to place a pinned native binary, and a pinned native
+    // binary is placed only by reviewed scripts: the four fields come together.
+    let native = recipe.native_binaries.is_some();
+    if native != recipe.binary_path.is_some()
+        || native == install.ignore_scripts
+        || native != recipe.lifecycle_review.is_some()
+        || (native && install.omit_optional != Some(false))
+        || (!native && install.omit_optional.is_some())
+    {
+        return Err(invalid("native_binaries"));
+    }
+    if let Some(review) = &recipe.lifecycle_review {
+        lifecycle_review(review, &install.package)?;
+    }
+    if let Some(pins) = &recipe.native_binaries {
+        let path = recipe.binary_path.as_deref().unwrap_or_default();
+        if path.len() > 128
+            || !path
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"_./-".contains(&b))
+            || path
+                .split('/')
+                .any(|part| part.is_empty() || part == "." || part == "..")
+        {
+            return Err(invalid("binary_path"));
+        }
+        let platforms: BTreeSet<&str> = recipe.platforms.iter().map(String::as_str).collect();
+        if pins.keys().map(String::as_str).collect::<BTreeSet<_>>() != platforms {
+            return Err(invalid("native_binaries.platforms"));
+        }
+        for pin in pins.values() {
+            native_binary_pin(pin, install)?;
+        }
     }
     Ok(())
 }
 
-fn lifecycle_review(review: &LifecycleReview) -> Result<(), ProtocolError> {
+fn native_binary_pin(
+    pin: &NativeBinaryPin,
+    install: &NpmGlobalInstall,
+) -> Result<(), ProtocolError> {
+    text(&pin.package, 214)?;
+    if !pin.package.starts_with(&format!("{}-", install.package))
+        || pin.package[install.package.len() + 1..]
+            .bytes()
+            .any(|b| !(b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'))
+        || pin.version != install.version
+    {
+        return Err(invalid("native_binaries.package"));
+    }
+    integrity(&pin.integrity)?;
+    tarball_member(&pin.member).ok_or_else(|| invalid("native_binaries.member"))?;
+    if !sha256_hex_ok(&pin.sha256) {
+        return Err(invalid("native_binaries.sha256"));
+    }
+    if pin.size == 0
+        || pin.size > pin.unpacked_size
+        || pin.unpacked_size > PROVIDER_CLI_NATIVE_MAX_BYTES
+    {
+        return Err(invalid("native_binaries.size"));
+    }
+    Ok(())
+}
+
+fn sha256_hex_ok(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// `package/<relative path>` with plain components; returns the relative part.
+fn tarball_member(member: &str) -> Option<&str> {
+    let relative = member.strip_prefix("package/")?;
+    (!relative.is_empty()
+        && relative
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"_./-".contains(&b))
+        && !relative
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == ".."))
+    .then_some(relative)
+}
+
+fn lifecycle_review(review: &LifecycleReview, package: &str) -> Result<(), ProtocolError> {
     let date = review.reviewed_at.as_bytes();
     if date.len() != 10
         || !date.iter().enumerate().all(|(i, b)| {
@@ -346,29 +505,41 @@ fn lifecycle_review(review: &LifecycleReview) -> Result<(), ProtocolError> {
     }
     let mut seen = BTreeSet::new();
     for file in &review.files {
-        let member = file
-            .member
-            .strip_prefix("package/")
-            .ok_or_else(|| invalid("lifecycle_review.member"))?;
-        if member.is_empty()
-            || !member
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"_./-".contains(&b))
-            || member
-                .split('/')
-                .any(|part| part.is_empty() || part == "." || part == "..")
-            || !seen.insert(&file.member)
-        {
+        if tarball_member(&file.member).is_none() || !seen.insert(&file.member) {
             return Err(invalid("lifecycle_review.member"));
         }
-        if file.sha256.len() != 64
-            || !file
-                .sha256
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        {
+        if !sha256_hex_ok(&file.sha256) {
             return Err(invalid("lifecycle_review.sha256"));
         }
+    }
+    // #131: the review names the scripts, which of them npm runs on a tarball
+    // global install, and the closure the sealed acceptance asserts.
+    let scripts = review
+        .scripts
+        .as_ref()
+        .ok_or_else(|| invalid("lifecycle_review.scripts"))?;
+    if scripts.is_empty() {
+        return Err(invalid("lifecycle_review.scripts"));
+    }
+    for (name, command) in scripts {
+        if name.len() > 32 || !slug(name, b'-') {
+            return Err(invalid("lifecycle_review.scripts"));
+        }
+        text(command, 256)?;
+    }
+    let runs = review
+        .runs
+        .as_ref()
+        .ok_or_else(|| invalid("lifecycle_review.runs"))?;
+    if runs.is_empty() || runs.iter().any(|name| !scripts.contains_key(name)) {
+        return Err(invalid("lifecycle_review.runs"));
+    }
+    let closure = review
+        .closure
+        .as_ref()
+        .ok_or_else(|| invalid("lifecycle_review.closure"))?;
+    if closure.packages != 2 || closure.with_scripts != [package.to_owned()] {
+        return Err(invalid("lifecycle_review.closure"));
     }
     Ok(())
 }
@@ -542,16 +713,47 @@ pub enum ProviderCliPlanStep {
         args: Vec<String>,
         prefix_from_step: u32,
     },
+    /// Read-only (#131): `<prefix>/<relative_path>` must be a regular file of
+    /// exactly `expected_size` bytes hashing to `expected_sha256`, reached by
+    /// an O_NOFOLLOW chain, and `<prefix>/bin/<entry>` must be a symlink that
+    /// resolves inside the prefix to that same file. Nothing is executed; a
+    /// mismatch ends the operation as `provider_cli_binary_mismatch` before
+    /// the probe.
+    VerifyFile {
+        step: u32,
+        purpose: String,
+        rule: String,
+        relative_path: String,
+        entry: String,
+        expected_size: u64,
+        expected_sha256: String,
+        prefix_from_step: u32,
+    },
 }
 
 impl ProviderCliPlanStep {
     pub fn step(&self) -> u32 {
         match self {
-            Self::Command { step, .. } | Self::Verify { step, .. } | Self::Resolve { step, .. } => {
-                *step
-            }
+            Self::Command { step, .. }
+            | Self::Verify { step, .. }
+            | Self::Resolve { step, .. }
+            | Self::VerifyFile { step, .. } => *step,
         }
     }
+}
+
+/// True when the first non-empty output line carries `expected` as a complete
+/// token: `2.1.302` matches `claude 2.1.302 (Claude Code)` and `2.1.302`;
+/// `2.1.3020`, `v2.1.302` and `02.1.302` do not. Tokens may be wrapped in
+/// parentheses or followed by a comma.
+pub fn provider_cli_version_token_matches(output: &str, expected: &str) -> bool {
+    let Some(line) = output.lines().find(|line| !line.trim().is_empty()) else {
+        return false;
+    };
+    !expected.is_empty()
+        && line
+            .split_whitespace()
+            .any(|token| token.trim_start_matches('(').trim_end_matches([')', ',']) == expected)
 }
 
 /// SHA-256 over the compact canonical JSON of the complete plan (every step:
@@ -601,6 +803,30 @@ pub struct ProviderCliRecipeView {
     pub package: Option<ProviderCliPackage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Vec<ProviderCliPlanStep>>,
+    /// #131: the version the probe must print as a complete token.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_seconds: Option<u64>,
+    /// Node `process.arch` token this platform's native entry requires.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_arch: Option<String>,
+    /// This platform's pinned native member for native-binary entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_binary: Option<NativeBinaryPin>,
+}
+
+/// Result of a `verify_file` step in the terminal report (#131): the measured
+/// size and digest when the file was read, and which check failed otherwise
+/// (`native_content`, `entry_link`, `not_regular`, `path_refused`). No path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderCliVerifiedFile {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -770,6 +996,14 @@ pub struct ProviderCliOperationReport {
     /// on `provider_cli_state_changed` it is the one that differed. No path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_before: Option<crate::ProviderCliObservationSummary>,
+    /// #131: outcome of the read-only file verification, when the plan has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verified_file: Option<ProviderCliVerifiedFile>,
+    /// #131: true once the install step started and the operation did not
+    /// succeed: the global prefix may have been modified; the user removes
+    /// the package with the existing uninstall path, nothing retries.
+    #[serde(default)]
+    pub prefix_modified: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -814,6 +1048,7 @@ pub struct ProviderCliOperationResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider_cli_expected_node_arch;
 
     const GOLDEN: &str = include_str!("../../../launchers/agent/tests/provider-recipe-hashes.json");
 
@@ -1043,16 +1278,284 @@ mod tests {
                 .unwrap_or_else(|| panic!("{name} accepted"));
             assert_eq!(error.code, PROVIDER_CLI_TABLE_INVALID, "{name}");
         }
-        let reviewed = mutate(|t| {
-            let r = supported(t);
-            r["install"]["ignore_scripts"] = false.into();
-            r["lifecycle_review"] = serde_json::json!({"reviewed_at":"2026-10-16","reviewer":"security","files":[{"member":"package/install.cjs","sha256":"a".repeat(64)}]});
-        })
-        .unwrap();
-        assert!(reviewed
+        // Scripts without a pinned native, or a pinned native without
+        // scripts, are refused in both directions.
+        for edit in [
+            |r: &mut Value| r["install"]["ignore_scripts"] = false.into(),
+            |r: &mut Value| r["install"]["omit_optional"] = false.into(),
+        ] {
+            let error = mutate(|t| edit(supported(t))).err().unwrap();
+            assert_eq!(error.code, PROVIDER_CLI_TABLE_INVALID);
+        }
+    }
+
+    fn claude(table: &mut Value) -> &mut Value {
+        table["recipes"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|recipe| recipe["recipe_id"] == "claude-native-npm")
+            .unwrap()
+    }
+
+    #[test]
+    fn native_binary_entries_pin_every_platform_script_and_version() {
+        let table = ValidatedProviderTable::embedded().expect("embedded table validates");
+        let entry = table
             .recipes
             .iter()
-            .any(|r| r.recipe.lifecycle_review.is_some()));
+            .find(|entry| entry.recipe.recipe_id == "claude-native-npm")
+            .unwrap();
+        let recipe = &entry.recipe;
+        assert!(recipe.supported);
+        assert_eq!(recipe.expected_version.as_deref(), Some("2.1.302"));
+        assert_eq!(recipe.binary_path.as_deref(), Some("bin/claude.exe"));
+        let install = recipe.install.as_ref().unwrap();
+        assert!(!install.ignore_scripts);
+        assert_eq!(install.omit_optional, Some(false));
+        let pins = recipe.native_binaries.as_ref().unwrap();
+        assert_eq!(pins.len(), 3);
+        for platform in &recipe.platforms {
+            let pin = &pins[platform];
+            assert_eq!(pin.version, install.version);
+            assert!(pin.package.starts_with("@anthropic-ai/claude-code-"));
+            assert!(pin.size <= pin.unpacked_size);
+        }
+        let review = recipe.lifecycle_review.as_ref().unwrap();
+        assert_eq!(
+            review.runs.as_deref(),
+            Some(&["postinstall".to_owned()][..])
+        );
+        assert_eq!(
+            review.closure.as_ref().unwrap().with_scripts,
+            vec!["@anthropic-ai/claude-code".to_owned()]
+        );
+        // Every other supported entry keeps scripts off and names its version.
+        for other in table.recipes.iter().filter(|e| e.recipe.supported) {
+            let install = other.recipe.install.as_ref().unwrap();
+            assert_eq!(
+                other.recipe.expected_version.as_deref(),
+                Some(install.version.as_str())
+            );
+            if other.recipe.native_binaries.is_none() {
+                assert!(install.ignore_scripts);
+                assert!(install.omit_optional.is_none());
+            }
+        }
+
+        type Edit = Box<dyn FnOnce(&mut Value)>;
+        let cases: Vec<(&str, Edit)> = vec![
+            (
+                "missing expected_version",
+                Box::new(|t| {
+                    claude(t)
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("expected_version");
+                }),
+            ),
+            (
+                "expected_version differs from install",
+                Box::new(|t| claude(t)["expected_version"] = "2.1.303".into()),
+            ),
+            (
+                "deadline below floor",
+                Box::new(|t| claude(t)["deadline_seconds"] = 30.into()),
+            ),
+            (
+                "deadline above cap",
+                Box::new(|t| claude(t)["deadline_seconds"] = 901.into()),
+            ),
+            (
+                "scripts on without native pins",
+                Box::new(|t| {
+                    let r = claude(t);
+                    for key in ["native_binaries", "binary_path"] {
+                        r.as_object_mut().unwrap().remove(key);
+                    }
+                }),
+            ),
+            (
+                "native pins with scripts off",
+                Box::new(|t| claude(t)["install"]["ignore_scripts"] = true.into()),
+            ),
+            (
+                "omit_optional true",
+                Box::new(|t| claude(t)["install"]["omit_optional"] = true.into()),
+            ),
+            (
+                "omit_optional missing",
+                Box::new(|t| {
+                    claude(t)["install"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("omit_optional");
+                }),
+            ),
+            (
+                "binary_path escapes",
+                Box::new(|t| claude(t)["binary_path"] = "../bin/claude.exe".into()),
+            ),
+            (
+                "binary_path absolute",
+                Box::new(|t| claude(t)["binary_path"] = "/bin/claude.exe".into()),
+            ),
+            (
+                "platform without pin",
+                Box::new(|t| {
+                    claude(t)["native_binaries"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("linux-x86_64");
+                }),
+            ),
+            (
+                "pin for unsupported platform",
+                Box::new(|t| {
+                    let pin = claude(t)["native_binaries"]["linux-x86_64"].clone();
+                    claude(t)["native_binaries"]["darwin-x86_64"] = pin;
+                }),
+            ),
+            (
+                "native version differs",
+                Box::new(|t| {
+                    claude(t)["native_binaries"]["linux-x86_64"]["version"] = "2.1.301".into()
+                }),
+            ),
+            (
+                "native package outside the root family",
+                Box::new(|t| {
+                    claude(t)["native_binaries"]["linux-x86_64"]["package"] =
+                        "@evil/claude-code-linux-x64".into()
+                }),
+            ),
+            (
+                "native integrity not sha512",
+                Box::new(|t| {
+                    claude(t)["native_binaries"]["linux-x86_64"]["integrity"] = "sha256-abc".into()
+                }),
+            ),
+            (
+                "native sha256 uppercase",
+                Box::new(|t| {
+                    claude(t)["native_binaries"]["linux-x86_64"]["sha256"] = "A".repeat(64).into()
+                }),
+            ),
+            (
+                "native size zero",
+                Box::new(|t| claude(t)["native_binaries"]["linux-x86_64"]["size"] = 0.into()),
+            ),
+            (
+                "native size above unpacked",
+                Box::new(|t| {
+                    claude(t)["native_binaries"]["linux-x86_64"]["unpacked_size"] = 1.into()
+                }),
+            ),
+            (
+                "native unpacked above cap",
+                Box::new(|t| {
+                    claude(t)["native_binaries"]["linux-x86_64"]["unpacked_size"] =
+                        (1_u64 << 31).into()
+                }),
+            ),
+            (
+                "native member escapes",
+                Box::new(|t| {
+                    claude(t)["native_binaries"]["linux-x86_64"]["member"] =
+                        "package/../claude".into()
+                }),
+            ),
+            (
+                "review without scripts",
+                Box::new(|t| {
+                    claude(t)["lifecycle_review"]
+                        .as_object_mut()
+                        .unwrap()
+                        .remove("scripts");
+                }),
+            ),
+            (
+                "runs names an unknown script",
+                Box::new(|t| {
+                    claude(t)["lifecycle_review"]["runs"] = Value::Array(vec!["preinstall".into()])
+                }),
+            ),
+            (
+                "closure with another scripted package",
+                Box::new(|t| {
+                    claude(t)["lifecycle_review"]["closure"]["with_scripts"] =
+                        Value::Array(vec!["@anthropic-ai/claude-code-linux-x64".into()])
+                }),
+            ),
+            (
+                "closure larger than root plus one native",
+                Box::new(|t| claude(t)["lifecycle_review"]["closure"]["packages"] = 3.into()),
+            ),
+            (
+                "unsupported entry carrying expected_version",
+                Box::new(|t| {
+                    let r = t["recipes"]
+                        .as_array_mut()
+                        .unwrap()
+                        .iter_mut()
+                        .find(|recipe| recipe["recipe_id"] == "claude-native-unavailable")
+                        .unwrap();
+                    r["expected_version"] = "2.1.302".into();
+                }),
+            ),
+            (
+                "schema_version 1",
+                Box::new(|t| t["schema_version"] = 1.into()),
+            ),
+        ];
+        for (name, edit) in cases {
+            let error = mutate(edit)
+                .err()
+                .unwrap_or_else(|| panic!("{name} accepted"));
+            assert_eq!(error.code, PROVIDER_CLI_TABLE_INVALID, "{name}");
+        }
+        // A bounded deadline is accepted and carried.
+        let bounded = mutate(|t| claude(t)["deadline_seconds"] = 900.into()).unwrap();
+        assert_eq!(
+            bounded
+                .recipes
+                .iter()
+                .find(|e| e.recipe.recipe_id == "claude-native-npm")
+                .unwrap()
+                .recipe
+                .deadline_seconds,
+            Some(900)
+        );
+    }
+
+    #[test]
+    fn version_token_match_is_exact_and_whitespace_bounded() {
+        for (output, expected, matches) in [
+            ("2.1.302\n", "2.1.302", true),
+            ("claude 2.1.302 (Claude Code)\n", "2.1.302", true),
+            ("\n  Claude Code (2.1.302)\n", "2.1.302", true),
+            ("version 2.1.302, build 7\n", "2.1.302", true),
+            ("2.1.3020\n", "2.1.302", false),
+            ("v2.1.302\n", "2.1.302", false),
+            ("02.1.302\n", "2.1.302", false),
+            ("2.1.30\n", "2.1.302", false),
+            ("codex-cli 0.163.0\n", "2.1.302", false),
+            ("\n\n", "2.1.302", false),
+            ("other\n2.1.302\n", "2.1.302", false),
+            ("2.1.302", "", false),
+        ] {
+            assert_eq!(
+                provider_cli_version_token_matches(output, expected),
+                matches,
+                "{output:?}"
+            );
+        }
+        assert_eq!(
+            provider_cli_expected_node_arch("darwin-aarch64"),
+            Some("arm64")
+        );
+        assert_eq!(provider_cli_expected_node_arch("linux-x86_64"), Some("x64"));
+        assert_eq!(provider_cli_expected_node_arch("windows-x86_64"), None);
     }
 
     #[test]

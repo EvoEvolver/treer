@@ -15,6 +15,10 @@ use treer_protocol::{
 };
 
 const TARBALL: &[u8] = b"fixture tarball bytes: not a real package\n";
+/// Fixture bytes standing in for the platform's native package tarball.
+const NATIVE_TARBALL: &[u8] = b"fixture native tarball bytes: not a real package\n";
+const CLAUDE: &str = "claude-native-npm";
+const CLAUDE_PINNED: &str = "2.1.302";
 /// The embedded Codex recipe's pinned version; the fixture install writes a
 /// binary reporting it, like a real global install would.
 const PINNED: &str = "0.163.0";
@@ -91,11 +95,19 @@ dir=$(cd "$(dirname "$0")/.." && pwd)
 env > "$dir/log/env-$1"
 cat "$PWD/package.json" > "$dir/log/package-$1" 2>/dev/null
 ls -A "$PWD" > "$dir/log/cwd-$1"
-printf '%s\n' "$@" > "$dir/log/argv-$1"
+case "$1 $2" in
+  "pack "*claude-code-*) printf '%s\n' "$@" > "$dir/log/argv-pack-native";;
+  *) printf '%s\n' "$@" > "$dir/log/argv-$1";;
+esac
 case "$1" in
   pack)
     for a in "$@"; do case "$a" in --pack-destination=*) dest=${a#--pack-destination=};; esac; done
-    cp "$dir/tarball.tgz" "$dest/openai-codex-0.163.0.tgz"
+    spec=$2; pkg=${spec%@*}; ver=${spec##*@}
+    file=$(printf '%s' "$pkg" | sed 's/^@//; s#/#-#g')-$ver.tgz
+    case "$pkg" in
+      *claude-code-*) cp "$dir/native.tgz" "$dest/$file";;
+      *) cp "$dir/tarball.tgz" "$dest/$file";;
+    esac
     if [ -f "$dir/slow-pack" ]; then sleep 2; fi
     if [ -f "$dir/plant-on-pack" ]; then
       printf '#!/bin/sh\necho codex-cli 9.9.9\n' > "$dir/prefix/bin/codex"; chmod 755 "$dir/prefix/bin/codex"
@@ -110,7 +122,22 @@ case "$1" in
       perl -MPOSIX -e 'POSIX::setsid(); exec "sleep", "20"' &
     fi
     if [ -f "$dir/fail-install" ]; then echo "EACCES fixture" >&2; exit 7; fi
-    printf '#!/bin/sh\necho codex-cli 0.163.0\n' > "$dir/prefix/bin/codex"; chmod 755 "$dir/prefix/bin/codex"
+    case "$*" in
+      *anthropic-ai-claude-code-2.1.302.tgz*)
+        pkg="$dir/prefix/lib/node_modules/@anthropic-ai/claude-code"
+        mkdir -p "$pkg/bin"
+        if [ -f "$dir/stub-native" ]; then printf 'placeholder: native package missing\n' > "$pkg/bin/claude.exe"
+        else cp "$dir/native-binary" "$pkg/bin/claude.exe"; fi
+        chmod 755 "$pkg/bin/claude.exe"
+        rm -f "$dir/prefix/bin/claude"
+        if [ -f "$dir/entry-elsewhere" ]; then ln -s "$dir/bin/codex" "$dir/prefix/bin/claude"
+        elif [ -f "$dir/entry-regular" ]; then cp "$pkg/bin/claude.exe" "$dir/prefix/bin/claude"
+        else ln -s ../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe "$dir/prefix/bin/claude"; fi
+        ;;
+      *)
+        printf '#!/bin/sh\necho codex-cli 0.163.0\n' > "$dir/prefix/bin/codex"; chmod 755 "$dir/prefix/bin/codex"
+        ;;
+    esac
     ;;
   prefix)
     if [ -f "$dir/break-prefix" ]; then echo "prefix fixture broken" >&2; exit 1; fi
@@ -127,6 +154,22 @@ exit 0
         &fixture.join("bin/codex"),
         "#!/bin/sh\necho decoy-on-path\n",
     );
+    // A fixture node prints the platform's expected architecture unless the
+    // `node-arch-wrong` marker is present (an x64 Node under Rosetta).
+    fs::write(
+        fixture.join("node-arch"),
+        treer_protocol::provider_cli_expected_node_arch(release_platform().unwrap()).unwrap(),
+    )
+    .unwrap();
+    write_executable(
+        &fixture.join("bin/node"),
+        r#"#!/bin/sh
+dir=$(cd "$(dirname "$0")/.." && pwd)
+printf '%s\n' "$@" > "$dir/log/argv-node"
+if [ -f "$dir/node-arch-wrong" ]; then echo other; else cat "$dir/node-arch"; fi
+"#,
+    );
+    fs::write(fixture.join("native.tgz"), NATIVE_TARBALL).unwrap();
     Fixture {
         root: dir.path().join("state/provider-cli"),
         // Fixture bin first (the decoy codex), then the system tools the
@@ -161,7 +204,7 @@ impl Fixture {
             .unwrap();
         ProviderCliRecipeRef {
             recipe_id: CODEX.into(),
-            recipe_version: 1,
+            recipe_version: 2,
             recipe_hash: entry.recipe_hash.clone(),
         }
     }
@@ -180,20 +223,143 @@ impl Fixture {
     /// What the Proxy would bind after `prepare`: the Controller's own
     /// observation turned into the one action it allows.
     async fn consent(&self, service: &ProviderCliService) -> ProviderCliConsent {
+        self.consent_for(service, &self.codex_ref(), PINNED).await
+    }
+
+    async fn consent_for(
+        &self,
+        service: &ProviderCliService,
+        reference: &ProviderCliRecipeRef,
+        pinned: &str,
+    ) -> ProviderCliConsent {
         let observation = service
-            .check(&self.codex_ref())
+            .check(reference)
             .await
             .unwrap()
             .observation
             .expect("v2 check carries an observation");
         let decision =
-            decide_provider_cli_action(&observation, PINNED).expect("prefix is observable");
+            decide_provider_cli_action(&observation, pinned).expect("prefix is observable");
         ProviderCliConsent {
             action: decision.action,
             version_relation: decision.version_relation,
-            observation_hash: observation.hash(&self.codex_ref().recipe_hash, PINNED),
+            observation_hash: observation.hash(&reference.recipe_hash, pinned),
         }
     }
+
+    fn claude_ref(&self) -> ProviderCliRecipeRef {
+        let entry = self
+            .table
+            .recipes
+            .iter()
+            .find(|entry| entry.recipe.recipe_id == CLAUDE)
+            .unwrap();
+        ProviderCliRecipeRef {
+            recipe_id: CLAUDE.into(),
+            recipe_version: entry.recipe.recipe_version,
+            recipe_hash: entry.recipe_hash.clone(),
+        }
+    }
+
+    /// The bytes the fixture install places as `claude.exe`: a script that
+    /// records that it ran and prints `line`. Returns them for pinning.
+    #[cfg(unix)]
+    fn native_binary(&self, line: &str) -> Vec<u8> {
+        let body = format!(
+            "#!/bin/sh\ntouch \"{}\"\necho {line}\n",
+            self.fixture.join("log/claude-ran").display()
+        );
+        fs::write(self.fixture.join("native-binary"), &body).unwrap();
+        body.into_bytes()
+    }
+
+    fn marker(&self, name: &str) {
+        fs::write(self.fixture.join(name), b"").unwrap();
+    }
+
+    fn unmark(&self, name: &str) {
+        let _ = fs::remove_file(self.fixture.join(name));
+    }
+
+    fn claude_exe(&self) -> PathBuf {
+        self.fixture
+            .join("prefix/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
+    }
+
+    fn reset_prefix(&self) {
+        let _ = fs::remove_dir_all(self.fixture.join("prefix"));
+        for sub in ["prefix/bin", "prefix/lib"] {
+            fs::create_dir_all(self.fixture.join(sub)).unwrap();
+        }
+    }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    format!("{:x}", Sha256::digest(bytes))
+}
+
+/// The embedded table with this platform's Claude native pin pointing at the
+/// fixture native tarball and the given placed-binary bytes.
+fn table_with_native(binary: &[u8]) -> ValidatedProviderTable {
+    let mut table: Value = serde_json::from_str(PROVIDER_RECIPES_TABLE).unwrap();
+    let recipes = table["recipes"].as_array_mut().unwrap();
+    let codex = recipes
+        .iter_mut()
+        .find(|recipe| recipe["recipe_id"] == CODEX)
+        .unwrap();
+    codex["install"]["integrity"] = Value::String(integrity_of(TARBALL));
+    let claude = recipes
+        .iter_mut()
+        .find(|recipe| recipe["recipe_id"] == CLAUDE)
+        .unwrap();
+    claude["install"]["integrity"] = Value::String(integrity_of(TARBALL));
+    let pin = &mut claude["native_binaries"][release_platform().unwrap()];
+    pin["integrity"] = Value::String(integrity_of(NATIVE_TARBALL));
+    pin["size"] = Value::from(binary.len() as u64);
+    pin["unpacked_size"] = Value::from(binary.len() as u64);
+    pin["sha256"] = Value::String(sha256_hex(binary));
+    ValidatedProviderTable::parse(&table.to_string()).unwrap()
+}
+
+/// A native fixture: the placed binary prints `line`, the table pins it.
+#[cfg(unix)]
+fn native_fixture(line: &str) -> Fixture {
+    // The binary body embeds the fixture path, so build it in two passes.
+    let probe = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    let bytes = probe.native_binary(line);
+    let mut fixture = probe;
+    fixture.table = table_with_native(&bytes);
+    fixture
+}
+
+async fn run_native(
+    fixture: &Fixture,
+    service: &ProviderCliService,
+    id: u32,
+) -> (ProviderCliOperationReport, Vec<ProviderCliPlanStep>) {
+    let recipes = service.recipes().unwrap();
+    let claude = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CLAUDE)
+        .unwrap_or_else(|| panic!("claude view missing: {recipes:?}"));
+    assert!(claude.supported, "{claude:?}");
+    let plan = claude.plan.clone().unwrap();
+    let reference = fixture.claude_ref();
+    let consent = fixture
+        .consent_for(service, &reference, CLAUDE_PINNED)
+        .await;
+    let id = operation_id(id);
+    service
+        .install(
+            &id,
+            &reference,
+            &recipes.table_hash,
+            &plan_argv_hash(&plan),
+            &consent,
+        )
+        .unwrap();
+    (wait_terminal(service, &id).await, plan)
 }
 
 fn operation_id(n: u32) -> String {
@@ -298,8 +464,11 @@ fn expansion_is_typed_isolated_and_identical_for_display_and_execution() {
         .find(|entry| entry.recipe.recipe_id == CODEX)
         .unwrap();
     let job = Path::new("/state/provider-cli/jobs/codex-npm-posix");
-    let plan = expand_plan(codex, "/opt/node/bin/npm", job).unwrap();
-    assert_eq!(expand_plan(codex, "/opt/node/bin/npm", job).unwrap(), plan);
+    let plan = expand_plan(codex, "/opt/node/bin/npm", None, "darwin-aarch64", job).unwrap();
+    assert_eq!(
+        expand_plan(codex, "/opt/node/bin/npm", None, "darwin-aarch64", job).unwrap(),
+        plan
+    );
     assert_eq!(plan.len(), 5);
     let (npm, pack) = argv_of(&plan[0]);
     assert_eq!(npm, "/opt/node/bin/npm");
@@ -338,31 +507,12 @@ fn expansion_is_typed_isolated_and_identical_for_display_and_execution() {
         matches!(&plan[4], ProviderCliPlanStep::Resolve { rule, .. } if rule == "<npm prefix --global>/bin/codex --version")
     );
     let hash = plan_argv_hash(&plan);
-    let other = expand_plan(codex, "/usr/local/bin/npm", job).unwrap();
+    let other = expand_plan(codex, "/usr/local/bin/npm", None, "darwin-aarch64", job).unwrap();
     assert_ne!(
         plan_argv_hash(&other),
         hash,
         "a different npm is a different plan"
     );
-    // A lifecycle-enabled entry omits --ignore-scripts from install only.
-    let mut lifecycle: Value = serde_json::from_str(PROVIDER_RECIPES_TABLE).unwrap();
-    let recipe = lifecycle["recipes"]
-        .as_array_mut()
-        .unwrap()
-        .iter_mut()
-        .find(|recipe| recipe["recipe_id"] == CODEX)
-        .unwrap();
-    recipe["install"]["ignore_scripts"] = Value::Bool(false);
-    recipe["lifecycle_review"] = serde_json::json!({"reviewed_at":"2026-10-16","reviewer":"security","files":[{"member":"package/install.cjs","sha256":"a".repeat(64)}]});
-    let lifecycle = ValidatedProviderTable::parse(&lifecycle.to_string()).unwrap();
-    let entry = lifecycle
-        .recipes
-        .iter()
-        .find(|entry| entry.recipe.recipe_id == CODEX)
-        .unwrap();
-    let plan = expand_plan(entry, "/opt/node/bin/npm", job).unwrap();
-    assert!(argv_of(&plan[0]).1.contains(&"--ignore-scripts".to_owned()));
-    assert!(!argv_of(&plan[2]).1.contains(&"--ignore-scripts".to_owned()));
 }
 
 #[cfg(unix)]
@@ -618,22 +768,22 @@ async fn install_refuses_changed_plan_table_unsupported_and_capped_storage() {
         refuse(&operation_id(4), &wrong, &table_hash, &argv_hash),
         "provider_cli_recipe_mismatch"
     );
-    let claude = recipes
+    let cursor = recipes
         .recipes
         .iter()
-        .find(|view| view.recipe_id == "claude-native-npm")
+        .find(|view| view.recipe_id == "cursor-cli")
         .unwrap();
-    let claude_ref = ProviderCliRecipeRef {
-        recipe_id: claude.recipe_id.clone(),
-        recipe_version: claude.recipe_version,
-        recipe_hash: claude.recipe_hash.clone(),
+    let cursor_ref = ProviderCliRecipeRef {
+        recipe_id: cursor.recipe_id.clone(),
+        recipe_version: cursor.recipe_version,
+        recipe_hash: cursor.recipe_hash.clone(),
     };
     assert_eq!(
-        refuse(&operation_id(4), &claude_ref, &table_hash, &argv_hash),
+        refuse(&operation_id(4), &cursor_ref, &table_hash, &argv_hash),
         "provider_cli_recipe_unsupported"
     );
     assert_eq!(
-        service.check(&claude_ref).await.unwrap_err().code,
+        service.check(&cursor_ref).await.unwrap_err().code,
         "provider_cli_recipe_unsupported"
     );
     // Consent shapes that can never run: noop and a malformed hash.
@@ -687,6 +837,8 @@ async fn install_refuses_changed_plan_table_unsupported_and_capped_storage() {
                 plan: Vec::new(),
                 consent: None,
                 observed_before: None,
+                verified_file: None,
+                prefix_modified: false,
             });
         }
         store.persist().unwrap();
@@ -1447,6 +1599,8 @@ fn restart_marks_running_operations_unknown_and_prunes_expired_results() {
         plan: Vec::new(),
         consent: None,
         observed_before: None,
+        verified_file: None,
+        prefix_modified: false,
     };
     let now = now_ms();
     let file = StoreFile {
@@ -1523,4 +1677,446 @@ fn helpers_validate_ids_prefixes_and_version_text() {
         !verify_pack(&pack, &integrity_of(TARBALL)),
         "exactly one tarball"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn native_entry_expands_to_the_nine_step_offline_plan() {
+    let table = table_with_native(b"x");
+    let platform = release_platform().unwrap();
+    let claude = table
+        .recipes
+        .iter()
+        .find(|entry| entry.recipe.recipe_id == CLAUDE)
+        .unwrap();
+    let job = Path::new("/state/provider-cli/jobs/claude-native-npm");
+    let npm = "/opt/node/bin/npm";
+    assert_eq!(
+        expand_plan(claude, npm, None, platform, job)
+            .unwrap_err()
+            .code,
+        "provider_cli_node_unavailable"
+    );
+    let plan = expand_plan(claude, npm, Some("/opt/node/bin/node"), platform, job).unwrap();
+    assert_eq!(plan.len(), 9);
+    assert_eq!(
+        plan.iter()
+            .map(ProviderCliPlanStep::step)
+            .collect::<Vec<_>>(),
+        (1..=9).collect::<Vec<_>>()
+    );
+    let (node, arch) = argv_of(&plan[0]);
+    assert_eq!(
+        (node, arch),
+        (
+            "/opt/node/bin/node",
+            &["-p".to_owned(), "process.arch".to_owned()][..]
+        )
+    );
+    let (_, pack) = argv_of(&plan[1]);
+    assert_eq!(pack[1], "@anthropic-ai/claude-code@2.1.302");
+    assert!(pack.contains(&"--ignore-scripts".to_owned()));
+    let pin = &claude.recipe.native_binaries.as_ref().unwrap()[platform];
+    let (_, pack_native) = argv_of(&plan[2]);
+    assert_eq!(pack_native[1], format!("{}@2.1.302", pin.package));
+    assert!(pack_native.contains(&"--ignore-scripts".to_owned()));
+    assert!(pack_native.contains(&format!(
+        "--pack-destination={}",
+        job.join("pack-native").display()
+    )));
+    assert!(pack_native.contains(&"--registry=https://registry.npmjs.org/".to_owned()));
+    assert!(
+        matches!(&plan[3], ProviderCliPlanStep::Verify { purpose, expected, .. } if purpose == "integrity" && *expected == integrity_of(TARBALL))
+    );
+    assert!(
+        matches!(&plan[4], ProviderCliPlanStep::Verify { purpose, expected, .. } if purpose == "integrity-native" && *expected == integrity_of(NATIVE_TARBALL))
+    );
+    let (_, install) = argv_of(&plan[5]);
+    assert_eq!(install[..2], ["install", "--global"]);
+    assert_eq!(
+        install[2],
+        job.join("pack/anthropic-ai-claude-code-2.1.302.tgz")
+            .display()
+            .to_string()
+    );
+    assert_eq!(
+        install[3],
+        job.join(format!(
+            "pack-native/{}",
+            tarball_name(&pin.package, "2.1.302")
+        ))
+        .display()
+        .to_string()
+    );
+    // Scripts run, nothing may be fetched: offline, closed-port registries.
+    assert!(!install.contains(&"--ignore-scripts".to_owned()));
+    assert!(install.contains(&"--offline".to_owned()));
+    assert!(install.contains(&"--registry=http://127.0.0.1:1/".to_owned()));
+    assert!(install.contains(&"--@anthropic-ai:registry=http://127.0.0.1:1/".to_owned()));
+    assert!(install
+        .iter()
+        .all(|arg| !arg.contains("registry.npmjs.org")));
+    assert!(install.iter().all(|arg| !arg.contains("--omit")));
+    assert!(
+        matches!(&plan[6], ProviderCliPlanStep::Command { purpose, .. } if purpose == "prefix")
+    );
+    match &plan[7] {
+        ProviderCliPlanStep::VerifyFile {
+            relative_path,
+            entry,
+            expected_size,
+            expected_sha256,
+            prefix_from_step,
+            rule,
+            ..
+        } => {
+            assert_eq!(
+                relative_path,
+                "lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"
+            );
+            assert_eq!(entry, "claude");
+            assert_eq!(*expected_size, 1);
+            assert_eq!(*expected_sha256, sha256_hex(b"x"));
+            assert_eq!(*prefix_from_step, 7);
+            assert!(rule.contains("symlink"));
+        }
+        other => panic!("not a verify-file step: {other:?}"),
+    }
+    assert!(
+        matches!(&plan[8], ProviderCliPlanStep::Resolve { prefix_from_step: 7, rule, .. } if rule == "<npm prefix --global>/bin/claude --version")
+    );
+    // Dropping --offline or re-enabling scripts is a different plan.
+    let hash = plan_argv_hash(&plan);
+    let mut other = plan.clone();
+    if let ProviderCliPlanStep::Command { args, .. } = &mut other[5] {
+        args.retain(|arg| arg != "--offline");
+    }
+    assert_ne!(plan_argv_hash(&other), hash);
+    let mut other = plan.clone();
+    if let ProviderCliPlanStep::Command { args, .. } = &mut other[5] {
+        args.push("--ignore-scripts".into());
+    }
+    assert_ne!(plan_argv_hash(&other), hash);
+    // Plain entries are untouched: five steps, scripts off.
+    let codex = table
+        .recipes
+        .iter()
+        .find(|entry| entry.recipe.recipe_id == CODEX)
+        .unwrap();
+    let codex_plan = expand_plan(codex, npm, Some("/opt/node/bin/node"), platform, job).unwrap();
+    assert_eq!(codex_plan.len(), 5);
+    assert!(argv_of(&codex_plan[2])
+        .1
+        .contains(&"--ignore-scripts".to_owned()));
+    assert!(!argv_of(&codex_plan[2]).1.contains(&"--offline".to_owned()));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_install_verifies_the_placed_binary_before_probing() {
+    let fixture = native_fixture("claude 2.1.302 \\(Claude Code\\)");
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let claude = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CLAUDE)
+        .unwrap();
+    assert!(claude.supported, "{claude:?}");
+    assert!(claude.lifecycle_scripts.as_ref().unwrap().enabled);
+    assert_eq!(claude.expected_version.as_deref(), Some(CLAUDE_PINNED));
+    assert_eq!(
+        claude.node_arch.as_deref(),
+        treer_protocol::provider_cli_expected_node_arch(release_platform().unwrap())
+    );
+    assert_eq!(
+        claude.native_binary.as_ref().unwrap().sha256,
+        sha256_hex(&fs::read(fixture.fixture.join("native-binary")).unwrap())
+    );
+    // The observation carries the Node architecture for the Proxy's refusal.
+    let observed = service
+        .check(&fixture.claude_ref())
+        .await
+        .unwrap()
+        .observation
+        .unwrap();
+    assert_eq!(observed.state, ProviderCliObservedState::Absent);
+    assert_eq!(observed.node_arch, claude.node_arch);
+    let observed_codex = service
+        .check(&fixture.codex_ref())
+        .await
+        .unwrap()
+        .observation
+        .unwrap();
+    assert_eq!(
+        observed_codex.node_arch, None,
+        "plain entries do not probe node"
+    );
+
+    let (report, plan) = run_native(&fixture, &service, 1).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Succeeded,
+        "{report:?}"
+    );
+    assert_eq!(
+        report
+            .steps
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|s| s.step)
+            .collect::<Vec<_>>(),
+        (1..=9).collect::<Vec<_>>()
+    );
+    let verified = report.verified_file.clone().unwrap();
+    assert_eq!(verified.failure, None);
+    assert_eq!(
+        verified.sha256.as_deref(),
+        Some(sha256_hex(&fs::read(fixture.claude_exe()).unwrap()).as_str())
+    );
+    assert_eq!(
+        verified.size,
+        Some(fs::metadata(fixture.claude_exe()).unwrap().len())
+    );
+    assert!(!report.prefix_modified);
+    assert!(report.stdout.contains("claude 2.1.302"));
+    assert!(fixture.fixture.join("log/claude-ran").exists());
+    // Executed argv equals the displayed plan for every command step.
+    for (index, log) in [
+        (0, "argv-node"),
+        (1, "argv-pack"),
+        (2, "argv-pack-native"),
+        (5, "argv-install"),
+        (6, "argv-prefix"),
+    ] {
+        let (_, args) = argv_of(&plan[index]);
+        let recorded: Vec<String> = fixture
+            .log(log)
+            .unwrap_or_else(|| panic!("{log} not recorded"))
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(recorded, args, "{log}");
+    }
+    let env = fixture.log("env-install").unwrap();
+    assert!(!env.contains("npm_config_") && !env.contains("NODE_OPTIONS"));
+    // The hard link the real postinstall prefers is accepted (nlink 2).
+    fixture.reset_prefix();
+    let service = fixture.service();
+    let (report, _) = run_native(&fixture, &service, 2).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Succeeded,
+        "{report:?}"
+    );
+    let linked = fixture
+        .fixture
+        .join("prefix/lib/node_modules/@anthropic-ai/claude-code/claude");
+    fs::hard_link(fixture.claude_exe(), &linked).unwrap();
+    let (size, digest) = verify_file(
+        &fixture.fixture.join("prefix"),
+        "lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        "claude",
+        fs::metadata(fixture.claude_exe()).unwrap().len(),
+        &sha256_hex(&fs::read(fixture.claude_exe()).unwrap()),
+    )
+    .unwrap();
+    assert_eq!(size, fs::metadata(&linked).unwrap().len());
+    assert_eq!(digest.len(), 64);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn native_install_fails_closed_on_stub_wrong_entry_version_and_node_arch() {
+    let fixture = native_fixture("claude 2.1.302");
+    // The postinstall soft-failed and left its placeholder: no probe runs.
+    fixture.marker("stub-native");
+    let service = fixture.service();
+    let (report, _) = run_native(&fixture, &service, 1).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Failed,
+        "{report:?}"
+    );
+    assert_eq!(
+        report.error_code.as_deref(),
+        Some("provider_cli_binary_mismatch")
+    );
+    assert_eq!(
+        report.verified_file.as_ref().unwrap().failure.as_deref(),
+        Some("native_content")
+    );
+    assert!(
+        report.prefix_modified,
+        "install started: prefix may be modified"
+    );
+    assert_eq!(report.step, Some(8));
+    assert!(
+        !fixture.fixture.join("log/claude-ran").exists(),
+        "probe never ran"
+    );
+    fixture.unmark("stub-native");
+
+    // The entry symlink leads outside the prefix, or is a plain copy.
+    for marker in ["entry-elsewhere", "entry-regular"] {
+        fixture.reset_prefix();
+        fixture.marker(marker);
+        let service = fixture.service();
+        let (report, _) = run_native(&fixture, &service, 2).await;
+        assert_eq!(
+            report.error_code.as_deref(),
+            Some("provider_cli_binary_mismatch"),
+            "{marker}"
+        );
+        assert_eq!(
+            report.verified_file.as_ref().unwrap().failure.as_deref(),
+            Some("entry_link"),
+            "{marker}"
+        );
+        assert!(
+            !fixture.fixture.join("log/claude-ran").exists(),
+            "{marker}: probe never ran"
+        );
+        fixture.unmark(marker);
+    }
+
+    // The wrong Node architecture stops before anything is fetched.
+    fixture.reset_prefix();
+    fixture.marker("node-arch-wrong");
+    let _ = fs::remove_file(fixture.fixture.join("log/argv-pack"));
+    let service = fixture.service();
+    let observed = service
+        .check(&fixture.claude_ref())
+        .await
+        .unwrap()
+        .observation
+        .unwrap();
+    assert_eq!(observed.node_arch.as_deref(), Some("other"));
+    let (report, _) = run_native(&fixture, &service, 3).await;
+    assert_eq!(
+        report.error_code.as_deref(),
+        Some("provider_cli_node_arch_mismatch"),
+        "{report:?}"
+    );
+    assert_eq!(report.step, Some(1));
+    assert!(fixture.log("argv-pack").is_none(), "pack never ran");
+    assert!(!report.prefix_modified);
+    fixture.unmark("node-arch-wrong");
+
+    // A verified binary that prints another version is not a success.
+    let fixture = native_fixture("claude 2.1.3020");
+    let service = fixture.service();
+    let (report, _) = run_native(&fixture, &service, 4).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Failed,
+        "{report:?}"
+    );
+    assert_eq!(
+        report.error_code.as_deref(),
+        Some("provider_cli_version_mismatch")
+    );
+    assert_eq!(report.exit_code, Some(0));
+    assert!(report.verified_file.as_ref().unwrap().failure.is_none());
+    assert!(report.prefix_modified);
+    // Plain entries get the same exact-token rule.
+    let fixture = fixture_with_codex_line("codex-cli 0.163.0-rc1");
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let plan = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CODEX)
+        .unwrap()
+        .plan
+        .clone()
+        .unwrap();
+    let consent = fixture.consent(&service).await;
+    let id = operation_id(5);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &plan_argv_hash(&plan),
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.error_code.as_deref(),
+        Some("provider_cli_version_mismatch"),
+        "{report:?}"
+    );
+}
+
+/// A codex fixture whose install writes a probe printing `line`.
+#[cfg(unix)]
+fn fixture_with_codex_line(line: &str) -> Fixture {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    let script = fs::read_to_string(fixture.fixture.join("bin/npm")).unwrap();
+    let script = script.replace("echo codex-cli 0.163.0", &format!("echo {line}"));
+    write_executable(&fixture.fixture.join("bin/npm"), &script);
+    fixture
+}
+
+#[cfg(unix)]
+#[test]
+fn verify_file_refuses_writable_or_linked_components_and_space_fails_closed() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = TempDir::new();
+    let prefix = dir.path().join("prefix");
+    let package = prefix.join("lib/node_modules/@anthropic-ai/claude-code/bin");
+    fs::create_dir_all(&package).unwrap();
+    fs::create_dir_all(prefix.join("bin")).unwrap();
+    let body = b"#!/bin/sh\necho claude 2.1.302\n";
+    fs::write(package.join("claude.exe"), body).unwrap();
+    std::os::unix::fs::symlink(
+        "../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe",
+        prefix.join("bin/claude"),
+    )
+    .unwrap();
+    let relative = "lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe";
+    let digest = sha256_hex(body);
+    let verify = |size: u64, digest: &str| verify_file(&prefix, relative, "claude", size, digest);
+    assert_eq!(
+        verify(body.len() as u64, &digest).unwrap().0,
+        body.len() as u64
+    );
+    assert_eq!(
+        verify(body.len() as u64 + 1, &digest),
+        Err("native_content")
+    );
+    assert_eq!(
+        verify(body.len() as u64, &"0".repeat(64)),
+        Err("native_content")
+    );
+    assert_eq!(
+        verify_file(&prefix, "lib/../lib/node_modules/x", "claude", 1, &digest),
+        Err("path_refused")
+    );
+    // A group-writable directory on the chain is refused.
+    let lib = prefix.join("lib");
+    fs::set_permissions(&lib, fs::Permissions::from_mode(0o775)).unwrap();
+    assert_eq!(verify(body.len() as u64, &digest), Err("path_refused"));
+    fs::set_permissions(&lib, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(verify(body.len() as u64, &digest).is_ok());
+    // A symlinked component is refused even when it points inside.
+    let modules = prefix.join("lib/node_modules");
+    let aside = prefix.join("lib/real_modules");
+    fs::rename(&modules, &aside).unwrap();
+    std::os::unix::fs::symlink("real_modules", &modules).unwrap();
+    assert_eq!(verify(body.len() as u64, &digest), Err("path_refused"));
+    fs::remove_file(&modules).unwrap();
+    fs::rename(&aside, &modules).unwrap();
+    // A directory in place of the file is not regular; a missing entry fails.
+    fs::remove_file(prefix.join("bin/claude")).unwrap();
+    assert_eq!(verify(body.len() as u64, &digest), Err("entry_link"));
+    fs::remove_file(package.join("claude.exe")).unwrap();
+    fs::create_dir(package.join("claude.exe")).unwrap();
+    assert_eq!(verify(body.len() as u64, &digest), Err("not_regular"));
+    assert!(space_available(dir.path(), 0));
+    assert!(!space_available(dir.path(), u64::MAX));
+    assert!(!space_available(&dir.path().join("missing"), 0));
 }

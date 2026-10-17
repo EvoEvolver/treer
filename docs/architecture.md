@@ -641,11 +641,18 @@ additionally require `machine.provider-cli-install.v2` (#134): a Controller
 that installs without first observing the prefix is refused with 409
 `provider_cli_controller_outdated`, never served by the unobserved flow. The recipe table is
 release data (`launchers/agent/provider-recipes.json`, schema
-`treer.provider-recipes/v1`) embedded by `treer-protocol` and validated at
-Controller start: typed `npm-global` installs with exact version, SHA-512
-`integrity`, allowlisted registry, `ignore_scripts` or an inline lifecycle
-review, `check` restricted to the recipe's `binary_names` and `--version`;
-any violation withholds the capability. The Controller owns one expansion
+`treer.provider-recipes/v1` at `schema_version` 2) embedded by `treer-protocol`
+and validated at Controller start: typed `npm-global` installs with exact
+version, SHA-512 `integrity`, allowlisted registry, a top-level
+`expected_version` equal to the pinned version, `ignore_scripts` or (only
+together with `binary_path` and per-platform `native_binaries` pins) an
+inline lifecycle review, `check` restricted to the recipe's `binary_names`
+and `--version`; any violation withholds the capability. Controllers whose
+table validates also advertise `machine.provider-cli-plan.v2` (#131): their
+plans may carry a `verify_file` step and native entries expand to nine steps
+(Node architecture probe, pack of root and native tarball, two SHA-512
+verifications, one offline install of both local tarballs, prefix,
+verify-file, probe). The Controller owns one expansion
 function that produces the plan shown at `recipes`/`prepare` and executed on
 `install`: `npm pack` into a private job directory, SHA-512 verification of the
 single tarball, `npm install --global <local tarball>`, `npm prefix --global`,
