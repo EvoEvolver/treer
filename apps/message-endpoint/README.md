@@ -637,6 +637,43 @@ adapter response limit. Authenticated UI, audit/receipt archival and explicit
 clear remain required before activation; these primitives are not a running
 owner recovery service.
 
+## Development owner authentication (`hub` Cargo feature)
+
+`owner_auth::OwnerAuth` now implements the outbound identity verification for
+the settings service. This is not yet an HTTP router or an OAuth flow. Every
+request checks `verify_app` at the configured Proxy for this service audience,
+workspace, active human subject and unexpired token, then fetches the current
+App directory and requires exactly one matching human with role `owner`.
+Token role/name headers, remembered membership and Agent identities cannot
+authorize management. The returned owner proof exposes only the verified ID.
+
+The service must preserve all repeated header values when constructing the
+input: injected identity header first, explicit Bearer second, otherwise a token
+resolved from its own opaque OAuth session store. Empty, duplicate, malformed,
+expired, forged or wrong-audience supplied identities fail without falling back
+to a different cookie user. OAuth sessions, state/PKCE and browser cookies still
+need implementation and tests; callers must never supply a raw token cookie or
+actor ID to bypass this selection.
+
+Management mutations require an exact configured App/Proxy `Origin`,
+`X-Endpoint-Request: 1`, and, when present, `Sec-Fetch-Site` of `same-origin` or
+`same-site`. Duplicate origin/custom/fetch-site headers are rejected. This
+includes authenticated requests carrying ambient injected human tokens; even
+an owner using curl must supply Origin. The future HTTP router must reject CORS
+preflights, enforce these checks on every mutation, verify confirmation/revision
+for destructive actions, and run network verification outside the state actor.
+
+Proxy/public origins come only from trusted operator configuration, never Host
+or browser parameters. HTTPS is required except literal loopback HTTP. URL
+credentials, query/fragment and non-root Proxy base paths are rejected, and the
+service ID must be a stable `svc_` URL component. The client disables environment
+proxies and redirects, uses 3-second connect/10-second request deadlines and a
+2 MiB response cap, emits only fixed errors and does not log/cache tokens.
+Tests use a private fake Proxy for per-request owner revocation, bad/Agent tokens,
+directory membership, CSRF, duplicate headers, no redirect and response caps.
+They do not establish real embedded-browser/OAuth acceptance or an authenticated
+settings server; those remain activation requirements.
+
 ## Development Bot API adapter (`hub` Cargo feature)
 
 The optional hub-only HTTP client uses one configured account and verified bot
