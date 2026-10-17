@@ -70,6 +70,17 @@ jobs:
         run: |
           cargo test --locked -p treer-agent-server --bin treer-agent-server service::tests::machine_
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test private-state placement rule (must run both tests)
+        # The placement predicate walks to the drive root and the Controller matrix
+        # decides whether image uploads stay enabled; the windows_ filter above does
+        # not select them, so name them exactly and fail if either did not run.
+        run: |
+          $output = cargo test --locked -p treer-agent-server --bin treer-agent-server -- --exact `
+            private_state::placement_tests::placement_allows_hidden_state_under_a_plain_home_and_refuses_repositories `
+            controller::private_state_tests::hidden_private_state_under_a_plain_home_is_injected_until_a_repository_appears 2>&1 | Out-String
+          Write-Host $output
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($output -notmatch '(?m)^test result: ok\. 2 passed; 0 failed') { Write-Host 'both placement tests must run'; exit 1 }
       - name: Build machine binaries
         run: cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
       - name: Windows administrator requirement (standard user, disposable runner)
