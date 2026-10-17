@@ -1,3 +1,6 @@
+import { WorkspacePinAction, WorkspacePinsNotice } from "@/components/workspace-pin-action"
+import type { PinsController } from "@/components/use-workspace-pins"
+import { workloadPin } from "@/lib/workspace-pins"
 import { workspaceWorkloads } from "@/lib/workspace-workloads"
 import { useEffect, useRef, useState } from "react"
 import { api, type Agent, type AppDeployment, type Machine, type WorkloadFolder as FolderEntry, type WorkloadTreeState as Tree } from "@/lib/api"
@@ -35,8 +38,8 @@ function StatusDot({ status }: { status: TreeStatus }) {
   return <span role="img" aria-label={label} data-tree-status={status.key} className={`size-2 shrink-0 rounded-full ${status.tone}`} />
 }
 
-export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, onOpen, workloadHref, onOpenInNewTab, onSettings, onRename, onDelete, onNew, preview, placementRevision = 0, onTreeChange }: {
-  workspaceId: string | null; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; selectedId: string | null
+export function WorkloadTree({ pins, workspaceId, agents, apps, machines, selectedId, onOpen, workloadHref, onOpenInNewTab, onSettings, onRename, onDelete, onNew, preview, placementRevision = 0, onTreeChange }: {
+  pins: PinsController; workspaceId: string | null; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; selectedId: string | null
   onOpen: (id: string, logs?: boolean) => void; workloadHref: (id: string) => string; onOpenInNewTab: (id: string) => void; onSettings: (app: AppDeployment) => void; onRename: (agent: Agent) => void; onDelete: (agent: Agent) => void; onNew: (folder?: NewAgentFolder) => void; preview: boolean; placementRevision?: number; onTreeChange?: (tree: Tree) => void
 }) {
   const [tree, setTree] = useState<Tree>({ folders: [], placements: [] })
@@ -219,6 +222,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
     const siblings = orderedRows(parent)
     const index = agent ? siblings.findIndex((entry) => entry.agent_id === agent.agent_id) : -1
     return <>
+      <WorkspacePinAction pins={pins} target={agent ? workloadPin(agent, apps) : {kind:"folder",id:item.id}} />
       {agent && <DropdownMenuItem onSelect={() => onOpenInNewTab(agent.agent_id)}>{t("app.open_in_new_tab")}</DropdownMenuItem>}
       {agent && !app && agent.kind !== "app" && <DropdownMenuItem disabled={busy || preview || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => setStartupAgent(agent)}>{t("startup.edit_startup_command")}</DropdownMenuItem>}
       {agent ? <><DropdownMenuItem disabled={busy || !machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")} onSelect={() => void lifecycle(agent, "start")}>{t("apps.start")}</DropdownMenuItem><DropdownMenuItem disabled={busy} onSelect={() => void lifecycle(agent, "restart")}>{t("apps.restart")}</DropdownMenuItem><DropdownMenuItem onSelect={() => onOpen(agent.agent_id, true)}>{t("tree.logs")}</DropdownMenuItem>{app && <DropdownMenuItem onSelect={() => onSettings(app)}>{t("tree.app_settings")}</DropdownMenuItem>}<DropdownMenuItem onSelect={() => onRename(agent)}>{t("machine.rename")}</DropdownMenuItem></> : <><DropdownMenuItem disabled={!workspaceId || busy || (!preview && machines.length > 0 && !machines.some((machine) => machine.status === "online"))} onSelect={() => onNew({ folderId: item.id, path: itemPath(item, parent) })}>{t("tree.new_agent")}</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("create", item.id)}>{t("tree.new_folder")}</DropdownMenuItem><DropdownMenuItem onSelect={() => edit("rename", parent, item)}>{t("machine.rename")}</DropdownMenuItem></>}
@@ -349,6 +353,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       </DropdownMenuContent></DropdownMenu>
     </div></div>
     {workspaceId && !preview && !machines.length && <div className="mx-3 mb-2 rounded-md border bg-muted/30 p-3"><p className="mb-2 text-xs text-muted-foreground">{t("tree.no_machines")}</p><Button variant="outline" size="sm" className="h-auto min-h-11 w-full whitespace-normal text-left" onClick={() => onNew()}>{t("wsettings.set_up_a_machine")}</Button></div>}
+    <WorkspacePinsNotice pins={pins} />
     {copyNotice && <p role="status" className="px-3 py-2 text-xs break-all">{copyNotice}</p>}
     {loading && <p role="status" className="px-3 text-xs">{t("tree.loading_folders")}</p>}{error && !editor && <div role="alert" className="px-3 py-2 text-xs text-destructive">{error}<Button variant="ghost" size="sm" className="mt-1 h-7" disabled={busy} onClick={() => setReload((value) => value + 1)}>{t("tree.reload_folders")}</Button></div>}
     <div ref={treeRoot} role="tree" aria-label={t("tree.workspace_workloads")} aria-busy={busy || loading} onKeyDown={treeKeyDown} onFocus={trackTreeFocus} className="thin-scroll min-h-0 flex-1 overflow-auto px-2 pb-3" onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); if (dragged) move(dragged, null); setDragged(null) }}>{render(null)}<div aria-label={t("tree.move_to_workspace_root")} className="mt-2 min-h-8 border-t px-2 py-2 text-[10px] text-muted-foreground">{t("tree.workspace_root")}</div></div>

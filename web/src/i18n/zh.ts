@@ -2,6 +2,17 @@ import type { Messages } from "./en"
 
 // 简体中文。键必须与 en.ts 完全一致(缺键会导致类型检查失败)。术语沿用 launcher 的中英对照。
 export const zh: Messages = {
+  "pins.pin": "置顶到总览",
+  "pins.unpin": "取消置顶",
+  "pins.shared": "与工作区共享",
+  "pins.pinned": "已置顶",
+  "pins.actions": "{path} 的操作",
+  "pins.load_failed": "无法加载工作区置顶。暂时无法更改置顶。",
+  "pins.write_failed": "无法更改置顶。请检查列表后重试。",
+  "pins.limit_reached": "工作区已达到 50 项置顶上限，请先取消一项置顶。",
+  "pins.retry": "重试置顶",
+  "pins.by": "由 {name} 置顶",
+  "pins.unknown_member": "未知成员",
   "cli.noop": "已安装",
   "cli.noop_hint": "不会执行安装，也未签发确认令牌。这是程序自报版本，不代表完整性已验证。",
   "cli.action_install": "动作：安装",

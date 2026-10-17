@@ -1,3 +1,4 @@
+import { PINS_EVENT } from "@/lib/workspace-pins"
 import { api,websocketUrl,type Agent,type AppDeployment,type Snapshot,type Workspace } from "@/lib/api"
 import { replaceWorkspace,visibleWorkspaceSnapshot } from "@/lib/control-plane"
 import { useCallback,useEffect,useRef,useState,type Dispatch,type RefObject,type SetStateAction } from "react"
@@ -107,10 +108,13 @@ export function useWorkspaceLiveFeed({ preview, workspaceId, workspaceIdRef, sna
     const connect = () => {
       if (disposed || workspaceIdRef.current !== workspaceId) return
       socket = new WebSocket(websocketUrl(`/api/workspaces/${encodeURIComponent(workspaceId)}/events`))
+      socket.onopen = () => { if (!disposed) window.dispatchEvent(new CustomEvent(PINS_EVENT, {detail:workspaceId})) }
       socket.onmessage = (event) => {
         if (disposed || workspaceIdRef.current !== workspaceId) return
         const message = JSON.parse(event.data) as { event: string; revision?: number; data?: Snapshot | Workspace | Agent }
-        if (message.event === "workspace.snapshot" && message.data) {
+        if (message.event === "workspace.pins.changed") {
+          window.dispatchEvent(new CustomEvent(PINS_EVENT, {detail:workspaceId}))
+        } else if (message.event === "workspace.snapshot" && message.data) {
           const next = visibleWorkspaceSnapshot(message.data as Snapshot)
           if (next.workspace.workspace_id !== workspaceId) return
           setSnapshot(next)

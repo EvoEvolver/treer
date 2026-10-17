@@ -1,6 +1,17 @@
 // English is the source dictionary. zh.ts must define every key (checked by the type system).
 // Keys are namespaced by screen. Values may contain {name} placeholders filled by t(key, { name }).
 export const en = {
+  "pins.pin": "Pin to Overview",
+  "pins.unpin": "Unpin",
+  "pins.shared": "Shared with the workspace",
+  "pins.pinned": "Pinned",
+  "pins.actions": "Actions for {path}",
+  "pins.load_failed": "Unable to load workspace pins. Pin changes are unavailable.",
+  "pins.write_failed": "Unable to change this pin. Review the list and try again.",
+  "pins.limit_reached": "This workspace has reached its 50-pin limit. Unpin an item first.",
+  "pins.retry": "Retry pins",
+  "pins.by": "Pinned by {name}",
+  "pins.unknown_member": "Unknown member",
   "cli.noop": "Already installed",
   "cli.noop_hint": "No installation will run and no confirmation token was issued. This is a self-reported version, not an integrity check.",
   "cli.action_install": "Action: install",

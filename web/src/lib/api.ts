@@ -352,6 +352,7 @@ export async function api<T>(path: string, options?: RequestInit): Promise<T> {
     credentials: "include",
     headers: { "content-type": "application/json", ...options?.headers },
   })
+  if (response.status === 204) return undefined as T
   const text = await response.text()
   let body: T & ApiErrorBody
   try {

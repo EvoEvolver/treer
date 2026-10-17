@@ -81,6 +81,30 @@ operation. The editor scrolls on short mobile screens and preserves input after
 a denied operation. Managed Apps have separate settings; their startup editing
 requires the forthcoming App update API.
 
+## Shared Overview pins
+
+On Proxies advertising `workspace.pins.v1`, **Pin to Overview** / **Unpin** in
+Tree context/⋯ menus and Overview row menus manage the workspace's shared list.
+Members with Tree read access see the same pins; only members with Tree manage
+access get write controls (`can_pin` is a display hint, and Core authorizes each
+write). Up to 50 Agent, App and folder pins are stored in Core, newest first.
+Stable IDs preserve pins across renames/moves; Apps use their App ID rather than
+the runtime Agent ID. Deleted/unavailable items are omitted without browser-side
+cleanup writes. Unknown or deleted pin authors display **Unknown member**.
+
+The **Pinned** section appears above Overview filters, remains visible while
+filtering, and disappears when empty. Pinned folders start collapsed and expand
+independently of the regular Overview and sidebar. Rows retain normal navigation
+and native new-tab links. Shared change signals on the existing workspace socket,
+reconnection, focus and visibility restoration trigger bounded, coalesced reads;
+there is no polling. Switching workspace/user discards late responses.
+
+Writes are not optimistic or retried automatically. Failed reads disable writes;
+a permission denial also clears the visible pins. Errors offer a read-only Retry
+and distinguish the 50-pin limit from other write failures. Older Proxies hide
+pin controls and the section; no localStorage substitute is used. This Web
+consumer must ship with the corresponding Core API.
+
 ## Console composition
 
 Workspaces open at **Overview** without attaching a PTY. The main view preserves
