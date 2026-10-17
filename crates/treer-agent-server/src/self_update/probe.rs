@@ -11,6 +11,23 @@ use super::{artifacts::Binary, hex, verified_image::VerifiedImage};
 const OUTPUT_LIMIT: usize = 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
+fn check_deadline(deadline: tokio::time::Instant) -> Result<()> {
+    if tokio::time::Instant::now() >= deadline {
+        bail!("update_image_probe_timeout");
+    }
+    Ok(())
+}
+
+// Synchronous filesystem work cannot be interrupted safely. Account for its
+// elapsed time on BOTH sides; a slow disk cannot grant a late probe result or
+// a fresh child timeout after authentication consumed the original budget.
+fn within_budget<T>(deadline: tokio::time::Instant, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    check_deadline(deadline)?;
+    let result = work();
+    check_deadline(deadline)?;
+    result
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct ImageVersion {
     pub version: String,
@@ -73,7 +90,12 @@ async fn run(
     authenticated_sha256: &str,
     timeout: Duration,
 ) -> Result<ImageVersion> {
-    let image = VerifiedImage::open(directory, executable, authenticated_sha256)?;
+    let deadline = tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| anyhow::anyhow!("update_image_probe_timeout"))?;
+    let image = within_budget(deadline, || {
+        VerifiedImage::open(directory, executable, authenticated_sha256)
+    })?;
     let parent = executable
         .parent()
         .ok_or_else(|| anyhow::anyhow!("unsafe_update_image_probe"))?;
@@ -86,26 +108,25 @@ async fn run(
         .current_dir(parent);
     // Keep authentication and path/retained-inode verification directly next
     // to spawn. No ambient identity, loader hook, proxy or PATH survives.
-    image.verify()?;
+    within_budget(deadline, || image.verify())?;
     let output =
-        treer_platform::bounded_child::output_quiescent(&mut command, timeout, OUTPUT_LIMIT)
+        treer_platform::bounded_child::output_quiescent_until(&mut command, deadline, OUTPUT_LIMIT)
             .await
             .map_err(|error| {
                 anyhow::anyhow!(match error.kind() {
                     std::io::ErrorKind::TimedOut => "update_image_probe_timeout",
-                    _ if error.to_string() == "child output limit exceeded" =>
-                        "update_image_probe_output_limit",
+                    std::io::ErrorKind::FileTooLarge => "update_image_probe_output_limit",
                     _ => "update_image_probe_failed",
                 })
             })?;
     // Successful output includes the strict group witness, not only leader
     // exit. Recheck the same physical image BEFORE accepting even valid version
     // text; same-byte replacement with a different inode also fails.
-    image.verify()?;
+    within_budget(deadline, || image.verify())?;
     if !output.status().success() {
         bail!("update_image_probe_failed");
     }
-    parse(binary, output.stdout())
+    within_budget(deadline, || parse(binary, output.stdout()))
 }
 
 /// Both installed images must identify the same native build. That build SHA
@@ -131,6 +152,45 @@ mod tests {
     struct Fixture {
         path: PathBuf,
         directory: InstallationDirectory,
+    }
+
+    #[test]
+    fn synchronous_authentication_cannot_extend_the_probe_deadline_or_grant_a_late_result() {
+        let error = within_budget::<()>(tokio::time::Instant::now(), || {
+            panic!("expired budget must reject before authentication")
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "update_image_probe_timeout");
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(5);
+        let error = within_budget(deadline, || {
+            // Deterministic stand-in for synchronous hashing blocked on disk.
+            // It cannot be preempted, but its completed result must be rejected.
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(())
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error.to_string(), "update_image_probe_timeout");
+    }
+
+    #[tokio::test]
+    async fn exhausted_total_budget_never_executes_the_authenticated_image() {
+        let f = Fixture::new();
+        let (path, digest) = f.executable("#!/bin/sh\nprintf executed > sentinel\n");
+        let result = run(
+            &f.directory,
+            &path,
+            Binary::Controller,
+            &digest,
+            Duration::ZERO,
+        )
+        .await;
+        assert_eq!(
+            result.err().unwrap().to_string(),
+            "update_image_probe_timeout"
+        );
+        assert!(!f.path.join("sentinel").exists());
     }
     impl Fixture {
         fn new() -> Self {

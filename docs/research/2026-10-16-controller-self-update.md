@@ -285,9 +285,15 @@ writer. The probe supplies only `--version`, null input/error streams, a cleared
 environment with C locale and a checked working directory. Version text is
 accepted only after strict completion and image revalidation; OS errors and
 child diagnostics are reduced to fixed labels. Timeout and cancellation clean
-the owned process group without granting a result. The execution/quiescence
-budget remains ten seconds and stdout stays bounded at 1 KiB; synchronous image
-hashing and kernel operations have no hard wall-clock bound. Isolated fixtures
+the owned process group without granting a result. One absolute ten-second
+deadline now starts before the first authentication hash and covers all image
+revalidation, execution, quiescence and version parsing. Synchronous work checks
+the deadline before and after each stage; the child receives that same absolute
+deadline, not a fresh budget. Exhaustion refuses spawn or any late result, but
+synchronous image hashing and kernel operations still have no hard wall-clock
+interruption bound. Stdout stays bounded at 1 KiB; the platform marks excess with
+`ErrorKind::FileTooLarge`, mapped to the fixed probe output-limit label without
+matching human-readable error text. Isolated fixtures
 cover descendant late writes on success/timeout/cancellation and a valid-version
 script replacing its own inode. They do not run a real launcher installation,
 persist child-start evidence or cover worker death. The future launcher executor

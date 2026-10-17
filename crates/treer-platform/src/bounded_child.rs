@@ -195,7 +195,10 @@ fn drain(child: &mut Child, bytes: &mut Vec<u8>, limit: usize) -> io::Result<()>
             Ok(0) => break,
             Ok(count) => {
                 if count > limit.saturating_sub(bytes.len()) {
-                    return Err(io::Error::other("child output limit exceeded"));
+                    return Err(io::Error::new(
+                        io::ErrorKind::FileTooLarge,
+                        "child output limit exceeded",
+                    ));
                 }
                 bytes.extend_from_slice(&buffer[..count]);
             }
@@ -240,6 +243,19 @@ pub async fn output_quiescent(
         .map(QuiescentOutput)
 }
 
+/// Absolute-budget form for callers whose authentication/preparation work must
+/// share the child's deadline. Expired budgets fail before spawn. All strict
+/// output/quiescence and failure/ownership contracts above also apply here.
+pub async fn output_quiescent_until(
+    command: &mut Command,
+    deadline: tokio::time::Instant,
+    limit: usize,
+) -> io::Result<QuiescentOutput> {
+    capture_until(command, deadline, limit, true)
+        .await
+        .map(QuiescentOutput)
+}
+
 async fn capture(
     command: &mut Command,
     timeout: Duration,
@@ -252,6 +268,21 @@ async fn capture(
     let deadline = tokio::time::Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| io::Error::other("invalid child budget"))?;
+    capture_until(command, deadline, limit, require_quiescent).await
+}
+
+async fn capture_until(
+    command: &mut Command,
+    deadline: tokio::time::Instant,
+    limit: usize,
+    require_quiescent: bool,
+) -> io::Result<Output> {
+    if limit == 0 {
+        return Err(io::Error::other("invalid child budget"));
+    }
+    if tokio::time::Instant::now() >= deadline {
+        return Err(io::Error::new(io::ErrorKind::TimedOut, "child deadline"));
+    }
     let mut group = Group::spawn(command)?;
     let mut bytes = Vec::new();
     loop {
@@ -275,7 +306,10 @@ async fn capture(
                     Ok(0) => break,
                     Ok(count) => {
                         if count > limit.saturating_sub(bytes.len()) {
-                            return Err(io::Error::other("child output limit exceeded"));
+                            return Err(io::Error::new(
+                                io::ErrorKind::FileTooLarge,
+                                "child output limit exceeded",
+                            ));
                         }
                         bytes.extend_from_slice(&buffer[..count]);
                     }
@@ -283,6 +317,9 @@ async fn capture(
                     Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
                     Err(error) => return Err(error),
                 }
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "child deadline"));
             }
             return Ok(Output {
                 status,
@@ -397,7 +434,16 @@ mod tests {
         let error = output(&mut command, Duration::from_secs(3), 64)
             .await
             .unwrap_err();
-        assert_eq!(error.to_string(), "child output limit exceeded");
+        assert_eq!(error.kind(), io::ErrorKind::FileTooLarge);
+        assert!(matches!(
+            output_quiescent_until(
+                &mut command,
+                tokio::time::Instant::now() + Duration::from_secs(3),
+                64
+            )
+            .await,
+            Err(error) if error.kind() == io::ErrorKind::FileTooLarge
+        ));
     }
 
     #[tokio::test]
@@ -469,6 +515,24 @@ mod tests {
                 .is_err());
             assert!(!fixture.0.join("ready").exists());
         }
+        assert!(matches!(
+            output_quiescent_until(
+                &mut fixture.command(true),
+                tokio::time::Instant::now(),
+                64
+            )
+            .await,
+            Err(error) if error.kind() == io::ErrorKind::TimedOut
+        ));
+        assert!(!fixture.0.join("ready").exists());
+        assert!(output_quiescent_until(
+            &mut fixture.command(true),
+            tokio::time::Instant::now() + Duration::from_secs(3),
+            0
+        )
+        .await
+        .is_err());
+        assert!(!fixture.0.join("ready").exists());
     }
 
     #[tokio::test]
