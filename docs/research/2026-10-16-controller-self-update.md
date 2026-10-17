@@ -5,6 +5,14 @@ remains internal WIP, without a public self-update CLI or full activation gate.
 Baseline: `2bb65dbe323457e8be6779c36d7469885e2433d5`. This is not a claim that
 Windows self-update already works.
 
+Priority correction (leader3158, 2026-10-17): Windows replaces the PowerShell
+updater first; Linux follows only where the shared implementation naturally
+supports it. Do not grow the Unix handshake as a prerequisite for Windows v1.
+Darwin authority-bearing self-update is unavailable and must fail with a fixed
+unsupported-attestation error until a supported primitive is reviewed. macOS
+retains its existing rollout script/updater path. This decision does not approve
+a production Windows caller or waive the deployed-Host breakaway probe below.
+
 ## Scope and reuse
 
 One Rust transaction engine in `treer-agent-server self-update` replaces the
@@ -753,10 +761,10 @@ prove that one process exclusively holds both ends or defeat colluding holders
 of leaked descriptors; descriptor isolation and live identity checks remain
 mandatory. Neither a challenge echo nor an ACK replaces OS authentication.
 
-Darwin decision requested from the product owner: keep authority-bearing
-self-update unavailable with a fixed unsupported-attestation failure until a
-supported primitive is reviewed. This is the recommended conservative policy,
-not a decision already granted by security3156 or a whole-P1 acceptance. Do not
+Darwin decision confirmed by leader3158: keep authority-bearing self-update
+unavailable with a fixed unsupported-attestation failure until a supported
+primitive is reviewed; retain the existing macOS rollout script/updater path.
+This is a product scope decision, not whole-P1 acceptance. Do not
 silently make LOCAL_PEERPID advisory and authorize installers from descriptor
 exclusivity alone. Both platforms retain the same intended transcript; on Darwin
 the current evidence permits isolated non-authority tests only. The final
