@@ -17,10 +17,10 @@ export function WorkspacePinAction({ pins, target }: {
 }
 
 export function WorkspacePinsNotice({ pins }: { pins: PinsController }) {
-  return pins.error ? <div role="alert" className="mx-3 mb-3 rounded-md border p-3 text-xs">
+  return pins.error ? <div role="alert" className="mx-3 mb-3 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-xs text-foreground">
     <p>{pins.error}</p>
-    <button type="button" className="mt-2 min-h-11 rounded px-2 underline focus-visible:ring-2 focus-visible:ring-ring" onClick={() => void pins.refresh()}>
+    {pins.retryable && <button type="button" className="mt-2 min-h-11 rounded px-2 underline focus-visible:ring-2 focus-visible:ring-ring" onClick={() => void pins.refresh()}>
       {t('pins.retry')}
-    </button>
+    </button>}
   </div> : null
 }

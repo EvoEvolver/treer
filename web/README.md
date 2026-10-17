@@ -583,9 +583,14 @@ Referrer-Policy and CSP through the Proxy tunnel. Top-level pages do not have th
 the standalone page and embedded page share the same origin and authority. This remains trusted workspace UI
 on the Proxy origin, pending per-Agent origin isolation. Deployments rejected by Core's separate-origin check
 return `503 embedded_ui_requires_separate_app_origin` at this route, including top-level navigation; opening
-a new tab cannot bypass this restriction. No token fallback or automatic retry is attempted. Agent-interface
-frame-embedding policy currently depends on the served page's own CSP; the App UI proxy's frame policy does
-not apply to this separate route (tracked as an existing Core hardening gap in #143).
+a new tab cannot bypass this restriction. After the user opens an online Agent, Console performs a bounded, read-only probe of its fixed
+interface root (no appearance query). Results are scoped per user/workspace/Proxy/Agent, cached in
+memory for 60 seconds with at most 64 entries; unselected Agents are never probed. Only an explicit 503 JSON error with that code
+switches only that Agent’s links and new-tab menus to the Console deep link; Apps retain their own URLs. Before the
+probe finishes, or on an unrelated error, the normal standalone URL remains. The probe does not follow
+redirects, execute UI bytes, or retry. This is a navigation fallback only: returning to Console does not
+restore a refused embedded UI. No token fallback is attempted; Core's embedded-UI origin and frame
+policies remain authoritative.
 
 Creating an Agent from Overview starts at the workspace root and shows no Tree folder hint.
 Creating from a folder in the Tree shows that folder’s full path and reserves placement there.
@@ -684,3 +689,6 @@ be verified separately in the sealed environment selected by release/security;
 Web tests never install packages on a live machine.
 
 Installation results show the outcome and latest version check first, with recovery guidance once and diagnostic output in expandable details. Terminal control bytes in that output are shown as literal escapes.
+
+Pin errors are announced with `role="alert"` and the existing error theme. Retry pins is a read-only
+refresh offered for network/server failures, never for 403 permission denial or the 409 pin limit.
