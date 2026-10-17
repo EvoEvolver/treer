@@ -1,4 +1,4 @@
-import type { Page } from '@playwright/test'
+import { expect, type Page } from '@playwright/test'
 
 const user = { user_id: 'map-user', email: 'map@example.test', preferred_name: 'Map reviewer' }
 const workspace = { workspace_id: 'map-workspace', organization_id: 'map-org', name: 'Studio' }
@@ -71,4 +71,15 @@ export async function mockDeepTreeMapApi(page: Page, large: boolean | "medium", 
     folders: large === "medium" ? [...nestedFolders, { folder_id: "operations", name: "Operations", parent_id: null }, { folder_id: "product", name: "Product", parent_id: null }] : nestedFolders,
     placements: nestedAgents.map((agent, position) => ({ agent_id: agent.agent_id, folder_id: large === "medium" && position >= 6 ? position < 13 ? "operations" : "product" : `level-${depth - 1}`, position })),
   }) }))
+}
+
+// Snapshot inventory and persisted placements load independently. In between,
+// every workload can briefly appear at the root; wait for the committed Tree,
+// not an icon assertion racing those two responses (especially in large maps).
+export async function waitForDeepTreeMap(page: Page) {
+  const tree = page.getByRole('tree', { name: 'Workspace workloads', exact: true })
+  await expect(tree.getByRole('treeitem', { name: 'Team', exact: true })).toHaveAttribute('aria-expanded', 'false')
+  await expect(tree).toHaveAttribute('aria-busy', 'false')
+  await expect(tree.locator('[data-agent-id="app-runtime"]')).toHaveAttribute('aria-label', 'dashboard')
+  await expect(tree.locator('[data-agent-id="deep-0"]')).toHaveCount(0)
 }

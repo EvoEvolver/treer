@@ -1,7 +1,7 @@
 import { openTabMenu, tabAction, backToWorkloads } from "./fixtures/tab-actions"
 import { test, expect } from '@playwright/test'
 import { browseTreeOnMobile, openOverviewMap } from './fixtures/navigation'
-import { mockTreeMapApi, mockDeepTreeMapApi, mapSnapshot } from './fixtures/treemap'
+import { waitForDeepTreeMap, mockTreeMapApi, mockDeepTreeMapApi, mapSnapshot } from './fixtures/treemap'
 
 for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
   test(`Overview owns the map entry ${theme} ${mobile ? '390' : 'desktop'}`, async ({ page }, info) => {
@@ -125,6 +125,33 @@ test('loading folders disables only Add folder; an empty workspace disables both
   await expect(page.getByRole('button', { name: 'Expand tree map', exact: true })).toBeDisabled()
 })
 
+// Exercise both independent reads without sleeps or relying on machine load.
+for (const delayed of ['snapshot', 'workload-tree'] as const) {
+  test(`fixed map readiness waits for ${delayed} to render`, async ({ page }) => {
+    await mockDeepTreeMapApi(page, true)
+    let release!: () => void
+    const pending = new Promise<void>((resolve) => { release = resolve })
+    await page.route(`**/${delayed}`, async (route) => {
+      await pending
+      await route.fallback()
+    })
+    await page.goto('/')
+    const tree = page.getByRole('tree', { name: 'Workspace workloads', exact: true })
+    // Observe the completed OTHER read before releasing this one.
+    if (delayed === 'snapshot') {
+      await expect(tree.getByRole('treeitem', { name: 'Team', exact: true })).toBeVisible()
+      await expect(tree.locator('[data-agent-id="app-runtime"]')).toHaveCount(0)
+    } else {
+      await expect(tree.locator('[data-agent-id="app-runtime"]')).toBeVisible()
+      await expect(tree).toHaveAttribute('aria-busy', 'true')
+    }
+    const ready = waitForDeepTreeMap(page)
+    release()
+    await ready
+    await expect(tree.locator('[data-agent-id="app-runtime"] [data-workload-icon="app"]')).toBeVisible()
+  })
+}
+
 async function noMapOverflow(page: import('@playwright/test').Page) {
   const dialog = page.getByRole('dialog', { name: 'Workspace map' })
   await expect.poll(() => dialog.evaluate((el) => {
@@ -156,7 +183,8 @@ for (const sample of ["small", "medium", "large"] as const) for (const mobile of
     await page.addInitScript((value) => localStorage.setItem('treer-theme', value), theme)
     await page.goto('/')
     await browseTreeOnMobile(page)
-    await expect(page.getByRole('treeitem', { name: 'dashboard', exact: true }).locator('[data-workload-icon="app"]')).toBeVisible()
+    await waitForDeepTreeMap(page)
+    await expect(page.locator('[data-agent-id="app-runtime"] [data-workload-icon="app"]')).toBeVisible()
     await openOverviewMap(page)
     const dialog = page.getByRole('dialog', { name: 'Workspace map' })
     await expect(dialog.locator('[data-map-id="level-0"]')).toBeVisible()
