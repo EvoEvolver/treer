@@ -689,6 +689,66 @@ with no named-socket, UID-only or message-PID fallback. This fixture does not
 implement the production channel, prove descriptor exclusivity against all
 forks/writers, or grant gate/bootstrap/installer authority.
 
+Child-created endpoint proposal (security3146; assessment, not an approved
+replacement for C1): the post-exec supervisor creates a fresh anonymous stream
+socketpair and transfers exactly one end to the owner using SCM_RIGHTS on the
+inherited bootstrap. The owner compares the received socket's OS peer to its
+actual owned Child, retained creation/image proof and expected executable. The
+bootstrap is single-use and closes after the bounded transfer. No named socket,
+message PID or UID-only fallback is allowed. A same-UID impostor holding the
+bootstrap and passing its own pair must fail the owned-child comparison.
+
+There are two distinct authentication directions; transferring a descriptor
+does not solve both automatically:
+
+| Observer | Available OS evidence | Remaining obligation |
+| --- | --- | --- |
+| Owner receiving the child-created pair | Linux SO_PEERCRED captures the socketpair creator, hence the child if the transfer is genuine | Compare against an unreaped owned Child and retained pidfd, creation identity and expected image; reject impostor-created sockets |
+| Supervisor retaining the other end | Linux SO_PEERCRED also names the child, not the owner now holding the transferred end | Prove owner continuity separately through the parent-created bootstrap; do not call the existing owner-authentication wrapper on this new pair or accept a claimed owner PID |
+
+The [Linux Unix-socket contract](https://man7.org/linux/man-pages/man7/unix.7.html)
+supports the creation-time credential observation. It does not attest who
+currently holds a transferred descriptor. On macOS the
+[Apple XNU implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/uipc_usrreq.c)
+of LOCAL_PEERPID reads the peer socket's `last_pid`, rather than an immutable
+creator identity. This is implementation evidence, not a stable cross-version
+contract. The earlier successful fixture therefore does not establish that the
+new pair supplies a durable creator attestation on Darwin. Require tests before
+and after descriptor transfer and bidirectional traffic, plus a supported
+platform contract, before making either observation a production prerequisite.
+Use the same handshake design on both platforms; an unsupported or ambiguous
+attestation remains a fixed closed failure, not an OS-specific bypass.
+
+Linux must acquire and retain a pidfd for the actual spawned child before
+authentication, while exclusively retaining child wait/reap ownership. The
+[pidfd_open contract](https://man7.org/linux/man-pages/man2/pidfd_open.2.html)
+only guarantees a post-spawn PID still denotes that child when SIGCHLD is not
+ignored, SA_NOCLDWAIT is absent and nobody else has reaped the child. Verify
+those prerequisites or use an atomic spawn/pidfd primitive; do not open a pidfd
+from a ready-message PID or silently fall back when pidfd creation fails. Check
+the retained handle for exit at each boundary, alongside live creation/image
+checks; a pidfd identifies a process lifetime, not its unchanged executable.
+
+Before implementation review, resolve how the child's parent-authenticated
+bootstrap proof binds the transferred endpoint and the fresh challenge to the
+same live owner after bootstrap closure. The current requirement that all
+ready/registration/permit traffic use one mutually authenticated connection is
+not satisfied merely by moving traffic to the child-created pair. Any change
+to that requirement needs explicit design review, not reuse of a gate token or
+an unverified ACK as endpoint ownership proof.
+
+The transport review must require one SCM_RIGHTS descriptor with a fixed-size
+payload, absolute deadline and one transfer only. Reject missing/extra rights,
+unknown ancillary records, MSG_CTRUNC, malformed payloads and EOF/timeout; close
+every received descriptor on every rejection, including partial parsing. Use
+atomic receive-CLOEXEC where supported; where unavailable, prove a single-thread,
+no-fork receive-to-CLOEXEC interval before enabling subprocesses. Close all
+bootstrap and transferred-end duplicates. Test same-UID impostors, child exit
+and PID reuse, descriptor truncation/leaks, replay and duplicate transfers on
+real macOS/Linux subprocesses. A trusted supervisor leaking an endpoint to its
+descendants remains a separate ownership violation; CLOEXEC does not prevent
+fork inheritance. No installer may be spawned during this bootstrap.
+
 Proposed handshake order, all over the same retained authenticated connection:
 
 1. The owner persists intent and spawns the verified Rust supervisor with birth
