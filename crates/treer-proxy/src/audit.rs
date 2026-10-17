@@ -201,7 +201,7 @@ pub(crate) async fn list_workspace(
          left(e.resource_kind,64) AS resource_kind, left(e.resource_id,256) AS resource_id, \
          NULL::TEXT AS resource_name, NULL::TEXT AS correlation_id, \
          COALESCE((SELECT jsonb_object_agg(k, e.payload->k) \
-           FROM unnest(ARRAY['server_id','startup_revision','exit_code','timed_out','truncated','timeout_ms','rate_limit_per_minute','rate_burst','concurrency_limit','ip_rate_limit_per_minute','ip_rate_burst','max_body_bytes','response_timeout_secs']) AS k \
+           FROM unnest(ARRAY['server_id','startup_revision','exit_code','timed_out','truncated','timeout_ms','rate_limit_per_minute','rate_burst','concurrency_limit','ip_rate_limit_per_minute','ip_rate_burst','max_body_bytes','response_timeout_secs','body_timeout_secs']) AS k \
            WHERE (jsonb_typeof(e.payload->k) IN ('number','boolean','null') AND octet_length((e.payload->k)::TEXT) <= 64) \
            OR (k = 'server_id' AND jsonb_typeof(e.payload->k) = 'string' AND octet_length((e.payload->k)::TEXT) <= 130)), \
            '{}'::JSONB) AS payload \
@@ -278,6 +278,7 @@ fn workspace_payload(action: &str, payload: &Value) -> Value {
             "ip_rate_burst",
             "max_body_bytes",
             "response_timeout_secs",
+            "body_timeout_secs",
         ],
         "workspace.audit.read"
         | "tree.folder.create"

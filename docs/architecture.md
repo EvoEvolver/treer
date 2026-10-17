@@ -601,8 +601,12 @@ Public ingress protection (#146) lives in `crates/treer-proxy/src/ingress_guard.
 (per-instance token buckets, in-flight permits, trusted-front client address
 resolution, rejection counters), `api/network/ingress_body.rs` (capped and
 idle-bounded request bodies, permit-holding response bodies) and
-`server.rs` (hyper-util HTTP/1 serving with header read timeout, header size
-and count caps, `ConnectInfo` and graceful shutdown). `proxy_service_ingress`
+`server.rs` (hyper-util HTTP/1-only serving with header read timeout, header
+size and count caps, global and per-peer open-connection budgets, `ConnectInfo`
+and graceful shutdown). Permits are leased: a response body releases its slot
+when it ends, when the client disconnects, or at the lease deadline even if the
+client never reads; unknown hostnames are admitted per verified client after
+the snapshot miss, never per front address. `proxy_service_ingress`
 admits a public request (client bucket, service bucket, in-flight permit),
 caps and times its body, forwards the verified address as `X-Treer-Client-IP`
 and bounds the upstream response; workspace ingress gets only the time bounds.

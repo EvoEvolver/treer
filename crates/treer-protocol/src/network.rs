@@ -337,6 +337,9 @@ pub const INGRESS_DEFAULT_IP_RATE_PER_MINUTE: u32 = 120;
 pub const INGRESS_DEFAULT_IP_RATE_BURST: u32 = 30;
 pub const INGRESS_DEFAULT_MAX_BODY_BYTES: u64 = 1024 * 1024;
 pub const INGRESS_DEFAULT_RESPONSE_TIMEOUT_SECS: u32 = 35;
+/// Total time a request body may take to arrive (idle rule aside), so a
+/// trickled body cannot hold an in-flight permit indefinitely.
+pub const INGRESS_DEFAULT_BODY_TIMEOUT_SECS: u32 = 60;
 /// Hard ceilings an owner override cannot exceed: protection can be loosened,
 /// never switched off.
 pub const INGRESS_MAX_RATE_PER_MINUTE: u32 = 60_000;
@@ -362,6 +365,8 @@ pub struct ServiceIngressLimits {
     pub max_body_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub response_timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_timeout_secs: Option<u32>,
 }
 
 /// The limits actually enforced for one ingress.
@@ -374,6 +379,7 @@ pub struct EffectiveIngressLimits {
     pub ip_rate_burst: u32,
     pub max_body_bytes: u64,
     pub response_timeout_secs: u32,
+    pub body_timeout_secs: u32,
 }
 
 impl Default for EffectiveIngressLimits {
@@ -386,6 +392,7 @@ impl Default for EffectiveIngressLimits {
             ip_rate_burst: INGRESS_DEFAULT_IP_RATE_BURST,
             max_body_bytes: INGRESS_DEFAULT_MAX_BODY_BYTES,
             response_timeout_secs: INGRESS_DEFAULT_RESPONSE_TIMEOUT_SECS,
+            body_timeout_secs: INGRESS_DEFAULT_BODY_TIMEOUT_SECS,
         }
     }
 }
@@ -407,6 +414,7 @@ impl ServiceIngressLimits {
             response_timeout_secs: self
                 .response_timeout_secs
                 .unwrap_or(defaults.response_timeout_secs),
+            body_timeout_secs: self.body_timeout_secs.unwrap_or(defaults.body_timeout_secs),
         }
     }
 
@@ -451,6 +459,13 @@ impl ServiceIngressLimits {
                 .contains(&secs)
             {
                 return Err("response_timeout_secs");
+            }
+        }
+        if let Some(secs) = self.body_timeout_secs {
+            if !(INGRESS_MIN_RESPONSE_TIMEOUT_SECS..=INGRESS_MAX_RESPONSE_TIMEOUT_SECS)
+                .contains(&secs)
+            {
+                return Err("body_timeout_secs");
             }
         }
         Ok(())
@@ -510,6 +525,12 @@ pub struct UpdateIngressLimitsRequest {
         skip_serializing_if = "Option::is_none"
     )]
     pub response_timeout_secs: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub body_timeout_secs: Option<Option<u32>>,
 }
 
 impl UpdateIngressLimitsRequest {
@@ -534,6 +555,9 @@ impl UpdateIngressLimitsRequest {
         }
         if let Some(value) = self.response_timeout_secs {
             limits.response_timeout_secs = value;
+        }
+        if let Some(value) = self.body_timeout_secs {
+            limits.body_timeout_secs = value;
         }
     }
 }

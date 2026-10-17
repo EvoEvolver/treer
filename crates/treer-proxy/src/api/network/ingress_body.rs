@@ -52,11 +52,19 @@ pub(crate) struct LimitedBody {
     remaining: u64,
     idle: Duration,
     deadline: Pin<Box<tokio::time::Sleep>>,
+    /// The whole body must arrive before this; a trickle that satisfies the
+    /// idle rule cannot hold a permit indefinitely.
+    total: Pin<Box<tokio::time::Sleep>>,
     outcome: BodyOutcome,
 }
 
 impl LimitedBody {
-    pub(crate) fn new(inner: Body, cap: u64, idle: Duration) -> (Self, BodyOutcome) {
+    pub(crate) fn new(
+        inner: Body,
+        cap: u64,
+        idle: Duration,
+        total: Duration,
+    ) -> (Self, BodyOutcome) {
         let outcome = BodyOutcome::default();
         (
             Self {
@@ -64,6 +72,7 @@ impl LimitedBody {
                 remaining: cap,
                 idle,
                 deadline: Box::pin(tokio::time::sleep(idle)),
+                total: Box::pin(tokio::time::sleep(total)),
                 outcome: outcome.clone(),
             },
             outcome,
@@ -100,6 +109,12 @@ impl http_body::Body for LimitedBody {
             }
             Poll::Ready(other) => Poll::Ready(other),
             Poll::Pending => {
+                if this.total.as_mut().poll(cx).is_ready() {
+                    this.outcome.stop(STOP_TIMEOUT);
+                    return Poll::Ready(Some(Err(axum::Error::new(BodyStopped(
+                        "request body took too long",
+                    )))));
+                }
                 ready!(this.deadline.as_mut().poll(cx));
                 this.outcome.stop(STOP_TIMEOUT);
                 Poll::Ready(Some(Err(axum::Error::new(BodyStopped(
@@ -119,7 +134,9 @@ impl http_body::Body for LimitedBody {
 }
 
 /// Response body: holds the in-flight permit until it ends (or is dropped
-/// when the client goes away) and fails when the upstream stalls for `idle`.
+/// when the client goes away), fails when the upstream stalls for `idle`,
+/// and leases the permit for at most `lease`: a client that never reads the
+/// response (so this body is never polled) cannot keep the slot beyond that.
 pub(crate) struct GuardedResponseBody {
     inner: Body,
     idle: Duration,
@@ -128,12 +145,33 @@ pub(crate) struct GuardedResponseBody {
 }
 
 impl GuardedResponseBody {
-    pub(crate) fn new(inner: Body, idle: Duration, permit: Option<Arc<Permit>>) -> Self {
+    pub(crate) fn new(
+        inner: Body,
+        idle: Duration,
+        lease: Duration,
+        permit: Option<Arc<Permit>>,
+    ) -> Self {
+        if let Some(permit) = permit.clone() {
+            tokio::spawn(async move {
+                tokio::time::sleep(lease).await;
+                permit.release();
+            });
+        }
         Self {
             inner,
             idle,
             deadline: Box::pin(tokio::time::sleep(idle)),
             _permit: permit,
+        }
+    }
+}
+
+impl Drop for GuardedResponseBody {
+    fn drop(&mut self) {
+        // The lease task also holds the permit; releasing here (idempotent)
+        // returns the slot as soon as the response ends or the client leaves.
+        if let Some(permit) = &self._permit {
+            permit.release();
         }
     }
 }
@@ -180,14 +218,22 @@ mod tests {
 
     #[tokio::test]
     async fn limited_body_caps_bytes_and_reports_the_reason() {
-        let (body, outcome) =
-            LimitedBody::new(Body::from(vec![0_u8; 10]), 4, Duration::from_secs(5));
+        let (body, outcome) = LimitedBody::new(
+            Body::from(vec![0_u8; 10]),
+            4,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        );
         let error = Body::new(body).collect().await.unwrap_err();
         assert!(error.to_string().contains("exceeds"));
         assert_eq!(outcome.stopped_by(), STOP_TOO_LARGE);
 
-        let (body, outcome) =
-            LimitedBody::new(Body::from(vec![1_u8; 4]), 4, Duration::from_secs(5));
+        let (body, outcome) = LimitedBody::new(
+            Body::from(vec![1_u8; 4]),
+            4,
+            Duration::from_secs(5),
+            Duration::from_secs(60),
+        );
         let bytes = Body::new(body).collect().await.unwrap().to_bytes();
         assert_eq!(bytes.len(), 4);
         assert_eq!(outcome.stopped_by(), STOP_NONE);
@@ -197,7 +243,12 @@ mod tests {
     async fn limited_body_times_out_when_no_bytes_arrive() {
         let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, axum::Error>>(4);
         let stream = tokio_stream_from(rx);
-        let (body, outcome) = LimitedBody::new(Body::new(stream), 1 << 20, Duration::from_secs(10));
+        let (body, outcome) = LimitedBody::new(
+            Body::new(stream),
+            1 << 20,
+            Duration::from_secs(10),
+            Duration::from_secs(60),
+        );
         tx.try_send(Ok(Frame::data(Bytes::from_static(b"start"))))
             .unwrap();
         let collect = tokio::spawn(async move { Body::new(body).collect().await });
@@ -226,6 +277,7 @@ mod tests {
         let body = GuardedResponseBody::new(
             Body::new(tokio_stream_from(rx)),
             Duration::from_secs(300),
+            Duration::from_secs(600),
             Some(Arc::new(admission.permit)),
         );
         let collect = tokio::spawn(async move { Body::new(body).collect().await });
@@ -250,11 +302,78 @@ mod tests {
         let body = GuardedResponseBody::new(
             Body::new(tokio_stream_from(rx2)),
             Duration::from_secs(300),
+            Duration::from_secs(600),
             Some(Arc::new(admission.permit)),
         );
         assert_eq!(guard.in_flight("ing_x"), 1);
         drop(body);
         assert_eq!(guard.in_flight("ing_x"), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn trickled_body_hits_the_total_deadline_and_unread_response_lease_expires() {
+        // One byte every 5 s keeps the idle rule happy; the total deadline
+        // (20 s) still ends it.
+        let (tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, axum::Error>>(16);
+        let (body, outcome) = LimitedBody::new(
+            Body::new(tokio_stream_from(rx)),
+            1 << 20,
+            Duration::from_secs(10),
+            Duration::from_secs(20),
+        );
+        let feeder = tokio::spawn(async move {
+            for _ in 0..10 {
+                if tx
+                    .send(Ok(Frame::data(Bytes::from_static(b"x"))))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(5)).await;
+            }
+        });
+        let collect = tokio::spawn(async move { Body::new(body).collect().await });
+        tokio::time::advance(Duration::from_secs(21)).await;
+        let error = collect.await.unwrap().unwrap_err();
+        assert!(error.to_string().contains("too long"), "{error}");
+        assert_eq!(outcome.stopped_by(), STOP_TIMEOUT);
+        feeder.abort();
+
+        // A response body that is never polled (client not reading) still
+        // gives its permit back when the lease ends.
+        let guard =
+            crate::ingress_guard::IngressGuard::new(crate::ingress_guard::TrustedProxies::none());
+        let limits = treer_protocol::EffectiveIngressLimits::default();
+        let admission = guard
+            .admit(
+                "ing_y",
+                &limits,
+                "203.0.113.1".parse().unwrap(),
+                &axum::http::HeaderMap::new(),
+            )
+            .unwrap();
+        let (_tx, rx) = tokio::sync::mpsc::channel::<Result<Frame<Bytes>, axum::Error>>(4);
+        let body = GuardedResponseBody::new(
+            Body::new(tokio_stream_from(rx)),
+            Duration::from_secs(300),
+            Duration::from_secs(120),
+            Some(Arc::new(admission.permit)),
+        );
+        assert_eq!(guard.in_flight("ing_y"), 1);
+        // Let the lease task start its timer before the clock jumps, then
+        // park once so the expired timer is delivered.
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(guard.in_flight("ing_y"), 1, "the lease has not expired yet");
+        tokio::time::advance(Duration::from_secs(121)).await;
+        tokio::time::sleep(Duration::from_millis(1)).await;
+        assert_eq!(
+            guard.in_flight("ing_y"),
+            0,
+            "lease expired while the body sat unpolled"
+        );
+        drop(body);
+        assert_eq!(guard.in_flight("ing_y"), 0);
     }
 
     fn tokio_stream_from(

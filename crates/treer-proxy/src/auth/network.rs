@@ -567,7 +567,7 @@ impl AuthStore {
             "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
              i.created_at, i.created_by, i.updated_at, i.updated_by, \
              i.limit_rate_per_minute, i.limit_rate_burst, i.limit_concurrency, i.limit_ip_rate_per_minute, \
-             i.limit_ip_rate_burst, i.limit_max_body_bytes, i.limit_response_timeout_secs, \
+             i.limit_ip_rate_burst, i.limit_max_body_bytes, i.limit_response_timeout_secs, i.limit_body_timeout_secs, \
              s.name AS service_name, s.server_id, s.target_agent_id, s.is_primary, s.target_host, s.target_port, \
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
@@ -950,7 +950,7 @@ impl AuthStore {
             "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
              i.created_at, i.created_by, i.updated_at, i.updated_by, \
              i.limit_rate_per_minute, i.limit_rate_burst, i.limit_concurrency, i.limit_ip_rate_per_minute, \
-             i.limit_ip_rate_burst, i.limit_max_body_bytes, i.limit_response_timeout_secs, \
+             i.limit_ip_rate_burst, i.limit_max_body_bytes, i.limit_response_timeout_secs, i.limit_body_timeout_secs, \
              s.name AS service_name, s.server_id, s.target_agent_id, s.is_primary, s.target_host, s.target_port, \
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
@@ -1007,7 +1007,7 @@ impl AuthStore {
             "UPDATE service_ingresses SET limit_rate_per_minute = $1, limit_rate_burst = $2, \
              limit_concurrency = $3, limit_ip_rate_per_minute = $4, limit_ip_rate_burst = $5, \
              limit_max_body_bytes = $6, limit_response_timeout_secs = $7, updated_at = $8, \
-             updated_by = $9 WHERE workspace_id = $10 AND ingress_id = $11",
+             updated_by = $9, limit_body_timeout_secs = $12 WHERE workspace_id = $10 AND ingress_id = $11",
         )
         .bind(to_i64(ingress.limits.rate_limit_per_minute))
         .bind(to_i64(ingress.limits.rate_burst))
@@ -1025,6 +1025,7 @@ impl AuthStore {
         .bind(&ingress.updated_by)
         .bind(workspace_id)
         .bind(&ingress.ingress_id)
+        .bind(to_i64(ingress.limits.body_timeout_secs))
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;

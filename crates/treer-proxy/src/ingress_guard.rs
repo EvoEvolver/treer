@@ -327,6 +327,7 @@ struct ServiceState {
     overflow: Bucket,
     counters: Arc<Counters>,
     last_warning: Option<Instant>,
+    last_evict: Instant,
 }
 
 impl ServiceState {
@@ -338,26 +339,47 @@ impl ServiceState {
             overflow: Bucket::new(limits.ip_rate_burst, now),
             counters: Arc::new(Counters::default()),
             last_warning: None,
+            last_evict: now,
         }
     }
 
+    /// Sweeps idle client buckets, at most once per interval: a flood of
+    /// fresh addresses cannot make every request pay for a full scan.
     fn evict(&mut self, now: Instant) {
+        if now.saturating_duration_since(self.last_evict) < EVICT_INTERVAL {
+            return;
+        }
+        self.last_evict = now;
         self.clients
             .retain(|_, bucket| now.saturating_duration_since(bucket.last_used) < BUCKET_IDLE_TTL);
     }
 }
 
-/// Releases one in-flight slot when dropped, whatever ended the request.
+/// One in-flight slot. Released once: explicitly by a lease that expires, or
+/// when the last holder drops it, whichever comes first.
 #[derive(Debug)]
 pub struct Permit {
     in_flight: Arc<AtomicU64>,
+    released: AtomicBool,
+}
+
+impl Permit {
+    /// Idempotent: the slot is returned exactly once.
+    pub fn release(&self) {
+        if !self.released.swap(true, Ordering::AcqRel) {
+            self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
 }
 
 impl Drop for Permit {
     fn drop(&mut self) {
-        self.in_flight.fetch_sub(1, Ordering::AcqRel);
+        self.release();
     }
 }
+
+/// Least often the per-ingress client table is swept when it is full.
+const EVICT_INTERVAL: Duration = Duration::from_secs(10);
 
 /// Outcome of a successful admission.
 #[derive(Debug)]
@@ -422,18 +444,24 @@ impl IngressGuard {
         self.inner.trusted.client_ip_header()
     }
 
-    /// Global pre-resolution check keyed by the raw peer: protects hostname
-    /// resolution (and the database behind it) from any single source.
-    pub fn admit_peer(&self, peer: IpAddr) -> Result<(), Refusal> {
+    /// Admission for a hostname that is not in the ingress snapshot: the one
+    /// request class that must stay cheap under a flood. Keyed by the
+    /// verified client address (never the raw front address) and skipped,
+    /// like the per-client limit, for a private peer without a configured
+    /// front, so an unconfigured load balancer never throttles a whole site.
+    pub fn admit_unknown_host(&self, peer: IpAddr, headers: &HeaderMap) -> Result<(), Refusal> {
+        let client = client_ip(&self.inner.trusted, peer, headers);
+        if !self.inner.trusted.configured() && is_private_or_local(client.address) {
+            self.warn_private_peer_once();
+            return Ok(());
+        }
         let now = Instant::now();
-        let key = rate_key(peer);
+        let key = rate_key(client.address);
         let mut peers = self.inner.peers.lock().unwrap_or_else(|p| p.into_inner());
         if peers.len() >= GLOBAL_PEER_KEYS && !peers.contains_key(&key) {
-            if peers.len().is_multiple_of(1024) {
-                peers.retain(|_, bucket| {
-                    now.saturating_duration_since(bucket.last_used) < BUCKET_IDLE_TTL
-                });
-            }
+            peers.retain(|_, bucket| {
+                now.saturating_duration_since(bucket.last_used) < BUCKET_IDLE_TTL
+            });
             if peers.len() >= GLOBAL_PEER_KEYS {
                 drop(peers);
                 let mut overflow = self
@@ -457,6 +485,14 @@ impl IngressGuard {
                 rejection: Rejection::RateLimited,
                 retry_after: Some(retry),
             })
+    }
+
+    fn warn_private_peer_once(&self) {
+        if !self.inner.private_peer_warned.swap(true, Ordering::AcqRel) {
+            tracing::warn!(
+                "public ingress sees a private or local peer address and no trusted front is configured: per-client rate limits are not enforced; set --ingress-trusted-proxies and --ingress-client-ip-header"
+            );
+        }
     }
 
     /// Resolves the client and admits one request to a public ingress:
@@ -489,10 +525,8 @@ impl IngressGuard {
                 .client_ip_fallback
                 .fetch_add(1, Ordering::Relaxed);
         }
-        if !per_ip_enforced && !self.inner.private_peer_warned.swap(true, Ordering::AcqRel) {
-            tracing::warn!(
-                "public ingress sees a private or local peer address and no trusted front is configured: per-client rate limits are not enforced; set --ingress-trusted-proxies and --ingress-client-ip-header"
-            );
+        if !per_ip_enforced {
+            self.warn_private_peer_once();
         }
         if per_ip_enforced {
             let key = rate_key(client.address);
@@ -554,7 +588,10 @@ impl IngressGuard {
             });
         }
         Ok(Admission {
-            permit: Permit { in_flight },
+            permit: Permit {
+                in_flight,
+                released: AtomicBool::new(false),
+            },
             client,
             per_ip_enforced,
         })
@@ -874,16 +911,81 @@ mod tests {
     }
 
     #[test]
-    fn global_peer_bucket_bounds_unknown_host_floods() {
+    fn unknown_host_admission_is_keyed_by_client_and_skips_unconfigured_fronts() {
         let guard = IngressGuard::new(TrustedProxies::none());
+        let headers = HeaderMap::new();
         for _ in 0..GLOBAL_PEER_BURST {
-            guard.admit_peer(public(9)).unwrap();
+            guard.admit_unknown_host(public(9), &headers).unwrap();
         }
-        let refused = guard.admit_peer(public(9)).unwrap_err();
+        let refused = guard.admit_unknown_host(public(9), &headers).unwrap_err();
         assert_eq!(refused.rejection, Rejection::RateLimited);
         assert!(
-            guard.admit_peer(public(10)).is_ok(),
+            guard.admit_unknown_host(public(10), &headers).is_ok(),
             "another peer is unaffected"
         );
+        // A private peer with no configured front is never limited here:
+        // behind an unconfigured load balancer it would be the whole site.
+        let lb: IpAddr = "10.0.0.7".parse().unwrap();
+        for _ in 0..(GLOBAL_PEER_BURST * 2) {
+            guard.admit_unknown_host(lb, &headers).unwrap();
+        }
+        // With a configured front the key is the client the front names.
+        let trusted =
+            TrustedProxies::parse(&["10.0.0.0/8".into()], Some("X-Real-IP"), false).unwrap();
+        let guard = IngressGuard::new(trusted);
+        let mut a = HeaderMap::new();
+        a.insert("x-real-ip", HeaderValue::from_static("203.0.113.1"));
+        let mut b = HeaderMap::new();
+        b.insert("x-real-ip", HeaderValue::from_static("203.0.113.2"));
+        for _ in 0..GLOBAL_PEER_BURST {
+            guard.admit_unknown_host(lb, &a).unwrap();
+        }
+        assert!(guard.admit_unknown_host(lb, &a).is_err());
+        assert!(
+            guard.admit_unknown_host(lb, &b).is_ok(),
+            "clients behind the front are independent"
+        );
+    }
+
+    #[test]
+    fn permits_release_once_through_lease_or_drop() {
+        let guard = IngressGuard::new(TrustedProxies::none());
+        let limits = make_limits(600, 10, 4, 600, 10);
+        let headers = HeaderMap::new();
+        let admission = guard.admit("ing_l", &limits, public(1), &headers).unwrap();
+        assert_eq!(guard.in_flight("ing_l"), 1);
+        admission.permit.release();
+        assert_eq!(guard.in_flight("ing_l"), 0);
+        admission.permit.release();
+        drop(admission);
+        assert_eq!(guard.in_flight("ing_l"), 0, "never below zero, never twice");
+    }
+
+    #[test]
+    fn client_table_sweeps_are_throttled() {
+        let guard = IngressGuard::new(TrustedProxies::none());
+        let limits = make_limits(60000, 60000, 60000, 60000, 60000);
+        let headers = HeaderMap::new();
+        // Fill the per-ingress key budget with distinct IPv6 /64 clients.
+        for n in 0..CLIENT_KEYS_PER_INGRESS {
+            let address: IpAddr = format!("2001:db8:{:x}:{:x}::1", n / 65536, n % 65536)
+                .parse()
+                .unwrap();
+            guard.admit("ing_s", &limits, address, &headers).unwrap();
+        }
+        // New keys share the overflow bucket; admission still works, the
+        // table does not grow and no request pays for a full sweep.
+        let before = std::time::Instant::now();
+        for n in 0..2000 {
+            let address: IpAddr = format!("2001:db8:ffff:{n:x}::1").parse().unwrap();
+            guard.admit("ing_s", &limits, address, &headers).unwrap();
+        }
+        assert!(
+            before.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            before.elapsed()
+        );
+        let services = guard.inner.services.lock().unwrap();
+        assert_eq!(services["ing_s"].clients.len(), CLIENT_KEYS_PER_INGRESS);
     }
 }

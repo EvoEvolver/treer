@@ -211,6 +211,14 @@ pub(crate) fn ingress_limits_from_row(
         ip_rate_burst: limit_u32(row, "limit_ip_rate_burst")?,
         max_body_bytes: max_body.map(|value| u64::try_from(value).unwrap_or(0)),
         response_timeout_secs: limit_u32(row, "limit_response_timeout_secs")?,
+        body_timeout_secs: if row
+            .try_get::<Option<i64>, _>("limit_body_timeout_secs")
+            .is_ok()
+        {
+            limit_u32(row, "limit_body_timeout_secs")?
+        } else {
+            None
+        },
     })
 }
 

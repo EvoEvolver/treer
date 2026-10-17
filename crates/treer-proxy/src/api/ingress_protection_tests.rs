@@ -1039,3 +1039,172 @@ async fn public_ingress_thirty_second_long_poll_passes_the_default_timeout() {
         0
     );
 }
+
+/// Security P3 (#146 3022): through the real server module, a WebSocket
+/// upgrade on public ingress reaches the App with the verified client address
+/// only; the client's own x-treer-client-ip / X-Forwarded-For never arrive.
+#[tokio::test]
+async fn websocket_upgrade_through_the_real_server_strips_client_address_headers() {
+    let mut fixture = fixture().await;
+    let ingress = fixture
+        .auth
+        .ensure_app_ingress(
+            &fixture.app,
+            "owner",
+            "apps.treer.example",
+            Some(ServiceIngressAccess::Public),
+        )
+        .await
+        .unwrap();
+    // Fake upstream that completes the upgrade and echoes nothing further.
+    let state = fixture.state.clone();
+    let connection = fixture.connection;
+    let mut rx = fixture.rx.take().unwrap();
+    let heads: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let heads_task = heads.clone();
+    tokio::spawn(async move {
+        let mut buffer = String::new();
+        let mut stream_id = None;
+        while let Some(frame) = rx.recv().await {
+            let SocketFrame::Binary(bytes) = frame else {
+                continue;
+            };
+            let Ok(frame) = NetworkBinaryFrame::decode(&bytes) else {
+                continue;
+            };
+            match frame.kind {
+                NetworkBinaryKind::Open => {
+                    stream_id = Some(frame.stream_id.clone());
+                    state
+                        .relay_network_frame(
+                            "default",
+                            "machine-a",
+                            connection,
+                            NetworkBinaryFrame {
+                                kind: NetworkBinaryKind::Opened,
+                                stream_id: frame.stream_id,
+                                payload: vec![],
+                            },
+                        )
+                        .await
+                        .unwrap();
+                }
+                NetworkBinaryKind::Data => {
+                    buffer.push_str(&String::from_utf8_lossy(&frame.payload));
+                    if buffer.contains("\r\n\r\n") && heads_task.lock().unwrap().is_empty() {
+                        heads_task.lock().unwrap().push(buffer.clone());
+                        let _ = state
+                            .relay_network_frame(
+                                "default",
+                                "machine-a",
+                                connection,
+                                NetworkBinaryFrame {
+                                    kind: NetworkBinaryKind::Data,
+                                    stream_id: stream_id.clone().unwrap(),
+                                    payload: b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n".to_vec(),
+                                },
+                            )
+                            .await;
+                    }
+                }
+                NetworkBinaryKind::HalfClose | NetworkBinaryKind::Reset => {
+                    // A real App closes its side when the client is gone.
+                    if let Some(id) = stream_id.clone() {
+                        let _ = state
+                            .relay_network_frame(
+                                "default",
+                                "machine-a",
+                                connection,
+                                NetworkBinaryFrame {
+                                    kind: NetworkBinaryKind::HalfClose,
+                                    stream_id: id,
+                                    payload: vec![],
+                                },
+                            )
+                            .await;
+                    }
+                }
+                _ => {}
+            }
+        }
+    });
+    let config = config(None);
+    let router = Router::new()
+        .fallback(axum::routing::any(proxy_service_ingress))
+        .layer(Extension(fixture.auth.clone()))
+        .layer(Extension(config.clone()))
+        .layer(Extension(fixture.identity.clone()))
+        .with_state(fixture.state.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        crate::server::serve(
+            listener,
+            router,
+            crate::server::ServerLimits::default(),
+            async move {
+                let _ = stop_rx.await;
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+    let request = format!(
+        "GET /ws HTTP/1.1\r\nHost: {}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nX-Treer-Client-IP: 9.9.9.9\r\nX-Forwarded-For: 8.8.8.8\r\nx-treer-identity-token: forged\r\n\r\n",
+        ingress.hostname
+    );
+    tokio::io::AsyncWriteExt::write_all(&mut client, request.as_bytes())
+        .await
+        .unwrap();
+    let mut response = Vec::new();
+    let mut buffer = [0_u8; 1024];
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let read = tokio::time::timeout_at(
+            deadline,
+            tokio::io::AsyncReadExt::read(&mut client, &mut buffer),
+        )
+        .await
+        .expect("upgrade response")
+        .unwrap();
+        response.extend_from_slice(&buffer[..read]);
+        if read == 0 || response.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
+    }
+    let text = String::from_utf8_lossy(&response);
+    assert!(text.starts_with("HTTP/1.1 101"), "{text}");
+    let head = heads.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(head.starts_with("get /ws http/1.1\r\n"), "{head}");
+    assert!(head.contains("upgrade: websocket"), "{head}");
+    assert!(
+        head.contains("x-treer-client-ip: 127.0.0.1\r\n"),
+        "verified peer: {head}"
+    );
+    assert!(
+        !head.contains("9.9.9.9") && !head.contains("8.8.8.8"),
+        "{head}"
+    );
+    assert!(
+        !head.contains("x-forwarded-for") && !head.contains("forged"),
+        "{head}"
+    );
+    // The upgraded connection holds its in-flight permit until it closes.
+    assert_eq!(config.guard().in_flight(&ingress.ingress_id), 1);
+    drop(client);
+    let released = tokio::time::Instant::now() + Duration::from_secs(5);
+    while config.guard().in_flight(&ingress.ingress_id) != 0 {
+        assert!(
+            tokio::time::Instant::now() < released,
+            "permit not released after the socket closed"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let _ = stop_tx.send(());
+    tokio::time::timeout(Duration::from_secs(10), server)
+        .await
+        .unwrap()
+        .unwrap();
+}

@@ -943,3 +943,4 @@ ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_ip_rate_per_minute 
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_ip_rate_burst BIGINT;
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_max_body_bytes BIGINT;
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_response_timeout_secs BIGINT;
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_body_timeout_secs BIGINT;

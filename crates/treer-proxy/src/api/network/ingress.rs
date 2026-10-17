@@ -115,18 +115,23 @@ pub(in crate::api) async fn proxy_service_ingress(
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip());
-    // Before resolving the hostname: one source cannot turn unknown hosts
-    // into unbounded lookups.
-    if let Some(peer) = peer {
-        if let Err(refusal) = guard.admit_peer(peer) {
-            return Ok(refusal_response(refusal));
-        }
-    }
     let resolved = auth
         .resolve_service_ingress_hostname(&hostname)
         .await?
-        .filter(|resolved| resolved.ingress.enabled)
-        .ok_or_else(|| ApiFailure::not_found("ingress_not_found", "service ingress not found"))?;
+        .filter(|resolved| resolved.ingress.enabled);
+    let Some(resolved) = resolved else {
+        // Unknown hostnames are answered from the snapshot, so the only cost
+        // left is this response; one client cannot have unbounded many.
+        if let Some(peer) = peer {
+            if let Err(refusal) = guard.admit_unknown_host(peer, request.headers()) {
+                return Ok(refusal_response(refusal));
+            }
+        }
+        return Err(ApiFailure::not_found(
+            "ingress_not_found",
+            "service ingress not found",
+        ));
+    };
     if request.uri().path() == "/.treer/callback" {
         require_ingress_navigation(request.headers())?;
         return complete_ingress_authorization(
@@ -255,7 +260,12 @@ pub(in crate::api) async fn proxy_service_ingress(
             u64::MAX
         };
         let body = std::mem::replace(request.body_mut(), Body::empty());
-        let (limited, outcome) = LimitedBody::new(body, cap, BODY_IDLE_TIMEOUT);
+        let (limited, outcome) = LimitedBody::new(
+            body,
+            cap,
+            BODY_IDLE_TIMEOUT,
+            Duration::from_secs(u64::from(limits.body_timeout_secs)),
+        );
         *request.body_mut() = Body::new(limited);
         Some(outcome)
     };
@@ -318,13 +328,16 @@ pub(in crate::api) async fn proxy_service_ingress(
         return Ok(response);
     }
     let (parts, body) = response.into_parts();
-    let guarded = GuardedResponseBody::new(body, RESPONSE_IDLE_TIMEOUT, permit);
+    let guarded = GuardedResponseBody::new(body, RESPONSE_IDLE_TIMEOUT, PERMIT_LEASE, permit);
     Ok(Response::from_parts(parts, Body::new(guarded)))
 }
 
-/// Idle limits that are not per-App configurable.
+/// Limits that are not per-App configurable.
 const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
 const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// A non-upgraded response holds its in-flight permit at most this long,
+/// even when the client never reads it; the stream itself may continue.
+const PERMIT_LEASE: Duration = Duration::from_secs(300);
 
 fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
     headers

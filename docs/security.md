@@ -931,20 +931,33 @@ and in-flight cap (64, held until the response body or upgraded connection
 ends); refusals are `429` with `Retry-After`. A noisy client therefore exhausts
 its own budget first, while a distributed flood from many addresses can still
 drain the service bucket — that is the intended trade for protecting the
-machine. A global per-peer bucket runs before hostname resolution, and the
-resolver answers unknown hostnames from its in-memory snapshot (refreshed every
-few seconds) so floods of random hosts do not become database queries. Request
+machine. The resolver answers unknown hostnames from its in-memory snapshot
+(refreshed every few seconds) so floods of random hosts do not become database
+queries, and those 404s are themselves limited per verified client (never per
+front address, and not at all for a private peer without a configured front,
+so an unconfigured load balancer can never throttle a whole site). Request
 bodies are capped (1 MiB; `Content-Length` above the cap is refused before a
-tunnel opens, a streamed body is cut at the cap) and must keep flowing (10 s
-idle), the service must answer headers within 35 s (long polls up to 30 s
-work), a non-upgraded response body may not stall for 300 s, and the HTTP/1
-server itself enforces a 30 s header read timeout with 32 KiB / 100 headers
-per request. Requests carrying both `Content-Length` and `Transfer-Encoding`
-are refused. Workspace owners may loosen or tighten a Managed App's limits
+tunnel opens, a streamed body is cut at the cap), must keep flowing (10 s idle)
+and must complete within 60 s in total (owner-adjustable), so a trickled body
+cannot hold an in-flight slot; the service must answer headers within 35 s
+(long polls up to 30 s work); a non-upgraded response body may not stall for
+300 s and its in-flight slot is leased for at most 300 s even if the client
+never reads the response (streams may continue without a slot; WebSocket
+upgrades hold their slot for the connection's lifetime). The HTTP/1 server
+itself enforces a 30 s header read timeout with 32 KiB / 100 headers per
+request and caps open connections (8192 in total, 256 per peer; excess
+connections are closed without a handshake). It speaks HTTP/1 only, as the
+Proxy did before (the HTTP/2 feature was never enabled, so no h2c was ever
+negotiated); TLS fronts talk HTTP/1 upstream. Requests carrying both
+`Content-Length` and `Transfer-Encoding` are refused. Ordinary API routes keep
+their existing extractor body limits; the body read timeouts described here
+apply to ingress only. Workspace owners may loosen or tighten a Managed App's limits
 through `PATCH /api/workspaces/{ws}/apps/{app}/ingress-limits`, audited as
 `ingress.limits.update` with the numbers only, within hard ceilings
-(60 000/min, 4096 in flight, 64 MiB, 5–600 s); nothing can switch protection
-off. All of this is per Proxy instance and in memory: a cluster of N multiplies
+(60 000/min, 4096 in flight, 64 MiB, 5–600 s for both the response and the
+body deadline); nothing can switch protection off. The per-client bucket table
+is bounded per ingress and swept at most every ten seconds, so a flood of fresh
+addresses shares one overflow bucket instead of forcing a scan per request. All of this is per Proxy instance and in memory: a cluster of N multiplies
 the ceilings by N, and rejection counters (reported per ingress, counts only,
 never addresses or paths) reset when the process restarts.
 

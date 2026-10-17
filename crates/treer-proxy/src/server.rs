@@ -21,6 +21,12 @@ pub const MAX_HEADER_BYTES: usize = 32 * 1024;
 pub const MAX_HEADERS: usize = 100;
 /// How long shutdown waits for in-flight connections before closing them.
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+/// Open connections the process accepts at once; beyond it new connections
+/// are closed immediately so idle or half-open floods cannot exhaust file
+/// descriptors.
+pub const MAX_CONNECTIONS: usize = 8192;
+/// Open connections one peer address may hold at once.
+pub const MAX_CONNECTIONS_PER_PEER: usize = 256;
 
 #[derive(Clone, Copy, Debug)]
 pub struct ServerLimits {
@@ -28,6 +34,8 @@ pub struct ServerLimits {
     pub max_header_bytes: usize,
     pub max_headers: usize,
     pub shutdown_grace: Duration,
+    pub max_connections: usize,
+    pub max_connections_per_peer: usize,
 }
 
 impl Default for ServerLimits {
@@ -37,8 +45,53 @@ impl Default for ServerLimits {
             max_header_bytes: MAX_HEADER_BYTES,
             max_headers: MAX_HEADERS,
             shutdown_grace: SHUTDOWN_GRACE,
+            max_connections: MAX_CONNECTIONS,
+            max_connections_per_peer: MAX_CONNECTIONS_PER_PEER,
         }
     }
+}
+
+/// Counts open connections globally and per peer; a slot decrements on drop.
+#[derive(Default)]
+struct ConnectionBudget {
+    total: usize,
+    per_peer: std::collections::HashMap<std::net::IpAddr, usize>,
+}
+
+struct ConnectionSlot {
+    budget: std::sync::Arc<std::sync::Mutex<ConnectionBudget>>,
+    peer: std::net::IpAddr,
+}
+
+impl Drop for ConnectionSlot {
+    fn drop(&mut self) {
+        let mut budget = self.budget.lock().unwrap_or_else(|p| p.into_inner());
+        budget.total = budget.total.saturating_sub(1);
+        if let Some(count) = budget.per_peer.get_mut(&self.peer) {
+            *count -= 1;
+            if *count == 0 {
+                budget.per_peer.remove(&self.peer);
+            }
+        }
+    }
+}
+
+fn take_slot(
+    budget: &std::sync::Arc<std::sync::Mutex<ConnectionBudget>>,
+    peer: std::net::IpAddr,
+    limits: &ServerLimits,
+) -> Option<ConnectionSlot> {
+    let mut guard = budget.lock().unwrap_or_else(|p| p.into_inner());
+    let per_peer = guard.per_peer.get(&peer).copied().unwrap_or(0);
+    if guard.total >= limits.max_connections || per_peer >= limits.max_connections_per_peer {
+        return None;
+    }
+    guard.total += 1;
+    *guard.per_peer.entry(peer).or_insert(0) += 1;
+    Some(ConnectionSlot {
+        budget: budget.clone(),
+        peer,
+    })
 }
 
 /// Accepts connections until `shutdown` resolves, then drains gracefully.
@@ -57,7 +110,10 @@ pub async fn serve(
         .max_buf_size(limits.max_header_bytes.max(8192))
         .max_headers(limits.max_headers)
         .keep_alive(true);
+    // HTTP/1 only, as before this module (axum::serve without the http2
+    // feature never negotiated h2c either); TLS fronts speak HTTP/1 upstream.
     let builder = builder.http1_only();
+    let budget = std::sync::Arc::new(std::sync::Mutex::new(ConnectionBudget::default()));
     let mut shutdown = std::pin::pin!(shutdown);
     loop {
         let (stream, peer) = tokio::select! {
@@ -73,6 +129,12 @@ pub async fn serve(
             },
             () = &mut shutdown => break,
         };
+        let Some(slot) = take_slot(&budget, peer.ip(), &limits) else {
+            // Over budget: close at once, no handshake, no handler.
+            drop(stream);
+            tracing::debug!(%peer, "connection refused: connection budget exhausted");
+            continue;
+        };
         let service = router.clone().map_request(
             move |mut request: axum::http::Request<hyper::body::Incoming>| {
                 request.extensions_mut().insert(ConnectInfo(peer));
@@ -85,6 +147,7 @@ pub async fn serve(
         );
         let watched = graceful.watch(connection.into_owned());
         tokio::spawn(async move {
+            let _slot = slot;
             if let Err(error) = watched.await {
                 tracing::debug!(%error, %peer, "connection closed with error");
             }
@@ -227,6 +290,40 @@ mod tests {
             text.is_empty() || text.starts_with("HTTP/1.1 431"),
             "an oversized head is refused or dropped, never served: {text}"
         );
+        let _ = stop.send(());
+        handle.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn connections_beyond_the_peer_budget_are_closed_at_once() {
+        let limits = ServerLimits {
+            max_connections_per_peer: 2,
+            ..ServerLimits::default()
+        };
+        let (address, stop, handle) = start(limits).await;
+        let first = tokio::net::TcpStream::connect(address).await.unwrap();
+        let second = tokio::net::TcpStream::connect(address).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut third = tokio::net::TcpStream::connect(address).await.unwrap();
+        let _ = third
+            .write_all(b"GET /peer HTTP/1.1\r\nHost: x\r\n\r\n")
+            .await;
+        let mut buffer = [0_u8; 64];
+        let read = tokio::time::timeout(Duration::from_secs(5), third.read(&mut buffer))
+            .await
+            .expect("the third connection is closed, not served")
+            .unwrap_or(0);
+        assert_eq!(read, 0, "no response on a refused connection");
+        // Releasing one slot admits a new connection.
+        drop(first);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let response = raw(
+            address,
+            "GET /peer HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+        drop(second);
         let _ = stop.send(());
         handle.await.unwrap();
     }
