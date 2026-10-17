@@ -74,6 +74,8 @@ try {
   // Headers: the React page gets the strict policy, the legacy page is unchanged.
   const csp = (await fetch(url())).headers.get("content-security-policy") ?? "";
   const asset = await fetch(url().replace(/index\.html$/, "ui.js"));
+  const pageHeaders = (await fetch(url())).headers;
+  for (const feature of ["camera", "microphone", "geolocation", "payment", "usb", "display-capture", "clipboard-read", "bluetooth", "hid", "serial", "midi", "accelerometer", "gyroscope", "magnetometer", "screen-wake-lock"]) assert.ok(pageHeaders.get("permissions-policy")?.includes(`${feature}=()`));
   assert.equal(asset.headers.get("x-content-type-options"), "nosniff");
   assert.equal(asset.headers.get("referrer-policy"), "no-referrer");
   assert.match(csp, /script-src 'self'/);
@@ -203,6 +205,9 @@ try {
   await expect(page.locator("html")).toHaveAttribute("data-theme", "dark", "system preference");
   await page.emulateMedia({ colorScheme: "light" });
   await expect(page.locator("html")).toHaveAttribute("data-theme", "light", "system changes are followed");
+  await page.evaluate(() => window.postMessage({ type: "treer:embed-theme", theme: "dark", look: "a" }, location.origin));
+  await page.waitForTimeout(50);
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light", "standalone pages ignore self/other-window embed messages");
   await page.goto(`${base}/api/health`); // a same-origin page without the UI policy; setContent would otherwise inherit it
   await page.setContent(`<iframe title="Agent" src="${url("?theme=light")}" style="width:100%;height:700px"></iframe>`);
   const frame = page.frameLocator("iframe");

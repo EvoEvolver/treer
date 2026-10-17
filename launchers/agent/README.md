@@ -628,6 +628,14 @@ only (markdown, sanitized with DOMPurify); everything else is rendered as text, 
 file names, paths, diffs, task output and errors are never interpreted as markup.
 Assets and requests are relative (`<base href="./">`), so the page works behind Treer's
 iframe tunnel.
+It also works as a standalone top-level page: prompting, transcript pagination,
+WebSocket updates and user-initiated image paste use the same relative APIs.
+Top-level pages do not have the Console iframe's sandbox; they rely on these
+page headers and remain trusted workspace code. HTML additionally denies camera,
+microphone, geolocation, payment, USB, display capture and clipboard read through
+Permissions-Policy (ordinary paste events remain supported).
+Bluetooth, HID, serial, MIDI, motion sensors and screen wake lock are denied too;
+clipboard write retains its normal browser policy for explicit copy actions.
 
 **Looks and themes.** Three selectable looks (A Quiet Editor, B Warm Paper, C Terminal
 Contrast; default B) times light/dark. Look: `?look=a|b|c`, else
@@ -637,7 +645,16 @@ else the stored mode (`treer-launcher-theme`: system, light or dark), else the s
 preference, including later system changes. The Appearance button (the header on every look) picks look and theme and exports the
 conversation as Markdown. On phones there is no bottom bar: one Menu button in the top
 bar opens a keyboard-reachable menu with Files, Tasks, Appearance and Theme. Every stored or URL value is checked against a fixed list; storage access is
-guarded. `?lang=en|zh` (else the browser language) selects the interface language;
+guarded. Parent messages are accepted only while framed, from the immediate
+parent and the exact HTTP(S) Console origin configured in `?embed_origin=`
+(same-origin fallback when omitted). Malformed origins disable messages.
+This parameter controls appearance only and grants no API authority; top-level
+pages ignore all embed messages and use their own URL/stored/system defaults.
+The source check restricts appearance messages to the immediate parent; it does
+not authenticate that parent as the Console. The query value is not a substitute
+for a deployment's embedding policy or Agent origin isolation. The generic Agent
+UI tunnel does not itself add the App UI route's `frame-ancestors` restriction.
+`?lang=en|zh` (else the browser language) selects the interface language;
 a missing translation falls back to English.
 
 **Conversation.** Messages and plans stay in the conversation. Consecutive machine

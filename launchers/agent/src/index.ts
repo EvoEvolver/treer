@@ -137,6 +137,7 @@ function serveFile(response: ServerResponse, file: string) {
     "referrer-policy": "no-referrer",
   };
   if (extname(file) === ".html") {
+    headers["permissions-policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=(), clipboard-read=(), bluetooth=(), hid=(), serial=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), screen-wake-lock=()";
     // The page ships no inline styles or scripts, so it runs under a strict policy (no 'unsafe-inline', no plugins, no foreign forms).
     headers["content-security-policy"] =
       "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'";
