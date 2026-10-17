@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{bail, Result};
 use treer_platform::installation_directory::InstallationDirectory;
+use treer_platform::retained_executable::RetainedExecutable;
 
 use super::{
     artifacts::Binary, handoff::OwnedActivation, launcher_preflight,
@@ -33,6 +34,7 @@ pub struct Invocation<'a> {
     arguments: Vec<OsString>,
     environment: BTreeMap<OsString, OsString>,
     temporary: Option<&'a LauncherTemporary<'a>>,
+    node: Option<RetainedExecutable>,
 }
 
 impl<'a> Invocation<'a> {
@@ -57,9 +59,18 @@ impl<'a> Invocation<'a> {
         InstallationDirectory::open(&home)
             .map_err(|_| anyhow::anyhow!("update_launcher_account_home_unavailable"))?;
         let node = crate::launcher::node_executable(None)
-            .map_err(|_| anyhow::anyhow!("update_launcher_node_unavailable"))?;
-        Self::with_context(selected, owned, journal, operation, &home, &node)?
-            .bind_temporary(temporary)
+            .map_err(|_| anyhow::anyhow!("update_launcher_node_untrusted_location"))?;
+        let node = retain_node(&node)?;
+        Self::with_context(
+            selected,
+            owned,
+            journal,
+            operation,
+            &home,
+            node.executable(),
+        )?
+        .bind_node(node)?
+        .bind_temporary(temporary)
     }
 
     // Private deterministic data-builder seam: production callers cannot
@@ -133,7 +144,19 @@ impl<'a> Invocation<'a> {
             arguments,
             environment,
             temporary: None,
+            node: None,
         })
+    }
+
+    fn bind_node(mut self, node: RetainedExecutable) -> Result<Self> {
+        self.verify_binding()?;
+        if self.arguments.get(2).map(OsString::as_os_str) != Some(node.executable().as_os_str()) {
+            bail!("update_launcher_binding_mismatch");
+        }
+        node.verify()
+            .map_err(|_| anyhow::anyhow!("update_launcher_node_changed"))?;
+        self.node = Some(node);
+        Ok(self)
     }
 
     fn bind_temporary(mut self, temporary: &'a LauncherTemporary<'a>) -> Result<Self> {
@@ -158,6 +181,10 @@ impl<'a> Invocation<'a> {
         if let Some(temporary) = self.temporary {
             temporary.verify_for(self.selected, self.owned, self.journal, &self.receipt)?;
         }
+        if let Some(node) = &self.node {
+            node.verify()
+                .map_err(|_| anyhow::anyhow!("update_launcher_node_changed"))?;
+        }
         Ok(())
     }
 
@@ -177,6 +204,11 @@ impl<'a> Invocation<'a> {
     }
 }
 
+fn retain_node(path: &Path) -> Result<RetainedExecutable> {
+    RetainedExecutable::open(path)
+        .map_err(|_| anyhow::anyhow!("update_launcher_node_untrusted_location"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -184,6 +216,133 @@ mod tests {
         publication::Publications, selection::tests::Fixture, tests::receipt, Phase,
     };
     use treer_platform::private_directory::PrivateDirectory;
+
+    // The normal selection fixture lives under OS temp (a writable ancestor),
+    // which the production Node trust check must reject. Use an exclusive
+    // directory beside this test binary in the private Cargo target instead.
+    struct NodeFixture(PathBuf);
+    impl NodeFixture {
+        fn new() -> Self {
+            use std::os::unix::fs::DirBuilderExt;
+            let parent = std::env::current_exe().unwrap().canonicalize().unwrap();
+            let path = parent
+                .parent()
+                .unwrap()
+                .join(format!("launcher-node-test-{}", uuid::Uuid::new_v4()));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+            let fixture = Self(path);
+            fixture.write("node");
+            fixture
+        }
+        fn write(&self, name: &str) -> PathBuf {
+            use std::os::unix::fs::PermissionsExt;
+            let path = self.0.join(name);
+            std::fs::write(&path, b"isolated inert interpreter fixture").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o500)).unwrap();
+            path
+        }
+        fn node(&self) -> PathBuf {
+            self.0.join("node")
+        }
+    }
+    impl Drop for NodeFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn retained_node_rejects_identical_replacement_and_never_adopts_it() {
+        let f = Fixture::standard_config();
+        f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+        let (selected, owned, journal) = bind(&f, "ws_a");
+        let node = NodeFixture::new();
+        let proof = retain_node(&node.node()).unwrap();
+        let plan = Invocation::with_context(
+            &selected,
+            &owned,
+            &journal,
+            Operation::Install,
+            &f.path,
+            &node.node(),
+        )
+        .unwrap()
+        .bind_node(proof)
+        .unwrap();
+        plan.verify_binding().unwrap();
+        std::fs::rename(node.node(), node.0.join("old-node")).unwrap();
+        node.write("node"); // Same bytes/mode, different inode.
+        assert_eq!(
+            plan.verify_binding().unwrap_err().to_string(),
+            "update_launcher_node_changed"
+        );
+        assert_eq!(
+            plan.verify_binding().unwrap_err().to_string(),
+            "update_launcher_node_changed"
+        );
+        // Fresh identity is available only to a new recipe, never adopted above.
+        assert!(retain_node(&node.node()).is_ok());
+    }
+
+    #[test]
+    fn node_trust_errors_are_fixed_and_recipe_requires_the_exact_node_path() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let f = Fixture::standard_config();
+        f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+        let (selected, owned, journal) = bind(&f, "ws_a");
+        let node = NodeFixture::new();
+        symlink(node.node(), node.0.join("alias")).unwrap();
+        for path in [
+            node.0.join("missing-private-path"),
+            node.0.join("alias"),
+            node.0.clone(),
+        ] {
+            assert_eq!(
+                retain_node(&path).err().unwrap().to_string(),
+                "update_launcher_node_untrusted_location"
+            );
+        }
+        let other = node.write("other-node");
+        let plan = Invocation::with_context(
+            &selected,
+            &owned,
+            &journal,
+            Operation::Status,
+            &f.path,
+            &other,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.bind_node(retain_node(&node.node()).unwrap())
+                .err()
+                .unwrap()
+                .to_string(),
+            "update_launcher_binding_mismatch"
+        );
+        let proof = retain_node(&node.node()).unwrap();
+        std::fs::set_permissions(node.node(), std::fs::Permissions::from_mode(0o700 | 0o020))
+            .unwrap();
+        let plan = Invocation::with_context(
+            &selected,
+            &owned,
+            &journal,
+            Operation::Status,
+            &f.path,
+            &node.node(),
+        )
+        .unwrap();
+        assert_eq!(
+            plan.bind_node(proof).err().unwrap().to_string(),
+            "update_launcher_node_changed"
+        );
+        assert_eq!(
+            retain_node(&node.node()).err().unwrap().to_string(),
+            "update_launcher_node_untrusted_location"
+        );
+    }
 
     fn bind(f: &Fixture, workspace: &str) -> (Selected, OwnedActivation, Journal) {
         let selected = f.inventory().select(Some(workspace), true).unwrap();

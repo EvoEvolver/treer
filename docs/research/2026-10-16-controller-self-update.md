@@ -348,7 +348,7 @@ check rejects changed receipt content/revision or temporary-directory identity.
 Public recipe preparation requires a borrowed `LauncherTemporary`, retaining
 the original owner, locks and directory descriptor. It neither authenticates image
 bytes nor starts any process, changes a receipt or grants execution authority.
-Node version/image retention, durable child-start/identity and recovery, actual
+Node22 validation, durable child-start/identity and recovery, actual
 env-clear/spawn/completion enforcement and final live health remain executor
 work; no real installation or whole-P1 acceptance is claimed here.
 
@@ -393,17 +393,33 @@ this identity-only guarantee. Source-only/package/network acceptance, Node22
 validation, actual spawn/completion wiring and durable child lifecycle remain
 pending, so this helper does not authorize installation.
 
+Public `Invocation::prepare` now retains this Node proof immediately after
+fixed-location resolution, builds `--node` from its exact physical path and owns
+the proof for the recipe lifetime. Binding verifies that argv names that same
+path; every subsequent `verify_binding` also rechecks the retained file and
+ancestor identities and current permissions. It never resolves or adopts a
+replacement inode during revalidation. Isolated invocation regressions use
+inert files in exclusive directories within the private Cargo target, allowing
+the production walker to start at `/` without changing system installations.
+They cover identical-byte replacement, repeated refusal without adoption,
+wrong-path proof binding, symlink/missing/non-regular paths and permissions
+changed between proof creation and binding. No fixture interpreter is executed.
+The future executor must still invoke these checks immediately before spawn
+and after proven completion; no actual execution-boundary wiring, Node22 probe
+or durable child-start authority is supplied by this recipe integration.
+
 Known permission boundary (security2545): these checks inspect Unix owner/mode
 bits only. They do not inspect macOS/POSIX ACL-granted write access or platform
 file flags (including Linux immutable flags). A passing check is not proof that
 an ACL grants no other account write access; operators must enforce that policy
 with the OS. This primitive does not add an ACL isolation guarantee.
 
-Executor diagnostics must distinguish initial trust-validation refusal
+Recipe preparation now distinguishes initial trust-validation refusal
 (`update_launcher_node_untrusted_location`) from failure to revalidate a retained
 identity (`update_launcher_node_changed`), without exposing raw paths or errors.
-The latter means revalidation failed, not proof of an attack. These mappings
-remain executor work; the platform helper still returns one fixed diagnostic.
+The latter means revalidation failed, not proof of an attack. The invocation
+layer implements these mappings; the platform helper still returns one fixed
+diagnostic. Future executor checks must preserve the same distinction.
 Resolved Homebrew/admin-group-writable directories and group-writable
 `/usr/local` ancestors are examples that fail the unchanged `0o022` check, even
 when they are intentional local package-manager layouts. A machine administrator
