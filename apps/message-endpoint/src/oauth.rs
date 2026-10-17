@@ -345,7 +345,7 @@ mod tests {
         let role = role.to_owned();
         let join = thread::spawn(move || {
             let responses = [
-                json!({"access_token":"synthetic-oauth-access-token","token_type":"Bearer","audience":"svc_hub","expires_at":"ignored; signed claims determine expiry"}),
+                json!({"access_token":"synthetic.oauth.signature","token_type":"Bearer","audience":"svc_hub","expires_at":"ignored; signed claims determine expiry"}),
                 json!({"active":true,"claims":{"service_id":"svc_hub","workspace_id":"ws_test","sub":"human_owner","principal_kind":"human","exp":NOW+120}}),
                 json!({"principals":[{"kind":"human","id":"human_owner","role":role}]}),
             ];
@@ -408,13 +408,13 @@ mod tests {
                 } else if i == 1 {
                     assert!(head.starts_with("POST /.treer/apps/identity/verify HTTP/1.1"));
                     let value: Value = serde_json::from_slice(&body).unwrap();
-                    assert_eq!(value["token"], "synthetic-oauth-access-token");
+                    assert_eq!(value["token"], "synthetic.oauth.signature");
                     assert_eq!(value["audience"], "svc_hub");
                 } else {
                     assert!(head.starts_with("GET /api/apps/svc_hub/directory HTTP/1.1"));
                     assert!(head
                         .to_ascii_lowercase()
-                        .contains("authorization: bearer synthetic-oauth-access-token"));
+                        .contains("authorization: bearer synthetic.oauth.signature"));
                 }
                 let bytes = response.to_string();
                 write!(
@@ -437,20 +437,20 @@ mod tests {
             .unwrap();
         server.join().unwrap();
         assert!(opaque(session.cookie_secret()));
-        assert_ne!(session.cookie_secret(), "synthetic-oauth-access-token");
+        assert_ne!(session.cookie_secret(), "synthetic.oauth.signature");
         assert_eq!(session.expires_at(), NOW + 120);
         assert_eq!(
             vault
                 .session_token(session.cookie_secret(), NOW)
                 .unwrap()
                 .as_deref(),
-            Some("synthetic-oauth-access-token")
+            Some("synthetic.oauth.signature")
         );
         assert!(vault
             .finish(&auth, "synthetic-code", &state, start.browser_secret(), NOW)
             .is_err());
         assert!(vault
-            .session_token("synthetic-oauth-access-token", NOW)
+            .session_token("synthetic.oauth.signature", NOW)
             .unwrap()
             .is_none());
         assert!(vault

@@ -169,7 +169,7 @@ leader-approved Core work, not this task.
 Workspace-auth ingress only. `/` negotiated HTML/Markdown, `/health`, relative
 React assets and `/v1/` JSON; no SPA fallback for unknown API paths. All settings
 routes require per-request App token verification (own audience/workspace) and
-current owner/admin directory membership. Invalid supplied token cannot fall back;
+current human workspace-owner directory membership. Invalid supplied token cannot fall back;
 Agents denied. No-header direct access uses OAuth+PKCE, single-use expiring state
 bound to HttpOnly browser nonce, validated local returns. No forwarded token
 persisted. Exact Origin/custom header/Sec-Fetch-Site same-origin on unsafe browser
@@ -666,20 +666,49 @@ to a different cookie user. Callers must never supply a raw token cookie or
 actor ID to bypass this selection. The OAuth primitives below still need HTTP
 cookie handling and route integration.
 
-Management mutations require an exact configured App/Proxy `Origin`,
+Any current human with workspace directory role `owner` is a hub owner; this
+is not a separate App-local administrator role. Management mutations require
+the single exact configured settings-page `Origin`,
 `X-Endpoint-Request: 1`, and, when present, `Sec-Fetch-Site` of `same-origin` or
 `same-site`. Duplicate origin/custom/fetch-site headers are rejected. This
 includes authenticated requests carrying ambient injected human tokens; even
 an owner using curl must supply Origin. The future HTTP router must reject CORS
 preflights, enforce these checks on every mutation, verify confirmation/revision
 for destructive actions, and run network verification outside the state actor.
+When the hub is on its own host, the Proxy origin is explicitly rejected. If
+the configured settings URL itself uses the Proxy origin, that is the single
+allowed origin, with a significant limitation: other scripts/pages on the same
+origin can act with the user's ambient authority. Origin/CSRF checks cannot
+isolate mutually untrusted Apps sharing an origin. Prefer the dedicated private
+App hostname; an embedded page on a different origin must open that hostname to
+edit, rather than silently broadening the origin allowlist.
 
 Proxy/public origins come only from trusted operator configuration, never Host
 or browser parameters. HTTPS is required except literal loopback HTTP. URL
 credentials, query/fragment and non-root Proxy base paths are rejected, and the
 service ID must be a stable `svc_` URL component. The client disables environment
 proxies and redirects, uses 3-second connect/10-second request deadlines and a
-2 MiB response cap, emits only fixed errors and does not log/cache tokens.
+2 MiB response cap, emits only fixed errors and does not log raw tokens.
+Before verification it rejects missing/duplicate/empty or non-compact-JWT-shaped
+credentials. A shared admission gate allows at most four verification operations
+globally, two per source and twenty per source per ten-second monotonic window;
+excess is a fixed rate-limit error for the router to return as HTTP 429. Pending
+source records are capped at 512 and expire after sixty idle seconds. The router
+must share one `OwnerAuth` instance, use the actual socket peer with
+`authenticate_from`, and never take the source from JSON, a claimed identity or
+untrusted forwarding headers. Behind Proxy this deliberately aggregates peers;
+the fallback/internal callback API uses one stricter aggregate source bucket.
+OAuth token exchange uses that same bounded gate.
+
+Only failures are cached: at most 512 private token-hash entries, each for three
+monotonic seconds. Raw tokens/hashes are never returned or logged. Positive
+identity/role results are never cached, so owner revocation is checked on every
+successful request. A corrected identity or restored owner role can remain
+temporarily denied during the negative TTL; there is no temporary allow. These
+limits reduce verification amplification; they are not complete denial-of-service
+protection. HTTP request/body/header limits and bounded async workers still need
+router integration, and owner-only management still needs policy/process
+isolation from other Agents.
 Tests use a private fake Proxy for per-request owner revocation, bad/Agent tokens,
 directory membership, CSRF, duplicate headers, no redirect and response caps.
 They do not establish real embedded-browser/OAuth acceptance or an authenticated

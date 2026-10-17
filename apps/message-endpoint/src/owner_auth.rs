@@ -11,7 +11,7 @@ use std::{collections::BTreeSet, io::Read, time::Duration};
 use thiserror::Error;
 const LIMIT: u64 = 2 * 1024 * 1024;
 type Headers<'a> = &'a [(&'a str, &'a str)];
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum Error {
     #[error("owner_auth_required")]
     Required,
@@ -29,6 +29,8 @@ pub enum Error {
     OAuthState,
     #[error("owner_login_capacity_exceeded")]
     LoginCapacity,
+    #[error("owner_verification_rate_limited")]
+    RateLimited,
 }
 pub struct Owner {
     id: String,
@@ -49,6 +51,7 @@ pub struct OwnerAuth {
     workspace: String,
     origins: BTreeSet<String>,
     public_url: Url,
+    gate: crate::verification_gate::Gate,
 }
 fn configured_url(value: &str) -> Result<Url, Error> {
     let url = Url::parse(value).map_err(|_| Error::Configuration)?;
@@ -101,6 +104,22 @@ fn select_token<'a>(headers: Headers<'a>, session: Option<&'a str>) -> Result<&'
     if token.is_empty() || token.len() > 8192 || !token.bytes().all(|b| b.is_ascii_graphic()) {
         return Err(Error::InvalidIdentity);
     }
+    // App identity tokens are compact JWTs. Reject malformed header floods
+    // locally, but never trust decoded claims as authentication.
+    let mut parts = token.split('.');
+    for _ in 0..3 {
+        if parts.next().is_none_or(|part| {
+            part.is_empty()
+                || !part
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        }) {
+            return Err(Error::InvalidIdentity);
+        }
+    }
+    if parts.next().is_some() {
+        return Err(Error::InvalidIdentity);
+    }
     Ok(token)
 }
 impl OwnerAuth {
@@ -129,12 +148,9 @@ impl OwnerAuth {
         if proxy.path() != "/" || !public.path().ends_with('/') {
             return Err(Error::Configuration);
         }
-        let origins = [
-            proxy.origin().ascii_serialization(),
-            public.origin().ascii_serialization(),
-        ]
-        .into_iter()
-        .collect();
+        let origins = [public.origin().ascii_serialization()]
+            .into_iter()
+            .collect();
         let client = Client::builder()
             .no_proxy()
             .redirect(Policy::none())
@@ -150,6 +166,7 @@ impl OwnerAuth {
             workspace: workspace.into(),
             origins,
             public_url: public,
+            gate: crate::verification_gate::Gate::default(),
         })
     }
     fn read(&self, response: Response) -> Result<Value, Error> {
@@ -178,10 +195,36 @@ impl OwnerAuth {
         session_token: Option<&str>,
         now: i64,
     ) -> Result<Owner, Error> {
+        // Internal callbacks without a transport source share a stricter
+        // aggregate bucket. The HTTP router should use authenticate_from with
+        // its actual socket peer; never accept a source address from JSON/XFF.
+        self.authenticate_from(
+            headers,
+            session_token,
+            now,
+            std::net::IpAddr::from([0, 0, 0, 0]),
+        )
+    }
+    pub fn authenticate_from(
+        &self,
+        headers: Headers<'_>,
+        session_token: Option<&str>,
+        now: i64,
+        source: std::net::IpAddr,
+    ) -> Result<Owner, Error> {
         if now < 0 {
             return Err(Error::InvalidIdentity);
         }
         let token = select_token(headers, session_token)?;
+        let hash = crate::verification_gate::token_hash(token);
+        let _permit = self.gate.enter(source, Some(hash))?;
+        let result = self.verify_token(token, now);
+        if let Err(error) = &result {
+            self.gate.remember_failure(hash, error.clone());
+        }
+        result
+    }
+    fn verify_token(&self, token: &str, now: i64) -> Result<Owner, Error> {
         let verify = self
             .proxy
             .join(".treer/apps/identity/verify")
@@ -263,6 +306,9 @@ impl OwnerAuth {
         Ok(url.into())
     }
     pub(crate) fn exchange_code(&self, code: &str, verifier: &str) -> Result<String, Error> {
+        let _permit = self
+            .gate
+            .enter(std::net::IpAddr::from([0, 0, 0, 0]), None)?;
         let url = self
             .proxy
             .join("api/apps/oauth/token")
@@ -317,7 +363,7 @@ mod tests {
     use super::*;
     use std::{net::TcpListener, thread, time::Instant};
     const NOW: i64 = 1_800_000_000;
-    const TOKEN: &str = "synthetic-owner-token";
+    const TOKEN: &str = "synthetic.header.signature";
     fn claims() -> Value {
         json!({"active":true,"claims":{"service_id":"svc_hub","workspace_id":"ws_test","sub":"human_owner","principal_kind":"human","exp":NOW+60,"role":"owner"}})
     }
@@ -409,6 +455,18 @@ mod tests {
                             _ => panic!("authentication followed a redirect"),
                         }
                     }
+                }
+            }
+            // Keep the private port owned while checking for an unexpected
+            // extra verification (including negative-cache bypass). Never
+            // test this by racing a closed/reusable local port.
+            let at = Instant::now();
+            while at.elapsed() < Duration::from_millis(50) {
+                match listener.accept() {
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(2))
+                    }
+                    _ => panic!("unexpected extra authentication request"),
                 }
             }
         });
@@ -503,10 +561,10 @@ mod tests {
             cases.push(invalid);
         }
         for answer in cases {
-            let (auth, server) = fake(vec![answer], "forged-token");
+            let (auth, server) = fake(vec![answer], "forged.header.signature");
             assert!(matches!(
                 auth.authenticate(
-                    &[("X-Treer-Identity-Token", "forged-token")],
+                    &[("X-Treer-Identity-Token", "forged.header.signature")],
                     Some(TOKEN),
                     NOW
                 ),
@@ -525,7 +583,7 @@ mod tests {
             let (auth, server) = fake(vec![claims(), json!({"principals":principals})], TOKEN);
             assert!(matches!(
                 auth.authenticate(
-                    &[("Authorization", "Bearer synthetic-owner-token")],
+                    &[("Authorization", "Bearer synthetic.header.signature")],
                     None,
                     NOW
                 ),
@@ -544,13 +602,14 @@ mod tests {
                 ("Sec-Fetch-Site", "same-origin")
             ])
             .is_ok());
-        assert!(auth
-            .check_mutation(&[
+        assert_eq!(
+            auth.check_mutation(&[
                 ("Origin", "https://proxy.example"),
                 ("X-Endpoint-Request", "1"),
                 ("Sec-Fetch-Site", "same-site")
-            ])
-            .is_ok());
+            ]),
+            Err(Error::Csrf)
+        );
         for headers in [
             vec![("X-Endpoint-Request", "1")],
             vec![("Origin", "https://hub.example")],
@@ -666,5 +725,89 @@ mod tests {
                 Err(Error::Configuration)
             ));
         }
+    }
+    #[test]
+    fn only_the_configured_settings_origin_is_allowed_even_for_proxy_tunnels() {
+        let auth = OwnerAuth::new(
+            "https://proxy.example/",
+            "svc_hub",
+            "ws_test",
+            "https://proxy.example/api/workspaces/ws_test/apps/svc_hub/ui/",
+        )
+        .unwrap();
+        assert!(auth
+            .check_mutation(&[
+                ("Origin", "https://proxy.example"),
+                ("X-Endpoint-Request", "1")
+            ])
+            .is_ok());
+        assert_eq!(
+            auth.check_mutation(&[
+                ("Origin", "https://hub.example"),
+                ("X-Endpoint-Request", "1")
+            ]),
+            Err(Error::Csrf)
+        );
+        assert_eq!(
+            configured().check_mutation(&[
+                ("Origin", "https://proxy.example"),
+                ("X-Endpoint-Request", "1")
+            ]),
+            Err(Error::Csrf)
+        );
+    }
+    #[test]
+    fn cheap_token_shape_checks_and_concurrency_refusal_happen_before_any_proxy_call() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let auth = OwnerAuth::new(
+            &format!("http://{}/", listener.local_addr().unwrap()),
+            "svc_hub",
+            "ws_test",
+            "https://hub.example/",
+        )
+        .unwrap();
+        for token in [
+            "not-jwt",
+            "a..c",
+            "a.b.c.extra",
+            "a.b.c=",
+            "a.b.c/",
+            "a.b.c\n",
+        ] {
+            assert!(matches!(
+                auth.authenticate(&[("X-Treer-Identity-Token", token)], None, NOW),
+                Err(Error::InvalidIdentity)
+            ));
+        }
+        let source = std::net::IpAddr::from([127, 0, 0, 1]);
+        let a = auth.gate.enter(source, None).unwrap();
+        let b = auth.gate.enter(source, None).unwrap();
+        // Admission must return before even connecting to the owned listener.
+        assert!(matches!(
+            auth.authenticate_from(&[("X-Treer-Identity-Token", TOKEN)], None, NOW, source),
+            Err(Error::RateLimited)
+        ));
+        drop((a, b));
+        assert!(matches!(listener.accept(),Err(ref e) if e.kind()==std::io::ErrorKind::WouldBlock));
+    }
+    #[test]
+    fn negative_only_cache_skips_repeat_failed_token_verification_without_caching_positive_membership(
+    ) {
+        let mut inactive = claims();
+        inactive["active"] = false.into();
+        let (auth, server) = fake(vec![inactive], TOKEN);
+        assert!(matches!(
+            auth.authenticate(&[("X-Treer-Identity-Token", TOKEN)], None, NOW),
+            Err(Error::InvalidIdentity)
+        ));
+        // The private listener remains owned and rejects extra requests. This
+        // asserts the failure-only cache, while the positive revocation test
+        // above still makes four calls.
+        assert!(matches!(
+            auth.authenticate(&[("X-Treer-Identity-Token", TOKEN)], None, NOW),
+            Err(Error::InvalidIdentity)
+        ));
+        server.join().unwrap();
     }
 }
