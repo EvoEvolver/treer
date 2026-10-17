@@ -7,6 +7,7 @@ import {
   type TurnDto,
 } from "../model.js";
 import { basename } from "node:path";
+import { providerError } from "./provider-error.js";
 
 export { mapPlanSteps, mapReasoningEffort };
 export type { HistoryItem, ModelOption, ReasoningEffort, TurnDto };
@@ -166,7 +167,7 @@ export function mapTurn(turn: CodexTurn): TurnDto {
     id,
     startedAt: null,
     status,
-    error: turn.error?.message ?? null,
+    error: turn.error ? providerError(turn.error.message) : null,
     items: (turn.items ?? []).map((item, index) => mapItem(item, id, index)),
   };
 }

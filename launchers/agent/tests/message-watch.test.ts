@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import test from "node:test";
 import type { HarnessRuntime } from "../src/runtime.js";
 import { PromptQueue } from "../src/prompt-queue.js";
-import { MessageWatch, messageWatchEnabled, wrapMessage, MESSAGE_WARNING, type MessageDelivery } from "../src/message-watch.js";
+import { MessageWatch, messageFailure, messageRetryDelay, messageWatchEnabled, wrapMessage, MESSAGE_WARNING, type MessageDelivery } from "../src/message-watch.js";
 import { QueueStore } from "../src/queue-store.js";
 import { hermeticEnv } from "./hermetic.mjs";
 
@@ -200,6 +200,24 @@ test("full queue and foreign recipients remain unacked; network errors back off 
   await assert.rejects(watch.receive({ ...delivery(), recipient: { kind: "agent", id: "other" } }), /recipient/);
   watch.start(); await new Promise((done) => setTimeout(done, 75)); await watch.stop();
   assert.ok(commands >= 2 && commands <= 4); assert.equal(commands, errors); queue.close();
+});
+
+test("watcher diagnostics are fixed, retries jitter within the cap, and auth stops polling", async () => {
+  const secret = "synthetic-secret https://private.invalid/?token=fixture";
+  for (const [text, kind] of [[`proxy_unavailable ${secret}`, "network"], [`invalid_credentials ${secret}`, "auth"], [secret, "other"]]) {
+    const failure = messageFailure(text);
+    assert.equal(failure.kind, kind); assert.ok(!failure.message.includes("synthetic"));
+  }
+  assert.equal(messageFailure("exit 1").kind, "other");
+  assert.equal(messageRetryDelay(0, 1000, () => 0), 1000);
+  assert.equal(messageRetryDelay(1, 1000, () => 0.5), 2200);
+  assert.equal(messageRetryDelay(20, 1000, () => 1), 60_000);
+  const queue = new PromptQueue(runtime(new Fake()), () => {}), logs: string[] = [];
+  let calls = 0;
+  const watch = new MessageWatch(queue, "ag_test", text => logs.push(text), async () => { calls++; throw messageFailure(`unauthorized ${secret}`); }, 1);
+  watch.start(); await new Promise(done => setTimeout(done, 30)); await watch.stop();
+  assert.equal(calls, 1); assert.match(logs[0], /stopped: message_auth:/);
+  assert.ok(!logs.join().includes(secret)); queue.close();
 });
 
 test("all message types show sender/body with one English warning and each ID once", () => {

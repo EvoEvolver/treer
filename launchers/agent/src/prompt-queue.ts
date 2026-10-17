@@ -34,8 +34,9 @@ export class PromptQueue {
     if (options.file) { this.store = new QueueStore(options.file); this.records = this.store.load(); }
     for (const record of this.records) if (record.submission.state === "running") this.finish(record, "interrupted", "Launcher restarted before the submitted turn was confirmed complete");
     this.persist();
-    runtime.on("state", () => { this.observe(); void this.drain(); });
+    runtime.on("state", () => { if (!this.closed) { this.observe(); void this.drain(); } });
     runtime.on("exit", () => {
+      if (this.closed) return;
       this.exited = true;
       for (const record of this.records) if (record.submission.state === "running") this.finish(record, "interrupted", "Harness process exited");
       this.persist(); this.changed(); void this.flushNotifications();
@@ -46,7 +47,7 @@ export class PromptQueue {
   get entries(): QueuedPrompt[] {
     return this.records.filter((record) => record.submission.state === "queued").map((record, index) => ({ id: record.submission.id, text: record.text, createdAt: record.submission.created_at, sender: record.submission.sender, position: index + 1 }));
   }
-  get busy() { return this.dispatching || this.runtime.snapshot().thread?.status === "running"; }
+  get busy() { const thread = this.runtime.snapshot().thread; return this.dispatching || thread?.status === "running" || Boolean(thread?.activeTurnId); }
   get submissions() { return this.records.filter((record) => record.submission.state === "queued").map((record) => ({ ...record.submission })); }
   submission(id: string) { const record = this.records.find((entry) => entry.submission.id === id); return record ? { ...record.submission } : undefined; }
   close() { this.closed = true; if (this.retry) clearTimeout(this.retry); }
@@ -177,11 +178,20 @@ export class PromptQueue {
   private async drain() {
     if (this.closed || this.dispatching) return;
     const snapshot = this.runtime.snapshot();
-    if (!snapshot.ready || snapshot.thread?.status !== "idle") return;
+    // A terminal provider failure is visible as error, but is not a live turn.
+    // Do not replay it: dispatch only the next durable submission. An active
+    // turn (even with a transient error status) still owns the harness.
+    if (!snapshot.ready || !snapshot.thread || snapshot.thread.activeTurnId || !["idle", "error"].includes(snapshot.thread.status)) return;
+    if (snapshot.thread.status === "error" && !this.runtime.preparePromptDispatch) return;
     const record = this.records.find((entry) => entry.submission.state === "queued");
     if (!record) return;
     this.dispatching = true;
-    try { await this.dispatch(record); }
+    try {
+      try { if (this.runtime.preparePromptDispatch && !await this.runtime.preparePromptDispatch()) return; }
+      catch { this.runtime.emit("log", "provider_state_unavailable: queued prompt retained until native state can be confirmed"); return; }
+      if (this.closed || !this.runtime.snapshot().ready || this.runtime.snapshot().thread?.activeTurnId) return;
+      await this.dispatch(record);
+    }
     finally { this.dispatching = false; }
     this.observe();
     queueMicrotask(() => { void this.drain(); });

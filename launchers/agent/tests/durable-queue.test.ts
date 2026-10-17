@@ -79,6 +79,19 @@ test("a queued image cannot dispatch after the native session changes", async t 
 const source = { agent_id: "ag_sender", path: "/team/sender", name: "sender" };
 const tick = () => new Promise((done) => setImmediate(done));
 const asRuntime = (runtime: Fake) => runtime as unknown as HarnessRuntime;
+test("error with an active turn never dispatches queued work, and other adapters keep their error contract", async () => {
+  const runtime = new Fake(); runtime.thread.status = "error"; runtime.thread.activeTurnId = "still-live";
+  const queue = new PromptQueue(asRuntime(runtime), () => {});
+  try {
+    const receipt = await queue.submit("pending", "queue");
+    assert.equal(queue.busy, true); assert.equal(queue.submission(receipt.id)?.state, "queued");
+    runtime.emit("state"); await tick(); assert.deepEqual(runtime.calls, []);
+    runtime.thread.activeTurnId = null; runtime.emit("state"); await tick();
+    assert.deepEqual(runtime.calls, [], "error recovery requires adapter opt-in");
+    runtime.thread.status = "idle"; runtime.emit("state"); await tick();
+    assert.deepEqual(runtime.calls, ["pending"]);
+  } finally { queue.close(); }
+});
 for (const notify of [undefined, null]) for (const terminal of ["completed", "failed", "interrupted", "exit", "restart"] as const) test(`sender with ${notify === null ? "null" : "omitted"} notify stays silent on ${terminal}`, async (t) => {
   assert.equal(submissionOptions(source, notify).notify, null);
   const { file } = await fixture(t);
