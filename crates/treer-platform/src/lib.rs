@@ -32,9 +32,11 @@ pub use environment::{
 #[cfg(windows)]
 #[allow(unsafe_code)]
 mod windows;
-#[cfg(windows)]
+// Development fixture only until directory trust and daemon-owned handoff are
+// enforced. No downstream crate can reach this launch surface.
+#[cfg(all(windows, test))]
 #[allow(unsafe_code)]
-pub mod windows_update_bootstrap;
+mod windows_update_bootstrap;
 #[cfg(windows)]
 pub use windows::{
     current_user_sid, process_created_at, terminate_process, LocalLock, ProcessTreeGuard,

@@ -207,7 +207,9 @@ floor, the real Host restart path and Console/PTY stdio remain final acceptance
 items before enabling activation, installer authority, deployment or retirement
 of the PowerShell updater. No new live-machine test is part of this slice.
 
-`treer-platform::windows_update_bootstrap` is an unwired platform adapter. It
+`windows_update_bootstrap` is an unwired, private, test-build-only platform adapter.
+Downstream crates cannot call it until directory trust and the daemon-owned
+handoff have been reviewed and implemented. It
 pins a non-reparse local fixed-drive NTFS image and every ancestor without delete sharing,
 refuses hardlinks/alternate data streams, checks the expected SHA256 and bounds
 the image to 128 MiB. The expected digest's authenticity, job-directory ACL,
@@ -216,11 +218,17 @@ come from a future trusted preparation coordinator; this adapter cannot prove
 them from a path/hash supplied by a caller. It does not use a downloaded image
 or PATH implicitly.
 
-The owner endpoint derives one fixed private pipe name from a 32-character
-lowercase hex job selector. Existing pipe names fail (FIRST_PIPE_INSTANCE);
+The owner endpoint generates a 128-bit selector using the Windows system CSPRNG
+and derives one fixed private pipe name from its 32-character lowercase hex
+encoding. Fixed-selector binding is private for adversarial fixtures. The selector
+is visible in the child's command line and is not a secret or authorization token.
+Existing pipe names fail (FIRST_PIPE_INSTANCE);
 the existing native pipe adapter supplies the current-SID/SYSTEM-only DACL,
 rejects remote clients and never impersonates them. The endpoint consumes
 itself on one launch/connection attempt, including refusal or cancellation.
+A same-account process that learns the selector can connect first and force an
+abort. This is an accepted availability limit, not account isolation; never add
+reconnect/retry logic that weakens the single-connection identity check.
 The fixed production child argv is `--self-update-supervisor SELECTOR`; there
 is **no such Controller entry point yet**. CreateProcess receives a fixed
 absolute image, its pinned parent as cwd, an empty Unicode environment,
@@ -248,6 +256,8 @@ and synced once-only decision are still required before a complete handoff can
 exist. These are the next reviewed slice, not implied by this type's name.
 
 Windows native unit tests cover pipe-name squatting and image-digest conflict.
+They also assert the exact UTF-16 production command-line bytes independently
+of the minimal libtest helper argv.
 The ignored `windows_update_bootstrap::tests::native_owner_round_trip` additionally
 exercises verified connection/abort, a same-SID wrong-PID pipe client, and
 cancellation while the actual owned child remains alive; retained duplicate

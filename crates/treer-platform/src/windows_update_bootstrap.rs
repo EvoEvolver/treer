@@ -21,6 +21,7 @@ use sha2::{Digest, Sha256};
 use tokio::net::windows::named_pipe::NamedPipeServer;
 use windows_sys::Win32::{
     Foundation::*,
+    Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG},
     Storage::FileSystem::*,
     System::{
         JobObjects::*, Pipes::GetNamedPipeClientProcessId, Threading::*,
@@ -377,12 +378,18 @@ impl Drop for OwnedBootstrap {
     }
 }
 
-fn command_line(path: &Path, selector: &str) -> OsString {
+fn production_command_line(path: &Path, selector: &str) -> OsString {
     let mut value = OsString::from("\"");
     value.push(path);
-    #[cfg(not(test))]
     value.push("\" --self-update-supervisor ");
-    #[cfg(test)]
+    value.push(selector);
+    value
+}
+
+fn command_line(path: &Path, selector: &str) -> OsString {
+    // Minimal libtest-only transport; production bytes are asserted below.
+    let mut value = OsString::from("\"");
+    value.push(path);
     value.push("\" --exact windows_update_bootstrap::tests::bootstrap_child --ignored --skip ");
     value.push(selector);
     value
@@ -396,7 +403,25 @@ pub struct Endpoint {
 }
 
 impl Endpoint {
-    pub fn bind(selector: &str) -> io::Result<Self> {
+    pub fn bind_random() -> io::Result<Self> {
+        let mut bytes = [0u8; 16];
+        if unsafe {
+            BCryptGenRandom(
+                ptr::null_mut(),
+                bytes.as_mut_ptr(),
+                bytes.len() as u32,
+                BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+            )
+        } < 0
+        {
+            return Err(denied());
+        }
+        let selector: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        Self::bind(&selector)
+    }
+
+    // Fixed selectors are confined to this module's adversarial fixtures.
+    fn bind(selector: &str) -> io::Result<Self> {
         if selector.len() != 32
             || !selector
                 .bytes()
@@ -488,6 +513,9 @@ mod tests {
 
     #[tokio::test]
     async fn endpoint_refuses_invalid_selectors_and_an_existing_instance() {
+        let random = Endpoint::bind_random().unwrap();
+        assert_eq!(random.selector.len(), 32);
+        assert!(Endpoint::bind(&random.selector).is_err());
         for value in ["", "..", "0000000000000000000000000000000G", "../other"] {
             assert!(Endpoint::bind(value).is_err());
         }
@@ -498,6 +526,19 @@ mod tests {
             "must not attach to an existing pipe name"
         );
         drop(first);
+    }
+
+    #[test]
+    fn production_argv_has_only_the_fixed_entry_and_selector() {
+        let path = Path::new(r"C:\Treer state\job\controller.exe");
+        let id = "0123456789abcdef0123456789abcdef";
+        let actual: Vec<u16> = production_command_line(path, id).encode_wide().collect();
+        let expected: Vec<u16> = OsStr::new(
+            r#""C:\Treer state\job\controller.exe" --self-update-supervisor 0123456789abcdef0123456789abcdef"#,
+        )
+        .encode_wide()
+        .collect();
+        assert_eq!(actual, expected);
     }
 
     #[test]
