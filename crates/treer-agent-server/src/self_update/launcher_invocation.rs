@@ -11,8 +11,8 @@ use anyhow::{bail, Result};
 use treer_platform::installation_directory::InstallationDirectory;
 
 use super::{
-    artifacts::Binary, handoff::OwnedActivation, launcher_preflight, selection::Selected, Journal,
-    Receipt,
+    artifacts::Binary, handoff::OwnedActivation, launcher_preflight,
+    launcher_temporary::LauncherTemporary, selection::Selected, Journal, Receipt,
 };
 
 #[derive(Clone, Copy)]
@@ -32,6 +32,7 @@ pub struct Invocation<'a> {
     cwd: PathBuf,
     arguments: Vec<OsString>,
     environment: BTreeMap<OsString, OsString>,
+    temporary: Option<&'a LauncherTemporary<'a>>,
 }
 
 impl<'a> Invocation<'a> {
@@ -43,9 +44,11 @@ impl<'a> Invocation<'a> {
         selected: &'a Selected,
         owned: &'a OwnedActivation,
         journal: &'a Journal,
+        temporary: &'a LauncherTemporary<'a>,
         operation: Operation,
     ) -> Result<Self> {
-        launcher_preflight::checked(selected, owned, journal)?;
+        let receipt = launcher_preflight::checked(selected, owned, journal)?;
+        temporary.verify_for(selected, owned, journal, &receipt)?;
         let home = nix::unistd::User::from_uid(nix::unistd::geteuid())
             .ok()
             .flatten()
@@ -55,7 +58,8 @@ impl<'a> Invocation<'a> {
             .map_err(|_| anyhow::anyhow!("update_launcher_account_home_unavailable"))?;
         let node = crate::launcher::node_executable(None)
             .map_err(|_| anyhow::anyhow!("update_launcher_node_unavailable"))?;
-        Self::with_context(selected, owned, journal, operation, &home, &node)
+        Self::with_context(selected, owned, journal, operation, &home, &node)?
+            .bind_temporary(temporary)
     }
 
     // Private deterministic data-builder seam: production callers cannot
@@ -128,7 +132,17 @@ impl<'a> Invocation<'a> {
             cwd,
             arguments,
             environment,
+            temporary: None,
         })
+    }
+
+    fn bind_temporary(mut self, temporary: &'a LauncherTemporary<'a>) -> Result<Self> {
+        self.verify_binding()?;
+        temporary.verify_for(self.selected, self.owned, self.journal, &self.receipt)?;
+        self.environment
+            .insert("TMPDIR".into(), temporary.path()?.as_os_str().to_owned());
+        self.temporary = Some(temporary);
+        Ok(self)
     }
 
     /// Only a journal/ownership binding check; never substitutes for retained
@@ -141,6 +155,9 @@ impl<'a> Invocation<'a> {
             .locks()
             .directory(self.selected, Binary::Controller)?;
         self.owned.locks().directory(self.selected, Binary::Cli)?;
+        if let Some(temporary) = self.temporary {
+            temporary.verify_for(self.selected, self.owned, self.journal, &self.receipt)?;
+        }
         Ok(())
     }
 
@@ -206,12 +223,21 @@ mod tests {
         let before = journal.read().unwrap();
         let home = f.path.join("account-home");
         let node = f.bin.join("trusted-node");
+        let temporary = LauncherTemporary::create(
+            &selected,
+            &owned,
+            &journal,
+            &f.path.join("jobs").join(before.job_id.to_string()),
+        )
+        .unwrap();
         for (operation, name) in [
             (Operation::Install, "install"),
             (Operation::Status, "status"),
         ] {
             let plan =
                 Invocation::with_context(&selected, &owned, &journal, operation, &home, &node)
+                    .unwrap()
+                    .bind_temporary(&temporary)
                     .unwrap();
             plan.verify_binding().unwrap();
             assert_eq!(plan.program(), selected.controller_path());
@@ -238,7 +264,8 @@ mod tests {
             .unwrap();
             assert!(matches!(parsed.command, Some(crate::Command::Launcher(_))));
             let env: BTreeMap<_, _> = plan.environment().collect();
-            assert_eq!(env.len(), 8);
+            assert_eq!(env.len(), 9);
+            assert_eq!(env[OsStr::new("TMPDIR")], temporary.path().unwrap());
             assert_eq!(env[OsStr::new("HOME")], home);
             assert_eq!(env[OsStr::new("XDG_CONFIG_HOME")], f.path.join("xdg"));
             assert_eq!(env[OsStr::new("TREER_WORKSPACE_ID")], "ws_b");
@@ -253,6 +280,49 @@ mod tests {
         }
         assert_eq!(journal.read().unwrap(), before);
         assert!(!f.bin.join("trusted-node").exists()); // No child execution.
+    }
+
+    #[test]
+    fn temporary_binding_rejects_a_copied_journal_and_tracks_directory_replacement() {
+        let f = Fixture::standard_config();
+        f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+        let (selected, owned, journal) = bind(&f, "ws_a");
+        let before = journal.read().unwrap();
+        let job_path = f.path.join("jobs").join(before.job_id.to_string());
+        let temporary = LauncherTemporary::create(&selected, &owned, &journal, &job_path).unwrap();
+        let jobs = PrivateDirectory::open(&f.path.join("jobs")).unwrap();
+        let copied = Journal::open(&jobs, &before.job_id.to_string()).unwrap();
+        assert!(Invocation::with_context(
+            &selected,
+            &owned,
+            &copied,
+            Operation::Status,
+            &f.path,
+            &f.bin.join("node"),
+        )
+        .unwrap()
+        .bind_temporary(&temporary)
+        .is_err());
+        let plan = Invocation::with_context(
+            &selected,
+            &owned,
+            &journal,
+            Operation::Status,
+            &f.path,
+            &f.bin.join("node"),
+        )
+        .unwrap()
+        .bind_temporary(&temporary)
+        .unwrap();
+        let target = temporary.path().unwrap().to_owned();
+        std::fs::rename(&target, job_path.join("old-tmp")).unwrap();
+        std::fs::create_dir(&target).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert_eq!(
+            plan.verify_binding().unwrap_err().to_string(),
+            "update_launcher_temporary_changed"
+        );
     }
 
     #[test]

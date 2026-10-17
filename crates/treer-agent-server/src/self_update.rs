@@ -30,6 +30,8 @@ pub mod launcher_invocation;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod launcher_preflight;
 pub mod launcher_report;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod launcher_temporary;
 pub mod probe;
 pub mod publication;
 pub mod safety;

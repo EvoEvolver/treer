@@ -84,6 +84,13 @@ impl PrivateDirectory {
         Ok(())
     }
 
+    /// Reopen a physical absolute locator and require this exact retained
+    /// private directory inode and current owner/permissions. No alias adoption,
+    /// creation or chmod. A path is only a locator, never ownership authority.
+    pub fn verify_path(&self, path: &Path) -> io::Result<()> {
+        self.matches_path(path).map_err(|_| denied())
+    }
+
     /// A fixed, exclusive endpoint under this exact retained private directory.
     /// The pathname is only a locator: it must reopen to this directory inode.
     /// No stale socket is unlinked or replaced, even on a failed bind/check.

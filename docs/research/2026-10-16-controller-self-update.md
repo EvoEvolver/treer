@@ -338,24 +338,39 @@ from the selected `<config-home>/treer/agent-servers` path; unrepresentable layo
 fail instead of falling back to another configuration. Node resolution reuses
 the launcher's trusted fixed OS locations without PATH fallback.
 
-The future child must clear its environment before applying the recipe's eight
+The future child must clear its environment before applying the recipe's nine
 allowlisted entries: HOME, XDG_CONFIG_HOME, fixed system PATH, C LANG/LC_ALL and
-the selected workspace, Controller URL and server ID. No ambient credentials,
+the selected workspace, Controller URL, server ID and job-private TMPDIR. No ambient credentials,
 workload identity, loader/Node hooks, proxy settings or state-directory override
 are copied. This intentionally uses the OS account's default launcher state
 location; it does not inherit an Agent's private state override. A recipe binding
-check rejects changed receipt content/revision. It neither authenticates image
+check rejects changed receipt content/revision or temporary-directory identity.
+Public recipe preparation requires a borrowed `LauncherTemporary`, retaining
+the original owner, locks and directory descriptor. It neither authenticates image
 bytes nor starts any process, changes a receipt or grants execution authority.
 Node version/image retention, durable child-start/identity and recovery, actual
 env-clear/spawn/completion enforcement and final live health remain executor
 work; no real installation or whole-P1 acceptance is claimed here.
 
-Executor review requirements (security2527): create a per-job private 0700
-temporary directory through the retained job-directory handle and add its exact
-physical path as TMPDIR. Keep that directory and its identity through child
-quiescence/recovery; do not adopt a pre-existing unverified directory or fall
-back to shared `/tmp`. The current eight-entry recipe does not yet provide this
-directory or permit installation. Retain Node's checked file descriptor and
+`launcher_temporary::LauncherTemporary` now creates exclusive 0700 storage using
+the original retained job-directory handle. Before creating anything it requires
+the job locator's UUID filename and physical directory identity to match that
+handle. The fixed `launcher-tmp` child and parent are synced; existing entries
+are never adopted, chmodded or removed, and errors/Drop preserve evidence for
+explicit recovery. There is no shared `/tmp` fallback. Revalidation reopens both
+physical locators without following symlinks and checks their retained inodes,
+owner and private permissions. Recipe binding requires the same selection,
+owner and journal instances and exact receipt snapshot; TMPDIR receives only
+the revalidated path. Isolated synthetic fixtures cover existing files,
+directories and symlinks, wrong/aliased job locators, directory replacement,
+permission and receipt changes, and copied-journal rejection. No installer runs.
+
+Executor review requirements (security2527) still include keeping this storage
+and its identity through child quiescence/recovery. Actual spawn wiring, durable
+child-start recording, recovery after worker death and cleanup only after proven
+quiescence remain pending. The current CoreHealthy snapshot binding must be
+integrated with validated executor phase transitions; it does not prove a child
+started or permit installation. Retain Node's checked file descriptor and
 physical identity (device/inode), accepting only root/current-account ownership
 and no group/other write permissions on the file and trusted ancestor chain.
 Recheck identity, permissions and the selected path before spawn and after
