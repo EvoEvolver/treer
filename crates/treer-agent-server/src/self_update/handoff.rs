@@ -540,6 +540,10 @@ mod tests {
     #[test]
     #[ignore = "owned subprocess helper, actually invoked by the outer peer test"]
     fn peer_child() {
+        // Endpoint acceptance requires a detached child before it connects.
+        // Match the real activator startup rather than inheriting this test's
+        // session and failing the independent session check.
+        treer_platform::process_image::enter_private_session().unwrap();
         let path = std::env::var_os("TREER_TEST_HANDOFF_SOCKET").unwrap();
         let mut socket = UnixStream::connect(path).unwrap();
         socket.write_all(b"R").unwrap();

@@ -22,8 +22,12 @@ impl Drop for OwnedChild {
     }
 }
 
+#[track_caller]
 fn wait_for(mut ready: impl FnMut() -> bool) {
-    let deadline = Instant::now() + Duration::from_secs(30);
+    // These isolated fixtures copy/hash the full debug test executable and can
+    // compete with the other image-identity tests in a workspace run. This is
+    // only a test-process lifetime bound, not a production handoff deadline.
+    let deadline = Instant::now() + Duration::from_secs(120);
     while !ready() {
         assert!(
             Instant::now() < deadline,
