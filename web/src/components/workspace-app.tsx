@@ -276,7 +276,7 @@ function WorkspaceAppContent() {
     ? proxyUrl(`/api/workspaces/${interfaceWorkspace}/agents/${encodeURIComponent(probeAgent.agent_id)}/interface/ui/`) : undefined
   const uiProbeScope = JSON.stringify([user?.user_id, workspaceId, proxyUrl("/"), preview]) + ":"
   useAgentUiFallback(`${uiProbeScope}${probeAgent?.agent_id}`,
-    preview ? undefined : probePath)
+    preview ? undefined : probePath, user?.user_id)
   for (const id of agentOwnUrls.keys()) if (agentUiIsRefused(`${uiProbeScope}${id}`)) agentOwnUrls.delete(id)
   const workloadHref = (id: string) => appOwnUrls.get(id) ?? agentOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id)
   // Synchronous to preserve the user gesture; session authentication stays in

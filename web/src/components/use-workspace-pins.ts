@@ -4,6 +4,7 @@ import { PINS_CAPABILITY, PINS_EVENT, parseWorkspacePins, type WorkspacePin, typ
 import { t } from '@/i18n'
 
 const empty: WorkspacePins = { pins: [], limit: 50, can_pin: false, revision: 0 }
+const canRetry = (error: unknown) => !(error instanceof ApiError) || [408, 425, 429].includes(error.status) || error.status >= 500
 
 export function useWorkspacePins(userId: string | null, workspaceId: string | null, preview: boolean) {
   const [retry, setRetry] = useState(0)
@@ -40,7 +41,7 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
           ...s,
           data: denied ? empty : { ...s.data, can_pin: false },
           error: t('pins.load_failed'),
-          retryable: !(error instanceof ApiError) || error.status >= 500,
+          retryable: canRetry(error),
         }))
       }
     }
@@ -101,7 +102,7 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
         setState((s) => ({
           ...s,
           data: denied ? empty : s.data,
-          retryable: !(error instanceof ApiError) || error.status >= 500,
+          retryable: canRetry(error),
           error: t(error instanceof ApiError && error.status === 409 ? 'pins.limit_reached' : 'pins.write_failed'),
         }))
       }

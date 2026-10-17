@@ -15,8 +15,13 @@ export function agentUiIsRefused(scope: string) {
   const cached = observations.get(scope)
   return !!cached?.refused && cached.until > Date.now()
 }
-export function useAgentUiFallback(scope: string, probeUrl: string | undefined) {
+export function useAgentUiFallback(scope: string, probeUrl: string | undefined, userId: string | undefined) {
   const [, notify] = useState(0)
+  // Logout/unmount and session changes discard even the scoped booleans.
+  useEffect(() => {
+    observations.clear()
+    return () => observations.clear()
+  }, [userId])
   useEffect(() => {
     if (!probeUrl) return
     const cached = observations.get(scope)

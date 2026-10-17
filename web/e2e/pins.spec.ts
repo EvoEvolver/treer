@@ -91,7 +91,7 @@ test('old Proxy hides all pins affordances without local storage fallback',async
   await expect(overview(page).getByRole('button',{name:/Actions for/})).toHaveCount(0)
   expect(api.reads).toBe(0)
 })
-for (const status of [403,409,503]) test(`pin write ${status} is explicit, no automatic retry`,async ({page}) => {
+for (const status of [403,409,408,425,429,503]) test(`pin write ${status} is explicit, no automatic retry`,async ({page}) => {
   const api = await backend(page,[pin('agent','leader')])
   await page.goto('/')
   await expect(pinned(page).getByRole('button',{name:'Actions for /coordinator',exact:true})).toBeVisible()
@@ -100,7 +100,7 @@ for (const status of [403,409,503]) test(`pin write ${status} is explicit, no au
   await page.getByRole('menuitem',{name:'Unpin',exact:true}).click()
   await expect(page.getByRole('alert').first()).toContainText(status === 409 ? '50-pin limit':'Unable to change')
   const retry = page.getByRole('button', { name: 'Retry pins', exact: true })
-  if (status === 503) {
+  if ([408,425,429,503].includes(status)) {
     await expect(retry.first()).toBeVisible()
     api.setWriteFailure(0)
     const reads = api.reads

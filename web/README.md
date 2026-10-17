@@ -585,7 +585,7 @@ on the Proxy origin, pending per-Agent origin isolation. Deployments rejected by
 return `503 embedded_ui_requires_separate_app_origin` at this route, including top-level navigation; opening
 a new tab cannot bypass this restriction. After the user opens an online Agent, Console performs a bounded, read-only probe of its fixed
 interface root (no appearance query). Results are scoped per user/workspace/Proxy/Agent, cached in
-memory for 60 seconds with at most 64 entries; unselected Agents are never probed. Only an explicit 503 JSON error with that code
+memory for 60 seconds with at most 64 entries and cleared on session changes or logout; unselected Agents are never probed. Only an explicit 503 JSON error with that code
 switches only that Agent’s links and new-tab menus to the Console deep link; Apps retain their own URLs. Before the
 probe finishes, or on an unrelated error, the normal standalone URL remains. The probe does not follow
 redirects, execute UI bytes, or retry. This is a navigation fallback only: returning to Console does not
@@ -691,4 +691,4 @@ Web tests never install packages on a live machine.
 Installation results show the outcome and latest version check first, with recovery guidance once and diagnostic output in expandable details. Terminal control bytes in that output are shown as literal escapes.
 
 Pin errors are announced with `role="alert"` and the existing error theme. Retry pins is a read-only
-refresh offered for network/server failures, never for 403 permission denial or the 409 pin limit.
+refresh offered for network/server failures and transient HTTP 408/425/429, never for 403 permission denial or the 409 pin limit.
