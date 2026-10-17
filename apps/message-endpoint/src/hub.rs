@@ -161,6 +161,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             workspace: workspace.into(),
             own_id: own_id.into(),
         };
+        hub.notice_schema()?;
         let telegram: bool = hub.store.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_chunks')",
             [],
@@ -415,6 +416,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         self.store.recheck_private_storage()?;
         self.store.cleanup_transfers(now)?;
         self.store.prune_completed(now)?;
+        self.cleanup_failure_notices(now)?;
         let telegram: bool = self.store.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_chunks')",
             [],
@@ -562,6 +564,10 @@ impl<M: Mailbox + Directory> Hub<M> {
             self.store
                 .transfer_payload(id, generation, Direction::Outbound, transfer)?;
         let bytes = serde_json::to_vec(&envelope).map_err(|_| Error::Binding)?;
+        let binding = self.view(id)?.binding;
+        if binding.generation != generation {
+            return Err(Error::Binding);
+        }
         // A human retry may later park for a different reason. Preserve the
         // first terminal receipt rather than overwriting it or conflicting with
         // its fixed delivery key; hub_parked carries the current reason.
@@ -595,6 +601,21 @@ impl<M: Mailbox + Directory> Hub<M> {
         }
         let tx = self.store.db.transaction()?;
         let added=tx.execute("INSERT OR IGNORE INTO hub_parked(endpoint,generation,transfer,reason,created_at) VALUES(?1,?2,?3,?4,?5)",params![id,generation,transfer,code,now])?;
+        let notice_code = match reason {
+            FailureReason::TransportRejected => crate::protocol::NoticeCode::TransportRejected,
+            _ => crate::protocol::NoticeCode::TransportRetriesExhausted,
+        };
+        if let Err(error) =
+            crate::notices::insert_notice(&tx, &binding, &envelope, transfer, notice_code, now)
+        {
+            tx.rollback()?;
+            if matches!(error, Error::FailureBudget) {
+                self.store
+                    .db
+                    .execute("UPDATE hub_identity SET blocked=1 WHERE singleton=1", [])?;
+            }
+            return Err(error);
+        }
         if added == 1 {
             tx.execute(
                 "INSERT OR IGNORE INTO hub_transport_health(endpoint) VALUES(?1)",

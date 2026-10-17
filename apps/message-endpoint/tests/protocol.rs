@@ -183,3 +183,36 @@ fn internally_tagged_envelope_rejects_duplicate_missing_and_unknown_fields() {
         assert!(serde_json::from_str::<Envelope>(&bad).is_err());
     }
 }
+
+#[test]
+fn failure_notice_rejects_free_text_provenance_unknown_codes_and_unbounded_fields() {
+    let base = serde_json::json!({"kind":"failure_notice","job_id":"failure_synthetic","recipient":"ag_target","transfer_id":"a".repeat(64),"code":"transport_rejected","attempts":2});
+    let notice: Envelope = serde_json::from_value(base.clone()).unwrap();
+    notice.validate().unwrap();
+    for field in ["body", "source", "context_ids", "command"] {
+        let mut value = base.clone();
+        value[field] = serde_json::json!("untrusted");
+        assert!(serde_json::from_value::<Envelope>(value).is_err());
+    }
+    for (key, value) in [
+        ("code", serde_json::json!("custom_error")),
+        ("attempts", serde_json::json!(-1)),
+        ("attempts", serde_json::json!(65536)),
+    ] {
+        let mut bad = base.clone();
+        bad[key] = value;
+        assert!(serde_json::from_value::<Envelope>(bad).is_err());
+    }
+    for (key, value) in [
+        ("transfer_id", serde_json::json!("not-a-digest")),
+        ("attempts", serde_json::json!(257)),
+        ("recipient", serde_json::json!("")),
+    ] {
+        let mut bad = base.clone();
+        bad[key] = value;
+        assert!(serde_json::from_value::<Envelope>(bad)
+            .unwrap()
+            .validate()
+            .is_err());
+    }
+}

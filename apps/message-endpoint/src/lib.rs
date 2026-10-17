@@ -6,6 +6,8 @@ pub mod failures;
 #[cfg(unix)]
 pub mod hub;
 #[cfg(unix)]
+pub mod notices;
+#[cfg(unix)]
 mod private_store;
 pub mod protocol;
 #[cfg(unix)]

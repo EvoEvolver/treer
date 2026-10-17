@@ -76,6 +76,28 @@ pub enum Envelope {
         context_ids: Vec<String>,
         source: ExternalSource,
     },
+    FailureNotice {
+        job_id: String,
+        recipient: String,
+        transfer_id: String,
+        code: NoticeCode,
+        attempts: u16,
+    },
+}
+
+#[derive(Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NoticeCode {
+    TransportRejected,
+    TransportRetriesExhausted,
+}
+impl NoticeCode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TransportRejected => "transport_rejected",
+            Self::TransportRetriesExhausted => "transport_retries_exhausted",
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -117,16 +139,34 @@ impl Envelope {
     pub fn source_id(&self) -> &str {
         match self {
             Self::Outbound { delivery_id, .. } => delivery_id,
-            Self::Deliver { job_id, .. } => job_id,
+            Self::Deliver { job_id, .. } | Self::FailureNotice { job_id, .. } => job_id,
         }
     }
     pub fn direction(&self) -> Direction {
         match self {
             Self::Outbound { .. } => Direction::Outbound,
-            Self::Deliver { .. } => Direction::Inbound,
+            Self::Deliver { .. } | Self::FailureNotice { .. } => Direction::Inbound,
         }
     }
     pub fn validate(&self) -> Result<(), Error> {
+        if let Self::FailureNotice {
+            job_id,
+            recipient,
+            transfer_id,
+            attempts,
+            ..
+        } = self
+        {
+            return if valid_id(job_id)
+                && valid_id(recipient)
+                && hex_digest(transfer_id)
+                && *attempts <= 256
+            {
+                Ok(())
+            } else {
+                Err(Error::Invalid)
+            };
+        }
         let (body, contexts, ids) = match self {
             Self::Outbound {
                 delivery_id,
@@ -156,6 +196,7 @@ impl Envelope {
                     &source.message_id,
                 ],
             ),
+            Self::FailureNotice { .. } => unreachable!("validated above"),
         };
         if body.trim().is_empty()
             || body.len() > MAX_BODY
@@ -166,6 +207,16 @@ impl Envelope {
             return Err(Error::Invalid);
         }
         Ok(())
+    }
+
+    /// Locally rendered status, not external-human content or arbitrary text.
+    pub fn failure_notice_body(&self) -> Option<String> {
+        match self {
+            Self::FailureNotice { transfer_id, code, attempts, .. } => Some(format!(
+                "[Treer endpoint transport status]\nTransfer: {transfer_id}\nResult: {}\nAttempts: {attempts}\nThe external transfer was parked for owner review. This is a failure report, not a delivery receipt.", code.as_str()
+            )),
+            _ => None,
+        }
     }
 
     /// Splitting handles wrapper escaping even when original body already fills
@@ -344,7 +395,11 @@ pub fn from_hub(sender: &Sender, pinned_hub: &str) -> bool {
 
 pub fn check_recipient(envelope: &Envelope, local_allowlist: &[String]) -> Result<(), Error> {
     match envelope {
-        Envelope::Deliver { recipient, .. } if local_allowlist.contains(recipient) => Ok(()),
+        Envelope::Deliver { recipient, .. } | Envelope::FailureNotice { recipient, .. }
+            if local_allowlist.contains(recipient) =>
+        {
+            Ok(())
+        }
         _ => Err(Error::Recipient),
     }
 }

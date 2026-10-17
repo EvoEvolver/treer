@@ -177,6 +177,7 @@ impl<M: Mailbox> Relay<M> {
         }
         let transaction = store.db.transaction().map_err(StoreError::from)?;
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS relay_pins (singleton INTEGER PRIMARY KEY CHECK(singleton=1), pins TEXT NOT NULL); CREATE TABLE IF NOT EXISTS relay_status (singleton INTEGER PRIMARY KEY CHECK(singleton=1), failure_budget_exhausted INTEGER NOT NULL DEFAULT 0); INSERT OR IGNORE INTO relay_status(singleton) VALUES(1)").map_err(StoreError::from)?;
+        transaction.execute_batch("CREATE TABLE IF NOT EXISTS relay_forwarded(transfer TEXT PRIMARY KEY,digest TEXT NOT NULL,recipient TEXT,accepted INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);").map_err(StoreError::from)?;
         let existing: Option<String> = transaction
             .query_row("SELECT pins FROM relay_pins WHERE singleton=1", [], |r| {
                 r.get(0)
@@ -275,6 +276,13 @@ impl<M: Mailbox> Relay<M> {
         self.store.recheck_private_storage()?;
         self.store.cleanup_transfers(now)?;
         self.store.prune_completed(now)?;
+        self.store
+            .db
+            .execute(
+                "DELETE FROM relay_forwarded WHERE accepted=1 AND created_at<=?1",
+                [now - crate::transfers::TOMBSTONE_TTL],
+            )
+            .map_err(StoreError::from)?;
         if self.failure_budget_exhausted()? {
             return Err(Error::FailureBudget);
         }
@@ -423,6 +431,16 @@ impl<M: Mailbox> Relay<M> {
                         )
                     }
                 };
+            let first = Fragment::parse(&frames[0]).map_err(|_| Error::Configuration)?;
+            let provenance_recipient = match &envelope {
+                Envelope::Outbound {
+                    original_sender, ..
+                } if original_sender.kind == protocol::SenderKind::Agent => {
+                    Some(original_sender.id.as_str())
+                }
+                _ => None,
+            };
+            self.reserve_forwarded(&first, provenance_recipient, now)?;
             for wire in frames {
                 let frame = Fragment::parse(&wire).map_err(|_| Error::Configuration)?;
                 self.mailbox.send(
@@ -433,10 +451,49 @@ impl<M: Mailbox> Relay<M> {
                     None,
                 )?;
             }
+            self.store
+                .db
+                .execute(
+                    "UPDATE relay_forwarded SET accepted=1 WHERE transfer=?1",
+                    [&first.transfer_id],
+                )
+                .map_err(StoreError::from)?;
             // Core's acceptance of all fragments is durable. Ambiguous/failed
             // sends leave the original unacked and repeat identical keys/payloads.
             self.mailbox.ack(&delivery.delivery_id)?;
         }
+        Ok(())
+    }
+
+    fn reserve_forwarded(
+        &mut self,
+        frame: &Fragment,
+        recipient: Option<&str>,
+        now: i64,
+    ) -> Result<(), Error> {
+        let tx = self.store.db.transaction().map_err(StoreError::from)?;
+        let existing: Option<(String, Option<String>)> = tx
+            .query_row(
+                "SELECT digest,recipient FROM relay_forwarded WHERE transfer=?1",
+                [&frame.transfer_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()
+            .map_err(StoreError::from)?;
+        if let Some((digest, old)) = existing {
+            if digest != frame.payload_digest || old.as_deref() != recipient {
+                return Err(Error::Configuration);
+            }
+        } else {
+            let count: i64 = tx
+                .query_row("SELECT COUNT(*) FROM relay_forwarded", [], |r| r.get(0))
+                .map_err(StoreError::from)?;
+            if count >= 10_000 {
+                return Err(StoreError::Full.into());
+            }
+            tx.execute("INSERT INTO relay_forwarded(transfer,digest,recipient,created_at) VALUES(?1,?2,?3,?4)",rusqlite::params![frame.transfer_id,frame.payload_digest,recipient,now]).map_err(StoreError::from)?;
+        }
+        tx.commit().map_err(StoreError::from)?;
         Ok(())
     }
 
@@ -461,6 +518,32 @@ impl<M: Mailbox> Relay<M> {
                     FailureReason::RecipientDenied,
                     now,
                 )?;
+            } else if let Envelope::FailureNotice {
+                ref recipient,
+                ref transfer_id,
+                ..
+            } = envelope
+            {
+                let prior:Option<i64>=self.store.db.query_row("SELECT notified FROM relay_forwarded WHERE transfer=?1 AND recipient=?2 AND accepted=1",rusqlite::params![transfer_id,recipient],|r|r.get(0)).optional().map_err(StoreError::from)?;
+                // Unrecorded/unfinished transfers cannot be invented by the hub.
+                // Already-notified transfers retire silently, without looping.
+                if prior == Some(0) {
+                    let body = envelope.failure_notice_body().ok_or(Error::Configuration)?;
+                    self.mailbox.send(
+                        recipient,
+                        &format!("ep-notice-{transfer_id}"),
+                        &body,
+                        &[],
+                        None,
+                    )?;
+                    self.store
+                        .db
+                        .execute(
+                            "UPDATE relay_forwarded SET notified=1 WHERE transfer=?1",
+                            [transfer_id],
+                        )
+                        .map_err(StoreError::from)?;
+                }
             } else if let Envelope::Deliver {
                 recipient,
                 body,
@@ -509,6 +592,7 @@ mod tests {
     struct Fake {
         deliveries: RefCell<Vec<Delivery>>,
         sent: RefCell<Vec<Sent>>,
+        externals: RefCell<Vec<Option<Value>>>,
         acked: RefCell<Vec<String>>,
         fail_send: Cell<bool>,
     }
@@ -524,6 +608,7 @@ mod tests {
             _context: &[String],
             _external: Option<Value>,
         ) -> Result<String, crate::core::Error> {
+            self.externals.borrow_mut().push(_external);
             self.sent
                 .borrow_mut()
                 .push((to.into(), key.into(), body.into()));
@@ -590,6 +675,157 @@ mod tests {
         }
         .fragments("ag_endpoint", 1)
         .unwrap()
+    }
+    #[test]
+    fn notice_of_unrecorded_or_unfinished_transfer_is_dropped_without_sending() {
+        let mut relay = fixture();
+        for n in 0..2 {
+            let outbound = Envelope::Outbound {
+                delivery_id: format!("del_local_{n}"),
+                message_id: format!("msg_local_{n}"),
+                original_sender: Sender {
+                    kind: SenderKind::Agent,
+                    id: "ag_target".into(),
+                },
+                body: "original".into(),
+                context_ids: vec![],
+            };
+            let frame = Fragment::parse(&outbound.fragments("ag_endpoint", 1).unwrap()[0]).unwrap();
+            if n == 1 {
+                relay
+                    .reserve_forwarded(&frame, Some("ag_target"), NOW)
+                    .unwrap();
+            }
+            let notice = Envelope::FailureNotice {
+                job_id: format!("notice_{n}"),
+                recipient: "ag_target".into(),
+                transfer_id: frame.transfer_id,
+                code: protocol::NoticeCode::TransportRejected,
+                attempts: 1,
+            };
+            let wire = notice.fragments("ag_endpoint", 1).unwrap().remove(0);
+            relay
+                .handle(delivery(&format!("del_notice_{n}"), "app_hub", &wire), NOW)
+                .unwrap();
+            relay.drain_ready(NOW).unwrap();
+        }
+        assert!(relay.mailbox.sent.borrow().is_empty());
+    }
+    #[test]
+    fn real_outbound_records_notice_authority_before_ack_and_duplicate_notice_cannot_spam() {
+        let mut relay = fixture();
+        relay
+            .handle(delivery("del_original", "ag_target", "original"), NOW)
+            .unwrap();
+        let frame = Fragment::parse(&relay.mailbox.sent.borrow()[0].2).unwrap();
+        let accepted: i64 = relay
+            .store
+            .db
+            .query_row(
+                "SELECT accepted FROM relay_forwarded WHERE transfer=?1",
+                [&frame.transfer_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(accepted, 1);
+        assert_eq!(relay.mailbox.acked.borrow().as_slice(), ["del_original"]);
+        relay.mailbox.sent.borrow_mut().clear();
+        relay.mailbox.externals.borrow_mut().clear();
+        for n in 0..2 {
+            let env = Envelope::FailureNotice {
+                job_id: format!("notice_wrapper_{n}"),
+                recipient: "ag_target".into(),
+                transfer_id: frame.transfer_id.clone(),
+                code: protocol::NoticeCode::TransportRejected,
+                attempts: n + 1,
+            };
+            let wire = env.fragments("ag_endpoint", 1).unwrap().remove(0);
+            relay
+                .handle(delivery(&format!("del_notice_{n}"), "app_hub", &wire), NOW)
+                .unwrap();
+            if n == 0 {
+                relay.mailbox.fail_send.set(true);
+                assert!(relay.drain_ready(NOW).is_err());
+                relay.mailbox.fail_send.set(false);
+            }
+            relay.drain_ready(NOW).unwrap();
+        }
+        let sent = relay.mailbox.sent.borrow();
+        assert_eq!(sent.len(), 2);
+        assert_eq!(sent[0], sent[1]);
+        assert!(sent[0].1.ends_with(&frame.transfer_id));
+        assert!(relay.mailbox.externals.borrow().iter().all(Option::is_none));
+    }
+    #[test]
+    fn provenance_budget_refuses_outbound_before_core_send_or_ack() {
+        let mut relay = fixture();
+        relay.store.db.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO relay_forwarded(transfer,digest,created_at) SELECT 'synthetic-'||i,'synthetic',0 FROM n;").unwrap();
+        assert!(matches!(
+            relay.handle(delivery("del_cap", "ag_target", "original"), NOW),
+            Err(Error::Storage(StoreError::Full))
+        ));
+        assert!(relay.mailbox.sent.borrow().is_empty());
+        assert!(relay.mailbox.acked.borrow().is_empty());
+    }
+    #[test]
+    fn failure_notice_requires_hub_and_local_recipient_pin_and_has_no_external_identity() {
+        for recipient in ["ag_target", "ag_outside"] {
+            let mut relay = fixture();
+            let outgoing = Envelope::Outbound {
+                delivery_id: "del_outgoing".into(),
+                message_id: "msg_outgoing".into(),
+                original_sender: protocol::Sender {
+                    kind: SenderKind::Agent,
+                    id: "ag_target".into(),
+                },
+                body: "original".into(),
+                context_ids: vec![],
+            };
+            let forwarded =
+                Fragment::parse(&outgoing.fragments("ag_endpoint", 1).unwrap()[0]).unwrap();
+            relay
+                .reserve_forwarded(&forwarded, Some("ag_target"), NOW)
+                .unwrap();
+            relay
+                .store
+                .db
+                .execute("UPDATE relay_forwarded SET accepted=1", [])
+                .unwrap();
+            let env = Envelope::FailureNotice {
+                job_id: "failure_synthetic".into(),
+                recipient: recipient.into(),
+                transfer_id: forwarded.transfer_id,
+                code: protocol::NoticeCode::TransportRejected,
+                attempts: 2,
+            };
+            let wire = env.fragments("ag_endpoint", 1).unwrap().remove(0);
+            relay
+                .handle(delivery("del_notice", "app_hub", &wire), NOW)
+                .unwrap();
+            relay.drain_ready(NOW).unwrap();
+            let sent = relay.mailbox.sent.borrow();
+            if recipient == "ag_target" {
+                assert_eq!(sent.len(), 1);
+                assert_eq!(sent[0].0, "ag_target");
+                assert!(sent[0].2.starts_with("[Treer endpoint transport status]"));
+                assert!(relay.mailbox.externals.borrow()[0].is_none());
+            } else {
+                assert!(sent.is_empty());
+            }
+        }
+        let mut relay = fixture();
+        let body = serde_json::to_string(&Envelope::FailureNotice {
+            job_id: "failure_fake".into(),
+            recipient: "ag_outside".into(),
+            transfer_id: "b".repeat(64),
+            code: protocol::NoticeCode::TransportRejected,
+            attempts: 1,
+        })
+        .unwrap();
+        relay
+            .handle(delivery("del_fake_notice", "ag_user", &body), NOW)
+            .unwrap();
+        assert_eq!(relay.mailbox.sent.borrow()[0].0, "app_hub"); // ordinary outbound text
     }
     #[test]
     fn outward_send_failure_never_acks_and_retries_identical_fragments() {

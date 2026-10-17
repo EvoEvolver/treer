@@ -159,7 +159,7 @@ impl<M: Mailbox + Directory> Hub<M> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::{
         core::{AgentMetadata, Delivery},
@@ -169,7 +169,7 @@ mod tests {
         telegram::{Error as TransportError, Target},
     };
     const NOW: i64 = 1_800_000_000;
-    struct NoIo;
+    pub(crate) struct NoIo;
     impl Directory for NoIo {
         fn metadata(&self, _: &str) -> Result<AgentMetadata, crate::core::Error> {
             panic!("state must not query Core")
@@ -193,7 +193,7 @@ mod tests {
             panic!("state must not send")
         }
     }
-    fn metadata() -> AgentMetadata {
+    pub(crate) fn metadata() -> AgentMetadata {
         AgentMetadata {
             agent_id: "ag_endpoint".into(),
             workspace_id: "ws_test".into(),
@@ -272,7 +272,7 @@ mod tests {
         hub.pause("ag_endpoint", 3).unwrap();
         (hub, transfer, second)
     }
-    fn fixture(store: Store) -> (Hub<NoIo>, String) {
+    pub(crate) fn fixture(store: Store) -> (Hub<NoIo>, String) {
         let (hub, transfer, _) = detailed_fixture(store);
         (hub, transfer)
     }

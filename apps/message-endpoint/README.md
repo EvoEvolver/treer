@@ -437,7 +437,7 @@ for owner inspection/retry/discard, is not sent or pruned automatically, and doe
 not block later transfers of that endpoint. A full bound-failure receipt budget
 still persistently blocks the hub without silently discarding work. The state-only
 owner recovery operations are described below; authenticated UI wiring and any
-routable failure callback are not implemented yet. Callbacks
+routable failure callback runtime/UI wiring are not implemented yet. Callbacks
 must pass through the pinned endpoint and its recipient allowlist; an arbitrary
 body-provided original sender can never expand hub send authority. Chunk lease/
 retry columns migrate on hub reopen while preserving accepted results; restore a
@@ -465,6 +465,49 @@ plaintext nor lease tokens. They are internal owner-service methods and must
 never be exposed without owner authorization. These changes add the audit table
 on demand; stop the App and restore a complete private pre-upgrade backup to
 roll back. Older draft binaries do not prune discarded-state tombstones.
+
+## Development failure notices
+
+A transport park atomically stores at most one fixed `failure_notice` per
+endpoint/generation/transfer alongside the park. It is eligible only when the
+endpoint-attested original sender is an Agent whose ID exactly matches the
+human-provisioned primary recipient. Humans, unknown senders and other Agent IDs
+produce owner-visible `recipient_not_pinned`; they never add recipients or widen
+the hub's Core send authority. The hub sends fragments only to its pinned
+endpoint. The relay rechecks its own local recipient allowlist and renders fixed
+text containing only transfer ID, fixed reason code and transport attempt count.
+It additionally requires its own durable record that this exact outbound
+transfer was fully accepted by Core and originated from that recipient Agent.
+Unrecorded or unfinished transfers are ignored. Relay notice keys use the
+original transfer ID, and a durable notified bit prevents a second status even
+if the hub sends a different wrapper/job ID. Relay provenance is metadata only,
+capped at 10000 records; full capacity leaves new outbound messages unacked
+before attempting Core sends. Completed provenance prunes after 30 days; notices
+for older transfers are ignored. A draft relay's older, unrecorded forwards
+cannot gain notice authority retroactively.
+There is no arbitrary body, context list or `external_source` in this envelope:
+hub-generated status must not impersonate an external human. It is normal Core
+content sent as the endpoint itself.
+
+Owned `NoticeIntent` values release state access before Core sends. Private
+60-second leases fence stale completions; retries use identical parts and keys.
+Core handoff retries back off and stop after eight reservations, visible as
+`handoff_retries_exhausted`. A successful handoff is `handed_to_endpoint`, never
+"delivered" or "read". Notices wait while the binding is paused or metadata is
+stale; the owner still sees the parked failure immediately. Owner retry/repark
+does not generate another notice or rewrite its first reason/attempt count.
+
+The notice budget is separate from pending plaintext capacity, capped at 1000
+per endpoint and 10000 globally. Full budget persistently blocks admission and
+keeps the original work; it never silently drops payload to make room. Pending
+notices are not pruned. Terminal notice dedup markers remain while the original
+transfer exists, then prune after the 30-day terminal retention window. This
+prevents long-lived parked work generating a second notice after retention.
+The table is added on hub open; pre-notice draft parks are not silently backfilled.
+This remains a development protocol: old relays reject `failure_notice`; upgrade
+the reviewed hub and relay artifacts together before activation. Scheduler,
+authenticated status/recovery UI and actual Core callback delivery tests remain
+required before deployment.
 
 ## Development Bot API adapter (`hub` Cargo feature)
 
