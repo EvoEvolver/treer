@@ -5852,6 +5852,20 @@ fn close_code(message: &tokio_tungstenite::tungstenite::Message) -> u16 {
 /// member receives agent events while GET /workload-tree answers 403.
 #[tokio::test]
 async fn workspace_event_stream_closes_on_revoked_membership_and_ended_session() {
+    // The shrunk windows are process-global; serialize against any other
+    // stream test and restore the defaults when this test ends.
+    static STREAM_WINDOWS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _windows = STREAM_WINDOWS.lock().await;
+    struct RestoreWindows;
+    impl Drop for RestoreWindows {
+        fn drop(&mut self) {
+            super::events::set_stream_revalidation_for_test(
+                super::events::STREAM_REVALIDATE_AFTER,
+                super::events::STREAM_IDLE_TICK,
+            );
+        }
+    }
+    let _restore = RestoreWindows;
     super::events::set_stream_revalidation_for_test(
         Duration::from_millis(200),
         Duration::from_millis(400),

@@ -31,9 +31,13 @@ pub(super) fn set_stream_revalidation_for_test(after: Duration, idle: Duration) 
         std::sync::atomic::Ordering::Relaxed,
     );
 }
+/// A re-check that keeps failing (database unavailable) may keep a subscriber
+/// at most this long before the stream closes instead (#141 P3).
+pub(super) const STREAM_UNVERIFIED_MAX: Duration = Duration::from_secs(120);
 /// Fixed WebSocket close codes; the reason is always empty.
 pub(super) const CLOSE_SESSION_ENDED: u16 = 4401;
 pub(super) const CLOSE_MEMBERSHIP_ENDED: u16 = 4403;
+pub(super) const CLOSE_UNVERIFIED: u16 = 4503;
 
 pub(super) async fn workspace_events(
     State(state): State<AppState>,
@@ -58,6 +62,8 @@ pub(super) enum StreamRevocation {
     Session,
     /// The user is no longer a current member or the workspace is gone.
     Membership,
+    /// The checks could not be completed for too long.
+    Unverified,
 }
 
 impl StreamRevocation {
@@ -65,9 +71,13 @@ impl StreamRevocation {
         match self {
             Self::Session => CLOSE_SESSION_ENDED,
             Self::Membership => CLOSE_MEMBERSHIP_ENDED,
+            Self::Unverified => CLOSE_UNVERIFIED,
         }
     }
 }
+
+/// `Ok(true)` verified, `Ok(false)` could not be verified right now.
+type Recheck = Result<bool, StreamRevocation>;
 
 /// The same checks the route middleware ran at connect time: the session
 /// lookup `authenticate_request` uses and current workspace membership
@@ -78,25 +88,45 @@ pub(super) async fn revalidate_subscriber(
     auth: &AuthStore,
     session: &CurrentSession,
     workspace_id: &str,
-) -> Result<(), StreamRevocation> {
+) -> Recheck {
     match auth.revalidate_session(&session.token).await {
         Ok(Some(current)) if current.user_id == session.user_id => {}
         Ok(_) => return Err(StreamRevocation::Session),
         Err(error) => {
             tracing::warn!(code = error.code(), %workspace_id, "event stream session re-check failed; keeping subscriber until the next check");
-            return Ok(());
+            return Ok(false);
         }
     }
     match auth
         .require_workspace_member(workspace_id, &session.user_id)
         .await
     {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(true),
         Err(error) if error.code() == "database_error" => {
             tracing::warn!(%workspace_id, "event stream membership re-check failed; keeping subscriber until the next check");
-            Ok(())
+            Ok(false)
         }
         Err(_) => Err(StreamRevocation::Membership),
+    }
+}
+
+/// When the subscriber was last verified and when a check is next due.
+struct SubscriberCheck {
+    verified_at: Instant,
+    due_at: Instant,
+}
+
+impl SubscriberCheck {
+    fn fresh() -> Self {
+        let now = Instant::now();
+        Self {
+            verified_at: now,
+            due_at: now + revalidate_after(),
+        }
+    }
+
+    fn force(&mut self) {
+        self.due_at = Instant::now();
     }
 }
 
@@ -111,7 +141,7 @@ pub(super) async fn stream_workspace_events(
     let mut events = state.subscribe();
     // The route middleware authenticated and authorized this connection just
     // now; every later delivery re-checks after the window.
-    let mut checked_at = Instant::now();
+    let mut check = SubscriberCheck::fresh();
     if let Ok(snapshot) = state.snapshot(&workspace_id).await {
         let initial = WorkspaceEvent {
             revision: snapshot.revision,
@@ -131,7 +161,7 @@ pub(super) async fn stream_workspace_events(
         tokio::select! {
             event = events.recv() => match event {
                 Ok(event) if event.workspace_id == workspace_id => {
-                    if !still_subscribed(&auth, &session, &workspace_id, &mut checked_at, &mut outgoing).await {
+                    if !still_subscribed(&auth, &session, &workspace_id, &mut check, &mut outgoing).await {
                         break;
                     }
                     if send_event(&mut outgoing, &event).await.is_err() {
@@ -140,7 +170,7 @@ pub(super) async fn stream_workspace_events(
                 }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
-                    if !still_subscribed(&auth, &session, &workspace_id, &mut checked_at, &mut outgoing).await {
+                    if !still_subscribed(&auth, &session, &workspace_id, &mut check, &mut outgoing).await {
                         break;
                     }
                     let Ok(snapshot) = state.snapshot(&workspace_id).await else { break };
@@ -159,8 +189,8 @@ pub(super) async fn stream_workspace_events(
             _ = idle.tick() => {
                 // Force a check: an idle subscriber must also lose a revoked
                 // membership within the tick.
-                checked_at = Instant::now() - revalidate_after();
-                if !still_subscribed(&auth, &session, &workspace_id, &mut checked_at, &mut outgoing).await {
+                check.force();
+                if !still_subscribed(&auth, &session, &workspace_id, &mut check, &mut outgoing).await {
                     break;
                 }
             }
@@ -173,24 +203,36 @@ pub(super) async fn stream_workspace_events(
     }
 }
 
-/// Re-checks the subscriber when the window has passed; on revocation sends
-/// the fixed close frame and reports false. Nothing about the session or the
-/// reason is logged beyond the fixed code.
+/// Re-checks the subscriber when a check is due; on revocation, or when the
+/// checks could not complete for `STREAM_UNVERIFIED_MAX`, sends the fixed
+/// close frame and reports false. Nothing about the session or the reason is
+/// logged beyond the fixed code.
 async fn still_subscribed(
     auth: &AuthStore,
     session: &CurrentSession,
     workspace_id: &str,
-    checked_at: &mut Instant,
+    check: &mut SubscriberCheck,
     outgoing: &mut futures_util::stream::SplitSink<WebSocket, Message>,
 ) -> bool {
-    if checked_at.elapsed() < revalidate_after() {
+    let now = Instant::now();
+    if now < check.due_at {
         return true;
     }
-    match revalidate_subscriber(auth, session, workspace_id).await {
-        Ok(()) => {
-            *checked_at = Instant::now();
-            true
+    let outcome = match revalidate_subscriber(auth, session, workspace_id).await {
+        Ok(true) => {
+            *check = SubscriberCheck::fresh();
+            return true;
         }
+        Ok(false) if now.saturating_duration_since(check.verified_at) < STREAM_UNVERIFIED_MAX => {
+            // Retry at the next window; the subscriber gains nothing meanwhile.
+            check.due_at = now + revalidate_after();
+            return true;
+        }
+        Ok(false) => Err(StreamRevocation::Unverified),
+        Err(revocation) => Err(revocation),
+    };
+    match outcome {
+        Ok(()) => true,
         Err(revocation) => {
             tracing::info!(%workspace_id, code = revocation.close_code(), "event stream subscriber revoked");
             let _ = outgoing
