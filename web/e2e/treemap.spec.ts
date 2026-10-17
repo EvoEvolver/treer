@@ -128,7 +128,7 @@ test('loading folders disables only Add folder; an empty workspace disables both
 // Exercise both independent reads without sleeps or relying on machine load.
 for (const delayed of ['snapshot', 'workload-tree'] as const) {
   test(`fixed map readiness waits for ${delayed} to render`, async ({ page }) => {
-    await mockDeepTreeMapApi(page, true)
+    await mockDeepTreeMapApi(page, false)
     let release!: () => void
     const pending = new Promise<void>((resolve) => { release = resolve })
     await page.route(`**/${delayed}`, async (route) => {
