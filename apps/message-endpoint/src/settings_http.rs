@@ -1,0 +1,824 @@
+//! Private settings HTTP boundary. No transport credentials or access tokens
+//! ever enter a response. Blocking Proxy calls hold a bounded admission permit,
+//! including after a disconnected caller cancels its async request.
+use crate::{
+    oauth::OAuthVault,
+    owner_auth::{Error, OwnerAuth},
+};
+use axum::{
+    body::{to_bytes, Body},
+    extract::{ConnectInfo, State},
+    http::{HeaderMap, HeaderValue, Method, StatusCode},
+    response::Response,
+    Router,
+};
+use serde_json::{json, Value};
+use std::{
+    collections::HashSet,
+    net::SocketAddr,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
+use tokio::sync::Semaphore;
+
+const SESSION: &str = "__Host-treer-endpoint-session";
+const BROWSER: &str = "__Host-treer-endpoint-login";
+const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings and endpoint status. Browsers receive the human interface.\n\n## Inspect\n\n`GET /health` reports process health. `GET /api/settings` requires a current verified workspace human owner and returns bounded endpoint metadata.\n\n## Authentication\n\nTreer-injected App identity takes precedence; an invalid supplied identity is rejected. Without an identity, open this App in a browser and use Treer OAuth. Opaque sessions remain HttpOnly; never paste tokens into URLs. This settings service does not accept Agent administration credentials.\n\nNo transport activation or configuration mutation route is exposed in this increment. State contains sensitive metadata: keep this Managed App workspace-only, use a dedicated OS user or container, and protect backups.\n";
+type Snapshot = dyn Fn() -> Result<Value, ()> + Send + Sync;
+/// The snapshot closure must only read bounded App state, never perform network
+/// calls or return message bodies/secrets. Authentication happens before it.
+pub struct Settings {
+    auth: Arc<OwnerAuth>,
+    vault: OAuthVault,
+    snapshot: Arc<Snapshot>,
+    slots: Arc<Semaphore>,
+    html: &'static str,
+    javascript: &'static str,
+    stylesheet: &'static str,
+}
+impl Settings {
+    pub fn new(
+        auth: OwnerAuth,
+        snapshot: Arc<Snapshot>,
+        html: &'static str,
+    ) -> Result<Self, Error> {
+        // Host cookies cannot be isolated between Apps sharing the Proxy origin.
+        // OAuth sessions are deliberately supported only on a dedicated root URL.
+        if !auth.dedicated_settings_origin() {
+            return Err(Error::Configuration);
+        }
+        Ok(Self {
+            auth: Arc::new(auth),
+            vault: OAuthVault::default(),
+            snapshot,
+            slots: Arc::new(Semaphore::new(16)),
+            html,
+            javascript: "",
+            stylesheet: "",
+        })
+    }
+    pub fn with_assets(mut self, javascript: &'static str, stylesheet: &'static str) -> Self {
+        self.javascript = javascript;
+        self.stylesheet = stylesheet;
+        self
+    }
+    pub fn router(self) -> Router {
+        Router::new().fallback(handle).with_state(Arc::new(self))
+    }
+}
+fn response(status: StatusCode, value: Value) -> Response {
+    let mut r = Response::new(Body::from(value.to_string()));
+    *r.status_mut() = status;
+    r.headers_mut().insert(
+        "content-type",
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    r
+}
+fn error(e: Error) -> Response {
+    let status = match e {
+        Error::Required | Error::InvalidIdentity => StatusCode::UNAUTHORIZED,
+        Error::OwnerRequired | Error::Csrf | Error::OAuthState => StatusCode::FORBIDDEN,
+        Error::RateLimited | Error::LoginCapacity => StatusCode::TOO_MANY_REQUESTS,
+        Error::Proxy => StatusCode::SERVICE_UNAVAILABLE,
+        Error::Configuration => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    response(
+        status,
+        json!({"error":{"code": e.to_string(), "message": e.to_string()}}),
+    )
+}
+fn fixed(status: StatusCode, code: &str) -> Response {
+    response(status, json!({"error":{"code":code,"message":code}}))
+}
+fn secure(mut r: Response) -> Response {
+    for (name, value) in [
+        ("cache-control", "no-store"), ("pragma", "no-cache"),
+        ("referrer-policy", "no-referrer"), ("x-content-type-options", "nosniff"),
+        ("content-security-policy", "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'self'"),
+    ] { r.headers_mut().insert(name, HeaderValue::from_static(value)); }
+    r
+}
+fn redirect(location: &str) -> Response {
+    match HeaderValue::from_str(location) {
+        Ok(value) => {
+            let mut r = Response::new(Body::empty());
+            *r.status_mut() = StatusCode::SEE_OTHER;
+            r.headers_mut().insert("location", value);
+            r
+        }
+        Err(_) => error(Error::Configuration),
+    }
+}
+fn cookie(r: &mut Response, name: &str, value: &str, max_age: i64) {
+    // Values are vault-generated URL-safe secrets, never arbitrary user data.
+    let text = format!("{name}={value}; Path=/; Max-Age={max_age}; Secure; HttpOnly; SameSite=Lax");
+    if let Ok(value) = HeaderValue::from_str(&text) {
+        r.headers_mut().append("set-cookie", value);
+    }
+}
+fn cookies(headers: &HeaderMap) -> Result<(Option<String>, Option<String>), Error> {
+    let mut names = HashSet::new();
+    let mut session = None;
+    let mut browser = None;
+    let mut bytes = 0usize;
+    for value in headers.get_all("cookie") {
+        let text = value.to_str().map_err(|_| Error::InvalidIdentity)?;
+        bytes = bytes.saturating_add(text.len());
+        if bytes > 8192 {
+            return Err(Error::InvalidIdentity);
+        }
+        for entry in text.split(';') {
+            let (name, value) = entry.trim().split_once('=').ok_or(Error::InvalidIdentity)?;
+            if name.is_empty() || !names.insert(name.to_string()) {
+                return Err(Error::InvalidIdentity);
+            }
+            if name == SESSION {
+                session = Some(value.to_string());
+            }
+            if name == BROWSER {
+                browser = Some(value.to_string());
+            }
+        }
+    }
+    Ok((session, browser))
+}
+fn wants_html(headers: &HeaderMap) -> bool {
+    let mut choices = Vec::new();
+    for value in headers.get_all("accept") {
+        let Ok(text) = value.to_str() else { continue };
+        for media in text.split(',') {
+            let mut parts = media.split(';');
+            let kind = parts.next().unwrap_or("").trim();
+            if kind != "text/html" && kind != "text/markdown" {
+                continue;
+            }
+            let quality = parts
+                .find_map(|p| p.trim().strip_prefix("q="))
+                .map(|q| q.parse::<f32>().unwrap_or(0.0))
+                .unwrap_or(1.0);
+            if quality.is_finite() && quality > 0.0 && quality <= 1.0 {
+                choices.push((kind == "text/html", quality));
+            }
+        }
+    }
+    if let Some((html, _)) = choices
+        .iter()
+        .enumerate()
+        .max_by(|(ai, a), (bi, b)| a.1.total_cmp(&b.1).then_with(|| bi.cmp(ai)))
+        .map(|(_, v)| v)
+    {
+        return *html;
+    }
+    headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("Mozilla/"))
+}
+fn callback(query: &str) -> Result<(String, String), Error> {
+    if query.len() > 4096 {
+        return Err(Error::OAuthState);
+    }
+    let mut code = None;
+    let mut state = None;
+    for (key, value) in reqwest::Url::parse(&format!("https://invalid.example/?{query}"))
+        .map_err(|_| Error::OAuthState)?
+        .query_pairs()
+    {
+        match key.as_ref() {
+            "code" if code.is_none() => code = Some(value.into_owned()),
+            "state" if state.is_none() => state = Some(value.into_owned()),
+            _ => return Err(Error::OAuthState),
+        }
+    }
+    Ok((
+        code.filter(|v| !v.is_empty()).ok_or(Error::OAuthState)?,
+        state.filter(|v| !v.is_empty()).ok_or(Error::OAuthState)?,
+    ))
+}
+async fn handle(
+    State(app): State<Arc<Settings>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+) -> Response {
+    let permit = match app.slots.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => return secure(error(Error::RateLimited)),
+    };
+    let (parts, body) = request.into_parts();
+    if parts.headers.len() > 128
+        || parts
+            .headers
+            .iter()
+            .map(|(k, v)| k.as_str().len() + v.len())
+            .sum::<usize>()
+            > 16384
+    {
+        return secure(fixed(
+            StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+            "headers_too_large",
+        ));
+    }
+    // No current route accepts request bodies. Bound chunked as well as declared
+    // lengths, and reject bodies rather than ignoring ambiguous input.
+    match tokio::time::timeout(std::time::Duration::from_secs(3), to_bytes(body, 1024)).await {
+        Ok(Ok(bytes)) if bytes.is_empty() => {}
+        _ => return secure(fixed(StatusCode::BAD_REQUEST, "request_body_not_allowed")),
+    }
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|v| i64::try_from(v.as_secs()).ok());
+        let Some(now) = now else {
+            return secure(error(Error::Proxy));
+        };
+        secure(dispatch(
+            &app,
+            parts.method,
+            parts.uri.path(),
+            parts.uri.query(),
+            &parts.headers,
+            peer,
+            now,
+        ))
+    })
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => secure(error(Error::Proxy)),
+    }
+}
+fn dispatch(
+    app: &Settings,
+    method: Method,
+    path: &str,
+    query: Option<&str>,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    now: i64,
+) -> Response {
+    if method == Method::GET && path == "/health" && query.is_none() {
+        return response(StatusCode::OK, json!({"status":"running"}));
+    }
+    let values: Result<Vec<_>, _> = headers
+        .iter()
+        .map(|(k, v)| v.to_str().map(|v| (k.as_str(), v)))
+        .collect();
+    let Ok(values) = values else {
+        return error(Error::InvalidIdentity);
+    };
+    let (session, browser) = match cookies(headers) {
+        Ok(c) => c,
+        Err(e) => return error(e),
+    };
+    if method == Method::GET && path == "/api/auth/callback" {
+        let (code, state) = match callback(query.unwrap_or("")) {
+            Ok(v) => v,
+            Err(e) => return error(e),
+        };
+        match app.vault.finish(
+            &app.auth,
+            &code,
+            &state,
+            browser.as_deref().unwrap_or(""),
+            now,
+        ) {
+            Ok(login) => {
+                let mut r = redirect(app.auth.settings_url().as_str());
+                cookie(&mut r, BROWSER, "", 0);
+                cookie(
+                    &mut r,
+                    SESSION,
+                    login.cookie_secret(),
+                    login.expires_at().saturating_sub(now),
+                );
+                return r;
+            }
+            Err(failure) => {
+                let mut r = error(failure.error);
+                if failure.clear_browser_cookie {
+                    cookie(&mut r, BROWSER, "", 0);
+                }
+                return r;
+            }
+        }
+    }
+    if query.is_some() {
+        return fixed(StatusCode::BAD_REQUEST, "query_not_allowed");
+    }
+    if method == Method::GET && path == "/api/auth/config" {
+        return response(
+            StatusCode::OK,
+            json!({"login_url":app.auth.settings_url().join("api/auth/start").map(|v|v.to_string()).ok()}),
+        );
+    }
+    if method == Method::GET && matches!(path, "/assets/app.js" | "/assets/app.css") {
+        let (body, kind) = if path.ends_with(".js") {
+            (app.javascript, "text/javascript; charset=utf-8")
+        } else {
+            (app.stylesheet, "text/css; charset=utf-8")
+        };
+        let mut r = Response::new(Body::from(body));
+        r.headers_mut()
+            .insert("content-type", HeaderValue::from_static(kind));
+        return r;
+    }
+    if method == Method::GET && path == "/" {
+        let html = wants_html(headers);
+        let mut r = Response::new(Body::from(if html { app.html } else { MANUAL }));
+        r.headers_mut().insert(
+            "content-type",
+            HeaderValue::from_static(if html {
+                "text/html; charset=utf-8"
+            } else {
+                "text/markdown; charset=utf-8"
+            }),
+        );
+        r.headers_mut()
+            .insert("vary", HeaderValue::from_static("Accept, User-Agent"));
+        return r;
+    }
+    let token = match session
+        .as_deref()
+        .map(|s| app.vault.session_token(s, now))
+        .transpose()
+    {
+        Ok(t) => t.flatten(),
+        Err(e) => return error(e),
+    };
+    if method == Method::GET && path == "/api/auth/start" {
+        // A supplied invalid identity cannot turn into a different login user.
+        match app
+            .auth
+            .authenticate_from(&values, token.as_deref(), now, peer.ip())
+        {
+            Ok(_) => return redirect(app.auth.settings_url().as_str()),
+            Err(Error::Required) => {}
+            Err(e) => return error(e),
+        }
+        return match app.vault.start_from(&app.auth, now, peer.ip()) {
+            Ok(start) => {
+                let mut r = redirect(&start.location);
+                cookie(&mut r, BROWSER, start.browser_secret(), 300);
+                r
+            }
+            Err(e) => error(e),
+        };
+    }
+    // Unknown routes and methods never become an HTML shell or perform Proxy
+    // verification. In particular POST on a static URL cannot mutate state.
+    if !((method == Method::GET && path == "/api/settings")
+        || (method == Method::POST && path == "/api/auth/logout"))
+    {
+        return fixed(StatusCode::NOT_FOUND, "route_not_found");
+    }
+    let owner = match app
+        .auth
+        .authenticate_from(&values, token.as_deref(), now, peer.ip())
+    {
+        Ok(o) => o,
+        Err(e) => return error(e),
+    };
+    if method == Method::POST {
+        if let Err(e) = app.auth.check_mutation(&values) {
+            return error(e);
+        }
+        if let Some(raw) = session {
+            if let Err(e) = app.vault.logout(&raw) {
+                return error(e);
+            }
+        }
+        let mut r = response(StatusCode::OK, json!({"logged_out":true}));
+        cookie(&mut r, SESSION, "", 0);
+        return r;
+    }
+    match (app.snapshot)() {
+        Ok(snapshot) => response(
+            StatusCode::OK,
+            json!({"owner_id":owner.id(), "settings":snapshot}),
+        ),
+        Err(_) => fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        thread,
+    };
+    const TOKEN: &str = "fixture.owner.token";
+    fn app(proxy: &str) -> Settings {
+        Settings::new(
+            OwnerAuth::new(proxy, "svc_hub", "ws_test", "https://hub.example/").unwrap(),
+            Arc::new(|| Ok(json!({"endpoints":[]}))),
+            "<!doctype html><title>Endpoints</title>",
+        )
+        .unwrap()
+    }
+    fn invoke(
+        app: &Settings,
+        method: Method,
+        path: &str,
+        query: Option<&str>,
+        headers: &HeaderMap,
+    ) -> Response {
+        secure(dispatch(
+            app,
+            method,
+            path,
+            query,
+            headers,
+            "127.0.0.1:1234".parse().unwrap(),
+            1000,
+        ))
+    }
+    fn headers(entries: &[(&str, &str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in entries {
+            h.append(
+                axum::http::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
+    }
+    fn proxy(replies: Vec<Value>) -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let base = format!("http://{}/", listener.local_addr().unwrap());
+        let thread = thread::spawn(move || {
+            for reply in replies {
+                let start = std::time::Instant::now();
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((s, _)) => break s,
+                        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(start.elapsed() < std::time::Duration::from_secs(2));
+                            thread::sleep(std::time::Duration::from_millis(2));
+                        }
+                        Err(_) => panic!("fixture accept failed"),
+                    }
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                    .unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.push(byte[0]);
+                    assert!(head.len() < 16384);
+                }
+                let text = String::from_utf8(head).unwrap();
+                let size = text
+                    .lines()
+                    .find_map(|l| {
+                        l.split_once(':')
+                            .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
+                            .map(|(_, v)| v.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                assert!(size < 16384);
+                let mut body = vec![0; size];
+                stream.read_exact(&mut body).unwrap();
+                let value = reply.to_string();
+                write!(stream,"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",value.len(),value).unwrap();
+            }
+        });
+        (base, thread)
+    }
+    fn verified() -> Vec<Value> {
+        vec![
+            json!({"active":true,"claims":{"sub":"user_owner","principal_kind":"human","workspace_id":"ws_test","service_id":"svc_hub","exp":2000}}),
+            json!({"principals":[{"id":"user_owner","kind":"human","role":"owner"}]}),
+        ]
+    }
+    #[test]
+    fn host_cookie_scope_requires_a_dedicated_root_url() {
+        let auth = OwnerAuth::new(
+            "https://proxy.example/",
+            "svc_hub",
+            "ws_test",
+            "https://proxy.example/other-app/",
+        )
+        .unwrap();
+        assert!(matches!(
+            Settings::new(auth, Arc::new(|| Ok(json!({}))), ""),
+            Err(Error::Configuration)
+        ));
+        let shared = OwnerAuth::new(
+            "https://proxy.example/",
+            "svc_hub",
+            "ws_test",
+            "https://proxy.example/",
+        )
+        .unwrap();
+        assert!(Settings::new(shared, Arc::new(|| Ok(json!({}))), "").is_err());
+    }
+    #[test]
+    fn root_negotiates_manual_or_browser_with_quality_and_order() {
+        let app = app("https://proxy.example/");
+        for (accept, agent, html) in [
+            ("*/*", "curl/8", false),
+            ("*/*", "Mozilla/5", true),
+            ("text/markdown, text/html", "Mozilla/5", false),
+            ("text/markdown;q=0.2,text/html;q=0.9", "curl/8", true),
+            ("text/html;q=0.1,text/markdown;q=1", "Mozilla/5", false),
+        ] {
+            let r = invoke(
+                &app,
+                Method::GET,
+                "/",
+                None,
+                &headers(&[("accept", accept), ("user-agent", agent)]),
+            );
+            assert_eq!(
+                r.headers()["content-type"]
+                    .to_str()
+                    .unwrap()
+                    .starts_with("text/html"),
+                html
+            );
+            assert_eq!(r.headers()["vary"], "Accept, User-Agent");
+        }
+    }
+    #[test]
+    fn callback_strips_code_sets_opaque_session_and_replay_fails_without_erasing_session() {
+        let mut replies =
+            vec![json!({"access_token":TOKEN,"token_type":"Bearer","audience":"svc_hub"})];
+        replies.extend(verified());
+        replies.extend(verified());
+        let (base, join) = proxy(replies);
+        let app = app(&base);
+        let start = app.vault.start(&app.auth, 1000).unwrap();
+        let parsed = reqwest::Url::parse(&start.location).unwrap();
+        let state = parsed
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .unwrap()
+            .1
+            .into_owned();
+        let query = format!("code=private-test-code&state={state}");
+        let browser = format!("{BROWSER}={}", start.browser_secret());
+        let r = invoke(
+            &app,
+            Method::GET,
+            "/api/auth/callback",
+            Some(&query),
+            &headers(&[("cookie", &browser)]),
+        );
+        assert_eq!(r.status(), StatusCode::SEE_OTHER);
+        assert_eq!(r.headers()["location"], "https://hub.example/");
+        let values = r
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(values.len(), 2);
+        let session = values
+            .iter()
+            .find(|v| v.starts_with(SESSION))
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_string();
+        assert!(!session.contains(TOKEN));
+        for v in values {
+            for flag in ["Secure", "HttpOnly", "SameSite=Lax", "Path=/"] {
+                assert!(v.contains(flag));
+            }
+        }
+        let settings = invoke(
+            &app,
+            Method::GET,
+            "/api/settings",
+            None,
+            &headers(&[("cookie", &session)]),
+        );
+        assert_eq!(settings.status(), StatusCode::OK);
+        let replay = invoke(
+            &app,
+            Method::GET,
+            "/api/auth/callback",
+            Some(&query),
+            &headers(&[("cookie", &browser)]),
+        );
+        assert_eq!(replay.status(), StatusCode::FORBIDDEN);
+        assert!(!replay.headers().contains_key("set-cookie"));
+        join.join().unwrap();
+    }
+    #[test]
+    fn duplicate_cookie_and_callback_parameters_are_rejected_without_clearing_valid_flow() {
+        for q in [
+            "code=a&code=b&state=c",
+            "code=a&state=c&state=d",
+            "code=a&state=c&redirect=https://evil.example",
+            "error=access_denied",
+            "code=&state=c",
+        ] {
+            assert!(callback(q).is_err());
+        }
+        assert!(cookies(&headers(&[("cookie", "x=1; x=2")])).is_err());
+        assert!(cookies(&headers(&[
+            ("cookie", "__Host-treer-endpoint-session=a"),
+            ("cookie", "__Host-treer-endpoint-session=b")
+        ]))
+        .is_err());
+        let app = app("https://proxy.example/");
+        let result = invoke(
+            &app,
+            Method::GET,
+            "/api/auth/callback",
+            Some("code=x&state=wrong"),
+            &headers(&[("cookie", "__Host-treer-endpoint-login=another-browser")]),
+        );
+        assert_eq!(result.status(), StatusCode::FORBIDDEN);
+        assert!(!result.headers().contains_key("set-cookie"));
+        assert_eq!(result.headers()["referrer-policy"], "no-referrer");
+        assert_eq!(result.headers()["cache-control"], "no-store");
+    }
+    #[test]
+    fn login_sets_only_secure_opaque_browser_cookie_and_invalid_injected_identity_cannot_fall_back()
+    {
+        let app = app("https://proxy.example/");
+        let result = invoke(
+            &app,
+            Method::GET,
+            "/api/auth/start",
+            None,
+            &HeaderMap::new(),
+        );
+        assert_eq!(result.status(), StatusCode::SEE_OTHER);
+        let c = result.headers()["set-cookie"].to_str().unwrap();
+        for flag in [
+            "__Host-treer-endpoint-login=",
+            "Path=/",
+            "Secure",
+            "HttpOnly",
+            "SameSite=Lax",
+            "Max-Age=300",
+        ] {
+            assert!(c.contains(flag));
+        }
+        let nonce = c.split(';').next().unwrap().split_once('=').unwrap().1;
+        let location = result.headers()["location"].to_str().unwrap();
+        assert!(location.starts_with("https://proxy.example/api/apps/oauth/authorize?"));
+        assert!(!location.contains(nonce));
+        assert!(location.contains("code_challenge_method=S256"));
+        let bad = invoke(
+            &app,
+            Method::GET,
+            "/api/auth/start",
+            None,
+            &headers(&[("x-treer-identity-token", "forged")]),
+        );
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+        assert!(!bad.headers().contains_key("set-cookie"));
+    }
+    #[test]
+    fn header_duplicates_are_authoritative_and_owner_snapshot_requires_current_verification() {
+        let (base, join) = proxy(verified());
+        let app = app(&base);
+        let result = invoke(
+            &app,
+            Method::GET,
+            "/api/settings",
+            None,
+            &headers(&[("x-treer-identity-token", TOKEN)]),
+        );
+        assert_eq!(result.status(), StatusCode::OK);
+        join.join().unwrap();
+        let bad = invoke(
+            &app,
+            Method::GET,
+            "/api/settings",
+            None,
+            &headers(&[
+                ("x-treer-identity-token", TOKEN),
+                ("x-treer-identity-token", TOKEN),
+            ]),
+        );
+        assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
+        let missing = invoke(&app, Method::GET, "/api/settings", None, &HeaderMap::new());
+        assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
+    }
+    #[test]
+    fn logout_needs_csrf_and_clears_host_session_cookie_only_on_success() {
+        let (base, join) = proxy([verified(), verified()].concat());
+        let app = app(&base);
+        let bad = invoke(
+            &app,
+            Method::POST,
+            "/api/auth/logout",
+            None,
+            &headers(&[
+                ("x-treer-identity-token", TOKEN),
+                ("origin", "https://evil.example"),
+                ("x-endpoint-request", "1"),
+            ]),
+        );
+        assert_eq!(bad.status(), StatusCode::FORBIDDEN);
+        assert!(!bad.headers().contains_key("set-cookie"));
+        let good = invoke(
+            &app,
+            Method::POST,
+            "/api/auth/logout",
+            None,
+            &headers(&[
+                ("x-treer-identity-token", TOKEN),
+                ("origin", "https://hub.example"),
+                ("x-endpoint-request", "1"),
+                ("sec-fetch-site", "same-origin"),
+            ]),
+        );
+        assert_eq!(good.status(), StatusCode::OK);
+        assert!(good.headers()["set-cookie"]
+            .to_str()
+            .unwrap()
+            .contains("Max-Age=0"));
+        join.join().unwrap();
+    }
+    #[test]
+    fn unknown_routes_and_wrong_methods_never_become_html_or_redirects() {
+        let app = app("https://proxy.example/");
+        for (m, p, q) in [
+            (Method::POST, "/", None),
+            (Method::GET, "/api/missing", None),
+            (Method::GET, "/api/auth/logout", None),
+            (Method::GET, "/api/settings", Some("token=untrusted")),
+        ] {
+            let r = invoke(&app, m, p, q, &HeaderMap::new());
+            assert!(r.status().is_client_error());
+            assert!(r.headers()["content-type"]
+                .to_str()
+                .unwrap()
+                .starts_with("application/json"));
+            assert!(!r.headers().contains_key("location"));
+        }
+    }
+    #[test]
+    fn real_router_bounds_headers_body_and_concurrent_blocking_admission() {
+        let app = app("https://proxy.example/");
+        let occupied = app.slots.clone().try_acquire_many_owned(16).unwrap();
+        let router = app.router();
+        let (send, recv) = std::sync::mpsc::channel();
+        let (stop, done) = tokio::sync::oneshot::channel::<()>();
+        let server = thread::spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(async {
+                    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    send.send(listener.local_addr().unwrap()).unwrap();
+                    axum::serve(
+                        listener,
+                        router.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .with_graceful_shutdown(async {
+                        let _ = done.await;
+                    })
+                    .await
+                    .unwrap();
+                });
+        });
+        let base = format!(
+            "http://{}",
+            recv.recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let result = client.get(format!("{base}/health")).send().unwrap();
+        assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
+        drop(occupied);
+        let result = client.get(format!("{base}/health")).send().unwrap();
+        assert_eq!(result.status(), StatusCode::OK);
+        let result = client
+            .post(format!("{base}/api/auth/logout"))
+            .body(vec![b'x'; 2048])
+            .send()
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::BAD_REQUEST);
+        let result = client
+            .get(format!("{base}/api/settings"))
+            .header("x-fixture", "x".repeat(17000))
+            .send()
+            .unwrap();
+        assert_eq!(result.status(), StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+        stop.send(()).unwrap();
+        server.join().unwrap();
+    }
+}

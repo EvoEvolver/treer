@@ -10,9 +10,11 @@ publish = false
 
 [features]
 default = []
-hub = ["dep:reqwest", "dep:getrandom"]
+hub = ["dep:reqwest", "dep:getrandom", "dep:axum", "dep:tokio"]
 
 [dependencies]
+axum = { version = "0.8.9", optional = true, default-features = false, features = ["http1", "json", "tokio", "query"] }
+tokio = { version = "1.53.1", optional = true, features = ["rt-multi-thread", "net", "time", "signal", "sync"] }
 getrandom = { version = "0.4.3", optional = true }
 reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
 base64 = "0.22"

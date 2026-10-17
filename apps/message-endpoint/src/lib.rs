@@ -30,6 +30,8 @@ pub mod oauth;
 #[cfg(all(unix, feature = "hub"))]
 pub mod owner_auth;
 #[cfg(all(unix, feature = "hub"))]
+pub mod settings_http;
+#[cfg(all(unix, feature = "hub"))]
 pub mod telegram_http;
 #[cfg(all(unix, feature = "hub"))]
 mod verification_gate;

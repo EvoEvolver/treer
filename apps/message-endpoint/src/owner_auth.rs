@@ -123,6 +123,12 @@ fn select_token<'a>(headers: Headers<'a>, session: Option<&'a str>) -> Result<&'
     Ok(token)
 }
 impl OwnerAuth {
+    pub(crate) fn settings_url(&self) -> &Url {
+        &self.public_url
+    }
+    pub(crate) fn dedicated_settings_origin(&self) -> bool {
+        self.public_url.path() == "/" && self.public_url.origin() != self.proxy.origin()
+    }
     /// URLs are trusted operator configuration, never Host headers or browser
     /// parameters. HTTPS is required except literal loopback HTTP for local use.
     pub fn new(

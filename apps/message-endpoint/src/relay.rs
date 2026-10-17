@@ -72,7 +72,7 @@ impl Config {
     }
 }
 pub const STARTUP_ERROR_BACKOFF_SECONDS: u64 = 30;
-fn hash_executable(path: &Path) -> Result<String, Error> {
+pub(crate) fn hash_executable(path: &Path) -> Result<String, Error> {
     use sha2::{Digest, Sha256};
     use std::{fs::File, io::Read};
     let mut file = File::open(path).map_err(|_| Error::Configuration)?;
