@@ -80,15 +80,27 @@ async fn relay_fixture(
     )
 }
 
+/// Waits for the Controller-bound frame the test already caused. This is a
+/// readiness wait on an event that is guaranteed to arrive, so its bound only
+/// has to exclude a hung test, not pace a loaded machine (#128: 5 s elapsed
+/// under a load average of 16 while the Proxy suite took 249 s). Nothing is
+/// retried and no assertion changes; the bound is one generous deadline.
+const CONTROLLER_FRAME_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+async fn await_frame(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+) -> SocketFrame {
+    tokio::time::timeout(CONTROLLER_FRAME_DEADLINE, receiver.recv())
+        .await
+        .expect("a Controller-bound frame was caused by the test and must arrive")
+        .expect("the fixture Controller connection stays open")
+}
+
 async fn next_frame(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
 ) -> NetworkBinaryFrame {
     loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap()
-        {
+        match await_frame(receiver).await {
             SocketFrame::Binary(data) => return NetworkBinaryFrame::decode(&data).unwrap(),
             _ => continue,
         }
@@ -240,10 +252,7 @@ async fn machine_restore_route_authenticates_scopes_and_reports_waiting_endpoint
     let responder = tokio::spawn(async move {
         let mut actions = Vec::new();
         while actions.len() < 2 {
-            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            let frame = await_frame(&mut receiver).await;
             let SocketFrame::Text(encoded) = frame else {
                 continue;
             };
