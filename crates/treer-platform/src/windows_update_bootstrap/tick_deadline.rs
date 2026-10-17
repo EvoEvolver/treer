@@ -13,13 +13,13 @@ fn refused(_: ()) -> io::Error {
     super::denied()
 }
 
-struct TickDeadline {
+pub(super) struct TickDeadline {
     window: Window,
     deadline: Deadline,
 }
 
 impl TickDeadline {
-    fn begin() -> io::Result<Self> {
+    pub(super) fn begin() -> io::Result<Self> {
         let sampled = now();
         let window = Window::begin(sampled).map_err(refused)?;
         let deadline = window
@@ -28,16 +28,34 @@ impl TickDeadline {
         Ok(Self { window, deadline })
     }
 
-    fn accept(window: Window, owner_original: Option<u64>) -> io::Result<Self> {
+    pub(super) fn accept(window: Window, owner_original: Option<u64>) -> io::Result<Self> {
         let deadline = window.accept(now(), owner_original).map_err(refused)?;
         Ok(Self { window, deadline })
     }
 
-    fn remaining(&mut self) -> io::Result<Duration> {
+    pub(super) fn remaining(&mut self) -> io::Result<Duration> {
         self.deadline
             .remaining_ms(now())
             .map(Duration::from_millis)
             .map_err(refused)
+    }
+
+    // Tokio bounds waiting, but its timer is not evidence that Windows' clock
+    // stayed in range across a blocking operation or power-state transition.
+    pub(super) async fn run<T>(
+        &mut self,
+        future: impl std::future::Future<Output = io::Result<T>>,
+    ) -> io::Result<T> {
+        let budget = self.remaining()?;
+        let result = tokio::time::timeout(budget, future).await;
+        self.remaining()?;
+        match result {
+            Ok(Ok(value)) => Ok(value),
+            _ => {
+                self.deadline.refuse();
+                Err(super::denied())
+            }
+        }
     }
 }
 

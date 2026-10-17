@@ -662,6 +662,7 @@ impl AuthenticatedConnection {
 #[cfg(test)]
 mod tests {
     use super::parent_proof::{OwnerIdentity, ParentProof};
+    use super::tick_deadline::TickDeadline;
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::windows::named_pipe::ClientOptions;
@@ -671,10 +672,11 @@ mod tests {
         selector: &str,
         registration: &[u8; 56],
         owner: bool,
+        clock: &mut TickDeadline,
         verify: impl Fn() -> io::Result<()>,
     ) -> io::Result<()> {
         use crate::update_binding::{Binding, Exchange, FRAME_SIZE};
-        let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
+        let deadline = tokio::time::Instant::now() + clock.remaining()?;
         // These are synthetic fixture inputs, not durable preparation records.
         let attempt_hash = Sha256::digest(selector.as_bytes());
         let binding = Binding {
@@ -683,32 +685,26 @@ mod tests {
             registration: Sha256::digest(registration).into(),
         };
         let mut exchange = Exchange::new(binding, random_nonce()?, owner, deadline.into_std());
+        clock.remaining()?;
         if owner {
             let hello = exchange
                 .start(tokio::time::Instant::now().into_std())
                 .map_err(|_| denied())?;
-            tokio::time::timeout_at(deadline, pipe.write_all(&hello))
-                .await
-                .map_err(|_| denied())?
-                .map_err(|_| denied())?;
+            clock.run(pipe.write_all(&hello)).await?;
         }
         for _ in 0..2 {
             let mut bytes = [0; FRAME_SIZE];
-            tokio::time::timeout_at(deadline, pipe.read_exact(&mut bytes))
-                .await
-                .map_err(|_| denied())?
-                .map_err(|_| denied())?;
+            clock.run(pipe.read_exact(&mut bytes)).await?;
             blocking_phase(&verify)?;
+            clock.remaining()?;
             let response = exchange
                 .receive(&bytes, tokio::time::Instant::now().into_std())
                 .map_err(|_| denied())?;
             if let Some(response) = response {
-                tokio::time::timeout_at(deadline, pipe.write_all(&response))
-                    .await
-                    .map_err(|_| denied())?
-                    .map_err(|_| denied())?;
+                clock.run(pipe.write_all(&response)).await?;
             }
         }
+        clock.remaining()?;
         if !exchange.complete() || tokio::time::Instant::now() >= deadline {
             return Err(denied());
         }
@@ -718,6 +714,67 @@ mod tests {
     struct PrivateImage {
         directory: PathBuf,
         path: PathBuf,
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn native_pipe_refuses_late_reply_and_ack_with_child_window_valid() {
+        use crate::update_deadline::Window;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use windows_sys::Win32::System::SystemInformation::GetTickCount64;
+
+        // Transport/deadline regression only: these peers are in one process;
+        // the separate native_owner_round_trip covers kernel process proof.
+        for delayed_receive in [0, 1] {
+            let mut endpoint = Endpoint::bind_random().unwrap();
+            let id = endpoint.selector.clone();
+            let mut client = ClientOptions::new()
+                .open(format!(r"\\.\pipe\Treer-update-{id}"))
+                .unwrap();
+            endpoint.pipe.connect().await.unwrap();
+            let sampled = unsafe { GetTickCount64() };
+            let window = Window {
+                start: sampled,
+                expiry: sampled.checked_add(250).unwrap(),
+            };
+            let mut owner_clock = TickDeadline::accept(window, Some(window.expiry)).unwrap();
+            let mut child_clock = TickDeadline::begin().unwrap();
+            let count = AtomicUsize::new(0);
+            let registration = [7; 56];
+            let owner = async {
+                let result = fixture_binding_exchange(
+                    &mut endpoint.pipe,
+                    &id,
+                    &registration,
+                    true,
+                    &mut owner_clock,
+                    || Ok(()),
+                )
+                .await;
+                drop(endpoint);
+                result
+            };
+            let child = async {
+                fixture_binding_exchange(
+                    &mut client,
+                    &id,
+                    &registration,
+                    false,
+                    &mut child_clock,
+                    || {
+                        if count.fetch_add(1, Ordering::SeqCst) == delayed_receive {
+                            std::thread::sleep(Duration::from_millis(350));
+                        }
+                        Ok(())
+                    },
+                )
+                .await
+            };
+            let (owner_result, _) = tokio::join!(owner, child);
+            assert!(owner_result.is_err());
+            assert!(owner_clock.remaining().is_err());
+            assert!(child_clock.remaining().is_ok());
+            assert!(count.load(Ordering::SeqCst) > delayed_receive);
+        }
     }
 
     fn set_fixture_security(path: &Path, extra: &str) {
@@ -923,21 +980,17 @@ mod tests {
         // This bounded fixture exchange exercises kernel-parent attestation and
         // registration comparison only; it is not a production handoff frame.
         let _parent = if let Some(pipe) = pipe.as_mut() {
-            let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
+            let mut clock = TickDeadline::begin().unwrap();
             let parent = blocking_phase(|| ParentProof::attest(pipe)).unwrap();
+            clock.remaining().unwrap();
             let mut registration = [0; 56];
-            tokio::time::timeout_at(deadline, pipe.read_exact(&mut registration))
-                .await
-                .unwrap()
-                .unwrap();
+            clock.run(pipe.read_exact(&mut registration)).await.unwrap();
             if blocking_phase(|| parent.verify_registration(&registration)).is_err() {
                 return;
             }
-            tokio::time::timeout_at(deadline, pipe.write_all(&[1]))
-                .await
-                .unwrap()
-                .unwrap();
-            fixture_binding_exchange(pipe, id, &registration, false, || {
+            clock.remaining().unwrap();
+            clock.run(pipe.write_all(&[1])).await.unwrap();
+            fixture_binding_exchange(pipe, id, &registration, false, &mut clock, || {
                 parent.verify_registration(&registration)
             })
             .await
@@ -979,25 +1032,30 @@ mod tests {
         let expected = digest(&File::open(&path).unwrap()).unwrap();
         let id = format!("f{}", &selector()[1..]);
         let endpoint = Endpoint::bind(&id).unwrap();
+        let mut clock = TickDeadline::begin().unwrap();
         let image = PinnedImage::open(&path, expected).await.unwrap();
-        let mut connection = endpoint.launch(image).await.unwrap();
+        let mut connection = clock.run(endpoint.launch(image)).await.unwrap();
         connection.child.verify().unwrap();
         let registration = blocking_phase(OwnerIdentity::current).unwrap().encode();
-        let deadline = tokio::time::Instant::now() + CONNECT_BUDGET;
-        tokio::time::timeout_at(deadline, connection._pipe.write_all(&registration))
+        clock
+            .run(connection._pipe.write_all(&registration))
             .await
-            .unwrap()
             .unwrap();
         let mut ack = [0];
-        tokio::time::timeout_at(deadline, connection._pipe.read_exact(&mut ack))
+        clock
+            .run(connection._pipe.read_exact(&mut ack))
             .await
-            .unwrap()
             .unwrap();
         assert_eq!(ack, [1]);
         let child = &connection.child;
-        fixture_binding_exchange(&mut connection._pipe, &id, &registration, true, || {
-            child.verify()
-        })
+        fixture_binding_exchange(
+            &mut connection._pipe,
+            &id,
+            &registration,
+            true,
+            &mut clock,
+            || child.verify(),
+        )
         .await
         .unwrap();
         connection.abort().unwrap();

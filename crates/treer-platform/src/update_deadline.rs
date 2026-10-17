@@ -57,6 +57,10 @@ impl Deadline {
 }
 
 impl Deadline {
+    pub(super) fn refuse(&mut self) {
+        self.refused = true;
+    }
+
     pub(super) fn remaining_ms(&mut self, now: u64) -> Result<u64, ()> {
         self.check(now)?;
         self.expiry.checked_sub(now).ok_or(())
@@ -107,6 +111,9 @@ fn backward_or_suspend_sized_jump_permanently_refuses_attempt() {
         assert!(deadline.check(bad).is_err());
         assert!(deadline.check(201).is_err());
     }
+    let mut refused = Window::begin(100).unwrap().accept(200, None).unwrap();
+    refused.refuse();
+    assert!(refused.remaining_ms(200).is_err());
 }
 
 #[test]

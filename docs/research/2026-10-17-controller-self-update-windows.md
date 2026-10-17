@@ -437,12 +437,34 @@ The private Windows-only `windows_update_bootstrap/tick_deadline.rs` substep now
 samples `GetTickCount64` into the validated model. It creates a bounded owner
 window, independently accepts a supplied fixture window with an optional original
 owner ceiling, and rechecks the native clock whenever returning remaining time.
-It is exercised only by an ordinary native test; the process/pipe fixture does
-not yet use it. The test covers ordinary elapsed time and short-window expiry,
+The ordinary adapter test covers ordinary elapsed time and short-window expiry,
 future-start refusal and an already expired original-owner ceiling. Thread sleep
 does not suspend Windows: actual sleep, hibernation and modern standby remain
 unverified, and no power transition is attempted on any machine. Hosted exact-SHA
 evidence is required before accepting this native substep.
+
+The subsequent transport substep reuses a `TickDeadline` throughout the positive
+owner fixture, beginning before `PinnedImage::open`, bounding launch/connect and
+registration exchange, then retaining the same deadline for all four frames.
+The child starts its own local window before parent attestation and also retains
+it through registration and frame exchange. Every awaited I/O operation checks
+the native clock before and after the wait; identity verification is followed by
+another clock check, and completion checks both the frame-model deadline and the
+native clock. Tokio timers bound waits but cannot establish native-clock validity.
+An I/O error or timer timeout permanently refuses that local deadline even if
+the last native tick has not advanced to expiry yet; there is no retry budget.
+This is partial integration: the two processes still have independent windows;
+no window is sent over the pipe, and neither reads a durable record yet. The
+existing negative-registration and rogue-client fixture paths retain their
+earlier local timeout checks; they do not grant completion or authority.
+
+A separate ordinary native test uses an actual private named pipe between peers
+in the same test process, delaying Reply and ACK past the owner's short window
+while the child's longer window remains valid. The owner must fail in both
+cases. This tests transport/clock refusal, not cross-process authentication;
+`native_owner_round_trip` remains the hosted actual-process proof test. All such
+changes require their own exact-SHA native evidence; the prior clock-adapter run
+does not cover this integration.
 
 Integration must not treat the child's local window as evidence of the owner's
 remaining budget. A corrupted but internally valid record can leave the child
