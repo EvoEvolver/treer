@@ -767,7 +767,6 @@ export const en = {
   "treemap.open_folder": "Open folder",
   "treemap.this_folder_is_empty": "This folder is empty",
   "treemap.compact_tiles_folder_previews_adapt": "Compact tiles · Folder previews adapt to space",
-  "tree.run_generation": "run {generation}",
   "treemap.open_agent": "Open {description}",
 
   "machine.unknown": "Unknown",

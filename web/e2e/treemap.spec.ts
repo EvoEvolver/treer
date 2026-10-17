@@ -35,7 +35,7 @@ for (const mobile of [false, true]) for (const theme of ['light', 'dark']) {
     await browseTreeOnMobile(page)
     await page.evaluate((value) => document.documentElement.classList.toggle('dark', value === 'dark'), theme)
     await expect(page.locator('#tree-sidebar').getByRole('button', { name: 'Expand tree map' })).toHaveCount(0)
-    await expect(page.getByRole('link', { name: /^coordinator agent · workstation · idle$/ })).toBeVisible()
+    await expect(page.getByRole('link', { name: /^coordinator$/ })).toBeVisible()
     await openOverviewMap(page)
     const dialog = page.getByRole('dialog', { name: 'Workspace map' })
     await expect(dialog.getByRole('group', { name: 'Workspace treemap' })).toBeVisible()

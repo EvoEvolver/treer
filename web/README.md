@@ -13,6 +13,19 @@ are workspace Tree addresses, independent of a machine working directory.
 Rename, create and move conflicts keep the editor open and display the backend's
 error. Renaming or moving retains the selected Agent's stable identity.
 
+Agent and App rows are a single line: icon and name only. A small status dot
+follows the name for non-idle states only (working/starting in the working colour;
+blocked, failed and offline-machine in the attention colour; exited/stopped muted),
+using the same colour tokens as the Overview chips. Idle, running (an App's normal
+state) and unknown rows show no dot. Colour is never the only cue: the dot is an
+`img` with a text name (so the row link's accessible name is e.g. "builder working"),
+and hovering or keyboard-focusing a row shows a tooltip with the full path and the
+status (hover-capable pointers only; it never takes pointer events, so it cannot
+cover the row's "⋯" button). The "⋯" button of Agent/App rows appears on row hover
+or keyboard focus within the row, stays visible while its menu is open, and is
+always visible on coarse pointers (phones/tablets) with its 44px target; right-click
+and Shift+F10 open the same menu. Folder rows are unchanged.
+
 Folder expansion is cached in browser localStorage under
 `treer:folder-expansion:v1:<workspace_id>`, keyed by stable folder IDs. Uncached
 folders, including newly created folders, start collapsed. Toggles save

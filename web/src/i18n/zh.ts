@@ -768,7 +768,6 @@ export const zh: Messages = {
   "treemap.open_folder": "打开文件夹",
   "treemap.this_folder_is_empty": "此文件夹为空",
   "treemap.compact_tiles_folder_previews_adapt": "紧凑方块 · 文件夹预览会随空间自适应",
-  "tree.run_generation": "第 {generation} 次运行",
   "treemap.open_agent": "打开 {description}",
 
   "machine.unknown": "未知",

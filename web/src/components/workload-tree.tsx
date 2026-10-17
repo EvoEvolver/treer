@@ -1,6 +1,6 @@
 import { workspaceWorkloads } from "@/lib/workspace-workloads"
 import { useEffect, useRef, useState } from "react"
-import { api, machineName, type Agent, type AppDeployment, type Machine, type WorkloadFolder as FolderEntry, type WorkloadTreeState as Tree } from "@/lib/api"
+import { api, type Agent, type AppDeployment, type Machine, type WorkloadFolder as FolderEntry, type WorkloadTreeState as Tree } from "@/lib/api"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogFooter } from "@/components/ui/dialog"
@@ -10,12 +10,30 @@ import { agentPath, workloadKind, folderPath as resolveFolderPath } from "@/lib/
 import { readFolderExpansion, writeFolderExpansion, type FolderExpansion } from "@/lib/folder-expansion"
 import { AgentStartupDialog } from "@/components/agent-startup-dialog"
 
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { WorkloadIcon } from "@/components/workload-icon"
 import { statusLabel, t } from "@/i18n"
 import { workloadLinkProps } from "@/lib/workload-link"
 
 export interface NewAgentFolder { folderId: string; path: string }
 type Item = { kind: "folder" | "agent"; id: string; name: string }
+
+// One compact status dot per row, only for non-idle states, in the same colours as the Overview/map legend.
+// Idle, running (an App's normal state) and unknown (legacy) rows show nothing. The dot has a text name, so colour is never the only cue.
+type TreeStatus = { key: string; tone: string }
+function treeStatus(agent: Agent, online: boolean): TreeStatus | null {
+  const key = online ? agent.status : "offline"
+  if (key === "working" || key === "starting") return { key, tone: "bg-status-working" }
+  if (key === "blocked" || key === "failed" || key === "offline") return { key, tone: "bg-status-attention" }
+  if (key === "exited" || key === "stopped") return { key, tone: "bg-muted-foreground" }
+  return null
+}
+// Hover tooltips only make sense with a hovering pointer; on touch they would stay open after a tap.
+const canHover = () => typeof matchMedia === "function" && matchMedia("(hover: hover)").matches
+function StatusDot({ status }: { status: TreeStatus }) {
+  const label = statusLabel(status.key)
+  return <span role="img" aria-label={label} data-tree-status={status.key} className={`size-2 shrink-0 rounded-full ${status.tone}`} />
+}
 
 export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, onOpen, workloadHref, onOpenInNewTab, onSettings, onRename, onDelete, onNew, preview, placementRevision = 0, onTreeChange }: {
   workspaceId: string | null; agents: Agent[]; apps: AppDeployment[]; machines: Machine[]; selectedId: string | null
@@ -212,8 +230,17 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       <DropdownMenuItem disabled={busy} onSelect={() => agent ? onDelete(agent) : void mutate(`/folders/${encodeURIComponent(item.id)}`, "DELETE")}>{t("machine.delete")}</DropdownMenuItem>
     </>
   }
-  function menu(item: Item, parent: string | null, agent?: Agent) {
-    return <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className="size-7 shrink-0 max-md:size-11" aria-label={t("tree.actions_for", { name: item.name })} tabIndex={-1} data-tree-actions=""><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{menuItems(item, parent, agent)}</DropdownMenuContent></DropdownMenu>
+  // One-line row link. The tooltip (full path, plus the status for non-idle rows) is only added when it says more than the row,
+  // opens on hover and keyboard focus, and never takes pointer events, so it cannot cover the row's "⋯" button.
+  function rowLink(agent: Agent, status: TreeStatus | null) {
+    const path = agentPath(agent, tree)
+    const link = <a data-tree-primary="" data-tree-key={agent.agent_id} className="min-w-0 flex-1 text-left" {...workloadLinkProps(workloadHref(agent.agent_id), () => onOpen(agent.agent_id))}><span className="flex min-w-0 items-center gap-1.5 text-xs font-medium"><WorkloadIcon kind={workloadKind(agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{agent.name}</span>{status && <StatusDot status={status} />}</span></a>
+    if (!canHover() || (!status && path === `/${agent.name}`)) return link
+    return <Tooltip><TooltipTrigger asChild>{link}</TooltipTrigger><TooltipContent side="bottom" align="start" className="pointer-events-none max-w-xs break-all">{path}{status && <span className="block text-[10px] opacity-80">{statusLabel(status.key)}</span>}</TooltipContent></Tooltip>
+  }
+  // Agent/App rows reveal "⋯" on hover or keyboard focus within the row, and keep it always visible on touch (coarse pointers) or while its menu is open.
+  function menu(item: Item, parent: string | null, agent?: Agent, reveal = false) {
+    return <DropdownMenu><DropdownMenuTrigger asChild><Button size="icon" variant="ghost" className={`size-7 shrink-0 max-md:size-11${reveal ? " opacity-0 group-focus-within/row:opacity-100 group-hover/row:opacity-100 focus-visible:opacity-100 data-[state=open]:opacity-100 [@media(pointer:coarse)]:opacity-100" : ""}`} aria-label={t("tree.actions_for", { name: item.name })} tabIndex={-1} data-tree-actions=""><MoreVertical className="size-3.5" /></Button></DropdownMenuTrigger><DropdownMenuContent align="end">{menuItems(item, parent, agent)}</DropdownMenuContent></DropdownMenu>
   }
   // Keyboard model (WAI-ARIA tree): one Tab stop on the row buttons (roving
   // tabindex), arrows move, Right/Left expand, collapse or enter/leave a row's
@@ -295,7 +322,7 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
       <div title={folderPath(folder)} onContextMenu={(event) => { event.preventDefault(); openContext(item, parent, undefined, event.currentTarget, event.clientX, event.clientY) }} className="flex min-h-10 items-center rounded px-1 hover:bg-accent max-md:min-h-12" draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => setDragged(null)} onDragOver={(event) => { event.preventDefault(); event.stopPropagation() }} onDrop={(event) => { event.preventDefault(); event.stopPropagation(); if (dragged) move(dragged, folder.folder_id); setDragged(null) }}>
         <button data-tree-primary="" data-tree-key={folder.folder_id} className="flex min-w-0 flex-1 items-center gap-1 text-left text-xs" onClick={() => { pendingReveal.current = null; saveExpansion({ ...expansion.current, [folder.folder_id]: expansion.current[folder.folder_id] !== true }) }}>{expanded[folder.folder_id] !== true ? <ChevronRight className="size-3" /> : <ChevronDown className="size-3" />}<Folder className="size-3.5" /><span className="truncate">{folder.name}</span></button>{menu(item, parent)}
       </div>{expanded[folder.folder_id] === true && <div role="group" className="ml-3 border-l pl-1">{render(folder.folder_id, new Set([...ancestors, folder.folder_id]))}</div>}
-    </div> })}{rows.map((agent) => { const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }; return <div role="treeitem" aria-level={ancestors.size + 1} aria-label={agent.name} title={agentPath(agent, tree)} data-agent-id={agent.agent_id} onContextMenu={(event) => { event.preventDefault(); openContext(item, parent, agent, event.currentTarget, event.clientX, event.clientY) }} aria-selected={selectedId === agent.agent_id} key={agent.agent_id} draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => { setDragged(null); setDropTarget(null) }} onDragOver={(event) => {
+    </div> })}{rows.map((agent) => { const item: Item = { kind: "agent", id: agent.agent_id, name: agent.name }; const status = treeStatus(agent, machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online")); return <div role="treeitem" aria-level={ancestors.size + 1} aria-label={agent.name} title={agentPath(agent, tree)} data-agent-id={agent.agent_id} onContextMenu={(event) => { event.preventDefault(); openContext(item, parent, agent, event.currentTarget, event.clientX, event.clientY) }} aria-selected={selectedId === agent.agent_id} key={agent.agent_id} draggable={!busy} onDragStart={(event) => { event.stopPropagation(); setDragged(item); event.dataTransfer.setData("text/plain", JSON.stringify(item)) }} onDragEnd={() => { setDragged(null); setDropTarget(null) }} onDragOver={(event) => {
       if (busy || dragged?.kind !== "agent" || dragged.id === agent.agent_id) return
       event.preventDefault(); event.stopPropagation()
       event.dataTransfer.dropEffect = "move"
@@ -309,8 +336,8 @@ export function WorkloadTree({ workspaceId, agents, apps, machines, selectedId, 
         void reorder(dragged.id, agent.agent_id, event.clientY >= rect.top + rect.height / 2, parent)
       }
       setDragged(null); setDropTarget(null)
-    }} className={`flex min-h-12 items-center gap-1 rounded px-2 py-1 hover:bg-accent ${selectedId === agent.agent_id ? "bg-accent" : ""} ${dropTarget?.id === agent.agent_id ? dropTarget.after ? "shadow-[inset_0_-2px_0_hsl(var(--primary))]" : "shadow-[inset_0_2px_0_hsl(var(--primary))]" : ""}`}>
-      <a data-tree-primary="" data-tree-key={agent.agent_id} className="min-w-0 flex-1 text-left" title={agentPath(agent, tree)} {...workloadLinkProps(workloadHref(agent.agent_id), () => onOpen(agent.agent_id))}><span className="flex min-w-0 items-center gap-1.5 text-xs font-medium"><WorkloadIcon kind={workloadKind(agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{agent.name}</span></span><span className="block truncate text-[9px] text-muted-foreground">{t(`kind.${workloadKind(agent)}`)} · {machineName(machines.find((machine) => machine.server_id === agent.server_id), agent.server_id)} · {machines.some((machine) => machine.server_id === agent.server_id && machine.status === "online") ? statusLabel(agent.status) : statusLabel("offline")}{agent.run_generation !== undefined && ` · ${t("tree.run_generation", { generation: agent.run_generation })}`}</span></a>{menu(item, parent, agent)}
+    }} className={`group/row flex min-h-9 items-center gap-1 rounded px-2 py-0.5 hover:bg-accent max-md:min-h-12 ${selectedId === agent.agent_id ? "bg-accent" : ""} ${dropTarget?.id === agent.agent_id ? dropTarget.after ? "shadow-[inset_0_-2px_0_hsl(var(--primary))]" : "shadow-[inset_0_2px_0_hsl(var(--primary))]" : ""}`}>
+      {rowLink(agent, status)}{menu(item, parent, agent, true)}
     </div> })}</>
   }
   return <div className="flex min-h-0 flex-1 flex-col overflow-hidden" data-tour="agents-tab">
