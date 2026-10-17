@@ -952,7 +952,33 @@ bridge Agent and retain sender-asserted external metadata.
 Workspace folders and placements are presentation metadata, available to
 current workspace members and authenticated workspace-bound Agents/operators.
 Agent/operator tree reads require `agent.tree.read`; mutations require
-`agent.tree.manage`, both on the workspace's `agent.tree` resource. These
+`agent.tree.manage`, both on the workspace's `agent.tree` resource.
+
+The flat workspace inventory is membership-based (#141): `GET
+/api/workspaces/{ws}/snapshot` and the browser event stream
+(`/api/workspaces/{ws}/events`) give every current member the same facts about
+every workload and machine: IDs, names, kinds, status, machine IDs, the
+workload's working directory (`cwd`, a path on the user's machine), `pid`,
+build versions and the machine root. Policy `agent.discover` filters this list
+for machine and Agent principals only; applying it to browser sessions is a
+separate decision (#152), as is minimising `cwd`/`pid` (#153). The stream
+never carries folders, placements, paths or pin names: `workspace.snapshot`,
+`server.*` and `agent.*` events hold the flat facts above (a test pins their
+field sets) and `workspace.pins.changed` holds IDs; the Tree and pins are read
+through `GET /workload-tree` and `GET /pins`, which authorise per request with
+`agent.tree.read`. Membership and the session are authenticated when the
+stream connects and re-checked afterwards with the same lookups the request
+middleware uses: before a delivery once more than 10 seconds passed since the
+last check, and on a 30 second tick while idle. A session that was logged out,
+expired or belongs to a deleted or disabled user closes the stream with
+WebSocket code 4401; a user who is no longer a current member (organization
+role removed, group membership or user grant removed) or whose workspace was
+deleted gets 4403. The close frame carries the code only. Revocation therefore
+takes effect no later than the first event after 10 seconds or the 30 second
+idle tick, whichever comes first; a database failure during a re-check keeps
+the subscriber until the next check and grants nothing new, and if the session
+or membership cannot be re-verified for 120 seconds the stream closes with
+code 4503. These
 permissions grant shared workspace organization, including peer placement,
 without process-control authority. Browser membership authorization is
 unchanged. Folder moves cannot change a workload's machine,
