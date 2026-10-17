@@ -535,6 +535,84 @@ and repeat-attempt disposition. These tests and the protocol are outstanding;
 to start the installer. The existing generic bounded subprocess helper does not
 implement this startup handshake or atomically inherited birth lock.
 
+Lifecycle acceptance invariants (security2598; required before implementation
+can be accepted):
+
+- **Negative evidence:** a held birth lock is positive evidence of possible
+  liveness; obtaining it is never proof of safety. A `never-started` decision
+  requires both proof that the original owner can no longer issue permits
+  (attested ownership takeover or proved death) and a validated durable
+  `exited-without-exec` record from the authenticated supervisor. That record
+  must bind the exact intent digest, unique attempt, registered supervisor
+  boot/creation/image identity and terminal reason (for example owner-channel
+  EOF). The trusted supervisor must irreversibly close its execution gate and
+  permit receiver BEFORE writing/syncing/readback of this record, then exit
+  without executing installer code. A permit once accepted precludes this
+  record. Its only writer is the authenticated supervisor through retained
+  private handles, never the installer or an unauthenticated client. Confirm
+  quiescence as well before archive/cleanup. If the supervisor dies before
+  this record becomes durable, do not infer `never-started`: valid registered
+  identity requires group reconciliation; missing/partial/unverifiable identity
+  or terminal evidence means `update_recovery_required`, even when a test knows
+  no installer actually ran. Lock availability cannot repair missing evidence.
+- **Channel and descriptor ownership:** only the original owner and trusted
+  supervisor may possess the private one-shot permit channel; no inherited
+  duplicate in Node, installer, unrelated child or reconnecting client. Bind
+  it to the exact intent/attempt and authenticate actual peer process identity
+  using Linux SO_PEERCRED or macOS LOCAL_PEERPID plus the existing OS
+  creation/image proof. Do not treat credentials cached on a pre-fork socketpair
+  as proof of the newly forked child: use an authenticated post-fork private
+  connection or separately attest the actual sender. No environment variable
+  or user-writable bootstrap location determines supervisor behavior. Keep the
+  inherited birth-lock descriptor in the supervisor, set CLOEXEC for installer
+  execution, and explicitly close it in any forked installer child before
+  execution. The supervisor retains its own copy. Do not pass ownership evidence
+  to Node. Channel EOF forbids execution, but is not itself durable negative
+  evidence until the supervisor records the closed-gate terminal result above.
+- **Process identity and containment:** Linux identity includes `/proc` start
+  time and boot_id, with a pidfd when available; macOS includes libproc start
+  time and kern.boottime. A PID alone never authorizes observation or signalling.
+  Reconcile both session ID and process-group ID with bounded complete scans,
+  because setpgid may leave the original group while remaining in the session.
+  Enumeration/permission errors or ambiguous reused identities fail closed.
+  Delegated Linux cgroup v2 may provide additional containment when available,
+  but baseline correctness cannot depend on its availability. A descendant
+  escaping with setsid/double-fork cannot be proved absent by session/group
+  scans alone. Document this cooperating-child limitation in operational
+  recovery-required guidance; do not silently assume the risk is zero. Suspected
+  escape or unprovable containment remains unresolved and prevents cleanup or
+  rollback based merely on leader disappearance.
+- **Fault evidence:** implement deterministic test-only crash checkpoints
+  (`cfg(test)`, no production crash controls), AND isolated substitute-supervisor
+  tests using actual SIGKILL of precisely owned/attested test processes. Cover
+  every fork/registration/write/sync/permit/ACK/descendant boundary with both
+  styles; no broad kill-by-name or real-service targets. Assert
+  the recovery classification and that no operation is replayed, using the
+  durable/OS observations available to recovery rather than the test's knowledge
+  of where it killed a process. Until these pass on Mac and Linux, the intent
+  remains storage only, not a recoverable startup mechanism.
+- **Disposition:** status uses the same evidence rules despite being read-only.
+  Archive/completion outcome is durable and bound to the original attempt;
+  another attempt needs a new identity and explicit authorization. Never remove
+  a conflicting marker merely to make the current operation ID runnable again.
+
+The minimum crash matrix must encode these expected decisions, rather than
+inferring success from elapsed time or a child PID:
+
+| Observed durable/OS evidence after failure | Required decision |
+| --- | --- |
+| Intent only, worker died before fork or runner registration | `recovery_required`; no identity/terminal evidence, no replay |
+| Unregistered runner still holds birth lock | `recovery_required`; no permit, no archive/cleanup |
+| Partial/corrupt identity or uncertain sync/readback | `recovery_required`; retain evidence, no permit/replay |
+| Registered identity, owner dead, runner durably records closed gate and no exec after EOF, then becomes quiescent | `never-started`; eligible only for explicit recorded disposition |
+| Registered identity, runner also dies before durable no-exec terminal record | `registered-needs-quiescence`; never infer no exec |
+| Registered identity, permit delivered, owner dies before ACK | `registered-needs-quiescence`; reconcile actual group, never send a second permit |
+| Registered leader dies with descendants in its group/session | `registered-needs-quiescence`; group/session must be accounted for |
+| Escape, incomplete inventory, unprovable identity/terminal evidence | `recovery_required`; no cleanup or rollback on an absence claim |
+
+These names describe required recovery classifications, not implemented receipt
+phases, CLI output or a claim that the current code can produce these proofs.
+
 Known permission boundary (security2545): these checks inspect Unix owner/mode
 bits only. They do not inspect macOS/POSIX ACL-granted write access or platform
 file flags (including Linux immutable flags). A passing check is not proof that
