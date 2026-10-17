@@ -8,7 +8,12 @@ publish = false
 # This App is released independently; do not add it to the Core workspace.
 [workspace]
 
+[features]
+default = []
+hub = ["dep:reqwest"]
+
 [dependencies]
+reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
 base64 = "0.22"
 rusqlite = { version = "0.32.1", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }

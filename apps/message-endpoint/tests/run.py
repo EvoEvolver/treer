@@ -24,7 +24,7 @@ with tempfile.TemporaryDirectory(prefix='treer-endpoint-check-') as home:
     for command in [
         ['/usr/bin/python3', '-I', str(root / 'tests/test_runtime_smoke.py')],
         [str(cargo), 'fmt', '--check'],
-        [str(cargo), 'test', '--offline', '--locked'],
-        [str(cargo), 'clippy', '--offline', '--locked', '--all-targets', '--', '-D', 'warnings'],
+        [str(cargo), 'test', '--offline', '--locked', '--all-features'],
+        [str(cargo), 'clippy', '--offline', '--locked', '--all-features', '--all-targets', '--', '-D', 'warnings'],
     ]:
         subprocess.run(command, cwd=root, env=environment, check=True)

@@ -12,6 +12,7 @@ pub enum FailureReason {
     FragmentConflict,
     TransferExpired,
     TransportRetriesExhausted,
+    TransportRejected,
 }
 impl FailureReason {
     fn code(self) -> i64 {
@@ -21,6 +22,7 @@ impl FailureReason {
             Self::FragmentConflict => 2,
             Self::TransferExpired => 3,
             Self::TransportRetriesExhausted => 4,
+            Self::TransportRejected => 5,
         }
     }
     fn from_code(code: i64) -> rusqlite::Result<Self> {
@@ -30,6 +32,7 @@ impl FailureReason {
             2 => Ok(Self::FragmentConflict),
             3 => Ok(Self::TransferExpired),
             4 => Ok(Self::TransportRetriesExhausted),
+            5 => Ok(Self::TransportRejected),
             _ => Err(rusqlite::Error::InvalidQuery),
         }
     }

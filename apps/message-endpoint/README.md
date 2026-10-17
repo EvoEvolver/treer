@@ -13,7 +13,7 @@ Independent Rust package under `apps/message-endpoint`, not the Core workspace:
   workers, SQLite state and its own integrated React settings UI with committed
   dist. Its own runtime identity runs Core receive/send/ack and App APIs (email
   route as the actual App). Never stores or uses endpoint workload credentials.
-- `treer-message-endpoint`: ordinary `kind=command` Agent, one per external target.
+- `treer-endpoint`: ordinary `kind=command` Agent, one per external target.
   A human creates it with fixed immutable release paths/cwd below machine root,
   then binds its stable ID to one hub and one external target. No App-side Agent
   creation, Policy writes, owner credential borrowing, or Start-as-wake.
@@ -426,3 +426,57 @@ must pass through the pinned endpoint and its recipient allowlist; an arbitrary
 body-provided original sender can never expand hub send authority. Chunk lease/
 retry columns migrate on hub reopen while preserving accepted results; restore a
 stopped private backup with the corresponding old executable to roll back.
+
+## Development Bot API adapter (`hub` Cargo feature)
+
+The optional hub-only HTTP client uses one configured account and verified bot
+ID. The relay's default build does not include reqwest/TLS dependencies. The
+client pins `https://api.telegram.org`, rejects token/path injection, disables
+redirects and environment proxies, caps responses at 1 MiB (including absent
+Content-Length), and uses a 3-second connect/10-second overall deadline. Bot
+identity must pass `getMe` before send/poll. Targets must match the client's
+account; sends use plain text, explicit chat/topic and disabled link previews.
+HTTP/client errors are fixed codes, never provider descriptions, URLs or tokens.
+Only synthetic tokens and local fake HTTP servers are used in tests. No real bot
+has been activated; token provisioning and runtime scheduling remain unfinished.
+
+Only ordinary `message.text` from `message.from.id` with `is_bot=false` is
+normalized. Bot/anonymous-admin, sender_chat, forwarded-origin, channel-post,
+edited, inline/callback, attachment/caption and unsupported updates are ignored,
+not used as identity. This text-only release deliberately ignores forwarded
+messages too. No topic (`None` in configuration; main chat) maps to stored topic
+key zero; an actual Bot API `message_thread_id` must be positive. The worker uses
+only the persisted polling offset, not a caller-provided offset.
+
+Typed HTTP 400/401/403/404 rejection parks a chunk after its first failed request;
+other errors remain transient up to the cap. HTTP429 returns a bounded typed
+retry delay (1–86400 seconds, malformed response defaults to60). Workers must call
+`fail_telegram_chunk` with that typed result after the request ends; it persists
+backoff/rate delay and releases the lease. Restart cannot reset attempts or
+next_attempt. Even unknown error classes remain transient, never classified from
+provider text. A separate manual `release` does not claim success or clear retry
+state. UI status, owner recovery and callback presentation remain activation gates.
+
+Telegram is not end-to-end encrypted. An allowed external account takeover gives
+that account whatever message authority the owner gave the endpoint. The local
+allowlist is an admission control, not verification of a Treer human identity;
+keep the endpoint's Core Policy isolation and external-provenance warning enabled.
+
+Downstream faults use a persisted per-endpoint circuit breaker. Three consecutive
+parks without an accepted external chunk pause only that binding with
+`transport_failing`; later work waits until the owner resolves the problem and
+explicitly resumes. Accepted chunks reset the counter, including a response
+accepted after pause, but never auto-resume a paused binding. Other bindings and
+inbound channels remain usable. Backoff at the head of a transfer preserves order;
+later transfers proceed only after that transfer is accepted or parked. CSPRNG
+lease generation, audited owner retry/discard and routable fixed-code failure
+notices still need runtime/settings integration before activation.
+
+Every new external text chunk repeats the endpoint-added provenance header and
+prefixes every content line with `| `. Unicode bidi controls and non-text control
+characters are displayed as escapes. A message body cannot emit an unprefixed
+sender line, including at a chunk boundary. The original queued Core text stays
+unchanged. This is presentation framing, not cryptographic proof of the nested
+sender: the header explicitly says the endpoint reports it. Older development
+chunk digests are never silently rewritten; a mismatching partial draft requires
+owner review/drain before activation. There has been no deployed hub/Bot worker.

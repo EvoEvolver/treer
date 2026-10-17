@@ -130,6 +130,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         let tx = store.db.transaction()?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);
+        CREATE TABLE IF NOT EXISTS hub_transport_health(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),consecutive_parks INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_parked(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(endpoint,generation,transfer));
         CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS hub_unknown_senders(kind TEXT NOT NULL,sender TEXT NOT NULL,attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL,PRIMARY KEY(kind,sender));
@@ -281,6 +282,10 @@ impl<M: Mailbox + Directory> Hub<M> {
         tx.execute("UPDATE endpoints SET paused=0 WHERE id=?1", [id])?;
         tx.execute(
             "UPDATE hub_bindings SET revision=revision+1,reason='active' WHERE endpoint=?1",
+            [id],
+        )?;
+        tx.execute(
+            "UPDATE hub_transport_health SET consecutive_parks=0 WHERE endpoint=?1",
             [id],
         )?;
         tx.commit()?;
@@ -460,8 +465,14 @@ impl<M: Mailbox + Directory> Hub<M> {
         id: &str,
         generation: i64,
         transfer: &str,
+        reason: FailureReason,
         now: i64,
     ) -> Result<(), Error> {
+        let code = match reason {
+            FailureReason::TransportRejected => "transport_rejected",
+            FailureReason::TransportRetriesExhausted => "transport_retries_exhausted",
+            _ => return Err(Error::Binding),
+        };
         let envelope =
             self.store
                 .transfer_payload(id, generation, Direction::Outbound, transfer)?;
@@ -471,7 +482,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             generation,
             &format!("transport-{transfer}"),
             &bytes,
-            FailureReason::TransportRetriesExhausted,
+            reason,
             now,
         ) {
             Err(StorageError::Full) => {
@@ -482,7 +493,25 @@ impl<M: Mailbox + Directory> Hub<M> {
             }
             other => other?,
         }
-        self.store.db.execute("INSERT OR IGNORE INTO hub_parked(endpoint,generation,transfer,reason,created_at) VALUES(?1,?2,?3,'transport_retries_exhausted',?4)",params![id,generation,transfer,now])?;
+        let tx = self.store.db.transaction()?;
+        let added=tx.execute("INSERT OR IGNORE INTO hub_parked(endpoint,generation,transfer,reason,created_at) VALUES(?1,?2,?3,?4,?5)",params![id,generation,transfer,code,now])?;
+        if added == 1 {
+            tx.execute(
+                "INSERT OR IGNORE INTO hub_transport_health(endpoint) VALUES(?1)",
+                [id],
+            )?;
+            tx.execute("UPDATE hub_transport_health SET consecutive_parks=MIN(consecutive_parks+1,3) WHERE endpoint=?1",[id])?;
+            let failures: i64 = tx.query_row(
+                "SELECT consecutive_parks FROM hub_transport_health WHERE endpoint=?1",
+                [id],
+                |r| r.get(0),
+            )?;
+            if failures >= 3 {
+                tx.execute("UPDATE endpoints SET paused=1 WHERE id=?1", [id])?;
+                tx.execute("UPDATE hub_bindings SET revision=revision+1,reason='transport_failing' WHERE endpoint=?1",[id])?;
+            }
+        }
+        tx.commit()?;
         Ok(())
     }
     /// Transport worker owns these jobs until downstream acceptance, including
