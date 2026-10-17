@@ -171,6 +171,7 @@ impl Fixture {
     }
 
     /// Simulates an existing global installation whose probe prints `line`.
+    #[cfg(unix)]
     fn install_binary(&self, line: &str) {
         let _ = fs::remove_file(self.prefix_binary());
         write_executable(&self.prefix_binary(), &format!("#!/bin/sh\necho {line}\n"));
