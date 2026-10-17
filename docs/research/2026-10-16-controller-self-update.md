@@ -535,18 +535,31 @@ and repeat-attempt disposition. These tests and the protocol are outstanding;
 to start the installer. The existing generic bounded subprocess helper does not
 implement this startup handshake or atomically inherited birth lock.
 
-The separate platform `birth_lock::prepare_inheritance` primitive now duplicates
+The separate platform `birth_lock::BirthLockInheritance` primitive now duplicates
 an already-held lock with atomic CLOEXEC, retaining the same open-file
 description. Only the intended child's post-fork `pre_exec` callback clears
 CLOEXEC using `fcntl`; the parent's descriptor remains CLOEXEC. The configured
-`Command` owns its duplicate until dropped, including after spawn, and must not
-be reused for another attempt. Callers still must prove the original lock is
-held, authenticate the supervisor and restore CLOEXEC in it before any installer
+inheritance value owns its duplicate until dropped or consumed by `spawn`, which
+also consumes the `Command`; neither can be reused for a second launch. The
+parent's duplicate closes on return, including spawn failure. Callers must prove
+the original lock is held, authenticate the supervisor and restore CLOEXEC before any installer
 exec. The returned descriptor number is only a bootstrap locator, never authority.
 Isolated Mac/Linux tests check inheritance across exec, lock exclusion after all
 parent copies drop, release after normal child exit or exact owned-child SIGKILL,
-and release when an unspawned command drops. This descriptor-only primitive has
-no production caller and does not implement registration, permit arbitration,
+and release when an unspawned inheritance drops or spawn fails. A compile-fail
+test checks that the inheritance value cannot be reused after spawn. Concurrent
+unrelated forks can briefly inherit CLOEXEC descriptors until exec; release
+assertions allow that bounded window, never treating availability as authority.
+
+State and job directories must reside on a local filesystem with native `flock`
+semantics. Network filesystems (including NFS flock emulation) are unsupported;
+their exclusion/inheritance behavior is not liveness evidence for this protocol.
+This is a documented deployment precondition, not an implemented filesystem-type
+probe. The current single-use adapter takes a standard `Command`; future Tokio
+integration must preserve the callback through `as_std_mut` and test both that
+path and the trusted supervisor restoring CLOEXEC before any installer child.
+Neither integration nor that installer-child test is complete.
+This descriptor-only primitive has no production caller and does not implement registration, permit arbitration,
 recovery or the required worker-crash fault matrix above.
 
 Lifecycle acceptance invariants (security2598; required before implementation
