@@ -137,7 +137,13 @@ or configuration contents. Failed launch retains the newly saved specification.
   actions on every chunk and commit, with caller/path/generation-bound handles.
   Treer private state is hard-denied by reserved namespace, physical-parent/name
   reservations (including absent files), and opened object identity, independent
-  of Policy. Commit refreshes these checks after atomic Core file replacements.
+  of Policy. The Controller passes the whole canonical Treer state directory
+  (`service::state_dir()`: startup stores, private state, provider CLI results,
+  service logs, machine identity and any future per-server file) plus its
+  service configuration as protected paths, so an enrolled root that contains
+  that directory (root = HOME with `~/.local/state/treer`) cannot read or write
+  below it through file transfer under any Policy; sibling directories stay
+  ordinary transfer targets. Commit refreshes these checks after atomic Core file replacements.
   Reserved Core names conservatively fold Unicode normalization and case; if a
   Core directory is absent, its first missing component is reserved too.
   Upload destinations are validated before recording a durable staging intent,

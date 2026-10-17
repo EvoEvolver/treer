@@ -2178,7 +2178,10 @@ fn config_dir() -> Result<PathBuf> {
     treer_platform::config_directory().context("user configuration directory is unavailable")
 }
 
-fn state_dir() -> Result<PathBuf> {
+/// Canonical Treer state directory. Every file below it (startup stores,
+/// private state, provider CLI results, service logs, machine identity) is
+/// Controller-owned; the machine file-transfer root reserves it by identity.
+pub fn state_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     return env::var_os("TREER_STATE_DIR")
         .map(PathBuf::from)

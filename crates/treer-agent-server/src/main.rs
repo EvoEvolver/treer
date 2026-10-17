@@ -332,7 +332,14 @@ async fn run_server(mut args: ServerArgs) -> Result<()> {
         sync,
         host_events,
         controller::ControllerConfig {
-            protected_paths: args.service_config_path.into_iter().collect(),
+            // The whole state directory is reserved for file transfer by identity
+            // and name, so an enrolled root that contains it (root = HOME with
+            // ~/.local/state/treer) cannot read or write below it under any Policy.
+            protected_paths: args
+                .service_config_path
+                .into_iter()
+                .chain(std::iter::once(service::state_dir()?))
+                .collect(),
             workspace_id: workspace.clone(),
             server_id: server_id.clone(),
             agent_server_url,
