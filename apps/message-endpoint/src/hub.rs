@@ -179,6 +179,23 @@ impl<M: Mailbox + Directory> Hub<M> {
     }
     /// Internal owner-service boundary only. New bindings always start paused.
     pub fn add_binding(&mut self, binding: Binding) -> Result<(), Error> {
+        self.add_binding_inner(binding, None)
+    }
+    pub fn add_binding_audited(
+        &mut self,
+        binding: Binding,
+        actor: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let context = crate::owner_actions::AuditContext::new(actor, now)?;
+        self.recovery_schema()?;
+        self.add_binding_inner(binding, Some(&context))
+    }
+    fn add_binding_inner(
+        &mut self,
+        binding: Binding,
+        audit: Option<&crate::owner_actions::AuditContext<'_>>,
+    ) -> Result<(), Error> {
         if !stable(&binding.endpoint_id)
             || !stable(&binding.recipient)
             || binding.generation <= 0
@@ -196,6 +213,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         if count >= 20 {
             return Err(StorageError::Full.into());
         }
+        crate::owner_actions::record(&tx, audit, "create_binding", &binding.endpoint_id, 0)?;
         tx.execute(
             "INSERT INTO endpoints(id,generation,recipient,paused) VALUES(?1,?2,?3,1)",
             params![binding.endpoint_id, binding.generation, binding.recipient],
@@ -331,6 +349,28 @@ impl<M: Mailbox + Directory> Hub<M> {
         readback: Readback,
         now: i64,
     ) -> Result<(), Error> {
+        self.resume_after_readback_inner(id, revision, readback, now, None)
+    }
+    pub fn resume_after_readback_audited(
+        &mut self,
+        id: &str,
+        revision: i64,
+        readback: Readback,
+        actor: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let context = crate::owner_actions::AuditContext::new(actor, now)?;
+        self.recovery_schema()?;
+        self.resume_after_readback_inner(id, revision, readback, now, Some(&context))
+    }
+    fn resume_after_readback_inner(
+        &mut self,
+        id: &str,
+        revision: i64,
+        readback: Readback,
+        now: i64,
+        audit: Option<&crate::owner_actions::AuditContext<'_>>,
+    ) -> Result<(), Error> {
         if self.blocked()? {
             return Err(Error::FailureBudget);
         }
@@ -350,6 +390,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(Error::Binding);
         }
         let tx = self.store.db.transaction()?;
+        crate::owner_actions::record(&tx, audit, "resume_binding", id, revision)?;
         tx.execute("UPDATE endpoints SET paused=0 WHERE id=?1", [id])?;
         tx.execute(
             "UPDATE hub_bindings SET revision=revision+1,reason='active' WHERE endpoint=?1",
@@ -363,10 +404,30 @@ impl<M: Mailbox + Directory> Hub<M> {
         Ok(())
     }
     pub fn pause(&mut self, id: &str, revision: i64) -> Result<(), Error> {
+        self.pause_inner(id, revision, None)
+    }
+    pub fn pause_audited(
+        &mut self,
+        id: &str,
+        revision: i64,
+        actor: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let context = crate::owner_actions::AuditContext::new(actor, now)?;
+        self.recovery_schema()?;
+        self.pause_inner(id, revision, Some(&context))
+    }
+    fn pause_inner(
+        &mut self,
+        id: &str,
+        revision: i64,
+        audit: Option<&crate::owner_actions::AuditContext<'_>>,
+    ) -> Result<(), Error> {
         if self.view(id)?.revision != revision {
             return Err(Error::Revision);
         }
         let tx = self.store.db.transaction()?;
+        crate::owner_actions::record(&tx, audit, "pause_binding", id, revision)?;
         tx.execute("UPDATE endpoints SET paused=1 WHERE id=?1", [id])?;
         tx.execute(
             "UPDATE hub_bindings SET revision=revision+1,reason='owner_paused' WHERE endpoint=?1",
@@ -772,6 +833,188 @@ mod tests {
     }
     fn activate(hub: &mut Hub<Fake>) {
         hub.resume("ag_endpoint", 1, NOW).unwrap();
+    }
+    #[test]
+    fn owner_actions_commit_revision_and_actor_audit_atomically_without_network() {
+        let fake = Fake::default();
+        let mut hub = Hub::new(
+            Store::memory(Limits::default()).unwrap(),
+            fake.clone(),
+            "app_hub",
+            "ws_test",
+        )
+        .unwrap();
+        hub.add_binding_audited(binding(), "user_owner", NOW)
+            .unwrap();
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        hub.bind_telegram_audited(
+            "ag_endpoint",
+            1,
+            crate::telegram::Target {
+                account_id: "bot_fixture".into(),
+                chat_id: 7,
+                topic_id: None,
+                allowed_senders: vec![8],
+            },
+            "user_owner",
+            NOW,
+        )
+        .unwrap();
+        hub.resume_after_readback_audited(
+            "ag_endpoint",
+            2,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW,
+            },
+            "user_owner",
+            NOW,
+        )
+        .unwrap();
+        assert!(!hub.view("ag_endpoint").unwrap().paused);
+        hub.pause_audited("ag_endpoint", 3, "user_owner", NOW)
+            .unwrap();
+        let view = hub.view("ag_endpoint").unwrap();
+        assert!(view.paused);
+        assert_eq!(view.revision, 4);
+        let audit = hub.owner_audit(None, 100).unwrap();
+        assert_eq!(
+            audit.iter().map(|a| a.action.as_str()).collect::<Vec<_>>(),
+            vec![
+                "pause_binding",
+                "resume_binding",
+                "bind_telegram",
+                "create_binding"
+            ]
+        );
+        assert!(audit
+            .iter()
+            .all(|a| a.actor_id == "user_owner" && a.at == NOW && a.transfer_id.is_empty()));
+        assert_eq!(
+            audit
+                .iter()
+                .map(|a| a.previous_revision)
+                .collect::<Vec<_>>(),
+            vec![3, 2, 1, 0]
+        );
+        assert!(fake.calls.borrow().is_empty());
+        assert!(hub
+            .pause_audited("ag_endpoint", 1, "user_owner", NOW)
+            .is_err());
+        assert_eq!(hub.owner_audit(None, 100).unwrap().len(), 4);
+    }
+    #[test]
+    fn owner_actions_fail_closed_on_invalid_actor_full_audit_and_stale_readback() {
+        let (mut hub, _) = fixture();
+        assert!(hub.pause_audited("ag_endpoint", 1, "", NOW).is_err());
+        assert!(hub
+            .pause_audited("ag_endpoint", 1, "user_owner", -1)
+            .is_err());
+        assert!(hub
+            .resume_after_readback_audited(
+                "ag_endpoint",
+                1,
+                Readback {
+                    observed: Some(metadata()),
+                    requested_at: NOW
+                },
+                "user_owner",
+                NOW + 31
+            )
+            .is_err());
+        hub.recovery_schema().unwrap();
+        hub.store.db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<10000) INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) SELECT 'user_owner','fixture','ag_endpoint','',1,1 FROM n;").unwrap();
+        assert!(hub
+            .resume_after_readback_audited(
+                "ag_endpoint",
+                1,
+                Readback {
+                    observed: Some(metadata()),
+                    requested_at: NOW
+                },
+                "user_owner",
+                NOW
+            )
+            .is_err());
+        let view = hub.view("ag_endpoint").unwrap();
+        assert!(view.paused);
+        assert_eq!(view.revision, 1);
+        assert!(hub
+            .pause_audited("ag_endpoint", 1, "user_owner", NOW)
+            .is_err());
+        let mut another = binding();
+        another.endpoint_id = "ag_other".into();
+        assert!(hub.add_binding_audited(another, "user_owner", NOW).is_err());
+        assert_eq!(hub.binding_ids().unwrap(), vec!["ag_endpoint"]);
+    }
+    #[test]
+    fn owner_actions_audit_failure_rolls_back_creation_and_later_sql_failure_rolls_back_audit() {
+        let fake = Fake::default();
+        let mut hub = Hub::new(
+            Store::memory(Limits::default()).unwrap(),
+            fake,
+            "app_hub",
+            "ws_test",
+        )
+        .unwrap();
+        hub.recovery_schema().unwrap();
+        hub.store.db.execute_batch("CREATE TRIGGER reject_audit BEFORE INSERT ON hub_owner_audit BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        assert!(hub
+            .add_binding_audited(binding(), "user_owner", NOW)
+            .is_err());
+        assert!(hub.binding_ids().unwrap().is_empty());
+        hub.store
+            .db
+            .execute_batch("DROP TRIGGER reject_audit;")
+            .unwrap();
+        hub.add_binding(binding()).unwrap();
+        hub.resume_after_readback(
+            "ag_endpoint",
+            1,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW,
+            },
+            NOW,
+        )
+        .unwrap();
+        hub.store.db.execute_batch("CREATE TRIGGER reject_revision BEFORE UPDATE ON hub_bindings BEGIN SELECT RAISE(ABORT,'fixture'); END;").unwrap();
+        assert!(hub
+            .pause_audited("ag_endpoint", 2, "user_owner", NOW)
+            .is_err());
+        let view = hub.view("ag_endpoint").unwrap();
+        assert!(!view.paused);
+        assert_eq!(view.revision, 2);
+        assert!(hub.owner_audit(None, 100).unwrap().is_empty());
+    }
+    #[test]
+    fn owner_actions_immutable_target_conflict_rolls_back_new_account_and_audit() {
+        let (mut hub, _) = fixture();
+        let target = crate::telegram::Target {
+            account_id: "bot_fixture".into(),
+            chat_id: 7,
+            topic_id: None,
+            allowed_senders: vec![8],
+        };
+        hub.bind_telegram_audited("ag_endpoint", 1, target.clone(), "user_owner", NOW)
+            .unwrap();
+        let mut conflict = target;
+        conflict.account_id = "bot_other".into();
+        assert!(hub
+            .bind_telegram_audited("ag_endpoint", 2, conflict, "user_owner", NOW)
+            .is_err());
+        assert_eq!(hub.owner_audit(None, 100).unwrap().len(), 1);
+        assert_eq!(hub.view("ag_endpoint").unwrap().revision, 2);
+        let count: i64 = hub
+            .store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM telegram_accounts WHERE account='bot_other'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
     }
     fn delivery(id: &str, sender: &str, body: &str) -> Delivery {
         Delivery {

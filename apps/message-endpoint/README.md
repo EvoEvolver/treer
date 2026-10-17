@@ -924,3 +924,25 @@ CLI hash check is currently startup-only; periodic integrity monitoring, a
 listener header-read timeout and the dated Rust/npm dependency audit remain
 pre-activation work. Versioned release files must be immutable to untrusted OS
 users; neither a hash nor 0600 protects against another process under the same UID.
+
+### Audited configuration primitives (not HTTP routes yet)
+
+`add_binding_audited`, `bind_telegram_audited`, `pause_audited` and
+`resume_after_readback_audited` are internal service boundaries, not independent
+identity checks. The future management route must verify the current human
+owner, CSRF and confirmation, derive the actor from that proof (never JSON),
+and supply the exact revision. A fresh Core readback must be obtained outside
+the state lock before resume. These state methods perform no Core/network call.
+Creation remains paused, targets remain immutable within a generation, and
+metadata refresh never resumes a paused endpoint.
+
+Every accepted configuration change and its body-free audit row commit in one
+SQLite transaction. The row includes actor, action, endpoint, previous revision
+and time. The shared 10,000-row audit limit refuses configuration changes until
+an explicit owner archive/clear workflow is implemented; the preview has no
+silent audit pruning. Audit insert failure, a later SQL error, an immutable
+retarget conflict, an obsolete revision or invalid input leaves configuration
+and its audit unchanged. A resume may still record its independently obtained
+metadata observation (or automatically pause on drift) before the activation
+transaction; an audit failure cannot activate it. Existing state-only primitives
+remain for worker/test internals and must not be exposed through HTTP.

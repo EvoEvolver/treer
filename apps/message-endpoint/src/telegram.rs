@@ -110,6 +110,27 @@ impl<M: Mailbox + Directory> Hub<M> {
         revision: i64,
         target: Target,
     ) -> Result<(), Error> {
+        self.bind_telegram_inner(endpoint, revision, target, None)
+    }
+    pub fn bind_telegram_audited(
+        &mut self,
+        endpoint: &str,
+        revision: i64,
+        target: Target,
+        actor: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let context = crate::owner_actions::AuditContext::new(actor, now)?;
+        self.recovery_schema()?;
+        self.bind_telegram_inner(endpoint, revision, target, Some(&context))
+    }
+    fn bind_telegram_inner(
+        &mut self,
+        endpoint: &str,
+        revision: i64,
+        target: Target,
+        audit: Option<&crate::owner_actions::AuditContext<'_>>,
+    ) -> Result<(), Error> {
         let view = self.view(endpoint)?;
         if !view.paused || view.revision != revision || !target.validate() {
             return Err(Error::Invalid);
@@ -117,6 +138,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         self.telegram_schema()?;
         let text = serde_json::to_string(&target).map_err(|_| Error::Invalid)?;
         let tx = self.store.db.transaction()?;
+        crate::owner_actions::record(&tx, audit, "bind_telegram", endpoint, revision)?;
         tx.execute(
             "INSERT OR IGNORE INTO telegram_accounts(account,offset) VALUES(?1,0)",
             [&target.account_id],

@@ -10,6 +10,8 @@ pub mod hub;
 #[cfg(unix)]
 pub mod notices;
 #[cfg(unix)]
+mod owner_actions;
+#[cfg(unix)]
 mod private_store;
 pub mod protocol;
 #[cfg(unix)]
