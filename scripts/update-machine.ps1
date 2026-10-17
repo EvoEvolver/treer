@@ -199,11 +199,16 @@ function Get-UpdateAgentVerdict($Before, $After) {
     $stopped = @($beforeLines | Where-Object { $_ -match '^[^:]+::[0-9]+$' })
     $afterIds = @($afterLines | ForEach-Object { ($_ -split ':')[0] })
     $beforeIds = @($beforeLines | ForEach-Object { ($_ -split ':')[0] })
+    $notRelisted = @($stopped | ForEach-Object { ($_ -split ':')[0] } | Where-Object { $afterIds -cnotcontains $_ } | Sort-Object)
+    $appeared = @($afterIds | Where-Object { $_ -ne '' -and $beforeIds -cnotcontains $_ } | Sort-Object)
+    # Receipts stay bounded: counts are exact, id lists are capped at 32.
     return @{
         live_preserved = @($beforeLines | Where-Object { $_ -ne '' -and $_ -notmatch '^[^:]+::[0-9]+$' }).Count
         stopped_before = $stopped.Count
-        stopped_not_relisted = @($stopped | ForEach-Object { ($_ -split ':')[0] } | Where-Object { $afterIds -cnotcontains $_ } | Sort-Object)
-        appeared = @($afterIds | Where-Object { $_ -ne '' -and $beforeIds -cnotcontains $_ } | Sort-Object)
+        stopped_not_relisted_count = $notRelisted.Count
+        stopped_not_relisted = @($notRelisted | Select-Object -First 32)
+        appeared_count = $appeared.Count
+        appeared = @($appeared | Select-Object -First 32)
     }
 }
 function Test-UpdateCommit($Expected, $Reported) {

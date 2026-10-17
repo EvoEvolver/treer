@@ -190,6 +190,9 @@ def inventory(config_path):
             for row in rows}
 
 
+MAX_RECEIPT_IDS = 32
+
+
 class InventoryError(RuntimeError):
     """A preservation check failed; `code` is a fixed receipt token."""
 
@@ -258,10 +261,15 @@ def check_agents(before, after, cold=False):
             raise InventoryError("cold_recovery_incomplete",
                                  "cold recovery did not recreate a previously live Agent")
     stopped = [key for key in before if key not in live]
+    not_relisted = sorted(key for key in stopped if key not in after)
+    appeared = sorted(key for key in after if key not in before)
+    # Receipts stay bounded: counts are exact, id lists are capped.
     return {"live_preserved": len(live),
             "stopped_before": len(stopped),
-            "stopped_not_relisted": sorted(key for key in stopped if key not in after),
-            "appeared": sorted(key for key in after if key not in before)}
+            "stopped_not_relisted_count": len(not_relisted),
+            "stopped_not_relisted": not_relisted[:MAX_RECEIPT_IDS],
+            "appeared_count": len(appeared),
+            "appeared": appeared[:MAX_RECEIPT_IDS]}
 
 
 def transaction(job, config):

@@ -255,7 +255,8 @@ else:
         self.assertEqual(code, 0, result)
         self.assertEqual(result["status"], "complete")
         self.assertEqual(result["inventory"], {"live_preserved": 1, "stopped_before": 2,
-            "stopped_not_relisted": ["ag_exited_old_shape", "app_exited_new_shape"], "appeared": []})
+            "stopped_not_relisted_count": 2, "stopped_not_relisted": ["ag_exited_old_shape", "app_exited_new_shape"],
+            "appeared_count": 0, "appeared": []})
         self.assertEqual(result["agents"], {"ag_fixture": {"pid": 444, "generation": 3}})
 
     def test_agents_created_during_the_window_are_reported_not_fatal(self):
@@ -270,7 +271,12 @@ else:
         live = {"a": {"pid": 1, "generation": 1}}
         gone = {"x": {"pid": None, "generation": 2}}
         self.assertEqual(update.check_agents({**live, **gone}, live),
-                         {"live_preserved": 1, "stopped_before": 1, "stopped_not_relisted": ["x"], "appeared": []})
+                         {"live_preserved": 1, "stopped_before": 1, "stopped_not_relisted_count": 1,
+                          "stopped_not_relisted": ["x"], "appeared_count": 0, "appeared": []})
+        many = {f"ag_{index:03d}": {"pid": None, "generation": 1} for index in range(40)}
+        bounded = update.check_agents({**live, **many}, live)
+        self.assertEqual((bounded["stopped_not_relisted_count"], len(bounded["stopped_not_relisted"])), (40, 32))
+        self.assertEqual(bounded["stopped_not_relisted"][0], "ag_000")
         self.assertEqual(update.check_agents(live, {**live, "n": {"pid": 9, "generation": 1}})["appeared"], ["n"])
         with self.assertRaises(update.InventoryError) as missing:
             update.check_agents(live, gone)
