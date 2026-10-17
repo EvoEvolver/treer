@@ -254,6 +254,24 @@ async fn public_ingress_admits_per_client_then_per_service_and_answers_429() {
         )
         .await
         .unwrap();
+    // Refill rates of one token per minute (the lowest an owner may set) keep
+    // the bursts exact however slowly a loaded runner drives the loops: the
+    // default buckets refill one token per 100 ms (service) and 500 ms (client),
+    // which turned an exact count into a race (#149). Burst sizes stay default.
+    fixture
+        .auth
+        .update_service_ingress_limits(
+            "default",
+            &ingress.ingress_id,
+            "owner",
+            &UpdateIngressLimitsRequest {
+                rate_limit_per_minute: Some(Some(1)),
+                ip_rate_limit_per_minute: Some(Some(1)),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
     let (heads, _) = upstream(
         fixture.state.clone(),
         fixture.connection,
