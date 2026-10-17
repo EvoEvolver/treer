@@ -93,6 +93,25 @@ test('the ⋯ button shows on hover, keyboard focus and while its menu is open, 
   await expect(page.getByRole('menuitem', { name: 'Logs' })).toBeVisible()
 })
 
+test('folder rows reveal their ⋯ like Agent/App rows', async ({ page }) => {
+  await page.setViewportSize({ width: 1360, height: 800 })
+  await mockTreeMapApi(page)
+  await page.route('**/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, agents: rows } }))
+  await page.route('**/workload-tree', (route) => route.fulfill({ json: { folders: [{ folder_id: 'f1', name: 'Research', parent_id: null }], placements: [] } }))
+  await page.route('**/groups', (route) => route.fulfill({ json: { groups: [] } }))
+  await page.goto('/')
+  const folder = tree(page).getByRole('treeitem', { name: 'Research', exact: true })
+  await expect(folder).toBeVisible()
+  await expect.poll(() => opacity(more(page, 'Research'))).toBe(0)
+  expect((await folder.locator('[data-tree-primary]').boundingBox())!.height).toBeLessThan(40)
+  await folder.locator('[data-tree-primary]').hover()
+  await expect.poll(() => opacity(more(page, 'Research'))).toBe(1)
+  await page.mouse.move(700, 600)
+  await expect.poll(() => opacity(more(page, 'Research'))).toBe(0)
+  await folder.locator('[data-tree-primary]').focus()
+  await expect.poll(() => opacity(more(page, 'Research'))).toBe(1)
+})
+
 test.describe('touch', () => {
   test.use({ hasTouch: true, isMobile: true })
   test('the ⋯ button is always visible on a coarse pointer and keeps its 44px target', async ({ page }, info) => {
