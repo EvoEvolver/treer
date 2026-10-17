@@ -251,6 +251,37 @@ test("file download destroys a response whose client stopped reading (write-idle
   } finally { for (const request of held) request.destroy(); await stop(server.child); }
 });
 
+test("file download ends a slow-drip download after the overall duration cap and frees its slot", { skip: process.platform === "win32" }, async () => {
+  const cwd = temp();
+  execFileSync("truncate", ["-s", String(512 * 1024 * 1024), join(cwd, "big.bin")]);
+  writeFileSync(join(cwd, "small.txt"), "small");
+  // The idle timeout stays at its default (60 s): these clients keep the socket active, only the duration cap can stop them.
+  const server = await launchServer(cwd, { AGENT_UI_DOWNLOAD_MAX_MS: "700" });
+  const held: ReturnType<typeof get>[] = [];
+  const drip = () => new Promise<void>((resolve, reject) => {
+    const request = get(server.base + "/v1/files/download?path=big.bin", (response) => {
+      response.on("error", () => {});
+      // Read a little every 50 ms: never idle, never finished.
+      const timer = setInterval(() => { response.read(1024); }, 50);
+      response.once("close", () => clearInterval(timer));
+      response.socket.once("close", () => clearInterval(timer));
+      response.pause(); resolve();
+    });
+    request.on("error", () => {}); request.on("socket", (socket) => socket.on("error", () => {}));
+    held.push(request); setTimeout(() => reject(new Error("no response")), 5000);
+  });
+  try {
+    await drip(); await drip();
+    assert.equal((await fetch(server.base + "/v1/files/download?path=small.txt")).status, 429);
+    let status = 429;
+    for (let attempt = 0; attempt < 60 && status !== 200; attempt++) {
+      status = (await fetch(server.base + "/v1/files/download?path=small.txt")).status;
+      if (status !== 200) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(status, 200, "the trickling downloads were cut off by the duration cap");
+  } finally { for (const request of held) request.destroy(); await stop(server.child); }
+});
+
 test("file download streams a large file with bounded server memory", { skip: process.platform === "win32" }, async () => {
   const cwd = temp();
   const size = 192 * 1024 * 1024;

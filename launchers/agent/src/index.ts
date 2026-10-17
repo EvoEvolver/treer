@@ -244,6 +244,8 @@ runtime.on("log", (message) => console.log(`[${runtime.harness.id}] ${message}`)
 const DOWNLOAD_LIMIT_BYTES = 1024 ** 3;
 const DOWNLOAD_MAX_CONCURRENT = 2;
 const DOWNLOAD_IDLE_MS = Math.max(100, Number(process.env.AGENT_UI_DOWNLOAD_IDLE_MS) || 60_000);
+// Even a client that keeps trickling bytes cannot hold one of the two slots for hours: one download lasts at most this long.
+const DOWNLOAD_MAX_MS = Math.max(100, Number(process.env.AGENT_UI_DOWNLOAD_MAX_MS) || 60 * 60_000);
 let activeDownloads = 0;
 
 const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 }, async (request, response) => {
@@ -335,7 +337,8 @@ const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 },
       // A client that stops reading must not hold the descriptor: no socket activity for the idle time destroys the response.
       const socket = response.socket;
       socket?.setTimeout(DOWNLOAD_IDLE_MS, () => response.destroy());
-      response.once("close", () => { release(); stream.destroy(); if (socket && !socket.destroyed) socket.setTimeout(0); });
+      const limit = setTimeout(() => response.destroy(), DOWNLOAD_MAX_MS);
+      response.once("close", () => { clearTimeout(limit); release(); stream.destroy(); if (socket && !socket.destroyed) socket.setTimeout(0); });
       stream.once("error", () => response.destroy());
       stream.pipe(response);
       return;
