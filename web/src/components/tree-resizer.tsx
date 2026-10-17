@@ -1,6 +1,4 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type KeyboardEvent } from "react"
-
-import { ChevronLeft, ChevronRight } from "lucide-react"
 import { t } from "@/i18n"
 
 const DEFAULT_WIDTH = 272
@@ -15,6 +13,10 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
   const [dragging, setDragging] = useState(false)
   const drag = useRef<{ id: number; x: number; width: number } | null>(null)
   const finishRef = useRef(onFinish)
+  // The collapse button (user row) and the re-open button (tab bar) are different elements; focus follows the toggle.
+  const collapseRef = useRef<HTMLButtonElement>(null)
+  const expandRef = useRef<HTMLButtonElement>(null)
+  const restoreFocus = useRef(false)
   finishRef.current = onFinish
   const key = userId ? `treer:tree-width:v1:${userId}` : null
   const collapsedKey = userId ? `treer:tree-collapsed:v1:${userId}` : null
@@ -32,6 +34,12 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
     setPreference(value)
     setCollapsed(hidden)
   }, [key, collapsedKey])
+
+  useEffect(() => {
+    if (!restoreFocus.current) return
+    restoreFocus.current = false
+    ;(collapsed ? expandRef : collapseRef).current?.focus()
+  }, [collapsed])
 
   function finish() {
     if (!drag.current) return
@@ -52,15 +60,16 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
     try { if (key) window.localStorage.setItem(key, String(next)) } catch { /* Keep in-memory resizing. */ }
   }
   return {
-    width, max, dragging, collapsed,
+    width, max, dragging, collapsed, collapseRef, expandRef,
     toggle() {
       finish()
+      restoreFocus.current = true
       const next = !collapsed
       setCollapsed(next)
       try { if (collapsedKey) window.localStorage.setItem(collapsedKey, String(next)) } catch { /* Keep in-memory toggling. */ }
       finishRef.current()
     },
-    style: { "--tree-width": collapsed ? "0px" : `${width}px`, "--tree-divider": collapsed ? "24px" : "8px" } as CSSProperties,
+    style: { "--tree-width": collapsed ? "0px" : `${width}px`, "--tree-divider": collapsed ? "0px" : "1px" } as CSSProperties,
     separator: {
       role: "separator", tabIndex: 0, "aria-label": t("resizer.resize_tree_sidebar"), "aria-orientation": "vertical" as const,
       "aria-controls": "tree-sidebar", "aria-valuemin": MIN_WIDTH, "aria-valuemax": max, "aria-valuenow": width,
@@ -90,14 +99,10 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
   }
 }
 
+// One visible 1px line; the wider invisible zone around it is the drag/keyboard handle.
 export function TreeResizer({ settings }: { settings: ReturnType<typeof useTreeWidth> }) {
-  return <div className="relative hidden min-h-0 bg-sidebar md:block">
-    {!settings.collapsed && <div {...settings.separator} className="absolute inset-y-0 -left-2 z-20 w-6 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-2 before:w-2 before:border-x before:border-border hover:before:bg-accent focus-visible:before:bg-ring/30" />}
-    <button type="button" aria-label={settings.collapsed ? t("resizer.expand_tree_sidebar") : t("resizer.collapse_tree_sidebar")} aria-expanded={!settings.collapsed} aria-controls="tree-sidebar" title={settings.collapsed ? t("resizer.expand_tree_sidebar") : t("resizer.collapse_tree_sidebar")} onClick={settings.toggle} className={`group absolute top-1/2 z-30 grid size-11 -translate-y-1/2 place-items-center rounded outline-none ${settings.collapsed ? "left-0" : "left-1/2 -translate-x-1/2"}`}>
-      <span aria-hidden="true" className={`pointer-events-none flex h-7 w-4 items-center justify-center rounded-sm border bg-sidebar text-muted-foreground shadow-sm group-hover:bg-accent group-hover:text-foreground group-focus-visible:ring-2 group-focus-visible:ring-ring ${settings.collapsed ? "-translate-x-2.5" : ""}`}>
-        {settings.collapsed ? <ChevronRight className="size-3" /> : <ChevronLeft className="size-3" />}
-      </span>
-    </button>
+  return <div className="relative hidden min-h-0 bg-border md:block">
+    {!settings.collapsed && <div {...settings.separator} className="absolute inset-y-0 left-1/2 z-20 w-6 -translate-x-1/2 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 hover:before:w-0.5 hover:before:bg-primary/60 focus-visible:before:w-0.5 focus-visible:before:bg-ring" />}
     {settings.dragging && <div aria-hidden="true" className="fixed inset-0 z-[200] cursor-col-resize touch-none" />}
   </div>
 }

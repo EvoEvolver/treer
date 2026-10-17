@@ -5,8 +5,10 @@ import App from "./App"
 import "./index.css"
 import { loadRuntimeConfig } from "./lib/api"
 import { applyStoredTheme } from "./lib/theme"
+import { installThinScroll } from "./lib/thin-scroll"
 
 applyStoredTheme()
+installThinScroll()
 
 const root = createRoot(document.getElementById("root")!)
 

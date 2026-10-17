@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent } from "react"
-import { ChevronDown, MoreHorizontal, PanelLeft, LayoutDashboard, PanelsTopLeft, RotateCw, TerminalSquare, X } from "lucide-react"
+import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent, type Ref } from "react"
+import { ChevronDown, MoreHorizontal, PanelLeft, PanelLeftOpen, LayoutDashboard, PanelsTopLeft, RotateCw, TerminalSquare, X } from "lucide-react"
 import type { Agent } from "@/lib/api"
 import { workloadKind } from "@/lib/workload-path"
 import { WorkloadIcon } from "@/components/workload-icon"
@@ -13,10 +13,11 @@ import { statusLabel, t } from "@/i18n"
 export type TabAction = "newtab" | "logs" | "rename" | "upload" | "reload" | "fullscreen" | "back"
 export type TabActions = { app: boolean; logs: boolean; online: boolean; active: boolean; ui: boolean }
 export type TabLabel = { agent: Agent; path: string; machine: string; ui: boolean }
-export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobile, onOpen, onClose, actions, onAction, onCloseMany, onBrowseTree }: {
+export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobile, onOpen, onClose, actions, onAction, onCloseMany, onBrowseTree, sidebarCollapsed = false, expandRef, onExpandSidebar }: {
   tabs: WorkspaceTab[]; labels: Map<string, TabLabel>; activeId: string | null; limit: number; liveCount: number; mobile: boolean
   onOpen: (id: string) => void; onClose: (id: string) => void; onBrowseTree: () => void
   actions: Map<string, TabActions>; onAction: (id: string, action: TabAction) => void; onCloseMany: (ids: string[]) => void
+  sidebarCollapsed?: boolean; expandRef?: Ref<HTMLButtonElement>; onExpandSidebar?: () => void
 }) {
   const [switcher, setSwitcher] = useState(false)
   const [menu, setMenu] = useState<{ id: string; x: number; y: number } | null>(null)
@@ -105,6 +106,7 @@ export function WorkspaceTabBar({ tabs, labels, activeId, limit, liveCount, mobi
   const hint = t("tabs.hint", { live: liveCount, limit })
   return <>
     {mobile ? <div className="box-content flex h-11 shrink-0 items-center gap-2 border-b bg-sidebar px-2"><Button variant="ghost" size="icon" className="size-11 shrink-0" aria-label={t("app.browse_tree")} title={t("app.browse_tree")} aria-controls="tree-sidebar" onClick={onBrowseTree}><PanelLeft aria-hidden="true" className="size-4" /></Button><button ref={mobileTitle} type="button" {...menuEvents(activeId ?? OVERVIEW_TAB)} onClick={() => { if (Date.now() >= suppressClick.current) setSwitcher(true) }} aria-label={t("tabs.active_actions", { path: activeId ? path(activeId) : t("tabs.console") })} title={activeId ? path(activeId) : t("tabs.console")} className="flex min-w-0 flex-1 touch-pan-y select-none items-center gap-2 self-stretch rounded-sm text-left text-xs font-medium outline-none focus-visible:ring-2 focus-visible:ring-ring">{activeId && stateDot(activeId)}<span className="truncate">{activeId ? title(activeId) : t("tabs.console")}</span>{activeId && activeId !== OVERVIEW_TAB && <span className="shrink-0 text-[10px] text-muted-foreground">{statusLabel(labels.get(activeId)?.agent.status ?? "")}</span>}</button>{activeId && moreButton(activeId, true)}<button type="button" aria-label={t("tabs.show_all", { count: ids.length })} onClick={() => setSwitcher(true)} className="grid size-11 shrink-0 place-items-center rounded-md border text-xs font-semibold outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring">{ids.length}</button></div> : <div className="flex h-10 shrink-0 border-b bg-sidebar">
+      {sidebarCollapsed && onExpandSidebar && <button ref={expandRef} type="button" aria-label={t("resizer.expand_tree_sidebar")} title={t("resizer.expand_tree_sidebar")} aria-expanded="false" aria-controls="tree-sidebar" onClick={onExpandSidebar} className="grid size-10 shrink-0 place-items-center border-r text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"><PanelLeftOpen aria-hidden="true" className="size-4" /></button>}
       <div ref={list} role="tablist" aria-label={t("tabs.open_pages")} className="flex min-w-0 flex-1 overflow-x-auto [scrollbar-width:none]">{ids.map((id) => <div key={id} className={cn("relative flex shrink-0 items-center border-r", id === OVERVIEW_TAB && "sticky left-0 z-10 bg-sidebar", id === activeId && "bg-background before:absolute before:inset-x-0 before:top-0 before:h-0.5 before:bg-primary")}>
         <button type="button" role="tab" id={`workspace-tab-${id}`} aria-controls={`workspace-panel-${id}`} aria-selected={id === activeId} tabIndex={id === (activeId ?? OVERVIEW_TAB) ? 0 : -1} aria-label={t("tabs.tab", { path: path(id) })} title={live(id) ? path(id) : t("tabs.unloaded_suffix", { path: path(id) })} {...menuEvents(id)} onClick={() => clicked(id)} onKeyDown={(event) => {
           menuEvents(id).onKeyDown(event)

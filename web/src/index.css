@@ -70,6 +70,17 @@
   ::selection { background: rgba(35, 131, 226, .22); }
 }
 
+/* Overlay scrollbar: hidden until the element scrolls, then a very thin thumb that fades out (see lib/thin-scroll.ts). */
+@supports selector(::-webkit-scrollbar) {
+  .thin-scroll::-webkit-scrollbar { width: 4px; height: 4px; background: transparent; }
+  .thin-scroll::-webkit-scrollbar-thumb { border-radius: 2px; background: transparent; transition: background-color .25s ease; }
+  .thin-scroll[data-scrolling]::-webkit-scrollbar-thumb { background: hsl(var(--muted-foreground) / .45); }
+}
+@supports not selector(::-webkit-scrollbar) {
+  .thin-scroll { scrollbar-width: thin; scrollbar-color: transparent transparent; }
+  .thin-scroll[data-scrolling] { scrollbar-color: hsl(var(--muted-foreground) / .45) transparent; }
+}
+
 .xterm { height: 100%; }
 .xterm,
 .xterm-screen,

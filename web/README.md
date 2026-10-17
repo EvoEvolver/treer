@@ -26,26 +26,38 @@ leaving other preferences intact. Reload starts at Overview with no selected
 Agent, preserving collapsed preferences. The current console has no Agent deep-link route;
 a future explicit deep-link selection should use the same reveal behavior.
 
-The desktop Tree sidebar has a focusable vertical separator with a 24px mouse/touch
-target. Drag to resize immediately; Left/Right change 16px (Shift: 64px), Home/End
-select the limits, and double-click restores 272px. The minimum is 240px; the
-maximum is the smallest of 480px, 45% of the viewport and the space left after
-reserving 400px for main content plus the 8px separator. Window resizing clamps
-the displayed width while retaining the preferred width for larger windows.
-The compact arrow sits at the vertical center of the separator, with a 44px
-click/touch target around its 16×28px visual surface. It collapses/expands the sidebar,
-including via Enter/Space, and exposes `aria-expanded` and `aria-controls`.
-A narrow rail keeps the expand button available while collapsed. The original
-width is restored on expansion, and the terminal is fitted after either toggle.
+The desktop Tree sidebar is divided from the main area by a single 1px line. A
+focusable vertical separator with a 24px invisible mouse/touch zone sits over it
+(the line thickens and takes the accent colour on hover/focus). Drag to resize
+immediately; Left/Right change 16px (Shift: 64px), Home/End select the limits,
+and double-click restores 272px. The minimum is 240px; the maximum is the
+smallest of 480px, 45% of the viewport and the space left after reserving 400px
+for main content plus the 1px divider. Window resizing clamps the displayed width
+while retaining the preferred width for larger windows.
+
+The sidebar shows no user avatar. The bottom row is a **Collapse tree sidebar**
+button (desktop only, in the old avatar slot), the user's name and the "⋯" user
+menu (Settings, Replay product tour, Log out; the email is in the menu header).
+Collapsing hides the sidebar and the divider; a single **Expand tree sidebar**
+button then appears at the left end of the tab bar. Both buttons expose
+`aria-expanded` and `aria-controls="tree-sidebar"`, work with Enter/Space, and
+focus moves to the counterpart button after a toggle. The original width is
+restored on expansion, and the terminal is fitted after either toggle.
 Preferences use `treer:tree-width:v1:<user_id>` and
 `treer:tree-collapsed:v1:<user_id>` in localStorage across workspaces.
 Unavailable storage falls back to the default on load and allows in-memory
 resizing and toggling. Collapse defaults to off when not cached. Pointer capture and a temporary overlay protect drags across terminals
 and embedded iframes; release/cancel/focus loss removes protection and fits the
-terminal after layout commits. Separator colors use theme tokens.
+terminal after layout commits. Divider colors use theme tokens.
 
-Below 768px the separator and arrow are hidden, desktop collapse is ignored,
-and the existing mobile layout stays intact.
+The Tree list uses an overlay scrollbar (`thin-scroll`, `lib/thin-scroll.ts`):
+hidden by default, a 4px thumb shows while the element scrolls and fades about
+800ms after it stops. Wheel, touch and keyboard scrolling are unchanged; only a
+`data-scrolling` attribute is toggled. Other scroll areas keep their native bars.
+
+Below 768px the divider and the collapse/expand buttons are hidden, desktop
+collapse is ignored, and the existing mobile layout stays intact: the bottom row is
+just the name and the user-menu trigger (44px).
 Managed App/Agent Interface embeds retain the same surrounding console sidebar.
 Native iOS/Android clients are retired. Agent-owned embedded interfaces remain
 separate from this responsive browser sidebar.
