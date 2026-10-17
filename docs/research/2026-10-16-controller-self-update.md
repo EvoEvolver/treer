@@ -210,6 +210,34 @@ replayed report can authorize a journal transition through this parser. Actual
 launcher process lifecycle, failure-to-Partial handling and main dispatch are
 still pending; these parser tests do not claim an isolated launcher install.
 
+An independent Unix platform helper now bounds trusted installer stdout and
+execution time, with real null stdin/stderr and a dedicated process group.
+Normal completion, errors, deadline expiry and future cancellation clean the
+group before reaping its leader. `waitid(WNOWAIT)` retains that leader's PID
+until group signalling, preventing a reap-then-signal PID/PGID reuse race. Darwin
+can return EPERM for a zombie-only group; only an independently exited owned
+leader plus a complete libproc inventory containing exactly that leader permits
+the singleton exception. Other permission failures remain errors. The small
+libproc wrapper uses initialized fixed-capacity storage and rejects truncated
+or failed inventories. Isolated subprocess tests cover normal exit with a live
+descendant, timeout, cancellation, excessive output, null streams, retention and
+reaping of the leader, and the Darwin singleton/multiple-member distinction.
+
+This helper authenticates no executable, argv, environment or receipt, and is not
+yet wired into the self-update worker or launcher. The caller must retain the
+transaction locks and map uncertain/cancelled execution to recovery or Partial,
+never completion. Descendants must cooperate by retaining their inherited group;
+this is not a sandbox against a same-account process calling setsid/setpgid.
+The supervisor must be the child's exclusive reaper. Killing its group does not
+survive the supervisor dying, and synchronous spawn or kernel-uninterruptible
+kill/reap cleanup has no hard wall-clock guarantee. Worker-death recovery and
+the actual authenticated launcher executor remain pending. No real service or
+installed launcher is exercised by these lifecycle fixtures.
+Group signal submission plus leader reaping does not prove every descendant has
+finished kernel teardown. The caller must retain locks and establish the needed
+quiescence/recovery evidence before rollback or release; this helper alone does
+not authorize either operation.
+
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
 modes/current bytes and executable stages before recording Activating or making
