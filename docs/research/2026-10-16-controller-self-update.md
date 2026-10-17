@@ -348,7 +348,7 @@ check rejects changed receipt content/revision or temporary-directory identity.
 Public recipe preparation requires a borrowed `LauncherTemporary`, retaining
 the original owner, locks and directory descriptor. It neither authenticates image
 bytes nor starts any process, changes a receipt or grants execution authority.
-Node22 validation, durable child-start/identity and recovery, actual
+Installer-time enforcement, durable child-start/identity and recovery, actual
 env-clear/spawn/completion enforcement and final live health remain executor
 work; no real installation or whole-P1 acceptance is claimed here.
 
@@ -389,8 +389,8 @@ well as recheck current permissions/types. This detects a replaced ancestor
 even when a hard link preserves the executable inode. It never canonicalizes a
 new target during revalidation, changes permissions or executes a process.
 No content digest is checked: in-place writes by a trusted owner are outside
-this identity-only guarantee. Source-only/package/network acceptance, Node22
-validation, actual spawn/completion wiring and durable child lifecycle remain
+this identity-only guarantee. Source-only/package/network and real Node22
+acceptance, installer spawn/completion wiring and durable child lifecycle remain
 pending, so this helper does not authorize installation.
 
 Public `Invocation::prepare` now retains this Node proof immediately after
@@ -409,9 +409,28 @@ before retention. A regression uses that same resolver with an isolated symlink,
 then retargets the link: the existing recipe still names and verifies the
 original physical target, while replacing that target's inode is refused.
 No test changes `/opt/homebrew`, `/usr/local` or `/usr`.
-The future executor must still invoke these checks immediately before spawn
-and after proven completion; no actual execution-boundary wiring, Node22 probe
-or durable child-start authority is supplied by this recipe integration.
+`Invocation::check_node_version` now probes this same retained interpreter with
+only fixed `--version`, a cleared environment with C LANG/LC_ALL, and the
+physical interpreter parent as cwd. It borrows the recipe and its original
+owner/locks throughout the call, checks the full binding directly before spawn
+and after strict process-group quiescence, and never opens a replacement proof.
+One absolute ten-second deadline covers checks, execution, quiescence and
+parsing; synchronous checks account for elapsed time on both sides. Stdout is
+bounded to 1024 bytes and never exposed in errors. Only a bounded stable numeric
+`vMAJOR.MINOR.PATCH` with major >=22 is accepted; extra text, prereleases,
+control characters and older versions fail. Probe timeout/output-limit/failure
+and invalid version use fixed diagnostics, distinct from retained-node change.
+Tests execute only isolated shell stand-ins: fixed argv/environment, journal
+preservation, wrong version, nonzero exit, excessive output, timeout and a
+replacement of the retained executable before successful output are covered.
+These are version-probe tests, not a real Node or installer acceptance test.
+The call does not advance a receipt or return reusable installation authority.
+
+The future executor must still enforce Node and Controller/CLI checks directly
+at installer spawn and after proven completion, integrate expected phase
+transitions and record durable child-start identity/recovery before installation.
+The standalone version probe does not supply that lifecycle authority, production
+dispatch or a worker-death recovery path; the installer must not start yet.
 
 Known permission boundary (security2545): these checks inspect Unix owner/mode
 bits only. They do not inspect macOS/POSIX ACL-granted write access or platform

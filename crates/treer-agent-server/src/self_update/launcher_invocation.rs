@@ -1,6 +1,6 @@
-//! Fixed launcher invocation data, NOT an execution capability. There is no
-//! spawn/Command API here. The executor still needs retained image proofs,
-//! durable child-start/identity, strict completion and final live health.
+//! Fixed launcher invocation data and a bounded interpreter-version probe,
+//! NOT installer execution authority. The executor still needs retained image
+//! proofs, durable child-start/identity, strict completion and final live health.
 use std::{
     collections::BTreeMap,
     ffi::{OsStr, OsString},
@@ -168,8 +168,8 @@ impl<'a> Invocation<'a> {
         Ok(self)
     }
 
-    /// Only a journal/ownership binding check; never substitutes for retained
-    /// image authentication or the durable child lifecycle at actual spawn.
+    /// Recheck receipt/ownership and retained dependencies; never substitutes
+    /// for release-image authentication or the installer's durable lifecycle.
     pub fn verify_binding(&self) -> Result<()> {
         if launcher_preflight::checked(self.selected, self.owned, self.journal)? != self.receipt {
             bail!("update_launcher_binding_mismatch");
@@ -186,6 +186,48 @@ impl<'a> Invocation<'a> {
                 .map_err(|_| anyhow::anyhow!("update_launcher_node_changed"))?;
         }
         Ok(())
+    }
+
+    /// Probe only the retained interpreter's fixed --version operation. This
+    /// grants no reusable execution authority and does not advance the journal.
+    pub async fn check_node_version(&self) -> Result<()> {
+        self.check_node_until(tokio::time::Instant::now() + std::time::Duration::from_secs(10))
+            .await
+    }
+
+    async fn check_node_until(&self, deadline: tokio::time::Instant) -> Result<()> {
+        let node = self
+            .node
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("update_launcher_binding_mismatch"))?;
+        let mut command = std::process::Command::new(node.executable());
+        command
+            .arg("--version")
+            .env_clear()
+            .env("LANG", "C")
+            .env("LC_ALL", "C")
+            .current_dir(
+                node.executable()
+                    .parent()
+                    .ok_or_else(|| anyhow::anyhow!("update_launcher_binding_mismatch"))?,
+            );
+        node_budget(deadline, || self.verify_binding())?;
+        let output =
+            treer_platform::bounded_child::output_quiescent_until(&mut command, deadline, 1024)
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!(match error.kind() {
+                        std::io::ErrorKind::TimedOut => "update_launcher_node_probe_timeout",
+                        std::io::ErrorKind::FileTooLarge =>
+                            "update_launcher_node_probe_output_limit",
+                        _ => "update_launcher_node_probe_failed",
+                    })
+                })?;
+        node_budget(deadline, || self.verify_binding())?;
+        if !output.status().success() {
+            bail!("update_launcher_node_probe_failed");
+        }
+        node_budget(deadline, || parse_node_version(output.stdout()))
     }
 
     pub fn program(&self) -> &Path {
@@ -207,6 +249,47 @@ impl<'a> Invocation<'a> {
 fn retain_node(path: &Path) -> Result<RetainedExecutable> {
     RetainedExecutable::open(path)
         .map_err(|_| anyhow::anyhow!("update_launcher_node_untrusted_location"))
+}
+
+fn node_budget<T>(deadline: tokio::time::Instant, work: impl FnOnce() -> Result<T>) -> Result<T> {
+    if tokio::time::Instant::now() >= deadline {
+        bail!("update_launcher_node_probe_timeout");
+    }
+    let result = work();
+    if tokio::time::Instant::now() >= deadline {
+        bail!("update_launcher_node_probe_timeout");
+    }
+    result
+}
+
+fn parse_node_version(bytes: &[u8]) -> Result<()> {
+    let invalid = || anyhow::anyhow!("invalid_update_launcher_node_version");
+    if bytes.len() > 64 {
+        return Err(invalid());
+    }
+    let text = std::str::from_utf8(bytes).map_err(|_| invalid())?;
+    let text = text.strip_suffix('\n').unwrap_or(text);
+    let text = text.strip_prefix('v').ok_or_else(invalid)?;
+    let components = text.split('.').collect::<Vec<_>>();
+    if components.len() != 3
+        || components.iter().any(|c| {
+            c.is_empty()
+                || c.len() > 10
+                || !c.bytes().all(|b| b.is_ascii_digit())
+                || (c.len() > 1 && c.starts_with('0'))
+        })
+    {
+        return Err(invalid());
+    }
+    let numbers = components
+        .iter()
+        .map(|c| c.parse::<u32>())
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| invalid())?;
+    if numbers[0] < 22 {
+        return Err(invalid());
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -247,11 +330,153 @@ mod tests {
         fn node(&self) -> PathBuf {
             self.0.join("node")
         }
+        fn script(&self, body: &str) {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::remove_file(self.node()).unwrap();
+            std::fs::write(self.node(), format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(self.node(), std::fs::Permissions::from_mode(0o500)).unwrap();
+        }
     }
     impl Drop for NodeFixture {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn node_versions_require_stable_numeric_22_or_newer_without_extra_text() {
+        for text in ["v22.0.0", "v22.14.0\n", "v24.1.2\n"] {
+            parse_node_version(text.as_bytes()).unwrap();
+        }
+        for text in [
+            "",
+            "v21.9.9",
+            "22.14.0",
+            "v022.1.0",
+            "v22.1",
+            "v22.1.0-pre",
+            "v22.1.0 private",
+            "v22.1.0\n\n",
+            "v22.1.0\r\n",
+            "v4294967296.0.0",
+        ] {
+            assert_eq!(
+                parse_node_version(text.as_bytes()).unwrap_err().to_string(),
+                "invalid_update_launcher_node_version"
+            );
+        }
+        assert!(parse_node_version(&[b'1'; 65]).is_err());
+        assert!(parse_node_version(&[0xff]).is_err());
+    }
+
+    #[tokio::test]
+    async fn node_version_probe_has_fixed_argv_clean_environment_and_preserves_journal() {
+        let f = Fixture::standard_config();
+        f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+        let (selected, owned, journal) = bind(&f, "ws_a");
+        let before = journal.read().unwrap();
+        let node = NodeFixture::new();
+        node.script("[ \"$#\" = 1 ] && [ \"$1\" = --version ] || exit 2\n[ \"$LANG\" = C ] && [ \"$LC_ALL\" = C ] || exit 3\n[ -z \"${HOME+x}${XDG_CONFIG_HOME+x}${TREER_WORKSPACE_ID+x}${TREER_WORKLOAD_CREDENTIAL+x}${NODE_OPTIONS+x}\" ] || exit 4\nprintf 'v22.14.0\\n'");
+        let plan = Invocation::with_context(
+            &selected,
+            &owned,
+            &journal,
+            Operation::Install,
+            &f.path,
+            &node.node(),
+        )
+        .unwrap()
+        .bind_node(retain_node(&node.node()).unwrap())
+        .unwrap();
+        plan.check_node_version().await.unwrap();
+        assert_eq!(journal.read().unwrap(), before);
+        plan.verify_binding().unwrap();
+    }
+
+    #[tokio::test]
+    async fn node_version_probe_rechecks_same_inode_after_child_quiescence() {
+        let f = Fixture::standard_config();
+        f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+        let (selected, owned, journal) = bind(&f, "ws_a");
+        let node = NodeFixture::new();
+        node.script("/bin/mv \"$0.next\" \"$0\" || exit 1\nprintf 'v22.14.0\\n'");
+        node.write("node.next");
+        let plan = Invocation::with_context(
+            &selected,
+            &owned,
+            &journal,
+            Operation::Status,
+            &f.path,
+            &node.node(),
+        )
+        .unwrap()
+        .bind_node(retain_node(&node.node()).unwrap())
+        .unwrap();
+        assert_eq!(
+            plan.check_node_version().await.unwrap_err().to_string(),
+            "update_launcher_node_changed"
+        );
+    }
+
+    #[tokio::test]
+    async fn node_probe_failure_output_limit_and_deadline_are_fixed_errors() {
+        let cases = [
+            (
+                "printf 'private failure'; exit 1".to_owned(),
+                "update_launcher_node_probe_failed",
+            ),
+            (
+                format!("printf '%s' '{}'", "x".repeat(1025)),
+                "update_launcher_node_probe_output_limit",
+            ),
+            (
+                "printf 'v21.0.0\\n'".to_owned(),
+                "invalid_update_launcher_node_version",
+            ),
+            (
+                "/bin/sleep 1; printf 'v22.0.0\\n'".to_owned(),
+                "update_launcher_node_probe_timeout",
+            ),
+        ];
+        for (script, expected) in cases {
+            let f = Fixture::standard_config();
+            f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
+            let (selected, owned, journal) = bind(&f, "ws_a");
+            let node = NodeFixture::new();
+            node.script(&script);
+            let plan = Invocation::with_context(
+                &selected,
+                &owned,
+                &journal,
+                Operation::Status,
+                &f.path,
+                &node.node(),
+            )
+            .unwrap()
+            .bind_node(retain_node(&node.node()).unwrap())
+            .unwrap();
+            let budget = if expected == "update_launcher_node_probe_timeout" {
+                std::time::Duration::from_millis(200)
+            } else {
+                std::time::Duration::from_secs(10)
+            };
+            let deadline = tokio::time::Instant::now() + budget;
+            assert_eq!(
+                plan.check_node_until(deadline)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                expected
+            );
+        }
+        assert_eq!(
+            node_budget::<()>(tokio::time::Instant::now(), || panic!(
+                "expired budget must not work"
+            ))
+            .unwrap_err()
+            .to_string(),
+            "update_launcher_node_probe_timeout"
+        );
     }
 
     #[test]
