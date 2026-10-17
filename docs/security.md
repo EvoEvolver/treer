@@ -286,6 +286,11 @@ What Core does promise:
   its placement is not atomic (verify-file catches partial results);
   same-account processes can race between verify-file and the probe; musl
   Linux is unsupported because npm would select a different native package.
+  The unit tests prove the plan shape and the fail-closed checks against
+  fixtures; that the offline install really satisfies the root's optional
+  dependency with a single copy of the verified native package, refuses an
+  injected native and uninstalls back to baseline is proven only by the
+  release-owned sealed acceptance in a disposable environment.
   The packed tarballs are verified and installed by the same account in the
   same private directory; a same-account process replacing them between the
   verification and install steps is inside the trust domain Core already

@@ -2110,6 +2110,52 @@ fn verify_file_refuses_writable_or_linked_components_and_space_fails_closed() {
     assert_eq!(verify(body.len() as u64, &digest), Err("path_refused"));
     fs::remove_file(&modules).unwrap();
     fs::rename(&aside, &modules).unwrap();
+    // The entry directory is held to the same rules: group-writable or a
+    // symlink in place of `bin` is refused even when the link inside is right.
+    fs::set_permissions(prefix.join("bin"), fs::Permissions::from_mode(0o775)).unwrap();
+    assert_eq!(verify(body.len() as u64, &digest), Err("entry_link"));
+    fs::set_permissions(prefix.join("bin"), fs::Permissions::from_mode(0o755)).unwrap();
+    fs::rename(prefix.join("bin"), prefix.join("real_bin")).unwrap();
+    std::os::unix::fs::symlink("real_bin", prefix.join("bin")).unwrap();
+    assert_eq!(verify(body.len() as u64, &digest), Err("entry_link"));
+    fs::remove_file(prefix.join("bin")).unwrap();
+    fs::rename(prefix.join("real_bin"), prefix.join("bin")).unwrap();
+    // An absolute target inside the prefix is fine; one escaping is not.
+    fs::remove_file(prefix.join("bin/claude")).unwrap();
+    std::os::unix::fs::symlink(
+        fs::canonicalize(&prefix).unwrap().join(relative),
+        prefix.join("bin/claude"),
+    )
+    .unwrap();
+    assert!(verify(body.len() as u64, &digest).is_ok());
+    // An absolute target spelled through a non-canonical prefix is refused:
+    // only the canonical prefix counts.
+    fs::remove_file(prefix.join("bin/claude")).unwrap();
+    std::os::unix::fs::symlink(
+        prefix.join("lib/../lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe"),
+        prefix.join("bin/claude"),
+    )
+    .unwrap();
+    let canonical_matches = fs::canonicalize(&prefix).unwrap() == prefix;
+    assert_eq!(
+        verify(body.len() as u64, &digest).is_ok(),
+        canonical_matches
+    );
+    assert_eq!(
+        entry_target_within("../lib/node_modules/x", Path::new("/p")),
+        Some("lib/node_modules/x".into())
+    );
+    assert_eq!(entry_target_within("../../etc/x", Path::new("/p")), None);
+    assert_eq!(
+        entry_target_within("/p/lib/x", Path::new("/p")),
+        Some("lib/x".into())
+    );
+    assert_eq!(entry_target_within("/q/lib/x", Path::new("/p")), None);
+    assert_eq!(entry_target_within("/pq/lib/x", Path::new("/p")), None);
+    assert_eq!(
+        entry_target_within("./claude.exe", Path::new("/p")),
+        Some("bin/claude.exe".into())
+    );
     // A directory in place of the file is not regular; a missing entry fails.
     fs::remove_file(prefix.join("bin/claude")).unwrap();
     assert_eq!(verify(body.len() as u64, &digest), Err("entry_link"));

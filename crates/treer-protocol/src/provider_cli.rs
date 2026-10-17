@@ -429,7 +429,11 @@ fn validate_recipe(
             return Err(invalid("binary_path"));
         }
         let platforms: BTreeSet<&str> = recipe.platforms.iter().map(String::as_str).collect();
-        if pins.keys().map(String::as_str).collect::<BTreeSet<_>>() != platforms {
+        if pins.keys().map(String::as_str).collect::<BTreeSet<_>>() != platforms
+            || platforms
+                .iter()
+                .any(|platform| crate::provider_cli_expected_node_arch(platform).is_none())
+        {
             return Err(invalid("native_binaries.platforms"));
         }
         for pin in pins.values() {
@@ -1317,6 +1321,10 @@ mod tests {
         assert_eq!(pins.len(), 3);
         for platform in &recipe.platforms {
             let pin = &pins[platform];
+            assert!(
+                provider_cli_expected_node_arch(platform).is_some(),
+                "{platform} has a Node architecture rule"
+            );
             assert_eq!(pin.version, install.version);
             assert!(pin.package.starts_with("@anthropic-ai/claude-code-"));
             assert!(pin.size <= pin.unpacked_size);

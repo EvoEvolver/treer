@@ -1059,7 +1059,11 @@ impl ProviderCliService {
     /// The remaining window is a TOCTOU between this observation and npm
     /// writing the prefix, bounded by the operation budget, not by a
     /// millisecond promise.
-    async fn consent_gate(&self, operation_id: &str, gate: &GateContext<'_>) -> ConsentGate {
+    async fn consent_gate(
+        &self,
+        operation_id: &str,
+        gate: &GateContext<'_>,
+    ) -> (ConsentGate, Option<PathBuf>) {
         let GateContext {
             plan,
             check,
@@ -1069,7 +1073,7 @@ impl ProviderCliService {
             deadline,
         } = *gate;
         if Instant::now() >= deadline {
-            return ConsentGate::Expired;
+            return (ConsentGate::Expired, None);
         }
         let observed = observe(plan, check, environment, job, deadline).await;
         let summary = observed
@@ -1078,16 +1082,26 @@ impl ProviderCliService {
         self.update(operation_id, |record| {
             record.observed_before = Some(summary);
         });
+        // The observed prefix (`<prefix>/bin/<binary>` minus two components)
+        // lets a native entry check the prefix volume before the install.
+        let prefix = observed
+            .observation
+            .executable
+            .as_deref()
+            .map(Path::new)
+            .and_then(Path::parent)
+            .and_then(Path::parent)
+            .map(Path::to_path_buf);
         if !observed.observation.probe.cleanup_confirmed {
-            return ConsentGate::Unconfirmed;
+            return (ConsentGate::Unconfirmed, prefix);
         }
         // Only the operation budget expires the operation; a single probe
         // that hung within budget is an unknown observation and fails the
         // comparison below as a state change.
         if Instant::now() >= deadline {
-            return ConsentGate::Expired;
+            return (ConsentGate::Expired, prefix);
         }
-        if target.consent.matches(
+        let gate = if target.consent.matches(
             &observed.observation,
             &target.recipe_hash,
             &target.target_version,
@@ -1095,7 +1109,8 @@ impl ProviderCliService {
             ConsentGate::Holds
         } else {
             ConsentGate::Changed
-        }
+        };
+        (gate, prefix)
     }
 
     async fn run_operation(
@@ -1175,7 +1190,7 @@ impl ProviderCliService {
                     // The consent gate: once before anything runs and once
                     // right before the step that rewrites the global prefix.
                     if Some(number) == first_command || purpose == "install" {
-                        let gate = self
+                        let (gate, observed_prefix) = self
                             .consent_gate(
                                 operation_id,
                                 &GateContext {
@@ -1206,6 +1221,18 @@ impl ProviderCliService {
                             final_status = status;
                             error_code = Some(code);
                             timed_out |= status == ProviderCliOperationStatus::TimedOut;
+                            break;
+                        }
+                        // The prefix volume is checked before it is written.
+                        if purpose == "install"
+                            && required_space.is_some_and(|required| {
+                                observed_prefix
+                                    .as_deref()
+                                    .is_some_and(|prefix| !space_available(prefix, required))
+                            })
+                        {
+                            final_status = ProviderCliOperationStatus::Failed;
+                            error_code = Some("provider_cli_space_insufficient");
                             break;
                         }
                     }
@@ -1713,7 +1740,7 @@ fn verify_file(
     expected_size: u64,
     expected_sha256: &str,
 ) -> Result<(u64, String), &'static str> {
-    use rustix::fs::{self as sys, FileType, Mode, OFlags};
+    use rustix::fs::{self as sys, AtFlags, FileType, Mode, OFlags};
     const REFUSED: &str = "path_refused";
     let prefix_real = fs::canonicalize(prefix).map_err(|_| REFUSED)?;
     let components: Vec<&str> = relative.split('/').collect();
@@ -1730,16 +1757,17 @@ fn verify_file(
     let directory_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     // The prefix root may itself be reached through symlinks (canonicalized
     // above); everything below it is opened without following.
-    let mut dir: fs::File = sys::open(
+    let root: fs::File = sys::open(
         &prefix_real,
         OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
         Mode::empty(),
     )
     .map_err(|_| REFUSED)?
     .into();
-    if !owned_and_private(&sys::fstat(&dir).map_err(|_| REFUSED)?) {
+    if !owned_and_private(&sys::fstat(&root).map_err(|_| REFUSED)?) {
         return Err(REFUSED);
     }
+    let mut dir = root.try_clone().map_err(|_| REFUSED)?;
     for name in dirs {
         let next: fs::File = sys::openat(&dir, *name, directory_flags, Mode::empty())
             .map_err(|_| REFUSED)?
@@ -1786,22 +1814,64 @@ fn verify_file(
     if total != expected_size || digest != expected_sha256 {
         return Err("native_content");
     }
-    // The user-facing entry must be a symlink that leads to this very file.
-    let entry_path = prefix_real.join("bin").join(entry);
-    let link = fs::symlink_metadata(&entry_path).map_err(|_| "entry_link")?;
-    if !link.file_type().is_symlink() {
-        return Err("entry_link");
+    // The user-facing entry must be a symlink that leads to this very file:
+    // `bin` is opened below the prefix under the same ownership rules (a
+    // symlinked or group-writable `bin` is refused), the link is read without
+    // following, its target must normalize against the prefix to exactly the
+    // verified path, and opening through it must reach the same inode.
+    const ENTRY: &str = "entry_link";
+    let bin: fs::File = sys::openat(&root, "bin", directory_flags, Mode::empty())
+        .map_err(|_| ENTRY)?
+        .into();
+    if !owned_and_private(&sys::fstat(&bin).map_err(|_| ENTRY)?) {
+        return Err(ENTRY);
     }
-    let resolved = fs::canonicalize(&entry_path).map_err(|_| "entry_link")?;
-    if resolved != prefix_real.join(relative) {
-        return Err("entry_link");
+    let link = sys::statat(&bin, entry, AtFlags::SYMLINK_NOFOLLOW).map_err(|_| ENTRY)?;
+    if FileType::from_raw_mode(link.st_mode) != FileType::Symlink {
+        return Err(ENTRY);
     }
-    let target = fs::File::open(&resolved).map_err(|_| "entry_link")?;
-    let target_stat = sys::fstat(&target).map_err(|_| "entry_link")?;
+    let target = sys::readlinkat(&bin, entry, Vec::new()).map_err(|_| ENTRY)?;
+    let target = target.to_str().map_err(|_| ENTRY)?;
+    if entry_target_within(target, &prefix_real).as_deref() != Some(relative) {
+        return Err(ENTRY);
+    }
+    let through: fs::File =
+        sys::openat(&bin, entry, OFlags::RDONLY | OFlags::CLOEXEC, Mode::empty())
+            .map_err(|_| ENTRY)?
+            .into();
+    let target_stat = sys::fstat(&through).map_err(|_| ENTRY)?;
     if target_stat.st_dev != stat.st_dev || target_stat.st_ino != stat.st_ino {
-        return Err("entry_link");
+        return Err(ENTRY);
     }
     Ok((size, digest))
+}
+
+/// Lexically resolves a symlink target read from `<prefix>/bin` to a path
+/// relative to the prefix: `..` pops, nothing may escape the prefix, and an
+/// absolute target must start inside it. `None` when it escapes.
+fn entry_target_within(target: &str, prefix_real: &Path) -> Option<String> {
+    let mut parts: Vec<&str> = Vec::new();
+    let rest = if let Some(stripped) = target.strip_prefix('/') {
+        let prefix = prefix_real.to_str()?.trim_end_matches('/');
+        let inside = format!("/{stripped}");
+        inside
+            .strip_prefix(prefix)?
+            .strip_prefix('/')
+            .map(str::to_owned)?
+    } else {
+        parts.push("bin");
+        target.to_owned()
+    };
+    for part in rest.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop()?;
+            }
+            name => parts.push(name),
+        }
+    }
+    (!parts.is_empty()).then(|| parts.join("/"))
 }
 
 #[cfg(not(unix))]
