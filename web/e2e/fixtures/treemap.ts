@@ -72,3 +72,19 @@ export async function mockDeepTreeMapApi(page: Page, large: boolean | "medium", 
     placements: nestedAgents.map((agent, position) => ({ agent_id: agent.agent_id, folder_id: large === "medium" && position >= 6 ? position < 13 ? "operations" : "product" : `level-${depth - 1}`, position })),
   }) }))
 }
+
+// Snapshot inventory and persisted placements load independently. In between,
+// every workload can briefly appear at the root; wait for the committed Tree,
+// not an icon assertion racing those two responses (especially in large maps).
+export async function waitForDeepTreeMap(page: Page) {
+  // Use the test's normal readiness budget, not the short assertion budget.
+  // Poll the DOM directly rather than repeatedly walking 300 accessible rows
+  // while the two independent reads are still committing.
+  await page.waitForFunction(() => {
+    const tree = document.querySelector('[role="tree"][aria-label="Workspace workloads"]')
+    return tree?.getAttribute('aria-busy') === 'false'
+      && tree.querySelector('[role="treeitem"][aria-label="Team"]')?.getAttribute('aria-expanded') === 'false'
+      && tree.querySelector('[data-agent-id="app-runtime"]')?.getAttribute('aria-label') === 'dashboard'
+      && !tree.querySelector('[data-agent-id="deep-0"]')
+  })
+}
