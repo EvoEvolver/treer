@@ -554,8 +554,20 @@ assertions allow that bounded window, never treating availability as authority.
 State and job directories must reside on a local filesystem with native `flock`
 semantics. Network filesystems (including NFS flock emulation) are unsupported;
 their exclusion/inheritance behavior is not liveness evidence for this protocol.
-This is a documented deployment precondition, not an implemented filesystem-type
-probe. The single-use adapters consume either a standard `Command` or Tokio's
+The platform `local_filesystem::verify` now probes the exact retained file or
+directory using `fstatfs`; `PrivateDirectory::verify_local_filesystem` exposes
+that check without reopening the path. Its conservative allowlist is APFS/HFS
+with Darwin `MNT_LOCAL`, or Linux ext2/3/4 (shared magic), XFS and Btrfs. Network,
+FUSE, overlay, memory, device and unknown filesystem types fail closed with a
+fixed diagnostic, as do probe errors; no mount/path details are disclosed.
+This type check is only a prerequisite: it does not attest backing-device
+durability, mount options, flush behavior or lock ownership. Synthetic tests
+cover both platform allowlists and deny network/unknown/nonlocal cases; real
+Mac handles check local temp storage and reject devfs, and Linux rejects procfs.
+No network mounts are created. The lifecycle must still invoke this preflight
+for every retained state/job/lock storage handle before relying on its evidence;
+that production integration remains unfinished.
+The single-use adapters consume either a standard `Command` or Tokio's
 `Command`; the latter preserves the callback through `as_std_mut`. Isolated
 tests cover both paths through the same Rust test supervisor, which restores
 CLOEXEC before starting a Rust descendant probe. That probe checks the descriptor

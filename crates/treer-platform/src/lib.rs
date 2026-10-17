@@ -14,6 +14,8 @@ mod environment;
 #[cfg(unix)]
 pub mod installation_directory;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
+pub mod local_filesystem;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod lock_transfer;
 pub mod machine_file;
 #[cfg(unix)]

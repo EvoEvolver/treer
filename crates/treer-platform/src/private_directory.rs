@@ -67,6 +67,13 @@ impl PrivateDirectory {
         self.file.sync_all()
     }
 
+    /// Preflight the filesystem of this retained directory for update jobs.
+    /// This is not ownership, lock, durability, or recovery authority.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn verify_local_filesystem(&self) -> io::Result<()> {
+        crate::local_filesystem::verify(&self.file)
+    }
+
     /// Open an existing absolute physical directory, rejecting every symlink
     /// component. Callers canonicalize trusted OS aliases before selecting it.
     /// This never chmods a pre-existing directory or creates missing ancestors.
