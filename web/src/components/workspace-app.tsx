@@ -238,6 +238,10 @@ function WorkspaceAppContent() {
   // or inaccessible ID is reported and never replaced by another workload. After that the URL only follows the
   // selection, so our own URL updates are never mistaken for a new link.
   const deepLinkWorkspace = useRef<string | null>(null)
+  // Capture readiness for this render. The initialization effect below marks
+  // the workspace before its selection state commits; URL synchronization must
+  // not treat that same render's empty selection as the user's intent.
+  const deepLinkInitialized = deepLinkWorkspace.current === workspaceId
   const firstPathname = useRef(location.pathname)
   const inventoryReady = Boolean(snapshot) && !appsLoading
   const routeMatchesWorkspace = Boolean(workspaceId) && route.workspaceId === workspaceId
@@ -261,9 +265,9 @@ function WorkspaceAppContent() {
   // The address bar follows the selection so the URL can be copied, shared or reloaded.
   const selectedWorkloadId = mainView === "terminal" ? selectedAgentId : null
   useEffect(() => {
-    if (!inventoryReady || !routeMatchesWorkspace || preview || deepLinkWorkspace.current !== workspaceId) return
+    if (!inventoryReady || !routeMatchesWorkspace || preview || !deepLinkInitialized) return
     if (selectedWorkloadId !== routeWorkloadId) replaceWorkloadRoute(selectedWorkloadId)
-  }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute])
+  }, [inventoryReady, routeMatchesWorkspace, preview, routeWorkloadId, selectedWorkloadId, workspaceId, replaceWorkloadRoute, deepLinkInitialized])
   // Registered Agent UIs and routed Apps open directly; other workloads retain
   // the Console deep link. Never use a descriptor's ui_path as a navigation URL.
   const appOwnUrls = useMemo(() => {

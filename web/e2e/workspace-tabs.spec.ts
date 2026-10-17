@@ -464,19 +464,58 @@ test.describe('workload deep links and new-tab entry points', () => {
     }
   })
 
-  test('focus mode shows only the workload with a way back to the full Console', async ({ page }) => {
-    await page.setViewportSize({ width: 1360, height: 900 })
+  for (const width of [1360, 390]) for (const theme of ['light', 'dark']) test(`focus mode shows only the workload with a way back to the full Console ${theme} ${width}`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 })
+    await page.addInitScript((theme) => localStorage.setItem('treer-theme', theme), theme)
+    const diagnostics: string[] = []
+    page.on('console', message => { if (message.type() === 'error') diagnostics.push(message.text()) })
+    page.on('pageerror', error => diagnostics.push(error.stack ?? error.message))
+    await page.addInitScript(() => {
+      const events: unknown[] = []
+      ;(window as any).__navigation = events
+      for (const method of ['pushState', 'replaceState'] as const) {
+        const original = history[method].bind(history)
+        history[method] = (...args: Parameters<History[typeof method]>) => {
+          events.push({ method, url: args[2], at: performance.now(), stack: new Error().stack })
+          return original(...args)
+        }
+      }
+    })
     await fixture(page)
     await page.goto(`${workspaceUrl}/workloads/tab-1?focus=1`)
     await expect(page.locator('#workspace-panel-tab-1 iframe')).toBeVisible()
     await expect(page.getByRole('tablist')).toHaveCount(0)
     await expect(page.getByRole('tree')).toHaveCount(0)
+    const consoleNavigation = width === 390 ? page.getByRole('button', { name: 'Browse tree', exact: true }) : page.getByRole('tablist')
     const back = page.getByRole('link', { name: 'Open full Console' })
     await expect(back).toHaveAttribute('href', `${workspaceUrl}/workloads/tab-1`)
+    await page.screenshot({ path: info.outputPath(`focus-${theme}-${width}.png`) })
+    const boot = await page.locator('#workspace-panel-tab-1 iframe').evaluate((iframe: HTMLIFrameElement) => (iframe.contentWindow as any).bootId)
     await back.click()
     await expect(page).toHaveURL(new RegExp(`${workspaceUrl}/workloads/tab-1$`))
-    await expect(page.getByRole('tablist')).toBeVisible()
-    await expect(page.getByRole('tree')).toBeVisible()
+    try {
+      await expect(consoleNavigation).toBeVisible()
+      if (width !== 390) await expect(page.getByRole('tree')).toBeVisible()
+      await page.screenshot({ path: info.outputPath(`full-console-${theme}-${width}.png`) })
+      // The URL must stay out of focus mode after the full Console commits;
+      // a transient URL-only success used to hide the stale-effect overwrite.
+      await expect(page).toHaveURL(new RegExp(`${workspaceUrl}/workloads/tab-1$`))
+      expect(await page.locator('#workspace-panel-tab-1 iframe').evaluate((iframe: HTMLIFrameElement) => (iframe.contentWindow as any).bootId)).toBe(boot)
+      await page.goBack()
+      await expect(page.getByRole('link', { name: 'Open full Console' })).toBeVisible()
+      await expect(consoleNavigation).toHaveCount(0)
+      await page.getByRole('link', { name: 'Open full Console' }).press('Enter')
+      await expect(consoleNavigation).toBeVisible()
+      await expect(page).toHaveURL(new RegExp(`${workspaceUrl}/workloads/tab-1$`))
+      // Initialization must never erase the deep-linked target, even briefly:
+      // that stale replace/repair pair could later restore the old focus query.
+      const erasedTargets = await page.evaluate((workspaceUrl) => ((window as any).__navigation as { url?: string }[])
+        .filter(({ url }) => url && new URL(url, location.href).pathname === workspaceUrl), workspaceUrl)
+      expect(erasedTargets).toEqual([])
+    } catch (error) {
+      console.log(JSON.stringify({ diagnostics, url: page.url(), navigation: await page.evaluate(() => (window as any).__navigation) }))
+      throw error
+    }
   })
 
   for (const mobile of [false, true]) test(`the tab menu opens the workload in a new browser tab ${mobile ? '390' : 'desktop'}`, async ({ page, context }) => {
