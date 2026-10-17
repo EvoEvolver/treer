@@ -414,7 +414,8 @@ impl StoredOperation {
                 .as_ref()
                 .map(|consent| consent.observation_hash.clone()),
             observed_before: self.observed_before.clone(),
-            verified_file: self.verified_file.clone(),
+            // Step data, like `steps` and `plan`, is reported once terminal.
+            verified_file: terminal.then(|| self.verified_file.clone()).flatten(),
             prefix_modified: self.prefix_modified,
         }
     }

@@ -1637,6 +1637,16 @@ fn restart_marks_running_operations_unknown_and_prunes_expired_results() {
     // Non-terminal reports expose no output; terminal ones do.
     let report = running.report();
     assert!(report.steps.is_some() && report.stdout.is_empty());
+    // A verify-file outcome recorded mid-run stays hidden until terminal.
+    let mut mid = make(4, ProviderCliOperationStatus::Running, now);
+    mid.verified_file = Some(treer_protocol::ProviderCliVerifiedFile {
+        size: Some(1),
+        sha256: Some("a".repeat(64)),
+        failure: None,
+    });
+    assert!(mid.report().verified_file.is_none());
+    mid.status = ProviderCliOperationStatus::Succeeded;
+    assert!(mid.report().verified_file.is_some());
     // An unreadable store is kept aside, never silently discarded.
     fs::write(root.join(STORE_FILE_NAME), b"not json").unwrap();
     let service = ProviderCliService::new(root.clone(), "srv_fixture");
