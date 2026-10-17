@@ -117,7 +117,7 @@
       },
       "lifecycle_review": {
         "reviewed_at": "2026-10-17",
-        "reviewer": "launcher-dev audit 3091; security-claude 3100/3107",
+        "reviewer": "launcher-dev audit 3091; security-claude contract reviewed 3100/3107",
         "files": [
           {"member": "package/install.cjs", "sha256": "32a7b2429d7447c5aa043e383bcf9a72e0b233dff66336ea4b5b32531da981ad"},
           {"member": "package/package.json", "sha256": "7aefd02c45ca3d00fc7ac15bcb378ac3d30f37c1709dbed1190b3f4fa914ea50"}

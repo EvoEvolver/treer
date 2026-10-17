@@ -191,7 +191,9 @@ claimed verified in the first iteration.
 `claude-native-npm` version 2 pins the root package `2.1.302` and one native
 package for each of `darwin-aarch64`, `linux-x86_64`, `linux-aarch64`. Intel macOS
 and Windows are covered by the unsupported `claude-native-unavailable` entry.
-Linux musl is unsupported: a mismatched native binary fails verification. Grok
+Linux musl is unsupported: a mismatched native binary fails verification; if the
+pinned glibc binary is present but cannot run on musl, the final version check
+fails instead. This does not imply the downloaded bytes were corrupt. Grok
 remains unsupported. This data must ship together with Core's reviewed executor
 and the Web consent/plan consumer; schema version 2 fails closed on old consumers.
 
