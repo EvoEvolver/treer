@@ -613,6 +613,39 @@ inferring success from elapsed time or a child PID:
 These names describe required recovery classifications, not implemented receipt
 phases, CLI output or a claim that the current code can produce these proofs.
 
+Permit/noexec arbitration (security2612): supervisor state has a single serialized
+decision point, with mutually exclusive terminal branches `accepted` and
+`closed-without-permit`; neither may transition to the other. The owner treats
+the permit as accepted only after receiving the supervisor's bound acceptance
+ACK, never merely after a successful write. No ACK is an ambiguous outcome,
+not evidence that the supervisor did not accept or execute.
+
+Before writing noexec evidence, the supervisor must irreversibly close the
+receiver and establish that no unread permit bytes were discarded. Establish
+that fact while the receiver still exists: after proving the owner cannot send
+again and all writer copies are gone, drain the authenticated channel to EOF
+under a bounded read and track every pending byte/frame. Only the zero-pending,
+no-accepted-permit branch may close the receiver, commit the irreversible closed
+state and persist noexec. Closing/shutting down the descriptor first and then
+assuming its buffer was empty is forbidden. A buffered complete permit, partial
+frame, read error or uncertain writer ownership prevents this negative proof;
+preserve the registered identity for quiescence/recovery instead. Thus a write
+may succeed without acceptance, but no acceptance ACK plus validated noexec
+evidence can establish never-started only with the other required owner and
+quiescence proofs. A received acceptance ACK and noexec record for the same
+attempt are contradictory evidence: fail closed, never choose one as truth.
+
+Add both deterministic and real-process races interleaving permit write,
+supervisor receive/accept/ACK, owner death/EOF, receiver close and terminal
+record sync. Assert mutual exclusion, no replay, and that unread/partial permit
+data cannot be hidden behind noexec. Also reject stale or foreign noexec
+evidence: its unique attempt, intent digest and registered identity must match
+the CURRENT attempt exactly, even for the same job/operation. Recovery must use
+the fixed refusal `update_launcher_attempt_mismatch` for attempt mismatch;
+test previous-attempt and other-attempt records against a new explicitly
+authorized attempt. This diagnostic and arbitration protocol remain requirements,
+not implemented behavior or new receipt fields.
+
 Known permission boundary (security2545): these checks inspect Unix owner/mode
 bits only. They do not inspect macOS/POSIX ACL-granted write access or platform
 file flags (including Linux immutable flags). A passing check is not proof that
