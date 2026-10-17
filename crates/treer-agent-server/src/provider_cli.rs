@@ -921,7 +921,10 @@ impl ProviderCliService {
         if !observed.observation.probe.cleanup_confirmed {
             return ConsentGate::Unconfirmed;
         }
-        if Instant::now() >= deadline || observed.outcome.timed_out {
+        // Only the operation budget expires the operation; a single probe
+        // that hung within budget is an unknown observation and fails the
+        // comparison below as a state change.
+        if Instant::now() >= deadline {
             return ConsentGate::Expired;
         }
         if target.consent.matches(

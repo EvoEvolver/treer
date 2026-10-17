@@ -1191,31 +1191,46 @@ async fn detached_descendant_holding_output_turns_operation_unknown() {
 #[tokio::test]
 async fn truncated_probe_output_never_yields_a_version() {
     let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
-    // Real first line 9.0.0 (newer than the target); the retained 32 KiB tail
-    // starts with a line claiming 0.1.0 (older) and then the target itself.
-    write_executable(
-        &fixture.prefix_binary(),
-        "#!/bin/sh\nprintf 'codex-cli 9.0.0\\n'\nhead -c 40000 /dev/zero | tr '\\0' x\nprintf '\\ncodex-cli 0.1.0\\ncodex-cli 0.163.0\\n'\n",
-    );
     let service = fixture.service();
-    let response = service.check(&fixture.codex_ref()).await.unwrap();
-    assert!(response.truncated, "{response:?}");
-    assert_eq!(response.exit_code, Some(0));
-    let observation = response.observation.unwrap();
-    assert_eq!(observation.validate(), Ok(()));
-    assert_eq!(observation.state, ProviderCliObservedState::Unknown);
-    assert_eq!(observation.current_version, None);
-    assert_eq!(
-        observation.probe.error_code.as_deref(),
-        Some("provider_cli_probe_output_truncated")
-    );
-    let decision = decide_provider_cli_action(&observation, PINNED).unwrap();
-    assert_eq!(decision.action, ProviderCliAction::Replace);
-    assert_eq!(
-        decision.version_relation,
-        Some(ProviderCliVersionRelation::Unknown),
-        "never upgrade or noop from a truncated tail"
-    );
+    // Real first line 9.0.0 (newer than the target). The retained tail is
+    // exactly PROVIDER_CLI_OUTPUT_TAIL_BYTES and starts with a crafted line:
+    // once claiming 0.1.0 (would read as an upgrade), once claiming the pinned
+    // version itself (would read as a noop).
+    for (spoof, parsed) in [("codex-cli 0.1.0", "0.1.0"), ("codex-cli 0.163.0", PINNED)] {
+        let line = format!("{spoof}\n");
+        let padding = treer_protocol::PROVIDER_CLI_OUTPUT_TAIL_BYTES - line.len();
+        write_executable(
+            &fixture.prefix_binary(),
+            &format!(
+                "#!/bin/sh\nprintf 'codex-cli 9.0.0\\n'\nhead -c 40000 /dev/zero | tr '\\0' x\nprintf '\\n{spoof}\\n'\nhead -c {padding} /dev/zero | tr '\\0' y\n"
+            ),
+        );
+        let response = service.check(&fixture.codex_ref()).await.unwrap();
+        assert!(response.truncated, "{response:?}");
+        assert_eq!(response.exit_code, Some(0));
+        // The retained tail does begin with the spoofed line: a parser that
+        // trusted it would have reported `parsed`.
+        assert!(response.stdout.starts_with(spoof), "{spoof}");
+        assert_eq!(
+            treer_protocol::provider_cli_version_from_output(&response.stdout).as_deref(),
+            Some(parsed)
+        );
+        let observation = response.observation.unwrap();
+        assert_eq!(observation.validate(), Ok(()));
+        assert_eq!(observation.state, ProviderCliObservedState::Unknown);
+        assert_eq!(observation.current_version, None);
+        assert_eq!(
+            observation.probe.error_code.as_deref(),
+            Some("provider_cli_probe_output_truncated")
+        );
+        let decision = decide_provider_cli_action(&observation, PINNED).unwrap();
+        assert_eq!(decision.action, ProviderCliAction::Replace);
+        assert_eq!(
+            decision.version_relation,
+            Some(ProviderCliVersionRelation::Unknown),
+            "never upgrade or noop from a truncated tail ({spoof})"
+        );
+    }
 }
 
 /// Process facts come before consent: an observation whose probe left a
@@ -1272,6 +1287,32 @@ async fn unconfirmed_probe_cleanup_issues_no_consent_and_stops_the_operation() {
         "no consent can be issued on an unconfirmed probe"
     );
     assert!(!response.installed);
+
+    // First gate: the detaching binary is already there when the consented
+    // (absent) install is dispatched; nothing runs, not even pack.
+    let id = operation_id(14);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Unknown,
+        "{report:?}"
+    );
+    assert_eq!(report.error_code.as_deref(), Some("cleanup_unconfirmed"));
+    assert_eq!(report.step, Some(1));
+    assert!(
+        fixture.log("argv-pack").is_none(),
+        "first gate spawns nothing"
+    );
+    assert!(report.steps.as_ref().unwrap().is_empty());
 
     // Second gate: the binary planted during pack detaches at probe time.
     fs::remove_file(fixture.prefix_binary()).unwrap();
