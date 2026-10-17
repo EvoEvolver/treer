@@ -361,6 +361,7 @@ mod events;
 mod machines;
 mod messages;
 mod network;
+mod pins;
 mod policy_provider;
 mod route_catalog;
 mod routes;
@@ -427,7 +428,7 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 
 async fn health() -> Json<Value> {
     Json(
-        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2] }),
+        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS] }),
     )
 }
 
@@ -453,6 +454,9 @@ async fn verify_workload_identity(
 #[cfg(test)]
 #[path = "api/app_dist_tests.rs"]
 mod app_dist_tests;
+#[cfg(test)]
+#[path = "api/pins_tests.rs"]
+mod pins_tests;
 #[cfg(test)]
 #[path = "api/provider_cli_tests.rs"]
 mod provider_cli_tests;

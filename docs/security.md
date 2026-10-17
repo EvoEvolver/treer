@@ -200,6 +200,21 @@ or configuration contents. Failed launch retains the newly saved specification.
   Treer workload/operator credential literals in new specifications are rejected. Audit events
   record actor/target IDs, never the command, arguments, or credentials.
 
+## Overview pins
+
+Workspace pins (#140) are shared state: any member who passes the Tree manage
+rule can pin, unpin or displace others' pins within the 50-item limit, and the
+audit log (`tree.pin.create`, `tree.pin.delete`, actor, kind and stable ID
+only) records who did what. Reading needs the Tree read rule, so a member who
+cannot read the Tree cannot enumerate pinned IDs through pins either; the
+response and the `workspace.pins.changed` signal carry no names or paths, and
+the signal grants nothing by itself (clients re-read `GET /pins`, which
+authorises). `can_pin` is a hint computed from the same rule as the write
+routes and false whenever Policy denies or fails; the write routes authorise
+independently. The workspace event stream itself delivers every workspace
+event to every member session without a per-subscriber Policy filter; that
+pre-existing boundary is tracked in #141, not changed here.
+
 ## Provider CLI installation
 
 Installing a provider CLI (Codex, Gemini; others are explicitly unsupported in

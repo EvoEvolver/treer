@@ -597,6 +597,21 @@ fixed text and records the failed creation without PATH, argv or output. A
 missing provider inside an already running launcher is a separate launcher
 status, not inferred from terminal output. This error contract installs nothing.
 
+Workspace-shared Overview pins (#140) live under
+`/api/workspaces/{ws}/pins` (`GET`, `PUT /{kind}/{id}`, `DELETE /{kind}/{id}`,
+human sessions only; capability `workspace.pins.v1` in the Proxy health
+document and `/api/auth/config`). One list per workspace, at most 50 items,
+keyed by stable agent, App or folder IDs in `workspace_pins`; reading needs the
+Tree read rule and writing the Tree manage rule (`agent.tree.manage`, the same
+action as moving or renaming), evaluated per request. Responses carry kind, ID,
+pin time and the pinner's user ID, never names or paths; `can_pin` is a UI hint
+that fails closed. Pin and unpin are serialised with the other Tree mutations
+through the workspace row lock, audited as `tree.pin.create`/`tree.pin.delete`
+only when the list changes, and announced on the workspace event stream as the
+IDs-only signal `workspace.pins.changed`, which clients answer with a fresh
+`GET`. App and folder deletion cascade to pins; agent deletion removes them in
+its own transaction and reads filter on an unrevoked credential.
+
 Provider CLI installation (#123 part 2) is a human-session feature under
 `/api/workspaces/{ws}/machines/{machine}/provider-clis` (`GET recipes`,
 `POST prepare`, `POST install`, `POST check`, `GET operations/{id}`), gated by

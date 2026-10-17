@@ -421,6 +421,14 @@ pub fn router(
             axum::routing::put(set_workload_placement),
         )
         .registered_route(
+            "/api/workspaces/{workspace_id}/pins",
+            get(pins::list_workspace_pins),
+        )
+        .registered_route(
+            "/api/workspaces/{workspace_id}/pins/{kind}/{id}",
+            axum::routing::put(pins::pin_workspace_item).delete(pins::unpin_workspace_item),
+        )
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}",
             get(get_app_deployment).delete(delete_app_deployment),
         )

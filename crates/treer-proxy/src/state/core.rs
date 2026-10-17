@@ -90,6 +90,39 @@ impl AppState {
         self.inner.events.subscribe()
     }
 
+    pub async fn workspace_revision(&self, workspace_id: &str) -> Option<u64> {
+        self.inner
+            .workspaces
+            .read()
+            .await
+            .get(workspace_id)
+            .map(|workspace| workspace.revision)
+    }
+
+    /// Publishes an IDs-only signal event on the workspace stream under a
+    /// fresh revision; the payload is built from that revision. A workspace
+    /// unknown to this Proxy publishes nothing (there is nobody to signal).
+    pub async fn publish_workspace_signal(
+        &self,
+        workspace_id: &str,
+        event: &str,
+        data: impl FnOnce(u64) -> Value,
+    ) -> Option<u64> {
+        let revision = {
+            let mut workspaces = self.inner.workspaces.write().await;
+            let workspace = workspaces.get_mut(workspace_id)?;
+            workspace.revision = workspace.revision.saturating_add(1);
+            workspace.revision
+        };
+        self.publish_workspace_event(WorkspaceEvent {
+            revision,
+            workspace_id: workspace_id.to_string(),
+            event: event.to_string(),
+            data: data(revision),
+        });
+        Some(revision)
+    }
+
     pub async fn allow_server_reenrollment(&self, workspace_id: &str, server_id: &str) {
         if let Some(workspace) = self.inner.workspaces.write().await.get_mut(workspace_id) {
             workspace.deleted_servers.remove(server_id);

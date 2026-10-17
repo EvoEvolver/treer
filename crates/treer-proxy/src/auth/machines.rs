@@ -384,6 +384,14 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
+        // A deleted Agent leaves no shared pin (#140); its credential row is
+        // only revoked, so the foreign key alone would not remove it.
+        sqlx::query("DELETE FROM workspace_pins WHERE workspace_id = $1 AND agent_id = $2")
+            .bind(workspace_id)
+            .bind(agent_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
         sqlx::query(
             "DELETE FROM machine_services WHERE workspace_id = $1 AND target_agent_id = $2",
         )

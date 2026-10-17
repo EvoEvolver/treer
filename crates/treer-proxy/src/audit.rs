@@ -277,6 +277,8 @@ fn workspace_payload(action: &str, payload: &Value) -> Value {
         | "tree.placement.create"
         | "tree.placement.update"
         | "tree.placement.delete"
+        | "tree.pin.create"
+        | "tree.pin.delete"
         | "tree.workload.rename"
         | "service.create"
         | "service.update"

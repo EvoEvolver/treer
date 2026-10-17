@@ -909,3 +909,22 @@ ALTER TABLE provider_cli_operations ADD COLUMN IF NOT EXISTS observation_hash TE
 ALTER TABLE provider_cli_operations ADD COLUMN IF NOT EXISTS observed_state TEXT;
 ALTER TABLE provider_cli_operations ADD COLUMN IF NOT EXISTS observed_version TEXT;
 ALTER TABLE provider_cli_operations ADD COLUMN IF NOT EXISTS observed_in_prefix BOOLEAN;
+
+-- #140: workspace-shared Overview pins keyed by stable IDs. Exactly one target
+-- column is set; App and folder deletion cascade here, agent deletion revokes
+-- its credential row instead of deleting it, so the agent path deletes pins
+-- explicitly and reads also filter on an unrevoked credential.
+CREATE TABLE IF NOT EXISTS workspace_pins (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(workspace_id) ON DELETE CASCADE,
+    agent_id TEXT REFERENCES agent_credentials(agent_id) ON DELETE CASCADE,
+    app_id TEXT REFERENCES app_deployments(app_id) ON DELETE CASCADE,
+    folder_id TEXT,
+    pinned_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    pinned_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    CHECK (num_nonnulls(agent_id, app_id, folder_id) = 1),
+    FOREIGN KEY (workspace_id, folder_id) REFERENCES workload_folders(workspace_id, folder_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS workspace_pins_agent ON workspace_pins(workspace_id, agent_id) WHERE agent_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS workspace_pins_app ON workspace_pins(workspace_id, app_id) WHERE app_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS workspace_pins_folder ON workspace_pins(workspace_id, folder_id) WHERE folder_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS workspace_pins_order ON workspace_pins(workspace_id, pinned_at DESC);
