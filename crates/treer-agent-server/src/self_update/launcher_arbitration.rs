@@ -1,12 +1,15 @@
 //! Serialized in-memory permit arbitration only, NOT execution authority.
 //! The supervisor must authenticate inputs, prove writer closure, inspect EOF
 //! before closing its receiver, and durably register its identity separately.
-//! No caller, transport, process launch, ACK, noexec record or receipt mutation
-//! is implemented here. Public values describe observations, not sealed proofs.
+//! No production caller, authenticated transport, process launch, ACK, noexec
+//! record or receipt mutation is implemented here. The raw transport submodule
+//! reads framing only; public values are observations, not sealed proofs.
 use anyhow::{bail, Result};
 use uuid::Uuid;
 
 use super::hex;
+
+pub mod transport;
 
 /// Metadata binding to one unique attempt, exact intent bytes, and registered
 /// supervisor identity record. Digests must come from independently verified

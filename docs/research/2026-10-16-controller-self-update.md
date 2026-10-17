@@ -737,8 +737,25 @@ buffered permit and partial-frame observations, plus stale bindings/read errors.
 These public observations are ordinary data, **not authenticated proof types**;
 constructing a binding or selecting a decision grants no execution, receipt or
 recovery authority. There is no production caller, OS/channel authentication,
-receiver drain/close, ACK handling, persistence or actual supervisor in this
+authenticated receiver drain/close, ACK handling, persistence or actual supervisor in this
 module. Real-process races and the complete fault matrix remain outstanding.
+
+The raw `launcher_arbitration::transport` reader now separately bounds private
+permit framing: a fixed 152-byte frame plus one overflow-detection byte, under a
+three-second absolute deadline that fragments cannot renew. A complete frame
+requires EOF; malformed, extra or repeated frames fail closed. Empty and partial
+EOF are distinct, and only a complete valid frame contains binding metadata.
+The private observation wrapper borrows the still-open receiver exclusively;
+neither its metadata nor EOF is authenticated authority. Socketpair fixtures
+deliberately retain a live writer after write-half-close to exercise this limit.
+An owned Rust subprocess fixture uses a unique private Unix socket for complete,
+partial and empty streams, waiting for peer exit before reading buffered bytes;
+deadline tests cover an open writer and slow fragments.
+Nonblocking reads and bounded waits enforce the deadline without setting socket
+timeouts after peer exit; deadline expiry never synthesizes an EOF observation.
+This reader has no production caller, peer authentication, writer-disappearance
+proof, arbitration transition, ACK or persistent record. It does not satisfy the
+sealed authenticated proof requirement below or authorize installer execution.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the
