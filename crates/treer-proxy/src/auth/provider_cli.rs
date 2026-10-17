@@ -8,8 +8,10 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use sqlx::Row;
 use treer_protocol::{
-    ProviderCliOperationStatus, ProviderCliRecipeRef, PROVIDER_CLI_CONTROLLER_GRACE_SECONDS,
-    PROVIDER_CLI_MAX_LIVE_TOKENS, PROVIDER_CLI_PREPARES_PER_MINUTE, PROVIDER_CLI_RETENTION_SECONDS,
+    ProviderCliAction, ProviderCliConsent, ProviderCliObservationSummary, ProviderCliObservedState,
+    ProviderCliOperationStatus, ProviderCliRecipeRef, ProviderCliVersionRelation,
+    PROVIDER_CLI_CONTROLLER_GRACE_SECONDS, PROVIDER_CLI_MAX_LIVE_TOKENS,
+    PROVIDER_CLI_PREPARES_PER_MINUTE, PROVIDER_CLI_RETENTION_SECONDS,
     PROVIDER_CLI_TOKEN_TTL_SECONDS,
 };
 use uuid::Uuid;
@@ -34,6 +36,24 @@ impl ProviderCliScope<'_> {
     }
 }
 
+/// The consent a token binds (#134): the action and relation the human saw
+/// and the path-free summary of the observation it was decided on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderCliObservedConsent {
+    pub consent: ProviderCliConsent,
+    pub state: ProviderCliObservedState,
+    pub current_version: Option<String>,
+    pub found_in_prefix: bool,
+}
+
+/// What a Controller report contributes to a terminal transition.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProviderCliFinishDetails<'a> {
+    pub exit_code: Option<i32>,
+    pub argv_hash: Option<&'a str>,
+    pub observed_before: Option<&'a ProviderCliObservationSummary>,
+}
+
 /// Binding recorded with a token and copied to the operation it starts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ProviderCliBinding {
@@ -42,6 +62,9 @@ pub(crate) struct ProviderCliBinding {
     pub controller_source_sha: String,
     /// Hash of the displayed plan's command steps (see `plan_argv_hash`).
     pub argv_hash: String,
+    /// Always present on tokens minted since #134; `None` only on operation
+    /// rows written before observation existed.
+    pub observed: Option<ProviderCliObservedConsent>,
 }
 
 #[derive(Debug, Clone)]
@@ -113,15 +136,116 @@ pub(crate) fn machine_busy() -> AuthFailure {
     )
 }
 
+fn acknowledgement_required() -> AuthFailure {
+    AuthFailure::bad_request(
+        "provider_cli_acknowledgement_required",
+        "This installation replaces an existing CLI with a downgrade or unknown version; acknowledge the shown relation to proceed",
+    )
+}
+
+fn acknowledgement_mismatch() -> AuthFailure {
+    AuthFailure::bad_request(
+        "provider_cli_acknowledgement_mismatch",
+        "The acknowledged relation does not match the prepared installation",
+    )
+}
+
+/// The install request must acknowledge exactly the bound relation when that
+/// relation needs it, and must not carry one otherwise.
+pub(crate) fn acknowledgement_ok(
+    bound: Option<ProviderCliVersionRelation>,
+    acknowledged: Option<ProviderCliVersionRelation>,
+) -> Result<(), AuthFailure> {
+    match (bound, acknowledged) {
+        (Some(relation), None) if relation.requires_acknowledgement() => {
+            Err(acknowledgement_required())
+        }
+        (Some(relation), Some(given)) if relation.requires_acknowledgement() => {
+            if given == relation {
+                Ok(())
+            } else {
+                Err(acknowledgement_mismatch())
+            }
+        }
+        (_, Some(_)) => Err(acknowledgement_mismatch()),
+        (_, None) => Ok(()),
+    }
+}
+
+/// Audit payload: scope, hashes and the path-free observation summary.
 fn binding_payload(binding: &ProviderCliBinding) -> Value {
-    json!({
+    let mut payload = json!({
         "recipe_id": binding.recipe.recipe_id,
         "recipe_version": binding.recipe.recipe_version,
         "recipe_hash": binding.recipe.recipe_hash,
         "table_hash": binding.table_hash,
         "controller_source_sha": binding.controller_source_sha,
         "argv_hash": binding.argv_hash,
-    })
+    });
+    if let Some(observed) = &binding.observed {
+        payload["action"] = Value::String(observed.consent.action.as_str().to_owned());
+        payload["version_relation"] = observed
+            .consent
+            .version_relation
+            .map(|relation| Value::String(relation.as_str().to_owned()))
+            .unwrap_or(Value::Null);
+        payload["observation_hash"] = Value::String(observed.consent.observation_hash.clone());
+        payload["observed_state"] = Value::String(observed.state.as_str().to_owned());
+        payload["observed_version"] = observed
+            .current_version
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null);
+        payload["observed_in_prefix"] = Value::Bool(observed.found_in_prefix);
+    }
+    payload
+}
+
+/// Reads the consent columns shared by token and operation rows.
+fn observed_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<Option<ProviderCliObservedConsent>, AuthFailure> {
+    let action: Option<String> = row.try_get("action").map_err(AuthFailure::database)?;
+    let Some(action) = action else {
+        return Ok(None);
+    };
+    let corrupt = || {
+        AuthFailure::internal(
+            "provider_cli_operation_corrupt",
+            "consent columns hold an unknown value".to_string(),
+        )
+    };
+    let action = ProviderCliAction::parse(&action).ok_or_else(corrupt)?;
+    let relation: Option<String> = row
+        .try_get("version_relation")
+        .map_err(AuthFailure::database)?;
+    let version_relation = match relation {
+        Some(text) => Some(ProviderCliVersionRelation::parse(&text).ok_or_else(corrupt)?),
+        None => None,
+    };
+    let observation_hash: Option<String> = row
+        .try_get("observation_hash")
+        .map_err(AuthFailure::database)?;
+    let state: Option<String> = row
+        .try_get("observed_state")
+        .map_err(AuthFailure::database)?;
+    let state = ProviderCliObservedState::parse(state.as_deref().unwrap_or_default())
+        .ok_or_else(corrupt)?;
+    let found_in_prefix: Option<bool> = row
+        .try_get("observed_in_prefix")
+        .map_err(AuthFailure::database)?;
+    Ok(Some(ProviderCliObservedConsent {
+        consent: ProviderCliConsent {
+            action,
+            version_relation,
+            observation_hash: observation_hash.ok_or_else(corrupt)?,
+        },
+        state,
+        current_version: row
+            .try_get("observed_version")
+            .map_err(AuthFailure::database)?,
+        found_in_prefix: found_in_prefix.unwrap_or(false),
+    }))
 }
 
 fn version_i64(version: u64) -> Result<i64, AuthFailure> {
@@ -160,6 +284,7 @@ fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<ProviderCliOperationReco
                 .try_get::<Option<String>, _>("argv_hash")
                 .map_err(AuthFailure::database)?
                 .unwrap_or_default(),
+            observed: observed_from_row(row)?,
         },
         status,
         error_code: row.try_get("error_code").map_err(AuthFailure::database)?,
@@ -178,7 +303,7 @@ fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<ProviderCliOperationReco
 }
 
 // Timestamps travel as epoch milliseconds: sqlx is built without chrono.
-const OPERATION_COLUMNS: &str = "operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, status, error_code, exit_code, argv_hash, (EXTRACT(EPOCH FROM created_at)*1000)::BIGINT AS created_at_ms, (EXTRACT(EPOCH FROM dispatched_at)*1000)::BIGINT AS dispatched_at_ms, (EXTRACT(EPOCH FROM reported_at)*1000)::BIGINT AS reported_at_ms, (EXTRACT(EPOCH FROM finished_at)*1000)::BIGINT AS finished_at_ms";
+const OPERATION_COLUMNS: &str = "operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, status, error_code, exit_code, argv_hash, action, version_relation, observation_hash, observed_state, observed_version, observed_in_prefix, (EXTRACT(EPOCH FROM created_at)*1000)::BIGINT AS created_at_ms, (EXTRACT(EPOCH FROM dispatched_at)*1000)::BIGINT AS dispatched_at_ms, (EXTRACT(EPOCH FROM reported_at)*1000)::BIGINT AS reported_at_ms, (EXTRACT(EPOCH FROM finished_at)*1000)::BIGINT AS finished_at_ms";
 
 fn timestamp(
     row: &sqlx::postgres::PgRow,
@@ -188,10 +313,77 @@ fn timestamp(
     Ok(millis.and_then(DateTime::from_timestamp_millis))
 }
 
+fn tokens_exhausted() -> AuthFailure {
+    AuthFailure::too_many_requests(
+        "provider_cli_tokens_exhausted",
+        "Too many unconfirmed installations; wait for them to expire",
+    )
+}
+
 impl AuthStore {
+    /// Admits one prepare before the Controller observes anything: at most
+    /// ten attempts per minute and four live tokens per user and machine, by
+    /// database time, counting every attempt whatever its outcome (noop,
+    /// unobservable, refused recipe) so a session cannot make the machine run
+    /// npm and the probe without bound.
+    pub(crate) async fn provider_cli_prepare_begin(
+        &self,
+        scope: &ProviderCliScope<'_>,
+    ) -> Result<(), AuthFailure> {
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!(
+                "provider_cli:{}:{}:{}",
+                scope.workspace_id, scope.server_id, scope.user_id
+            ))
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM provider_cli_prepare_attempts WHERE attempt_id IN (SELECT attempt_id FROM provider_cli_prepare_attempts WHERE attempted_at < CURRENT_TIMESTAMP - INTERVAL '1 hour' LIMIT 100)")
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        let recent: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_cli_prepare_attempts WHERE workspace_id=$1 AND server_id=$2 AND user_id=$3 AND attempted_at > CURRENT_TIMESTAMP - INTERVAL '1 minute'",
+        )
+        .bind(scope.workspace_id)
+        .bind(scope.server_id)
+        .bind(scope.user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if recent >= PROVIDER_CLI_PREPARES_PER_MINUTE {
+            return Err(AuthFailure::too_many_requests(
+                "provider_cli_rate_limited",
+                "Too many installation requests; retry in a minute",
+            ));
+        }
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_cli_install_tokens WHERE workspace_id=$1 AND server_id=$2 AND user_id=$3 AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP",
+        )
+        .bind(scope.workspace_id)
+        .bind(scope.server_id)
+        .bind(scope.user_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
+        if live >= PROVIDER_CLI_MAX_LIVE_TOKENS {
+            return Err(tokens_exhausted());
+        }
+        sqlx::query("INSERT INTO provider_cli_prepare_attempts(workspace_id, server_id, user_id) VALUES($1,$2,$3)")
+            .bind(scope.workspace_id)
+            .bind(scope.server_id)
+            .bind(scope.user_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)
+    }
+
     /// Mints a single-use confirmation token after the caller displayed the
-    /// exact recipe. Limits use database time and shared state so every Proxy
-    /// replica enforces the same ceiling. Returns the plaintext token once.
+    /// exact recipe and observation. `provider_cli_prepare_begin` already
+    /// admitted the attempt; the live-token ceiling is restated here under the
+    /// same lock so concurrent replicas cannot overshoot it.
     pub(crate) async fn provider_cli_prepare(
         &self,
         scope: &ProviderCliScope<'_>,
@@ -212,8 +404,8 @@ impl AuthStore {
             .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
-        let (live, recent): (i64, i64) = sqlx::query_as(
-            "SELECT COUNT(*) FILTER (WHERE consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP), COUNT(*) FILTER (WHERE created_at > CURRENT_TIMESTAMP - INTERVAL '1 minute') FROM provider_cli_install_tokens WHERE workspace_id=$1 AND server_id=$2 AND user_id=$3",
+        let live: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM provider_cli_install_tokens WHERE workspace_id=$1 AND server_id=$2 AND user_id=$3 AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP",
         )
         .bind(scope.workspace_id)
         .bind(scope.server_id)
@@ -222,20 +414,23 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         if live >= PROVIDER_CLI_MAX_LIVE_TOKENS {
-            return Err(AuthFailure::too_many_requests(
-                "provider_cli_tokens_exhausted",
-                "Too many unconfirmed installations; wait for them to expire",
-            ));
+            return Err(tokens_exhausted());
         }
-        if recent >= PROVIDER_CLI_PREPARES_PER_MINUTE {
-            return Err(AuthFailure::too_many_requests(
-                "provider_cli_rate_limited",
-                "Too many installation requests; retry in a minute",
+        let observed = binding.observed.as_ref().ok_or_else(|| {
+            AuthFailure::internal(
+                "provider_cli_consent_missing",
+                "a token requires an observed consent".to_string(),
+            )
+        })?;
+        if observed.consent.action == ProviderCliAction::Noop {
+            return Err(AuthFailure::internal(
+                "provider_cli_consent_missing",
+                "a noop never receives a token".to_string(),
             ));
         }
         let token = new_confirmation_token();
         let expires_at_ms: i64 = sqlx::query_scalar(
-            "INSERT INTO provider_cli_install_tokens(token_hash, workspace_id, server_id, user_id, session_hash, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$12, CURRENT_TIMESTAMP + make_interval(secs => $11)) RETURNING (EXTRACT(EPOCH FROM expires_at)*1000)::BIGINT",
+            "INSERT INTO provider_cli_install_tokens(token_hash, workspace_id, server_id, user_id, session_hash, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, action, version_relation, observation_hash, observed_state, observed_version, observed_in_prefix, expires_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$12,$13,$14,$15,$16,$17,$18, CURRENT_TIMESTAMP + make_interval(secs => $11)) RETURNING (EXTRACT(EPOCH FROM expires_at)*1000)::BIGINT",
         )
         .bind(sha256_hex(&token))
         .bind(scope.workspace_id)
@@ -249,6 +444,12 @@ impl AuthStore {
         .bind(&binding.controller_source_sha)
         .bind(PROVIDER_CLI_TOKEN_TTL_SECONDS as f64)
         .bind(&binding.argv_hash)
+        .bind(observed.consent.action.as_str())
+        .bind(observed.consent.version_relation.map(|relation| relation.as_str()))
+        .bind(&observed.consent.observation_hash)
+        .bind(observed.state.as_str())
+        .bind(&observed.current_version)
+        .bind(observed.found_in_prefix)
         .fetch_one(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
@@ -329,6 +530,7 @@ impl AuthStore {
         &self,
         scope: &ProviderCliScope<'_>,
         confirmation_token: &str,
+        acknowledged_relation: Option<ProviderCliVersionRelation>,
     ) -> Result<ProviderCliOperationRecord, AuthFailure> {
         if !token_shape_ok(confirmation_token) {
             return Err(invalid_token());
@@ -347,7 +549,7 @@ impl AuthStore {
             return Err(machine_busy());
         }
         let consumed = sqlx::query(
-            "UPDATE provider_cli_install_tokens SET consumed_at=CURRENT_TIMESTAMP WHERE token_hash=$1 AND workspace_id=$2 AND server_id=$3 AND user_id=$4 AND session_hash=$5 AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP RETURNING recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash",
+            "UPDATE provider_cli_install_tokens SET consumed_at=CURRENT_TIMESTAMP WHERE token_hash=$1 AND workspace_id=$2 AND server_id=$3 AND user_id=$4 AND session_hash=$5 AND consumed_at IS NULL AND expires_at > CURRENT_TIMESTAMP RETURNING recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, action, version_relation, observation_hash, observed_state, observed_version, observed_in_prefix",
         )
         .bind(sha256_hex(confirmation_token))
         .bind(scope.workspace_id)
@@ -380,10 +582,19 @@ impl AuthStore {
             argv_hash: consumed
                 .try_get("argv_hash")
                 .map_err(AuthFailure::database)?,
+            observed: observed_from_row(&consumed)?,
         };
+        // A token without consent predates observation: never installable.
+        // Any refusal below rolls the transaction back, so the token stays
+        // unconsumed for a corrected request.
+        let observed = binding.observed.clone().ok_or_else(invalid_token)?;
+        if observed.consent.action == ProviderCliAction::Noop {
+            return Err(invalid_token());
+        }
+        acknowledgement_ok(observed.consent.version_relation, acknowledged_relation)?;
         let operation_id = format!("pco_{}", Uuid::new_v4().simple());
         let inserted = sqlx::query(&format!(
-            "INSERT INTO provider_cli_operations(operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, status) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued') RETURNING {OPERATION_COLUMNS}"
+            "INSERT INTO provider_cli_operations(operation_id, workspace_id, server_id, created_by, recipe_id, recipe_version, recipe_hash, table_hash, controller_source_sha, argv_hash, status, action, version_relation, observation_hash, observed_state, observed_version, observed_in_prefix) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'queued',$11,$12,$13,$14,$15,$16) RETURNING {OPERATION_COLUMNS}"
         ))
         .bind(&operation_id)
         .bind(scope.workspace_id)
@@ -395,6 +606,12 @@ impl AuthStore {
         .bind(&binding.table_hash)
         .bind(&binding.controller_source_sha)
         .bind(&binding.argv_hash)
+        .bind(observed.consent.action.as_str())
+        .bind(observed.consent.version_relation.map(|relation| relation.as_str()))
+        .bind(&observed.consent.observation_hash)
+        .bind(observed.state.as_str())
+        .bind(&observed.current_version)
+        .bind(observed.found_in_prefix)
         .fetch_one(&mut *transaction)
         .await;
         let row = match inserted {
@@ -444,10 +661,14 @@ impl AuthStore {
         operation_id: &str,
         status: ProviderCliOperationStatus,
         error_code: Option<&str>,
-        exit_code: Option<i32>,
-        argv_hash: Option<&str>,
+        reported: ProviderCliFinishDetails<'_>,
     ) -> Result<bool, AuthFailure> {
         debug_assert!(status.is_terminal());
+        let ProviderCliFinishDetails {
+            exit_code,
+            argv_hash,
+            observed_before,
+        } = reported;
         let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
         let updated = sqlx::query(&format!(
             "UPDATE provider_cli_operations SET status=$2, error_code=$3, exit_code=$4, argv_hash=COALESCE($5, argv_hash), reported_at=CURRENT_TIMESTAMP, finished_at=CURRENT_TIMESTAMP WHERE operation_id=$1 AND workspace_id=$6 AND server_id=$7 AND status IN ('queued','running','unknown') AND status <> $2 RETURNING {OPERATION_COLUMNS}"
@@ -478,6 +699,15 @@ impl AuthStore {
             .clone()
             .map(Value::String)
             .unwrap_or(Value::Null);
+        if let Some(observed_before) = observed_before {
+            // Path-free by construction (see `ProviderCliObservationSummary`).
+            payload["observed_before"] = json!({
+                "state": observed_before.state.as_str(),
+                "current_version": observed_before.current_version,
+                "found_in_prefix": observed_before.found_in_prefix,
+                "observation_hash": observed_before.observation_hash,
+            });
+        }
         self.provider_cli_audit(
             &mut transaction,
             scope,
@@ -526,10 +756,12 @@ impl AuthStore {
         row_to_record(&row)
     }
 
-    /// Records an outcome-only audit row for a version check (no output).
-    pub(crate) async fn provider_cli_audit_check(
+    /// Records an outcome-only audit row (no output, no path) for a version
+    /// check or a prepare that issued no token (`noop`, unobservable).
+    pub(crate) async fn provider_cli_audit_outcome(
         &self,
         scope: &ProviderCliScope<'_>,
+        event: &str,
         recipe: &ProviderCliRecipeRef,
         payload: Value,
     ) -> Result<(), AuthFailure> {
@@ -538,7 +770,7 @@ impl AuthStore {
         payload["recipe_id"] = Value::String(recipe.recipe_id.clone());
         payload["recipe_version"] = Value::from(recipe.recipe_version);
         payload["recipe_hash"] = Value::String(recipe.recipe_hash.clone());
-        self.provider_cli_audit(&mut transaction, scope, "provider_cli.check", payload)
+        self.provider_cli_audit(&mut transaction, scope, event, payload)
             .await?;
         transaction.commit().await.map_err(AuthFailure::database)
     }
@@ -599,6 +831,43 @@ impl AuthStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn acknowledgement_must_match_the_bound_relation_exactly() {
+        use ProviderCliVersionRelation::*;
+        assert!(acknowledgement_ok(None, None).is_ok());
+        assert!(acknowledgement_ok(Some(Upgrade), None).is_ok());
+        assert_eq!(
+            acknowledgement_ok(Some(Upgrade), Some(Upgrade))
+                .unwrap_err()
+                .code(),
+            "provider_cli_acknowledgement_mismatch"
+        );
+        assert_eq!(
+            acknowledgement_ok(None, Some(Downgrade))
+                .unwrap_err()
+                .code(),
+            "provider_cli_acknowledgement_mismatch"
+        );
+        for relation in [Downgrade, Incomparable, Unknown] {
+            assert_eq!(
+                acknowledgement_ok(Some(relation), None).unwrap_err().code(),
+                "provider_cli_acknowledgement_required"
+            );
+            assert!(acknowledgement_ok(Some(relation), Some(relation)).is_ok());
+            let other = if relation == Downgrade {
+                Unknown
+            } else {
+                Downgrade
+            };
+            assert_eq!(
+                acknowledgement_ok(Some(relation), Some(other))
+                    .unwrap_err()
+                    .code(),
+                "provider_cli_acknowledgement_mismatch"
+            );
+        }
+    }
 
     #[test]
     fn confirmation_tokens_have_a_fixed_shape_and_hash_once() {

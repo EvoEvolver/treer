@@ -6,15 +6,19 @@
 use chrono::Utc;
 use serde::de::DeserializeOwned;
 use treer_protocol::{
-    ProviderCliCheckResponse, ProviderCliInstallAccepted, ProviderCliInstallRequest,
-    ProviderCliInstallResponse, ProviderCliOperationReport, ProviderCliOperationResponse,
+    decide_provider_cli_action, ProviderCliAction, ProviderCliCheckResponse, ProviderCliConsent,
+    ProviderCliInstallAccepted, ProviderCliInstallRequest, ProviderCliInstallResponse,
+    ProviderCliObservation, ProviderCliOperationReport, ProviderCliOperationResponse,
     ProviderCliOperationStatus, ProviderCliPrepareResponse, ProviderCliRecipeRef,
     ProviderCliRecipesResponse, CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL,
-    PROVIDER_CLI_POLL_AFTER_MS,
+    CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, PROVIDER_CLI_POLL_AFTER_MS,
 };
 
 use super::*;
-use crate::auth::{ProviderCliBinding, ProviderCliOperationRecord, ProviderCliScope};
+use crate::auth::{
+    ProviderCliBinding, ProviderCliFinishDetails, ProviderCliObservedConsent,
+    ProviderCliOperationRecord, ProviderCliScope,
+};
 
 async fn provider_cli_scope(
     state: &AppState,
@@ -62,6 +66,60 @@ fn unsupported() -> ApiFailure {
     }
 }
 
+/// A Controller that installs without observing (v1 only) must be updated;
+/// the Proxy never falls back to the unobserved consent flow.
+fn controller_outdated() -> ApiFailure {
+    ApiFailure {
+        status: StatusCode::CONFLICT,
+        error: ProtocolError::new(
+            "provider_cli_controller_outdated",
+            "This machine's Controller predates installation observation; update the machine first",
+        ),
+    }
+}
+
+/// The machine's observation left a process behind: its output is not
+/// evidence, and no consent is issued on it.
+fn probe_unconfirmed() -> ApiFailure {
+    ApiFailure {
+        status: StatusCode::CONFLICT,
+        error: ProtocolError::new(
+            "provider_cli_probe_unconfirmed",
+            "The machine's version probe left a process behind, so the existing installation state is not confirmed; nothing was issued",
+        ),
+    }
+}
+
+fn state_unobservable() -> ApiFailure {
+    ApiFailure {
+        status: StatusCode::CONFLICT,
+        error: ProtocolError::new(
+            "provider_cli_state_unobservable",
+            "The machine could not resolve its npm global prefix, so the existing installation state is unknown; nothing can be installed until a check succeeds",
+        ),
+    }
+}
+
+/// Both provider-CLI capabilities present: the Controller observes before it
+/// installs. v1 alone is outdated; neither is unsupported.
+async fn require_observing_controller(
+    state: &AppState,
+    workspace_id: &str,
+    server_id: &str,
+) -> Result<(), ApiFailure> {
+    let capabilities = state
+        .server_capabilities(workspace_id, server_id)
+        .await
+        .map_err(controller_failure)?;
+    if !capabilities.contains(CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL) {
+        return Err(unsupported());
+    }
+    if !capabilities.contains(CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2) {
+        return Err(controller_outdated());
+    }
+    Ok(())
+}
+
 fn machine_offline() -> ApiFailure {
     ApiFailure::service_unavailable(
         "provider_cli_machine_offline",
@@ -98,6 +156,7 @@ fn controller_failure(error: ProtocolError) -> ApiFailure {
         | "provider_cli_operation_conflict" => StatusCode::CONFLICT,
         "provider_cli_recipe_unsupported"
         | "provider_cli_recipe_invalid"
+        | "provider_cli_consent_invalid"
         | "provider_cli_platform_unsupported" => StatusCode::BAD_REQUEST,
         "provider_cli_table_invalid" | "provider_cli_storage_exhausted" => {
             StatusCode::SERVICE_UNAVAILABLE
@@ -157,6 +216,61 @@ async fn controller_recipes(
     parse_controller(value)
 }
 
+/// Runs the Controller's observation (its check) and requires the v2 shape.
+async fn controller_observation(
+    state: &AppState,
+    workspace_id: &str,
+    server_id: &str,
+    reference: &ProviderCliRecipeRef,
+) -> Result<(ProviderCliCheckResponse, ProviderCliObservation), ApiFailure> {
+    let value = state
+        .send_command(
+            workspace_id,
+            server_id,
+            AgentCommand::ProviderCliCheck {
+                recipe: reference.clone(),
+            },
+        )
+        .await
+        .map_err(controller_failure)?;
+    let response: ProviderCliCheckResponse = parse_controller(value)?;
+    let observation = response
+        .observation
+        .clone()
+        .ok_or_else(controller_outdated)?;
+    // The Controller's observation is input, not truth: it is stored, audited
+    // and shown, so its shape is checked here and a bad one fails closed.
+    validate_observation(&observation, workspace_id, server_id)?;
+    Ok((response, observation))
+}
+
+fn validate_observation(
+    observation: &ProviderCliObservation,
+    workspace_id: &str,
+    server_id: &str,
+) -> Result<(), ApiFailure> {
+    if let Err(reason) = observation.validate() {
+        tracing::warn!(%workspace_id, %server_id, reason, "Controller returned a malformed provider CLI observation");
+        return Err(ApiFailure::bad_gateway(
+            "provider_cli_controller_error",
+            "Controller returned an unexpected provider CLI response",
+        ));
+    }
+    Ok(())
+}
+
+/// Audit payload for an observation: classification only, never the path.
+fn observation_payload(observation: &ProviderCliObservation) -> Value {
+    json!({
+        "observed_state": observation.state.as_str(),
+        "observed_version": observation.current_version,
+        "observed_in_prefix": observation.found_in_prefix,
+        "probe_exit_code": observation.probe.exit_code,
+        "probe_timed_out": observation.probe.timed_out,
+        "probe_error_code": observation.probe.error_code,
+    })
+}
+
 /// `GET .../provider-clis/recipes`: the machine-scoped table with the exact
 /// plan each supported entry would run; unsupported entries carry a reason.
 pub(crate) async fn provider_cli_recipes(
@@ -173,8 +287,10 @@ pub(crate) async fn provider_cli_recipes(
 }
 
 /// `POST .../provider-clis/prepare`: re-reads the Controller's current table,
-/// refuses a changed or unsupported recipe, and mints a short-lived single-use
-/// confirmation token bound to this user, session, recipe and Controller.
+/// refuses a changed or unsupported recipe, observes what the install would
+/// overwrite, decides the one action the human may consent to, and (unless
+/// that action is `noop`) mints a short-lived single-use confirmation token
+/// bound to this user, session, recipe, Controller, plan and observation.
 pub(crate) async fn provider_cli_prepare(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -185,6 +301,11 @@ pub(crate) async fn provider_cli_prepare(
 ) -> Result<Json<ProviderCliPrepareResponse>, ApiFailure> {
     provider_cli_scope(&state, &auth, &policy, &session, &workspace_id, &server_id).await?;
     validate_recipe_ref(&reference)?;
+    require_observing_controller(&state, &workspace_id, &server_id).await?;
+    // Admission (rate and live-token ceilings) precedes every Controller
+    // command: noop and unobservable prepares make the machine run npm too.
+    let scope = scope(&session, &workspace_id, &server_id);
+    auth.provider_cli_prepare_begin(&scope).await?;
     let recipes = controller_recipes(&state, &workspace_id, &server_id).await?;
     let recipe = recipes
         .recipes
@@ -201,28 +322,87 @@ pub(crate) async fn provider_cli_prepare(
                 "Recipe is unknown or changed on this machine; reload the recipes",
             ),
         })?;
-    let Some(plan) = recipe.plan.as_deref().filter(|_| recipe.supported) else {
+    let (Some(plan), Some(package)) = (
+        recipe.plan.as_deref().filter(|_| recipe.supported),
+        recipe.package.as_ref(),
+    ) else {
         return Err(ApiFailure::bad_request(
             "provider_cli_recipe_unsupported",
             "This recipe cannot be installed on this machine",
         ));
     };
+    let target_version = package.version.clone();
+    let (_, observation) =
+        controller_observation(&state, &workspace_id, &server_id, &reference).await?;
+    let observation_hash = observation.hash(&reference.recipe_hash, &target_version);
+    let Some(decision) = decide_provider_cli_action(&observation, &target_version) else {
+        let unconfirmed = !observation.probe.cleanup_confirmed;
+        let mut payload = observation_payload(&observation);
+        payload["outcome"] = Value::String(
+            if unconfirmed {
+                "probe_unconfirmed"
+            } else {
+                "unobservable"
+            }
+            .into(),
+        );
+        if let Err(error) = auth
+            .provider_cli_audit_outcome(&scope, "provider_cli.prepare", &reference, payload)
+            .await
+        {
+            tracing::warn!(code = error.code(), %workspace_id, %server_id, "failed to record provider CLI prepare audit event");
+        }
+        return Err(if unconfirmed {
+            probe_unconfirmed()
+        } else {
+            state_unobservable()
+        });
+    };
+    let mut response = ProviderCliPrepareResponse {
+        confirmation_token: None,
+        expires_at: None,
+        machine_id: server_id.clone(),
+        table_hash: recipes.table_hash.clone(),
+        recipe: recipe.clone(),
+        action: decision.action,
+        version_relation: decision.version_relation,
+        target_version: target_version.clone(),
+        observation: observation.clone(),
+        observation_hash: observation_hash.clone(),
+    };
+    if decision.action == ProviderCliAction::Noop {
+        // Nothing would change: no token, no operation, no slot, no count.
+        let mut payload = observation_payload(&observation);
+        payload["action"] = Value::String("noop".into());
+        payload["observation_hash"] = Value::String(observation_hash);
+        if let Err(error) = auth
+            .provider_cli_audit_outcome(&scope, "provider_cli.prepare", &reference, payload)
+            .await
+        {
+            tracing::warn!(code = error.code(), %workspace_id, %server_id, "failed to record provider CLI prepare audit event");
+        }
+        return Ok(Json(response));
+    }
     let binding = ProviderCliBinding {
         recipe: reference,
         table_hash: recipes.table_hash.clone(),
         controller_source_sha: recipes.controller_source_sha.clone(),
         argv_hash: treer_protocol::plan_argv_hash(plan),
+        observed: Some(ProviderCliObservedConsent {
+            consent: ProviderCliConsent {
+                action: decision.action,
+                version_relation: decision.version_relation,
+                observation_hash,
+            },
+            state: observation.state,
+            current_version: observation.current_version.clone(),
+            found_in_prefix: observation.found_in_prefix,
+        }),
     };
-    let (confirmation_token, expires_at) = auth
-        .provider_cli_prepare(&scope(&session, &workspace_id, &server_id), &binding)
-        .await?;
-    Ok(Json(ProviderCliPrepareResponse {
-        confirmation_token,
-        expires_at: expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
-        machine_id: server_id,
-        table_hash: recipes.table_hash,
-        recipe: recipe.clone(),
-    }))
+    let (confirmation_token, expires_at) = auth.provider_cli_prepare(&scope, &binding).await?;
+    response.confirmation_token = Some(confirmation_token);
+    response.expires_at = Some(expires_at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true));
+    Ok(Json(response))
 }
 
 /// `POST .../provider-clis/install`: consumes the token and inserts the unique
@@ -238,17 +418,26 @@ pub(crate) async fn provider_cli_install(
     Json(request): Json<ProviderCliInstallRequest>,
 ) -> Result<Json<ProviderCliInstallResponse>, ApiFailure> {
     provider_cli_scope(&state, &auth, &policy, &session, &workspace_id, &server_id).await?;
-    let capabilities = state
-        .server_capabilities(&workspace_id, &server_id)
-        .await
-        .map_err(controller_failure)?;
-    if !capabilities.contains(CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL) {
-        return Err(unsupported());
-    }
+    require_observing_controller(&state, &workspace_id, &server_id).await?;
     let scope = scope(&session, &workspace_id, &server_id);
     let record = auth
-        .provider_cli_accept(&scope, &request.confirmation_token)
+        .provider_cli_accept(
+            &scope,
+            &request.confirmation_token,
+            request.acknowledged_relation,
+        )
         .await?;
+    let consent = record
+        .binding
+        .observed
+        .as_ref()
+        .map(|observed| observed.consent.clone())
+        .ok_or_else(|| {
+            ApiFailure::internal(
+                "provider_cli_consent_missing",
+                "accepted operation lacks its consent",
+            )
+        })?;
     let dispatch = state
         .send_command(
             &workspace_id,
@@ -258,6 +447,7 @@ pub(crate) async fn provider_cli_install(
                 recipe: record.binding.recipe.clone(),
                 table_hash: record.binding.table_hash.clone(),
                 argv_hash: record.binding.argv_hash.clone(),
+                consent,
             },
         )
         .await;
@@ -376,8 +566,11 @@ async fn finish(
             &record.operation_id,
             status,
             Some(error_code).filter(|code| !code.is_empty()),
-            report.and_then(|report| report.exit_code),
-            report.map(|report| report.argv_hash.as_str()),
+            ProviderCliFinishDetails {
+                exit_code: report.and_then(|report| report.exit_code),
+                argv_hash: report.map(|report| report.argv_hash.as_str()),
+                observed_before: report.and_then(|report| report.observed_before.as_ref()),
+            },
         )
         .await;
     if let Err(error) = result {
@@ -408,17 +601,30 @@ pub(crate) async fn provider_cli_check(
         .await
         .map_err(controller_failure)?;
     let response: ProviderCliCheckResponse = parse_controller(value)?;
+    if let Some(observation) = &response.observation {
+        validate_observation(observation, &workspace_id, &server_id)?;
+    }
+    let mut payload = json!({
+        "installed": response.installed,
+        "found_in_prefix": response.found_in_prefix,
+        "exit_code": response.exit_code,
+        "timed_out": response.timed_out,
+        "error_code": response.error_code,
+    });
+    if let Some(observation) = &response.observation {
+        payload["observed_state"] = Value::String(observation.state.as_str().to_owned());
+        payload["observed_version"] = observation
+            .current_version
+            .clone()
+            .map(Value::String)
+            .unwrap_or(Value::Null);
+    }
     if let Err(error) = auth
-        .provider_cli_audit_check(
+        .provider_cli_audit_outcome(
             &scope(&session, &workspace_id, &server_id),
+            "provider_cli.check",
             &reference,
-            json!({
-                "installed": response.installed,
-                "found_in_prefix": response.found_in_prefix,
-                "exit_code": response.exit_code,
-                "timed_out": response.timed_out,
-                "error_code": response.error_code,
-            }),
+            payload,
         )
         .await
     {
@@ -577,5 +783,31 @@ fn operation_response(
         steps: output.and_then(|report| report.steps.clone()),
         plan: output.and_then(|report| report.plan.clone()),
         poll_after_ms: (!terminal).then_some(PROVIDER_CLI_POLL_AFTER_MS),
+        action: record
+            .binding
+            .observed
+            .as_ref()
+            .map(|observed| observed.consent.action),
+        version_relation: record
+            .binding
+            .observed
+            .as_ref()
+            .and_then(|observed| observed.consent.version_relation),
+        observation_hash: record
+            .binding
+            .observed
+            .as_ref()
+            .map(|observed| observed.consent.observation_hash.clone()),
+        observed_state: record
+            .binding
+            .observed
+            .as_ref()
+            .map(|observed| observed.state),
+        observed_version: record
+            .binding
+            .observed
+            .as_ref()
+            .and_then(|observed| observed.current_version.clone()),
+        observed_before: report.and_then(|report| report.observed_before.clone()),
     }
 }

@@ -613,19 +613,36 @@ pub struct ProviderCliRecipesResponse {
     pub recipes: Vec<ProviderCliRecipeView>,
 }
 
+/// Prepare result (#134): the observed installation state, the one action the
+/// human may consent to and, unless the action is `noop`, the token bound to
+/// exactly that observation, action and relation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCliPrepareResponse {
-    pub confirmation_token: String,
-    pub expires_at: String,
+    /// Absent for `noop`: nothing would change, so nothing can be confirmed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confirmation_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
     pub machine_id: String,
     pub table_hash: String,
     pub recipe: ProviderCliRecipeView,
+    pub action: crate::ProviderCliAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_relation: Option<crate::ProviderCliVersionRelation>,
+    /// The recipe's pinned package version, repeated for display.
+    pub target_version: String,
+    pub observation: crate::ProviderCliObservation,
+    pub observation_hash: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderCliInstallRequest {
     pub confirmation_token: String,
+    /// Required and equal to the prepared `version_relation` when that relation
+    /// is `downgrade`, `incomparable` or `unknown`; forbidden otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_relation: Option<crate::ProviderCliVersionRelation>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -704,6 +721,9 @@ pub struct ProviderCliCheckResponse {
     /// profile that wants the exact executable; Treer never edits PATH.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub executable: Option<String>,
+    /// Evidence-based classification (#134); v1 Controllers omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation: Option<crate::ProviderCliObservation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -739,6 +759,17 @@ pub struct ProviderCliOperationReport {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Vec<ProviderCliPlanStep>>,
     pub argv_hash: String,
+    /// Consent the operation was dispatched with (#134; v1 records omit it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<crate::ProviderCliAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_relation: Option<crate::ProviderCliVersionRelation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_hash: Option<String>,
+    /// The latest observation the Controller compared against the consent;
+    /// on `provider_cli_state_changed` it is the one that differed. No path.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_before: Option<crate::ProviderCliObservationSummary>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -764,6 +795,20 @@ pub struct ProviderCliOperationResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<Vec<ProviderCliPlanStep>>,
     pub poll_after_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<crate::ProviderCliAction>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version_relation: Option<crate::ProviderCliVersionRelation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observation_hash: Option<String>,
+    /// Observation the consent was given on (from the Proxy row, path-free).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_state: Option<crate::ProviderCliObservedState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_version: Option<String>,
+    /// The Controller's latest comparison observation, when it reported one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_before: Option<crate::ProviderCliObservationSummary>,
 }
 
 #[cfg(test)]

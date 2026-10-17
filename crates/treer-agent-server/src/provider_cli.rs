@@ -30,11 +30,13 @@ use sha2::{Digest, Sha512};
 use tokio::io::AsyncReadExt;
 use tracing::warn;
 use treer_protocol::{
-    plan_argv_hash, ProtocolError, ProviderCliCheckResponse, ProviderCliInstallAccepted,
-    ProviderCliLifecycleScripts, ProviderCliOperationReport, ProviderCliOperationStatus,
-    ProviderCliPackage, ProviderCliPlanStep, ProviderCliRecipeRef, ProviderCliRecipeView,
-    ProviderCliRecipesResponse, ProviderCliStepResult, ValidatedProviderRecipe,
-    ValidatedProviderTable, PROVIDER_CLI_CHECK_TIMEOUT_SECONDS,
+    plan_argv_hash, provider_cli_version_from_output, provider_cli_version_text, ProtocolError,
+    ProviderCheck, ProviderCliAction, ProviderCliCheckResponse, ProviderCliConsent,
+    ProviderCliInstallAccepted, ProviderCliLifecycleScripts, ProviderCliObservation,
+    ProviderCliObservationSummary, ProviderCliObservedState, ProviderCliOperationReport,
+    ProviderCliOperationStatus, ProviderCliPackage, ProviderCliPlanStep, ProviderCliProbe,
+    ProviderCliRecipeRef, ProviderCliRecipeView, ProviderCliRecipesResponse, ProviderCliStepResult,
+    ValidatedProviderRecipe, ValidatedProviderTable, PROVIDER_CLI_CHECK_TIMEOUT_SECONDS,
     PROVIDER_CLI_OPERATION_DEADLINE_SECONDS, PROVIDER_CLI_OUTPUT_TAIL_BYTES,
     PROVIDER_CLI_RETAINED_OPERATIONS, PROVIDER_CLI_RETENTION_SECONDS,
 };
@@ -56,7 +58,6 @@ const MAX_TARBALL_BYTES: u64 = 256 * 1024 * 1024;
 /// How long readers may lag after the step's own process exited before the
 /// surviving pipe holder is treated as an unconfirmed descendant.
 const DESCENDANT_GRACE: Duration = Duration::from_secs(10);
-const MAX_VERSION_TEXT: usize = 200;
 
 pub fn release_platform() -> Option<&'static str> {
     Some(match (std::env::consts::OS, std::env::consts::ARCH) {
@@ -256,6 +257,13 @@ struct StoredOperation {
     #[serde(default)]
     steps: Vec<ProviderCliStepResult>,
     plan: Vec<ProviderCliPlanStep>,
+    /// Consent the operation was dispatched with (#134); absent on records
+    /// written before the Controller observed installations.
+    #[serde(default)]
+    consent: Option<ProviderCliConsent>,
+    /// Latest observation compared against the consent, path-free.
+    #[serde(default)]
+    observed_before: Option<ProviderCliObservationSummary>,
 }
 
 impl StoredOperation {
@@ -288,6 +296,16 @@ impl StoredOperation {
             steps: terminal.then(|| self.steps.clone()),
             plan: terminal.then(|| self.plan.clone()),
             argv_hash: self.argv_hash.clone(),
+            action: self.consent.as_ref().map(|consent| consent.action),
+            version_relation: self
+                .consent
+                .as_ref()
+                .and_then(|consent| consent.version_relation),
+            observation_hash: self
+                .consent
+                .as_ref()
+                .map(|consent| consent.observation_hash.clone()),
+            observed_before: self.observed_before.clone(),
         }
     }
 }
@@ -418,6 +436,9 @@ struct Inner {
     /// machine exec allowlist's PATH. Tests point it at a fixture npm.
     search_path: Option<OsString>,
     store: Mutex<Store>,
+    /// Operation budget; production uses the protocol constant, tests shrink
+    /// it to prove that nothing spawns once it is spent.
+    operation_budget: Mutex<Duration>,
 }
 
 /// Controller-owned provider CLI service; cheap to clone, one per Controller.
@@ -483,8 +504,28 @@ impl ProviderCliService {
                 table,
                 search_path,
                 store: Mutex::new(store),
+                operation_budget: Mutex::new(Duration::from_secs(
+                    PROVIDER_CLI_OPERATION_DEADLINE_SECONDS,
+                )),
             }),
         }
+    }
+
+    fn operation_budget(&self) -> Duration {
+        *self
+            .inner
+            .operation_budget
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_operation_budget(&self, budget: Duration) {
+        *self
+            .inner
+            .operation_budget
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = budget;
     }
 
     /// Advertised only when the embedded table validated on a known platform.
@@ -647,75 +688,48 @@ impl ProviderCliService {
             &job,
             self.search_path().as_deref(),
         );
-        let deadline = Instant::now() + Duration::from_secs(PROVIDER_CLI_CHECK_TIMEOUT_SECONDS * 2);
         let check = entry
             .recipe
             .check
             .as_ref()
             .expect("supported entry has check");
-        let outcome = async {
-            let prefix_step = plan
-                .iter()
-                .find(|step| matches!(step, ProviderCliPlanStep::Command { purpose, .. } if purpose == "prefix"))
-                .cloned()
-                .expect("plan has prefix step");
-            let prefix = run_step(&prefix_step, &environment, &job, deadline).await;
-            let Some(prefix_path) = parse_prefix(&prefix) else {
-                return ProviderCliCheckResponse {
-                    installed: false,
-                    found_in_prefix: false,
-                    version: None,
-                    exit_code: prefix.exit_code,
-                    timed_out: prefix.timed_out,
-                    stdout: String::new(),
-                    stderr: prefix.stderr,
-                    truncated: prefix.truncated,
-                    error_code: Some("provider_cli_prefix_unresolved".into()),
-                    executable: None,
-                };
-            };
-            let Some(step) = resolve_check(&prefix_path, &check.executable, &check.args) else {
-                return ProviderCliCheckResponse {
-                    installed: false,
-                    found_in_prefix: false,
-                    version: None,
-                    exit_code: None,
-                    timed_out: false,
-                    stdout: String::new(),
-                    stderr: String::new(),
-                    truncated: false,
-                    error_code: Some("provider_cli_binary_not_found".into()),
-                    executable: None,
-                };
-            };
-            let probe = run_step(
-                &step,
-                &environment,
-                &job,
-                Instant::now() + Duration::from_secs(PROVIDER_CLI_CHECK_TIMEOUT_SECONDS),
-            )
-            .await;
-            let installed = probe.exit_code == Some(0) && probe.cleanup_confirmed;
-            let executable = match &step {
-                ProviderCliPlanStep::Command { executable, .. } => Some(executable.clone()),
-                _ => None,
-            };
-            ProviderCliCheckResponse {
-                installed,
-                found_in_prefix: true,
-                version: installed.then(|| version_text(&probe.stdout)),
-                exit_code: probe.exit_code,
-                timed_out: probe.timed_out,
-                stdout: probe.stdout,
-                stderr: probe.stderr,
-                truncated: probe.truncated,
-                error_code: (!probe.cleanup_confirmed).then(|| "cleanup_unconfirmed".to_owned()),
-                executable,
-            }
-        }
+        let observed = observe(
+            &plan,
+            check,
+            &environment,
+            &job,
+            Instant::now() + Duration::from_secs(PROVIDER_CLI_CHECK_TIMEOUT_SECONDS * 2),
+        )
         .await;
+        let outcome = observed.outcome;
+        let observation = observed.observation;
+        let probe_succeeded = observation.probe.exit_code == Some(0)
+            && observation.probe.cleanup_confirmed
+            && observed.probed;
+        let response = ProviderCliCheckResponse {
+            installed: probe_succeeded,
+            found_in_prefix: observation.found_in_prefix,
+            version: probe_succeeded
+                .then(|| version_text(&outcome.stdout))
+                .filter(|text| !text.is_empty()),
+            exit_code: outcome.exit_code,
+            timed_out: outcome.timed_out,
+            stdout: if observed.probed {
+                outcome.stdout
+            } else {
+                String::new()
+            },
+            stderr: outcome.stderr,
+            truncated: outcome.truncated,
+            error_code: observation.probe.error_code.clone(),
+            executable: observed
+                .probed
+                .then(|| observation.executable.clone())
+                .flatten(),
+            observation: Some(observation),
+        };
         drop(job_dir);
-        Ok(outcome)
+        Ok(response)
     }
 
     /// Records and starts an installation. Returns once the record is durable
@@ -726,11 +740,18 @@ impl ProviderCliService {
         reference: &ProviderCliRecipeRef,
         table_hash: &str,
         argv_hash: &str,
+        consent: &ProviderCliConsent,
     ) -> Result<ProviderCliInstallAccepted, ProtocolError> {
         if !operation_id_ok(operation_id) {
             return Err(ProtocolError::new(
                 "provider_cli_recipe_invalid",
                 "operation ID is invalid",
+            ));
+        }
+        if !consent_shape_ok(consent) {
+            return Err(ProtocolError::new(
+                "provider_cli_consent_invalid",
+                "the confirmed action cannot be installed",
             ));
         }
         let (table, platform) = self.table()?;
@@ -800,6 +821,8 @@ impl ProviderCliService {
                 error_code: None,
                 steps: Vec::new(),
                 plan: plan.clone(),
+                consent: Some(consent.clone()),
+                observed_before: None,
             });
             if let Err(error) = store.persist() {
                 store.operations.pop();
@@ -813,8 +836,20 @@ impl ProviderCliService {
             .check
             .clone()
             .expect("supported entry has check");
+        let target = ConsentTarget {
+            consent: consent.clone(),
+            recipe_hash: entry.recipe_hash.clone(),
+            target_version: entry
+                .recipe
+                .install
+                .as_ref()
+                .map(|install| install.version.clone())
+                .unwrap_or_default(),
+        };
         tokio::spawn(async move {
-            service.run_operation(&spawned_id, plan, job, check).await;
+            service
+                .run_operation(&spawned_id, plan, job, check, target)
+                .await;
         });
         Ok(ProviderCliInstallAccepted {
             operation_id: operation_id.to_owned(),
@@ -855,15 +890,64 @@ impl ProviderCliService {
         }
     }
 
+    /// Re-observes the prefix under the operation's own deadline and decides
+    /// whether the next step may run. Runs before any mutation and again
+    /// immediately before the install step. Process facts come first: an
+    /// observation whose descendants were not confirmed gone stops the
+    /// operation as `unknown` (nothing after it may spawn), an exhausted
+    /// budget stops it as timed out, and only then is the consent compared.
+    /// The remaining window is a TOCTOU between this observation and npm
+    /// writing the prefix, bounded by the operation budget, not by a
+    /// millisecond promise.
+    async fn consent_gate(&self, operation_id: &str, gate: &GateContext<'_>) -> ConsentGate {
+        let GateContext {
+            plan,
+            check,
+            environment,
+            job,
+            target,
+            deadline,
+        } = *gate;
+        if Instant::now() >= deadline {
+            return ConsentGate::Expired;
+        }
+        let observed = observe(plan, check, environment, job, deadline).await;
+        let summary = observed
+            .observation
+            .summary(&target.recipe_hash, &target.target_version);
+        self.update(operation_id, |record| {
+            record.observed_before = Some(summary);
+        });
+        if !observed.observation.probe.cleanup_confirmed {
+            return ConsentGate::Unconfirmed;
+        }
+        // Only the operation budget expires the operation; a single probe
+        // that hung within budget is an unknown observation and fails the
+        // comparison below as a state change.
+        if Instant::now() >= deadline {
+            return ConsentGate::Expired;
+        }
+        if target.consent.matches(
+            &observed.observation,
+            &target.recipe_hash,
+            &target.target_version,
+        ) {
+            ConsentGate::Holds
+        } else {
+            ConsentGate::Changed
+        }
+    }
+
     async fn run_operation(
         &self,
         operation_id: &str,
         plan: Vec<ProviderCliPlanStep>,
         job: PathBuf,
-        check: treer_protocol::ProviderCheck,
+        check: ProviderCheck,
+        target: ConsentTarget,
     ) {
         let started = Instant::now();
-        let deadline = started + Duration::from_secs(PROVIDER_CLI_OPERATION_DEADLINE_SECONDS);
+        let deadline = started + self.operation_budget();
         let job_dir = match JobDirectory::create(&job) {
             Ok(dir) => dir,
             Err(error) => {
@@ -911,6 +995,43 @@ impl ProviderCliService {
                     });
                 }
                 ProviderCliPlanStep::Command { purpose, .. } => {
+                    // The consent gate: once before anything runs and once
+                    // right before the step that rewrites the global prefix.
+                    if purpose == "pack" || purpose == "install" {
+                        let gate = self
+                            .consent_gate(
+                                operation_id,
+                                &GateContext {
+                                    plan: &plan,
+                                    check: &check,
+                                    environment: &environment,
+                                    job: &job,
+                                    target: &target,
+                                    deadline,
+                                },
+                            )
+                            .await;
+                        let stop = match gate {
+                            ConsentGate::Holds => None,
+                            ConsentGate::Unconfirmed => {
+                                Some((ProviderCliOperationStatus::Unknown, "cleanup_unconfirmed"))
+                            }
+                            ConsentGate::Expired => Some((
+                                ProviderCliOperationStatus::TimedOut,
+                                "provider_cli_deadline",
+                            )),
+                            ConsentGate::Changed => Some((
+                                ProviderCliOperationStatus::Failed,
+                                "provider_cli_state_changed",
+                            )),
+                        };
+                        if let Some((status, code)) = stop {
+                            final_status = status;
+                            error_code = Some(code);
+                            timed_out |= status == ProviderCliOperationStatus::TimedOut;
+                            break;
+                        }
+                    }
                     let outcome = run_step(step, &environment, &job, deadline).await;
                     let (status, code) = classify(&outcome, purpose);
                     last_exit = outcome.exit_code;
@@ -1010,16 +1131,202 @@ fn operation_id_ok(value: &str) -> bool {
 }
 
 fn version_text(stdout: &str) -> String {
-    let line = stdout
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    let cleaned: String = line
-        .chars()
-        .filter(|c| !c.is_control())
-        .take(MAX_VERSION_TEXT)
-        .collect();
-    cleaned.trim().to_owned()
+    provider_cli_version_text(stdout).unwrap_or_default()
+}
+
+fn consent_shape_ok(consent: &ProviderCliConsent) -> bool {
+    consent.action != ProviderCliAction::Noop
+        && consent.observation_hash.len() == 64
+        && consent
+            .observation_hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// What a running operation compares fresh observations against.
+struct ConsentTarget {
+    consent: ProviderCliConsent,
+    recipe_hash: String,
+    target_version: String,
+}
+
+/// Everything one consent gate needs besides the operation ID.
+#[derive(Clone, Copy)]
+struct GateContext<'a> {
+    plan: &'a [ProviderCliPlanStep],
+    check: &'a ProviderCheck,
+    environment: &'a BTreeMap<OsString, OsString>,
+    job: &'a Path,
+    target: &'a ConsentTarget,
+    deadline: Instant,
+}
+
+/// Outcome of one consent gate, in the order it is decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConsentGate {
+    Holds,
+    /// The observation's own processes were not confirmed gone.
+    Unconfirmed,
+    /// The operation budget is spent; nothing more may spawn.
+    Expired,
+    /// A fresh observation no longer supports the consent.
+    Changed,
+}
+
+struct Observed {
+    observation: ProviderCliObservation,
+    /// Probe outcome when the probe ran, else the prefix step's outcome.
+    outcome: StepOutcome,
+    probed: bool,
+}
+
+fn probe_of(outcome: &StepOutcome, error_code: Option<&str>) -> ProviderCliProbe {
+    ProviderCliProbe {
+        exit_code: outcome.exit_code,
+        timed_out: outcome.timed_out,
+        cleanup_confirmed: outcome.cleanup_confirmed,
+        error_code: error_code.map(str::to_owned),
+    }
+}
+
+/// One observation of the global prefix for the recipe's binary (#134):
+/// `npm prefix --global` under the private job environment, an `lstat` of
+/// `<prefix>/bin/<binary>`, and the recipe's version probe only when a file
+/// inside the prefix is there. Every classification names its evidence; an
+/// error is never read as absence.
+async fn observe(
+    plan: &[ProviderCliPlanStep],
+    check: &ProviderCheck,
+    environment: &BTreeMap<OsString, OsString>,
+    job: &Path,
+    deadline: Instant,
+) -> Observed {
+    let prefix_step = plan
+        .iter()
+        .find(|step| matches!(step, ProviderCliPlanStep::Command { purpose, .. } if purpose == "prefix"))
+        .cloned()
+        .expect("plan has prefix step");
+    let probe_timeout = Duration::from_secs(PROVIDER_CLI_CHECK_TIMEOUT_SECONDS);
+    // Each process gets at most the probe budget and never outlives the
+    // caller's deadline; `run_step` refuses to spawn once that has passed.
+    let step_deadline = || deadline.min(Instant::now() + probe_timeout);
+    let prefix = run_step(&prefix_step, environment, job, step_deadline()).await;
+    // A truncated prefix answer has no trustworthy first line.
+    let prefix_path = (!prefix.truncated && prefix.cleanup_confirmed)
+        .then(|| parse_prefix(&prefix))
+        .flatten();
+    let Some(prefix_path) = prefix_path else {
+        let code = if !prefix.cleanup_confirmed {
+            "cleanup_unconfirmed"
+        } else {
+            "provider_cli_prefix_unresolved"
+        };
+        return Observed {
+            observation: ProviderCliObservation {
+                state: ProviderCliObservedState::Unknown,
+                current_version: None,
+                version_text: None,
+                executable: None,
+                found_in_prefix: false,
+                probe: probe_of(&prefix, Some(code)),
+            },
+            outcome: StepOutcome {
+                stdout: String::new(),
+                ..prefix
+            },
+            probed: false,
+        };
+    };
+    let candidate = prefix_path.join("bin").join(&check.executable);
+    let executable = Some(candidate.display().to_string());
+    let unprobed = |state, found_in_prefix, code: &str, outcome: StepOutcome| Observed {
+        observation: ProviderCliObservation {
+            state,
+            current_version: None,
+            version_text: None,
+            executable: executable.clone(),
+            found_in_prefix,
+            probe: ProviderCliProbe {
+                exit_code: None,
+                timed_out: false,
+                cleanup_confirmed: true,
+                error_code: Some(code.to_owned()),
+            },
+        },
+        outcome,
+        probed: false,
+    };
+    let silent = StepOutcome {
+        stdout: String::new(),
+        stderr: String::new(),
+        exit_code: None,
+        ..prefix.clone()
+    };
+    match fs::symlink_metadata(&candidate) {
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return unprobed(
+                ProviderCliObservedState::Absent,
+                false,
+                "provider_cli_binary_not_found",
+                silent,
+            );
+        }
+        Err(_) => {
+            return unprobed(
+                ProviderCliObservedState::Unknown,
+                false,
+                "provider_cli_stat_failed",
+                silent,
+            );
+        }
+        Ok(_) => {}
+    }
+    let Some(step) = resolve_check(&prefix_path, &check.executable, &check.args) else {
+        // Something occupies the slot but is not a regular file inside the
+        // prefix (an escaping symlink, a directory): never executed.
+        return unprobed(
+            ProviderCliObservedState::Unknown,
+            true,
+            "provider_cli_binary_outside_prefix",
+            silent,
+        );
+    };
+    let probe = run_step(&step, environment, job, step_deadline()).await;
+    // Only an untruncated tail has a first line; a truncated one could hide
+    // the real first line behind a crafted tail.
+    let current_version = (!probe.truncated)
+        .then(|| provider_cli_version_from_output(&probe.stdout))
+        .flatten();
+    let error_code = if !probe.cleanup_confirmed {
+        Some("cleanup_unconfirmed")
+    } else if probe.timed_out {
+        Some("provider_cli_probe_timed_out")
+    } else if probe.exit_code != Some(0) {
+        Some("provider_cli_probe_failed")
+    } else if probe.truncated {
+        Some("provider_cli_probe_output_truncated")
+    } else if current_version.is_none() {
+        Some("provider_cli_version_unparsed")
+    } else {
+        None
+    };
+    let state = if error_code.is_none() {
+        ProviderCliObservedState::Installed
+    } else {
+        ProviderCliObservedState::Unknown
+    };
+    Observed {
+        observation: ProviderCliObservation {
+            state,
+            current_version: current_version.filter(|_| error_code.is_none()),
+            version_text: provider_cli_version_text(&probe.stdout),
+            executable,
+            found_in_prefix: true,
+            probe: probe_of(&probe, error_code),
+        },
+        outcome: probe,
+        probed: true,
+    }
 }
 
 /// Exactly one absolute existing directory on stdout.
@@ -1190,7 +1497,7 @@ impl Drop for JobDirectory {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct StepOutcome {
     exit_code: Option<i32>,
     stdout: String,
@@ -1226,6 +1533,15 @@ impl StepOutcome {
             timed_out: false,
             spawn_failed: true,
             cleanup_confirmed: true,
+        }
+    }
+
+    /// The deadline had passed before anything was spawned.
+    fn expired(started: Instant) -> Self {
+        Self {
+            timed_out: true,
+            spawn_failed: false,
+            ..Self::spawn_failure(started)
         }
     }
 }
@@ -1269,6 +1585,10 @@ async fn run_step(
     else {
         return StepOutcome::spawn_failure(started);
     };
+    if started >= deadline {
+        // The budget is spent: nothing new is started.
+        return StepOutcome::expired(started);
+    }
     let mut command = tokio::process::Command::new(executable);
     command
         .args(args)

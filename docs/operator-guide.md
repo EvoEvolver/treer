@@ -1759,8 +1759,16 @@ Provider CLI installation from the Console (`provider-clis` routes) needs Node
 npm commands before anything runs, installs into npm's default global prefix
 for that Node (a non-writable prefix fails visibly, and Treer never elevates or
 edits PATH), keeps results under `<state dir>/provider-cli/` for 24 hours, and
-leaves provider login to the user. Windows machines list every recipe as
-unsupported in this release. See [security](security.md#provider-cli-installation).
+leaves provider login to the user. The confirmation also shows what the install
+would replace: the version the installed binary reports (or that something
+unreadable is there) next to the pinned target, with the action `install`,
+`replace` or `noop` (already at the pinned version, nothing to confirm). A
+downgrade or unknown existing version needs an extra explicit acknowledgement,
+and an installation that changes between confirmation and the install step is
+refused as `provider_cli_state_changed` without touching the prefix. Machines
+whose Controller predates this observation answer `provider_cli_controller_outdated`
+until updated. Windows machines list every recipe as unsupported in this
+release. See [security](security.md#provider-cli-installation).
 
 Windows machine exec has a 30-second ceiling and is owned by the Controller.
 Windows PowerShell 5.1 receives a fixed system module search directory from

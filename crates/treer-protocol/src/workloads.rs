@@ -399,6 +399,10 @@ pub enum AgentCommand {
         table_hash: String,
         /// Hash of the plan the user confirmed; a fresh expansion must match.
         argv_hash: String,
+        /// Consent (#134): the action and relation the human confirmed and the
+        /// hash of the observation they were shown; the Controller re-observes
+        /// before any mutation and refuses any difference.
+        consent: crate::ProviderCliConsent,
     },
     ProviderCliOperation {
         operation_id: String,
@@ -570,9 +574,11 @@ impl AgentCommand {
             Self::Exec { .. } => Some(CAPABILITY_MACHINE_EXEC),
             Self::ProviderCliRecipes {}
             | Self::ProviderCliCheck { .. }
-            | Self::ProviderCliInstall { .. }
             | Self::ProviderCliOperation { .. } => {
                 Some(crate::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL)
+            }
+            Self::ProviderCliInstall { .. } => {
+                Some(crate::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2)
             }
             Self::FileTransfer { .. } | Self::FileTransferInfo {} => {
                 Some(CAPABILITY_MACHINE_FILE_TRANSFER)

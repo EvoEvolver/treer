@@ -9,9 +9,15 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
-use treer_protocol::{PROVIDER_CLI_RETAINED_OPERATIONS, PROVIDER_RECIPES_TABLE};
+use treer_protocol::{
+    decide_provider_cli_action, ProviderCliObservedState, ProviderCliVersionRelation,
+    PROVIDER_CLI_RETAINED_OPERATIONS, PROVIDER_RECIPES_TABLE,
+};
 
 const TARBALL: &[u8] = b"fixture tarball bytes: not a real package\n";
+/// The embedded Codex recipe's pinned version; the fixture install writes a
+/// binary reporting it, like a real global install would.
+const PINNED: &str = "0.163.0";
 
 struct TempDir(PathBuf);
 
@@ -90,6 +96,13 @@ case "$1" in
   pack)
     for a in "$@"; do case "$a" in --pack-destination=*) dest=${a#--pack-destination=};; esac; done
     cp "$dir/tarball.tgz" "$dest/openai-codex-0.163.0.tgz"
+    if [ -f "$dir/slow-pack" ]; then sleep 2; fi
+    if [ -f "$dir/plant-on-pack" ]; then
+      printf '#!/bin/sh\necho codex-cli 9.9.9\n' > "$dir/prefix/bin/codex"; chmod 755 "$dir/prefix/bin/codex"
+    fi
+    if [ -f "$dir/plant-on-pack-detach" ]; then
+      printf '#!/bin/sh\nperl -MPOSIX -e '"'"'POSIX::setsid(); exec "sleep", "20"'"'"' &\necho codex-cli 0.162.0\n' > "$dir/prefix/bin/codex"; chmod 755 "$dir/prefix/bin/codex"
+    fi
     ;;
   install)
     if [ -f "$dir/slow-install" ]; then sleep 3; fi
@@ -97,22 +110,22 @@ case "$1" in
       perl -MPOSIX -e 'POSIX::setsid(); exec "sleep", "20"' &
     fi
     if [ -f "$dir/fail-install" ]; then echo "EACCES fixture" >&2; exit 7; fi
+    printf '#!/bin/sh\necho codex-cli 0.163.0\n' > "$dir/prefix/bin/codex"; chmod 755 "$dir/prefix/bin/codex"
     ;;
   prefix)
+    if [ -f "$dir/break-prefix" ]; then echo "prefix fixture broken" >&2; exit 1; fi
+    if [ -f "$dir/slow-prefix-after-pack" ] && [ -f "$dir/log/argv-pack" ]; then sleep 3; fi
     printf '%s\n' "$dir/prefix"
     ;;
 esac
 exit 0
 "#,
     );
-    // A same-named binary on PATH must never satisfy the check.
+    // A same-named binary on PATH must never satisfy the check. The prefix
+    // starts empty: tests that need an installation call `install_binary`.
     write_executable(
         &fixture.join("bin/codex"),
         "#!/bin/sh\necho decoy-on-path\n",
-    );
-    write_executable(
-        &fixture.join("prefix/bin/codex"),
-        "#!/bin/sh\necho codex-cli 0.163.0\n",
     );
     Fixture {
         root: dir.path().join("state/provider-cli"),
@@ -150,6 +163,34 @@ impl Fixture {
             recipe_id: CODEX.into(),
             recipe_version: 1,
             recipe_hash: entry.recipe_hash.clone(),
+        }
+    }
+
+    fn prefix_binary(&self) -> PathBuf {
+        self.fixture.join("prefix/bin/codex")
+    }
+
+    /// Simulates an existing global installation whose probe prints `line`.
+    fn install_binary(&self, line: &str) {
+        let _ = fs::remove_file(self.prefix_binary());
+        write_executable(&self.prefix_binary(), &format!("#!/bin/sh\necho {line}\n"));
+    }
+
+    /// What the Proxy would bind after `prepare`: the Controller's own
+    /// observation turned into the one action it allows.
+    async fn consent(&self, service: &ProviderCliService) -> ProviderCliConsent {
+        let observation = service
+            .check(&self.codex_ref())
+            .await
+            .unwrap()
+            .observation
+            .expect("v2 check carries an observation");
+        let decision =
+            decide_provider_cli_action(&observation, PINNED).expect("prefix is observable");
+        ProviderCliConsent {
+            action: decision.action,
+            version_relation: decision.version_relation,
+            observation_hash: observation.hash(&self.codex_ref().recipe_hash, PINNED),
         }
     }
 }
@@ -349,16 +390,18 @@ async fn install_runs_the_displayed_plan_privately_and_checks_from_the_prefix() 
         .all(|view| view.plan.is_none() && view.unsupported_reason.is_some()));
 
     let reference = fixture.codex_ref();
+    let consent = fixture.consent(&service).await;
+    assert_eq!(consent.action, ProviderCliAction::Install, "empty prefix");
     let id = operation_id(1);
     let accepted = service
-        .install(&id, &reference, &recipes.table_hash, &argv_hash)
+        .install(&id, &reference, &recipes.table_hash, &argv_hash, &consent)
         .unwrap();
     assert_eq!(accepted.argv_hash, argv_hash);
     assert_eq!(accepted.status, ProviderCliOperationStatus::Running);
     // Redelivery is idempotent and a second job is refused while active.
     assert_eq!(
         service
-            .install(&id, &reference, &recipes.table_hash, &argv_hash)
+            .install(&id, &reference, &recipes.table_hash, &argv_hash, &consent)
             .unwrap()
             .operation_id,
         id
@@ -369,6 +412,7 @@ async fn install_runs_the_displayed_plan_privately_and_checks_from_the_prefix() 
             &reference,
             &recipes.table_hash,
             &argv_hash,
+            &consent,
         )
         .unwrap_err();
     assert_eq!(busy.code, "provider_cli_machine_busy");
@@ -382,6 +426,18 @@ async fn install_runs_the_displayed_plan_privately_and_checks_from_the_prefix() 
     assert_eq!(report.exit_code, Some(0));
     assert!(!report.timed_out);
     assert_eq!(report.argv_hash, argv_hash);
+    assert_eq!(report.action, Some(ProviderCliAction::Install));
+    assert_eq!(report.version_relation, None);
+    assert_eq!(
+        report.observation_hash.as_deref(),
+        Some(consent.observation_hash.as_str())
+    );
+    let before = report.observed_before.clone().unwrap();
+    assert_eq!(before.state, ProviderCliObservedState::Absent);
+    assert_eq!(before.observation_hash, consent.observation_hash);
+    assert!(!serde_json::to_string(&before)
+        .unwrap()
+        .contains("prefix/bin"));
     let steps = report.steps.unwrap();
     assert_eq!(
         steps.iter().map(|step| step.step).collect::<Vec<_>>(),
@@ -497,8 +553,15 @@ async fn integrity_mismatch_aborts_before_install() {
         .unwrap();
     let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
     let id = operation_id(3);
+    let consent = fixture.consent(&service).await;
     service
-        .install(&id, &fixture.codex_ref(), &recipes.table_hash, &argv_hash)
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
         .unwrap();
     let report = wait_terminal(&service, &id).await;
     assert_eq!(report.status, ProviderCliOperationStatus::Failed);
@@ -529,9 +592,10 @@ async fn install_refuses_changed_plan_table_unsupported_and_capped_storage() {
     let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
     let reference = fixture.codex_ref();
     let table_hash = recipes.table_hash.clone();
+    let consent = fixture.consent(&service).await;
     let refuse = |id: &str, reference: &ProviderCliRecipeRef, table: &str, hash: &str| {
         service
-            .install(id, reference, table, hash)
+            .install(id, reference, table, hash, &consent)
             .unwrap_err()
             .code
     };
@@ -571,6 +635,31 @@ async fn install_refuses_changed_plan_table_unsupported_and_capped_storage() {
         service.check(&claude_ref).await.unwrap_err().code,
         "provider_cli_recipe_unsupported"
     );
+    // Consent shapes that can never run: noop and a malformed hash.
+    let mut noop = consent.clone();
+    noop.action = ProviderCliAction::Noop;
+    assert_eq!(
+        service
+            .install(&operation_id(4), &reference, &table_hash, &argv_hash, &noop)
+            .unwrap_err()
+            .code,
+        "provider_cli_consent_invalid"
+    );
+    let mut malformed = consent.clone();
+    malformed.observation_hash = "zz".into();
+    assert_eq!(
+        service
+            .install(
+                &operation_id(4),
+                &reference,
+                &table_hash,
+                &argv_hash,
+                &malformed
+            )
+            .unwrap_err()
+            .code,
+        "provider_cli_consent_invalid"
+    );
     assert!(
         fixture.log("argv-pack").is_none(),
         "refusals execute nothing"
@@ -595,6 +684,8 @@ async fn install_refuses_changed_plan_table_unsupported_and_capped_storage() {
                 error_code: Some("provider_cli_pack_failed".into()),
                 steps: Vec::new(),
                 plan: Vec::new(),
+                consent: None,
+                observed_before: None,
             });
         }
         store.persist().unwrap();
@@ -617,6 +708,7 @@ async fn install_refuses_changed_plan_table_unsupported_and_capped_storage() {
 #[tokio::test]
 async fn check_probes_only_the_installed_prefix() {
     let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    fixture.install_binary("codex-cli 0.163.0");
     let service = fixture.service();
     let reference = fixture.codex_ref();
     let response = service.check(&reference).await.unwrap();
@@ -624,9 +716,13 @@ async fn check_probes_only_the_installed_prefix() {
     assert!(response.found_in_prefix);
     assert_eq!(response.version.as_deref(), Some("codex-cli 0.163.0"));
     assert_eq!(response.exit_code, Some(0));
+    assert_eq!(
+        response.executable.as_deref(),
+        Some(fixture.prefix_binary().display().to_string().as_str())
+    );
     assert!(!fixture.root.join("checks").join(CODEX).exists());
     // Only the prefix binary is consulted: the PATH decoy never answers.
-    fs::remove_file(fixture.fixture.join("prefix/bin/codex")).unwrap();
+    fs::remove_file(fixture.prefix_binary()).unwrap();
     let response = service.check(&reference).await.unwrap();
     assert!(!response.installed);
     assert!(!response.found_in_prefix);
@@ -635,24 +731,357 @@ async fn check_probes_only_the_installed_prefix() {
         Some("provider_cli_binary_not_found")
     );
     assert!(!response.stdout.contains("decoy"));
-    // A symlink escaping the prefix is refused too.
-    std::os::unix::fs::symlink(
-        fixture.fixture.join("bin/codex"),
-        fixture.fixture.join("prefix/bin/codex"),
-    )
-    .unwrap();
+    assert_eq!(response.executable, None, "nothing probed, no path");
+    // A symlink escaping the prefix occupies the slot but is never executed.
+    std::os::unix::fs::symlink(fixture.fixture.join("bin/codex"), fixture.prefix_binary()).unwrap();
     let response = service.check(&reference).await.unwrap();
-    assert!(!response.found_in_prefix);
-    // A failing probe is "not installed" with its exit code, not an error.
-    fs::remove_file(fixture.fixture.join("prefix/bin/codex")).unwrap();
-    write_executable(
-        &fixture.fixture.join("prefix/bin/codex"),
-        "#!/bin/sh\necho broken >&2\nexit 3\n",
+    assert!(!response.installed && response.found_in_prefix);
+    assert_eq!(
+        response.error_code.as_deref(),
+        Some("provider_cli_binary_outside_prefix")
     );
+    assert!(!response.stdout.contains("decoy"));
+    // A failing probe is "not installed" with its exit code, not an error.
+    fixture.install_binary("broken >&2; exit 3");
     let response = service.check(&reference).await.unwrap();
     assert!(!response.installed && response.found_in_prefix);
     assert_eq!(response.exit_code, Some(3));
     assert!(response.stderr.contains("broken"));
+}
+
+/// The observation (#134) names its evidence for every state and never
+/// reads an error as absence; the decision table follows the contract.
+#[cfg(unix)]
+#[tokio::test]
+async fn observation_classifies_the_prefix_from_evidence_only() {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    let service = fixture.service();
+    let reference = fixture.codex_ref();
+    let observe = |service: &ProviderCliService| {
+        let reference = reference.clone();
+        let service = service.clone();
+        async move {
+            let observation = service
+                .check(&reference)
+                .await
+                .unwrap()
+                .observation
+                .unwrap();
+            // Every observation this Controller emits passes the Proxy's
+            // shape and consistency validation.
+            assert_eq!(observation.validate(), Ok(()), "{observation:?}");
+            observation
+        }
+    };
+    let expected_path = fixture.prefix_binary().display().to_string();
+
+    // Empty prefix: absent, with the path the install would write.
+    let absent = observe(&service).await;
+    assert_eq!(absent.state, ProviderCliObservedState::Absent);
+    assert!(!absent.found_in_prefix);
+    assert_eq!(absent.current_version, None);
+    assert_eq!(absent.executable.as_deref(), Some(expected_path.as_str()));
+    assert_eq!(
+        absent.probe.error_code.as_deref(),
+        Some("provider_cli_binary_not_found")
+    );
+    assert_eq!(
+        decide_provider_cli_action(&absent, PINNED).unwrap().action,
+        ProviderCliAction::Install
+    );
+
+    // Pinned version present: installed, and the only decision is noop.
+    fixture.install_binary("codex-cli 0.163.0");
+    let same = observe(&service).await;
+    assert_eq!(same.state, ProviderCliObservedState::Installed);
+    assert_eq!(same.current_version.as_deref(), Some("0.163.0"));
+    assert_eq!(same.version_text.as_deref(), Some("codex-cli 0.163.0"));
+    assert!(same.found_in_prefix);
+    assert_eq!(
+        decide_provider_cli_action(&same, PINNED).unwrap().action,
+        ProviderCliAction::Noop
+    );
+
+    fixture.install_binary("codex-cli 0.162.0");
+    let older = decide_provider_cli_action(&observe(&service).await, PINNED).unwrap();
+    assert_eq!(older.action, ProviderCliAction::Replace);
+    assert_eq!(
+        older.version_relation,
+        Some(ProviderCliVersionRelation::Upgrade)
+    );
+
+    fixture.install_binary("codex-cli 1.0.0");
+    let newer = decide_provider_cli_action(&observe(&service).await, PINNED).unwrap();
+    assert_eq!(
+        newer.version_relation,
+        Some(ProviderCliVersionRelation::Downgrade)
+    );
+
+    // A probe whose output carries no strict version is unknown-but-found.
+    fixture.install_binary("codex-cli dev-build");
+    let unparsed = observe(&service).await;
+    assert_eq!(unparsed.state, ProviderCliObservedState::Unknown);
+    assert!(unparsed.found_in_prefix);
+    assert_eq!(unparsed.current_version, None);
+    assert_eq!(
+        unparsed.probe.error_code.as_deref(),
+        Some("provider_cli_version_unparsed")
+    );
+    assert_eq!(
+        decide_provider_cli_action(&unparsed, PINNED)
+            .unwrap()
+            .version_relation,
+        Some(ProviderCliVersionRelation::Unknown)
+    );
+
+    // A failing probe is unknown-but-found with its exit code.
+    fixture.install_binary("broken >&2; exit 3");
+    let failing = observe(&service).await;
+    assert_eq!(failing.state, ProviderCliObservedState::Unknown);
+    assert_eq!(failing.probe.exit_code, Some(3));
+    assert_eq!(
+        failing.probe.error_code.as_deref(),
+        Some("provider_cli_probe_failed")
+    );
+
+    // Output that pretends to be two versions yields the first token only.
+    fixture.install_binary("0.164.0 0.163.0");
+    let spoof = observe(&service).await;
+    assert_eq!(spoof.current_version.as_deref(), Some("0.164.0"));
+
+    // An unresolved prefix is unobservable: no state, no action.
+    fs::write(fixture.fixture.join("break-prefix"), b"").unwrap();
+    let unresolved = observe(&service).await;
+    assert_eq!(unresolved.state, ProviderCliObservedState::Unknown);
+    assert!(!unresolved.found_in_prefix);
+    assert_eq!(unresolved.executable, None);
+    assert_eq!(
+        unresolved.probe.error_code.as_deref(),
+        Some("provider_cli_prefix_unresolved")
+    );
+    assert!(unresolved.unobservable());
+    assert_eq!(decide_provider_cli_action(&unresolved, PINNED), None);
+    fs::remove_file(fixture.fixture.join("break-prefix")).unwrap();
+
+    // The hash binds the path: a moved prefix is a different observation.
+    fixture.install_binary("codex-cli 0.162.0");
+    let before = observe(&service).await;
+    let hash = before.hash(&reference.recipe_hash, PINNED);
+    assert_eq!(
+        observe(&service).await.hash(&reference.recipe_hash, PINNED),
+        hash
+    );
+    let summary = before.summary(&reference.recipe_hash, PINNED);
+    assert_eq!(summary.observation_hash, hash);
+    assert!(!serde_json::to_string(&summary)
+        .unwrap()
+        .contains("prefix/bin"));
+}
+
+/// Consent is re-checked before anything runs: an installation that appeared
+/// (or changed) after `prepare` fails closed without packing.
+#[cfg(unix)]
+#[tokio::test]
+async fn install_refuses_when_the_prefix_changed_after_consent() {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let codex = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CODEX)
+        .unwrap();
+    let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
+    let reference = fixture.codex_ref();
+
+    // Consented to a fresh install; a newer CLI shows up before dispatch.
+    let install_consent = fixture.consent(&service).await;
+    assert_eq!(install_consent.action, ProviderCliAction::Install);
+    fixture.install_binary("codex-cli 1.0.0");
+    let id = operation_id(8);
+    service
+        .install(
+            &id,
+            &reference,
+            &recipes.table_hash,
+            &argv_hash,
+            &install_consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Failed,
+        "{report:?}"
+    );
+    assert_eq!(
+        report.error_code.as_deref(),
+        Some("provider_cli_state_changed")
+    );
+    assert!(fixture.log("argv-pack").is_none(), "nothing ran");
+    assert!(fixture.log("argv-install").is_none());
+    let observed = report.observed_before.clone().unwrap();
+    assert_eq!(observed.state, ProviderCliObservedState::Installed);
+    assert_eq!(observed.current_version.as_deref(), Some("1.0.0"));
+    assert_ne!(observed.observation_hash, install_consent.observation_hash);
+    assert_eq!(
+        report.observation_hash.as_deref(),
+        Some(install_consent.observation_hash.as_str())
+    );
+    assert!(!fixture.root.join("jobs").join(CODEX).exists());
+    // The existing installation was not touched.
+    assert!(fs::read_to_string(fixture.prefix_binary())
+        .unwrap()
+        .contains("1.0.0"));
+
+    // Consented to replace 0.162.0 (upgrade); by dispatch the pinned version
+    // is already there, so the action became noop: refused, not "succeeded".
+    fixture.install_binary("codex-cli 0.162.0");
+    let replace_consent = fixture.consent(&service).await;
+    assert_eq!(replace_consent.action, ProviderCliAction::Replace);
+    assert_eq!(
+        replace_consent.version_relation,
+        Some(ProviderCliVersionRelation::Upgrade)
+    );
+    fixture.install_binary("codex-cli 0.163.0");
+    let id = operation_id(9);
+    service
+        .install(
+            &id,
+            &reference,
+            &recipes.table_hash,
+            &argv_hash,
+            &replace_consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.error_code.as_deref(),
+        Some("provider_cli_state_changed")
+    );
+    assert_eq!(
+        report.observed_before.unwrap().current_version.as_deref(),
+        Some("0.163.0")
+    );
+    assert!(fixture.log("argv-pack").is_none());
+}
+
+/// The second gate runs right before the install step: a change between pack
+/// and install is refused with the tarball already verified and the prefix
+/// untouched.
+#[cfg(unix)]
+#[tokio::test]
+async fn install_refuses_when_the_prefix_changes_after_pack() {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    fs::write(fixture.fixture.join("plant-on-pack"), b"").unwrap();
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let codex = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CODEX)
+        .unwrap();
+    let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
+    let consent = fixture.consent(&service).await;
+    assert_eq!(consent.action, ProviderCliAction::Install);
+    let id = operation_id(10);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Failed,
+        "{report:?}"
+    );
+    assert_eq!(
+        report.error_code.as_deref(),
+        Some("provider_cli_state_changed")
+    );
+    assert_eq!(report.step, Some(3));
+    assert!(fixture.log("argv-pack").is_some(), "pack ran");
+    assert!(
+        fixture.log("argv-install").is_none(),
+        "install must not run"
+    );
+    let steps: Vec<u32> = report
+        .steps
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|step| step.step)
+        .collect();
+    assert_eq!(steps, [1, 2], "pack and integrity recorded, nothing after");
+    let observed = report.observed_before.unwrap();
+    assert_eq!(observed.state, ProviderCliObservedState::Installed);
+    assert_eq!(observed.current_version.as_deref(), Some("9.9.9"));
+    assert!(!fixture.root.join("jobs").join(CODEX).exists());
+    assert!(fs::read_to_string(fixture.prefix_binary())
+        .unwrap()
+        .contains("9.9.9"));
+}
+
+/// A consented replacement runs the plan and reports both the consent and the
+/// observation it was re-verified against.
+#[cfg(unix)]
+#[tokio::test]
+async fn replace_runs_when_the_observed_installation_is_unchanged() {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    fixture.install_binary("codex-cli 0.162.0");
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let codex = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CODEX)
+        .unwrap();
+    let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
+    let consent = fixture.consent(&service).await;
+    assert_eq!(consent.action, ProviderCliAction::Replace);
+    assert_eq!(
+        consent.version_relation,
+        Some(ProviderCliVersionRelation::Upgrade)
+    );
+    let id = operation_id(11);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Succeeded,
+        "{report:?}"
+    );
+    assert_eq!(report.action, Some(ProviderCliAction::Replace));
+    assert_eq!(
+        report.version_relation,
+        Some(ProviderCliVersionRelation::Upgrade)
+    );
+    let observed = report.observed_before.unwrap();
+    assert_eq!(observed.state, ProviderCliObservedState::Installed);
+    assert_eq!(observed.current_version.as_deref(), Some("0.162.0"));
+    assert_eq!(observed.observation_hash, consent.observation_hash);
+    assert!(report.stdout.contains("codex-cli 0.163.0"));
+    // Persisted consent survives a reload of the private store.
+    let reloaded = fixture.service();
+    let again = reloaded.operation(&id).unwrap();
+    assert_eq!(again.action, Some(ProviderCliAction::Replace));
+    assert_eq!(
+        again.observation_hash.as_deref(),
+        Some(consent.observation_hash.as_str())
+    );
 }
 
 #[cfg(unix)]
@@ -669,8 +1098,15 @@ async fn failed_install_step_reports_exit_code_and_cleans_up() {
         .unwrap();
     let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
     let id = operation_id(6);
+    let consent = fixture.consent(&service).await;
     service
-        .install(&id, &fixture.codex_ref(), &recipes.table_hash, &argv_hash)
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
         .unwrap();
     let report = wait_terminal(&service, &id).await;
     assert_eq!(report.status, ProviderCliOperationStatus::Failed);
@@ -681,9 +1117,17 @@ async fn failed_install_step_reports_exit_code_and_cleans_up() {
     assert_eq!(report.exit_code, Some(7));
     assert_eq!(report.step, Some(3));
     assert!(report.stderr.contains("EACCES fixture"));
-    assert!(
-        fixture.log("argv-prefix").is_none(),
-        "no step after the failure"
+    // No plan step after the failure (the consent observation's own prefix
+    // resolution is not a plan step and records no result).
+    assert_eq!(
+        report
+            .steps
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|step| step.step)
+            .collect::<Vec<_>>(),
+        [1, 2, 3]
     );
     assert!(!fixture.root.join("jobs").join(CODEX).exists());
 }
@@ -715,8 +1159,15 @@ async fn detached_descendant_holding_output_turns_operation_unknown() {
         .unwrap();
     let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
     let id = operation_id(7);
+    let consent = fixture.consent(&service).await;
     service
-        .install(&id, &fixture.codex_ref(), &recipes.table_hash, &argv_hash)
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
         .unwrap();
     let report = wait_terminal(&service, &id).await;
     assert_eq!(
@@ -726,9 +1177,245 @@ async fn detached_descendant_holding_output_turns_operation_unknown() {
     );
     assert_eq!(report.error_code.as_deref(), Some("cleanup_unconfirmed"));
     assert_eq!(report.step, Some(3));
-    assert!(
-        fixture.log("argv-prefix").is_none(),
+    assert_eq!(
+        report.steps.as_ref().unwrap().len(),
+        3,
         "an unconfirmed step stops the plan"
+    );
+}
+
+/// A probe whose output exceeds the retained tail has no trustworthy first
+/// line: a crafted tail must not turn a newer installation into an "upgrade"
+/// or a "noop". Truncated output is unknown and needs acknowledgement.
+#[cfg(unix)]
+#[tokio::test]
+async fn truncated_probe_output_never_yields_a_version() {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    let service = fixture.service();
+    // Real first line 9.0.0 (newer than the target). The retained tail is
+    // exactly PROVIDER_CLI_OUTPUT_TAIL_BYTES and starts with a crafted line:
+    // once claiming 0.1.0 (would read as an upgrade), once claiming the pinned
+    // version itself (would read as a noop).
+    for (spoof, parsed) in [("codex-cli 0.1.0", "0.1.0"), ("codex-cli 0.163.0", PINNED)] {
+        let line = format!("{spoof}\n");
+        let padding = treer_protocol::PROVIDER_CLI_OUTPUT_TAIL_BYTES - line.len();
+        write_executable(
+            &fixture.prefix_binary(),
+            &format!(
+                "#!/bin/sh\nprintf 'codex-cli 9.0.0\\n'\nhead -c 40000 /dev/zero | tr '\\0' x\nprintf '\\n{spoof}\\n'\nhead -c {padding} /dev/zero | tr '\\0' y\n"
+            ),
+        );
+        let response = service.check(&fixture.codex_ref()).await.unwrap();
+        assert!(response.truncated, "{response:?}");
+        assert_eq!(response.exit_code, Some(0));
+        // The retained tail does begin with the spoofed line: a parser that
+        // trusted it would have reported `parsed`.
+        assert!(response.stdout.starts_with(spoof), "{spoof}");
+        assert_eq!(
+            treer_protocol::provider_cli_version_from_output(&response.stdout).as_deref(),
+            Some(parsed)
+        );
+        let observation = response.observation.unwrap();
+        assert_eq!(observation.validate(), Ok(()));
+        assert_eq!(observation.state, ProviderCliObservedState::Unknown);
+        assert_eq!(observation.current_version, None);
+        assert_eq!(
+            observation.probe.error_code.as_deref(),
+            Some("provider_cli_probe_output_truncated")
+        );
+        let decision = decide_provider_cli_action(&observation, PINNED).unwrap();
+        assert_eq!(decision.action, ProviderCliAction::Replace);
+        assert_eq!(
+            decision.version_relation,
+            Some(ProviderCliVersionRelation::Unknown),
+            "never upgrade or noop from a truncated tail ({spoof})"
+        );
+    }
+}
+
+/// Process facts come before consent: an observation whose probe left a
+/// detached pipe holder is not evidence at prepare time, and at either gate
+/// it stops the operation as `unknown` (`cleanup_unconfirmed`) with nothing
+/// executed after it. Takes two descendant grace periods (about twenty
+/// seconds).
+#[cfg(unix)]
+#[tokio::test]
+async fn unconfirmed_probe_cleanup_issues_no_consent_and_stops_the_operation() {
+    assert!(
+        std::process::Command::new("perl")
+            .arg("-MPOSIX")
+            .arg("-e")
+            .arg("1")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false),
+        "this regression needs perl with POSIX to detach a descendant; do not skip it"
+    );
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let codex = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CODEX)
+        .unwrap();
+    let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
+    // Consent given on an empty prefix.
+    let consent = fixture.consent(&service).await;
+    assert_eq!(consent.action, ProviderCliAction::Install);
+
+    // Prepare-time: the probe detaches a holder of its stdout.
+    fixture.install_binary(
+        "codex-cli 0.162.0; perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"20\"' &",
+    );
+    let response = service.check(&fixture.codex_ref()).await.unwrap();
+    let observation = response.observation.unwrap();
+    assert_eq!(observation.validate(), Ok(()));
+    assert!(!observation.probe.cleanup_confirmed);
+    assert_eq!(
+        observation.probe.error_code.as_deref(),
+        Some("cleanup_unconfirmed")
+    );
+    assert_eq!(observation.state, ProviderCliObservedState::Unknown);
+    assert_eq!(
+        observation.current_version, None,
+        "its output is not evidence"
+    );
+    assert_eq!(
+        decide_provider_cli_action(&observation, PINNED),
+        None,
+        "no consent can be issued on an unconfirmed probe"
+    );
+    assert!(!response.installed);
+
+    // First gate: the detaching binary is already there when the consented
+    // (absent) install is dispatched; nothing runs, not even pack.
+    let id = operation_id(14);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Unknown,
+        "{report:?}"
+    );
+    assert_eq!(report.error_code.as_deref(), Some("cleanup_unconfirmed"));
+    assert_eq!(report.step, Some(1));
+    assert!(
+        fixture.log("argv-pack").is_none(),
+        "first gate spawns nothing"
+    );
+    assert!(report.steps.as_ref().unwrap().is_empty());
+
+    // Second gate: the binary planted during pack detaches at probe time.
+    fs::remove_file(fixture.prefix_binary()).unwrap();
+    fs::write(fixture.fixture.join("plant-on-pack-detach"), b"").unwrap();
+    let id = operation_id(12);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Unknown,
+        "{report:?}"
+    );
+    assert_eq!(report.error_code.as_deref(), Some("cleanup_unconfirmed"));
+    assert_eq!(report.step, Some(3));
+    assert!(fixture.log("argv-pack").is_some());
+    assert!(
+        fixture.log("argv-install").is_none(),
+        "nothing spawns after an unconfirmed observation"
+    );
+    assert_eq!(report.steps.as_ref().unwrap().len(), 2);
+    let observed = report.observed_before.unwrap();
+    assert_eq!(observed.state, ProviderCliObservedState::Unknown);
+    assert_eq!(observed.current_version, None);
+}
+
+/// Observations inherit the operation's absolute deadline: when the budget is
+/// spent during the second gate, the install step is never spawned and the
+/// operation ends timed out, not changed or succeeded.
+#[cfg(unix)]
+#[tokio::test]
+async fn consent_gate_inherits_the_operation_deadline() {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    fs::write(fixture.fixture.join("slow-pack"), b"").unwrap();
+    fs::write(fixture.fixture.join("slow-prefix-after-pack"), b"").unwrap();
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let codex = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CODEX)
+        .unwrap();
+    let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
+    let consent = fixture.consent(&service).await;
+    // Budget: the first gate and the two-second pack fit; the second gate's
+    // three-second prefix resolution crosses the deadline.
+    service.set_operation_budget(Duration::from_secs(4));
+    let id = operation_id(13);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::TimedOut,
+        "{report:?}"
+    );
+    assert_eq!(report.error_code.as_deref(), Some("provider_cli_deadline"));
+    assert!(report.timed_out);
+    assert!(fixture.log("argv-pack").is_some());
+    assert!(
+        fixture.log("argv-install").is_none(),
+        "an exhausted budget spawns nothing"
+    );
+    assert_eq!(report.steps.as_ref().unwrap().len(), 2);
+    assert!(!fixture.root.join("jobs").join(CODEX).exists());
+
+    // run_step itself refuses to spawn once the deadline has passed.
+    let step = ProviderCliPlanStep::Command {
+        step: 9,
+        purpose: "prefix".into(),
+        executable: fixture.fixture.join("bin/npm").display().to_string(),
+        args: vec!["expired-probe".into()],
+    };
+    let environment = step_environment(
+        BTreeMap::new(),
+        fixture.root.as_path(),
+        Some(fixture.search_path.as_os_str()),
+    );
+    let outcome = run_step(
+        &step,
+        &environment,
+        fixture.fixture.as_path(),
+        Instant::now() - Duration::from_millis(1),
+    )
+    .await;
+    assert!(outcome.timed_out && outcome.cleanup_confirmed && !outcome.spawn_failed);
+    assert!(
+        fixture.log("argv-expired-probe").is_none(),
+        "no process was started"
     );
 }
 
@@ -757,6 +1444,8 @@ fn restart_marks_running_operations_unknown_and_prunes_expired_results() {
         error_code: None,
         steps: Vec::new(),
         plan: Vec::new(),
+        consent: None,
+        observed_before: None,
     };
     let now = now_ms();
     let file = StoreFile {

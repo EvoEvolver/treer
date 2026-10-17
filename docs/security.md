@@ -240,11 +240,71 @@ What Core does promise:
   The packed tarball is verified and installed by the same account in the same
   private directory; a same-account process replacing it between steps 2 and 3
   is inside the trust domain Core already grants that account.
+- The install step overwrites whatever lives in npm's global prefix, so the
+  consent names what it replaces (#134). `prepare` first has the Controller
+  observe the prefix with the same constraints as `check` (cleared
+  environment, private `HOME`, process-group timeout and cleanup confirmation,
+  bounded output; the probe executes the already-installed binary, which is
+  third-party code the machine account already trusts). The observed state is
+  `absent` only when the prefix resolved and the binary's `lstat` returned
+  not-found, `installed` only when a regular file inside the prefix exited 0
+  with a strict version on its first line (bounded numeric components, no
+  leading zeros, bounded prerelease identifiers; the first matching token
+  wins, so extra output cannot spoof a version into an upgrade), and
+  `unknown` otherwise with the reason named (`provider_cli_prefix_unresolved`,
+  `provider_cli_binary_outside_prefix`, `provider_cli_probe_failed`,
+  `provider_cli_probe_timed_out`, `provider_cli_probe_output_truncated`,
+  `provider_cli_version_unparsed`, `cleanup_unconfirmed`). Output that
+  exceeded the retained tail has no trustworthy first line and never yields a
+  version, so a crafted tail cannot turn a newer installation into an
+  "upgrade" or a "noop". A probe whose descendants were not confirmed gone is
+  not evidence at all: `prepare` refuses it (409
+  `provider_cli_probe_unconfirmed`) and issues nothing. The action shown and bound is `install`, `replace`
+  (relation `upgrade`, `downgrade`, `incomparable` or `unknown`) or `noop`;
+  `noop` issues no token and nothing runs, an unobservable prefix refuses the
+  prepare, and a spoofed probe that prints the pinned version only ever yields
+  `noop`. A `downgrade`, `incomparable` or `unknown` relation must be
+  acknowledged in the install request with exactly that relation; a missing or
+  different value is 400 and leaves the token usable, so no client can confirm
+  a downgrade blindly.
+- The Controller re-derives the action from a fresh observation before any
+  step and again immediately before the install step, under the operation's
+  single five-minute deadline (each observation process gets at most the probe
+  budget, never beyond that deadline, and nothing spawns once it has passed).
+  Process facts are decided first: an observation whose descendants were not
+  confirmed gone ends the operation `unknown` (`cleanup_unconfirmed`) with
+  nothing executed after it, and a spent budget ends it timed out
+  (`provider_cli_deadline`). Only then are hash, action and relation compared
+  strictly; any difference (a prefix that moved, a binary that appeared,
+  changed or became unreadable, an action that became `noop`) fails the
+  operation as `provider_cli_state_changed` with nothing written to the prefix
+  and the job directory removed. What remains is a time-of-check/time-of-use
+  window between the second observation and npm writing the prefix: it is
+  bounded by the remaining operation budget, not by any millisecond promise,
+  and lies inside the same account's trust domain. Tokens minted before
+  observation existed are never accepted, and a v1-only Controller is refused
+  with `provider_cli_controller_outdated` rather than served unobserved.
+- The Controller's observation is treated as input, not truth: the Proxy
+  validates its shape before storing, auditing or showing it (canonical strict
+  version, bounded control-free text, bounded absolute executable path, a
+  probe code from the known set, and state/evidence agreement such as
+  `installed` requiring a found binary and a clean probe); a malformed
+  observation is a Controller error (502) that mints nothing. Every `prepare`
+  is admitted against the per-minute and live-token ceilings before any
+  Controller command, and counts whatever its outcome (`noop`, unobservable,
+  refused recipe), so a session cannot make the machine run `npm prefix` and
+  the probe without bound.
+- The observed executable path (`<prefix>/bin/<binary>`, under the machine
+  account's home) is returned only to the creator's `prepare` and `check`
+  responses for display. Proxy rows, audit payloads, operation reports
+  (`observed_before`) and logs carry the path-free summary: state, normalized
+  version, presence and the observation hash.
 - Confirmation tokens are 256-bit, stored hashed, expire after 120 seconds of
   database time, are consumed once by `UPDATE … RETURNING`, and are bound to
-  workspace, machine, user, session, recipe triple, table hash, Controller build
-  and plan hash. Expired, consumed, foreign and mismatched tokens share one 409.
-  At most four live tokens and ten prepares per minute per user and machine.
+  workspace, machine, user, session, recipe triple, table hash, Controller
+  build, plan hash, observation hash, action and relation. Expired, consumed,
+  foreign and mismatched tokens share one 409. At most four live tokens and
+  ten prepare attempts per minute per user and machine.
 - One active installation per machine, enforced by a PostgreSQL partial unique
   index, with a five-minute deadline. Provider CLI commands are excluded from
   reconnect replay. Each step runs in its own Unix process group that is
@@ -261,7 +321,8 @@ What Core does promise:
 - Output never enters Proxy storage, audit or logs. Results stay in the
   Controller's private `0600` store for 24 hours (64 results; a full store
   refuses new installations rather than evicting). Audit rows record actor,
-  machine, recipe triple, table hash, plan hash, status and exit code.
+  machine, recipe triple, table hash, plan hash, action, relation, observation
+  hash, observed state and version, status and exit code.
 - Windows entries are all unsupported in this iteration; nothing executes
   there. Provider login is never performed or handled by Core.
 
