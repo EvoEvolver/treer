@@ -2,8 +2,8 @@
 export const en = {
   "images.add": "Attach images",
   "images.attached": "Attached images",
-  "images.storageInside": "Image uploads disabled: private storage is on a non-hidden path inside the working directory. Set the Agent's working directory to a project folder outside Treer private storage.",
-  "images.storageVcs": "Image uploads disabled: private storage is inside a version-controlled tree. Move Treer private storage outside that repository.",
+  "images.storageInside": "Image uploads disabled: The Agent's working directory contains the Treer private state directory on a non-hidden path; set the Agent's cwd to a project folder outside the Treer state directory.",
+  "images.storageVcs": "Image uploads disabled: The Treer private state directory lies inside a version-controlled tree, so attachments could be committed; move the repository or the Treer state directory apart (for example do not keep the home directory itself as a repository), or use a state directory outside any repository.",
   "images.storageUnsafe": "Image uploads disabled: private storage needs its permissions repaired.",
   "images.storageAdministrator": "Image uploads disabled: Treer on Windows requires an administrator account.",
   "images.storageUnavailable": "Image uploads unavailable: this Controller has no usable private attachment storage.",
