@@ -49,9 +49,21 @@
           "types": "All four regular files; only program member is package/claude. No symlink, hardlink, extended header, device or additional program member.",
           "format": "Single gzip member, plain ustar; zero padding, two terminal zero blocks, no trailing content.",
           "archives": [
-            {"platform": "darwin-aarch64", "compressed_size": 119065220, "tar_size": 267961344, "native_header_sha256": "128e64a470c4783da0830a487d020c7fe60bf61e49d9f9b9d69d2385633a93bd"},
-            {"platform": "linux-x86_64", "compressed_size": 129008778, "tar_size": 285798400, "native_header_sha256": "e117cda98369d7c5703a95413acc44da57264985d3b147def2f1e7232da1e2ba"},
-            {"platform": "linux-aarch64", "compressed_size": 129489471, "tar_size": 285340672, "native_header_sha256": "f8ab3d5487390b0e1c3b07c0b4108ca95a2bdeb8647f62d16bcced26ba65cd4e"}
+            {
+              "platform": "darwin-aarch64", "compressed_size": 119065220, "tar_size": 267961344,
+              "native_header_sha256": "128e64a470c4783da0830a487d020c7fe60bf61e49d9f9b9d69d2385633a93bd",
+              "package_json": {"member": "package/package.json", "sha256": "5afe8faf5039f2bad80f2f9c314a76ac3e8a4fd6301493833c7928652985746c", "scripts": {}, "dependencies": {}, "optionalDependencies": {}, "tarball_integrity_verified": true}
+            },
+            {
+              "platform": "linux-x86_64", "compressed_size": 129008778, "tar_size": 285798400,
+              "native_header_sha256": "e117cda98369d7c5703a95413acc44da57264985d3b147def2f1e7232da1e2ba",
+              "package_json": {"member": "package/package.json", "sha256": "04a0bd5fe3d4f13537230250194ebbac149fa1fe3595d4c3d12f3741497adc09", "scripts": {}, "dependencies": {}, "optionalDependencies": {}, "tarball_integrity_verified": true}
+            },
+            {
+              "platform": "linux-aarch64", "compressed_size": 129489471, "tar_size": 285340672,
+              "native_header_sha256": "f8ab3d5487390b0e1c3b07c0b4108ca95a2bdeb8647f62d16bcced26ba65cd4e",
+              "package_json": {"member": "package/package.json", "sha256": "6c44b50e2229c1422ac1ad478587b6cfa24fca46224750034df64dd6bc6b5719", "scripts": {}, "dependencies": {}, "optionalDependencies": {}, "tarball_integrity_verified": true}
+            }
           ]
         }
       },
