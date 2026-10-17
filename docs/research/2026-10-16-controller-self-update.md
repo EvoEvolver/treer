@@ -751,8 +751,18 @@ deliberately retain a live writer after write-half-close to exercise this limit.
 An owned Rust subprocess fixture uses a unique private Unix socket for complete,
 partial and empty streams, waiting for peer exit before reading buffered bytes;
 deadline tests cover an open writer and slow fragments.
-Nonblocking reads and bounded waits enforce the deadline without setting socket
-timeouts after peer exit; deadline expiry never synthesizes an EOF observation.
+Nonblocking reads and `poll` over the input and a private cancellation socket
+enforce the deadline without setting socket timeouts after peer exit. Interrupted
+polls recompute the original remaining budget; input errors and deadline expiry
+never synthesize an EOF observation. Cancellation data, write-half-close, peer
+disappearance or descriptor errors return `update_launcher_permit_read_cancelled`.
+Cancellation takes priority when both sockets are ready in the same poll, and a
+final nonblocking cancellation check runs after EOF, before returning a raw
+observation. This is a local interruption signal, not a durable ACK, proof of
+permit-peer death, or a promise about a cancellation racing after that check.
+Socketpair tests cover all three cancellation signals with buffered complete
+frames and empty EOF, plus interruption of open and partial input streams while
+retaining the receiver. No 1ms polling loop remains in the reader.
 This reader has no production caller, peer authentication, writer-disappearance
 proof, arbitration transition, ACK or persistent record. It does not satisfy the
 sealed authenticated proof requirement below or authorize installer execution.
@@ -767,8 +777,9 @@ or invalid framing, must call `invalidate()` on the pending arbitration, making
 it `Uncertain`. Never retry ambiguous input as `Pending` or as empty EOF. Add
 integration tests for all three failure classes and for rejection before reading
 an unauthenticated connection when this wiring exists; current raw fixtures do
-not establish those guarantees. Replace the bounded 1ms polling with cancellable
-poll/event waiting at integration, retaining the same absolute deadline.
+not establish those guarantees. Wire the existing cancellable poll wait to the
+supervisor's exclusively owned cancellation channel, retaining the same absolute
+deadline and fail-closed arbitration requirement.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the

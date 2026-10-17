@@ -4,11 +4,12 @@
 //! or that every writer copy is gone. No connection, launch or receipt mutation.
 use std::{
     io::{self, Read},
-    os::unix::net::UnixStream,
+    os::{fd::AsFd, unix::net::UnixStream},
     time::{Duration, Instant},
 };
 
 use anyhow::{bail, Result};
+use nix::poll::{poll, PollFd, PollFlags, PollTimeout};
 use uuid::Uuid;
 
 use super::Binding;
@@ -56,11 +57,22 @@ impl Observation<'_> {
 /// invalidate the pending arbitration on every read error (including timeout or
 /// invalid framing), never retry it as Pending. These integration guards are
 /// not implemented here; raw unit fixtures confer no authority.
-pub fn read(receiver: &mut UnixStream) -> Result<Observation<'_>> {
-    read_until(receiver, Instant::now() + BUDGET)
+/// The caller exclusively owns a private cancellation socket's read endpoint;
+/// data, write-half-close, peer disappearance or a socket error cancels reading.
+/// Cancellation wins when both descriptors are ready in the same poll. It is
+/// an interruption signal, not evidence about the permit peer or its writers.
+pub fn read<'a>(
+    receiver: &'a mut UnixStream,
+    cancellation: &UnixStream,
+) -> Result<Observation<'a>> {
+    read_until(receiver, cancellation, Instant::now() + BUDGET)
 }
 
-fn read_until(receiver: &mut UnixStream, deadline: Instant) -> Result<Observation<'_>> {
+fn read_until<'a>(
+    receiver: &'a mut UnixStream,
+    cancellation: &UnixStream,
+    deadline: Instant,
+) -> Result<Observation<'a>> {
     // Use nonblocking reads rather than SO_RCVTIMEO: setting a socket timeout
     // can fail on macOS after the peer has exited, before buffered input drains.
     receiver
@@ -69,10 +81,7 @@ fn read_until(receiver: &mut UnixStream, deadline: Instant) -> Result<Observatio
     let mut bytes = [0; FRAME + 1];
     let mut count = 0;
     loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            bail!("update_launcher_permit_read_timeout");
-        }
+        wait_for_input(receiver, cancellation, deadline)?;
         match receiver.read(&mut bytes[count..]) {
             Ok(0) => break,
             Ok(read) => {
@@ -81,9 +90,13 @@ fn read_until(receiver: &mut UnixStream, deadline: Instant) -> Result<Observatio
                     bail!("update_launcher_permit_frame_invalid");
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
-                std::thread::sleep(remaining.min(Duration::from_millis(1)));
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                ) =>
+            {
+                continue
             }
             Err(_) => bail!("update_launcher_permit_read_failed"),
         }
@@ -91,16 +104,68 @@ fn read_until(receiver: &mut UnixStream, deadline: Instant) -> Result<Observatio
     if Instant::now() >= deadline {
         bail!("update_launcher_permit_read_timeout");
     }
+    // Catch a cancellation observed after the final input poll/EOF read. This
+    // remains a raw I/O observation, never a durable cancellation/permit ACK.
+    let mut descriptor = [PollFd::new(cancellation.as_fd(), PollFlags::POLLIN)];
+    poll(&mut descriptor, PollTimeout::ZERO)
+        .map_err(|_| anyhow::anyhow!("update_launcher_permit_read_failed"))?;
+    require_not_cancelled(&descriptor[0])?;
     let (kind, binding) = match count {
         0 => (Kind::EmptyEof, None),
         FRAME => (Kind::Permit, Some(parse(&bytes[..FRAME])?)),
         _ => (Kind::PartialEof, None),
     };
+    if Instant::now() >= deadline {
+        bail!("update_launcher_permit_read_timeout");
+    }
     Ok(Observation {
         _receiver: receiver,
         kind,
         binding,
     })
+}
+
+fn require_not_cancelled(descriptor: &PollFd<'_>) -> Result<()> {
+    if descriptor.revents().is_none_or(|events| !events.is_empty()) {
+        bail!("update_launcher_permit_read_cancelled");
+    }
+    Ok(())
+}
+
+fn wait_for_input(
+    receiver: &UnixStream,
+    cancellation: &UnixStream,
+    deadline: Instant,
+) -> Result<()> {
+    loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            bail!("update_launcher_permit_read_timeout");
+        }
+        let timeout = PollTimeout::try_from(remaining.as_millis().max(1))
+            .map_err(|_| anyhow::anyhow!("update_launcher_permit_read_failed"))?;
+        let mut descriptors = [
+            PollFd::new(cancellation.as_fd(), PollFlags::POLLIN),
+            PollFd::new(receiver.as_fd(), PollFlags::POLLIN),
+        ];
+        match poll(&mut descriptors, timeout) {
+            Err(nix::errno::Errno::EINTR) => continue,
+            Err(_) => bail!("update_launcher_permit_read_failed"),
+            Ok(0) => bail!("update_launcher_permit_read_timeout"),
+            Ok(_) => {}
+        }
+        require_not_cancelled(&descriptors[0])?;
+        if Instant::now() >= deadline {
+            bail!("update_launcher_permit_read_timeout");
+        }
+        let events = descriptors[1].revents().unwrap_or(PollFlags::POLLNVAL);
+        if events.intersects(PollFlags::POLLNVAL | PollFlags::POLLERR)
+            || !events.intersects(PollFlags::POLLIN | PollFlags::POLLHUP)
+        {
+            bail!("update_launcher_permit_read_failed");
+        }
+        return Ok(());
+    }
 }
 
 fn parse(bytes: &[u8]) -> Result<Binding> {
@@ -121,6 +186,69 @@ fn parse(bytes: &[u8]) -> Result<Binding> {
 mod tests {
     use super::*;
     use std::{io::Write, net::Shutdown};
+
+    fn read(receiver: &mut UnixStream) -> Result<Observation<'_>> {
+        read_until(receiver, Instant::now() + BUDGET)
+    }
+
+    fn read_until(receiver: &mut UnixStream, deadline: Instant) -> Result<Observation<'_>> {
+        let (cancellation, _sender) = UnixStream::pair().unwrap();
+        super::read_until(receiver, &cancellation, deadline)
+    }
+
+    #[test]
+    fn cancellation_wins_over_buffered_permit_and_empty_eof() {
+        for payload in [&frame()[..], &[][..]] {
+            for mode in ["data", "half_close", "drop"] {
+                let (mut receiver, mut writer) = UnixStream::pair().unwrap();
+                writer.write_all(payload).unwrap();
+                writer.shutdown(Shutdown::Write).unwrap();
+                let (cancellation, mut sender) = UnixStream::pair().unwrap();
+                match mode {
+                    "data" => sender.write_all(b"cancel").unwrap(),
+                    "half_close" => sender.shutdown(Shutdown::Write).unwrap(),
+                    "drop" => drop(sender),
+                    _ => unreachable!(),
+                }
+                assert_eq!(
+                    super::read(&mut receiver, &cancellation)
+                        .err()
+                        .unwrap()
+                        .to_string(),
+                    "update_launcher_permit_read_cancelled"
+                );
+                if !payload.is_empty() {
+                    let mut first = [0];
+                    receiver.read_exact(&mut first).unwrap();
+                    assert_eq!(
+                        first[0], HEADER[0],
+                        "cancellation must win before draining input"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn cancellation_interrupts_an_open_or_partial_stream_without_closing_receiver() {
+        for payload in [&[][..], &frame()[..7]] {
+            let (mut receiver, mut writer) = UnixStream::pair().unwrap();
+            writer.write_all(payload).unwrap();
+            let (cancellation, sender) = UnixStream::pair().unwrap();
+            let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(0);
+            let reader = std::thread::spawn(move || {
+                ready_tx.send(()).unwrap();
+                let error = super::read(&mut receiver, &cancellation).err().unwrap();
+                (receiver, error.to_string())
+            });
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            sender.shutdown(Shutdown::Write).unwrap();
+            let (receiver, error) = reader.join().unwrap();
+            assert_eq!(error, "update_launcher_permit_read_cancelled");
+            writer.write_all(b"still-open").unwrap();
+            drop(receiver);
+        }
+    }
 
     fn frame() -> [u8; FRAME] {
         let mut bytes = [b'a'; FRAME];
