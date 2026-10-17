@@ -1,7 +1,8 @@
 //! Owned Unix subprocess groups for trusted, cooperating installers.
 //!
 //! This is lifecycle management, not executable authentication or a sandbox.
-//! Descendants must retain their inherited process group. Callers authenticate
+//! Descendants must retain their inherited process group and remain signalable
+//! by the caller. Callers authenticate
 //! the executable, set fixed argv/cwd and a clean environment, retain transaction
 //! locks, and interpret output separately. No other waiter may reap this child
 //! (including a process-wide SIGCHLD handler with waitpid(-1)).
@@ -17,9 +18,34 @@ use rustix::{
     process::{kill_process_group, waitid, Pid, Signal, WaitId, WaitIdOptions},
 };
 
+#[cfg(target_os = "linux")]
+mod linux;
 #[cfg(target_os = "macos")]
 #[allow(unsafe_code)]
 mod macos;
+
+fn quiescent(pid: Pid) -> io::Result<bool> {
+    #[cfg(target_os = "macos")]
+    return macos::quiescent(pid);
+    #[cfg(target_os = "linux")]
+    return linux::quiescent(pid);
+}
+
+/// Output whose owned group was observed with no executing members before the
+/// leader was reaped. No authentication, receipt or rollback authority is
+/// implied. The cooperating-child/no-external-reaper contract still applies.
+/// Deliberately no Debug/Serialize: stdout can contain private installer data.
+pub struct QuiescentOutput(Output);
+
+impl QuiescentOutput {
+    pub fn status(&self) -> std::process::ExitStatus {
+        self.0.status
+    }
+
+    pub fn stdout(&self) -> &[u8] {
+        &self.0.stdout
+    }
+}
 
 struct Group {
     child: Option<Child>,
@@ -104,6 +130,51 @@ impl Group {
         // fails. Standard Child owns no background or implicit global reaper.
         child.wait()
     }
+
+    async fn finish_quiescent(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> io::Result<std::process::ExitStatus> {
+        if !self.exited()? {
+            return Err(io::Error::other("child group quiescence unavailable"));
+        }
+        // Keep the leader unreaped through signalling AND the OS inventory.
+        // Permission errors are not success. Preserve the narrow Darwin
+        // singleton exception; an ambiguous multi-member EPERM still fails,
+        // even if some members might be zombies. The full state check remains
+        // mandatory before returning an output witness.
+        match kill_process_group(self.pid, Signal::KILL) {
+            Ok(()) => {}
+            #[cfg(target_os = "macos")]
+            Err(rustix::io::Errno::PERM) if macos::only_owned_leader(self.pid) => {}
+            Err(error) => return Err(error.into()),
+        }
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "child group quiescence deadline",
+                ));
+            }
+            let quiet = quiescent(self.pid)?;
+            // OS inventory reads are synchronous. Never return a successful
+            // witness after a slow inventory consumed the remaining budget.
+            if tokio::time::Instant::now() >= deadline {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "child group quiescence deadline",
+                ));
+            }
+            if quiet && self.exited()? {
+                // No further signal uses this number, including on Drop.
+                return self.child.take().unwrap().wait();
+            }
+            tokio::time::sleep_until(
+                deadline.min(tokio::time::Instant::now() + Duration::from_millis(10)),
+            )
+            .await;
+        }
+    }
 }
 
 impl Drop for Group {
@@ -146,6 +217,35 @@ fn drain(child: &mut Child, bytes: &mut Vec<u8>, limit: usize) -> io::Result<()>
 /// that every descendant has completed kernel teardown; quiescence/recovery
 /// evidence and transaction-lock lifetime remain the caller's responsibility.
 pub async fn output(command: &mut Command, timeout: Duration, limit: usize) -> io::Result<Output> {
+    capture(command, timeout, limit, false).await
+}
+
+/// Strict capture for future transaction callers. The SAME timeout includes
+/// post-signal quiescence observation; it is never extended. Only a successful
+/// result carries QuiescentOutput. On error/cancellation the old best-effort
+/// Drop cleanup still runs, but there is NO quiescence proof: the caller must
+/// retain transaction ownership for recovery, not release locks or roll back.
+/// This observes stopped user execution, not full kernel teardown: zombies are
+/// inert and may await their own parent/init reaper. It cannot contain deliberate
+/// group escape or another same-account process joining the group later. OS
+/// inventory reads are synchronous and may stall in the kernel; exceeding the
+/// budget returns an error, never a late successful witness.
+pub async fn output_quiescent(
+    command: &mut Command,
+    timeout: Duration,
+    limit: usize,
+) -> io::Result<QuiescentOutput> {
+    capture(command, timeout, limit, true)
+        .await
+        .map(QuiescentOutput)
+}
+
+async fn capture(
+    command: &mut Command,
+    timeout: Duration,
+    limit: usize,
+    require_quiescent: bool,
+) -> io::Result<Output> {
     if timeout.is_zero() || limit == 0 {
         return Err(io::Error::other("invalid child budget"));
     }
@@ -162,7 +262,11 @@ pub async fn output(command: &mut Command, timeout: Duration, limit: usize) -> i
         if group.exited()? {
             // Retain the pipe independently while stop consumes/reaps Child.
             let mut stdout = group.child.as_mut().unwrap().stdout.take().unwrap();
-            let status = group.stop()?;
+            let status = if require_quiescent {
+                group.finish_quiescent(deadline).await?
+            } else {
+                group.stop()?
+            };
             // The exited leader cannot produce more bytes. Read its remaining
             // buffered bytes, without waiting for descendant-held pipe handles.
             let mut buffer = [0; 8192];
@@ -365,5 +469,89 @@ mod tests {
                 .is_err());
             assert!(!fixture.0.join("ready").exists());
         }
+    }
+
+    #[tokio::test]
+    async fn strict_result_requires_observed_quiescence_before_reaping() {
+        let fixture = Fixture::new();
+        let result = output_quiescent(&mut fixture.command(true), Duration::from_secs(3), 64)
+            .await
+            .unwrap();
+        assert_eq!(result.status().code(), Some(7));
+        assert_eq!(result.stdout(), b"result");
+        no_late_write(&fixture).await;
+    }
+
+    #[tokio::test]
+    async fn live_members_are_not_quiescent_and_killed_members_are() {
+        let fixture = Fixture::new();
+        let mut group = Group::spawn(&mut fixture.command(false)).unwrap();
+        ready(&fixture.0).await;
+        assert!(!quiescent(group.pid).unwrap());
+        kill_process_group(group.pid, Signal::KILL).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !group.exited().unwrap() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !quiescent(group.pid).unwrap() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        // Test the state observation after the test's own signal, without
+        // sending another kill to an already zombie-only Darwin group (that
+        // case intentionally retains the conservative EPERM failure rule).
+        let status = group.child.take().unwrap().wait().unwrap();
+        assert!(!status.success());
+        assert!(group.child.is_none());
+        no_late_write(&fixture).await;
+    }
+
+    #[tokio::test]
+    async fn expired_quiescence_budget_keeps_the_unreaped_owner_and_grants_no_witness() {
+        let mut command = Command::new("/bin/sh");
+        command.env_clear().args(["-c", "exit 0"]);
+        let mut group = Group::spawn(&mut command).unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !group.exited().unwrap() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let error = group
+            .finish_quiescent(tokio::time::Instant::now())
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(group.child.is_some());
+        assert!(group.exited().unwrap());
+        assert!(group.stop().unwrap().success());
+    }
+
+    #[tokio::test]
+    async fn strict_deadline_or_cancellation_grants_no_result() {
+        let fixture = Fixture::new();
+        assert!(
+            output_quiescent(&mut fixture.command(false), Duration::from_millis(150), 64)
+                .await
+                .is_err()
+        );
+        no_late_write(&fixture).await;
+
+        let fixture = Fixture::new();
+        let mut command = fixture.command(false);
+        let task = tokio::spawn(async move {
+            output_quiescent(&mut command, Duration::from_secs(3), 64).await
+        });
+        ready(&fixture.0).await;
+        task.abort();
+        assert!(task.await.err().unwrap().is_cancelled());
+        no_late_write(&fixture).await;
     }
 }

@@ -238,6 +238,33 @@ finished kernel teardown. The caller must retain locks and establish the needed
 quiescence/recovery evidence before rollback or release; this helper alone does
 not authorize either operation.
 
+The optional `output_quiescent` path now retains the unreaped leader through
+group signalling and bounded OS state observation, and only then reaps it and
+returns a private-constructor `QuiescentOutput`. A live, stopped or unreadable
+member does not count as quiescent; only exited/zombie state does. Darwin uses
+a bounded group inventory and fixed-size initialized `proc_bsdinfo` output with
+the documented zombie-inclusive argument; changed/disappearing members require
+another inventory. Linux bounds `/proc` enumeration and each `stat` read, parses
+the PID/group/state without decoding or retaining the opaque process name, and
+requires the reserved owned leader in the observed group. Linux procfs enumeration
+is not an atomic group snapshot: the observation follows group SIGKILL, relying
+on Linux group-signal/fork locking and the trusted cooperating-child contract.
+All descendants must remain in their inherited group and remain signalable by
+the caller. This is not containment of another same-account actor or an escaping
+or credential-changing installer. Permission errors still fail, except for the
+existing narrow Darwin exited-singleton exception.
+
+The original execution deadline also covers quiescence; failed, cancelled or
+expired observation returns no witness and cannot authorize rollback or lock
+release. A slow synchronous inventory cannot return a late successful witness;
+kernel-stalled inventory I/O still has no hard wall-clock bound. Zombies cannot
+issue further user-mode writes, but this does not prove all kernel teardown or
+previous asynchronous I/O has finished. Authenticated command construction,
+durable child-start/worker-death recovery, no-global-reaper integration guards,
+final live health and journal completion are still separate pending obligations.
+The strict lifecycle fixture does not claim a launcher installation or whole P1
+completion, and no production self-update call site uses it yet.
+
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
 modes/current bytes and executable stages before recording Activating or making
