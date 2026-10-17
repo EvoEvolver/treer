@@ -71,6 +71,9 @@ pub struct Core {
 }
 
 impl Core {
+    pub(crate) fn is_identity(&self, id: &str) -> bool {
+        self.own_id == id
+    }
     pub fn new(executable: &Path, own_id: &str) -> Result<Self, Error> {
         if !executable.is_absolute() || !valid_id(own_id) {
             return Err(Error::Invalid);

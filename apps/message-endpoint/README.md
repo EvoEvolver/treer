@@ -555,21 +555,51 @@ not increment counters. The hub-wide hold ceiling also sets a persistent visible
 capacity-exceeded flag; it still records/acks overflow rather than blocking the
 Core window or poisoning the fault ledger. Metadata receipt reads paginate by
 opaque delivery ID, with at most 100 per page. Receipt/counter archival, explicit
-owner clear and audited refetch remain activation requirements. Storage failure
+owner clear and owner-authorized refetch integration remain activation
+requirements. Storage failure
 returns no ack permission and preserves the prior hold; counters are not a
 substitute for a successful disk commit. Holds use the same private plaintext
 database, backup and encryption requirements as other message state.
 
-`Core::get_bound_message` is a network primitive for future owner-authorized
+`Core::get_bound_message` is a network primitive for owner-authorized
 receipt recovery. It invokes only `treer message get -- <stored-message-id>` under
 the hub's own identity and verifies exact message ID, workspace, bound endpoint
 Agent sender and the hub Agent's presence in Core's recipient list, plus size and
-context limits. It is not an HTTP API or owner authorization check. The future
-service must select IDs from a durable receipt, verify owner/CSRF/confirmation,
-audit the action and revalidate binding generation, freshness, fragment hashes
-and original delivery dedup before admission. Core content can remain readable
-after ack, but refetch may fail; no automatic refetch or successful-recovery
-claim is made by this helper.
+context limits. It is not an HTTP API or owner authorization check.
+
+`prepare_receipt_refetch` and `complete_receipt_refetch` now implement internal
+state recovery around that adapter. The future HTTP service must first verify
+the current human owner, CSRF and explicit confirmation, derive the actor ID
+itself, and provide a fresh CSPRNG lease token; these Rust methods alone do not
+authenticate an owner. Selection is by an existing receipt's delivery ID, never
+by a browser-supplied message ID or body. Preparation requires an active, fresh,
+current-generation binding and exact revision, records a body-free started
+audit, and leases the attempt for 60 seconds. Only capacity/hold-expiry receipts
+within the 30-day replay retention can be selected. Invalid or old-generation
+receipts cannot be resurrected. Overlapping attempts for the same receipt are
+rejected, and replaced/expired leases or changed revisions cannot complete.
+
+The owned intent calls the fixed Core adapter outside state access, checking
+that its configured identity is the pinned hub's. Its result has no public
+constructor or deserializer. Completion rechecks the binding and lease, then
+uses the normal fragment store for size, generation, hash and capacity checks.
+The original fragment dedup is preserved. Queue-full, unavailable, invalid and
+terminal-expired results have fixed audit outcomes, without raw errors or
+payloads, and permit an explicit later retry. Accepted fragments set the
+receipt's `recovered_at`; this means fragment admission, **not external delivery**
+or recovery of every part of the original message.
+
+The started audit precedes fragment commit. Fragment admission and the final
+receipt/audit update are separate transactions: a crash or final-audit disk
+failure can leave a pending started attempt with its fragment already saved.
+Retry runs normal hash dedup, rather than blindly creating new work. Audits are
+append-only and capped at 10000; a full audit refuses recovery before admission.
+For refetch audit entries the existing `transfer_id` field identifies the Core
+delivery receipt. No automatic refetch is performed. Core content can remain
+readable after ack but can still be unavailable, expired, denied or exceed the
+adapter response limit. Authenticated UI, audit/receipt archival and explicit
+clear remain required before activation; these primitives are not a running
+owner recovery service.
 
 ## Development Bot API adapter (`hub` Cargo feature)
 

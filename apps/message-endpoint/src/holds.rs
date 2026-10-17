@@ -36,6 +36,8 @@ pub struct CapacityReceipt {
     pub generation: i64,
     pub reason: String,
     pub at: i64,
+    /// Fragment admission, not completion of the original external message.
+    pub recovered_at: Option<i64>,
 }
 
 /// Capped metadata receipt + counter, committed before removing plaintext/acking.
@@ -297,7 +299,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(Error::Binding);
         }
         let generation = self.view(endpoint)?.binding.generation;
-        let mut q=self.store.db.prepare("SELECT delivery,message,generation,reason,at FROM hub_capacity_receipts WHERE endpoint=?1 AND generation=?2 AND (?4 IS NULL OR delivery<?4) ORDER BY delivery DESC LIMIT ?3")?;
+        let mut q=self.store.db.prepare("SELECT delivery,message,generation,reason,at,recovered_at FROM hub_capacity_receipts WHERE endpoint=?1 AND generation=?2 AND (?4 IS NULL OR delivery<?4) ORDER BY delivery DESC LIMIT ?3")?;
         let rows = q
             .query_map(params![endpoint, generation, limit, before], |r| {
                 Ok(CapacityReceipt {
@@ -306,6 +308,7 @@ impl<M: Mailbox + Directory> Hub<M> {
                     generation: r.get(2)?,
                     reason: r.get(3)?,
                     at: r.get(4)?,
+                    recovered_at: r.get(5)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;

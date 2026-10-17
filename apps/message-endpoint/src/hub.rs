@@ -105,8 +105,8 @@ impl Status {
 pub struct Hub<M> {
     pub(crate) store: Store,
     pub(crate) mailbox: M,
-    workspace: String,
-    own_id: String,
+    pub(crate) workspace: String,
+    pub(crate) own_id: String,
 }
 fn stable(id: &str) -> bool {
     valid_id(id) && (id.starts_with("ag_") || id.starts_with("app_"))

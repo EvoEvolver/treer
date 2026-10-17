@@ -8,7 +8,7 @@ use crate::{
 use rusqlite::params;
 use serde::Serialize;
 
-const AUDIT_LIMIT: i64 = 10_000;
+pub(crate) const AUDIT_LIMIT: i64 = 10_000;
 
 #[derive(Clone, Copy)]
 pub enum Recovery {
@@ -46,7 +46,7 @@ pub struct Audit {
 }
 
 impl<M: Mailbox + Directory> Hub<M> {
-    fn recovery_schema(&self) -> Result<(), Error> {
+    pub(crate) fn recovery_schema(&self) -> Result<(), Error> {
         self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_owner_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,endpoint TEXT NOT NULL,transfer TEXT NOT NULL,revision INTEGER NOT NULL,at INTEGER NOT NULL);")?;
         Ok(())
     }

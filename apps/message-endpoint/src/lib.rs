@@ -15,6 +15,8 @@ pub mod protocol;
 #[cfg(unix)]
 pub mod recovery;
 #[cfg(unix)]
+pub mod refetch;
+#[cfg(unix)]
 pub mod relay;
 pub mod store;
 #[cfg(unix)]
