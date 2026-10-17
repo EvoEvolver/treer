@@ -180,6 +180,8 @@ export const en = {
   "files.bytes": "{{n}} bytes",
   "files.unavailable": "Preview unavailable",
   "files.open": "Open full text",
+  "files.download": "Download",
+  "files.downloadFile": "Download {{name}}",
   "tasks.title": "Background tasks",
   "tasks.close": "Close background tasks",
   "tasks.empty": "No background tasks.",

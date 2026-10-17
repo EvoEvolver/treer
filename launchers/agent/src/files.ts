@@ -67,6 +67,25 @@ export async function previewFile(root: string, path: string) {
   } finally { await handle.close(); }
 }
 
+/** An open canonical regular file for streaming; never reads it into memory and never follows a swapped final symlink. */
+export async function openDownload(root: string, path: string) {
+  if (!path) throw new FileAccessError("A file path is required");
+  const file = await workspacePath(root, path);
+  const handle = await open(file.canonical, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+  try {
+    const metadata = await handle.stat();
+    if (!metadata.isFile()) throw new FileAccessError("Not a regular file");
+    return { handle, size: metadata.size, name: basename(file.path) };
+  } catch (error) { await handle.close(); throw error; }
+}
+
+/** RFC 6266 attachment header: an ASCII fallback plus a UTF-8 filename* (RFC 5987 percent-encoding). */
+export function contentDisposition(name: string) {
+  const fallback = name.replace(/[^\x20-\x7e]/g, "_").replace(/["\\%;]/g, "_").replace(/[\x00-\x1f\x7f]/g, "_") || "download";
+  const encoded = encodeURIComponent(name).replace(/['()*!]/g, (char) => `%${char.charCodeAt(0).toString(16).toUpperCase()}`);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
 export function fileErrorStatus(error: unknown) {
   if (error instanceof FileAccessError) return error.status;
   const code = (error as NodeJS.ErrnoException).code;

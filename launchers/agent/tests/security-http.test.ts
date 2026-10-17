@@ -79,7 +79,7 @@ test("malformed absolute request URL is rejected without unhandled rejection or 
 
 test("every browser HTTP surface rejects unmarked Origin/Fetch Metadata and foreign Host", async (t) => {
   const server = await fixture(t);
-  const routes = [["/", "GET"], ["/api/state", "GET"], ["/v1/transcript", "GET"], ["/v1/files/tree", "GET"], ["/v1/files?path=.env", "GET"], ["/api/prompt", "POST"], ["/api/interrupt", "POST"], ["/api/settings", "POST"], ["/api/goal", "PUT"], ["/v1/abort", "POST"], ["/api/prompt", "OPTIONS"]];
+  const routes = [["/", "GET"], ["/api/state", "GET"], ["/v1/transcript", "GET"], ["/v1/files/tree", "GET"], ["/v1/files?path=.env", "GET"], ["/v1/files/download?path=.env", "GET"], ["/api/prompt", "POST"], ["/api/interrupt", "POST"], ["/api/settings", "POST"], ["/api/goal", "PUT"], ["/v1/abort", "POST"], ["/api/prompt", "OPTIONS"]];
   const hostile: Record<string, string>[] = [{ origin: "https://attacker.invalid" }, { origin: "null" }, { "sec-fetch-site": "same-origin" }, { "sec-fetch-mode": "navigate" }, { host: "rebinding.invalid" }];
   for (const [path, method] of routes) {
     for (const headers of hostile) {

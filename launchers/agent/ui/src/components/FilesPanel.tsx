@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { request } from "../api";
+import { fileDownloadUrl, request } from "../api";
 import { t } from "../i18n";
+import { safeUrl } from "../lib/url";
 import type { FileEntry, FilePreview } from "../types";
 import { useDialogs } from "./Dialogs";
 import { Icon } from "./Icon";
@@ -110,6 +111,12 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
   const tabbable = entryRows.some((row) => row.entry.path === focusPath) ? focusPath : (entryRows.find((row) => row.entry.path === selected) ?? entryRows[0])?.entry.path;
 
   function onKeyDown(event: KeyboardEvent<HTMLUListElement>) {
+    const active = document.activeElement as HTMLElement | null;
+    if (active?.dataset.dl !== undefined) {
+      // A row's download link is reached with ArrowRight and left with ArrowLeft; Enter downloads natively.
+      if (event.key === "ArrowLeft") { event.preventDefault(); list.current?.querySelector<HTMLElement>(`[role=treeitem][data-path="${CSS.escape(active.dataset.dl)}"]`)?.focus(); }
+      return;
+    }
     const items = [...(list.current?.querySelectorAll<HTMLElement>("[role=treeitem]") ?? [])];
     const index = items.indexOf(document.activeElement as HTMLElement);
     if (index < 0) return;
@@ -119,7 +126,10 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
     else if (event.key === "ArrowUp") { event.preventDefault(); go(index - 1); }
     else if (event.key === "Home") { event.preventDefault(); go(0); }
     else if (event.key === "End") { event.preventDefault(); go(items.length - 1); }
-    else if (event.key === "ArrowRight" && row?.entry.kind === "directory") {
+    else if (event.key === "ArrowRight" && row?.entry.kind === "file") {
+      const link = items[index]?.parentElement?.querySelector<HTMLElement>("[data-dl]");
+      if (link) { event.preventDefault(); link.focus(); }
+    } else if (event.key === "ArrowRight" && row?.entry.kind === "directory") {
       event.preventDefault();
       if (!row.open) toggleDirectory(row.entry.path); else go(index + 1);
     } else if (event.key === "ArrowLeft" && row) {
@@ -143,19 +153,21 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
         {rows.map((row) => row.kind === "notice" ? (
           <li key={row.key} role="none" className="tree-empty">{row.text}{row.retry && <> <button type="button" className="btn" onClick={row.retry}>{t("files.retry")}</button></>}</li>
         ) : (
-          <li key={row.entry.path} role="none">
+          <li key={row.entry.path} role="none" className={row.entry.kind === "file" ? "has-dl" : undefined}>
             <button type="button" role="treeitem" className={`trow${selected === row.entry.path ? " sel" : ""}`} data-path={row.entry.path} title={row.entry.path} aria-level={row.depth + 1}
               aria-expanded={row.entry.kind === "directory" ? row.open : undefined} aria-selected={row.entry.kind !== "directory" ? selected === row.entry.path : undefined} tabIndex={tabbable === row.entry.path ? 0 : -1}
               style={{ "--lvl": row.depth } as CSSProperties} onFocus={() => setFocusPath(row.entry.path)} onClick={() => (row.entry.kind === "directory" ? toggleDirectory(row.entry.path) : void select(row.entry.path))}>
               {row.entry.kind === "directory" ? <Icon name="chev" className="chev" /> : <span className="chev-sp" />}
               <Icon name={row.entry.kind === "directory" ? "folder" : "file"} /><span className="tn">{row.entry.name}</span>
             </button>
+            {row.entry.kind === "file" && <a className="trow-dl" href={safeUrl(fileDownloadUrl(row.entry.path))} download={row.entry.name} data-dl={row.entry.path} tabIndex={-1} title={t("files.downloadFile", { name: row.entry.name })} aria-label={t("files.downloadFile", { name: row.entry.name })}><Icon name="download" /></a>}
           </li>
         ))}
       </ul>
       <section className="preview" aria-label={t("files.preview")}>
         <div className="pmeta"><b>{selected ?? t("files.select")}</b><span className={file?.truncated ? "truncated" : undefined}>{meta}</span>
-          {file && <button type="button" className="btn" onClick={() => openText(file.path, file.content)}>{t("files.open")}</button>}</div>
+          {file && <button type="button" className="btn" onClick={() => openText(file.path, file.content)}>{t("files.open")}</button>}
+          {selected && preview.state !== "idle" && <a className="btn dl" href={safeUrl(fileDownloadUrl(selected))} download={selected.split("/").pop()} title={t("files.downloadFile", { name: selected })}><Icon name="download" /> {t("files.download")}</a>}</div>
         {preview.state === "error" && <p className="field-error" role="status">{preview.message}</p>}
         <pre tabIndex={0}>{file ? file.content : preview.state === "idle" ? t("files.hint") : ""}</pre>
       </section>

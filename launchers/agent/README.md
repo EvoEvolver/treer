@@ -700,7 +700,11 @@ conversation; a cleared goal collapses back to **Set goal**.
 **Files and tasks.** The Files panel loads folders only when expanded, supports
 arrow-key navigation and a filter over loaded entries, previews a selected file as
 read-only text (truncated at 64 KiB, with local errors) and refreshes expanded
-folders. When the harness reports background tasks, the Tasks panel shows each
+folders. Every file can be downloaded: a download link on its row (shown on hover or
+keyboard focus on desktop, reached with ArrowRight from the row, always visible with a
+44px target on touch) and a **Download** button in the preview header; the browser streams
+the file straight to disk from `GET /v1/files/download` (files only, no folder/zip
+download yet). When the harness reports background tasks, the Tasks panel shows each
 task's status, duration, exit code and summary; expanding a task loads its output tail
 and a running task refreshes every three seconds while open. On phones the two panels
 share one full-screen slot.
@@ -711,6 +715,7 @@ The additional read-only JSON routes are:
 | --- | --- |
 | `GET /v1/files/tree?path=` | `{path, entries: [{name, path, kind, size, has_children}]}` for one directory; empty path is the working directory |
 | `GET /v1/files?path=src/main.ts` | `{path, name, content, size, truncated}`; content is at most the first 64 KiB of file bytes, decoded as UTF-8 |
+| `GET /v1/files/download?path=src/main.ts` | The file's bytes as an attachment: streamed (never read fully into memory) with `Content-Length`, `Content-Type: application/octet-stream`, an RFC 6266 `Content-Disposition: attachment` (ASCII `filename` fallback plus UTF-8 `filename*`), `X-Content-Type-Options: nosniff` and `Cache-Control: no-store`. Regular files only; the same confinement as the preview (`..`, absolute paths, escaping symlinks: 403; directories, FIFOs and other special files: 400; missing: 404; non-GET: 405). No folder/zip download yet |
 
 Paths are resolved inside `AGENT_UI_CWD` (the runtime's working directory).
 Parent (`..`) components and paths/symlinks outside that root are rejected.

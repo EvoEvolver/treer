@@ -180,6 +180,8 @@ export const zh: Partial<Record<MessageKey, string>> = {
   "files.bytes": "{{n}} 字节",
   "files.unavailable": "无法预览",
   "files.open": "查看全文",
+  "files.download": "下载",
+  "files.downloadFile": "下载 {{name}}",
   "tasks.title": "后台任务",
   "tasks.close": "关闭后台任务",
   "tasks.empty": "没有后台任务。",
