@@ -12,8 +12,8 @@ const exec = promisify(execFile);
 const image = process.argv[2];
 if (!image || process.argv.length !== 3) throw new Error('usage: smoke.mjs LOCAL_IMAGE');
 const prefix = `treer-single-${randomBytes(5).toString('hex')}`;
-const proxyHost = `${prefix}.test:8080`;
-const appHost = `console-${prefix}.test:8080`;
+const proxyHost = `${prefix}.treer.test:8080`;
+const appHost = `console-${prefix}.treer.test:8080`;
 const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
 const containers = [], volumes = [];
 let network = false, port, cookie = '';
@@ -90,7 +90,7 @@ try {
   const organization=(await request('/api/organizations')).data.organizations[0].organization_id;
   const workspace=(await request('/api/workspaces',{organization_id:organization,name:'Disposable smoke'})).data.workspace.workspace_id;
   // Build only a tiny disposable enrolled machine fixture, not another server.
-  fs.writeFileSync(path.join(dir,'Dockerfile'),`FROM debian:bookworm-slim
+  fs.writeFileSync(path.join(dir,'Dockerfile'),`FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl python3 procps && rm -rf /var/lib/apt/lists/* && useradd --create-home --shell /bin/sh smoke
 USER smoke
 ENV PATH=/home/smoke/.local/bin:/usr/local/bin:/usr/bin:/bin

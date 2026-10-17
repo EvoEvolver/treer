@@ -1,6 +1,7 @@
 import hashlib
 import importlib.util
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -95,6 +96,17 @@ class InputTests(unittest.TestCase):
 
     def test_missing_platform_rejected(self):
         (self.source / "machines/linux-x86_64/treer").unlink()
+        self.rejected()
+
+    def test_hardlinked_native_file_rejected(self):
+        path = self.source / "proxy/linux-aarch64/treer-proxy"
+        os.link(path, Path(self.tmp.name) / "linked-binary")
+        self.rejected()
+
+    def test_small_non_elf_rejected_even_with_matching_checksum(self):
+        leaf = self.source / "proxy/linux-aarch64"
+        (leaf / "treer-proxy").write_bytes(b"not a binary")
+        self.checksums(leaf, {"treer-proxy"})
         self.rejected()
 
     def test_unexpected_input_rejected(self):

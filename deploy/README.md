@@ -28,8 +28,10 @@ docker run -d --name treer --restart unless-stopped --stop-timeout 65 \
 ```
 
 Docker creates the named volume if absent. Open the Console at
-`http://localhost:8080`; its API is `http://127.0.0.1:8080`. These are two
-different browser origins on **one port**, without DNS setup. Preserve that
+`http://console.treer.localhost:8080`; its API is `http://proxy.treer.localhost:8080`. These are two
+different browser origins on **one port**, and share a site for the existing
+`SameSite=Strict` sessions. Chromium and Firefox resolve these loopback names
+without DNS setup. Preserve that
 separation: the Proxy serves Console files only for the configured Console
 Host, API/embedded UIs only for the Proxy Host, and rejects other Hosts.
 The local addresses work only on the server machine, not remote clients.
@@ -42,7 +44,7 @@ private terminal (this command displays the secret):
 docker exec treer cat /data/private/admin-password
 ```
 
-Use it at `http://localhost:8080/admin` to create an invitation, then register
+Use it at `http://console.treer.localhost:8080/admin` to create an invitation, then register
 your ordinary user account and create a workspace. The platform admin password
 is a **long-lived startup credential**, not the ordinary member password. Do
 not delete its file and expect a restart to work. Rotation: mount a private,
@@ -59,12 +61,20 @@ TREER_APP_PUBLIC_URL=https://console.example.com/
 TREER_PROXY_PUBLIC_URL=https://proxy.example.com/
 ```
 
+Both public names must share the same scheme and registrable domain (site),
+while remaining different origins. `localhost` plus `127.0.0.1` is **not** a
+working local pair: Strict sessions are withheld across those sites.
 The reverse proxy must preserve the original `Host` and support WebSockets;
 its certificate must cover both names. Do not expose plain HTTP publicly.
 Cookie/Origin/CSRF checks remain enabled. Identical origins cannot safely embed
 untrusted App/Agent UIs: the Core single-origin mode warns and disables framing;
 use two names for the full Console. Wildcard service ingress additionally needs
-its own DNS/TLS domain via `TREER_INGRESS_PUBLIC_URL`. Do not route arbitrary
+its own DNS/TLS domain via `TREER_INGRESS_PUBLIC_URL`. Prefer a different
+registrable domain for untrusted App content, e.g. `apps.example.net`; if it
+shares the Console site, SameSite is not an additional barrier and the exact
+Origin/CookieOriginClass checks are essential. Host routing is not authorization.
+Cookies are not isolated by port: do not run untrusted services on another
+port of these same hostnames. Do not route arbitrary
 unknown Hosts to the Console. Configure routable public URLs before enrolling
 remote machines; loopback defaults will not connect from another machine.
 
@@ -74,8 +84,8 @@ Configuration is through environment variables (no manual config editing):
 | --- | --- |
 | `ADMIN_PASSWORD`, `ADMIN_PASSWORD_FILE` | Env takes precedence; otherwise private file, otherwise generated on first start |
 | `POSTGRES_PASSWORD`, `POSTGRES_PASSWORD_FILE` | Random on first start; persisted, mismatched replacement rejected (not a DB rotation API) |
-| `TREER_PROXY_PUBLIC_URL` | `http://127.0.0.1:8080/` |
-| `TREER_APP_PUBLIC_URL` | `http://localhost:8080/` |
+| `TREER_PROXY_PUBLIC_URL` | `http://proxy.treer.localhost:8080/` |
+| `TREER_APP_PUBLIC_URL` | `http://console.treer.localhost:8080/` |
 | `TREER_ENABLE_CORE_MESSAGES` | `true`, works without NATS |
 | `TREER_NATS_URL` | Unset; external NATS is opt-in, none is installed |
 | `TREER_SINGLE_MAINTENANCE` | Unset; `restore` starts only PG for an offline logical restore |
@@ -103,6 +113,7 @@ The HTTP listener and artifact/static directories are fixed by this image;
 external `DATABASE_URL` and disabled authentication are refused. Updater
 configuration is ignored: this image never mounts `docker.sock`.
 
+The image does not encrypt its volume; use encrypted host storage where needed.
 The only persistent volume is `/data`: `pg/` stores the database, `private/`
 stores bootstrap credentials and storage/release markers, and `socket/`
 contains PG's local socket. PG listens only on container loopback with SCRAM
@@ -118,6 +129,31 @@ Do not put unrelated files in `/data`: startup scans the volume for external
 symlinks, which can take longer on large databases. Debian setuid/setgid bits
 are removed in the image; `/app/system-packages.txt` records the installed
 package versions (the apt security repository itself is not snapshotted).
+
+### Local browser compatibility
+
+| Engine tested with isolated profiles | `*.treer.localhost` | `.test` mapping below |
+| --- | --- | --- |
+| Chromium (Playwright) | Resolution and Strict-cookie cross-origin requests passed | Not separately tested |
+| Firefox 153 (Playwright) | Resolution and Strict-cookie cross-origin requests passed | Not separately tested |
+| WebKit 26.5 (Playwright) | Resolves, but cross-origin Strict cookie is withheld | Passed with local DNS-proxy mapping |
+| Actual Safari.app | Not tested | Not tested; do not infer Safari support from WebKit |
+
+For Safari/WebKit compatibility, map ordinary same-site local names instead.
+Add this line to your own machine's hosts file (the installer does not edit it):
+
+```text
+127.0.0.1 console.treer.test proxy.treer.test
+```
+
+Recreate the container with `TREER_APP_PUBLIC_URL=http://console.treer.test:8080/`
+and `TREER_PROXY_PUBLIC_URL=http://proxy.treer.test:8080/`, then open
+`http://console.treer.test:8080`. Both URLs must change together. The `.test`
+names are local only, not public deployment names; login/CSRF now use these
+new exact origins. WebKit was tested using a local HTTP proxy as DNS mapping,
+without modifying this machine's hosts file. Real Safari remains an operator
+verification step. Do not relax cookies, CORS or Origin checks to work around
+browser differences.
 
 ### Single-container updates and backups
 
@@ -226,9 +262,14 @@ docker build -f Dockerfile.single --build-arg TREER_BUILD_COMMIT="$(git rev-pars
   --build-arg TREER_NATIVE_INPUT_SHA256="$TRUSTED_NATIVE_INPUT_SHA256" \
   --build-arg TREER_VERSION=0.1.14 -t treer-single:local .
 env -i PATH="$PATH" python3 -I -m unittest discover -s deploy/single-container/tests
+node --test deploy/single-container/browser-cookie.test.mjs
 node deploy/single-container/smoke.mjs treer-single:local
 ```
 
+The focused browser test uses only a loopback server and synthetic cookies in
+private profiles. Set `SINGLE_CONTAINER_BROWSER=firefox|webkit` to select an
+installed Playwright engine; `SINGLE_CONTAINER_DNS_PROXY=1` tests the `.test`
+compatibility mapping without editing hosts or reaching external networks.
 The smoke script uses only disposable containers, a private Docker network,
 random names/ports, test credentials and a disposable enrolled machine. It
 checks static/API Host separation, health, admin login/registration, native

@@ -76,7 +76,7 @@ the [operator guide](docs/operator-guide.md).
 
 For a single-container self-hosted central server, use
 `docker run -d --name treer --stop-timeout 65 -p 127.0.0.1:8080:8080 -v treer-data:/data ghcr.io/evoevolver/treer:vX.Y.Z`
-with a published version tag. Open `http://localhost:8080`; retrieve the generated
+with a published version tag. Open `http://console.treer.localhost:8080`; retrieve the generated
 admin password with `docker exec treer cat /data/private/admin-password` in a
 private terminal. Machines enroll separately. See
 [Single container](deploy/README.md#single-container) for hardened flags,

@@ -52,7 +52,7 @@ def strict_object(pairs):
 
 def input_hashes(source):
     return {path.relative_to(source).as_posix(): hash_file(path)
-            for path in sorted(source.rglob("*")) if path.is_file() and path.name != ".gitignore"}
+            for path in sorted(source.rglob("*")) if stat.S_ISREG(path.lstat().st_mode) and path.name != ".gitignore"}
 
 
 def input_digest(source):

@@ -241,8 +241,8 @@ class Supervisor:
                               TREER_APP_DIST_DIR="/app/web", TREER_ARTIFACTS_DIR="/app/dist",
                               TREER_PROXY_LISTEN="0.0.0.0:8080", PORT="8080")
         # Defaults may be changed only via explicit public URLs, not request Host headers.
-        self.proxy_env.setdefault("TREER_PROXY_PUBLIC_URL", "http://127.0.0.1:8080/")
-        self.proxy_env.setdefault("TREER_APP_PUBLIC_URL", "http://localhost:8080/")
+        self.proxy_env.setdefault("TREER_PROXY_PUBLIC_URL", "http://proxy.treer.localhost:8080/")
+        self.proxy_env.setdefault("TREER_APP_PUBLIC_URL", "http://console.treer.localhost:8080/")
         self.proxy_env.setdefault("TREER_ENABLE_CORE_MESSAGES", "true")
         # Missing platforms fail closed, never bootstrap a different 'latest' commit.
         self.proxy_env.setdefault("TREER_RELEASE_ARTIFACT_BASE_URL", "http://127.0.0.1:9/unavailable/")

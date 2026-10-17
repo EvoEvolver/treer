@@ -26,6 +26,7 @@ class HealthTests(unittest.TestCase):
             with patch.object(module.http.client, "HTTPConnection", return_value=connection):
                 self.assertEqual(module.main(), 1)
         self.assertEqual(connection.request.call_count, 1)
+        connection.request.assert_called_once_with("GET", "/api/health", headers={"Host": "proxy.treer.localhost:8080"})
 
     def test_credentials_and_invalid_url_refused(self):
         for value in ("", "file:///etc/passwd", "http://user:synthetic@host/"):
