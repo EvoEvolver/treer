@@ -30,7 +30,38 @@ pub struct RefetchIntent {
 /// No Deserialize or public constructor: a browser cannot supply a body/proof.
 pub struct Refetched {
     intent: RefetchIntent,
-    message: Option<Message>,
+    message: Result<Message, FetchFailure>,
+}
+enum FetchFailure {
+    IdentityMismatch,
+    Unavailable,
+    Timeout,
+    OutputLimit,
+    Rejected,
+    InvalidResponse,
+}
+impl From<crate::core::Error> for FetchFailure {
+    fn from(error: crate::core::Error) -> Self {
+        match error {
+            crate::core::Error::Unavailable => Self::Unavailable,
+            crate::core::Error::Timeout => Self::Timeout,
+            crate::core::Error::OutputLimit => Self::OutputLimit,
+            crate::core::Error::Rejected => Self::Rejected,
+            crate::core::Error::Invalid => Self::InvalidResponse,
+        }
+    }
+}
+impl FetchFailure {
+    fn audit_action(&self) -> &'static str {
+        match self {
+            Self::IdentityMismatch => "refetch_hub_identity_mismatch",
+            Self::Unavailable => "refetch_core_unavailable",
+            Self::Timeout => "refetch_core_timeout",
+            Self::OutputLimit => "refetch_core_output_limit",
+            Self::Rejected => "refetch_core_rejected",
+            Self::InvalidResponse => "refetch_core_invalid_response",
+        }
+    }
 }
 impl RefetchIntent {
     /// Run outside the state actor. No caller-selected message ID, identity or
@@ -40,9 +71,9 @@ impl RefetchIntent {
             intent: self.clone(),
             message: if core.is_identity(&self.hub) {
                 core.get_bound_message(&self.message, &self.endpoint, &self.workspace)
-                    .ok()
+                    .map_err(FetchFailure::from)
             } else {
-                None
+                Err(FetchFailure::IdentityMismatch)
             },
         }
     }
@@ -70,7 +101,8 @@ impl RefetchOutcome {
 impl<M: Mailbox + Directory> Hub<M> {
     fn refetch_schema(&self) -> Result<(), Error> {
         self.recovery_schema()?;
-        self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_refetch_leases(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,delivery TEXT NOT NULL,token TEXT NOT NULL,until_at INTEGER NOT NULL,audit INTEGER NOT NULL,PRIMARY KEY(endpoint,generation,delivery));")?;
+        self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_refetch_leases(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,delivery TEXT NOT NULL,token TEXT NOT NULL,until_at INTEGER NOT NULL,audit INTEGER NOT NULL,PRIMARY KEY(endpoint,generation,delivery));
+        CREATE TABLE IF NOT EXISTS hub_refetch_rate(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,delivery TEXT NOT NULL,at INTEGER NOT NULL,audit INTEGER PRIMARY KEY);")?;
         Ok(())
     }
     /// Internal verified-owner operation. Only a stored, current-generation
@@ -112,6 +144,11 @@ impl<M: Mailbox + Directory> Hub<M> {
         if leased {
             return Err(Error::Binding);
         }
+        tx.execute("DELETE FROM hub_refetch_rate WHERE endpoint=?1 AND generation=?2 AND delivery=?3 AND at<=?4",params![endpoint,generation,delivery,now-3600])?;
+        let attempts:i64=tx.query_row("SELECT COUNT(*) FROM hub_refetch_rate WHERE endpoint=?1 AND generation=?2 AND delivery=?3",params![endpoint,generation,delivery],|r|r.get(0))?;
+        if attempts >= 5 {
+            return Err(Error::RefetchRateLimited);
+        }
         let audits: i64 = tx.query_row("SELECT COUNT(*) FROM hub_owner_audit", [], |r| r.get(0))?;
         // A completion also needs an audit slot; it checks again before save.
         if audits >= AUDIT_LIMIT - 1 {
@@ -119,6 +156,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         }
         tx.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES(?1,'refetch_started',?2,?3,?4,?5)",params![actor,endpoint,delivery,revision,now])?;
         let audit = tx.last_insert_rowid();
+        tx.execute("INSERT INTO hub_refetch_rate(endpoint,generation,delivery,at,audit) VALUES(?1,?2,?3,?4,?5)",params![endpoint,generation,delivery,now,audit])?;
         tx.execute("INSERT INTO hub_refetch_leases(endpoint,generation,delivery,token,until_at,audit) VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(endpoint,generation,delivery) DO UPDATE SET token=excluded.token,until_at=excluded.until_at,audit=excluded.audit",params![endpoint,generation,delivery,token,until,audit])?;
         tx.commit()?;
         Ok(RefetchIntent {
@@ -169,7 +207,12 @@ impl<M: Mailbox + Directory> Hub<M> {
         if audits >= AUDIT_LIMIT {
             return Err(StorageError::Full.into());
         }
-        let outcome = if let Some(message) = result.message {
+        let failure_action = result
+            .message
+            .as_ref()
+            .err()
+            .map(FetchFailure::audit_action);
+        let outcome = if let Ok(message) = result.message {
             // Defense in depth; only get_bound_message creates production proof.
             if message.message_id != intent.message
                 || message.sender.id != intent.endpoint
@@ -199,7 +242,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         if outcome == RefetchOutcome::Accepted {
             tx.execute("UPDATE hub_capacity_receipts SET recovered_at=?4 WHERE endpoint=?1 AND generation=?2 AND delivery=?3 AND recovered_at IS NULL",params![intent.endpoint,intent.generation,intent.delivery,now])?;
         }
-        tx.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES(?1,?2,?3,?4,?5,?6)",params![intent.actor,outcome.audit_action(),intent.endpoint,intent.delivery,intent.revision,now])?;
+        tx.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES(?1,?2,?3,?4,?5,?6)",params![intent.actor,failure_action.unwrap_or(outcome.audit_action()),intent.endpoint,intent.delivery,intent.revision,now])?;
         tx.execute("DELETE FROM hub_refetch_leases WHERE endpoint=?1 AND generation=?2 AND delivery=?3 AND token=?4 AND audit=?5",params![intent.endpoint,intent.generation,intent.delivery,intent.token,intent.audit])?;
         tx.commit()?;
         Ok(outcome)
@@ -308,7 +351,7 @@ mod tests {
     fn proof(intent: RefetchIntent) -> Refetched {
         Refetched {
             intent,
-            message: Some(message()),
+            message: Ok(message()),
         }
     }
     #[test]
@@ -462,7 +505,7 @@ mod tests {
             hub.complete_receipt_refetch(
                 Refetched {
                     intent,
-                    message: None
+                    message: Err(FetchFailure::Unavailable)
                 },
                 NOW
             )
@@ -476,7 +519,7 @@ mod tests {
             hub.complete_receipt_refetch(
                 Refetched {
                     intent,
-                    message: Some(bad)
+                    message: Ok(bad)
                 },
                 NOW
             )
@@ -655,5 +698,128 @@ mod tests {
             ),
             Err(Error::Storage(StorageError::Full))
         ));
+    }
+    #[test]
+    fn receipt_rate_is_durable_and_rolling_and_refusals_do_not_add_audit_rows() {
+        let mut hub = fixture(Limits::default());
+        for n in 0..5 {
+            let intent = prepare(&mut hub, '1', NOW);
+            assert_eq!(
+                hub.complete_receipt_refetch(
+                    Refetched {
+                        intent,
+                        message: Err(FetchFailure::Unavailable)
+                    },
+                    NOW
+                )
+                .unwrap(),
+                RefetchOutcome::RetrievalUnavailable
+            );
+            assert_eq!(hub.owner_audit(None, 20).unwrap().len(), 2 * (n + 1));
+        }
+        let rev = hub.view("ag_endpoint").unwrap().revision;
+        assert!(matches!(
+            hub.prepare_receipt_refetch(
+                "ag_endpoint",
+                rev,
+                "del_fragment_20",
+                "human_owner",
+                &"2".repeat(64),
+                NOW
+            ),
+            Err(Error::RefetchRateLimited)
+        ));
+        assert_eq!(hub.owner_audit(None, 20).unwrap().len(), 10);
+        // State is a database table, not a process-local limiter. Re-initializing
+        // schemas cannot reset it, nor can removal of archived audit records.
+        hub.refetch_schema().unwrap();
+        hub.store
+            .db
+            .execute("DELETE FROM hub_owner_audit", [])
+            .unwrap();
+        assert!(matches!(
+            hub.prepare_receipt_refetch(
+                "ag_endpoint",
+                rev,
+                "del_fragment_20",
+                "human_owner",
+                &"2".repeat(64),
+                NOW
+            ),
+            Err(Error::RefetchRateLimited)
+        ));
+        hub.record_readback(
+            "ag_endpoint",
+            rev,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW + 3599,
+            },
+            NOW + 3599,
+        )
+        .unwrap();
+        assert!(matches!(
+            hub.prepare_receipt_refetch(
+                "ag_endpoint",
+                rev,
+                "del_fragment_20",
+                "human_owner",
+                &"2".repeat(64),
+                NOW + 3599
+            ),
+            Err(Error::RefetchRateLimited)
+        ));
+        hub.record_readback(
+            "ag_endpoint",
+            rev,
+            Readback {
+                observed: Some(metadata()),
+                requested_at: NOW + 3600,
+            },
+            NOW + 3600,
+        )
+        .unwrap();
+        assert!(hub
+            .prepare_receipt_refetch(
+                "ag_endpoint",
+                rev,
+                "del_fragment_20",
+                "human_owner",
+                &"2".repeat(64),
+                NOW + 3600
+            )
+            .is_ok());
+    }
+    #[test]
+    fn retrieval_audit_uses_fixed_internal_causes_without_provider_text() {
+        for (failure, code) in [
+            (
+                FetchFailure::IdentityMismatch,
+                "refetch_hub_identity_mismatch",
+            ),
+            (FetchFailure::Unavailable, "refetch_core_unavailable"),
+            (FetchFailure::Timeout, "refetch_core_timeout"),
+            (FetchFailure::OutputLimit, "refetch_core_output_limit"),
+            (FetchFailure::Rejected, "refetch_core_rejected"),
+            (
+                FetchFailure::InvalidResponse,
+                "refetch_core_invalid_response",
+            ),
+        ] {
+            let mut hub = fixture(Limits::default());
+            let intent = prepare(&mut hub, '1', NOW);
+            assert_eq!(
+                hub.complete_receipt_refetch(
+                    Refetched {
+                        intent,
+                        message: Err(failure)
+                    },
+                    NOW
+                )
+                .unwrap(),
+                RefetchOutcome::RetrievalUnavailable
+            );
+            assert_eq!(hub.owner_audit(None, 10).unwrap()[0].action, code);
+        }
     }
 }

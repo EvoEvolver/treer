@@ -605,6 +605,10 @@ audit, and leases the attempt for 60 seconds. Only capacity/hold-expiry receipts
 within the 30-day replay retention can be selected. Invalid or old-generation
 receipts cannot be resurrected. Overlapping attempts for the same receipt are
 rejected, and replaced/expired leases or changed revisions cannot complete.
+Each receipt permits at most five preparations in a rolling hour, recorded in
+SQLite separately from the audit so archiving audit rows cannot reset the rate.
+Rate refusals add no audit rows. Pending leases and unsuccessful retrievals count
+as attempts; there is no automatic retry.
 
 The owned intent calls the fixed Core adapter outside state access, checking
 that its configured identity is the pinned hub's. Its result has no public
@@ -615,6 +619,11 @@ terminal-expired results have fixed audit outcomes, without raw errors or
 payloads, and permit an explicit later retry. Accepted fragments set the
 receipt's `recovered_at`; this means fragment admission, **not external delivery**
 or recovery of every part of the original message.
+The external outcome remains `retrieval_unavailable`; internal audit codes
+distinguish a pinned-hub identity mismatch, unavailable CLI, timeout, output
+limit, rejected Core request and invalid adapter response. Core's CLI rejection
+does not distinguish not-found from denied; the App does not inspect or persist
+raw stderr to guess why access failed.
 
 The started audit precedes fragment commit. Fragment admission and the final
 receipt/audit update are separate transactions: a crash or final-audit disk
