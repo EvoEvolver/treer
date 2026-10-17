@@ -23,7 +23,7 @@ and hovering or keyboard-focusing a row shows a tooltip with the full path and t
 status (hover-capable pointers only; it never takes pointer events, so it cannot
 cover the row's "⋯" button). The "⋯" button of Agent/App rows appears on row hover
 or keyboard focus within the row, stays visible while its menu is open, and is
-always visible on coarse pointers (phones/tablets) with its 44px target; right-click
+always visible on coarse pointers (phones and wide touch tablets) with its 44px target (rows, the folder/Agent/App "⋯" and the bottom user row all switch to 44px on `pointer: coarse`, not only below 768px); right-click
 and Shift+F10 open the same menu. Folder rows use the same 36px height and the same
 hover/focus/coarse-pointer "⋯" rule.
 

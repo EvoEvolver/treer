@@ -128,3 +128,29 @@ test.describe('touch', () => {
     await page.screenshot({ path: info.outputPath('tree-compact-390.png') })
   })
 })
+
+test.describe('coarse pointer on a wide tablet', () => {
+  test.use({ hasTouch: true, isMobile: true })
+  test('Agent/App/folder ⋯, rows and the bottom user row keep 44px targets at 1024px', async ({ page }, info) => {
+    await page.setViewportSize({ width: 1024, height: 768 })
+    await mockTreeMapApi(page)
+    await page.route('**/snapshot', (route) => route.fulfill({ json: { ...mapSnapshot, agents: rows } }))
+    await page.route('**/workload-tree', (route) => route.fulfill({ json: { folders: [{ folder_id: 'f1', name: 'Research', parent_id: null }], placements: [] } }))
+    await page.route('**/groups', (route) => route.fulfill({ json: { groups: [] } }))
+    await page.goto('/')
+    await expect(tree(page).getByRole('treeitem')).toHaveCount(rows.length + 1)
+    const size = (locator: ReturnType<Page['locator']>) => locator.evaluate((element) => { const box = element.getBoundingClientRect(); return { width: box.width, height: box.height } })
+    for (const name of ['builder', 'sleeper', 'Research']) {
+      await expect.poll(() => opacity(more(page, name))).toBe(1)
+      const box = await size(more(page, name))
+      expect(box.width, name).toBeGreaterThanOrEqual(43.5)
+      expect(box.height, name).toBeGreaterThanOrEqual(43.5)
+    }
+    for (const item of await tree(page).getByRole('treeitem').all()) expect((await size(item.locator('[data-tree-primary]').first().locator('xpath=..'))).height).toBeGreaterThanOrEqual(47.5)
+    const userMenu = tree(page).getByRole('button', { name: 'User menu' })
+    expect((await size(userMenu)).height).toBeGreaterThanOrEqual(43.5)
+    expect((await size(tree(page).getByRole('button', { name: 'Collapse tree sidebar' }))).height).toBeGreaterThanOrEqual(43.5)
+    expect((await size(tree(page).getByRole('button', { name: 'Collapse tree sidebar' }))).width).toBeGreaterThanOrEqual(43.5)
+    await page.screenshot({ path: info.outputPath('tree-compact-tablet-1024.png') })
+  })
+})
