@@ -65,7 +65,7 @@ def fixture(binary):
         root.chmod(0o700)
         cli = root / 'fixture-cli'
         # Fixed argv, no environment credential access and no network calls.
-        cli.write_text('#!/usr/bin/python3\nimport json,sys\nif sys.argv[1:3]==["message","receive"]: print(json.dumps({"deliveries":[],"remaining_unacknowledged":0}))\nelse: sys.exit(1)\n')
+        cli.write_text('#!/usr/bin/python3\nimport json,sys\nif sys.argv[1:3]==["message","receive"]: print(json.dumps({"deliveries":[],"remaining_unacknowledged":0}))\nelif sys.argv[1:4]==["agent","show","--"] and sys.argv[4] in ("ag_new","ag_recipient","ag_wrong_workspace","ag_unplaced"): print(json.dumps({"agent_id":sys.argv[4],"workspace_id":"ws_other" if sys.argv[4]=="ag_wrong_workspace" else "ws_test","server_id":"machine_fixture","kind":"command","cwd":"/private/fixture","status":"running","path":None if sys.argv[4]=="ag_unplaced" else "/team/"+sys.argv[4]}))\nelse: sys.exit(1)\n')
         cli.chmod(0o700)
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0))

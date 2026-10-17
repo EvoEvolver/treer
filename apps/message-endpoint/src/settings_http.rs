@@ -3,7 +3,7 @@
 //! including after a disconnected caller cancels its async request.
 use crate::{
     oauth::OAuthVault,
-    owner_auth::{Error, OwnerAuth},
+    owner_auth::{Error, Owner, OwnerAuth},
 };
 use axum::{
     body::{to_bytes, Body},
@@ -24,7 +24,7 @@ use tokio::sync::Semaphore;
 
 const SESSION: &str = "__Host-treer-endpoint-session";
 const BROWSER: &str = "__Host-treer-endpoint-login";
-const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings and endpoint status. Browsers receive the human interface.\n\n## Inspect\n\n`GET /health` reports process health. `GET /api/settings` requires a current verified workspace human owner and returns bounded endpoint metadata.\n\n## Authentication\n\nTreer-injected App identity takes precedence; an invalid supplied identity is rejected. Without an identity, open this App in a browser and use Treer OAuth. Opaque sessions remain HttpOnly; never paste tokens into URLs. This settings service does not accept Agent administration credentials.\n\nNo transport activation or configuration mutation route is exposed in this increment. State contains sensitive metadata: keep this Managed App workspace-only, use a dedicated OS user or container, and protect backups.\n";
+const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings and endpoint status. Browsers receive the human interface.\n\n## Inspect\n\n`GET /health` reports process health. `GET /api/settings` requires a current verified workspace human owner and returns bounded endpoint metadata.\n\n## Authentication\n\nTreer-injected App identity takes precedence; an invalid supplied identity is rejected. Without an identity, open this App in a browser and use Treer OAuth. Opaque sessions remain HttpOnly; never paste tokens into URLs. This settings service does not accept Agent administration credentials.\n\nPOST /api/configuration accepts confirmed owner create, pause and bind_telegram commands. New endpoints remain paused; transport activation is not exposed. State contains sensitive metadata: keep this Managed App workspace-only, use a dedicated OS user or container, and protect backups.\n";
 #[derive(Default, Serialize)]
 pub struct SettingsSnapshot {
     pub endpoints: Vec<EndpointSnapshot>,
@@ -87,6 +87,9 @@ fn snapshot_value(owner: &str, snapshot: SettingsSnapshot) -> Result<Value, ()> 
     }
     Ok(value)
 }
+type Mutation = dyn Fn(&Owner, crate::configuration::Command) -> Result<(), crate::configuration::Failure>
+    + Send
+    + Sync;
 type Snapshot = dyn Fn() -> Result<SettingsSnapshot, ()> + Send + Sync;
 /// The snapshot closure must only read bounded App state, never perform network
 /// calls or return message bodies/secrets. Authentication happens before it.
@@ -94,6 +97,7 @@ pub struct Settings {
     auth: Arc<OwnerAuth>,
     vault: OAuthVault,
     snapshot: Arc<Snapshot>,
+    mutation: Option<Arc<Mutation>>,
     slots: Arc<Semaphore>,
     html: &'static str,
     javascript: &'static str,
@@ -128,6 +132,7 @@ impl Settings {
             auth: Arc::new(auth),
             vault: OAuthVault::default(),
             snapshot,
+            mutation: None,
             slots: Arc::new(Semaphore::new(16)),
             html,
             javascript: "",
@@ -159,6 +164,10 @@ impl Settings {
         }
         self.allowed_hosts.insert(listener.to_string());
         Ok(self)
+    }
+    pub fn with_configuration(mut self, mutation: Arc<Mutation>) -> Self {
+        self.mutation = Some(mutation);
+        self
     }
     pub fn with_assets(mut self, javascript: &'static str, stylesheet: &'static str) -> Self {
         self.javascript = javascript;
@@ -318,6 +327,9 @@ async fn handle(
             "headers_too_large",
         ));
     }
+    if parts.method == Method::POST && parts.uri.path() == "/api/configuration" {
+        return configuration_request(app, peer, parts, body).await;
+    }
     // Refuse framed bodies before waiting for bytes or consuming verification
     // capacity. This includes chunked zero-byte bodies and slow-drip clients.
     if parts.headers.contains_key("transfer-encoding")
@@ -375,6 +387,120 @@ async fn handle(
     .await
     {
         Ok(r) => r,
+        Err(_) => secure(error(Error::Proxy)),
+    }
+}
+fn owner_for_mutation(
+    app: &Settings,
+    headers: &HeaderMap,
+    peer: SocketAddr,
+    now: i64,
+) -> Result<Owner, Error> {
+    let mut hosts = headers.get_all("host").iter();
+    if !hosts
+        .next()
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| app.allowed_hosts.contains(&v.to_ascii_lowercase()))
+        || hosts.next().is_some()
+    {
+        return Err(Error::Csrf);
+    }
+    let values: Result<Vec<_>, _> = headers
+        .iter()
+        .map(|(k, v)| v.to_str().map(|v| (k.as_str(), v)))
+        .collect();
+    let values = values.map_err(|_| Error::InvalidIdentity)?;
+    app.auth.check_mutation(&values)?;
+    let (session, _) = cookies(headers)?;
+    let token = session
+        .as_deref()
+        .map(|s| app.vault.session_token(s, now))
+        .transpose()?
+        .flatten();
+    app.auth
+        .authenticate_from(&values, token.as_deref(), now, peer.ip())
+}
+async fn configuration_request(
+    app: Arc<Settings>,
+    peer: SocketAddr,
+    parts: axum::http::request::Parts,
+    body: Body,
+) -> Response {
+    if parts.uri.query().is_some() || app.mutation.is_none() {
+        return secure(fixed(StatusCode::NOT_FOUND, "route_not_found"));
+    }
+    let lengths: Vec<_> = parts.headers.get_all("content-length").iter().collect();
+    let size = lengths
+        .first()
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if parts.headers.contains_key("transfer-encoding")
+        || lengths.len() != 1
+        || !size.is_some_and(|n| n > 0 && n <= 16384)
+        || parts
+            .headers
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            != Some("application/json")
+    {
+        return secure(fixed(StatusCode::BAD_REQUEST, "invalid_configuration_body"));
+    }
+    let permit = match app.slots.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => return secure(error(Error::RateLimited)),
+    };
+    let auth_app = app.clone();
+    // The blocking verification owns the slot even if this HTTP future is dropped.
+    let verified = tokio::task::spawn_blocking(move || {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|t| i64::try_from(t.as_secs()).ok())
+            .ok_or(Error::Proxy);
+        let result = now.and_then(|now| owner_for_mutation(&auth_app, &parts.headers, peer, now));
+        (result, permit)
+    })
+    .await;
+    let (owner, permit) = match verified {
+        Ok((Ok(owner), permit)) => (owner, permit),
+        Ok((Err(e), _)) => return secure(error(e)),
+        Err(_) => return secure(error(Error::Proxy)),
+    };
+    // Authenticate before reading JSON. The same slot remains held during the
+    // three-second bounded read and all subsequent Core/configuration work.
+    let bytes = match tokio::time::timeout(std::time::Duration::from_secs(3), to_bytes(body, 16384))
+        .await
+    {
+        Ok(Ok(b)) if Some(b.len()) == size => b,
+        _ => return secure(fixed(StatusCode::BAD_REQUEST, "invalid_configuration_body")),
+    };
+    let command = match serde_json::from_slice(&bytes) {
+        Ok(c) => c,
+        Err(_) => return secure(fixed(StatusCode::BAD_REQUEST, "invalid_configuration_body")),
+    };
+    match tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        match (app
+            .mutation
+            .as_ref()
+            .expect("checked configuration service"))(&owner, command)
+        {
+            Ok(()) => response(StatusCode::OK, json!({"saved":true})),
+            Err(crate::configuration::Failure::Invalid) => {
+                fixed(StatusCode::BAD_REQUEST, "invalid_configuration")
+            }
+            Err(crate::configuration::Failure::Conflict) => {
+                fixed(StatusCode::CONFLICT, "configuration_conflict")
+            }
+            Err(crate::configuration::Failure::Unavailable) => {
+                fixed(StatusCode::SERVICE_UNAVAILABLE, "configuration_unavailable")
+            }
+            Err(crate::configuration::Failure::Expired) => error(Error::InvalidIdentity),
+        }
+    })
+    .await
+    {
+        Ok(r) => secure(r),
         Err(_) => secure(error(Error::Proxy)),
     }
 }

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real executable and loopback doubles; explicitly synthetic identities."""
 import json
+import sqlite3
 from pathlib import Path
 import sys
 import unittest
@@ -31,4 +32,41 @@ class Runtime(unittest.TestCase):
             for p in f['state'].iterdir():
                 self.assertEqual(p.stat().st_mode&0o777,0o600)
             self.assertEqual(f['state'].stat().st_mode&0o777,0o700)
+    def test_owner_configuration_csrf_strict_json_core_readback_and_atomic_audit(self):
+        with fixture(BINARY) as f:
+            request=f['request']
+            trusted={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+            def write(command, headers=None, path='/api/configuration'):
+                return request(path,trusted if headers is None else headers,method='POST',body=json.dumps(command).encode())[0]
+            create={'action':'create','endpoint_id':'ag_new','generation':1,'recipient':'ag_recipient','confirm':True}
+            self.assertEqual(write(create,{'Content-Type':'application/json'}),403)
+            self.assertEqual(write(create,{**trusted,'X-Treer-Identity-Token':'forged'}),401)
+            self.assertEqual(write(create,{**trusted,'Origin':'https://evil.example'}),403)
+            self.assertEqual(write(create,{**trusted,'Host':'evil.example'}),403)
+            self.assertEqual(write(create,{**trusted,'Sec-Fetch-Site':'cross-site'}),403)
+            self.assertEqual(write(create,path='/api/configuration?actor=owner'),404)
+            for body in [{**create,'actor':'user_other'},{**create,'expected_path':'/invented'}, {**create,'confirm':False},{**create,'endpoint_id':'ag_wrong_workspace'},{**create,'endpoint_id':'ag_unplaced'}]:
+                self.assertEqual(write(body),400)
+            self.assertEqual(write(create),200)
+            # Duplicate creation fails without adding an audit row or changing pins.
+            self.assertNotEqual(write(create),200)
+            snapshot=json.loads(request('/api/settings',{'X-Treer-Identity-Token':TOKEN})[2])
+            endpoint=next(e for e in snapshot['settings']['endpoints'] if e['binding']['endpoint_id']=='ag_new')
+            self.assertTrue(endpoint['paused'])
+            self.assertEqual(endpoint['binding']['expected_path'],'/team/ag_new')
+            bind={'action':'bind_telegram','endpoint_id':'ag_new','revision':1,'confirm':True,'target':{'account_id':'bot_fixture','chat_id':123,'topic_id':None,'allowed_senders':[456]}}
+            self.assertEqual(write(bind),200)
+            self.assertEqual(write(bind),409)
+            self.assertEqual(write({'action':'pause','endpoint_id':'ag_new','revision':2,'confirm':True}),200)
+            self.assertEqual(write({'action':'resume','endpoint_id':'ag_new','revision':3,'confirm':True}),400)
+            db=sqlite3.connect(f['state']/'hub.sqlite3')
+            rows=db.execute('SELECT actor,action FROM hub_owner_audit').fetchall()
+            self.assertEqual(rows,[('user_owner','create_binding'),('user_owner','bind_telegram'),('user_owner','pause_binding')])
+            self.assertEqual(db.execute("SELECT paused FROM endpoints WHERE id='ag_new'").fetchone()[0],1)
+            db.execute("CREATE TRIGGER deny_owner_audit BEFORE INSERT ON hub_owner_audit BEGIN SELECT RAISE(ABORT,'fixture failure'); END")
+            db.commit()
+            self.assertEqual(write({'action':'pause','endpoint_id':'ag_new','revision':3,'confirm':True}),503)
+            self.assertEqual(db.execute("SELECT revision FROM hub_bindings WHERE endpoint='ag_new'").fetchone()[0],3)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM hub_owner_audit').fetchone()[0],3)
+            db.close()
 if __name__=='__main__':unittest.main()

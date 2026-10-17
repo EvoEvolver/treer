@@ -1,5 +1,5 @@
 //! Executable composition: private state + own Core workers + owner HTTP.
-//! Transport workers and audited configuration writes remain a separate increment.
+//! Transport workers remain a separate increment; owner writes use audited commands.
 use crate::{
     core::Core,
     hub::Hub,
@@ -99,7 +99,8 @@ pub fn run(config: Config) -> Result<(), Error> {
     let store =
         Store::open(&config.state_directory, Limits::default()).map_err(|_| Error::Storage)?;
     let hub = Arc::new(Mutex::new(
-        Hub::new(store, core, &config.hub_id, &config.workspace_id).map_err(|_| Error::Storage)?,
+        Hub::new(store, core.clone(), &config.hub_id, &config.workspace_id)
+            .map_err(|_| Error::Storage)?,
     ));
     let listener = std::net::TcpListener::bind(config.listen).map_err(|_| Error::Runtime)?;
     listener.set_nonblocking(true).map_err(|_| Error::Runtime)?;
@@ -122,9 +123,15 @@ pub fn run(config: Config) -> Result<(), Error> {
             workers: status,
         })
     });
+    let mutation = Arc::new(crate::configuration::core_executor(
+        hub.clone(),
+        core,
+        config.workspace_id.clone(),
+    ));
     let serve = || -> Result<(), Error> {
         let settings = Settings::new(auth, snapshot, include_str!("../dist/index.html"))
             .map_err(|_| Error::Configuration)?
+            .with_configuration(mutation)
             .with_loopback_listener(config.listen)
             .map_err(|_| Error::Configuration)?
             .with_assets(

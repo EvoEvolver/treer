@@ -813,15 +813,16 @@ owner review/drain before activation. There has been no deployed hub/Bot worker.
 
 The `hub` feature now includes an Axum router (`settings_http::Settings`) with
 `GET /api/settings` (current human workspace owner), `GET /api/auth/start`,
-`GET /api/auth/callback` and `POST /api/auth/logout`. This increment exposes
-**no binding/transport mutation routes**. A snapshot is bounded metadata only;
+`GET /api/auth/callback`, `POST /api/auth/logout`, and the confirmed owner-only
+`POST /api/configuration` described below. A snapshot is bounded metadata only;
 health reports process liveness, not working channels. Root negotiates Markdown
 and HTML; only the two named committed asset paths are served, with unknown
 API/static routes remaining JSON 404s. No CORS is enabled.
 
 The router shares at most 16 in-flight Proxy-capable requests. Health, static
 assets and local logout remain available when that budget is occupied. It rejects
-nonzero Content-Length and all Transfer-Encoding immediately, bounds headers to
+nonzero Content-Length outside the configuration route and all Transfer-Encoding
+immediately, bounds headers to
 16 KiB/128 entries and any remaining body read to three seconds, and retains its
 permit until a blocking Proxy verification finishes,
 even when the browser disconnects. Its source is the actual socket peer, never
@@ -877,10 +878,11 @@ wildcard/public addresses and `access:public`. It starts its own Core inbox,
 metadata-refresh and maintenance workers and stops only these owned threads on
 SIGINT. Invalid configuration/storage/listener failures return nonzero with
 fixed error codes, never raw configuration or credentials. A changed CLI hash
-requires a human-reviewed config update. No transport account workers or owner
-configuration writes are connected yet, so **this is a status-only development
-preview, not ready for activation/migration**. An empty preview cannot create,
-bind or resume endpoints. Existing configured state is shown read-only.
+requires a human-reviewed config update. Confirmed owner configuration writes
+can create paused bindings, pin Telegram targets, and pause bindings. Transport
+account workers and resume are not connected, so **this is a development preview,
+not ready for activation/migration**. The React page remains read-only until its
+configuration forms are connected.
 
 The React page follows the initial injected identity automatically, keeps OAuth
 as the no-identity fallback on the dedicated App URL, and treats invalid supplied
@@ -925,13 +927,13 @@ listener header-read timeout and the dated Rust/npm dependency audit remain
 pre-activation work. Versioned release files must be immutable to untrusted OS
 users; neither a hash nor 0600 protects against another process under the same UID.
 
-### Audited configuration primitives (not HTTP routes yet)
+### Audited owner configuration
 
 `add_binding_audited`, `bind_telegram_audited`, `pause_audited` and
 `resume_after_readback_audited` are internal service boundaries, not independent
-identity checks. The future management route must verify the current human
-owner, CSRF and confirmation, derive the actor from that proof (never JSON),
-and supply the exact revision. A fresh Core readback must be obtained outside
+identity checks. The management route verifies the current human owner, CSRF
+and confirmation, derives the actor from that proof (never JSON), and requires
+the exact revision for existing bindings. A fresh Core readback must be obtained outside
 the state lock before resume. These state methods perform no Core/network call.
 Creation remains paused, targets remain immutable within a generation, and
 metadata refresh never resumes a paused endpoint.
@@ -946,3 +948,32 @@ and its audit unchanged. A resume may still record its independently obtained
 metadata observation (or automatically pause on drift) before the activation
 transaction; an audit failure cannot activate it. Existing state-only primitives
 remain for worker/test internals and must not be exposed through HTTP.
+
+
+`POST /api/configuration` accepts only `Content-Type: application/json`, one
+positive Content-Length at most 16 KiB, no query, and no Transfer-Encoding.
+Host/Origin, `X-Endpoint-Request: 1`, Sec-Fetch-Site when supplied, and current
+workspace human owner verification precede JSON body reads. One shared admission
+slot stays held through verification, a three-second body deadline, fresh Core
+queries and the transaction, including disconnected blocking callers. Unknown
+fields/actions, duplicate fields and `confirm:false` are rejected. No actor,
+Core readback, expected path/cwd/machine or token can be supplied in the JSON.
+
+Supported command objects (all require `confirm:true`):
+
+- `{"action":"create","endpoint_id":"ag_endpoint","generation":1,"recipient":"ag_recipient","confirm":true}`.
+  The hub queries both stable IDs through its own Core identity outside the state
+  mutex, requires command Agents in its workspace and a placed endpoint, and
+  derives expected path/cwd/machine from Core. Creation is paused at revision 1.
+- `{"action":"pause","endpoint_id":"ag_endpoint","revision":1,"confirm":true}`.
+- `{"action":"bind_telegram","endpoint_id":"ag_endpoint","revision":2,"target":{"account_id":"bot_team","chat_id":123,"topic_id":null,"allowed_senders":[456]},"confirm":true}`.
+  The binding must be paused. This pins target metadata only, never accepts a bot
+  token or verifies an account. Binding does not enable receiving or sending.
+
+Successful writes return only `{"saved":true}`. Reload `/api/settings` for the
+new revision. Stale revisions return 409; malformed input 400; unavailable Core,
+storage or audit capacity 503, all with fixed body-free error codes. Owner proof
+expiry is rechecked after Core queries and mutex waits before committing. These
+routes do not expose resume, retarget, deletion, generation replacement, transport
+secret writes, receipt refetch or audit erasure. Owner role is checked once per
+request through Proxy; there is no cross-system transaction with role revocation.

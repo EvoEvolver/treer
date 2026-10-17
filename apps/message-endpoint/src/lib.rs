@@ -39,3 +39,6 @@ pub mod settings_http;
 pub mod telegram_http;
 #[cfg(all(unix, feature = "hub"))]
 mod verification_gate;
+
+#[cfg(all(unix, feature = "hub"))]
+pub mod configuration;
