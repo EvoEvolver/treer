@@ -8,7 +8,8 @@ export function agentOriginUrl(agent: Agent, blockedOrigins: readonly string[]) 
   const url = new URL(own)
   // The read-model contract is an origin root, never an arbitrary path or a
   // token-bearing link. Do not construct hosts from Controller inventory.
-  return url.pathname === '/' && !url.search && !url.hash && /^ag-[0-9a-f]{32}\./.test(url.hostname) ? own : null
+  const id = /^ag_([0-9a-f]{32})$/.exec(agent.agent_id)?.[1]
+  return id && url.pathname === '/' && !url.search && !url.hash && url.hostname.split('.')[0] === `ag-${id}` ? own : null
 }
 
 export function interfaceSignature(agent: Agent) {

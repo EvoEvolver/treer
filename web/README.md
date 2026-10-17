@@ -573,13 +573,15 @@ defense in depth. Menu opens use `noopener,noreferrer` so the Console URL is not
 
 When the Proxy advertises `agent.interface-origin.v1`, Agent native links and new-tab menus use its
 authorized snapshot `interface.origin_url` synchronously (`https://ag-<id>.<apps domain>/`). The URL must
-be an HTTPS origin root without credentials, query or fragment, distinct from the Console and Proxy.
+be an HTTPS origin root without credentials, query or fragment, distinct from the Console and Proxy;
+its `ag-<32 hex>` hostname label must match the selected Agent ID.
 Missing/invalid URLs and unavailable capability discovery keep the Console detail destination. Origin
 failures never silently downgrade to the Proxy UI. The standalone host owns its fixed error/retry page;
 the Console's embedded iframe stays on the Proxy tunnel (embedded isolation is tracked separately).
 Inventory events cannot supply origin grants: ordinary updates retain a read-model URL only for the
 same registered interface. Interface appearance/replacement triggers a 200ms debounced snapshot refresh
-(maximum wait 2s); returning to the page also refreshes. Removed/replaced interfaces drop their old URL
+(maximum debounce wait 2s), subject to a 5s floor between origin-driven reads. Sustained churn doubles
+that floor up to 60s; 30s without signals resets it to 5s. Returning to the page uses the same bounded refresh. Removed/replaced interfaces drop their old URL
 immediately; a fresh authorized snapshot can also revoke a URL. No high-frequency polling or persisted
 origin cache is used, and account/workspace changes discard the grants.
 

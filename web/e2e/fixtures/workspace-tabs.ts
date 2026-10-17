@@ -1,9 +1,9 @@
 import { expect, type Page, type WebSocketRoute } from '@playwright/test'
 import { mockTreeMapApi, mapSnapshot } from './treemap'
 export const names = ['Terminal', 'Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Archive']
-export async function fixture(page: Page, origins: Record<string, string> = {}) {
+export async function fixture(page: Page, origins: Record<string, string> = {}, agentIds: Record<string, string> = {}) {
   await mockTreeMapApi(page)
-  const agents = names.map((name, i) => ({ agent_id: `tab-${i}`, name, kind: i === 7 ? 'app' : 'command', server_id: 'local', status: i === 7 ? 'idle' : i === 2 ? 'blocked' : 'working', path: `/${name}`, ...(i && i !== 7 ? { interface: { origin_url: origins[`tab-${i}`], protocol: 'treer.agent-interface/v1', instance_id: `ui-${i}`, ui_path: '/', port: 8080, capabilities: [], registered_at: '2026-10-15T00:00:00Z' } } : {}) }))
+  const agents = names.map((name, i) => ({ agent_id: agentIds[`tab-${i}`] ?? `tab-${i}`, name, kind: i === 7 ? 'app' : 'command', server_id: 'local', status: i === 7 ? 'idle' : i === 2 ? 'blocked' : 'working', path: `/${name}`, ...(i && i !== 7 ? { interface: { origin_url: origins[`tab-${i}`], protocol: 'treer.agent-interface/v1', instance_id: `ui-${i}`, ui_path: '/', port: 8080, capabilities: [], registered_at: '2026-10-15T00:00:00Z' } } : {}) }))
   const app = { app_id: 'app-archive', runtime_agent_id: 'tab-7', name: 'Archive', server_id: 'local', status: 'running', hostname: 'archive.test', public_url: null }
   const build = { version: 'test', git_commit: 'test' }
   let snapshot = { ...mapSnapshot, servers: mapSnapshot.servers.map((machine) => ({ ...machine, controller_build: build, host_build: build })), agents }, apps = [app]

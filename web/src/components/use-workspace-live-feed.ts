@@ -116,16 +116,32 @@ export function useWorkspaceLiveFeed({ preview, userId, isolatedAgentOrigins, wo
     let timer: number | undefined
     let originTimer: ReturnType<typeof setTimeout> | undefined
     let originMaxTimer: ReturnType<typeof setTimeout> | undefined
+    let originLastRefresh: number | undefined
+    let originLastSignal: number | undefined
+    let originRefreshFloor = 5000
+    let originConsecutiveRefreshes = 0
     const scheduleOriginRefresh = () => {
       if (!isolatedAgentOrigins) return
+      const now = Date.now()
+      // Churning Controller registrations must not turn every Console into an
+      // unbounded Policy/read-model client. Quiet periods restore prompt updates.
+      if (originLastSignal !== undefined && now - originLastSignal >= 30000) {
+        originRefreshFloor = 5000
+        originConsecutiveRefreshes = 0
+      }
+      originLastSignal = now
+      const floor = originLastRefresh === undefined ? 0 : Math.max(0, originLastRefresh + originRefreshFloor - now)
       const refresh = () => {
         clearTimeout(originTimer); clearTimeout(originMaxTimer)
         originTimer = originMaxTimer = undefined
-        if (!disposed) void refreshSnapshot().catch(showError)
+        if (disposed) return
+        if (originConsecutiveRefreshes++ > 0) originRefreshFloor = Math.min(originRefreshFloor * 2, 60000)
+        originLastRefresh = Date.now()
+        void refreshSnapshot().catch(showError)
       }
       clearTimeout(originTimer)
-      originTimer = setTimeout(refresh, 200)
-      originMaxTimer ??= setTimeout(refresh, 2000)
+      originTimer = setTimeout(refresh, Math.max(200, floor))
+      originMaxTimer ??= setTimeout(refresh, Math.max(2000, floor))
     }
     originRefresh.current = scheduleOriginRefresh
     const reconcileInventory = (next: Snapshot) => {
