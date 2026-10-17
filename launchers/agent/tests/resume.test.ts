@@ -171,6 +171,86 @@ test("file download streams regular files with safe headers and keeps the workin
   } finally { await stop(server.child); }
 });
 
+test("file download enforces the 1 GiB limit from the open descriptor, before any byte", { skip: process.platform === "win32" }, async () => {
+  const cwd = temp();
+  const limit = 1024 ** 3;
+  execFileSync("truncate", ["-s", String(limit), join(cwd, "exact.bin")]);
+  execFileSync("truncate", ["-s", String(limit + 1), join(cwd, "over.bin")]);
+  const server = await launchServer(cwd);
+  try {
+    // Exactly at the limit is allowed; look at the headers and drop the connection instead of moving a GiB.
+    const exact = await new Promise<import("node:http").IncomingMessage>((resolve, reject) => { const request = get(server.base + "/v1/files/download?path=exact.bin", (response) => { response.pause(); resolve(response); }); request.on("error", reject); });
+    assert.equal(exact.statusCode, 200);
+    assert.equal(exact.headers["content-length"], String(limit));
+    exact.destroy();
+    const over = await fetch(server.base + "/v1/files/download?path=over.bin");
+    assert.equal(over.status, 413);
+    assert.equal(over.headers.get("content-disposition"), null);
+    const body = await over.json();
+    assert.equal(body.error.code, "file_too_large");
+    assert.equal(body.error.limit_bytes, limit);
+    assert.equal(body.error.size, limit + 1);
+    assert.match(body.error.message, /1 GiB/);
+  } finally { await stop(server.child); }
+});
+
+test("file download caps concurrent downloads at two and frees the slot when a client goes away", { skip: process.platform === "win32" }, async () => {
+  const cwd = temp();
+  execFileSync("truncate", ["-s", String(256 * 1024 * 1024), join(cwd, "big.bin")]);
+  writeFileSync(join(cwd, "small.txt"), "small");
+  const server = await launchServer(cwd);
+  const held: ReturnType<typeof get>[] = [];
+  const hold = () => new Promise<import("node:http").IncomingMessage>((resolve, reject) => {
+    const request = get(server.base + "/v1/files/download?path=big.bin", (response) => { response.pause(); resolve(response); });
+    request.on("error", reject);
+    held.push(request);
+  });
+  try {
+    const first = await hold(), second = await hold();
+    assert.equal(first.statusCode, 200); assert.equal(second.statusCode, 200);
+    const third = await fetch(server.base + "/v1/files/download?path=small.txt");
+    assert.equal(third.status, 429);
+    assert.equal(third.headers.get("retry-after"), "2");
+    assert.equal((await third.json()).error.code, "too_many_downloads");
+    first.destroy();
+    let freed = false;
+    for (let attempt = 0; attempt < 50 && !freed; attempt++) {
+      const retry = await fetch(server.base + "/v1/files/download?path=small.txt");
+      freed = retry.status === 200 && (await retry.text()) === "small";
+      if (!freed) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.ok(freed, "a slot is released after a client disconnects");
+    // Other routes are not affected by the download cap.
+    assert.equal((await fetch(server.base + "/v1/files/tree?path=")).status, 200);
+  } finally { for (const request of held) request.destroy(); await stop(server.child); }
+});
+
+test("file download destroys a response whose client stopped reading (write-idle timeout) and frees its slot", { skip: process.platform === "win32" }, async () => {
+  const cwd = temp();
+  execFileSync("truncate", ["-s", String(512 * 1024 * 1024), join(cwd, "big.bin")]);
+  writeFileSync(join(cwd, "small.txt"), "small");
+  const server = await launchServer(cwd, { AGENT_UI_DOWNLOAD_IDLE_MS: "400" });
+  const held: ReturnType<typeof get>[] = [];
+  // Two clients that accept the response and never read it fill both download slots.
+  const stall = () => new Promise<void>((resolve, reject) => {
+    const request = get(server.base + "/v1/files/download?path=big.bin", (response) => { response.pause(); response.on("error", () => {}); resolve(); });
+    request.on("error", () => {}); request.on("socket", (socket) => socket.on("error", () => {}));
+    held.push(request); setTimeout(() => reject(new Error("no response")), 5000);
+  });
+  try {
+    await stall(); await stall();
+    // A paused client stream does not report the server closing the connection, so the observable effect is the freed slot:
+    // right now both slots are taken (429); once the idle timeout destroys the stalled responses a download works again.
+    assert.equal((await fetch(server.base + "/v1/files/download?path=small.txt")).status, 429);
+    let status = 429;
+    for (let attempt = 0; attempt < 60 && status !== 200; attempt++) {
+      status = (await fetch(server.base + "/v1/files/download?path=small.txt")).status;
+      if (status !== 200) await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    assert.equal(status, 200, "the stalled downloads were destroyed and their slots released");
+  } finally { for (const request of held) request.destroy(); await stop(server.child); }
+});
+
 test("file download streams a large file with bounded server memory", { skip: process.platform === "win32" }, async () => {
   const cwd = temp();
   const size = 192 * 1024 * 1024;
@@ -179,15 +259,20 @@ test("file download streams a large file with bounded server memory", { skip: pr
   const rss = () => Number(execFileSync("ps", ["-o", "rss=", "-p", String(server.child.pid)], { encoding: "utf8" }).trim()) * 1024;
   try {
     const before = rss();
-    const response = await fetch(server.base + "/v1/files/download?path=big.bin");
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get("content-length"), String(size));
     let received = 0, peak = before;
-    const reader = response.body!.getReader();
-    for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) {
-      received += chunk.value.length;
-      if (received % (16 * 1024 * 1024) < chunk.value.length) peak = Math.max(peak, rss());
-    }
+    // node:http streams chunk by chunk (the shared localFetch helper buffers the whole body), so the server is sampled mid-transfer.
+    await new Promise<void>((resolve, reject) => {
+      const request = get(server.base + "/v1/files/download?path=big.bin", (response) => {
+        assert.equal(response.statusCode, 200);
+        assert.equal(response.headers["content-length"], String(size));
+        response.on("data", (chunk: Buffer) => {
+          received += chunk.length;
+          if (received % (16 * 1024 * 1024) < chunk.length) peak = Math.max(peak, rss());
+        });
+        response.on("end", resolve); response.on("error", reject);
+      });
+      request.on("error", reject);
+    });
     assert.equal(received, size);
     // A full read into memory would add 192 MiB; streaming stays far below that.
     assert.ok(peak - before < 80 * 1024 * 1024, `RSS grew by ${((peak - before) / 1048576).toFixed(0)} MiB`);

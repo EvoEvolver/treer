@@ -182,6 +182,7 @@ export const zh: Partial<Record<MessageKey, string>> = {
   "files.open": "查看全文",
   "files.download": "下载",
   "files.downloadFile": "下载 {{name}}",
+  "files.downloadTooLarge": "超过 1 GiB 下载上限",
   "tasks.title": "后台任务",
   "tasks.close": "关闭后台任务",
   "tasks.empty": "没有后台任务。",

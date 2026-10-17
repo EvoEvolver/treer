@@ -6,6 +6,9 @@ import type { FileEntry, FilePreview } from "../types";
 import { useDialogs } from "./Dialogs";
 import { Icon } from "./Icon";
 
+// The server refuses larger files with 413 before sending a byte; the UI says so up front instead of starting a failed download.
+const DOWNLOAD_LIMIT_BYTES = 1024 ** 3;
+
 type Preview = { state: "idle" } | { state: "loading" } | { state: "ready"; file: FilePreview } | { state: "error"; message: string };
 type Row = { kind: "entry"; entry: FileEntry; depth: number; open: boolean } | { kind: "notice"; key: string; depth: number; text: string; retry?: () => void };
 
@@ -160,14 +163,18 @@ export function FilesPanel({ open, requestedFile, onClose }: { open: boolean; re
               {row.entry.kind === "directory" ? <Icon name="chev" className="chev" /> : <span className="chev-sp" />}
               <Icon name={row.entry.kind === "directory" ? "folder" : "file"} /><span className="tn">{row.entry.name}</span>
             </button>
-            {row.entry.kind === "file" && <a className="trow-dl" href={safeUrl(fileDownloadUrl(row.entry.path))} download={row.entry.name} data-dl={row.entry.path} tabIndex={-1} title={t("files.downloadFile", { name: row.entry.name })} aria-label={t("files.downloadFile", { name: row.entry.name })}><Icon name="download" /></a>}
+            {row.entry.kind === "file" && ((row.entry.size ?? 0) > DOWNLOAD_LIMIT_BYTES
+              ? <button type="button" className="trow-dl" disabled title={t("files.downloadTooLarge")} aria-label={`${t("files.downloadFile", { name: row.entry.name })}: ${t("files.downloadTooLarge")}`}><Icon name="download" /></button>
+              : <a className="trow-dl" href={safeUrl(fileDownloadUrl(row.entry.path))} download={row.entry.name} data-dl={row.entry.path} tabIndex={-1} title={t("files.downloadFile", { name: row.entry.name })} aria-label={t("files.downloadFile", { name: row.entry.name })}><Icon name="download" /></a>)}
           </li>
         ))}
       </ul>
       <section className="preview" aria-label={t("files.preview")}>
         <div className="pmeta"><b>{selected ?? t("files.select")}</b><span className={file?.truncated ? "truncated" : undefined}>{meta}</span>
           {file && <button type="button" className="btn" onClick={() => openText(file.path, file.content)}>{t("files.open")}</button>}
-          {selected && preview.state !== "idle" && <a className="btn dl" href={safeUrl(fileDownloadUrl(selected))} download={selected.split("/").pop()} title={t("files.downloadFile", { name: selected })}><Icon name="download" /> {t("files.download")}</a>}</div>
+          {selected && preview.state !== "idle" && (file && file.size > DOWNLOAD_LIMIT_BYTES
+            ? <><button type="button" className="btn dl" disabled title={t("files.downloadTooLarge")}><Icon name="download" /> {t("files.download")}</button><span className="dl-note" role="status">{t("files.downloadTooLarge")}</span></>
+            : <a className="btn dl" href={safeUrl(fileDownloadUrl(selected))} download={selected.split("/").pop()} title={t("files.downloadFile", { name: selected })}><Icon name="download" /> {t("files.download")}</a>)}</div>
         {preview.state === "error" && <p className="field-error" role="status">{preview.message}</p>}
         <pre tabIndex={0}>{file ? file.content : preview.state === "idle" ? t("files.hint") : ""}</pre>
       </section>
