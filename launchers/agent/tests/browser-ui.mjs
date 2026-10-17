@@ -75,7 +75,7 @@ try {
   const csp = (await fetch(url())).headers.get("content-security-policy") ?? "";
   const asset = await fetch(url().replace(/index\.html$/, "ui.js"));
   const pageHeaders = (await fetch(url())).headers;
-  for (const feature of ["camera", "microphone", "geolocation", "payment", "usb", "display-capture", "clipboard-read"]) assert.ok(pageHeaders.get("permissions-policy")?.includes(`${feature}=()`));
+  for (const feature of ["camera", "microphone", "geolocation", "payment", "usb", "display-capture", "clipboard-read", "bluetooth", "hid", "serial", "midi", "accelerometer", "gyroscope", "magnetometer", "screen-wake-lock"]) assert.ok(pageHeaders.get("permissions-policy")?.includes(`${feature}=()`));
   assert.equal(asset.headers.get("x-content-type-options"), "nosniff");
   assert.equal(asset.headers.get("referrer-policy"), "no-referrer");
   assert.match(csp, /script-src 'self'/);

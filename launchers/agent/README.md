@@ -634,6 +634,8 @@ Top-level pages do not have the Console iframe's sandbox; they rely on these
 page headers and remain trusted workspace code. HTML additionally denies camera,
 microphone, geolocation, payment, USB, display capture and clipboard read through
 Permissions-Policy (ordinary paste events remain supported).
+Bluetooth, HID, serial, MIDI, motion sensors and screen wake lock are denied too;
+clipboard write retains its normal browser policy for explicit copy actions.
 
 **Looks and themes.** Three selectable looks (A Quiet Editor, B Warm Paper, C Terminal
 Contrast; default B) times light/dark. Look: `?look=a|b|c`, else
