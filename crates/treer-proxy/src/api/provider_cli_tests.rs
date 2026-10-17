@@ -1792,3 +1792,74 @@ async fn provider_cli_prepare_binds_observed_state_and_requires_acknowledgement(
     );
     assert_eq!(token_rows().await, token_rows_before);
 }
+
+/// #131: a native-binary entry names the Node architecture it needs; the
+/// Controller's observation reports what its Node printed, and anything else
+/// refuses `prepare` with a fixed code before a token exists.
+#[tokio::test]
+async fn provider_cli_prepare_refuses_a_wrong_node_architecture_for_native_entries() {
+    let auth = seeded_auth().await;
+    let state = super::tests::state_with_managed_agent().await;
+    let (_, rx) = connect(&state, capability()).await;
+    let reported = Arc::new(std::sync::Mutex::new(Some("x64".to_owned())));
+    let controller_arch = reported.clone();
+    let seen = controller(state.clone(), rx, move |command, _| match command {
+        AgentCommand::ProviderCliRecipes {} => {
+            let mut recipes = recipes_response();
+            recipes.schema_version = 2;
+            recipes.recipes[0].node_arch = Some("arm64".into());
+            recipes.recipes[0].expected_version = Some(TARGET_VERSION.into());
+            Ok(serde_json::to_value(recipes).unwrap())
+        }
+        AgentCommand::ProviderCliCheck { .. } => {
+            let mut observed = observation(None, false);
+            observed.node_arch = controller_arch.lock().unwrap().clone();
+            Ok(check_response(&observed))
+        }
+        other => panic!("unexpected command {other:?}"),
+    });
+    let creator = session("creator", "session-one");
+    let allow = PolicyEngine::allow_all();
+    let prepare = || {
+        let (state, auth, policy, user) =
+            (state.clone(), auth.clone(), allow.clone(), creator.clone());
+        async move {
+            provider_cli_prepare(
+                State(state),
+                Extension(auth),
+                Extension(policy),
+                Extension(user),
+                Path((WORKSPACE.into(), MACHINE.into())),
+                Json(codex_ref()),
+            )
+            .await
+        }
+    };
+    // An x64 Node on an arm64 platform: refused, audited, no token.
+    let error = prepare().await.unwrap_err();
+    assert_eq!(
+        (error.status, error.error.code.as_str()),
+        (StatusCode::CONFLICT, "provider_cli_node_arch_mismatch")
+    );
+    let prepares = audit_actions(&auth, "provider_cli.prepare").await;
+    assert_eq!(prepares.len(), 1);
+    assert_eq!(prepares[0]["outcome"], "node_arch_mismatch");
+    assert_eq!(prepares[0]["node_arch"], "x64");
+    // A Node that could not report its architecture is refused the same way.
+    *reported.lock().unwrap() = None;
+    let error = prepare().await.unwrap_err();
+    assert_eq!(error.error.code, "provider_cli_node_arch_mismatch");
+    // A malformed token is a malformed Controller response, not a mismatch.
+    *reported.lock().unwrap() = Some("X64 (rosetta)".into());
+    let error = prepare().await.unwrap_err();
+    assert_eq!(
+        (error.status, error.error.code.as_str()),
+        (StatusCode::BAD_GATEWAY, "provider_cli_controller_error")
+    );
+    // The native architecture proceeds to a token.
+    *reported.lock().unwrap() = Some("arm64".into());
+    let prepared = prepare().await.unwrap();
+    assert!(prepared.confirmation_token.is_some());
+    assert_eq!(prepared.observation.node_arch.as_deref(), Some("arm64"));
+    assert!(seen.load(std::sync::atomic::Ordering::SeqCst) >= 8);
+}

@@ -1077,7 +1077,7 @@ mod tests {
                 "darwin-aarch64",
                 &ProviderCliRecipeRef {
                     recipe_id: "codex-npm-posix".into(),
-                    recipe_version: 1,
+                    recipe_version: 2,
                     recipe_hash: hashes["codex-npm-posix"].as_str().unwrap().into(),
                 },
             )
@@ -1088,7 +1088,7 @@ mod tests {
                 "windows-x86_64",
                 &ProviderCliRecipeRef {
                     recipe_id: "codex-npm-posix".into(),
-                    recipe_version: 1,
+                    recipe_version: 2,
                     recipe_hash: hashes["codex-npm-posix"].as_str().unwrap().into(),
                 },
             )
