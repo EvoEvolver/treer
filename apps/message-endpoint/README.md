@@ -61,10 +61,11 @@ Each frame is a big-endian u32 byte length followed by one UTF-8 JSON object,
 maximum 128 KiB; body maximum 60,000 UTF-8 bytes, context IDs maximum 32. Reject
 zero/oversize frames before allocation, duplicate keys, unknown fields/operations,
 invalid UTF-8, trailing JSON, version mismatch and non-finite numbers. Five-second
-frame deadline; one response per request, no pipelining; 20-second `pull` wait.
-Two authenticated connections per endpoint permit receive and send scheduling
-independently; global 48 connection cap, authentication-rate cap and bounded
-worker tasks prevent unbounded spawn. Unknown/revoked/wrong-generation credentials
+frame deadline; one response per request, no pipelining; one authenticated
+connection per endpoint, replacing a stale connection only after reauthentication.
+`pull` waits at most 250 ms so pending submits cannot be starved. Core receive
+runs independently of the socket scheduler; bounded queues, global 24 connection
+cap, authentication-rate cap and bounded worker tasks prevent unbounded spawn. Unknown/revoked/wrong-generation credentials
 have one generic error. No bodies/tokens/raw upstream errors in logs.
 
 ### Operations and crash boundaries
@@ -76,7 +77,7 @@ authenticated binding generation, never an arbitrary channel/account/target.
 | Operation | Request | Durable response / effect |
 | --- | --- | --- |
 | `submit` | Core `delivery_id`, `message_id`, verified-delivery sender reference, body, context IDs, creation time | Transaction inserts outbound intent and dedup digest, then returns stable `receipt_id`; only then may endpoint ack Core |
-| `pull` | `wait_ms` (0–20000) | Oldest eligible inbound job, fixed stable recipient ID, body/source, context, stable Core idempotency key, opaque lease token; or empty |
+| `pull` | `wait_ms` (0–250) | Oldest eligible inbound job, fixed stable recipient ID, body/source, context, stable Core idempotency key, opaque lease token; or empty |
 | `complete` | job ID, lease token, successful Core message ID | Atomically records Core acceptance and context mapping; retry of the same result succeeds |
 | `defer` | job ID, lease token, allowlisted temporary error code | Releases lease with bounded backoff; never accepts caller-provided exception text |
 | `status` | no fields | pause/generation/queue counters; no credentials or other bindings |
@@ -92,7 +93,10 @@ Core-authenticated human/Agent claim. Relay has no generic exec/RPC operation.
 Inbound is durably admitted/deduplicated before advancing Telegram update offset
 or returning public acceptance. `pull` leases one job for 60 seconds; only one
 live lease per endpoint, FIFO by committed sequence. Expired leases replay the
-same job/idempotency key after reconnect. Endpoint executes a fixed argv vector:
+same job/idempotency key after reconnect. Endpoint checks the recipient against stable IDs in its human-provisioned local
+binding file (owned regular no-follow 0600 file); a hub-supplied ID cannot extend
+that allowlist. Mismatch pauses the binding and reports a static audit error.
+Endpoint executes a fixed argv vector:
 `treer message send --to ID [--context ID] --idempotency-key KEY --stdin-envelope`,
 body and external source exclusively over stdin. It returns success only after
 validating the CLI JSON Core message ID. An ambiguous send retries the same key;
@@ -154,8 +158,11 @@ Human creates an ordinary command Agent with immutable absolute release paths:
 /immutable/release/treer-message-endpoint
   --socket /private/hub/endpoint.sock
   --credential-file /private/endpoint/binding.key
+  --binding-file /private/endpoint/binding.json
 ```
 
+The local binding file pins endpoint ID, generation and allowed recipient IDs;
+changes require the human provisioning step, never socket instructions.
 Only file paths enter argv. Runtime supplies its own ID/Controller/workload
 credential; never configure another Agent's ID/credential. No shell interpolation,
 remote download, mutable checkout or user-controlled command arguments. Relay
@@ -204,9 +211,11 @@ invalid supplied token never falls back. Current directory membership and owner/
 admin role required for settings data/mutations; Agents denied even if they can
 open the App. No header: standard OAuth+PKCE fallback, single-use expiring state
 bound to HttpOnly browser nonce, no open redirects. Never persist injected tokens.
-Origin/Sec-Fetch-Site + JSON/custom-header CSRF protection for writes, including
-injected humans; configured Proxy/ingress origin allowlist, no forwarded-Host trust.
-CSP/nosniff/no-store, escaped React text, no raw HTML/markdown execution. Desktop/
+Exact Origin + custom-header protection for all unsafe methods, including
+injected humans; browser writes require `Sec-Fetch-Site: same-origin`, no CORS; configured Proxy/ingress origin allowlist, no forwarded-Host trust.
+Strict CSP (no inline script/eval/third-party assets, direct `frame-ancestors
+none`; authenticated Treer tunnel rewrites framing as documented), nosniff and
+no-store; escaped React text, no raw HTML/markdown execution. Desktop/
 390px, keyboard, light/dark, en/zh, long IDs/errors and tunnel prefixes tested.
 
 ## Delivery gates
@@ -217,6 +226,11 @@ browser tests and RSS including real waiting CLI; then release-owned disposable
 canary-e2e bot validation. P3 independent public HTTP socket review + channel tests,
 OAuth/email tests with fake outbox. P4 reviewed offline backup/drain/cutover/reverse
 journal/rollback with no dual polling; no old App retirement before acceptance.
+
+Pin an independent Cargo.lock; audit dependencies, forbid unsafe in App code,
+review transitive build scripts and keep reproducible React dist build inputs.
+Parser depth/length caps apply to both socket and transport JSON; adapter failures
+are contained and surfaced without exposing raw request/response/exception text.
 
 Use private worktree Cargo target and closed test environment. No shared target,
 real credentials or production transport in tests. No push/deploy/restart is
