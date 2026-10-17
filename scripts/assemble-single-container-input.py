@@ -44,8 +44,10 @@ def main(argv):
     if len(argv) != 3:
         raise SystemExit("usage: assemble-single-container-input.py <artifacts-dir> <output-dir>")
     artifacts, output = Path(argv[1]), Path(argv[2])
-    if output.exists():
-        raise SystemExit("output directory must not exist")
+    # The checkout tracks only a .gitignore placeholder here (the Dockerfile COPYs this directory).
+    if output.exists() and (output.is_symlink() or not output.is_dir() or {e.name for e in output.iterdir()} - {".gitignore"}):
+        raise SystemExit("output directory must not exist or hold only .gitignore")
+    output.mkdir(exist_ok=True)
     for platform in PLATFORMS:
         leaf(artifacts / f"treer-{platform}", output / "machines" / platform, MACHINE_FILES)
         leaf(artifacts / f"treer-proxy-{platform}", output / "proxy" / platform, PROXY_FILES)

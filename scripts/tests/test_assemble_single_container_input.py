@@ -62,6 +62,18 @@ class AssembleTests(unittest.TestCase):
             verify_inputs.verify(self.output, verified, COMMIT, VERSION, architecture, self.cargo, digest)
             self.assertTrue((verified / "bin" / "treer-proxy").is_file())
 
+    def test_an_output_directory_holding_only_gitignore_is_accepted(self):
+        self.output.mkdir()
+        (self.output / ".gitignore").write_text("*\n")
+        result = self.run_assemble()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), verify_inputs.input_digest(self.output))
+
+    def test_a_non_empty_output_directory_is_refused(self):
+        self.output.mkdir()
+        (self.output / "stale").write_text("x")
+        self.assertNotEqual(self.run_assemble().returncode, 0)
+
     def test_a_missing_proxy_artifact_is_refused(self):
         import shutil
         shutil.rmtree(self.artifacts / "treer-proxy-linux-aarch64")
