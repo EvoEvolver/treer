@@ -123,7 +123,7 @@ class QueueStore(Database):
                            ("1" if paused else "0",))
             else:
                 if revoke:
-                    db.execute("UPDATE clients SET revoked=1,generation=generation+1 WHERE id=?", (client,))
+                    db.execute("UPDATE clients SET revoked=1,generation=generation+1,pair_hash=NULL WHERE id=?", (client,))
                 if paused is not None:
                     db.execute("UPDATE clients SET paused=? WHERE id=?", (int(paused), client))
 
@@ -276,7 +276,7 @@ class AdminStore(Database, RegistryMixin):
             db.executescript(REGISTRY_SCHEMA)
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS http_pairs (
-                    handle TEXT PRIMARY KEY, salt TEXT NOT NULL, code_hash TEXT NOT NULL,
+                    handle_hash TEXT PRIMARY KEY, salt TEXT NOT NULL, code_hash TEXT NOT NULL,
                     client_id TEXT NOT NULL, creator TEXT NOT NULL, poc TEXT NOT NULL,
                     label TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
                     token_expires REAL, spent INTEGER NOT NULL DEFAULT 0);
@@ -315,12 +315,12 @@ class AdminStore(Database, RegistryMixin):
             salt = secrets.token_hex(16)
             db.execute("UPDATE http_pairs SET spent=1 WHERE client_id=?", (client,))
             db.execute("INSERT INTO http_pairs VALUES (?,?,?,?,?,?,?,?,?,?,0)",
-                       (handle, salt, self._code_hash(salt, secret), client, actor, poc, label,
+                       (digest(handle), salt, self._code_hash(salt, secret), client, actor, poc, label,
                         self.clock(), self.clock() + 600, expires))
             # Reserve the client and its permitted POC in private state, never in the public queue file.
-            db.execute("INSERT INTO im_users VALUES ('http',?,?,?,1,'control') ON CONFLICT(channel,account_id,user_id) DO UPDATE SET label=excluded.label",
+            db.execute("INSERT INTO im_users VALUES ('http',?,?,?,1,'control') ON CONFLICT(channel,account_id,user_id) DO UPDATE SET label=excluded.label,enabled=1",
                        (self.ACCOUNT, client, label))
-            db.execute("INSERT INTO poc_bindings VALUES ('http',?,?,?,0,1,?,?) ON CONFLICT(channel,account_id,conversation) DO UPDATE SET target_agent_id=excluded.target_agent_id,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
+            db.execute("INSERT INTO poc_bindings VALUES ('http',?,?,?,0,1,?,?) ON CONFLICT(channel,account_id,conversation) DO UPDATE SET target_agent_id=excluded.target_agent_id,enabled=1,updated_at=excluded.updated_at,updated_by=excluded.updated_by",
                        (self.ACCOUNT, client, poc, self.clock(), actor))
             self._audit(db, self.clock(), None, actor, "settings", "pair.create", "http", self.ACCOUNT, client, None, poc, "ok")
             db.execute("DELETE FROM http_pairs WHERE expires_at<?", (self.clock() - 86400,))
@@ -344,12 +344,14 @@ class AdminStore(Database, RegistryMixin):
                 self.backoff_steps += 1
                 self.cooldown_until = now + delay
                 raise Error(429, "pair_backoff", "Pairing temporarily cooling down", delay)
-            if not isinstance(code, str) or len(code) != 43 or code[32] != "." or not ID.fullmatch(code[:32]):
+            if not isinstance(code, str) or len(code) != 43 or code[32] != "." or not ID.fullmatch(code[:32]) or any(ch not in PAIR_ALPHABET for ch in code[33:]):
                 raise invalid()
-            handle, secret = code.split(".")
+            handle, secret = code.split(".", 1)
             with self._connect() as db:
-                row = db.execute("SELECT * FROM http_pairs WHERE handle=?", (handle,)).fetchone()
-            valid = hmac.compare_digest(self._code_hash(row["salt"] if row else "0", secret), row["code_hash"] if row else "0" * 64)
+                row = db.execute("SELECT * FROM http_pairs WHERE handle_hash=?", (digest(handle),)).fetchone()
+            handle_valid = hmac.compare_digest(digest(handle), row["handle_hash"] if row else "0" * 64)
+            secret_valid = hmac.compare_digest(self._code_hash(row["salt"] if row else "0", secret), row["code_hash"] if row else "0" * 64)
+            valid = handle_valid & secret_valid
             failures = self.failures.get(handle, 0) if row else 0
             if row is None or row["spent"] or row["expires_at"] <= now or failures >= 10 or not valid:
                 if row is not None and not row["spent"] and row["expires_at"] > now:
@@ -363,7 +365,7 @@ class AdminStore(Database, RegistryMixin):
             # A crash between files burns the code; it cannot issue two tokens.
             with self._connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                changed = db.execute("UPDATE http_pairs SET spent=1 WHERE handle=? AND spent=0 AND expires_at>?", (handle, now)).rowcount
+                changed = db.execute("UPDATE http_pairs SET spent=1 WHERE handle_hash=? AND spent=0 AND expires_at>?", (digest(handle), now)).rowcount
                 if changed != 1:
                     raise invalid()
                 self._audit(db, now, None, "client:" + row["client_id"], "pair", "pair.redeem", "http", self.ACCOUNT,
@@ -377,6 +379,24 @@ class AdminStore(Database, RegistryMixin):
         if binding is None or user is None or not binding.enabled or not user[1]:
             raise Error(403, "client_disabled", "Client is not admitted")
         return binding, user[0]
+
+    def revoke(self, client, actor):
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if db.execute("SELECT 1 FROM im_users WHERE channel='http' AND account_id=? AND user_id=?", (self.ACCOUNT, client)).fetchone() is None:
+                raise Error(404, "client_unavailable", "Client unavailable")
+            db.execute("UPDATE http_pairs SET spent=1 WHERE client_id=?", (client,))
+            db.execute("UPDATE im_users SET enabled=0 WHERE channel='http' AND account_id=? AND user_id=?", (self.ACCOUNT, client))
+            self.queues.control(client, revoke=True)
+            self._audit(db, self.clock(), None, actor, "settings", "client.revoke", "http", self.ACCOUNT, client, None, None, "ok")
+
+    def _unreplied(self, _db, conversation):
+        # RegistryMixin's default uses Telegram message_mappings. HTTP keeps its
+        # delivery mappings in a separate queue file and has no numeric topics.
+        with self.queues._connect() as db:
+            last = db.execute("SELECT coalesce(max(created_at),0) FROM outbox WHERE client_id=?", (conversation,)).fetchone()[0]
+            return db.execute("SELECT count(*) FROM inbox WHERE client_id=? AND state='delivered' AND created_at>?",
+                              (conversation, last)).fetchone()[0]
 
     def notice(self, actor, operation, client=None, *, size=0, delivery=None, reason="ok"):
         self.audit(actor, "http", operation, "http", self.ACCOUNT, client,

@@ -32,9 +32,12 @@ class StoreTests(unittest.TestCase):
             content = '\n'.join(db.iterdump())
             self.assertNotIn(self.token, content)
             self.assertNotIn(self.pair['code'], content)
+            self.assertNotIn(self.pair['code'].split('.')[0], content)
             self.assertNotIn('code_hash', content)
         with self.a._connect() as db:
-            self.assertNotIn(self.pair['code'], '\n'.join(db.iterdump()))
+            content = '\n'.join(db.iterdump())
+            self.assertNotIn(self.pair['code'], content)
+            self.assertNotIn(self.pair['code'].split('.')[0], content)
         self.assertEqual(self.root.stat().st_mode & 0o777, 0o700)
         for path in self.root.iterdir():
             self.assertEqual(path.stat().st_mode & 0o777, 0o600)

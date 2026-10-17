@@ -1,0 +1,8 @@
+@import url('./base.css');
+/* Reuse Telegram settings tokens and components. */
+select{font:inherit;color:var(--fg);background:var(--panel);border:1px solid var(--line2);border-radius:6px;padding:8px;min-height:44px;max-width:100%;width:100%}
+button,input{min-height:44px}.tools{display:flex;gap:8px;align-items:end}.tools label{margin:0}.tools select{width:auto}.muted{color:var(--fg2)}
+.endpoint,code,.client p{overflow-wrap:anywhere}.client{border-top:1px solid var(--line);padding:12px 0}.client h3{margin:0}.client p{margin:4px 0}.client .row{flex-wrap:wrap}.client .danger{margin-left:auto}
+#pair-code{display:block;font-size:18px;letter-spacing:0;word-break:break-all;user-select:all}.code .row{justify-content:center}
+@media(max-width:640px){.top{flex-wrap:wrap}.tools{width:100%;justify-content:flex-end}input,select{font-size:16px}}
+@media(prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
