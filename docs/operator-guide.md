@@ -964,6 +964,33 @@ the administrator refused, a single reset only restores the budget for an instan
 3. Sign in, then lift the temporary restriction. Existing sessions were never
    affected. Do not use `--disable-auth` as a recovery method.
 
+## Serving the browser App from the Proxy
+
+`TREER_APP_DIST_DIR` (or `--app-dist-dir`) makes the Proxy serve the web App
+build itself, for the single-container deployment. Requests whose Host is the
+App public URL receive files from that directory with `index.html` as the SPA
+fallback, `GET /config.json` with the Proxy URL and `GET /health`, all with the
+same headers as the standalone nginx image (`X-Frame-Options: DENY`,
+`Content-Security-Policy: frame-ancestors 'none'; object-src 'none'; base-uri
+'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+`Cache-Control: no-cache`, `no-store` for `/config.json` and `/health`). Files
+are resolved only inside the canonical directory (no traversal, no symlink
+escape); `/api/`, `/agent/`, `/artifacts/`, `/.treer/`, `/.well-known/` and
+`/install.*` are never served as App content. In this mode the Proxy applies a strict Host allowlist: exactly one Host header,
+compared as host:port (default port from each URL's scheme) against the App
+URL, the Proxy URL and the configured ingress suffix; any other host receives a
+fixed 421 `host_not_configured`, which also defends `docker run -p` setups
+against DNS rebinding. Core routes never execute on the App host (JSON 404),
+and the Proxy host never returns the Console. Forwarded headers are not
+consulted: a TLS terminator must pass the original Host. A zero-DNS pair such
+as Console `http://localhost:8080` and Proxy `http://127.0.0.1:8080` already
+gives two origins on one port; public deployments use two DNS names (or a
+wildcard) on the same port with a certificate covering both. When the App public
+URL equals the Proxy public URL, embedded App interfaces and virtual-host
+tunnels answer `embedded_ui_requires_separate_app_origin` (503): App content
+must never share the Console origin, so configure a separate App hostname to
+use them. Cookie, Origin and CSRF rules are unchanged.
+
 ## NATS event bus and multi-Proxy routing
 
 The Proxy can publish revisioned workspace changes as versioned domain events

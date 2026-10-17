@@ -64,6 +64,12 @@ struct Args {
     artifacts_dir: PathBuf,
     #[arg(
         long,
+        env = "TREER_APP_DIST_DIR",
+        help = "Serve the browser App build from this directory for requests to the App public URL (single-container mode)"
+    )]
+    app_dist_dir: Option<PathBuf>,
+    #[arg(
+        long,
         env = "TREER_RELEASE_ARTIFACT_BASE_URL",
         default_value = "https://github.com/EvoEvolver/treer/releases/latest/download/",
         help = "Fallback URL for platform binaries absent from the local artifact directory"
@@ -210,6 +216,18 @@ async fn main() -> anyhow::Result<()> {
         args.artifacts_dir,
         args.release_artifact_base_url,
     );
+    let bootstrap = match &args.app_dist_dir {
+        Some(dist) => {
+            let app_dist = api::AppDistConfig::new(dist, &app_public_url, &proxy_public_url)?;
+            if app_dist.embedding_allowed() {
+                info!(dist = %dist.display(), app_host = %app_public_url, "serving the browser App build from the Proxy");
+            } else {
+                warn!(code = "app_served_on_proxy_origin", dist = %dist.display(), "the browser App is served on the Proxy origin: embedded App interfaces and virtual-host tunnels are disabled until a separate App public URL is configured");
+            }
+            bootstrap.with_app_dist(app_dist)
+        }
+        None => bootstrap,
+    };
     let email_config = args
         .cloudflare_api_token
         .map(|api_token| auth::CloudflareEmailConfig {

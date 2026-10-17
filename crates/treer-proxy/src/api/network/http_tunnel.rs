@@ -9,9 +9,12 @@ pub(in crate::api) async fn proxy_virtual_network_host_root(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(browser): Extension<BrowserAccess>,
+    Extension(bootstrap): Extension<BootstrapConfig>,
     Path((workspace_id, hostname)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
+    // App content must never run on the Console's origin (#132).
+    bootstrap.app_dist().require_embedding_allowed()?;
     browser.validate_tunnel_if_present(request.headers())?;
     proxy_virtual_network_host(state, auth, workspace_id, hostname, String::new(), request).await
 }
@@ -20,9 +23,12 @@ pub(in crate::api) async fn proxy_virtual_network_host_path(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(browser): Extension<BrowserAccess>,
+    Extension(bootstrap): Extension<BootstrapConfig>,
     Path((workspace_id, hostname, path)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
+    // App content must never run on the Console's origin (#132).
+    bootstrap.app_dist().require_embedding_allowed()?;
     browser.validate_tunnel_if_present(request.headers())?;
     proxy_virtual_network_host(state, auth, workspace_id, hostname, path, request).await
 }
@@ -86,9 +92,12 @@ pub(in crate::api) async fn proxy_virtual_network_host(
 pub(in crate::api) async fn proxy_agent_interface_ui_root(
     State(state): State<AppState>,
     Extension(browser): Extension<BrowserAccess>,
+    Extension(bootstrap): Extension<BootstrapConfig>,
     Path((workspace_id, agent_id)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
+    // App content must never run on the Console's origin (#132).
+    bootstrap.app_dist().require_embedding_allowed()?;
     browser.validate_tunnel_if_present(request.headers())?;
     proxy_agent_interface_ui(state, workspace_id, agent_id, String::new(), request).await
 }
@@ -96,9 +105,12 @@ pub(in crate::api) async fn proxy_agent_interface_ui_root(
 pub(in crate::api) async fn proxy_agent_interface_ui_path(
     State(state): State<AppState>,
     Extension(browser): Extension<BrowserAccess>,
+    Extension(bootstrap): Extension<BootstrapConfig>,
     Path((workspace_id, agent_id, path)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
+    // App content must never run on the Console's origin (#132).
+    bootstrap.app_dist().require_embedding_allowed()?;
     browser.validate_tunnel_if_present(request.headers())?;
     proxy_agent_interface_ui(state, workspace_id, agent_id, path, request).await
 }
