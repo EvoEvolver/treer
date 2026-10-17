@@ -402,11 +402,13 @@ test.describe('resizable tree sidebar', () => {
     await tree.evaluate((element) => { element.style.maxHeight = '90px'; element.scrollTop = 40 })
     await expect(tree).toHaveAttribute('data-scrolling', '')
     await expect(tree).not.toHaveAttribute('data-scrolling', '', { timeout: 3000 })
-    // Keyboard scrolling is untouched.
+    // Keyboard scrolling is untouched: a focused row plus PageDown really scrolls the (still 90px high) tree.
     await tree.evaluate((element) => { element.scrollTop = 0 })
-    await tree.focus()
+    await expect.poll(() => tree.evaluate((element) => element.scrollTop)).toBe(0)
+    await tree.getByRole('link').first().focus()
+    await expect(tree.getByRole('link').first()).toBeFocused()
     await page.keyboard.press('PageDown')
-    expect(await tree.evaluate((element) => element.scrollTop)).toBeGreaterThanOrEqual(0)
+    await expect.poll(() => tree.evaluate((element) => element.scrollTop)).toBeGreaterThan(0)
   })
   async function drag(page: Page, delta: number) {
     const box = (await separator(page).boundingBox())!
