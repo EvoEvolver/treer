@@ -484,14 +484,22 @@ OS-captured PID/creation identity, private SID/PGID, image dev/inode and SHA256.
 It revalidates the intent and private process session immediately before writing
 and after file/directory sync, then checks bounded exact-byte readback and the
 registration inode. Existing entries, nil attempts and non-private sessions fail
-closed without replacement. `RegisteredSupervisor` retains the intent, process
+closed without replacement. The registration API accepts a mutable borrow of
+the coordinator's actual `std::process::Child`, not a PID or caller-created
+ProcessImage. It rejects an exited/reaped child or any try_wait error, captures
+the image internally, and rechecks the owned child before writing, after sync
+and before returning the registration. The caller retains Child lifecycle
+ownership; registration never signals the child or transfers its process handle.
+`RegisteredSupervisor` retains the intent, process
 image and record FD; verification and binding access recheck those records and
 live image/session. Drop preserves evidence. Isolated Rust subprocess tests cover
 valid registration, replacement/mutation, changed intent, child exit, existing
-entries and refusal to replace a registration even with a fresh intent/attempt.
-This is durable identity metadata, not attestation of owned-child provenance or
-an authenticated connection: the caller must supply the coordinator's owned
-child image. Registration alone authorizes no permit/noexec/ACK or installer
+entries, already-reaped children, real non-private-session children, and refusal
+to replace a registration even with a fresh intent/attempt.
+This narrows supervisor identity provenance to an owned Child at registration;
+it is not approval of its executable, authenticated IPC, proof of the permit
+owner's parent relationship or an all-descendants containment guarantee.
+Registration alone authorizes no permit/noexec/ACK or installer
 execution. Its private in-memory gate is described below; the real supervisor
 entry, authenticated lifecycle connection and recovery/death matrix remain
 future work. Sync-failure/crash-point

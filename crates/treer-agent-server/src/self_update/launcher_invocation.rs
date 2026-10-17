@@ -455,7 +455,9 @@ mod tests {
     #[test]
     #[ignore = "owned subprocess helper, invoked by registration fixture"]
     fn supervisor_registration_child() {
-        treer_platform::process_image::enter_private_session().unwrap();
+        if std::env::var_os("TREER_TEST_REGISTRATION_NOT_PRIVATE").is_none() {
+            treer_platform::process_image::enter_private_session().unwrap();
+        }
         std::fs::write(
             std::env::var_os("TREER_TEST_REGISTRATION_READY").unwrap(),
             b"ready",
@@ -495,6 +497,7 @@ mod tests {
             "existing_symlink",
             "nil",
             "not_private",
+            "already_exited",
         ] {
             let f = Fixture::standard_config();
             f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
@@ -530,6 +533,10 @@ mod tests {
                     ])
                     .env_clear()
                     .env("TREER_TEST_REGISTRATION_READY", &ready)
+                    .envs(
+                        (fault == "not_private")
+                            .then_some(("TREER_TEST_REGISTRATION_NOT_PRIVATE", "1")),
+                    )
                     .stdin(Stdio::piped())
                     .stdout(Stdio::null())
                     .stderr(Stdio::null())
@@ -542,12 +549,10 @@ mod tests {
                 assert!(child.0.try_wait().unwrap().is_none());
                 std::thread::sleep(Duration::from_millis(1));
             }
-            let image = ProcessImage::capture(if fault == "not_private" {
-                std::process::id()
-            } else {
-                child.0.id()
-            })
-            .unwrap();
+            if fault == "already_exited" {
+                child.0.stdin.take();
+                assert!(child.0.wait().unwrap().success());
+            }
             let path = job.join("launcher-install-supervisor.json");
             match fault {
                 "existing_empty" => std::fs::write(&path, b"").unwrap(),
@@ -560,8 +565,10 @@ mod tests {
             } else {
                 uuid::Uuid::new_v4()
             };
-            let result = intent.register_supervisor(attempt, image);
-            if fault.starts_with("existing") || matches!(fault, "nil" | "not_private") {
+            let result = intent.register_supervisor(attempt, &mut child.0);
+            if fault.starts_with("existing")
+                || matches!(fault, "nil" | "not_private" | "already_exited")
+            {
                 assert_eq!(
                     result.err().unwrap().to_string(),
                     "update_recovery_required",
@@ -570,7 +577,7 @@ mod tests {
                 if fault == "existing_corrupt" {
                     assert_eq!(std::fs::read(&path).unwrap(), b"partial private evidence");
                 }
-                if matches!(fault, "nil" | "not_private") {
+                if matches!(fault, "nil" | "not_private" | "already_exited") {
                     assert!(!path.exists());
                 }
                 continue;
@@ -592,13 +599,10 @@ mod tests {
                 std::fs::rename(&intent_path, job.join("saved-intent")).unwrap();
                 let next = plan.record_start_intent().unwrap();
                 assert_eq!(
-                    next.register_supervisor(
-                        attempt,
-                        ProcessImage::capture(child.0.id()).unwrap(),
-                    )
-                    .err()
-                    .unwrap()
-                    .to_string(),
+                    next.register_supervisor(attempt, &mut child.0)
+                        .err()
+                        .unwrap()
+                        .to_string(),
                     "update_recovery_required"
                 );
                 assert_eq!(std::fs::read(&path).unwrap(), bytes);
@@ -679,10 +683,7 @@ mod tests {
                     // existing registration for this operation.
                     std::fs::rename(&intent_path, job.join("saved-intent")).unwrap();
                     let next = plan.record_start_intent().unwrap();
-                    let result = next.register_supervisor(
-                        uuid::Uuid::new_v4(),
-                        ProcessImage::capture(child.0.id()).unwrap(),
-                    );
+                    let result = next.register_supervisor(uuid::Uuid::new_v4(), &mut child.0);
                     assert_eq!(
                         result.err().unwrap().to_string(),
                         "update_recovery_required"

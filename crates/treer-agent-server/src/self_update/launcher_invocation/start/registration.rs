@@ -5,6 +5,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     os::unix::fs::MetadataExt,
+    process::Child,
 };
 
 use anyhow::{bail, Result};
@@ -68,22 +69,25 @@ pub struct RegisteredSupervisor<'plan, 'owner> {
 }
 
 impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
-    /// `image` must originate from the coordinator's owned child, never an
-    /// incoming PID claim. This verifies its private session but does not prove
-    /// child ownership, authenticate its IPC connection or start that process.
+    /// Derive identity from an unreaped, live Child actually held by the caller,
+    /// never an incoming PID/image claim. This does not authenticate the child's
+    /// IPC connection, approve its executable or start that process.
     /// Any existing registration requires recovery; a new attempt cannot replace
     /// it. Consume the fresh intent capability even on a persistence failure.
     pub fn register_supervisor(
         self,
         attempt: Uuid,
-        image: ProcessImage,
+        child: &mut Child,
     ) -> Result<RegisteredSupervisor<'plan, 'owner>> {
         let result = (|| -> Result<_> {
             if attempt.is_nil() {
                 bail!("update_recovery_required");
             }
             self.verify()?;
+            require_live_child(child)?;
+            let image = ProcessImage::capture(child.id())?;
             image.verify_private_session()?;
+            require_live_child(child)?;
             let intent_metadata = self.file.metadata()?;
             let image_metadata = image.executable().metadata()?;
             let image_sha256 = digest_file(image.executable())?;
@@ -116,12 +120,14 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             // than only an earlier preflight. All uncertainty preserves evidence.
             self.verify()?;
             image.verify_private_session()?;
+            require_live_child(child)?;
             let mut file = self.invocation.journal.directory.create_file(name)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             self.invocation.journal.directory.sync()?;
             self.verify()?;
             image.verify_private_session()?;
+            require_live_child(child)?;
             let binding = Binding::new(
                 attempt,
                 &self.sha256,
@@ -141,10 +147,21 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
                 gate,
             };
             proof.verify()?;
+            require_live_child(child)?;
             Ok(proof)
         })();
         result.map_err(|_| anyhow::anyhow!("update_recovery_required"))
     }
+}
+
+// try_wait errors and already-exited/reaped children are uncertainty, not a
+// source of a PID that may now name an unrelated process. Never signal or wait
+// for a caller-supplied PID; the caller retains this actual Child's ownership.
+fn require_live_child(child: &mut Child) -> Result<()> {
+    if child.try_wait()?.is_some() {
+        bail!("update_recovery_required");
+    }
+    Ok(())
 }
 
 impl RegisteredSupervisor<'_, '_> {
