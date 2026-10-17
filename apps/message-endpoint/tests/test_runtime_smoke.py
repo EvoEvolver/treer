@@ -1,0 +1,66 @@
+import importlib.util
+import os
+from pathlib import Path
+import tempfile
+import unittest
+
+ROOT = Path(__file__).resolve().parent
+spec = importlib.util.spec_from_file_location('smoke', ROOT / 'app-runtime-smoke.py')
+smoke = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(smoke)
+
+
+class RuntimeSmokeTests(unittest.TestCase):
+    def test_contract_validated_fake_app_roundtrip(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            fake = root / 'fake-treer'
+            # The fake validates every argv against the shared real clap snapshot.
+            fake.write_text('''#!/usr/bin/python3
+import json,sys
+from pathlib import Path
+sys.path.insert(0, APPS_PATH)
+from cli_contract import violation
+args=sys.argv[1:]
+assert violation(args) is None
+state=Path(__file__).with_name('state.json')
+s=json.loads(state.read_text()) if state.exists() else {}
+if args[:2]==['message','send']:
+ body=json.load(sys.stdin)['body']
+ if s: assert s['body']==body
+ else: s={'body':body,'acked':False}
+ result={'message':{'message_id':'msg_synthetic'}}
+elif args[:2]==['message','receive']:
+ result={'deliveries':[] if s['acked'] else [{'delivery_id':'del_synthetic','message':{
+  'message_id':'msg_synthetic','body':s['body'],'sender':{'id':'ag_synthetic','kind':'agent'}}}]}
+elif args[:2]==['message','ack']:
+ assert args[2]=='del_synthetic'
+ result={'acknowledged_delivery_ids':[] if s['acked'] else ['del_synthetic'],
+         'already_acknowledged_delivery_ids':['del_synthetic'] if s['acked'] else []}
+ s['acked']=True
+else: raise AssertionError('unexpected operation')
+state.write_text(json.dumps(s))
+print(json.dumps(result))
+'''.replace('APPS_PATH', repr(str(ROOT.parents[1]))))
+            fake.chmod(0o700)
+            checks = smoke.exercise(str(fake), 'ag_synthetic', 'synthetic123')
+            self.assertEqual(len(checks), 7)
+
+    def test_child_timeout_and_output_bound(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fake = Path(temporary) / 'fake'
+            fake.write_text('#!/usr/bin/python3\nimport time\ntime.sleep(5)\n')
+            fake.chmod(0o700)
+            with self.assertRaises(smoke.SmokeError):
+                smoke.cli(str(fake), [], timeout=0.05)
+            fake.write_text('#!/usr/bin/python3\nprint("x"*1100000)\n')
+            with self.assertRaises(smoke.SmokeError):
+                smoke.cli(str(fake), [])
+
+    def test_invalid_target_does_not_invoke_cli(self):
+        with self.assertRaises(smoke.SmokeError):
+            smoke.exercise('/nonexistent', 'human', 'synthetic123')
+
+
+if __name__ == '__main__':
+    unittest.main()

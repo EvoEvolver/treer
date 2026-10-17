@@ -1,0 +1,31 @@
+{
+  "schema_version": 2,
+  "defaults": {},
+  "groups": {},
+  "rules": [
+    {
+      "id": "endpoint-smoke-receive",
+      "priority": 100,
+      "effect": "allow",
+      "subjects": [{"kind": "agent", "id": "SMOKE_AGENT_ID", "self": true}],
+      "actions": ["message.receive"],
+      "resources": [{"kind": "message.mailbox", "id": "SMOKE_AGENT_ID"}]
+    },
+    {
+      "id": "endpoint-smoke-self-send",
+      "priority": 100,
+      "effect": "allow",
+      "subjects": [{"kind": "agent", "id": "SMOKE_AGENT_ID"}],
+      "actions": ["message.send"],
+      "resources": [{"kind": "message.mailbox", "id": "SMOKE_AGENT_ID"}]
+    },
+    {
+      "id": "endpoint-smoke-ack",
+      "priority": 100,
+      "effect": "allow",
+      "subjects": [{"kind": "agent", "id": "SMOKE_AGENT_ID"}],
+      "actions": ["message.ack"],
+      "resources": [{"kind": "message.delivery"}]
+    }
+  ]
+}

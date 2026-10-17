@@ -22,6 +22,7 @@ with tempfile.TemporaryDirectory(prefix='treer-endpoint-check-') as home:
     # Pin tooling/cache locations only. No TREER_*, AGENT_UI_*, harness, cloud
     # credentials, proxy vars or real HOME reach tests or their child processes.
     for command in [
+        ['/usr/bin/python3', '-I', str(root / 'tests/test_runtime_smoke.py')],
         [str(cargo), 'fmt', '--check'],
         [str(cargo), 'test', '--offline', '--locked'],
         [str(cargo), 'clippy', '--offline', '--locked', '--all-targets', '--', '-D', 'warnings'],

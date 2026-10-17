@@ -204,3 +204,7 @@ Production DB opener/WAL recovery, Core relay, transports and UI are unfinished.
 Offline focused checks: `python3 apps/message-endpoint/tests/run.py` (stripped
 Treer/harness environment, private HOME/temp, private worktree target). Independent
 Cargo.lock pinned; review/audit dependencies and build scripts. No root Core gate.
+
+The separate [App-runtime smoke procedure](tests/RUNTIME-SMOKE.md) is a disposable
+Python test helper for verifying the existing App-kind Core messaging path before
+the Rust hub exists. It is not a production entry point or third product program.
