@@ -15,9 +15,13 @@ use super::{
     Journal, Phase, Receipt,
 };
 
+mod launcher_frame;
 mod ownership;
 pub mod parent;
+#[cfg(test)]
+mod source_boundary_tests;
 mod worker;
+pub use launcher_frame::LauncherFrame;
 pub use ownership::{AcceptedOwnership, OwnedActivation};
 pub use worker::WorkerBootstrap;
 
@@ -163,43 +167,6 @@ pub struct AuthenticatedPeer {
     launcher_read_started: bool,
 }
 
-/// A single read from the actual authenticated connection, retaining its
-/// exclusive receiver borrow and process image. Only the authenticated reader
-/// below can construct it. No Clone, raw-stream accessor or public constructor.
-/// This is not proof of durable registration, owner ACK or writer death.
-pub struct LauncherFrame<'a> {
-    observation: super::launcher_arbitration::transport::Observation<'a>,
-    image: &'a ProcessImage,
-}
-
-impl LauncherFrame<'_> {
-    pub fn kind(&self) -> super::launcher_arbitration::transport::Kind {
-        self.observation.kind()
-    }
-
-    /// Ordinary metadata for diagnostics/comparison; copying it does not copy
-    /// this connection-bound observation or permit another acceptance.
-    pub fn binding(&self) -> Option<&super::launcher_arbitration::Binding> {
-        self.observation.binding()
-    }
-
-    pub(super) fn permit_binding(
-        &self,
-        arbitration: &mut super::launcher_arbitration::Arbitration,
-    ) -> Result<&super::launcher_arbitration::Binding> {
-        // A caller may delay acceptance after reading. Revalidate while the
-        // actual receiver is still borrowed, not just when the frame was read.
-        revalidate_launcher_image(self.image, arbitration)?;
-        match self.binding() {
-            Some(binding) => Ok(binding),
-            None => {
-                arbitration.invalidate();
-                bail!("update_recovery_required");
-            }
-        }
-    }
-}
-
 impl AuthenticatedPeer {
     /// `expected` must be captured from the coordinator's owned child/parent;
     /// `verified_image` is the checked job-local image held by the coordinator,
@@ -254,55 +221,6 @@ impl AuthenticatedPeer {
         self.image
             .verify_current()
             .map_err(|_| anyhow::anyhow!("update_handoff_peer_changed"))
-    }
-
-    /// Revalidate this exact connected peer before a single raw launcher read,
-    /// and its creation identity/image again before returning successful input.
-    /// Complete frames must match the pending arbitration's exact binding.
-    /// This compares metadata only: the future supervisor must derive that
-    /// binding from verified durable records, not from incoming frame contents.
-    /// Every failure invalidates pending arbitration, including cancellation and
-    /// repeat reads. Success does not accept a permit or establish authenticated
-    /// EOF/all-writers-gone evidence; the peer may die while the read drains.
-    /// The future supervisor must privately own both cancellation endpoints and
-    /// keep the write end exclusively inside its signal/shutdown handling.
-    pub fn read_launcher_frame<'a>(
-        &'a mut self,
-        arbitration: &mut super::launcher_arbitration::Arbitration,
-        cancellation: &UnixStream,
-    ) -> Result<LauncherFrame<'a>> {
-        use super::launcher_arbitration::{transport, Decision};
-
-        if self.launcher_read_started || arbitration.decision() != Decision::Pending {
-            arbitration.invalidate();
-            bail!("update_recovery_required");
-        }
-        self.launcher_read_started = true;
-        if let Err(error) = self.verify() {
-            arbitration.invalidate();
-            return Err(error);
-        }
-        match transport::read(&mut self.stream, cancellation) {
-            Ok(observation) => {
-                // The exclusive stream borrow prevents descriptor replacement;
-                // UID/PID are connection credentials already checked above.
-                // Recheck the independent image field while the observation
-                // borrows the receiver: a same-PID exec during reading must
-                // not turn raw input into a successfully verified observation.
-                revalidate_launcher_image(&self.image, arbitration)?;
-                if let Some(binding) = observation.binding() {
-                    arbitration.match_binding(binding)?;
-                }
-                Ok(LauncherFrame {
-                    observation,
-                    image: &self.image,
-                })
-            }
-            Err(error) => {
-                arbitration.invalidate();
-                Err(error)
-            }
-        }
     }
 
     /// This is NOT an ownership ACK. The parent retains locks until a durable
@@ -601,8 +519,101 @@ mod tests {
         let path = std::env::var_os("TREER_TEST_HANDOFF_SOCKET").unwrap();
         let mut socket = UnixStream::connect(path).unwrap();
         socket.write_all(b"R").unwrap();
+        if std::env::var_os("TREER_TEST_LAUNCHER_FRAME").is_some() {
+            let mut frame = Vec::from(&b"TRLP\x01\0\0\0"[..]);
+            frame.extend_from_slice(uuid::Uuid::from_u128(7).as_bytes());
+            frame.extend_from_slice(&[b'a'; 64]);
+            frame.extend_from_slice(&[b'b'; 64]);
+            socket.write_all(&frame).unwrap();
+            socket.shutdown(std::net::Shutdown::Write).unwrap();
+            let _ = std::io::stdin().read(&mut [0]);
+            return;
+        }
         let _ = std::io::stdin().read(&mut [0]);
         socket.write_all(b"E").unwrap();
+    }
+
+    #[test]
+    fn peer_exit_after_successful_frame_read_cannot_be_accepted() {
+        use super::super::launcher_arbitration::{Arbitration, Binding, Decision};
+        for killed in [false, true] {
+            let root = std::env::temp_dir().canonicalize().unwrap().join(format!(
+                "ta-{}",
+                &uuid::Uuid::new_v4().simple().to_string()[..16]
+            ));
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&root)
+                .unwrap();
+            let fixture = Fixture(root);
+            let socket = fixture.0.join("s");
+            let listener = UnixListener::bind(&socket).unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let mut child = OwnedChild(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "self_update::handoff::tests::peer_child",
+                        "--ignored",
+                    ])
+                    .env_clear()
+                    .env("TREER_TEST_HANDOFF_SOCKET", &socket)
+                    .env("TREER_TEST_LAUNCHER_FRAME", "1")
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .unwrap(),
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(child.0.try_wait().unwrap().is_none());
+                        assert!(Instant::now() < deadline, "owned child did not connect");
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(error) => panic!("fixture accept failed: {error}"),
+                }
+            };
+            stream.set_nonblocking(false).unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            let mut ready = [0];
+            stream.read_exact(&mut ready).unwrap();
+            assert_eq!(ready, [b'R']);
+            let image = ProcessImage::capture(child.0.id()).unwrap();
+            let digest = digest_file(image.executable()).unwrap();
+            let mut peer =
+                AuthenticatedPeer::authenticate(stream, &image, image.executable(), &digest)
+                    .unwrap();
+            let expected =
+                Binding::new(uuid::Uuid::from_u128(7), &"a".repeat(64), &"b".repeat(64)).unwrap();
+            let mut arbitration = Arbitration::new(expected);
+            let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+            let frame = peer.read_launcher_frame(&mut arbitration, &cancel).unwrap();
+            assert_eq!(arbitration.decision(), Decision::Pending);
+            assert!(child.0.try_wait().unwrap().is_none());
+            if killed {
+                child.0.kill().unwrap();
+            } else {
+                drop(child.0.stdin.take());
+            }
+            let status = child.0.wait().unwrap();
+            assert_eq!(status.success(), !killed);
+            assert!(image.verify_current().is_err());
+            // The frame really passed the read boundary while the peer was
+            // alive. Only the acceptance-time identity check can reject it.
+            assert_eq!(
+                arbitration.accept(frame).unwrap_err().to_string(),
+                "update_handoff_peer_changed"
+            );
+            assert_eq!(arbitration.decision(), Decision::Uncertain);
+            assert!(peer.read_launcher_frame(&mut arbitration, &cancel).is_err());
+            assert_eq!(arbitration.decision(), Decision::Uncertain);
+        }
     }
 
     #[test]

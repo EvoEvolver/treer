@@ -848,8 +848,10 @@ frames. This closes metadata equality at the read boundary only: the binding is
 still caller-constructible, not derived from an authenticated durable supervisor
 registration. That derivation and sealed writer-closure proofs remain required.
 
-The returned `LauncherFrame` now has private fields, no public constructor and
-no Clone implementation. It wraps the raw observation and retains both the
+The returned `LauncherFrame` now has fields private to the dedicated leaf
+`handoff::launcher_frame` module, no public constructor and no Clone
+implementation. Even sibling ownership/worker modules and the parent handoff
+module cannot initialize its fields. It wraps the raw observation and retains both the
 actual receiver's exclusive borrow and the authenticated process image borrow.
 The public `Arbitration::accept` consumes that frame by value; Binding metadata
 or a raw transport observation alone cannot be passed to it. Acceptance checks
@@ -863,8 +865,23 @@ for one gate, where only the first can succeed. This does not establish that a
 supplied binding came from durable supervisor registration, prevent a caller
 from constructing another arbitration with the same metadata, or prove writer
 closure/owner ACK/durability. The real lifecycle must exclusively own one gate
-per registered attempt. Compile-fail boundary checks and delayed peer-exit/exec
-acceptance regressions remain required before lifecycle integration.
+per registered attempt. A source-audit regression scans self-update Rust files
+for explicit frame construction and requires the sole site to remain in the
+authenticated leaf reader; it also guards against introducing ordinary child
+module declarations into that leaf. This is a grep-style tripwire, not a Rust
+parser or a full compile-fail test: the private-field compiler boundary enforces
+external construction refusal. Source spelling tricks or new construction APIs
+still require code review.
+
+A real owned Rust child fixture sends a valid matching frame, half-closes its
+socket and blocks on stdin. The parent authenticates and successfully reads
+the frame while the child is alive, then either releases stdin for normal exit
+or sends SIGKILL to that exact owned child, and reaps it before acceptance.
+Consuming the retained frame must return `update_handoff_peer_changed`, leave
+Uncertain and refuse retry, despite the earlier successful read. Unique private
+0700 directories/sockets and cleared child environments are used; no deployed
+process or installer is touched. A delayed same-PID exec acceptance regression,
+as distinct from the existing exec-during-read test, remains outstanding.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the
