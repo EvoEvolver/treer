@@ -325,6 +325,31 @@ installer argv/environment, durable child-start/identity and worker-death
 reconciliation, spawn/completion revalidation and final live health remain
 required before production dispatch or whole-P1 acceptance.
 
+`launcher_invocation::Invocation` now supplies a read-only recipe under borrowed
+original ownership and an exact CoreHealthy journal snapshot. Its only operations
+are `install` and `status`; program/cwd and explicit CLI path come from the locked
+selection, with explicit Node/workspace/Controller URL arguments and server ID.
+The URL is the saved numeric Controller listener, not the remote Proxy URL. It
+preserves the launcher's exact listener selector (including wildcard spelling),
+unlike the health transport's loopback normalization. HOME comes from the
+effective OS account database, canonicalized and checked as an owned installation
+directory, never the updating Agent's environment. XDG_CONFIG_HOME is recovered
+from the selected `<config-home>/treer/agent-servers` path; unrepresentable layouts
+fail instead of falling back to another configuration. Node resolution reuses
+the launcher's trusted fixed OS locations without PATH fallback.
+
+The future child must clear its environment before applying the recipe's eight
+allowlisted entries: HOME, XDG_CONFIG_HOME, fixed system PATH, C LANG/LC_ALL and
+the selected workspace, Controller URL and server ID. No ambient credentials,
+workload identity, loader/Node hooks, proxy settings or state-directory override
+are copied. This intentionally uses the OS account's default launcher state
+location; it does not inherit an Agent's private state override. A recipe binding
+check rejects changed receipt content/revision. It neither authenticates image
+bytes nor starts any process, changes a receipt or grants execution authority.
+Node version/image retention, durable child-start/identity and recovery, actual
+env-clear/spawn/completion enforcement and final live health remain executor
+work; no real installation or whole-P1 acceptance is claimed here.
+
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
 modes/current bytes and executable stages before recording Activating or making

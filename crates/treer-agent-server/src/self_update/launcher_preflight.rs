@@ -10,7 +10,11 @@ use super::{
 
 const BUDGET: Duration = Duration::from_secs(20);
 
-fn checked(selected: &Selected, owned: &OwnedActivation, journal: &Journal) -> Result<Receipt> {
+pub(super) fn checked(
+    selected: &Selected,
+    owned: &OwnedActivation,
+    journal: &Journal,
+) -> Result<Receipt> {
     let receipt = journal
         .read()
         .map_err(|_| anyhow::anyhow!("update_launcher_binding_mismatch"))?;

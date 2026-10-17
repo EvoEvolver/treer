@@ -262,6 +262,31 @@ pub struct SelectionLocks {
 }
 
 impl Selected {
+    /// Recover the exact XDG configuration root from this selected enrollment,
+    /// never from the updating Agent's ambient HOME/XDG environment.
+    pub(super) fn launcher_config_home(&self) -> Result<&Path> {
+        let treer = self.config_root.parent();
+        if self
+            .config_root
+            .file_name()
+            .is_none_or(|name| name != "agent-servers")
+            || treer.is_none_or(|path| path.file_name().is_none_or(|name| name != "treer"))
+        {
+            bail!("update_launcher_config_binding_mismatch");
+        }
+        treer
+            .and_then(Path::parent)
+            .filter(|path| physical_path(path))
+            .ok_or_else(|| anyhow::anyhow!("update_launcher_config_binding_mismatch"))
+    }
+
+    /// Match the launcher's saved-listener selection exactly. Its URL selector
+    /// is not the health transport's wildcard-to-loopback normalization.
+    pub(super) fn launcher_url(&self) -> Result<String> {
+        self.health_address()?; // Reject ephemeral/invalid listener bindings.
+        Ok(format!("http://{}", self.enrollment.controller.listen))
+    }
+
     pub fn workspace(&self) -> &str {
         &self.enrollment.controller.workspace
     }
@@ -450,10 +475,17 @@ pub(super) mod tests {
     pub(in crate::self_update) struct Fixture {
         pub(in crate::self_update) path: PathBuf,
         config: PrivateDirectory,
+        config_path: PathBuf,
         pub(in crate::self_update) bin: PathBuf,
     }
     impl Fixture {
         pub(in crate::self_update) fn new() -> Self {
+            Self::with_config(&["config"])
+        }
+        pub(in crate::self_update) fn standard_config() -> Self {
+            Self::with_config(&["xdg", "treer", "agent-servers"])
+        }
+        fn with_config(components: &[&str]) -> Self {
             let path = std::env::temp_dir()
                 .canonicalize()
                 .unwrap()
@@ -463,7 +495,12 @@ pub(super) mod tests {
                 .create(&path)
                 .unwrap();
             let root = PrivateDirectory::open(&path).unwrap();
-            let config = root.create_child("config").unwrap();
+            let mut config = PrivateDirectory::open(&path).unwrap();
+            let mut config_path = path.clone();
+            for component in components {
+                config = config.create_child(component).unwrap();
+                config_path.push(component);
+            }
             root.create_child("bin").unwrap();
             let bin = path.join("bin");
             let files = InstallationDirectory::open(&bin).unwrap();
@@ -477,7 +514,12 @@ pub(super) mod tests {
                 .unwrap()
                 .write_all(b"cli")
                 .unwrap();
-            Self { path, config, bin }
+            Self {
+                path,
+                config,
+                config_path,
+                bin,
+            }
         }
         pub(in crate::self_update) fn enrollment(
             &self,
@@ -499,7 +541,7 @@ pub(super) mod tests {
                     format!("{server}-host.json"),
                     serde_json::json!({
                         "socket_path": self.path.join(format!("{server}.sock")), "controller_path": controller,
-                        "controller_config_path": self.path.join(format!("config/{server}-controller.json")),
+                        "controller_config_path": self.config_path.join(format!("{server}-controller.json")),
                         "root": self.path.join("workloads")
                     }),
                 ),
@@ -512,7 +554,7 @@ pub(super) mod tests {
             }
         }
         pub(in crate::self_update) fn inventory(&self) -> Inventory {
-            Inventory::load(&self.path.join("config"), "fixture-host").unwrap()
+            Inventory::load(&self.config_path, "fixture-host").unwrap()
         }
     }
     impl Drop for Fixture {
@@ -979,10 +1021,12 @@ pub(super) mod tests {
         ] {
             selected.enrollment.controller.listen = listen.into();
             assert_eq!(selected.health_address().unwrap().to_string(), expected);
+            assert_eq!(selected.launcher_url().unwrap(), format!("http://{listen}"));
         }
         for invalid in ["127.0.0.1:0", "localhost:1234", "http://127.0.0.1:1234/"] {
             selected.enrollment.controller.listen = invalid.into();
             assert!(selected.health_address().is_err());
+            assert!(selected.launcher_url().is_err());
         }
     }
 
