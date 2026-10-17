@@ -16,6 +16,8 @@ pub fn router(
     voice: VoiceServices,
 ) -> Router {
     let cors = browser.cors_layer();
+    let bootstrap_for_hosts = bootstrap.clone();
+    let ingress_for_hosts = ingress.clone();
     let workload_identity = WorkloadIdentityApi {
         auth: auth_store.clone(),
         policy: policy.clone(),
@@ -791,7 +793,7 @@ pub fn router(
     Router::new()
         .merge(control)
         .registered_route("/.treer/ingress/authorize", get(authorize_service_ingress))
-        .fallback(any(proxy_service_ingress))
+        .fallback(any(super::app_dist::app_or_ingress_fallback))
         .layer(Extension(bootstrap))
         .layer(Extension(policy))
         .layer(Extension(identity))
@@ -805,5 +807,10 @@ pub fn router(
         .layer(Extension(updater))
         .layer(Extension(voice.asr))
         .layer(Extension(voice.llm))
+        // Outermost: Host allowlist and route exclusivity in App-serving mode.
+        .layer(middleware::from_fn_with_state(
+            (bootstrap_for_hosts, ingress_for_hosts),
+            super::app_dist::host_routing,
+        ))
         .with_state(state)
 }

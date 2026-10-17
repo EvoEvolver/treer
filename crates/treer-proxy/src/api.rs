@@ -100,6 +100,7 @@ pub struct BootstrapConfig {
     public_url: Url,
     artifacts_dir: PathBuf,
     release_artifact_base_url: Url,
+    app_dist: AppDistConfig,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +216,7 @@ impl IngressConfig {
         })
     }
 
-    fn matches_hostname(&self, hostname: &str) -> bool {
+    pub(in crate::api) fn matches_hostname(&self, hostname: &str) -> bool {
         self.base_domain.as_deref().is_some_and(|base| {
             hostname
                 .strip_suffix(&format!(".{base}"))
@@ -270,7 +271,18 @@ impl BootstrapConfig {
             public_url,
             artifacts_dir,
             release_artifact_base_url,
+            app_dist: AppDistConfig::disabled(),
         }
+    }
+
+    /// Serve the browser App build from this Proxy (single-container mode).
+    pub fn with_app_dist(mut self, app_dist: AppDistConfig) -> Self {
+        self.app_dist = app_dist;
+        self
+    }
+
+    pub fn app_dist(&self) -> &AppDistConfig {
+        &self.app_dist
     }
 }
 
@@ -339,6 +351,8 @@ impl BrowserAccess {
 mod agents;
 mod email;
 use email::*;
+mod app_dist;
+pub use app_dist::AppDistConfig;
 mod app_identity;
 mod app_ui;
 mod apps;
@@ -436,6 +450,9 @@ async fn verify_workload_identity(
         .into_response()
 }
 
+#[cfg(test)]
+#[path = "api/app_dist_tests.rs"]
+mod app_dist_tests;
 #[cfg(test)]
 #[path = "api/provider_cli_tests.rs"]
 mod provider_cli_tests;

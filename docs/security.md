@@ -133,6 +133,12 @@ or configuration contents. Failed launch retains the newly saved specification.
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
   output, and file content.
+- When the Proxy serves the browser App itself (`TREER_APP_DIST_DIR`), it does
+  so only for the App public URL's host, only from files inside the canonical
+  build directory, never for reserved Core prefixes, with the nginx image's
+  header set; and if the App shares the Proxy origin, embedded App interfaces
+  and virtual-host tunnels are refused so App content never runs on the
+  Console origin.
 - Provider CLI installation runs only recipes embedded in the Core release,
   never browser argv, user-editable tables or remote recipe URLs; see
   [Provider CLI installation](#provider-cli-installation).

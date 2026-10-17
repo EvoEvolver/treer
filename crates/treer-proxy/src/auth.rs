@@ -668,6 +668,16 @@ impl AuthStore {
     }
 
     #[cfg(test)]
+    /// Test-only: the same store with different public URLs, so Origin/CSRF
+    /// behaviour can be exercised for a given Console/Proxy pair.
+    pub(crate) fn with_public_urls(mut self, app_public_url: Url, proxy_public_url: Url) -> Self {
+        self.app_public_url = app_public_url;
+        self.proxy_public_url = proxy_public_url;
+        self.secure_cookies = app_public_url_is_https(&self.app_public_url);
+        self
+    }
+
+    #[cfg(test)]
     pub(crate) async fn for_test(admin_password: &str) -> Self {
         let database_url = std::env::var("TREER_TEST_DATABASE_URL")
             .unwrap_or_else(|_| "postgres://treer:treer@127.0.0.1:55432/treer_test".to_string());
@@ -801,6 +811,12 @@ pub(crate) use provider_cli::*;
 mod workload_tree;
 
 pub(crate) use handlers::*;
+
+#[cfg(test)]
+fn app_public_url_is_https(url: &Url) -> bool {
+    url.scheme() == "https"
+}
+
 #[derive(Debug)]
 pub struct AuthFailure {
     status: StatusCode,
