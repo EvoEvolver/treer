@@ -555,10 +555,17 @@ State and job directories must reside on a local filesystem with native `flock`
 semantics. Network filesystems (including NFS flock emulation) are unsupported;
 their exclusion/inheritance behavior is not liveness evidence for this protocol.
 This is a documented deployment precondition, not an implemented filesystem-type
-probe. The current single-use adapter takes a standard `Command`; future Tokio
-integration must preserve the callback through `as_std_mut` and test both that
-path and the trusted supervisor restoring CLOEXEC before any installer child.
-Neither integration nor that installer-child test is complete.
+probe. The single-use adapters consume either a standard `Command` or Tokio's
+`Command`; the latter preserves the callback through `as_std_mut`. Isolated
+tests cover both paths through the same Rust test supervisor, which restores
+CLOEXEC before starting a Rust descendant probe. That probe checks the descriptor
+is absent or refers to a different device/inode after exec (allowing descriptor
+number reuse). A positive control first confirms the probe detects the same lock
+before CLOEXEC is restored. Parent readiness is withheld until both bounded
+probes succeed.
+This tests the adapter and substitute-supervisor mechanics, not the unfinished
+production supervisor or an actual installer. Production lifecycle integration
+must still enforce that ordering and preflight the local filesystem restriction.
 This descriptor-only primitive has no production caller and does not implement registration, permit arbitration,
 recovery or the required worker-crash fault matrix above.
 

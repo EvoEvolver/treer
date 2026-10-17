@@ -53,11 +53,25 @@ impl BirthLockInheritance {
     }
 
     pub fn spawn(self, mut command: Command) -> io::Result<Child> {
+        self.configure(&mut command);
+        command.spawn()
+    }
+
+    /// Preserve the same single-use configuration through Tokio's std adapter.
+    pub fn spawn_tokio(
+        self,
+        mut command: tokio::process::Command,
+    ) -> io::Result<tokio::process::Child> {
+        self.configure(command.as_std_mut());
+        command.spawn()
+    }
+
+    fn configure(self, command: &mut Command) {
         let inherited = self.inherited;
         // SAFETY: the post-fork callback only calls async-signal-safe fcntl on
         // an owned, already-duplicated descriptor, without allocation/locking.
-        // Command owns the captured fd and is dropped before returning, so no
-        // caller can reuse that command to inherit the lock a second time.
+        // Command owns the captured fd; both consuming spawn adapters drop the
+        // command before returning, preventing reuse of this configuration.
         unsafe {
             command.pre_exec(move || {
                 let mut flags = fcntl_getfd(&inherited)?;
@@ -66,7 +80,6 @@ impl BirthLockInheritance {
                 Ok(())
             });
         }
-        command.spawn()
     }
 }
 
@@ -77,7 +90,7 @@ mod tests {
     use std::{
         io::{BufRead, Write},
         os::fd::BorrowedFd,
-        os::unix::fs::DirBuilderExt,
+        os::unix::fs::{DirBuilderExt, MetadataExt},
         path::PathBuf,
         process::{Child, Stdio},
         sync::atomic::{AtomicU64, Ordering},
@@ -133,6 +146,38 @@ mod tests {
     }
 
     #[test]
+    fn descendant_birth_lock_probe() {
+        let Some(value) = std::env::var_os("TREER_TEST_CLOSED_BIRTH_FD") else {
+            return;
+        };
+        let raw: RawFd = value.to_str().unwrap().parse().unwrap();
+        let expected_device: u64 = std::env::var("TREER_TEST_BIRTH_DEV")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let expected_inode: u64 = std::env::var("TREER_TEST_BIRTH_INO")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let expected_present = std::env::var("TREER_TEST_BIRTH_EXPECT_PRESENT").unwrap() == "true";
+        match std::fs::metadata(format!("/dev/fd/{raw}")) {
+            Ok(metadata) => assert_eq!(
+                (metadata.dev(), metadata.ino()) == (expected_device, expected_inode),
+                expected_present,
+                "unexpected birth lock inheritance"
+            ),
+            Err(error) => {
+                assert!(!expected_present, "expected inherited lock is missing");
+                assert!(
+                    error.kind() == io::ErrorKind::NotFound
+                        || error.raw_os_error() == Some(rustix::io::Errno::BADF.raw_os_error()),
+                    "unexpected descriptor metadata error: {error}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn inherited_holder() {
         let Some(value) = std::env::var_os("TREER_TEST_INHERITED_BIRTH_FD") else {
             return;
@@ -143,8 +188,44 @@ mod tests {
         // its BirthLockInheritance passed across exec; borrow never closes it.
         let inherited = unsafe { BorrowedFd::borrow_raw(raw) };
         assert!(!fcntl_getfd(inherited).unwrap().contains(FdFlags::CLOEXEC));
-        // A real supervisor must do this before creating installer children.
-        fcntl_setfd(inherited, FdFlags::CLOEXEC).unwrap();
+        // First establish the probe detects inheritance, then restore CLOEXEC
+        // before the second substitute child, as the real supervisor must.
+        for expected_present in [true, false] {
+            if !expected_present {
+                fcntl_setfd(inherited, FdFlags::CLOEXEC).unwrap();
+            }
+            let metadata = std::fs::metadata(format!("/dev/fd/{raw}")).unwrap();
+            let mut probe = OwnedChild(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "birth_lock::tests::descendant_birth_lock_probe",
+                        "--nocapture",
+                    ])
+                    .env_clear()
+                    .env("TREER_TEST_CLOSED_BIRTH_FD", raw.to_string())
+                    .env("TREER_TEST_BIRTH_DEV", metadata.dev().to_string())
+                    .env("TREER_TEST_BIRTH_INO", metadata.ino().to_string())
+                    .env(
+                        "TREER_TEST_BIRTH_EXPECT_PRESENT",
+                        expected_present.to_string(),
+                    )
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::inherit())
+                    .spawn()
+                    .unwrap(),
+            );
+            let deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(status) = probe.0.try_wait().unwrap() {
+                    assert!(status.success(), "descendant descriptor probe failed");
+                    break;
+                }
+                assert!(Instant::now() < deadline, "descendant probe timed out");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
         std::io::stdout().write_all(b"inherited-ready\n").unwrap();
         std::io::stdout().flush().unwrap();
         let mut byte = [0];
@@ -168,7 +249,7 @@ mod tests {
                 .env_clear()
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
-                .stderr(Stdio::null());
+                .stderr(Stdio::inherit());
             let inheritance = BirthLockInheritance::new(&held).unwrap();
             let descriptor = inheritance.descriptor();
             command.env("TREER_TEST_INHERITED_BIRTH_FD", descriptor.to_string());
@@ -232,6 +313,56 @@ mod tests {
         assert!(inheritance
             .spawn(Command::new(fixture.0.join("missing-supervisor")))
             .is_err());
+        assert_lock_eventually_available(&directory);
+    }
+
+    #[tokio::test]
+    async fn tokio_adapter_preserves_inheritance_and_descendant_cloexec() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let fixture = Fixture::new();
+        let directory = PrivateDirectory::open(&fixture.0).unwrap();
+        let held = directory.lock("birth.lock").unwrap();
+        let inheritance = BirthLockInheritance::new(&held).unwrap();
+        let mut command = tokio::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "birth_lock::tests::inherited_holder",
+                "--nocapture",
+            ])
+            .env_clear()
+            .env(
+                "TREER_TEST_INHERITED_BIRTH_FD",
+                inheritance.descriptor().to_string(),
+            )
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit());
+        let mut child = inheritance.spawn_tokio(command).unwrap();
+        drop(held);
+        let mut lines = tokio::io::BufReader::new(child.stdout.take().unwrap()).lines();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let line = lines
+                    .next_line()
+                    .await
+                    .unwrap()
+                    .expect("supervisor exited early");
+                if line == "inherited-ready" {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(directory.lock("birth.lock").is_err());
+        child.stdin.take().unwrap().write_all(b"x").await.unwrap();
+        let status = tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(status.success());
         assert_lock_eventually_available(&directory);
     }
 }
