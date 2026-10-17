@@ -155,7 +155,9 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
     finally { pending.current = false; if (live.current) setBusy(false) }
   }
 
-  const canProbe = !operation?.prefix_modified && operation?.error_code !== "provider_cli_binary_mismatch" &&
+  const prefixMayBeModified = operation?.prefix_modified || !!tracked?.recipe.native_binary &&
+    (unconfirmed || !!operation && ["unknown", "timed_out"].includes(operation.status) && (operation.step == null || operation.step >= 6))
+  const canProbe = !prefixMayBeModified && operation?.error_code !== "provider_cli_binary_mismatch" &&
     (!tracked?.recipe.native_binary || !!operation?.verified_file && !operation.verified_file.failure &&
       operation.verified_file.sha256 === tracked.recipe.native_binary.sha256 && operation.verified_file.size === tracked.recipe.native_binary.size)
   async function check() {
@@ -233,7 +235,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
               <div><h4 className="font-medium">{t("cli.observed_now")}</h4>{operation.observed_before ? <ObservationView observation={operation.observed_before} /> : <p>{t("cli.observation_unavailable")}</p>}</div>
               <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void prepare(tracked!.recipe, true)}>{t("cli.prepare_again")}</Button>
             </div>}
-            {operation?.prefix_modified && <p role="alert" className="rounded-md border border-destructive/50 p-3">{t("cli.prefix_modified")}</p>}
+            {prefixMayBeModified && <p role="alert" className="rounded-md border border-destructive/50 p-3">{t("cli.prefix_modified")}</p>}
             {operation?.error_code && nativeFailureKey(operation.error_code) && <p role="alert">{t(nativeFailureKey(operation.error_code)!)}</p>}
             {operation?.verified_file?.sha256 && !operation.verified_file.failure && <p className="break-all">{t("cli.file_verified", { size: operation.verified_file.size ?? 0, hash: operation.verified_file.sha256 })}</p>}
             {probe && <code className="block break-all">{probe.executable}</code>}

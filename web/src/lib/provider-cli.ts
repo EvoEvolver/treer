@@ -73,6 +73,7 @@ export function providerCliOperation(v: unknown, expected: ProviderCliRecipeIden
     if (!record(f) || f.size !== undefined && (!nonnegative(f.size) || f.size > 1073741824) || f.sha256 !== undefined && !hash(f.sha256) ||
       f.failure !== undefined && !["native_content", "entry_link", "not_regular", "path_refused"].includes(f.failure as string) ||
       f.failure === undefined && (f.size === undefined || f.sha256 === undefined) || v.status === "succeeded" && f.failure !== undefined || !providerCliTerminal(v.status as ProviderCliStatus)) return null
+    if (f.failure !== undefined && (v.status !== "failed" || v.error_code !== "provider_cli_binary_mismatch")) return null
     verified = { ...(f.size === undefined ? {} : { size: f.size as number }), ...(f.sha256 === undefined ? {} : { sha256: f.sha256 as string }), ...(f.failure === undefined ? {} : { failure: f.failure as string }) }
   }
   if (expected.verified_pin && verified && !verified.failure && (verified.size !== expected.verified_pin.size || verified.sha256 !== expected.verified_pin.sha256)) return null

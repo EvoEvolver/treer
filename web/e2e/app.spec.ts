@@ -3079,3 +3079,19 @@ for (const status of ['unknown', 'succeeded']) test(`native provider ${status} w
   await expect(page.getByText(/Installed file matched the release pin/)).toHaveCount(0)
   expect(backend.requests.filter(r => r.path.endsWith('/check'))).toHaveLength(0)
 })
+
+for (const [status, step, warning] of [['unknown', 9, true], ['timed_out', 6, true], ['timed_out', 5, false]] as const) test(`native provider ${status} step ${step} explains uncertain prefix without a server flag`, async ({ page }) => {
+  const backend = await mockNativeProviderApi(page)
+  const { nativeRecipe } = await import('./fixtures/provider-native')
+  await page.route('**/provider-clis/operations/*', route => ok(route, { operation_id: 'op-fixture', machine_id: 'srv-a', recipe_id: nativeRecipe.recipe_id, recipe_version: 2, recipe_hash: nativeRecipe.recipe_hash,
+    status, step, elapsed_ms: 100, exit_code: null, timed_out: status === 'timed_out', stdout: '', stderr: '', truncated: false }))
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install claude', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(page.getByRole('status')).toContainText(status === 'unknown' ? 'unknown' : 'time limit')
+  await expect(page.getByRole('alert').filter({ hasText: 'global npm prefix may have been modified' })).toHaveCount(warning ? 1 : 0)
+  await expect(page.getByRole('button', { name: 'Check installed version', exact: true })).toHaveCount(0)
+  expect(backend.requests.filter(r => r.path.endsWith('/install'))).toHaveLength(1)
+  expect(backend.requests.filter(r => r.path.endsWith('/check'))).toHaveLength(0)
+})

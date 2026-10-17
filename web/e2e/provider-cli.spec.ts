@@ -99,6 +99,7 @@ test('native provider wire validates both schemas, every verification field and 
       receipt: p.providerCliOperation(receipt, expected), badReceipts: [
         { verified_file: { failure: 'unknown' } }, { verified_file: { size: -1, sha256: 'f'.repeat(64) } },
         { prefix_modified: 'yes' }, { step: 10 }, { status: 'succeeded', exit_code: 0 },
+        { status: 'unknown' }, { status: 'timed_out' }, { error_code: 'provider_cli_version_mismatch' }, { error_code: undefined },
         { verified_file: { size: 1024, sha256: '0'.repeat(64) } },
         { status: 'succeeded', exit_code: 0, prefix_modified: false, verified_file: undefined },
       ].map(patch => p.providerCliOperation({ ...receipt, ...patch }, expected)) }
@@ -110,5 +111,5 @@ test('native provider wire validates both schemas, every verification field and 
   expect(result.receipt?.prefix_modified).toBe(true)
   expect(result.receipt?.verified_file).toEqual({ failure: 'entry_link' })
   expect(result.receipt).not.toHaveProperty('max_steps')
-  expect(result.badReceipts).toEqual(Array(7).fill(null))
+  expect(result.badReceipts).toEqual(Array(11).fill(null))
 })

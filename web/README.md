@@ -631,6 +631,9 @@ running its version probe. The review and hashes prove neither safe behavior nor
 a vendor signature. Noop still means self-reported version, not file integrity.
 A failed operation with `prefix_modified` warns to uninstall before retrying;
 Web offers neither automatic retry nor a version-probe button for that state.
+Native unknown outcomes and timeouts at/after the installation step
+show the same warning even if the server omitted the flag. A file-failure receipt
+must have failed status and the binary-mismatch code; inconsistent reports fail closed.
 Version mismatches can include incompatible runtimes such as musl and are not
 labelled corrupt downloads. Real sealed installation acceptance belongs to
 release/security; Web tests use synthetic responses and never run npm installs.
