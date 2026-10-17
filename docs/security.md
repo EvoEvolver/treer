@@ -1054,6 +1054,16 @@ limits same-site sibling origins from framing the authenticated Agent UI, but
 does not isolate Agent JavaScript from the Proxy authority described above.
 Embedded content remains trusted workspace code, not an isolation boundary.
 
+When the Console and Proxy are configured on one origin, Core refuses embedded
+UI tunnels with `503 embedded_ui_requires_separate_app_origin`. The Console's
+Agent-link fallback supports this same-origin topology: after the user opens an
+online Agent, an explicit refusal changes only that Agent's standalone links to
+Console navigation. It does not restore embedding or bypass Core's refusal.
+A split-origin deployment whose refusal response is unreadable through CORS
+keeps the existing standalone link; cross-origin refusal fallback is not a
+supported guarantee. Other errors also leave links unchanged. The bounded probe
+and cache behavior are documented in [the Web guide](../web/README.md).
+
 For Workspace ingress authenticated with an ingress session, and for the
 workspace-authenticated Managed App UI tunnel, the Proxy issues a fresh
 60-second human App token on each request. It uses the App's registered
