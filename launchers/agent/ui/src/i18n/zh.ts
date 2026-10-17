@@ -3,7 +3,8 @@ import type { MessageKey } from "./en";
 export const zh: Partial<Record<MessageKey, string>> = {
   "images.add": "添加图片",
   "images.attached": "已添加的图片",
-  "images.storageInside": "图片上传已禁用：私有存储位于工作目录内。",
+  "images.storageInside": "图片上传已禁用：私有存储位于工作目录内的非隐藏路径。请将 Agent 的工作目录设为 Treer 私有存储之外的项目目录。",
+  "images.storageVcs": "图片上传已禁用：私有存储位于版本控制目录内。请将 Treer 私有存储移出该仓库。",
   "images.storageUnsafe": "图片上传已禁用：需要修复私有存储权限。",
   "images.storageAdministrator": "图片上传已禁用：Windows 上的 Treer 需要管理员账户。",
   "images.storageUnavailable": "图片上传不可用：此 Controller 没有可用的私有附件存储。",

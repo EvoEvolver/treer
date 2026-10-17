@@ -26,6 +26,7 @@ import { GoalEdits } from "./goal-edits.js";
 import { AttachmentStore } from "./attachments.js";
 import { AttachmentError } from "./image-format.js";
 import { PrivateStateClient, type PrivateStateStatus } from "./private-state.js";
+import { privateStatePlacement } from "./private-state-placement.js";
 
 /** Reads AGENT_UI_<name>, falling back to the CODEX_UI_<name> spelling of older launches. */
 function setting(name: string) {
@@ -74,15 +75,25 @@ try {
   const quota = new PrivateStateClient(process.env.TREER_AGENT_SERVER_URL || "", agentId, process.env.TREER_WORKLOAD_CREDENTIAL || "");
   attachmentStorageStatus = await quota.status();
   if (privateStateRoot && attachmentStorageStatus === "available") {
-    const inside = relative(realpathSync.native(cwd), realpathSync.native(privateStateRoot));
-    if (!isAbsolute(privateStateRoot) || !inside || !isAbsolute(inside) && inside !== ".." && !inside.startsWith(`..${sep}`)) throw new AttachmentError("agent_private_state_inside_cwd", 503);
+    attachmentStorageStatus = privateStatePlacement(cwd, privateStateRoot);
+    if (attachmentStorageStatus !== "available") throw new AttachmentError(attachmentStorageStatus, 503);
     attachments = new AttachmentStore(join(privateStateRoot, "images"), undefined, undefined, quota);
   } else if (!privateStateRoot && attachmentStorageStatus === "available") attachmentStorageStatus = "agent_private_state_unavailable";
 } catch (error) {
   // Image storage failures must never prevent text-only Agent recovery.
-  attachmentStorageStatus = error instanceof AttachmentError && error.code === "windows_requires_administrator" ? "windows_requires_administrator" : error instanceof AttachmentError && error.code === "agent_private_state_inside_cwd" ? "agent_private_state_inside_cwd" : "agent_private_state_unavailable";
+  attachmentStorageStatus = error instanceof AttachmentError && ["windows_requires_administrator", "agent_private_state_inside_cwd", "agent_private_state_inside_vcs_worktree"].includes(error.code) ? error.code as PrivateStateStatus : "agent_private_state_unavailable";
+}
+function currentAttachmentStorageStatus(): PrivateStateStatus {
+  // Core still owns admission/quotas. Re-check the mirror even when Core has
+  // not restarted: git init must disable an already-running launcher's uploads.
+  if (privateStateRoot) {
+    const placement = privateStatePlacement(cwd, privateStateRoot);
+    if (placement !== "available") return placement;
+  }
+  return attachmentStorageStatus;
 }
 if (attachments) setInterval(() => {
+  if (currentAttachmentStorageStatus() !== "available") return;
   try { attachments!.sweep(); }
   catch { runtime.emit("log", "Attachment draft cleanup failed; private storage requires inspection"); }
 }, 60_000).unref();
@@ -146,10 +157,11 @@ function historyLimitFrom(body: Record<string, unknown>) {
 }
 
 function statePayload(historyLimit = initialHistoryLimit) {
+  const storageStatus = currentAttachmentStorageStatus();
   const snapshot = runtime.snapshot(historyLimit);
   if (snapshot.thread) snapshot.thread = { ...snapshot.thread, turns: snapshot.thread.turns.map(turn => ({ ...turn, items: turn.items.map(item => {
     const { attachmentDigests, ...visible } = item;
-    if (!attachments) return { ...visible, attachments: [] };
+    if (!attachments || storageStatus !== "available") return { ...visible, attachments: [] };
     const candidates = [...attachments.metadataFor(item.attachments?.map(image => image.id) ?? [], snapshot.thread!.id), ...attachments.metadataForDigests(attachmentDigests ?? [], snapshot.thread!.id)];
     const images = [...new Map(candidates.map(image => [image.id, image])).values()];
     if (images.length && JSON.stringify(attachments.history(snapshot.thread!.id, item.id)) !== JSON.stringify(images)) attachments.bind(snapshot.thread!.id, item.id, images.map(image => image.id));
@@ -175,8 +187,8 @@ function statePayload(historyLimit = initialHistoryLimit) {
     goal: snapshot.goal,
     goalDelivery: goalEdits.state,
     history: { limit: historyLimit },
-    attachmentsAvailable: Boolean(attachments),
-    attachmentStorageStatus,
+    attachmentsAvailable: Boolean(attachments) && storageStatus === "available",
+    attachmentStorageStatus: storageStatus,
   };
 }
 
@@ -238,6 +250,8 @@ const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 },
     const queueRoute = path === "/v1/prompts" || path === "/v1/queue" || path.startsWith("/v1/queue/") || path.startsWith("/v1/submissions/");
     const attested = queueRoute ? verifyInterfaceCaller(request.headers, agentId, interfaceInstanceId) : false;
     if (path === "/api/attachments" || path.startsWith("/api/attachments/")) {
+      const storageStatus = currentAttachmentStorageStatus();
+      if (storageStatus !== "available") throw new AttachmentError(storageStatus, 503);
       if (!attachments) throw new AttachmentError("attachment_private_root_required", 503);
       const session = runtime.snapshot().thread?.id;
       if (!session) throw new AttachmentError("attachment_session_required", 409);

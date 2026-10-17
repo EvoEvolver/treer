@@ -105,7 +105,7 @@ export type RuntimeState = "starting" | "working" | "blocked" | "idle";
 /** The body of GET api/state and of every WebSocket `state` frame (the frame adds `type`). */
 export interface Snapshot {
   attachmentsAvailable?: boolean;
-  attachmentStorageStatus?: "available" | "agent_private_state_unsafe" | "agent_private_state_inside_cwd" | "agent_private_state_unavailable" | "windows_requires_administrator";
+  attachmentStorageStatus?: "available" | "agent_private_state_unsafe" | "agent_private_state_inside_cwd" | "agent_private_state_inside_vcs_worktree" | "agent_private_state_unavailable" | "windows_requires_administrator";
   type?: "state";
   ready: boolean;
   runtime: { state: RuntimeState; error: string | null };

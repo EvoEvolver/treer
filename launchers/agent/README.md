@@ -569,7 +569,7 @@ ACP receives image blocks only when its initialize response advertises
 warns that private local paths are sent as text and the model may not see images.
 
 The guarded `POST api/attachments` streams binary bytes into the Controller's
-trusted per-Agent private directory outside the working directory; it ignores
+trusted per-Agent private directory; it ignores
 client filenames/MIME and validates raster containers. It returns public metadata
 `{attachment:{id,mime,size}}`. `POST api/prompt` and `POST v1/prompts` accept
 optional `attachment_ids`; clients cannot supply paths or URLs. Same-origin
@@ -584,6 +584,18 @@ unsafe or inside-working-directory state without exposing a filesystem path.
 On Windows, a Controller status of `windows_requires_administrator` disables
 image uploads and displays “Treer on Windows requires an administrator account”.
 It does not redirect storage to the checkout or block text-only Agent recovery.
+Placement is checked on every upload and browser state read, using physical
+paths. A private directory in any version-controlled tree is refused (markers
+`.git`, `.hg`, `.jj`, `.svn`, `.bzr`, `.sl`, including files and symlinks;
+inspection errors fail closed). Inside the working directory, only a path whose
+first relative component is a dot-directory is allowed; equality is refused.
+Thus a non-repository HOME with `.local/state/treer` works, while a dotfiles
+repository containing that state does not, even for an Agent working elsewhere.
+The UI gives path-free guidance. Existing no-follow, ownership and Windows ACL
+checks remain independent. Core alone maintains private-root ignore files;
+the launcher never creates or overwrites them. This is protection against
+accidental repository inclusion, not isolation from tools running as the user.
+
 The Controller advertises `agent.private-state.v1` as an interface-contract
 feature, separately from AIS registration capabilities. The launcher authenticates
 to its bound loopback Controller using its workload identity, checks

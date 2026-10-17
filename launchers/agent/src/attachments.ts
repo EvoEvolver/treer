@@ -14,7 +14,7 @@ interface Journal { version: 1; entries: Entry[]; bindings: Record<string, strin
 const DRAFT_TTL = 60 * 60 * 1000;
 const AGENT_QUOTA = 256 * 1024 * 1024;
 
-/** Root is supplied by the Controller, outside cwd. Never derive it from a request.
+/** Root is supplied by the Controller, subject to the placement predicate. Never derive it from a request.
  * The Controller owns deletion and global quota; this store only owns exact files
  * registered in this Agent's journal. Restart preserves sent attachments.
  */
