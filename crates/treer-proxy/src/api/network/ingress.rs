@@ -1,4 +1,7 @@
+use super::ingress_body::{GuardedResponseBody, LimitedBody, STOP_TIMEOUT, STOP_TOO_LARGE};
 use super::*;
+use crate::ingress_guard::{Refusal, Rejection};
+use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 pub(in crate::api) struct IngressAuthorizeQuery {
@@ -92,6 +95,10 @@ pub(in crate::api) async fn authorize_service_ingress(
     Ok(response)
 }
 
+/// Serves one request for a service ingress hostname. Public ingress (#146)
+/// is admitted per client and per service before anything is forwarded,
+/// capped in body size, bounded in time, and tagged with the verified client
+/// address; workspace ingress only gets the time bounds.
 pub(in crate::api) async fn proxy_service_ingress(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
@@ -103,11 +110,28 @@ pub(in crate::api) async fn proxy_service_ingress(
     if !config.matches_hostname(&hostname) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
+    let guard = config.guard();
+    let peer = request
+        .extensions()
+        .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
+        .map(|info| info.0.ip());
     let resolved = auth
         .resolve_service_ingress_hostname(&hostname)
         .await?
-        .filter(|resolved| resolved.ingress.enabled)
-        .ok_or_else(|| ApiFailure::not_found("ingress_not_found", "service ingress not found"))?;
+        .filter(|resolved| resolved.ingress.enabled);
+    let Some(resolved) = resolved else {
+        // Unknown hostnames are answered from the snapshot, so the only cost
+        // left is this response; one client cannot have unbounded many.
+        if let Some(peer) = peer {
+            if let Err(refusal) = guard.admit_unknown_host(peer, request.headers()) {
+                return Ok(refusal_response(refusal));
+            }
+        }
+        return Err(ApiFailure::not_found(
+            "ingress_not_found",
+            "service ingress not found",
+        ));
+    };
     if request.uri().path() == "/.treer/callback" {
         require_ingress_navigation(request.headers())?;
         return complete_ingress_authorization(
@@ -121,6 +145,43 @@ pub(in crate::api) async fn proxy_service_ingress(
     }
     if request.uri().path().starts_with("/.treer/") {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
+    }
+    let public = resolved.ingress.access == ServiceIngressAccess::Public;
+    let limits = resolved.ingress.limits.effective();
+    let ingress_id = resolved.ingress.ingress_id.clone();
+    // Ambiguous framing is refused for every ingress: it is how request
+    // smuggling starts.
+    if request.headers().contains_key(header::CONTENT_LENGTH)
+        && request.headers().contains_key(header::TRANSFER_ENCODING)
+    {
+        guard.record(&ingress_id, Rejection::RequestRejected);
+        return Err(ApiFailure::bad_request(
+            "ingress_request_rejected",
+            "request carries both Content-Length and Transfer-Encoding",
+        ));
+    }
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    let mut admission = None;
+    if public {
+        // No peer address means no socket (tests): treat it as a local peer.
+        let peer = peer.unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST));
+        match guard.admit(&ingress_id, &limits, peer, request.headers()) {
+            Ok(admitted) => {
+                tracing::trace!(
+                    ingress_id,
+                    per_ip_enforced = admitted.per_ip_enforced,
+                    "public ingress request admitted"
+                );
+                admission = Some(admitted);
+            }
+            Err(refusal) => return Ok(refusal_response(refusal)),
+        }
+        if let Some(length) = declared_content_length(request.headers()) {
+            if length > limits.max_body_bytes {
+                guard.record(&ingress_id, Rejection::BodyTooLarge);
+                return Err(body_too_large());
+            }
+        }
     }
 
     let mut identity_token = None;
@@ -167,7 +228,6 @@ pub(in crate::api) async fn proxy_service_ingress(
         }
     }
 
-    let upgraded = request.headers().contains_key(header::UPGRADE);
     sanitize_ingress_request_headers(
         request.headers_mut(),
         upgraded,
@@ -176,7 +236,41 @@ pub(in crate::api) async fn proxy_service_ingress(
         config.ingress_cookie_name(),
         identity_token.as_deref(),
     )?;
-    tunnel_http_request(
+    // The front's own header never reaches the App: only the verified header
+    // below is meaningful there.
+    if let Some(name) = guard.client_ip_header() {
+        request.headers_mut().remove(name);
+    }
+    // After the strip of every client x-treer-* header: the verified address.
+    if let Some(admitted) = &admission {
+        request.headers_mut().insert(
+            treer_protocol::TREER_CLIENT_IP_HEADER,
+            HeaderValue::from_str(&admitted.client.address.to_string())
+                .map_err(|error| ApiFailure::internal("invalid_client_ip", &error.to_string()))?,
+        );
+    }
+    // Request body: capped for public ingress, idle-bounded for every ingress
+    // (upgraded connections are governed by their permit instead).
+    let body_outcome = if upgraded {
+        None
+    } else {
+        let cap = if public {
+            limits.max_body_bytes
+        } else {
+            u64::MAX
+        };
+        let body = std::mem::replace(request.body_mut(), Body::empty());
+        let (limited, outcome) = LimitedBody::new(
+            body,
+            cap,
+            BODY_IDLE_TIMEOUT,
+            Duration::from_secs(u64::from(limits.body_timeout_secs)),
+        );
+        *request.body_mut() = Body::new(limited);
+        Some(outcome)
+    };
+    let permit = admission.map(|admitted| std::sync::Arc::new(admitted.permit));
+    let tunnel = tunnel_http_request(
         state,
         &resolved.ingress.workspace_id,
         &resolved.service.server_id,
@@ -187,8 +281,114 @@ pub(in crate::api) async fn proxy_service_ingress(
         false,
         "service ingress",
         TrafficClass::ServiceIngress,
+        permit.clone(),
+    );
+    let response = match tokio::time::timeout(
+        Duration::from_secs(u64::from(limits.response_timeout_secs)),
+        tunnel,
     )
     .await
+    {
+        Err(_) => {
+            guard.record(&ingress_id, Rejection::UpstreamTimeout);
+            return Err(ApiFailure {
+                status: StatusCode::GATEWAY_TIMEOUT,
+                error: ProtocolError::new(
+                    "ingress_upstream_timeout",
+                    "the service did not answer in time",
+                ),
+            });
+        }
+        Ok(Err(error)) => {
+            if let Some(outcome) = &body_outcome {
+                match outcome.stopped_by() {
+                    STOP_TOO_LARGE => {
+                        guard.record(&ingress_id, Rejection::BodyTooLarge);
+                        return Err(body_too_large());
+                    }
+                    STOP_TIMEOUT => {
+                        guard.record(&ingress_id, Rejection::BodyTimeout);
+                        return Err(ApiFailure {
+                            status: StatusCode::REQUEST_TIMEOUT,
+                            error: ProtocolError::new(
+                                "ingress_body_timeout",
+                                "the request body stopped arriving",
+                            ),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            return Err(error);
+        }
+        Ok(Ok(response)) => response,
+    };
+    if response.status() == StatusCode::SWITCHING_PROTOCOLS {
+        // The upgrade task owns the permit for the connection's lifetime.
+        return Ok(response);
+    }
+    let (parts, body) = response.into_parts();
+    let guarded = GuardedResponseBody::new(body, RESPONSE_IDLE_TIMEOUT, PERMIT_LEASE, permit);
+    Ok(Response::from_parts(parts, Body::new(guarded)))
+}
+
+/// Limits that are not per-App configurable.
+const BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
+/// A non-upgraded response holds its in-flight permit at most this long,
+/// even when the client never reads it; the stream itself may continue.
+const PERMIT_LEASE: Duration = Duration::from_secs(300);
+
+fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(header::CONTENT_LENGTH)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
+}
+
+fn body_too_large() -> ApiFailure {
+    ApiFailure {
+        status: StatusCode::PAYLOAD_TOO_LARGE,
+        error: ProtocolError::new(
+            "ingress_body_too_large",
+            "request body exceeds this service's limit",
+        ),
+    }
+}
+
+/// 429 with Retry-After and a fixed JSON body; nothing about the client.
+fn refusal_response(refusal: Refusal) -> Response {
+    let (code, message) = match refusal.rejection {
+        Rejection::IpRateLimited => (
+            "ingress_rate_limited",
+            "too many requests from this client; retry later",
+        ),
+        Rejection::ConcurrencyLimited => (
+            "ingress_concurrency_limited",
+            "the service is handling its maximum number of requests; retry later",
+        ),
+        _ => (
+            "ingress_rate_limited",
+            "too many requests for this service; retry later",
+        ),
+    };
+    let mut response = ApiFailure {
+        status: StatusCode::TOO_MANY_REQUESTS,
+        error: ProtocolError::new(code, message),
+    }
+    .into_response();
+    if let Some(seconds) = refusal.retry_after {
+        if let Ok(value) = HeaderValue::from_str(&seconds.max(1).to_string()) {
+            response.headers_mut().insert(header::RETRY_AFTER, value);
+        }
+    }
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
 }
 
 pub(in crate::api) async fn complete_ingress_authorization(

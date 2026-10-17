@@ -315,6 +315,267 @@ pub struct ServiceIngress {
     pub created_by: String,
     pub updated_at: DateTime<Utc>,
     pub updated_by: String,
+    /// Owner overrides for the public ingress protection (#146); unset
+    /// fields use the Proxy defaults.
+    #[serde(default)]
+    pub limits: ServiceIngressLimits,
+}
+
+/// Advertised by the Proxy health document and `/api/auth/config` once public
+/// ingress is rate-limited, body-capped, time-limited and forwards the
+/// verified client IP.
+pub const CAPABILITY_INGRESS_PROTECTION: &str = "ingress.protection.v1";
+/// Set by the Proxy on every forwarded public-ingress request after client
+/// `x-treer-*` headers are stripped; Apps trust only this header for the
+/// client address.
+pub const TREER_CLIENT_IP_HEADER: &str = "x-treer-client-ip";
+
+pub const INGRESS_DEFAULT_RATE_PER_MINUTE: u32 = 600;
+pub const INGRESS_DEFAULT_RATE_BURST: u32 = 120;
+pub const INGRESS_DEFAULT_CONCURRENCY: u32 = 64;
+pub const INGRESS_DEFAULT_IP_RATE_PER_MINUTE: u32 = 120;
+pub const INGRESS_DEFAULT_IP_RATE_BURST: u32 = 30;
+pub const INGRESS_DEFAULT_MAX_BODY_BYTES: u64 = 1024 * 1024;
+pub const INGRESS_DEFAULT_RESPONSE_TIMEOUT_SECS: u32 = 35;
+/// Total time a request body may take to arrive (idle rule aside), so a
+/// trickled body cannot hold an in-flight permit indefinitely.
+pub const INGRESS_DEFAULT_BODY_TIMEOUT_SECS: u32 = 60;
+/// Hard ceilings an owner override cannot exceed: protection can be loosened,
+/// never switched off.
+pub const INGRESS_MAX_RATE_PER_MINUTE: u32 = 60_000;
+pub const INGRESS_MAX_CONCURRENCY: u32 = 4096;
+pub const INGRESS_MAX_BODY_BYTES: u64 = 64 * 1024 * 1024;
+pub const INGRESS_MIN_RESPONSE_TIMEOUT_SECS: u32 = 5;
+pub const INGRESS_MAX_RESPONSE_TIMEOUT_SECS: u32 = 600;
+
+/// Stored overrides; `None` means "Proxy default".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceIngressLimits {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_limit_per_minute: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rate_burst: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub concurrency_limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_rate_limit_per_minute: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ip_rate_burst: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_body_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_timeout_secs: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_timeout_secs: Option<u32>,
+}
+
+/// The limits actually enforced for one ingress.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EffectiveIngressLimits {
+    pub rate_limit_per_minute: u32,
+    pub rate_burst: u32,
+    pub concurrency_limit: u32,
+    pub ip_rate_limit_per_minute: u32,
+    pub ip_rate_burst: u32,
+    pub max_body_bytes: u64,
+    pub response_timeout_secs: u32,
+    pub body_timeout_secs: u32,
+}
+
+impl Default for EffectiveIngressLimits {
+    fn default() -> Self {
+        Self {
+            rate_limit_per_minute: INGRESS_DEFAULT_RATE_PER_MINUTE,
+            rate_burst: INGRESS_DEFAULT_RATE_BURST,
+            concurrency_limit: INGRESS_DEFAULT_CONCURRENCY,
+            ip_rate_limit_per_minute: INGRESS_DEFAULT_IP_RATE_PER_MINUTE,
+            ip_rate_burst: INGRESS_DEFAULT_IP_RATE_BURST,
+            max_body_bytes: INGRESS_DEFAULT_MAX_BODY_BYTES,
+            response_timeout_secs: INGRESS_DEFAULT_RESPONSE_TIMEOUT_SECS,
+            body_timeout_secs: INGRESS_DEFAULT_BODY_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl ServiceIngressLimits {
+    pub fn effective(&self) -> EffectiveIngressLimits {
+        let defaults = EffectiveIngressLimits::default();
+        EffectiveIngressLimits {
+            rate_limit_per_minute: self
+                .rate_limit_per_minute
+                .unwrap_or(defaults.rate_limit_per_minute),
+            rate_burst: self.rate_burst.unwrap_or(defaults.rate_burst),
+            concurrency_limit: self.concurrency_limit.unwrap_or(defaults.concurrency_limit),
+            ip_rate_limit_per_minute: self
+                .ip_rate_limit_per_minute
+                .unwrap_or(defaults.ip_rate_limit_per_minute),
+            ip_rate_burst: self.ip_rate_burst.unwrap_or(defaults.ip_rate_burst),
+            max_body_bytes: self.max_body_bytes.unwrap_or(defaults.max_body_bytes),
+            response_timeout_secs: self
+                .response_timeout_secs
+                .unwrap_or(defaults.response_timeout_secs),
+            body_timeout_secs: self.body_timeout_secs.unwrap_or(defaults.body_timeout_secs),
+        }
+    }
+
+    /// Every set value must be positive and within the hard ceilings.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        for (value, max, name) in [
+            (
+                self.rate_limit_per_minute,
+                INGRESS_MAX_RATE_PER_MINUTE,
+                "rate_limit_per_minute",
+            ),
+            (self.rate_burst, INGRESS_MAX_RATE_PER_MINUTE, "rate_burst"),
+            (
+                self.concurrency_limit,
+                INGRESS_MAX_CONCURRENCY,
+                "concurrency_limit",
+            ),
+            (
+                self.ip_rate_limit_per_minute,
+                INGRESS_MAX_RATE_PER_MINUTE,
+                "ip_rate_limit_per_minute",
+            ),
+            (
+                self.ip_rate_burst,
+                INGRESS_MAX_RATE_PER_MINUTE,
+                "ip_rate_burst",
+            ),
+        ] {
+            if let Some(value) = value {
+                if value == 0 || value > max {
+                    return Err(name);
+                }
+            }
+        }
+        if let Some(bytes) = self.max_body_bytes {
+            if bytes == 0 || bytes > INGRESS_MAX_BODY_BYTES {
+                return Err("max_body_bytes");
+            }
+        }
+        if let Some(secs) = self.response_timeout_secs {
+            if !(INGRESS_MIN_RESPONSE_TIMEOUT_SECS..=INGRESS_MAX_RESPONSE_TIMEOUT_SECS)
+                .contains(&secs)
+            {
+                return Err("response_timeout_secs");
+            }
+        }
+        if let Some(secs) = self.body_timeout_secs {
+            if !(INGRESS_MIN_RESPONSE_TIMEOUT_SECS..=INGRESS_MAX_RESPONSE_TIMEOUT_SECS)
+                .contains(&secs)
+            {
+                return Err("body_timeout_secs");
+            }
+        }
+        Ok(())
+    }
+}
+
+fn nullable_override<'de, D: serde::Deserializer<'de>, T: Deserialize<'de>>(
+    d: D,
+) -> Result<Option<Option<T>>, D::Error> {
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// Owner patch: a present field sets the override, an explicit `null` clears
+/// it back to the default, an absent field leaves it alone.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateIngressLimitsRequest {
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rate_limit_per_minute: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub rate_burst: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub concurrency_limit: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ip_rate_limit_per_minute: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub ip_rate_burst: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub max_body_bytes: Option<Option<u64>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub response_timeout_secs: Option<Option<u32>>,
+    #[serde(
+        default,
+        deserialize_with = "nullable_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub body_timeout_secs: Option<Option<u32>>,
+}
+
+impl UpdateIngressLimitsRequest {
+    pub fn apply(&self, limits: &mut ServiceIngressLimits) {
+        if let Some(value) = self.rate_limit_per_minute {
+            limits.rate_limit_per_minute = value;
+        }
+        if let Some(value) = self.rate_burst {
+            limits.rate_burst = value;
+        }
+        if let Some(value) = self.concurrency_limit {
+            limits.concurrency_limit = value;
+        }
+        if let Some(value) = self.ip_rate_limit_per_minute {
+            limits.ip_rate_limit_per_minute = value;
+        }
+        if let Some(value) = self.ip_rate_burst {
+            limits.ip_rate_burst = value;
+        }
+        if let Some(value) = self.max_body_bytes {
+            limits.max_body_bytes = value;
+        }
+        if let Some(value) = self.response_timeout_secs {
+            limits.response_timeout_secs = value;
+        }
+        if let Some(value) = self.body_timeout_secs {
+            limits.body_timeout_secs = value;
+        }
+    }
+}
+
+/// Per-ingress rejection counters of one Proxy instance since its start.
+/// Counts only: no addresses, paths or payloads.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IngressRejectionCounters {
+    pub rate_limited: u64,
+    pub ip_rate_limited: u64,
+    pub concurrency_limited: u64,
+    pub body_too_large: u64,
+    pub body_timeout: u64,
+    pub upstream_timeout: u64,
+    pub request_rejected: u64,
+    /// A trusted front did not supply a usable client address and the peer
+    /// address was used instead: a misconfigured front, not an attack.
+    pub client_ip_fallback: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -385,5 +646,104 @@ impl From<MachineTrafficRecord> for AgentTrafficRecord {
             billable_bytes: value.billable_bytes,
             meter_version: value.meter_version,
         }
+    }
+}
+
+#[cfg(test)]
+mod ingress_limit_tests {
+    use super::*;
+
+    #[test]
+    fn limits_default_apply_and_validate_within_ceilings() {
+        let defaults = ServiceIngressLimits::default().effective();
+        assert_eq!(
+            defaults.rate_limit_per_minute,
+            INGRESS_DEFAULT_RATE_PER_MINUTE
+        );
+        assert_eq!(defaults.max_body_bytes, INGRESS_DEFAULT_MAX_BODY_BYTES);
+        let mut limits = ServiceIngressLimits::default();
+        let patch: UpdateIngressLimitsRequest = serde_json::from_value(serde_json::json!({
+            "concurrency_limit": 8,
+            "max_body_bytes": 2048
+        }))
+        .unwrap();
+        patch.apply(&mut limits);
+        assert_eq!(limits.concurrency_limit, Some(8));
+        assert_eq!(limits.max_body_bytes, Some(2048));
+        assert_eq!(limits.effective().concurrency_limit, 8);
+        assert_eq!(
+            limits.effective().rate_limit_per_minute,
+            INGRESS_DEFAULT_RATE_PER_MINUTE
+        );
+        assert_eq!(limits.validate(), Ok(()));
+        // null clears, absent leaves alone, unknown fields are refused.
+        let clear: UpdateIngressLimitsRequest =
+            serde_json::from_value(serde_json::json!({"concurrency_limit": null})).unwrap();
+        clear.apply(&mut limits);
+        assert_eq!(limits.concurrency_limit, None);
+        assert_eq!(limits.max_body_bytes, Some(2048));
+        assert!(serde_json::from_value::<UpdateIngressLimitsRequest>(
+            serde_json::json!({"paths": []})
+        )
+        .is_err());
+        for (field, bad) in [
+            (
+                "rate_limit_per_minute",
+                ServiceIngressLimits {
+                    rate_limit_per_minute: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "rate_limit_per_minute",
+                ServiceIngressLimits {
+                    rate_limit_per_minute: Some(INGRESS_MAX_RATE_PER_MINUTE + 1),
+                    ..Default::default()
+                },
+            ),
+            (
+                "concurrency_limit",
+                ServiceIngressLimits {
+                    concurrency_limit: Some(INGRESS_MAX_CONCURRENCY + 1),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_body_bytes",
+                ServiceIngressLimits {
+                    max_body_bytes: Some(INGRESS_MAX_BODY_BYTES + 1),
+                    ..Default::default()
+                },
+            ),
+            (
+                "max_body_bytes",
+                ServiceIngressLimits {
+                    max_body_bytes: Some(0),
+                    ..Default::default()
+                },
+            ),
+            (
+                "response_timeout_secs",
+                ServiceIngressLimits {
+                    response_timeout_secs: Some(INGRESS_MIN_RESPONSE_TIMEOUT_SECS - 1),
+                    ..Default::default()
+                },
+            ),
+            (
+                "response_timeout_secs",
+                ServiceIngressLimits {
+                    response_timeout_secs: Some(INGRESS_MAX_RESPONSE_TIMEOUT_SECS + 1),
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert_eq!(bad.validate(), Err(field));
+        }
+        let serialized = serde_json::to_value(ServiceIngressLimits::default()).unwrap();
+        assert_eq!(
+            serialized,
+            serde_json::json!({}),
+            "unset overrides serialise empty"
+        );
     }
 }

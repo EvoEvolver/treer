@@ -93,6 +93,10 @@ pub struct AuthStore {
     agent_credentials: Arc<tokio::sync::RwLock<HashMap<String, AgentCredentialRecord>>>,
     service_ingresses: Arc<tokio::sync::RwLock<HashMap<String, ResolvedServiceIngress>>>,
     service_ingresses_update: Arc<tokio::sync::Mutex<()>>,
+    /// True once the ingress cache holds a full snapshot; from then on an
+    /// unknown hostname is answered from the cache (refreshed every few
+    /// seconds) instead of querying PostgreSQL per request (#146).
+    service_ingresses_complete: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone, Debug)]
@@ -660,6 +664,7 @@ impl AuthStore {
             agent_credentials: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             service_ingresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             service_ingresses_update: Arc::new(tokio::sync::Mutex::new(())),
+            service_ingresses_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         store.initialize_schema().await?;
         store.refresh_virtual_network_hosts().await?;
@@ -723,6 +728,7 @@ impl AuthStore {
             agent_credentials: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             service_ingresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             service_ingresses_update: Arc::new(tokio::sync::Mutex::new(())),
+            service_ingresses_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         store
             .initialize_schema()

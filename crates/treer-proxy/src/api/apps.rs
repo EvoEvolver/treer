@@ -167,6 +167,43 @@ pub(super) struct UpdateAppAccessRequest {
     access: ServiceIngressAccess,
 }
 
+/// `PATCH /api/workspaces/{ws}/apps/{app}/ingress-limits` (#146): workspace
+/// owners adjust the public ingress protection of a Managed App within the
+/// hard ceilings. Nothing here can switch protection off.
+pub(super) async fn update_app_ingress_limits(
+    State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
+    Extension(config): Extension<IngressConfig>,
+    Extension(session): Extension<CurrentSession>,
+    headers: HeaderMap,
+    Path((workspace_id, target)): Path<(String, String)>,
+    Json(request): Json<treer_protocol::UpdateIngressLimitsRequest>,
+) -> Result<Json<Value>, ApiFailure> {
+    auth.require_workspace_owner(&workspace_id, &session.user_id)
+        .await?;
+    let app = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
+    let hostname = crate::auth::platform_service_hostname(&app.service_id, config.base_domain()?)?;
+    let ingress = auth
+        .list_service_ingresses(&workspace_id)
+        .await?
+        .into_iter()
+        .find(|ingress| ingress.service_id == app.service_id && ingress.hostname == hostname)
+        .ok_or_else(|| {
+            ApiFailure::not_found("ingress_not_found", "the App has no managed ingress")
+        })?;
+    let updated = auth
+        .update_service_ingress_limits(
+            &workspace_id,
+            &ingress.ingress_id,
+            &session.user_id,
+            &request,
+        )
+        .await?;
+    Ok(Json(json!({
+        "ingress": super::network::service_ingress_json(&config, updated)?
+    })))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn update_app_access(
     State(state): State<AppState>,

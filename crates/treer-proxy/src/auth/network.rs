@@ -555,9 +555,19 @@ impl AuthStore {
         {
             return Ok(Some(resolved));
         }
+        // With a complete snapshot in memory a miss is a miss: floods of
+        // unknown hostnames must not become database queries.
+        if self
+            .service_ingresses_complete
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(None);
+        }
         let row = sqlx::query(
             "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
              i.created_at, i.created_by, i.updated_at, i.updated_by, \
+             i.limit_rate_per_minute, i.limit_rate_burst, i.limit_concurrency, i.limit_ip_rate_per_minute, \
+             i.limit_ip_rate_burst, i.limit_max_body_bytes, i.limit_response_timeout_secs, i.limit_body_timeout_secs, \
              s.name AS service_name, s.server_id, s.target_agent_id, s.is_primary, s.target_host, s.target_port, \
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
@@ -647,6 +657,7 @@ impl AuthStore {
             created_by: actor.to_string(),
             updated_at: now,
             updated_by: actor.to_string(),
+            limits: Default::default(),
         };
         sqlx::query(
             "INSERT INTO service_ingresses(\
@@ -730,6 +741,7 @@ impl AuthStore {
             created_by: actor.to_string(),
             updated_at: now,
             updated_by: actor.to_string(),
+            limits: Default::default(),
         };
         let inserted = sqlx::query(
             "INSERT INTO service_ingresses(\
@@ -937,6 +949,8 @@ impl AuthStore {
         let rows = sqlx::query(
             "SELECT i.ingress_id, i.workspace_id, i.service_id, i.hostname, i.access, i.enabled, \
              i.created_at, i.created_by, i.updated_at, i.updated_by, \
+             i.limit_rate_per_minute, i.limit_rate_burst, i.limit_concurrency, i.limit_ip_rate_per_minute, \
+             i.limit_ip_rate_burst, i.limit_max_body_bytes, i.limit_response_timeout_secs, i.limit_body_timeout_secs, \
              s.name AS service_name, s.server_id, s.target_agent_id, s.is_primary, s.target_host, s.target_port, \
              s.protocol AS service_protocol, s.created_at AS service_created_at, \
              s.created_by AS service_created_by, s.updated_at AS service_updated_at, \
@@ -954,7 +968,100 @@ impl AuthStore {
             refreshed.insert(resolved.ingress.hostname.to_ascii_lowercase(), resolved);
         }
         *self.service_ingresses.write().await = refreshed;
+        self.service_ingresses_complete
+            .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
+    }
+
+    /// Owner override of the public ingress protection limits (#146). Values
+    /// are validated against the hard ceilings; the audit row carries the
+    /// resulting numbers only.
+    pub async fn update_service_ingress_limits(
+        &self,
+        workspace_id: &str,
+        ingress_id: &str,
+        actor: &str,
+        request: &treer_protocol::UpdateIngressLimitsRequest,
+    ) -> Result<ServiceIngress, AuthFailure> {
+        let _update = self.service_ingresses_update.lock().await;
+        let current = self
+            .resolve_service_ingress(workspace_id, ingress_id)
+            .await?;
+        let mut ingress = current.ingress;
+        let mut limits = ingress.limits.clone();
+        request.apply(&mut limits);
+        if let Err(field) = limits.validate() {
+            return Err(AuthFailure::bad_request(
+                "ingress_limit_invalid",
+                &format!("{field} is zero or outside the allowed range"),
+            ));
+        }
+        if limits == ingress.limits {
+            return Ok(ingress);
+        }
+        ingress.limits = limits;
+        ingress.updated_at = Utc::now();
+        ingress.updated_by = actor.to_string();
+        let to_i64 = |value: Option<u32>| value.map(i64::from);
+        sqlx::query(
+            "UPDATE service_ingresses SET limit_rate_per_minute = $1, limit_rate_burst = $2, \
+             limit_concurrency = $3, limit_ip_rate_per_minute = $4, limit_ip_rate_burst = $5, \
+             limit_max_body_bytes = $6, limit_response_timeout_secs = $7, updated_at = $8, \
+             updated_by = $9, limit_body_timeout_secs = $12 WHERE workspace_id = $10 AND ingress_id = $11",
+        )
+        .bind(to_i64(ingress.limits.rate_limit_per_minute))
+        .bind(to_i64(ingress.limits.rate_burst))
+        .bind(to_i64(ingress.limits.concurrency_limit))
+        .bind(to_i64(ingress.limits.ip_rate_limit_per_minute))
+        .bind(to_i64(ingress.limits.ip_rate_burst))
+        .bind(
+            ingress
+                .limits
+                .max_body_bytes
+                .map(|bytes| i64::try_from(bytes).unwrap_or(i64::MAX)),
+        )
+        .bind(to_i64(ingress.limits.response_timeout_secs))
+        .bind(ingress.updated_at.to_rfc3339())
+        .bind(&ingress.updated_by)
+        .bind(workspace_id)
+        .bind(&ingress.ingress_id)
+        .bind(to_i64(ingress.limits.body_timeout_secs))
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let organization: String =
+            sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE workspace_id = $1")
+                .bind(workspace_id)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(AuthFailure::database)?;
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        audit::insert(
+            &mut transaction,
+            NewAuditEvent {
+                organization_id: &organization,
+                workspace_id: Some(workspace_id),
+                actor_kind: "user",
+                actor_id: Some(actor),
+                source: "control-plane",
+                action: "ingress.limits.update",
+                resource_kind: "ingress",
+                resource_id: &ingress.ingress_id,
+                resource_name: None,
+                payload: serde_json::to_value(&ingress.limits).unwrap_or(serde_json::Value::Null),
+            },
+        )
+        .await
+        .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
+        self.service_ingresses.write().await.insert(
+            ingress.hostname.to_ascii_lowercase(),
+            ResolvedServiceIngress {
+                ingress: ingress.clone(),
+                service: current.service,
+            },
+        );
+        Ok(ingress)
     }
 
     pub async fn create_ingress_auth_code(

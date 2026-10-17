@@ -922,7 +922,73 @@ cookie-to-token mapping in SQLite. Telegram can read bridged bodies and stores
 Bot API offsets, delivery hashes, errors, and external/Core ID mappings. App
 state and WAL files require normal credential-store protection and backup.
 
-Public service ingress deliberately accepts anonymous internet traffic.
+Public service ingress deliberately accepts anonymous internet traffic, so the
+Proxy protects it generically (#146) before anything reaches a machine tunnel:
+every public request is admitted first against a per-client token bucket
+(default 120 requests/min, burst 30, keyed by the verified client address, IPv6
+by /64) and only then against the service's own bucket (600/min, burst 120)
+and in-flight cap (64, held until the response body or upgraded connection
+ends); refusals are `429` with `Retry-After`. A noisy client therefore exhausts
+its own budget first, while a distributed flood from many addresses can still
+drain the service bucket — that is the intended trade for protecting the
+machine. The resolver answers unknown hostnames from its in-memory snapshot
+(refreshed every few seconds) so floods of random hosts do not become database
+queries, and those 404s are themselves limited per verified client (never per
+front address, and not at all for a private peer without a configured front,
+so an unconfigured load balancer can never throttle a whole site). Request
+bodies are capped (1 MiB; `Content-Length` above the cap is refused before a
+tunnel opens, a streamed body is cut at the cap), must keep flowing (10 s idle)
+and must complete within 60 s in total (owner-adjustable), so a trickled body
+cannot hold an in-flight slot; the service must answer headers within 35 s
+(long polls up to 30 s work); a non-upgraded response body may not stall for
+300 s and its in-flight slot is leased for at most 300 s even if the client
+never reads the response. Streams longer than 300 s therefore continue without
+counting against the in-flight cap; they remain bounded by the connection
+budget and the per-client rate. WebSocket upgrades hold their slot for the
+connection's lifetime. The HTTP/1 server
+itself enforces a 30 s header read timeout with 32 KiB / 100 headers per
+request and caps open connections (8192 in total; 256 per peer for public,
+untrusted peers only — a configured trusted front or a private/loopback peer
+carries many clients on one address and is bounded by the global budget alone;
+excess connections are closed without a handshake). It speaks HTTP/1 only, as the
+Proxy did before (the HTTP/2 feature was never enabled, so no h2c was ever
+negotiated); TLS fronts talk HTTP/1 upstream. Requests carrying both
+`Content-Length` and `Transfer-Encoding` are refused. Ordinary API routes keep
+their existing extractor body limits; the body read timeouts described here
+apply to ingress only. Workspace owners may loosen or tighten a Managed App's limits
+through `PATCH /api/workspaces/{ws}/apps/{app}/ingress-limits`, audited as
+`ingress.limits.update` with the numbers only, within hard ceilings
+(60 000/min, 4096 in flight, 64 MiB, 5–600 s for both the response and the
+body deadline); nothing can switch protection off. The per-client bucket table
+is bounded per ingress and swept at most every ten seconds, so a flood of fresh
+addresses shares one overflow bucket instead of forcing a scan per request. All of this is per Proxy instance and in memory: a cluster of N multiplies
+the ceilings by N, and rejection counters (reported per ingress, counts only,
+never addresses or paths) reset when the process restarts.
+
+The client address the Proxy enforces and forwards is the TCP peer, unless the
+operator names a trusted front (`--ingress-trusted-proxies` CIDRs plus exactly
+one `--ingress-client-ip-header`); only a peer inside those ranges may supply
+the header, `X-Forwarded-For` is read right-to-left skipping trusted hops, any
+other header must hold exactly one address, and a missing or invalid value
+falls back to the peer (counted as `client_ip_fallback`, which usually means
+the front is misconfigured). `/0` ranges are never accepted and ranges wider
+than /8 (IPv4) or /32 (IPv6) need `--ingress-allow-wide-trust`. The Proxy
+forwards the verified address as `X-Treer-Client-IP` after stripping every
+client-supplied `x-treer-*` header (upgrade requests included); Apps must use
+that header and nothing else for per-client accounting. Behind a front that is
+not configured, every client would share the front's address, so when the peer
+is a private, loopback or link-local address and no trusted range is set, the
+per-client limit is not enforced (the service limit still is) and the Proxy
+logs a fixed warning once; per-client limits are effective only with a public
+peer or a configured front, which #142 must state. Private, loopback and
+link-local peers are therefore always "front or internal" to the Proxy: a
+Proxy exposed directly to untrusted clients on a private network relies on the
+per-service limits and the global connection budget alone.
+
+Workspace ingress gets the time bounds (body idle, response header, response
+idle) and the framing check but no rate limits and no default body cap:
+authenticated Apps may legitimately upload larger files. Public TCP services
+are outside this protection.
 Workspace ingress requires a current member session or service-audience token.
 For restricted workspaces, current membership means an effective direct or
 group workspace grant, workspace creation ownership, or organization manager

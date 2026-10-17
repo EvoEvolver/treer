@@ -9,6 +9,7 @@ pub(super) use registry::*;
 mod ingress;
 pub(super) use ingress::*;
 mod http_tunnel;
+mod ingress_body;
 pub(super) use http_tunnel::*;
 mod agent_services;
 pub(super) use agent_services::*;

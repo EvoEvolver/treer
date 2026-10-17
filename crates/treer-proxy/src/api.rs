@@ -150,6 +150,9 @@ pub struct IngressConfig {
     base_domain: Option<Arc<str>>,
     proxy_public_url: Url,
     app_public_url: Url,
+    /// Admission control for public ingress (#146); defaults to no trusted
+    /// front, so the TCP peer is the client.
+    guard: crate::ingress_guard::IngressGuard,
 }
 
 impl IngressConfig {
@@ -196,7 +199,20 @@ impl IngressConfig {
             base_domain,
             proxy_public_url: proxy_public_url.clone(),
             app_public_url: app_public_url.clone(),
+            guard: crate::ingress_guard::IngressGuard::new(
+                crate::ingress_guard::TrustedProxies::none(),
+            ),
         })
+    }
+
+    /// Replaces the default guard with one built from operator configuration.
+    pub fn with_guard(mut self, guard: crate::ingress_guard::IngressGuard) -> Self {
+        self.guard = guard;
+        self
+    }
+
+    pub fn guard(&self) -> &crate::ingress_guard::IngressGuard {
+        &self.guard
     }
 
     pub fn public_url(&self) -> Option<&Url> {
@@ -428,7 +444,7 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 
 async fn health() -> Json<Value> {
     Json(
-        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS] }),
+        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION] }),
     )
 }
 
@@ -454,6 +470,9 @@ async fn verify_workload_identity(
 #[cfg(test)]
 #[path = "api/app_dist_tests.rs"]
 mod app_dist_tests;
+#[cfg(test)]
+#[path = "api/ingress_protection_tests.rs"]
+mod ingress_protection_tests;
 #[cfg(test)]
 #[path = "api/pins_tests.rs"]
 mod pins_tests;

@@ -437,6 +437,10 @@ pub fn router(
             axum::routing::patch(update_app_access),
         )
         .registered_route(
+            "/api/workspaces/{workspace_id}/apps/{app_id}/ingress-limits",
+            axum::routing::patch(update_app_ingress_limits),
+        )
+        .registered_route(
             "/api/workspaces/{workspace_id}/apps/{app_id}/start",
             post(start_app_deployment),
         )
