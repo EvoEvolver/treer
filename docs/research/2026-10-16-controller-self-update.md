@@ -190,6 +190,26 @@ releases OS locks, and production main must explicitly report/handle this status
 instead of silently returning. Launcher execution, production dispatch and crash
 recovery remain pending. No network failure authorizes restarting the Host.
 
+Launcher report comparison is now a separate bounded metadata parser, with no
+process execution or receipt-transition capability. Install and independent
+status outputs must identify the same `sha256-` content version and authenticated
+native artifact source SHA (not a reused release wrapper SHA). Both compatibility
+reports must be compatible, the installed runtime portable, the active entry
+integrity valid, and the current version present exactly once. Older retained
+incompatible versions may lack provenance without invalidating the current one.
+Duplicate known JSON fields, duplicate version IDs/profile names, missing or
+wrong fields, empty profiles, more than 32 profiles or 1024 retained versions,
+and either output over 4 MiB fail with a fixed diagnostic. Extra path/Agent
+metadata is ignored rather than retained or logged. The result retains only
+content version, source SHA and profile count; it is explicitly NOT install or
+live-health proof. The future executor must supply bounded exit-zero outputs
+from the reverified new Controller under original ownership, preserve the
+launcher's own profile transaction/readback checks, and independently recheck
+Core/Host/workload health before Complete. Neither arbitrary caller JSON nor a
+replayed report can authorize a journal transition through this parser. Actual
+launcher process lifecycle, failure-to-Partial handling and main dispatch are
+still pending; these parser tests do not claim an isolated launcher install.
+
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
 modes/current bytes and executable stages before recording Activating or making
