@@ -224,6 +224,15 @@ impl<M: Mailbox + Directory> Hub<M> {
                 .map_err(|_| Error::Binding)?,
         })
     }
+    /// Bounded internal worker snapshot; not a workspace directory enumeration.
+    pub fn binding_ids(&self) -> Result<Vec<String>, Error> {
+        let mut query = self
+            .store
+            .db
+            .prepare("SELECT endpoint FROM hub_bindings ORDER BY endpoint LIMIT 20")?;
+        let rows = query.query_map([], |r| r.get(0))?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
+    }
     /// Per-ID lookup only. Failure/drift pauses and is sticky until owner resumes.
     /// Old expected and current observed values remain separately visible.
     #[cfg(test)]

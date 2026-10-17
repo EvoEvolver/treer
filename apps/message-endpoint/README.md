@@ -520,12 +520,39 @@ required before deployment.
 
 `Core::receive_batch` preserves Core's `remaining_unacknowledged` count alongside
 its bounded 10-delivery page. Backlog is not a receive cursor: only ack moves the
-oldest-first window. The future scheduler must drain bounded zero-wait pages and
-yield between ticks. Core currently has no sender skip, nack or recipient cap.
+oldest-first window. Core currently has no sender skip, nack or recipient cap.
 Leaving a paused endpoint unacked can block other endpoints; multi-endpoint
 activation is gated on scheduler integration and audited owner refetch. The
-state-only hold/capacity implementation below does not establish real runtime
-fairness or successful recovery by itself.
+hold/capacity implementation below does not establish successful recovery by
+itself. The Core worker implementation below is not yet wired into a hub
+executable or channel workers.
+
+`scheduler::CoreWorkers` now runs the actual Core receive/ack, maintenance and
+per-endpoint readback threads around shared SQLite state. It long-polls for at
+most one second, drains subsequent pages with zero wait, limits each drain to
+ten pages or 250 ms elapsed, and yields 100 ms between drains. This is a work
+budget, not cancellation of in-flight CLI calls: the fixed adapter's 15-second
+deadline still bounds each receive or ack. At least one delivery is processed
+per page; after the budget no further ack is started, and remaining deliveries
+stay in Core. State admission commits before ack, and neither receive nor ack
+holds the state mutex. A separate maintenance worker runs every second and
+promotes at most ten held fragments per binding.
+
+The readback supervisor starts at most one independent worker per configured
+binding (maximum twenty), including bindings added later. Each targets a query
+start every ten seconds, records query time before the network call, and submits
+the ordinary revision/freshness-fenced result. One blocked endpoint query cannot
+starve another binding's refresh or the settings state. Missing or denied
+metadata follows the existing sticky pause path; a matching result never resumes
+an owner pause. Shutdown joins only these owned threads and waits for bounded
+in-flight CLI calls; it does not signal or restart any Treer process.
+
+Tests run this production scheduler against a private fake Core mailbox: an
+oldest-first paused flood reaches the healthy endpoint after repeated bounded
+drains, and actual blocked receive/readback threads leave maintenance and other
+binding state accessible. This is not live Policy/isolation, a Bot acceptance
+test or a complete hub executable. Channel workers, authenticated settings and
+their integrated tests remain activation requirements.
 
 Valid bound fragments for a paused/stale binding, or for a full active queue,
 commit to a separate hold before ack. Holds are capped at 20 fragments/256 KiB

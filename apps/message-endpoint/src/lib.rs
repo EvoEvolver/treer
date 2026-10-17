@@ -18,6 +18,8 @@ pub mod recovery;
 pub mod refetch;
 #[cfg(unix)]
 pub mod relay;
+#[cfg(unix)]
+pub mod scheduler;
 pub mod store;
 #[cfg(unix)]
 pub mod telegram;
