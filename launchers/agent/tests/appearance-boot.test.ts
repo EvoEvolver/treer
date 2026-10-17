@@ -35,7 +35,7 @@ test("framed boot accepts only the immediate parent at the configured exact orig
   assert.equal(root.dataset.theme, "dark"); assert.equal(root.dataset.look, "c");
 });
 test("invalid configured origins fail closed, omitted origin allows same-origin frames", () => {
-  for (const origin of ["null", "https://user:pass@console.test", "javascript:alert(1)", "https://console.test/path"]) {
+  for (const origin of ["", "null", "https://user:pass@console.test", "javascript:alert(1)", "https://console.test/path", "https://*.test"]) {
     assert.equal(boot(true, `?embed_origin=${encodeURIComponent(origin)}`).listeners.has("message"), false);
   }
   const { root, listeners, parent } = boot(true);

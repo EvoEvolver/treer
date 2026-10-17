@@ -30,9 +30,9 @@
   // the Console supplies its own origin explicitly (appearance only, not auth).
   let parentOrigin = null;
   try {
-    const configured = params.get("embed_origin") || location.origin;
+    const configured = params.has("embed_origin") ? params.get("embed_origin") : location.origin;
     const candidate = new URL(configured);
-    if (["http:", "https:"].includes(candidate.protocol) && candidate.origin === configured) parentOrigin = configured;
+    if (["http:", "https:"].includes(candidate.protocol) && !candidate.hostname.includes("*") && candidate.origin === configured) parentOrigin = configured;
   } catch { /* malformed configuration disables parent messages */ }
   if (window.top !== window && parentOrigin) addEventListener("message", (event) => {
     if (event.source !== parent || event.origin !== parentOrigin || event.data?.type !== "treer:embed-theme" || !okTheme(event.data.theme)) return;

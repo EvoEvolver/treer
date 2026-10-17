@@ -648,6 +648,8 @@ parent and the exact HTTP(S) Console origin configured in `?embed_origin=`
 (same-origin fallback when omitted). Malformed origins disable messages.
 This parameter controls appearance only and grants no API authority; top-level
 pages ignore all embed messages and use their own URL/stored/system defaults.
+The embedding constraint is the immediate-parent source check together with the
+Proxy's `frame-ancestors` policy (Console origin and self), not this query value.
 `?lang=en|zh` (else the browser language) selects the interface language;
 a missing translation falls back to English.
 
