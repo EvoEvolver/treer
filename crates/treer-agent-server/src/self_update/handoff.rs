@@ -617,11 +617,19 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "owned same-PID exec helper, invoked twice by the outer exec test"]
+    #[ignore = "owned same-PID exec helper, invoked twice per outer exec case"]
     fn peer_exec_child() {
         use nix::fcntl::{fcntl, FcntlArg, FdFlag};
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
+        let after_read = std::env::var("TREER_TEST_EXEC_AFTER_READ").as_deref() == Ok("1");
+        let frame = || {
+            let mut bytes = Vec::from(&b"TRLP\x01\0\0\0"[..]);
+            bytes.extend_from_slice(uuid::Uuid::from_u128(7).as_bytes());
+            bytes.extend_from_slice(&[b'a'; 64]);
+            bytes.extend_from_slice(&[b'b'; 64]);
+            bytes
+        };
         let path = std::env::var_os("TREER_TEST_HANDOFF_SOCKET").unwrap();
         let mut socket = UnixStream::connect(&path).unwrap();
         require_cloexec(&socket).unwrap();
@@ -634,23 +642,31 @@ mod tests {
             // Restore CLOEXEC immediately; safe raw-fd send/shutdown avoid
             // manufacturing Rust ownership of an inherited descriptor.
             fcntl(inherited, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).unwrap();
-            let mut frame = Vec::from(&b"TRLP\x01\0\0\0"[..]);
-            frame.extend_from_slice(&[1; 16]);
-            frame.extend_from_slice(&[b'a'; 64]);
-            frame.extend_from_slice(&[b'b'; 64]);
-            while !frame.is_empty() {
-                let sent =
-                    nix::sys::socket::send(inherited, &frame, nix::sys::socket::MsgFlags::empty())
-                        .unwrap();
-                assert!(sent > 0);
-                frame.drain(..sent);
+            if !after_read {
+                let mut frame = frame();
+                while !frame.is_empty() {
+                    let sent = nix::sys::socket::send(
+                        inherited,
+                        &frame,
+                        nix::sys::socket::MsgFlags::empty(),
+                    )
+                    .unwrap();
+                    assert!(sent > 0);
+                    frame.drain(..sent);
+                }
+                nix::sys::socket::shutdown(inherited, nix::sys::socket::Shutdown::Write).unwrap();
             }
-            nix::sys::socket::shutdown(inherited, nix::sys::socket::Shutdown::Write).unwrap();
             socket.write_all(b"X").unwrap();
             let _ = std::io::stdin().read(&mut [0]);
             return;
         }
         socket.write_all(b"R").unwrap();
+        if after_read {
+            // Return a valid matching frame while still in the original image;
+            // only the parent's later stdin byte permits exec to happen.
+            socket.write_all(&frame()).unwrap();
+            socket.shutdown(std::net::Shutdown::Write).unwrap();
+        }
         std::io::stdin().read_exact(&mut [0]).unwrap();
         let image = std::env::var_os("TREER_TEST_EXEC_IMAGE").unwrap();
         fcntl(socket.as_raw_fd(), FcntlArg::F_SETFD(FdFlag::empty())).unwrap();
@@ -663,6 +679,10 @@ mod tests {
             .env_clear()
             .env("TREER_TEST_HANDOFF_SOCKET", path)
             .env("TREER_TEST_EXEC_TARGET", "1")
+            .env(
+                "TREER_TEST_EXEC_AFTER_READ",
+                if after_read { "1" } else { "0" },
+            )
             .env("TREER_TEST_EXEC_FD", socket.as_raw_fd().to_string())
             .stdin(Stdio::inherit())
             .stdout(Stdio::null())
@@ -671,8 +691,7 @@ mod tests {
         panic!("owned fixture exec failed: {error}");
     }
 
-    #[test]
-    fn same_pid_exec_after_read_entry_invalidates_the_observation() {
+    fn same_pid_exec_invalidates_observation(after_read: bool) {
         use nix::fcntl::{fcntl, FcntlArg, OFlag};
         use std::os::fd::AsRawFd;
 
@@ -701,6 +720,10 @@ mod tests {
                 .env_clear()
                 .env("TREER_TEST_HANDOFF_SOCKET", &path)
                 .env("TREER_TEST_EXEC_IMAGE", &alternate)
+                .env(
+                    "TREER_TEST_EXEC_AFTER_READ",
+                    if after_read { "1" } else { "0" },
+                )
                 .stdin(Stdio::piped())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -744,21 +767,47 @@ mod tests {
             || OFlag::from_bits_truncate(fcntl(observer.as_raw_fd(), FcntlArg::F_GETFL).unwrap());
         assert!(!flags().contains(OFlag::O_NONBLOCK));
         let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+        let (read_tx, read_rx) = std::sync::mpsc::channel();
+        let (accept_tx, accept_rx) = std::sync::mpsc::channel();
         let reader = std::thread::spawn(move || {
-            let mut arbitration = pending();
-            let error = authenticated
-                .read_launcher_frame(&mut arbitration, &cancel)
-                .err()
-                .map(|error| error.to_string());
+            use super::super::launcher_arbitration::{transport::Kind, Arbitration, Binding};
+            let binding =
+                Binding::new(uuid::Uuid::from_u128(7), &"a".repeat(64), &"b".repeat(64)).unwrap();
+            let mut arbitration = Arbitration::new(binding);
+            let result = authenticated.read_launcher_frame(&mut arbitration, &cancel);
+            let error = if after_read {
+                let frame = result.unwrap();
+                assert_eq!(frame.kind(), Kind::Permit);
+                assert_eq!(
+                    arbitration.decision(),
+                    super::super::launcher_arbitration::Decision::Pending
+                );
+                // Hold the actual connection-bound frame in this thread until
+                // the parent has OS evidence that the same PID changed image.
+                read_tx.send(()).unwrap();
+                accept_rx.recv_timeout(Duration::from_secs(10)).unwrap();
+                arbitration
+                    .accept(frame)
+                    .err()
+                    .map(|error| error.to_string())
+            } else {
+                result.err().map(|error| error.to_string())
+            };
             (error, arbitration.decision())
         });
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !flags().contains(OFlag::O_NONBLOCK) {
-            assert!(
-                Instant::now() < deadline,
-                "reader did not pass authentication"
-            );
-            std::thread::sleep(Duration::from_millis(1));
+        if after_read {
+            read_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(child.0.try_wait().unwrap().is_none());
+            original.verify_current().unwrap();
+        } else {
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while !flags().contains(OFlag::O_NONBLOCK) {
+                assert!(
+                    Instant::now() < deadline,
+                    "reader did not pass authentication"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
         }
         child.0.stdin.as_mut().unwrap().write_all(b"E").unwrap();
         let (_target_connection, ready) = accept();
@@ -768,6 +817,9 @@ mod tests {
         assert_eq!(changed.pid(), original.pid());
         assert!(changed.matches_file(&alternate_file).unwrap());
         assert!(original.verify_current().is_err());
+        if after_read {
+            accept_tx.send(()).unwrap();
+        }
         let (error, decision) = reader.join().unwrap();
         assert_eq!(error.as_deref(), Some("update_handoff_peer_changed"));
         assert_eq!(
@@ -776,6 +828,16 @@ mod tests {
         );
         drop(child.0.stdin.take());
         assert!(child.0.wait().unwrap().success());
+    }
+
+    #[test]
+    fn same_pid_exec_after_read_entry_invalidates_the_observation() {
+        same_pid_exec_invalidates_observation(false);
+    }
+
+    #[test]
+    fn same_pid_exec_after_successful_read_cannot_be_accepted() {
+        same_pid_exec_invalidates_observation(true);
     }
 
     #[test]

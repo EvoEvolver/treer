@@ -884,8 +884,22 @@ or sends SIGKILL to that exact owned child, and reaps it before acceptance.
 Consuming the retained frame must return `update_handoff_peer_changed`, leave
 Uncertain and refuse retry, despite the earlier successful read. Unique private
 0700 directories/sockets and cleared child environments are used; no deployed
-process or installer is touched. A delayed same-PID exec acceptance regression,
-as distinct from the existing exec-during-read test, remains outstanding.
+process or installer is touched.
+
+The owned exec fixture also tests the separate delay between successful read
+and acceptance. In this mode the original image sends a valid matching frame,
+half-closes writes, then waits for the parent's stdin byte before exec. The
+reader thread retains the actual `LauncherFrame` and signals successful read;
+the parent confirms the original image is still current before allowing exec.
+The copied target restores CLOEXEC on its retained original socket, reports
+readiness through a separate connection and stays alive. After OS evidence
+confirms the same PID now has the copied executable inode, a second channel
+barrier lets the reader consume the frame. Acceptance must return
+`update_handoff_peer_changed` and leave Uncertain. Thus both exec-during-read
+and exec-after-read cases reject a live peer with a changed image, at their
+respective guards. Channel/stdin/OS barriers establish ordering; no production
+hooks or timing sleeps manufacture the acceptance window. This still does not
+implement supervisor registration, ACK/durable decisions or writer-death proof.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the
