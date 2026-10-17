@@ -407,7 +407,10 @@ test.describe('resizable tree sidebar', () => {
     await platform(page, name)
     await page.goto('/')
     await browseTreeOnMobile(page)
-    await page.waitForTimeout(300)
+    // The tab bar remounts after the workspace loads; wait for the loaded layout instead of sleeping.
+    await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
+    await expect(page.locator('[role=treeitem]').first()).toBeAttached()
+    await expect(page.locator('#tree-sidebar').getByRole('button', { name: 'Collapse tree sidebar' })).toBeVisible()
     expect(await claimed(page, other)).toBe(false)
     await sidebarShown(page)
     expect(await claimed(page, key)).toBe(true)
