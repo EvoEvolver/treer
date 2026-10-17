@@ -41,7 +41,19 @@
         "failure": "Native absence may exit zero leaving a 500-byte placeholder. Placement is not atomic; install or later failure may leave a modified prefix and requires uninstall before retry.",
         "closure": "Expected root plus one native, only root postinstall runs. Both tarballs must verify before offline installation using an empty private cache; sealed acceptance must prove the optional dependency uses that single native copy.",
         "prepare": "Publishing guard; not expected to run for tarball installation. If invoked without AUTHORIZED it exits 1, failing closed.",
-        "verification": "Read-only tarball/member inspection only; no installer, provider binary or lifecycle code executed. Native member is package/claude; installation target is root bin/claude.exe."
+        "verification": "Read-only tarball/member inspection only; no installer, provider binary or lifecycle code executed. Native member is package/claude; installation target is root bin/claude.exe.",
+        "native_archive_listing": {
+          "reference": "Issue #131 2442/2482: SHA-512 verified before streaming member hashing, no installation or execution.",
+          "members": ["package/claude", "package/package.json", "package/LICENSE.md", "package/README.md"],
+          "member_count": 4,
+          "types": "All four regular files; only program member is package/claude. No symlink, hardlink, extended header, device or additional program member.",
+          "format": "Single gzip member, plain ustar; zero padding, two terminal zero blocks, no trailing content.",
+          "archives": [
+            {"platform": "darwin-aarch64", "compressed_size": 119065220, "tar_size": 267961344, "native_header_sha256": "128e64a470c4783da0830a487d020c7fe60bf61e49d9f9b9d69d2385633a93bd"},
+            {"platform": "linux-x86_64", "compressed_size": 129008778, "tar_size": 285798400, "native_header_sha256": "e117cda98369d7c5703a95413acc44da57264985d3b147def2f1e7232da1e2ba"},
+            {"platform": "linux-aarch64", "compressed_size": 129489471, "tar_size": 285340672, "native_header_sha256": "f8ab3d5487390b0e1c3b07c0b4108ca95a2bdeb8647f62d16bcced26ba65cd4e"}
+          ]
+        }
       },
       "disposition": "reviewed-offline-local-tarballs-with-native-pin; sealed-install-acceptance-required"
     },
