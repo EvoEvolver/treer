@@ -57,7 +57,17 @@ impl BotClient {
             .send()
             .map_err(|_| Error::Transport)?;
         let status = response.status();
-        if matches!(status.as_u16(), 400 | 401 | 403 | 404) {
+        if matches!(status.as_u16(), 401 | 403) {
+            self.verified
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Err(Error::Credentials);
+        }
+        if status.as_u16() == 409 {
+            self.verified
+                .store(false, std::sync::atomic::Ordering::Release);
+            return Err(Error::Conflict);
+        }
+        if matches!(status.as_u16(), 400 | 404) {
             return Err(Error::Rejected);
         }
         if status.as_u16() == 429 {
@@ -428,10 +438,31 @@ mod tests {
             let error = server.client().verify().unwrap_err();
             match (error, delay) {
                 (Error::RateLimited(actual), Some(expected)) => assert_eq!(actual, expected),
-                (Error::Rejected, None) => {}
+                (Error::Credentials, None) => {}
                 _ => panic!("wrong fixed error class"),
             }
             assert_eq!(server.finish().len(), 1);
+        }
+    }
+    #[test]
+    fn credential_or_duplicate_poller_response_invalidates_client_before_another_request() {
+        for status in [401, 403, 409] {
+            let server = Server::start(vec![
+                (
+                    200,
+                    json!({"ok":true,"result":{"id":12345,"is_bot":true}}).to_string(),
+                ),
+                (status, TOKEN.into()),
+            ]);
+            let client = server.client();
+            client.verify().unwrap();
+            assert!(matches!(
+                client.poll(0),
+                Err(Error::Credentials | Error::Conflict)
+            ));
+            assert!(!client.verified.load(std::sync::atomic::Ordering::Acquire));
+            assert!(matches!(client.poll(0), Err(Error::Invalid)));
+            assert_eq!(server.finish().len(), 2);
         }
     }
     #[test]

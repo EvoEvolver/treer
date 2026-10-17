@@ -80,8 +80,11 @@ impl CoreHandoffs {
             handoffs_stopped: self.c.stopping.load(Ordering::Relaxed),
         }
     }
-    pub fn stop(&mut self) {
+    pub fn request_stop(&self) {
         self.c.stopping.store(true, Ordering::Release);
+    }
+    pub fn stop(&mut self) {
+        self.request_stop();
         if let Some(join) = self.join.take() {
             if join.join().is_err() {
                 increment(&self.c.failures);

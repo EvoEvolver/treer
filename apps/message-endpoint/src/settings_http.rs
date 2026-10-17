@@ -31,6 +31,7 @@ pub struct SettingsSnapshot {
     pub workers: crate::scheduler::WorkerStatus,
     pub audit_full: bool,
     pub emergency_pause_bindings: i64,
+    pub telegram_accounts: Vec<crate::telegram_workers::Status>,
 }
 #[derive(Serialize)]
 pub struct EndpointSnapshot {
@@ -80,7 +81,7 @@ impl From<crate::hub::View> for EndpointSnapshot {
     }
 }
 fn snapshot_value(owner: &str, snapshot: SettingsSnapshot) -> Result<Value, ()> {
-    if snapshot.endpoints.len() > 20 {
+    if snapshot.endpoints.len() > 20 || snapshot.telegram_accounts.len() > 20 {
         return Err(());
     }
     let value = json!({"owner_id":owner,"settings":snapshot});
@@ -865,6 +866,7 @@ mod tests {
                 workers: Default::default(),
                 audit_full: false,
                 emergency_pause_bindings: 0,
+                telegram_accounts: vec![],
             },
         )
         .unwrap();
@@ -877,7 +879,8 @@ mod tests {
                 endpoints: (0..21).map(|_| endpoint(1)).collect(),
                 workers: Default::default(),
                 audit_full: false,
-                emergency_pause_bindings: 0
+                emergency_pause_bindings: 0,
+                telegram_accounts: vec![],
             }
         )
         .is_err());
@@ -887,7 +890,8 @@ mod tests {
                 endpoints: vec![endpoint(512 * 1024)],
                 workers: Default::default(),
                 audit_full: false,
-                emergency_pause_bindings: 0
+                emergency_pause_bindings: 0,
+                telegram_accounts: vec![],
             }
         )
         .is_err());

@@ -440,6 +440,9 @@ impl<M: Mailbox + Directory> Hub<M> {
         Ok(())
     }
     pub(crate) fn blocked(&self) -> Result<bool, Error> {
+        // Maintenance reports problems, but each admission/handoff also needs
+        // its own fail-closed gate before using private persistent state.
+        self.store.recheck_private_storage()?;
         Ok(self.store.db.query_row(
             "SELECT blocked FROM hub_identity WHERE singleton=1",
             [],
@@ -836,6 +839,49 @@ mod tests {
     }
     fn activate(hub: &mut Hub<Fake>) {
         hub.resume("ag_endpoint", 1, NOW).unwrap();
+    }
+    #[test]
+    fn unsafe_live_storage_blocks_admission_and_handoffs_without_waiting_for_maintenance() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let path = std::fs::canonicalize(tmp.path()).unwrap().join("state");
+        let store = Store::open(&path, Limits::default()).unwrap();
+        let mut hub = Hub::new(store, Fake::default(), "app_hub", "ws_test").unwrap();
+        hub.add_binding(binding()).unwrap();
+        assert!(!hub.blocked().unwrap());
+        std::fs::set_permissions(
+            path.join("hub.sqlite3"),
+            std::fs::Permissions::from_mode(0o644),
+        )
+        .unwrap();
+        assert!(matches!(
+            hub.blocked(),
+            Err(Error::Storage(StorageError::PrivateStorage))
+        ));
+        let delivery = Delivery {
+            delivery_id: "delivery_private".into(),
+            recipient: crate::core::Principal {
+                kind: SenderKind::Agent,
+                id: "app_hub".into(),
+            },
+            message: crate::core::Message {
+                message_id: "msg_private".into(),
+                sender: crate::core::Principal {
+                    kind: SenderKind::Agent,
+                    id: "ag_endpoint".into(),
+                },
+                body: "never admitted".into(),
+                context_ids: vec![],
+            },
+        };
+        assert!(matches!(
+            hub.admit_core_delivery(&delivery, NOW),
+            Err(Error::Storage(StorageError::PrivateStorage))
+        ));
+        assert!(matches!(
+            hub.ready_outbound("ag_endpoint", NOW),
+            Err(Error::Storage(StorageError::PrivateStorage))
+        ));
     }
     #[test]
     fn owner_actions_commit_revision_and_actor_audit_atomically_without_network() {

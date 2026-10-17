@@ -879,8 +879,8 @@ metadata-refresh and maintenance workers and stops only these owned threads on
 SIGINT. Invalid configuration/storage/listener failures return nonzero with
 fixed error codes, never raw configuration or credentials. A changed CLI hash
 requires a human-reviewed config update. Confirmed owner configuration writes
-can create paused bindings, pin Telegram targets, and pause bindings. Transport
-account workers and resume are not connected, so **this is a development preview,
+can create paused bindings, pin Telegram targets, and pause bindings. Telegram account poll/send workers can run from private operator files; owner
+resume and browser account administration are not connected, so **this is a development preview,
 not ready for activation/migration**. The React page supports these confirmed configuration writes only on its
 configured dedicated root URL. Embedded tunnels, forwarded preview origins and
 other direct origins stay read-only and link to that URL; they never widen the
@@ -1045,6 +1045,90 @@ Failure notices retain their durable eight-attempt/backoff policy. Unexpected
 worker termination or a poisoned actor stops this owned worker group rather than
 hot-respawning. The owner snapshot/UI shows inbound handoffs, notice handoffs,
 failures and stopped state; no raw CLI errors or message bodies are exposed.
-This connects only Core handoff from already admitted hub state. Telegram account
-poll/send workers, account-secret configuration and owner resume remain separate
-unfinished work, so no channel is ready for activation.
+These workers connect Core handoff from already admitted hub state. The next
+section describes Telegram account loops. Owner resume, browser account setup and
+recovery/retirement workflows remain unfinished; no live channel is approved for
+activation.
+
+
+### Operator-file Telegram account loops (development; not activated)
+
+The private hub config optionally contains `telegram_accounts` (default `[]`,
+at most 20). Each entry is a trusted operator setting, not browser input:
+
+```json
+{"account_id":"bot_team","bot_id":12345,"token_file":"/private/hub/secrets/team.json"}
+```
+
+The token file is strict JSON with one `token` string (the real BotFather token).
+Never paste a real token into shell argv/history, tickets or the repository.
+Create it with a private editor/secret provisioner: its directory must be owned
+0700 and the regular, single-link file owned 0600, outside VCS and without symlink
+ancestors. The same no-follow bounded reader used for hub configuration applies.
+Unknown account fields, duplicate account or bot IDs, alternate API origins,
+wrong token format/bot-ID prefix and unsafe files fail startup with one fixed
+configuration error. Tokens are only in these private files/process memory, not
+SQLite, snapshots, Core Messages, responses, logs or browser storage. Both hub
+state and token/config files require protected backups, dedicated OS user or
+container, encrypted disks/backups where appropriate; same-UID Agents can read
+0600 files, so that mode is **not** Agent isolation.
+
+Configuring an account is an explicit operator action that can start real
+getMe/getUpdates requests; **do not configure a live account before release
+review and legacy-poller drain approval**. There is no real-account test or
+migration permission in this change. A file is read at startup only; file changes
+or deletion do not revoke the in-memory token. Revoke compromised credentials at
+Telegram, then have the authorized releaser update the private file and restart
+the versioned App. No live file reload or hidden token-recovery path exists.
+Changing tokens for the same bot is supported; after successful getMe, the App
+persists account ID → bot ID, capped at 20. Changing a known account to another
+bot fails closed before polling/sending, even if its new token verifies. Use a
+new account ID and reviewed drain/new bindings; pin retirement is not implemented.
+
+Each account has independent owned poll and send threads. First, getMe must verify the configured bot identity; that check expires after
+five minutes and requests wait for a fresh check before resuming. Both directions
+are gated by that bounded identity check. Account status exposes only account/bot
+IDs, fixed phase codes and counters; getMe does not verify Policy isolation,
+recipient permission, or message delivery. The only production origin remains
+https://api.telegram.org; redirects and environment proxies stay disabled, with
+3-second connect/10-second total and 1-MiB response caps. No URL is accepted from
+configuration, messages, API parameters or webhook payloads.
+
+Polling uses only the durable offset and existing strict normalizer/allowlist
+admission. Queue/offset writes happen before the next offset is sent. A paused or
+full target causes visible `backpressure` and preserves its offset, so it can
+block that **account**, not other accounts. Telegram retains updates for a limited
+period; this is not indefinite external-mailbox durability. No raw response body
+is reported. Sending prepares one leased chunk per endpoint per round outside
+network waits, checks active/current revision/budget again before HTTP, and
+commits accepted results only under the generation/private lease. One slow target
+can delay others on that account by the 10-second request bound; other accounts,
+Core workers, state and settings remain independent. Telegram sendMessage has no
+idempotency key: losing the accepted result before commit can duplicate an
+external message, as documented for the chunk state machine.
+
+429 retry_after (1..86400 seconds) gates both account loops. 401/403 clear the
+client identity check and require a new getMe; credential failures show a fixed
+phase and back off. 409 is sticky `duplicate_poller`, with no automatic retries
+until an operator resolves the competing poller and an authorized restart.
+Permanent chunk rejection parks through the existing bounded retry policy;
+network errors reverify/back off. Wrong bot/pin mismatch, poisoned account state
+or worker panic fail the account closed; other accounts continue. SIGINT requests
+stop of all owned worker groups before joins and checks between operations; an
+already-started HTTP/CLI request can still be accepted and recorded. No worker
+restarts another App/Agent or changes a remote machine.
+
+The page now separates the pause control and its own confirmation from Telegram
+target fields, and embedded cards deep-link to that endpoint's dedicated pause
+control. Browser token/account editing, owner resume, recovery/archive controls,
+permanent inbound Core-handoff failure parking, CLI periodic integrity checks,
+header-read timeout, dated dependency audit, Policy evidence and live acceptance
+remain unfinished. These limitations must be closed before migration/activation.
+
+
+Private store checks also run in the common admission/handoff budget gate, not
+only the maintenance timer. Unsafe directory/database/WAL metadata therefore
+refuses new Core or Telegram admission and subsequent sends immediately on that
+gate. Repairing storage remains an operator action; the App never chmods an unsafe
+live file into apparent safety. Already in-flight network operations cannot be
+recalled, and no file mode can undo data that another OS process already read.

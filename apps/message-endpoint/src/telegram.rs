@@ -23,6 +23,8 @@ pub enum Error {
     Invalid,
     #[error("telegram_transport_unavailable")]
     Transport,
+    #[error("telegram_credentials_rejected")]
+    Credentials,
     #[error("telegram_transport_rejected")]
     Rejected,
     #[error("telegram_rate_limited")]
@@ -501,7 +503,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             .ok_or(Error::Conflict)?;
         let backoff = (5_i64 << (attempts - 1).min(6)).min(300);
         let (class, delay) = match error {
-            Error::Rejected => (1, 0),
+            Error::Rejected | Error::Credentials => (1, 0),
             Error::RateLimited(delay) => (0, backoff.max(i64::from((*delay).clamp(1, 86400)))),
             _ => (0, backoff),
         };

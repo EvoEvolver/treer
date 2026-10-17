@@ -34,6 +34,7 @@ try {
   if(await surface.getByRole('link',{name:'Continue with Treer'}).count())throw new Error('injected owner was sent to login');
   if(await surface.getByRole('button',{name:'Create paused binding'}).count())throw new Error('embedded/forward view exposed editing');
   if(await surface.getByRole('link',{name:'Open settings'}).getAttribute('href')!==config.url)throw new Error('wrong dedicated editing URL');
+  if(await surface.getByRole('link',{name:'Open this endpoint’s pause control'}).getAttribute('href')!==config.url+'#pause-ag_demo')throw new Error('missing endpoint-specific pause link');
   if(await surface.locator('img').count())throw new Error('metadata rendered HTML');
   const fits=await surface.locator('body').evaluate(el=>el.scrollWidth<=innerWidth);
   if(!fits)throw new Error(`horizontal overflow ${mode} ${width} ${color}`);
@@ -70,9 +71,11 @@ try {
  await card.getByLabel('Telegram account configuration ID (no token)',{exact:true}).fill('bot_fixture');
  await card.getByLabel('Chat ID',{exact:true}).fill('123');
  await card.getByLabel('Allowed human Telegram IDs (comma separated)',{exact:true}).fill('456');
- await card.getByRole('checkbox').check();await card.getByRole('button',{name:'Bind Telegram target'}).click();
+ await card.getByLabel('Confirm the exact target and allowed senders.',{exact:true}).check();await card.getByRole('button',{name:'Bind Telegram target'}).click();
  await card.getByText('2',{exact:true}).waitFor();
- await card.getByRole('checkbox').check();await card.getByRole('button',{name:'Pause endpoint',exact:true}).click();
+ // Safety pause is its own form: invalid unrelated target fields cannot block it.
+ await card.getByLabel('Chat ID',{exact:true}).fill('');
+ await card.getByLabel('Confirm pausing this endpoint at the displayed revision.',{exact:true}).check();await card.getByRole('button',{name:'Pause endpoint',exact:true}).click();
  await card.getByText('3',{exact:true}).waitFor();
  if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('editing form overflow at 390px');
  await edit.screenshot({path:join(screenshotPath,'owner-edit-390-light.png'),fullPage:true});

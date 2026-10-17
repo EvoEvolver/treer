@@ -46,6 +46,8 @@ pub struct Config {
     state_directory: PathBuf,
     #[serde(default = "listen")]
     listen: SocketAddr,
+    #[serde(default)]
+    telegram_accounts: Vec<crate::telegram_workers::AccountConfig>,
 }
 impl Config {
     pub fn load(
@@ -88,6 +90,8 @@ pub fn run(config: Config) -> Result<(), Error> {
     {
         return Err(Error::Configuration);
     }
+    let accounts = crate::telegram_workers::load(&config.telegram_accounts)
+        .map_err(|_| Error::Configuration)?;
     let core = Core::new(&config.cli, &config.hub_id).map_err(|_| Error::Configuration)?;
     let auth = OwnerAuth::new(
         &config.proxy_url,
@@ -110,6 +114,11 @@ pub fn run(config: Config) -> Result<(), Error> {
     let handoffs = Arc::new(Mutex::new(
         crate::handoffs::CoreHandoffs::start(hub.clone()).map_err(|_| Error::Runtime)?,
     ));
+    let telegram = Arc::new(Mutex::new(
+        crate::telegram_workers::TelegramWorkers::start(hub.clone(), accounts)
+            .map_err(|_| Error::Runtime)?,
+    ));
+    let snapshot_telegram = telegram.clone();
     let snapshot_handoffs = handoffs.clone();
     let snapshot_hub = hub.clone();
     let snapshot_workers = workers.clone();
@@ -133,6 +142,7 @@ pub fn run(config: Config) -> Result<(), Error> {
             workers: status,
             audit_full,
             emergency_pause_bindings,
+            telegram_accounts: snapshot_telegram.lock().map_err(|_| ())?.status(),
         })
     });
     let mutation = Arc::new(crate::configuration::core_executor(
@@ -171,8 +181,22 @@ pub fn run(config: Config) -> Result<(), Error> {
                     .router()
                     .into_make_service_with_connect_info::<SocketAddr>(),
             )
-            .with_graceful_shutdown(async {
-                let _ = tokio::signal::ctrl_c().await;
+            .with_graceful_shutdown({
+                let workers = workers.clone();
+                let handoffs = handoffs.clone();
+                let telegram = telegram.clone();
+                async move {
+                    let _ = tokio::signal::ctrl_c().await;
+                    if let Ok(w) = workers.lock() {
+                        w.request_stop();
+                    }
+                    if let Ok(w) = handoffs.lock() {
+                        w.request_stop();
+                    }
+                    if let Ok(w) = telegram.lock() {
+                        w.request_stop();
+                    }
+                }
             })
             .await
             .map_err(|_| Error::Runtime)
@@ -180,6 +204,9 @@ pub fn run(config: Config) -> Result<(), Error> {
     };
     let result = serve();
     // Stop only the threads owned by this process. No external signals/restarts.
+    if let Ok(mut telegram) = telegram.lock() {
+        telegram.stop();
+    }
     if let Ok(mut handoffs) = handoffs.lock() {
         handoffs.stop();
     }

@@ -148,8 +148,11 @@ impl CoreWorkers {
                 .and_then(|old| old.as_ref().map(|(_, at)| at.elapsed().as_secs())),
         }
     }
-    pub fn stop(&mut self) {
+    pub fn request_stop(&self) {
         self.shared.stopping.store(true, Ordering::Release);
+    }
+    pub fn stop(&mut self) {
+        self.request_stop();
         for join in self.joins.drain(..) {
             if join.join().is_err() {
                 increment(&self.shared.failures);

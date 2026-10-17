@@ -45,3 +45,6 @@ pub mod configuration;
 
 #[cfg(all(unix, feature = "hub"))]
 pub mod handoffs;
+
+#[cfg(all(unix, feature = "hub"))]
+pub mod telegram_workers;
