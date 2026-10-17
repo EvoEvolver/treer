@@ -100,3 +100,44 @@ fn backward_or_suspend_sized_jump_permanently_refuses_attempt() {
         assert!(deadline.check(201).is_err());
     }
 }
+
+#[test]
+fn child_with_later_window_cannot_complete_owner_after_reply_or_ack_expiry() {
+    use super::update_binding::{Binding, Exchange};
+    use std::time::{Duration, Instant};
+
+    // Synthetic mapping only, not the native clock adapter: both local windows
+    // feed their independently bounded deadlines into the existing frame model.
+    for expire_at_ack in [false, true] {
+        let original = Window::begin(100).unwrap();
+        let corrupt = Window::begin(200).unwrap();
+        let mut owner_window = corrupt.accept(200, Some(original.expiry)).unwrap();
+        let mut child_window = corrupt.accept(200, None).unwrap();
+        let epoch = Instant::now();
+        let at = |ms| epoch + Duration::from_millis(ms);
+        let binding = Binding {
+            attempt: [1; 16],
+            intent: [2; 32],
+            registration: [3; 32],
+        };
+        let mut owner = Exchange::new(binding, [4; 16], true, at(owner_window.expiry));
+        let mut child = Exchange::new(binding, [5; 16], false, at(child_window.expiry));
+        let hello = owner.start(at(200)).unwrap();
+        let reply = child.receive(&hello, at(200)).unwrap().unwrap();
+        let late_frame = if expire_at_ack {
+            let finish = owner.receive(&reply, at(200)).unwrap().unwrap();
+            child.receive(&finish, at(5_100)).unwrap().unwrap()
+        } else {
+            reply
+        };
+        assert!(child_window.check(5_100).is_ok());
+        assert!(owner_window.check(5_100).is_err());
+        assert!(owner.receive(&late_frame, at(5_100)).is_err());
+        assert!(!owner.complete());
+        // Even replay with an earlier sample cannot revive owner completion.
+        assert!(owner.receive(&late_frame, at(201)).is_err());
+        assert!(!(owner.complete() && child.complete()));
+    }
+    // Exchange completion is diagnostic only; these models expose no permit or
+    // authority constructor, including when the child alone has reached ACK.
+}

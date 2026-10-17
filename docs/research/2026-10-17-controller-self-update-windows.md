@@ -437,7 +437,12 @@ remaining budget. A corrupted but internally valid record can leave the child
 unexpired after the owner's original deadline. Every owner-side ACK/permit
 acceptance must remain bounded by that original deadline; the stricter side wins.
 Add an integration case where the owner is expired and the child is not: joint
-completion must fail and no authority may result. Consider an authenticated owner
+completion must fail and no authority may result. The pure cross-model test now
+feeds independent validated window ceilings into the frame model and checks both
+a late Reply and late ACK: the owner refuses at its original expiry even while
+the child's window remains valid, and replay cannot revive completion. This uses
+synthetic clock mapping; native transport integration still needs the same case.
+The models expose no authority constructor. Consider an authenticated owner
 expiry echo that lets the child further shorten its window; it cannot replace
 the owner's own checks or grant extra time. The first native clock-acquisition
 slice must check the sleep/hibernation assumption on hosted images where feasible
