@@ -689,12 +689,13 @@ with no named-socket, UID-only or message-PID fallback. This fixture does not
 implement the production channel, prove descriptor exclusivity against all
 forks/writers, or grant gate/bootstrap/installer authority.
 
-Child-created endpoint proposal (security3146; assessment, not an approved
-replacement for C1): the post-exec supervisor creates a fresh anonymous stream
+Child-created endpoint proposal (security3146, revised by security3156;
+design review required before implementation): the post-exec supervisor creates a fresh anonymous stream
 socketpair and transfers exactly one end to the owner using SCM_RIGHTS on the
 inherited bootstrap. The owner compares the received socket's OS peer to its
 actual owned Child, retained creation/image proof and expected executable. The
-bootstrap is single-use and closes after the bounded transfer. No named socket,
+descriptor transfer is single-use; the bootstrap remains open for owner-to-child
+traffic until the permit has been consumed. No named socket,
 message PID or UID-only fallback is allowed. A same-UID impostor holding the
 bootstrap and passing its own pair must fail the owned-child comparison.
 
@@ -704,7 +705,7 @@ does not solve both automatically:
 | Observer | Available OS evidence | Remaining obligation |
 | --- | --- | --- |
 | Owner receiving the child-created pair | Linux SO_PEERCRED captures the socketpair creator, hence the child if the transfer is genuine | Compare against an unreaped owned Child and retained pidfd, creation identity and expected image; reject impostor-created sockets |
-| Supervisor retaining the other end | Linux SO_PEERCRED also names the child, not the owner now holding the transferred end | Prove owner continuity separately through the parent-created bootstrap; do not call the existing owner-authentication wrapper on this new pair or accept a claimed owner PID |
+| Supervisor reading the parent-created bootstrap | Linux SO_PEERCRED names the parent creator | Compare to getppid, independently retained parent ProcessImage and registration owner fields; never authenticate the owner using the child-created pair |
 
 The [Linux Unix-socket contract](https://man7.org/linux/man-pages/man7/unix.7.html)
 supports the creation-time credential observation. It does not attest who
@@ -729,13 +730,38 @@ from a ready-message PID or silently fall back when pidfd creation fails. Check
 the retained handle for exit at each boundary, alongside live creation/image
 checks; a pidfd identifies a process lifetime, not its unchanged executable.
 
-Before implementation review, resolve how the child's parent-authenticated
-bootstrap proof binds the transferred endpoint and the fresh challenge to the
-same live owner after bootstrap closure. The current requirement that all
-ready/registration/permit traffic use one mutually authenticated connection is
-not satisfied merely by moving traffic to the child-created pair. Any change
-to that requirement needs explicit design review, not reuse of a gate token or
-an unverified ACK as endpoint ownership proof.
+The revised design replaces the earlier single mutually authenticated connection
+requirement with two retained channels, each used for protocol data only in the
+direction whose intended sender is its OS-attested creator. The parent-created
+bootstrap first receives the one SCM_RIGHTS transfer in the reverse direction;
+that transfer alone is untrusted and conveys no protocol or gate authority.
+After transfer, the supervisor shuts down that endpoint's unused write direction
+and retains its read direction. The owner retains its bootstrap write direction
+and closes the unused read direction. For the child-created pair, only the child
+writes and only the owner reads; close the unused directions and all duplicate
+ends. Do not close the bootstrap wholesale after transferring the descriptor.
+
+The child sends its fresh challenge, attempt, intent digest and independently
+observed child identity on the child-created channel. The owner returns that
+challenge and binding with the exact synced registration digest on the
+parent-created channel. Registration-ready and decision ACK travel only on the
+child-created channel; registration response and permit travel only on the
+parent-created channel. Reject messages on the wrong channel, as well as
+duplicates and out-of-order messages, without constructing or reopening a gate.
+The challenge binds the two retained channels to one transcript. It does not
+prove that one process exclusively holds both ends or defeat colluding holders
+of leaked descriptors; descriptor isolation and live identity checks remain
+mandatory. Neither a challenge echo nor an ACK replaces OS authentication.
+
+Darwin decision requested from the product owner: keep authority-bearing
+self-update unavailable with a fixed unsupported-attestation failure until a
+supported primitive is reviewed. This is the recommended conservative policy,
+not a decision already granted by security3156 or a whole-P1 acceptance. Do not
+silently make LOCAL_PEERPID advisory and authorize installers from descriptor
+exclusivity alone. Both platforms retain the same intended transcript; on Darwin
+the current evidence permits isolated non-authority tests only. The final
+unsupported error spelling and pre-mutation failure placement need a reviewed
+implementation and regression test before shipping.
 
 The transport review must require one SCM_RIGHTS descriptor with a fixed-size
 payload, absolute deadline and one transfer only. Reject missing/extra rights,
@@ -749,31 +775,34 @@ real macOS/Linux subprocesses. A trusted supervisor leaking an endpoint to its
 descendants remains a separate ownership violation; CLOEXEC does not prevent
 fork inheritance. No installer may be spawned during this bootstrap.
 
-Proposed handshake order, all over the same retained authenticated connection:
+Revised handshake order over the two directionally authenticated channels:
 
 1. The owner persists intent and spawns the verified Rust supervisor with birth
    lock inheritance. The supervisor restores descriptor CLOEXEC before any
    threads/forks, establishes its private session and authenticates its actual
-   OS parent and fixed bootstrap. It creates a fresh one-shot session challenge
+   OS parent and fixed bootstrap. It transfers one end of its freshly created
+   pair, closes the unused directions as specified above, and creates a fresh one-shot session challenge
    in memory while the execution gate remains closed. No Node child exists.
-2. A bounded ready message binds that fresh challenge to the attempt and exact
-   intent digest. The owner authenticates the connected peer against its owned
+2. A bounded ready message on the child-created channel binds that fresh
+   challenge to the attempt and exact intent digest. The owner authenticates
+   that channel's creator against its owned
    live Child and expected image, then exclusively writes/syncs/reads back the
    schema-2 child registration. A self-reported PID or ready message alone
    cannot replace those checks.
-3. A registration response binds the same challenge and the exact durable
+3. A registration response on the parent-created channel binds the same challenge and the exact durable
    registration digest. The supervisor independently verifies the record,
    including schema, receipt/intent, its own image/session and the OS-attested
    parent identity and owner image digest. The private fresh-session capability
    is consumed to construct its single arbitration gate. A storage read, even
    of valid schema-2 bytes, cannot construct that capability after restart.
-4. A registration-ready confirmation tells the owner only that the child has
+4. A registration-ready confirmation on the child-created channel tells the owner only that the child has
    completed this bootstrap. It is neither an execution permit nor a durable
    execution-decision ACK. The owner rechecks registration, actual child/image
-   and original ownership before its one-shot permit write and write-half-close.
-5. The supervisor authenticates/drains that same owner connection, validates
+   and original ownership before its one-shot permit write and write-half-close
+   on the parent-created channel.
+5. The supervisor authenticates/drains the retained parent-created channel, validates
    the complete binding and arbitrates once. A successful in-memory decision
-   must be durably synced/read back before a distinct bound decision ACK or
+   must be durably synced/read back before a distinct bound decision ACK on the child-created channel or
    installer dispatch. ACK durability and all-writers-gone/cancellation proofs
    remain separate prerequisites; this proposal implements neither.
 
@@ -797,6 +826,12 @@ while the gate is closed,
 birth ownership survives the spawn window, evidence is preserved, and no crash
 path constructs a second gate. This is in addition to, not a replacement for,
 the existing full-P1 death matrix and real isolated-upgrade acceptance.
+Include a same-UID impostor's bootstrap write, a challenge echoed on the wrong
+channel, premature bootstrap closure before permit, and a supervisor leaking an
+end through fork/exec. The fork case must exercise explicit end closure, not
+merely CLOEXEC, and demonstrate rejection/no authority when ownership cannot be
+established. Darwin tests must pin the closed unsupported-attestation outcome
+until the product decision and a supported primitive change that policy.
 
 Status intent policy (security2596): this is the updater's one-shot post-install
 status verification, not an intent requirement for ordinary `treer launcher
