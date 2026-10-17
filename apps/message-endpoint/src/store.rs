@@ -240,7 +240,7 @@ impl Store {
         available(&transaction, endpoint, generation)?;
         let first = transaction
             .query_row(
-                "SELECT id,recipient,body,lease_until FROM inbound
+                "SELECT id,recipient,body,lease_until,external_id FROM inbound
              WHERE endpoint=?1 AND generation=?2 AND pending=1 ORDER BY id LIMIT 1",
                 params![endpoint, generation],
                 |r| {
@@ -249,11 +249,12 @@ impl Store {
                         r.get::<_, String>(1)?,
                         r.get::<_, String>(2)?,
                         r.get::<_, Option<i64>>(3)?,
+                        r.get::<_, String>(4)?,
                     ))
                 },
             )
             .optional()?;
-        let Some((id, recipient, body, expiry)) = first else {
+        let Some((id, recipient, body, expiry, external_id)) = first else {
             return Ok(None);
         };
         if expiry.is_some_and(|expiry| expiry > now) {
@@ -268,7 +269,15 @@ impl Store {
             job_id: id,
             recipient,
             body,
-            idempotency_key: format!("endpoint-{endpoint}-{generation}-{id}"),
+            idempotency_key: format!(
+                "ep-in-{}",
+                super::protocol::digest_id(
+                    "inbound-delivery",
+                    endpoint,
+                    generation as u64,
+                    &external_id
+                )
+            ),
         }))
     }
 
@@ -488,6 +497,31 @@ mod tests {
         ));
         s.complete("ag_one", 1, id, &token, "msg").unwrap();
     }
+    #[test]
+    fn rebuilt_database_reused_row_ids_do_not_reuse_unrelated_core_keys() {
+        let mut original = fixture(Limits::default());
+        let token = "a".repeat(64);
+        let first_id = enqueue(&mut original, "ag_one", "external-original", "hello").unwrap();
+        let original_key = original
+            .lease("ag_one", 1, 100, &token)
+            .unwrap()
+            .unwrap()
+            .idempotency_key;
+        // Reconstruct the row after backup/rebuild, deliberately changing row order.
+        let mut restored = fixture(Limits::default());
+        let reused_id = enqueue(&mut restored, "ag_one", "external-unrelated", "other").unwrap();
+        assert_eq!(first_id, reused_id);
+        let unrelated = restored.lease("ag_one", 1, 100, &token).unwrap().unwrap();
+        assert_ne!(original_key, unrelated.idempotency_key);
+        restored
+            .complete("ag_one", 1, reused_id, &token, "msg_other")
+            .unwrap();
+        let replay_id = enqueue(&mut restored, "ag_one", "external-original", "hello").unwrap();
+        assert_ne!(first_id, replay_id);
+        let replay = restored.lease("ag_one", 1, 101, &token).unwrap().unwrap();
+        assert_eq!(original_key, replay.idempotency_key);
+    }
+
     #[test]
     fn recipient_is_binding_owned_not_external_text() {
         let mut s = fixture(Limits::default());

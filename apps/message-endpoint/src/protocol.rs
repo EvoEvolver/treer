@@ -103,7 +103,7 @@ fn digest(bytes: &[u8]) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect()
 }
-fn digest_id(label: &str, endpoint: &str, generation: u64, source: &str) -> String {
+pub(crate) fn digest_id(label: &str, endpoint: &str, generation: u64, source: &str) -> String {
     // Length-prefix IDs to avoid delimiter ambiguity.
     let mut hash = Sha256::new();
     for value in [label, endpoint, &generation.to_string(), source] {
@@ -114,6 +114,12 @@ fn digest_id(label: &str, endpoint: &str, generation: u64, source: &str) -> Stri
 }
 
 impl Envelope {
+    pub fn source_id(&self) -> &str {
+        match self {
+            Self::Outbound { delivery_id, .. } => delivery_id,
+            Self::Deliver { job_id, .. } => job_id,
+        }
+    }
     pub fn direction(&self) -> Direction {
         match self {
             Self::Outbound { .. } => Direction::Outbound,
@@ -164,13 +170,9 @@ impl Envelope {
 
     /// Splitting handles wrapper escaping even when original body already fills
     /// Core's 32KiB limit. Persist/retry the exact returned part bytes.
-    pub fn fragments(
-        &self,
-        endpoint: &str,
-        generation: u64,
-        source: &str,
-    ) -> Result<Vec<String>, Error> {
+    pub fn fragments(&self, endpoint: &str, generation: u64) -> Result<Vec<String>, Error> {
         self.validate()?;
+        let source = self.source_id();
         if !valid_id(endpoint) || !valid_id(source) || generation == 0 {
             return Err(Error::Invalid);
         }
@@ -251,6 +253,7 @@ fn hex_digest(text: &str) -> bool {
 /// One bounded transfer assembly. Caller also caps number/total bytes of
 /// simultaneous assemblies and persists hub parts before acknowledging Core.
 pub struct Assembly {
+    endpoint: String,
     transfer: String,
     hash: String,
     generation: u64,
@@ -260,16 +263,29 @@ pub struct Assembly {
     parts: BTreeMap<u16, Vec<u8>>,
 }
 impl Assembly {
-    pub fn new(first: &Fragment) -> Self {
-        Self {
+    pub fn new(
+        first: &Fragment,
+        endpoint: &str,
+        generation: u64,
+        direction: Direction,
+    ) -> Result<Self, Error> {
+        if !valid_id(endpoint)
+            || generation == 0
+            || first.generation != generation
+            || first.direction != direction
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(Self {
+            endpoint: endpoint.into(),
             transfer: first.transfer_id.clone(),
             hash: first.payload_digest.clone(),
-            generation: first.generation,
-            direction: first.direction,
+            generation,
+            direction,
             count: first.parts,
             bytes: 0,
             parts: BTreeMap::new(),
-        }
+        })
     }
     pub fn push(&mut self, frame: &Fragment) -> Result<Option<Envelope>, Error> {
         // Validate even frames constructed directly rather than through parse.
@@ -307,7 +323,13 @@ impl Assembly {
         }
         let envelope: Envelope = serde_json::from_slice(&complete).map_err(|_| Error::Invalid)?;
         envelope.validate()?;
-        if envelope.direction() != self.direction {
+        let label = if self.direction == Direction::Outbound {
+            "outbound"
+        } else {
+            "inbound"
+        };
+        let expected = digest_id(label, &self.endpoint, self.generation, envelope.source_id());
+        if envelope.direction() != self.direction || expected != self.transfer {
             return Err(Error::Conflict);
         }
         Ok(Some(envelope))

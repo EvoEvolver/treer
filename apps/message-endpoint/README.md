@@ -208,3 +208,13 @@ Cargo.lock pinned; review/audit dependencies and build scripts. No root Core gat
 The separate [App-runtime smoke procedure](tests/RUNTIME-SMOKE.md) is a disposable
 Python test helper for verifying the existing App-kind Core messaging path before
 the Rust hub exists. It is not a production entry point or third product program.
+
+Security follow-ups3504: assemblies pin the local endpoint/generation/direction
+and recompute transfer identity from the reassembled source ID. Inbound Core
+idempotency keys derive from endpoint/generation/external ID, never SQLite row IDs;
+a rebuild can reorder rows without changing the key. Relay startup must report
+its own binary hash to hub status (diagnostic only, never trust/authorization).
+Incomplete-transfer expiry/cleanup and capacity accounting, completed tombstone
+pruning, durable poison-message failure+ack, production no-follow/effective-UID
+storage opener and actual relay startup reporting remain P2 work. None may be
+inferred as complete from the current in-memory queue tests.

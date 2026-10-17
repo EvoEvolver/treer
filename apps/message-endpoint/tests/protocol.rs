@@ -15,12 +15,12 @@ fn outbound(body: String) -> Envelope {
 fn maximal_escaped_body_fragments_fit_core_and_reassemble_out_of_order() {
     let original = "\u{0001}".repeat(MAX_BODY);
     let parts = outbound(original.clone())
-        .fragments("ag_endpoint", 1, "del_one")
+        .fragments("ag_endpoint", 1)
         .unwrap();
     assert!(parts.len() > 1);
     assert!(parts.iter().all(|text| text.len() <= MAX_BODY));
     let first = Fragment::parse(&parts[0]).unwrap();
-    let mut assembly = Assembly::new(&first);
+    let mut assembly = Assembly::new(&first, "ag_endpoint", 1, Direction::Outbound).unwrap();
     let mut complete = None;
     for part in parts.iter().rev() {
         complete = assembly.push(&Fragment::parse(part).unwrap()).unwrap();
@@ -32,40 +32,34 @@ fn maximal_escaped_body_fragments_fit_core_and_reassemble_out_of_order() {
 }
 #[test]
 fn fragment_retry_same_key_conflicting_payload_rejected() {
-    let parts = outbound("hello".into())
-        .fragments("ag_one", 1, "del_one")
-        .unwrap();
+    let parts = outbound("hello".into()).fragments("ag_one", 1).unwrap();
     let first = Fragment::parse(&parts[0]).unwrap();
     let key = first.idempotency_key();
     assert_eq!(
         parts,
-        outbound("hello".into())
-            .fragments("ag_one", 1, "del_one")
-            .unwrap()
+        outbound("hello".into()).fragments("ag_one", 1).unwrap()
     );
-    let mut assembly = Assembly::new(&first);
+    let mut assembly = Assembly::new(&first, "ag_one", 1, Direction::Outbound).unwrap();
     assert!(assembly.push(&first).unwrap().is_some());
     assert!(assembly.push(&first).unwrap().is_some());
-    let changed = outbound("changed".into())
-        .fragments("ag_one", 1, "del_one")
-        .unwrap();
+    let changed = outbound("changed".into()).fragments("ag_one", 1).unwrap();
     let changed = Fragment::parse(&changed[0]).unwrap();
     assert_eq!(changed.idempotency_key(), key);
     assert!(assembly.push(&changed).is_err());
 }
 #[test]
 fn endpoint_generation_direction_and_source_isolate_transfer_keys() {
-    let first = outbound("hello".into())
-        .fragments("ag_one", 1, "d1")
-        .unwrap();
+    let first = outbound("hello".into()).fragments("ag_one", 1).unwrap();
     for (id, generation, source) in [
-        ("ag_two", 1, "d1"),
-        ("ag_one", 2, "d1"),
+        ("ag_two", 1, "del_one"),
+        ("ag_one", 2, "del_one"),
         ("ag_one", 1, "d2"),
     ] {
-        let other = outbound("hello".into())
-            .fragments(id, generation, source)
-            .unwrap();
+        let mut envelope = outbound("hello".into());
+        if let Envelope::Outbound { delivery_id, .. } = &mut envelope {
+            *delivery_id = source.into();
+        }
+        let other = envelope.fragments(id, generation).unwrap();
         assert_ne!(
             Fragment::parse(&first[0]).unwrap().idempotency_key(),
             Fragment::parse(&other[0]).unwrap().idempotency_key()
@@ -118,9 +112,7 @@ fn local_recipient_pin_is_independent_of_hub_envelope() {
 }
 #[test]
 fn strict_fragment_json_size_base64_and_unknown_fields() {
-    let parts = outbound("hello".into())
-        .fragments("ag_one", 1, "d1")
-        .unwrap();
+    let parts = outbound("hello".into()).fragments("ag_one", 1).unwrap();
     let text = &parts[0];
     let duplicate = text.replacen('{', "{\"part\":0,", 1);
     assert!(Fragment::parse(&duplicate).is_err());
@@ -134,26 +126,60 @@ fn strict_fragment_json_size_base64_and_unknown_fields() {
 }
 #[test]
 fn fragment_corruption_and_direction_mismatch_rejected() {
-    let parts = outbound("hello".into())
-        .fragments("ag_one", 1, "d1")
-        .unwrap();
+    let parts = outbound("hello".into()).fragments("ag_one", 1).unwrap();
     let mut frame = Fragment::parse(&parts[0]).unwrap();
     frame.payload_digest = "0".repeat(64);
-    assert!(Assembly::new(&frame).push(&frame).is_err());
+    assert!(Assembly::new(&frame, "ag_one", 1, frame.direction)
+        .unwrap()
+        .push(&frame)
+        .is_err());
     let mut frame = Fragment::parse(&parts[0]).unwrap();
     frame.direction = Direction::Inbound;
-    assert!(Assembly::new(&frame).push(&frame).is_err());
+    assert!(Assembly::new(&frame, "ag_one", 1, frame.direction)
+        .unwrap()
+        .push(&frame)
+        .is_err());
 }
 #[test]
 fn oversized_body_and_contexts_fail_before_send() {
     assert!(outbound("a".repeat(MAX_BODY + 1))
-        .fragments("ag_one", 1, "d")
+        .fragments("ag_one", 1)
         .is_err());
-    assert!(outbound("   ".into()).fragments("ag_one", 1, "d").is_err());
-    assert!(outbound("hi".into()).fragments("ag_one", 0, "d").is_err());
+    assert!(outbound("   ".into()).fragments("ag_one", 1).is_err());
+    assert!(outbound("hi".into()).fragments("ag_one", 0).is_err());
     let mut envelope = outbound("hi".into());
     if let Envelope::Outbound { context_ids, .. } = &mut envelope {
         *context_ids = vec!["ctx".into(); 33];
     }
-    assert!(envelope.fragments("ag_one", 1, "d").is_err());
+    assert!(envelope.fragments("ag_one", 1).is_err());
+}
+
+#[test]
+fn receiver_recomputes_transfer_identity_and_checks_local_pins() {
+    let parts = outbound("hello".into()).fragments("ag_one", 1).unwrap();
+    let mut first = Fragment::parse(&parts[0]).unwrap();
+    assert!(Assembly::new(&first, "ag_one", 2, Direction::Outbound).is_err());
+    assert!(Assembly::new(&first, "ag_one", 1, Direction::Inbound).is_err());
+    let mut wrong_endpoint = Assembly::new(&first, "ag_other", 1, Direction::Outbound).unwrap();
+    assert!(wrong_endpoint.push(&first).is_err());
+    first.transfer_id = "0".repeat(64);
+    assert!(Assembly::new(&first, "ag_one", 1, Direction::Outbound)
+        .unwrap()
+        .push(&first)
+        .is_err());
+}
+
+#[test]
+fn internally_tagged_envelope_rejects_duplicate_missing_and_unknown_fields() {
+    let good = serde_json::to_string(&outbound("hello".into())).unwrap();
+    assert!(serde_json::from_str::<Envelope>(&good).is_ok());
+    for bad in [
+        good.replacen('{', "{\"kind\":\"outbound\",", 1),
+        good.replace("\"kind\":\"outbound\",", ""),
+        good.replace("\"kind\":\"outbound\"", "\"kind\":\"execute\""),
+        good.replacen('{', "{\"command\":\"do not execute\",", 1),
+        good.replacen('{', "{\"body\":\"duplicate\",", 1),
+    ] {
+        assert!(serde_json::from_str::<Envelope>(&bad).is_err());
+    }
 }
