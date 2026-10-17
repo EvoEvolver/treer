@@ -363,6 +363,30 @@ strict completion; a same-bytes inode replacement must fail. This OS dependency
 does not acquire a release-artifact digest pin merely by residing at a fixed
 path. Preserve the separate Controller/CLI receipt-digest checks.
 
+The Unix platform `retained_executable::RetainedExecutable` now provides the
+underlying OS-dependency identity mechanism, not executor wiring. Its public
+entry opens a physical absolute path from `/` using handle-relative no-follow,
+close-on-exec traversal, checking every directory plus the regular executable
+file for root/current-account ownership and no group/other write permissions.
+Privileged file mode bits and non-executable files are rejected. It retains all
+directory/file descriptors; fresh traversal must match every device/inode as
+well as recheck current permissions/types. This detects a replaced ancestor
+even when a hard link preserves the executable inode. It never canonicalizes a
+new target during revalidation, changes permissions or executes a process.
+No content digest is checked: in-place writes by a trusted owner are outside
+this identity-only guarantee. Source-only/package/network acceptance, Node22
+validation, actual spawn/completion wiring and durable child lifecycle remain
+pending, so this helper does not authorize installation.
+
+Tests exercise the same walker under a private fixture-root handle, avoiding
+system-directory writes and a real Node dependency; only the private test seam
+can choose that root, while the public entry always starts at `/`. They cover
+same-bytes replacement, ancestor replacement with the original file inode,
+unsafe modes on the root/ancestor/file, file/ancestor symlinks and non-regular
+files (Unix sockets on Mac/Linux and a FIFO on Linux), with fixed diagnostics.
+The owner predicate also explicitly covers root/current/foreign IDs; no real
+chown or installed Node was exercised. This is not process-execution acceptance.
+
 Static package-manager audit: the Rust launcher uses `install.mjs
 --controller-request`, which dispatches directly to `controller-install.mjs`,
 not the legacy git/npm installer `main()`. Its fixed self-update argv omits

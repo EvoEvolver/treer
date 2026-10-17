@@ -17,6 +17,8 @@ pub mod machine_file;
 pub mod private_directory;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 pub mod process_image;
+#[cfg(unix)]
+pub mod retained_executable;
 pub use environment::{
     clean_process_environment_before_threads, inherited_environment, inherited_variable_allowed,
     machine_exec_environment, machine_exec_variable_allowed,
