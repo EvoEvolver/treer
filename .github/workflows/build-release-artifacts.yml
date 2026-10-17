@@ -323,6 +323,8 @@ jobs:
         with:
           name: single-container-input
           path: .single-container-input/
+          # The directory name starts with a dot, which upload-artifact treats as hidden.
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 14
 
