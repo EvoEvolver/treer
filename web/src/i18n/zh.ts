@@ -364,6 +364,7 @@ export const zh: Messages = {
   "resizer.resize_tree_sidebar": "调整树侧栏宽度",
   "resizer.expand_tree_sidebar": "展开树侧栏",
   "resizer.collapse_tree_sidebar": "收起树侧栏",
+  "resizer.drag_hint": "拖动调整宽度 · {shortcut} 隐藏侧边栏",
   "traffic.range_6h": "最近 6 小时",
   "traffic.range_24h": "最近 24 小时",
   "traffic.range_7d": "最近 7 天",
@@ -768,7 +769,6 @@ export const zh: Messages = {
   "treemap.open_folder": "打开文件夹",
   "treemap.this_folder_is_empty": "此文件夹为空",
   "treemap.compact_tiles_folder_previews_adapt": "紧凑方块 · 文件夹预览会随空间自适应",
-  "tree.run_generation": "第 {generation} 次运行",
   "treemap.open_agent": "打开 {description}",
 
   "machine.unknown": "未知",

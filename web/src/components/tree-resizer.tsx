@@ -1,5 +1,7 @@
 import { useEffect, useRef, useState, type CSSProperties, type PointerEvent, type KeyboardEvent } from "react"
 import { t } from "@/i18n"
+import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
+import { isSidebarShortcut, sidebarShortcutLabel } from "@/lib/shortcut"
 
 const DEFAULT_WIDTH = 272
 const MIN_WIDTH = 240
@@ -41,6 +43,22 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
     ;(collapsed ? expandRef : collapseRef).current?.focus()
   }, [collapsed])
 
+  // Cmd/Ctrl+B toggles the sidebar like the collapse button (desktop layout only). Focus is only moved when it was inside the
+  // sidebar (or nowhere), so the shortcut never steals focus from the page or a terminal.
+  const toggleRef = useRef<(keepFocus: boolean) => void>(() => {})
+  useEffect(() => {
+    function onKey(event: globalThis.KeyboardEvent) {
+      const aside = document.getElementById("tree-sidebar")
+      // No sidebar in the layout (phones, focus mode: display none) means nothing to toggle.
+      if (window.innerWidth < 768 || !aside || aside.getClientRects().length === 0 || !isSidebarShortcut(event)) return
+      event.preventDefault()
+      const active = document.activeElement
+      toggleRef.current(Boolean(active && active !== document.body && !aside.contains(active)))
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [])
+
   function finish() {
     if (!drag.current) return
     drag.current = null
@@ -59,16 +77,19 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
     setPreference(next)
     try { if (key) window.localStorage.setItem(key, String(next)) } catch { /* Keep in-memory resizing. */ }
   }
+  // Takes no event argument on purpose: the buttons call toggle() from onClick.
+  function toggleWith(keepFocusInPlace: boolean) {
+    finish()
+    restoreFocus.current = !keepFocusInPlace
+    const next = !collapsed
+    setCollapsed(next)
+    try { if (collapsedKey) window.localStorage.setItem(collapsedKey, String(next)) } catch { /* Keep in-memory toggling. */ }
+    finishRef.current()
+  }
+  toggleRef.current = toggleWith
   return {
     width, max, dragging, collapsed, collapseRef, expandRef,
-    toggle() {
-      finish()
-      restoreFocus.current = true
-      const next = !collapsed
-      setCollapsed(next)
-      try { if (collapsedKey) window.localStorage.setItem(collapsedKey, String(next)) } catch { /* Keep in-memory toggling. */ }
-      finishRef.current()
-    },
+    toggle: () => toggleWith(false),
     style: { "--tree-width": collapsed ? "0px" : `${width}px`, "--tree-divider": collapsed ? "0px" : "1px" } as CSSProperties,
     separator: {
       role: "separator", tabIndex: 0, "aria-label": t("resizer.resize_tree_sidebar"), "aria-orientation": "vertical" as const,
@@ -102,7 +123,7 @@ export function useTreeWidth(userId: string | undefined, onFinish: () => void) {
 // One visible 1px line; the wider invisible zone around it is the drag/keyboard handle.
 export function TreeResizer({ settings }: { settings: ReturnType<typeof useTreeWidth> }) {
   return <div className="relative hidden min-h-0 bg-border md:block">
-    {!settings.collapsed && <div {...settings.separator} className="absolute inset-y-0 left-1/2 z-20 w-6 -translate-x-1/2 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 hover:before:w-0.5 hover:before:bg-primary/60 focus-visible:before:w-0.5 focus-visible:before:bg-ring" />}
+    {!settings.collapsed && <Tooltip open={settings.dragging ? false : undefined}><TooltipTrigger asChild><div {...settings.separator} className="absolute inset-y-0 left-1/2 z-20 w-6 -translate-x-1/2 touch-none cursor-col-resize outline-none before:absolute before:inset-y-0 before:left-1/2 before:w-px before:-translate-x-1/2 hover:before:w-0.5 hover:before:bg-primary/60 focus-visible:before:w-0.5 focus-visible:before:bg-ring" /></TooltipTrigger><TooltipContent side="right" className="pointer-events-none">{t("resizer.drag_hint", { shortcut: sidebarShortcutLabel() })}</TooltipContent></Tooltip>}
     {settings.dragging && <div aria-hidden="true" className="fixed inset-0 z-[200] cursor-col-resize touch-none" />}
   </div>
 }
