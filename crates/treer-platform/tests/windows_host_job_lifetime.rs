@@ -76,10 +76,11 @@ impl Child {
         )));
         // Fixture-only inputs; production launch must have its own reviewed argv.
         let mut env = Vec::new();
+        // Windows environment blocks must be sorted by case-insensitive key.
         for (key, value) in [
             ("TREER_LIFETIME_DIR", dir.display().to_string()),
-            ("TREER_LIFETIME_ROLE", role.to_owned()),
             ("TREER_LIFETIME_OBSERVER", observer().to_string()),
+            ("TREER_LIFETIME_ROLE", role.to_owned()),
         ] {
             env.extend(format!("{key}={value}").encode_utf16());
             env.push(0);
