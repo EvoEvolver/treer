@@ -1796,6 +1796,9 @@ impl ControllerRuntime {
             .collect();
         if self.inner.provider_cli.capability_available() {
             capabilities.push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL.to_string());
+            // v2 (#134): installations are observed and consent-gated.
+            capabilities
+                .push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2.to_string());
         }
         capabilities
     }

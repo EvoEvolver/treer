@@ -269,6 +269,8 @@ impl AppState {
                             required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER
                                 || required
                                     == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
+                                || required
+                                    == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2
                                 || !capabilities.contains(required)
                         })
                 })
@@ -299,7 +301,9 @@ impl AppState {
             let required = pending.required_capability.unwrap_or("unknown");
             let error = if required == treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER {
                 ProtocolError::new("machine_transfer_stale", "Controller connection changed; transfer commands are not replayed, inspect the destination before retrying")
-            } else if required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL {
+            } else if required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL
+                || required == treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2
+            {
                 // An installation is never replayed to a replacement Controller:
                 // its outcome is ambiguous and the operation record says so.
                 ProtocolError::new(

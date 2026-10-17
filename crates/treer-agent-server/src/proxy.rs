@@ -1030,10 +1030,11 @@ impl ProxyClient {
                 recipe,
                 table_hash,
                 argv_hash,
+                consent,
             } => self
                 .runtime
                 .provider_cli()
-                .install(&operation_id, &recipe, &table_hash, &argv_hash)
+                .install(&operation_id, &recipe, &table_hash, &argv_hash, &consent)
                 .map(|response| CommandResult::success(command_id.clone(), response))
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::ProviderCliOperation { operation_id } => self

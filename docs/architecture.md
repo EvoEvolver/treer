@@ -602,7 +602,10 @@ Provider CLI installation (#123 part 2) is a human-session feature under
 `POST prepare`, `POST install`, `POST check`, `GET operations/{id}`), gated by
 current workspace membership, Policy `machine.exec` on the machine and the
 `machine.provider-cli-install.v1` capability that both the Proxy health document
-and a Controller advertise (old peers fail with 501). The recipe table is
+and a Controller advertise (old peers fail with 501). `prepare` and `install`
+additionally require `machine.provider-cli-install.v2` (#134): a Controller
+that installs without first observing the prefix is refused with 409
+`provider_cli_controller_outdated`, never served by the unobserved flow. The recipe table is
 release data (`launchers/agent/provider-recipes.json`, schema
 `treer.provider-recipes/v1`) embedded by `treer-protocol` and validated at
 Controller start: typed `npm-global` installs with exact version, SHA-512
@@ -612,19 +615,40 @@ any violation withholds the capability. The Controller owns one expansion
 function that produces the plan shown at `recipes`/`prepare` and executed on
 `install`: `npm pack` into a private job directory, SHA-512 verification of the
 single tarball, `npm install --global <local tarball>`, `npm prefix --global`,
-then the probe from that prefix's `bin` (never PATH). The Proxy binds the hash
-of the displayed plan into the 120-second single-use confirmation token (hashed
-at rest, bound to workspace, machine, user, session, recipe triple, table hash
-and Controller build); `install` refuses a busy machine or an old/offline
-Controller before consuming the token, then consumes it and inserts the single
-active operation per machine (PostgreSQL partial unique index) in one
-transaction before dispatching exactly once. Provider CLI commands are never
+then the probe from that prefix's `bin` (never PATH). Before minting a token,
+`prepare` runs the Controller's observation (`ProviderCliObservation`, the
+same procedure as `check`): `npm prefix --global` under the private job
+environment, an `lstat` of `<prefix>/bin/<binary>` and, only when a regular
+file inside the prefix is there, the recipe's version probe. The state is
+decided from evidence (`absent`, `installed` with a strict normalized semver,
+or `unknown` with a named reason), never from an error, and maps to exactly
+one action: `install`, `replace` (with a `version_relation` of `upgrade`,
+`downgrade`, `incomparable` or `unknown`) or `noop` (already at the pinned
+version: no token, no operation, nothing counted). An unresolvable prefix is
+409 `provider_cli_state_unobservable`. The Proxy binds the hash of the
+displayed plan, the `observation_hash`
+(`treer.provider-cli-observation/v1` over recipe hash, target version, state,
+current version, executable and presence), the action and the relation into
+the 120-second single-use confirmation token (hashed at rest, bound to
+workspace, machine, user, session, recipe triple, table hash and Controller
+build); `install` refuses a busy machine or an old/offline Controller before
+consuming the token, requires `acknowledged_relation` equal to the bound
+relation for `downgrade`, `incomparable` and `unknown` (400 otherwise, token
+left usable), then consumes it and inserts the single active operation per
+machine (PostgreSQL partial unique index) in one transaction before
+dispatching exactly once with the consent. The Controller re-observes before
+any step and again immediately before the install step and fails the
+operation as `provider_cli_state_changed` (reporting the path-free
+`observed_before` summary) on any difference, including the action having
+become `noop`. Provider CLI commands are never
 replayed to a replacement Controller; a lost dispatch, a silent Controller past
 a ten-minute grace or a missing Controller record ends as `unknown`, which only
 the machine's own later report may resolve. Output lives only in the
 Controller's private store (24 hours, 64 results, refusal when full); the Proxy
-keeps scope, status, recipe hashes and argv hash, and audit rows carry no
-token, output or path. See [security](security.md#provider-cli-installation).
+keeps scope, status, recipe hashes, argv hash, action, relation, observation
+hash and the observed state/version, and audit rows carry no token, output or
+path (the observed executable path reaches only the creator's `prepare` and
+`check` responses). See [security](security.md#provider-cli-installation).
 
 New human Agent creations also atomically record their original human creator,
 workspace and machine in `agent_creation_reservations`; legacy and non-human
