@@ -207,6 +207,15 @@ Offline focused checks: `python3 apps/message-endpoint/tests/run.py` (stripped
 Treer/harness environment, private HOME/temp, private worktree target). Independent
 Cargo.lock pinned; review/audit dependencies and build scripts. No root Core gate.
 
+The Unix CLI adapter invokes only fixed send/receive/ack operations using this
+process's own injected identity. Sends use stdin envelopes for bodies and external
+metadata; contexts are separately validated CLI options. It caps combined child
+output at 1 MiB, uses nonblocking stdin/stdout/stderr and a 15-second deadline,
+and kills/reaps only its own exact child on failure. Responses must identify the
+expected receiver/sender runtime. Errors are fixed codes without raw output.
+Fake CLI tests validate each operation against the repository's real clap snapshot.
+This adapter is not yet a running relay or a hub transport implementation.
+
 The separate [App-runtime smoke procedure](tests/RUNTIME-SMOKE.md) is a disposable
 Python test helper for verifying the existing App-kind Core messaging path before
 the Rust hub exists. It is not a production entry point or third product program.
