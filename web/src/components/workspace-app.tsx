@@ -1,3 +1,4 @@
+import { useWorkspacePins } from "@/components/use-workspace-pins"
 import { agentCreationFailure, type AgentCreationFailure } from "@/lib/agent-creation-failure"
 import { WorkloadSurface } from "@/components/workload-surface"
 import { appOwnUrl } from "@/lib/app-url"
@@ -225,6 +226,7 @@ function WorkspaceAppContent() {
     setSelectedAgentId, setSelectedMachineId, syncWorkspaces, showError,
   })
 
+  const pins = useWorkspacePins(user?.user_id ?? null, workspaceId, preview)
   const workloads = useMemo(() => workspaceWorkloads(snapshot?.agents ?? [], apps), [snapshot?.agents, apps])
   const tabs = useWorkspaceTabs(user?.user_id, workspaceId, isMobile, workloads.map((agent) => agent.agent_id), Boolean(snapshot) && !appsLoading, preview)
   // Deep link: the /workloads/:id present when a workspace first becomes ready selects that workload; an unknown
@@ -1055,7 +1057,7 @@ function WorkspaceAppContent() {
           <span data-tour="create-workspace"><IconButton label={workspace ? t("app.workspace_settings") : t("org.create_workspace")} disabled={!organizationId} className={cn("max-md:size-11", mainView === "workspace" && "bg-accent")} onClick={openWorkspaceSettings}>{workspace ? <MoreHorizontal /> : <Plus />}</IconButton></span>
         </div>
         <button type="button" aria-label={t("app.workspace_overview")} onClick={showOverview} className={cn("mx-3 mb-2 flex min-h-10 items-center gap-2 rounded-md px-2 text-left text-xs outline-none hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring", mainView === "overview" && "bg-accent")}><LayoutDashboard aria-hidden="true" className="size-3.5" />{t("app.overview")}</button>
-        <WorkloadTree key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
+        <WorkloadTree pins={pins} key={workspaceId} workspaceId={workspaceId} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} selectedId={selectedAgentId} onOpen={showAgentTerminal} workloadHref={workloadHref} onOpenInNewTab={openInNewTab} onSettings={openAppSettings} onRename={(agent) => openRename({ kind: "agent", id: agent.agent_id, name: agent.name })} onDelete={(agent) => setDeleteTarget({ kind: "agent", id: agent.agent_id, name: agent.name })} onNew={openCreateAgentOrMachineSetup} placementRevision={placementRevision} onTreeChange={setWorkloadTree} preview={preview} />
 
         <UserMenu user={user} role={roleLabel(currentRole)} preview={preview} collapseRef={treeWidth.collapseRef} onCollapse={treeWidth.toggle} onSettings={openSettings} onTour={replayFirstRunTour} onLogout={logout} />
       </aside>
@@ -1073,7 +1075,7 @@ function WorkspaceAppContent() {
         </header>}
         <div className={cn("relative min-h-0 flex-1", mainView !== "overview" && mainView !== "terminal" && "hidden")}>
           <div id="workspace-panel-overview" role="tabpanel" aria-labelledby={isMobile ? undefined : "workspace-tab-overview"} aria-label={isMobile ? t("app.overview") : undefined} hidden={mainView !== "overview"} className="absolute inset-0 overflow-auto">
-            <WorkspaceOverview key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} workloadHref={workloadHref} onOpen={showAgentTerminal} onNewAgent={() => openCreateAgentOrMachineSetup()} onWorkspaceSettings={openWorkspaceSettings} />
+            <WorkspaceOverview pins={pins} members={members} key={workspaceId} workspace={workspace} agents={snapshot?.agents ?? []} apps={apps} machines={snapshot?.servers ?? []} tree={workloadTree} loading={Boolean(workspaceId && !snapshot)} workloadHref={workloadHref} onOpen={showAgentTerminal} onNewAgent={() => openCreateAgentOrMachineSetup()} onWorkspaceSettings={openWorkspaceSettings} />
           </div>
           {workspaceId && tabs.tabs.map((tab) => {
             const label = tabLabels.get(tab.id)
