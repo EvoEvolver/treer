@@ -85,8 +85,9 @@ an ambient-environment value. The report also includes this helper's own SHA256
 and size. Parent Job member enumeration is bounded to 1024 entries; an incomplete
 query fails closed and no other process IDs are output. A failed parent limit
 query has the fixed `parent_job_limits_unavailable` stage with null flags. Access
-denied at CreateProcess is `breakaway_denied`; other creation errors are
-`child_create`. Termination failure or an unconfirmed wait is
+denied at CreateProcess is `breakaway_denied` only after the fixed control
+starts and is cleaned up; otherwise it remains `child_create`. Termination
+failure or an unconfirmed wait is
 `cleanup_unconfirmed`, never retried through another API. The current Job may be
 one level of a nested tree, so its limit flags are not claimed to enumerate all
 ancestor limits; the independent child query still checks membership in any Job.
