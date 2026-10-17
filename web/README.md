@@ -50,7 +50,7 @@ while retaining the preferred width for larger windows.
 
 The sidebar shows no user avatar. The bottom row is a **Collapse tree sidebar**
 button (desktop only, in the old avatar slot), the user's name and the "⋯" user
-menu (Settings, Replay product tour, Log out; the email is in the menu header).
+menu (a slim 36px row on desktop with the same density as the Tree rows; 44px+ below 768px) (Settings, Replay product tour, Log out; the email is in the menu header).
 Collapsing hides the sidebar and the divider; a single **Expand tree sidebar**
 button then appears at the left end of the tab bar. Both buttons expose
 `aria-expanded` and `aria-controls="tree-sidebar"`, work with Enter/Space, and

@@ -20,11 +20,11 @@ export function UserMenu({ user, role, preview, collapseRef, onCollapse, onSetti
   onLogout: () => void
 }) {
   const t = useT()
-  return <div className="flex shrink-0 items-center gap-1 border-t p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))]">
-    <button ref={collapseRef} type="button" aria-label={t("resizer.collapse_tree_sidebar")} title={t("resizer.collapse_tree_sidebar")} aria-expanded="true" aria-controls="tree-sidebar" onClick={onCollapse} className="hidden size-9 shrink-0 place-items-center rounded-[5px] text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring md:grid"><PanelLeftClose aria-hidden="true" className="size-4" /></button>
+  return <div className="flex shrink-0 items-center gap-1 border-t p-2 pb-[max(0.5rem,env(safe-area-inset-bottom))] md:gap-0.5 md:px-2 md:py-1">
+    <button ref={collapseRef} type="button" aria-label={t("resizer.collapse_tree_sidebar")} title={t("resizer.collapse_tree_sidebar")} aria-expanded="true" aria-controls="tree-sidebar" onClick={onCollapse} className="hidden size-9 shrink-0 place-items-center md:size-7 rounded-[5px] text-muted-foreground outline-none hover:bg-accent hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring md:grid"><PanelLeftClose aria-hidden="true" className="size-4" /></button>
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button type="button" aria-label={t("userMenu.trigger")} className="grid h-12 min-w-0 flex-1 grid-cols-[minmax(0,1fr)_24px] items-center gap-2.5 rounded-[5px] px-2 text-left hover:bg-accent sm:h-11 sm:grid-cols-[minmax(0,1fr)_20px] sm:gap-2">
+        <button type="button" aria-label={t("userMenu.trigger")} className="grid h-12 min-w-0 flex-1 grid-cols-[minmax(0,1fr)_24px] items-center gap-2.5 rounded-[5px] px-2 text-left hover:bg-accent sm:h-11 sm:grid-cols-[minmax(0,1fr)_20px] sm:gap-2 md:h-7">
           <span className="block min-w-0 truncate text-sm font-medium sm:text-xs">{user.preferred_name}</span>
           <MoreHorizontal className="size-5 text-muted-foreground sm:size-4" />
         </button>

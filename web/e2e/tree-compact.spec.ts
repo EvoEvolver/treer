@@ -54,6 +54,11 @@ for (const theme of ['light', 'dark']) test(`Tree rows are one line with a statu
   expect(await dotColour('waiter')).toBe(attention)
   expect(await dotColour('crasher')).toBe(attention)
   expect(await dotColour('remote-one')).toBe(attention)
+  // The bottom user row is slim on desktop (same density as the Tree rows).
+  const userRow = await tree(page).getByRole('button', { name: 'User menu' }).evaluate((button) => ({ row: button.parentElement!.getBoundingClientRect().height, trigger: button.getBoundingClientRect().height, collapse: button.parentElement!.querySelector('button')!.getBoundingClientRect().height }))
+  expect(userRow.row).toBeLessThan(40)
+  expect(userRow.trigger).toBeLessThan(32)
+  expect(userRow.collapse).toBeLessThan(32)
   // One compact line per row.
   const heights = await tree(page).getByRole('treeitem').evaluateAll((items) => items.map((item) => item.getBoundingClientRect().height))
   for (const height of heights) expect(height).toBeLessThan(40)
@@ -98,6 +103,8 @@ test.describe('touch', () => {
       expect(box.width).toBeGreaterThanOrEqual(43.5)
       expect(box.height).toBeGreaterThanOrEqual(43.5)
     }
+    // The bottom user row keeps a 44px target on touch.
+    expect((await tree(page).getByRole('button', { name: 'User menu' }).boundingBox())!.height).toBeGreaterThanOrEqual(43.5)
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: info.outputPath('tree-compact-390.png') })
   })
