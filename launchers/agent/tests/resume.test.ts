@@ -1,5 +1,5 @@
 import { test } from "node:test";
-import { get } from "node:http";
+import { get, Agent } from "node:http";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, statSync, readdirSync, writeFileSync, realpathSync, mkdirSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -88,7 +88,7 @@ async function launchServer(cwd: string, env: Record<string, string> = {}) {
     try {
       const port = Number(readFileSync(portFile, "utf8"));
       const base = `http://127.0.0.1:${port}`;
-      if ((await fetch(base + "/api/health")).ok) return { child, port, base };
+      if ((await fetch(base + "/api/health")).ok) return { child, port, base, logs: () => output };
     } catch { /* wait for startup */ }
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
@@ -280,6 +280,29 @@ test("file download ends a slow-drip download after the overall duration cap and
     }
     assert.equal(status, 200, "the trickling downloads were cut off by the duration cap");
   } finally { for (const request of held) request.destroy(); await stop(server.child); }
+});
+
+test("repeated downloads over one keep-alive socket leave no listeners behind and the idle socket is still closed", { skip: process.platform === "win32" }, async () => {
+  const cwd = temp();
+  writeFileSync(join(cwd, "small.txt"), "small");
+  const server = await launchServer(cwd);
+  const agent = new Agent({ keepAlive: true, maxSockets: 1 });
+  const sockets = new Set<import("node:net").Socket>();
+  const once = () => new Promise<string>((resolve, reject) => {
+    const request = get(server.base + "/v1/files/download?path=small.txt", { agent }, (response) => {
+      let body = ""; response.on("data", (chunk) => { body += chunk; }); response.on("end", () => resolve(body)); response.on("error", reject);
+    });
+    request.on("socket", (socket) => sockets.add(socket)); request.on("error", reject);
+  });
+  try {
+    for (let index = 0; index < 15; index++) assert.equal(await once(), "small");
+    assert.equal(sockets.size, 1, "all downloads reused one keep-alive socket");
+    // Each download used to add a timeout listener to that socket; Node warns once more than ten are attached.
+    assert.ok(!/MaxListenersExceededWarning/.test(server.logs()), server.logs());
+    // The socket's own keep-alive timer is not left disabled: the idle reused socket is closed by the server (default 5 s).
+    const [socket] = [...sockets];
+    await new Promise<void>((resolve, reject) => { const timer = setTimeout(() => reject(new Error("the idle keep-alive socket was never closed by the server")), 9000); socket.once("close", () => { clearTimeout(timer); resolve(); }); });
+  } finally { agent.destroy(); await stop(server.child); }
 });
 
 test("file download streams a large file with bounded server memory", { skip: process.platform === "win32" }, async () => {

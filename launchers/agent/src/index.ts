@@ -10,7 +10,8 @@ import { CodexRuntime } from "./harness/codex.js";
 import { ClaudeRuntime } from "./harness/claude.js";
 import type { HarnessRuntime } from "./runtime.js";
 import { threadStatePath } from "./thread-state.js";
-import { listFiles, previewFile, openDownload, contentDisposition, fileErrorStatus } from "./files.js";
+import { listFiles, previewFile, fileErrorStatus } from "./files.js";
+import { createDownloads } from "./download.js";
 import { InvalidPromptMode, PromptQueue, promptMode } from "./prompt-queue.js";
 import { taskOutput } from "./task-output.js";
 import { GoalError, goalUpdate } from "./goals.js";
@@ -239,14 +240,8 @@ runtime.on("state", broadcast);
 runtime.on("log", (message) => console.log(`[${runtime.harness.id}] ${message}`));
 
 // Keep stalled uploads bounded (Node's defaults, explicit for this boundary).
-// Download hardening (#165): a fixed per-file limit decided from the open descriptor, a small concurrent-download cap, and a
-// write-idle timeout (AGENT_UI_DOWNLOAD_IDLE_MS only tunes the idle time, e.g. for tests).
-const DOWNLOAD_LIMIT_BYTES = 1024 ** 3;
-const DOWNLOAD_MAX_CONCURRENT = 2;
-const DOWNLOAD_IDLE_MS = Math.max(100, Number(process.env.AGENT_UI_DOWNLOAD_IDLE_MS) || 60_000);
-// Even a client that keeps trickling bytes cannot hold one of the two slots for hours: one download lasts at most this long.
-const DOWNLOAD_MAX_MS = Math.max(100, Number(process.env.AGENT_UI_DOWNLOAD_MAX_MS) || 60 * 60_000);
-let activeDownloads = 0;
+// File downloads (#165): limit, concurrency cap, idle and duration timeouts live in src/download.ts; the env vars only tune the timeouts.
+const downloads = createDownloads({ cwd, idleMs: Number(process.env.AGENT_UI_DOWNLOAD_IDLE_MS) || undefined, maxMs: Number(process.env.AGENT_UI_DOWNLOAD_MAX_MS) || undefined });
 
 const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 }, async (request, response) => {
   const method = request.method ?? "GET";
@@ -291,58 +286,7 @@ const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 },
       send(response, 200, await runtime.exportSession());
       return;
     }
-    if (path === "/v1/files/download") {
-      if (method !== "GET") {
-        response.setHeader("allow", "GET");
-        send(response, 405, { error: { code: "method_not_allowed", message: "File download is read-only; use GET" } });
-        return;
-      }
-      // A page on another site must not be able to start a download in the user's browser (it could not read the file, but
-      // it could fill the disk). Same-origin, same-site and user-typed (none) navigations through the Proxy are unaffected.
-      if (request.headers["sec-fetch-site"] === "cross-site") {
-        send(response, 403, { error: { code: "cross_site_download", message: "Downloads cannot be started from another site" } });
-        return;
-      }
-      if (activeDownloads >= DOWNLOAD_MAX_CONCURRENT) {
-        response.setHeader("retry-after", "2");
-        send(response, 429, { error: { code: "too_many_downloads", message: "Too many downloads are running; try again in a moment" } });
-        return;
-      }
-      activeDownloads++;
-      let released = false;
-      const release = () => { if (!released) { released = true; activeDownloads--; } };
-      let download: Awaited<ReturnType<typeof openDownload>> | undefined;
-      try { download = await openDownload(cwd, url.searchParams.get("path") ?? ""); }
-      catch (error) {
-        release();
-        const status = fileErrorStatus(error);
-        send(response, status, { error: { code: "file_access_failed", message: status === 404 ? "File not found" : status === 500 ? "Unable to read file" : error instanceof Error ? error.message : "File access denied" } });
-        return;
-      }
-      const { handle, size, name } = download;
-      // The size limit is decided from the open descriptor before any byte is sent.
-      if (size > DOWNLOAD_LIMIT_BYTES) {
-        await handle.close(); release();
-        send(response, 413, { error: { code: "file_too_large", message: `This file is larger than the ${DOWNLOAD_LIMIT_BYTES / 1024 ** 3} GiB download limit`, limit_bytes: DOWNLOAD_LIMIT_BYTES, size } });
-        return;
-      }
-      // Stream exactly the size seen on the open descriptor, so a file that grows meanwhile cannot break Content-Length.
-      response.writeHead(200, {
-        "content-type": "application/octet-stream", "content-length": size, "content-disposition": contentDisposition(name),
-        "x-content-type-options": "nosniff", "cache-control": "no-store",
-      });
-      // No CSP sandbox header here: Chromium treats a sandboxed response as a sandboxed download source and cancels it.
-      if (size === 0) { await handle.close(); release(); response.end(); return; }
-      const stream = handle.createReadStream({ start: 0, end: size - 1, autoClose: true });
-      // A client that stops reading must not hold the descriptor: no socket activity for the idle time destroys the response.
-      const socket = response.socket;
-      socket?.setTimeout(DOWNLOAD_IDLE_MS, () => response.destroy());
-      const limit = setTimeout(() => response.destroy(), DOWNLOAD_MAX_MS);
-      response.once("close", () => { clearTimeout(limit); release(); stream.destroy(); if (socket && !socket.destroyed) socket.setTimeout(0); });
-      stream.once("error", () => response.destroy());
-      stream.pipe(response);
-      return;
-    }
+    if (path === "/v1/files/download") { await downloads.handle(request, response, url); return; }
     if (path === "/v1/files/tree" || path === "/v1/files") {
       if (method !== "GET") {
         response.setHeader("allow", "GET");
