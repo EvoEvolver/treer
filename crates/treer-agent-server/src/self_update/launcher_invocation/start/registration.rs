@@ -105,6 +105,9 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             self.verify()?;
             require_live_child(child)?;
             let image = ProcessImage::capture(child.id())?;
+            // The registering process must itself send the permit (threads
+            // are fine). A helper process would need its own OS-attested owner
+            // binding; it must not reuse this current-process identity.
             let owner = ProcessImage::capture(std::process::id())?;
             image.verify_parent(&owner)?;
             let owner_metadata = owner.executable().metadata()?;

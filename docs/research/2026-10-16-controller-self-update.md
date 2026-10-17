@@ -520,6 +520,14 @@ authenticated same-account process or sibling sharing its executable cannot
 substitute for it. These are live, point-in-time checks, not proof that every
 writer has disappeared or that cancellation endpoints are sealed. No record
 reconstruction or installer authority is introduced.
+The registering process must itself send the permit; another thread in that
+process is allowed, another process is not. A future helper-process design must
+explicitly bind its OS-attested owner rather than reuse the registering PID.
+Recovery/ACK reader TODO: require schema 2 for this registration record kind,
+reject schema 1, and compare every owner identity field against the independently
+retained/OS-attested owner evidence. Current verification compares the original
+exact record bytes and live retained owner; no recovery reader exists yet, and
+parsing these fields must never reconstruct an accept-capable gate.
 Production lifecycle wiring must invoke this
 only after the supervisor's ready barrier confirms its intended image is running;
 owning a live Child or observing a private session alone does not establish that.
@@ -1020,6 +1028,16 @@ and exec-after-read cases reject a live peer with a changed image, at their
 respective guards. Channel/stdin/OS barriers establish ordering; no production
 hooks or timing sleeps manufacture the acceptance window. This still does not
 implement supervisor registration, ACK/durable decisions or writer-death proof.
+
+Known development-test flake (security3106, 2026-10-17): macOS
+`same_pid_exec_after_read_entry_invalidates_the_observation` returned
+`update_launcher_permit_read_timeout` instead of `update_handoff_peer_changed`
+once during the parallel handoff run; its isolated rerun passed in 6.84 seconds,
+and the Linux run passed. The barriers order authentication and exec but do not
+guarantee exec completes before the fixed read deadline under load. Keep this
+timing limitation visible until the fixture deterministically coordinates that
+deadline; do not loosen production timeouts or accept a timeout as proof of the
+image-change guard. Both errors still invalidate the pending gate.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the
