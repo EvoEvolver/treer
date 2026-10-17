@@ -7,7 +7,12 @@ start this sidecar.
 
 ## Single container
 
-The single-container **central server** image is `ghcr.io/evoevolver/treer`.
+The single-container **central server** has passed native amd64/arm64 image
+smoke tests in CI. Image publishing is currently disabled pending the user's
+decision: **there is no published single-container image to pull yet**.
+[Build locally](#build-and-verify-the-single-image) to try it now. The planned
+registry name is `ghcr.io/evoevolver/treer`; the pull/run examples below apply
+after a version has been published.
 It contains PostgreSQL 17, the standalone Proxy, the browser Console, and native
 Linux machine binaries built from the same commit. Machines, Controllers,
 Hosts, Agent runtimes and workspace Apps run separately and enroll normally;
