@@ -378,6 +378,19 @@ test.describe('resizable tree sidebar', () => {
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: info.outputPath(`sidebar-chrome-${theme}-390.png`) })
   })
+  // Guard, not a fix: Chromium already maps the transparent thumb to a system colour in forced-colors mode.
+  // This fails if someone later opts the tree out with forced-color-adjust: none.
+  test('forced colors keep a visible tree scrollbar thumb', async ({ page }) => {
+    await page.emulateMedia({ forcedColors: 'active' })
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    const tree = page.getByRole('tree', { name: 'Workspace workloads' })
+    await expect(tree.getByRole('treeitem').first()).toBeVisible()
+    await expect(tree).not.toHaveAttribute('data-scrolling', '', { timeout: 3000 })
+    const thumb = await tree.evaluate((element) => getComputedStyle(element, '::-webkit-scrollbar-thumb').backgroundColor)
+    expect(thumb).not.toBe('rgba(0, 0, 0, 0)')
+    expect(thumb).not.toBe('transparent')
+  })
   test('the tree scrollbar is hidden until it scrolls, then fades', async ({ page }) => {
     await page.goto('/')
     await browseTreeOnMobile(page)
