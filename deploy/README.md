@@ -272,8 +272,10 @@ installed Playwright engine; `SINGLE_CONTAINER_DNS_PROXY=1` tests the `.test`
 compatibility mapping without editing hosts or reaching external networks.
 The smoke script uses only disposable containers, a private Docker network,
 random names/ports, test credentials and a disposable enrolled machine. It
-checks static/API Host separation, health, admin login/registration, native
-installation/enrollment, Agent creation and persistence across server restart;
+checks static/API Host separation, duplicate-Host refusal, degraded single-origin
+embedding refusal, distinct fresh signing keys/passwords, health, admin login/
+registration, native installation/enrollment, Agent creation and key/data
+persistence across server restart;
 it does not touch any real machine. `runtime-smoke.py` additionally tests real
 PG against a fake Proxy to exercise volume/permissions without a Rust build.
 Base-image indexes are pinned by digest; release rebuilds still pick up apt
