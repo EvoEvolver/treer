@@ -68,3 +68,48 @@ test('provider consent validates fresh observation summaries and pre-step failur
   expect(result.observations[0]?.current_version).toBe('2.0.0')
   expect(result.observations.slice(1)).toEqual(Array(3).fill(null))
 })
+
+test('native provider wire validates both schemas, every verification field and bounded receipts', async ({ page }) => {
+  await page.route('**/api/**', route => route.fulfill({ status: 401, json: {} }))
+  await page.goto('/')
+  const { nativeRecipe } = await import('./fixtures/provider-native')
+  const result = await page.evaluate(async (recipe) => {
+    // @ts-expect-error Vite browser module.
+    const p = await import('/src/lib/provider-cli.ts')
+    const catalog = { schema_version: 2, machine_id: 'srv-test', platform: recipe.platform, controller_source_sha: 'f'.repeat(40), table_hash: 'a'.repeat(64), recipes: [recipe] }
+    const mutate = (fn: (r: any) => void) => { const r = structuredClone(recipe); fn(r); return p.providerCliRecipes({ ...catalog, recipes: [r] }, 'srv-test') }
+    const invalid = [
+      (r: any) => r.plan[7].kind = 'place', (r: any) => r.plan[7].expected_size = -1,
+      (r: any) => r.plan[7].expected_size = 1073741825, (r: any) => r.plan[7].expected_sha256 = 'bad',
+      (r: any) => r.plan[7].relative_path = '../escape', (r: any) => r.plan[7].relative_path = '/escape',
+      (r: any) => r.plan[7].entry = '../claude', (r: any) => r.plan[7].prefix_from_step = 4,
+      (r: any) => r.plan[8].prefix_from_step = 4, (r: any) => r.plan[7].step = 9,
+      (r: any) => r.native_binary.sha256 = '0'.repeat(64), (r: any) => r.native_binary.size = 100,
+      (r: any) => r.native_binary.unpacked_size = 1, (r: any) => r.native_binary.version = '9.0.0',
+      (r: any) => r.lifecycle_scripts.review = undefined, (r: any) => r.lifecycle_scripts.review.runs = ['prepare'],
+      (r: any) => r.lifecycle_scripts.review.files[0].sha256 = 'bad', (r: any) => r.lifecycle_scripts.review.closure.with_scripts = ['other'],
+      (r: any) => r.expected_version = '2.1.3020', (r: any) => r.expected_version = undefined,
+      (r: any) => r.node_arch = 'unknown', (r: any) => r.deadline_seconds = 901,
+    ].map(mutate)
+    const expected = { operation_id: 'op-test', machine_id: 'srv-test', recipe_id: recipe.recipe_id, recipe_version: 2, recipe_hash: recipe.recipe_hash, max_steps: 9, verified_pin: recipe.native_binary }
+    const receipt = { ...expected, status: 'failed', step: 8, elapsed_ms: 10, exit_code: null, timed_out: false, stdout: '', stderr: '', truncated: false, error_code: 'provider_cli_binary_mismatch', prefix_modified: true, verified_file: { failure: 'entry_link', token: 'not-projected' } }
+    return { valid: p.providerCliRecipes(catalog, 'srv-test'), invalid,
+      oldSchema: p.providerCliRecipes({ ...catalog, schema_version: 1 }, 'srv-test'), unknownSchema: p.providerCliRecipes({ ...catalog, schema_version: 3 }, 'srv-test'),
+      hidden: p.providerCliAvailableRecipes(catalog, []).recipes.length, shown: p.providerCliAvailableRecipes(catalog, ['machine.provider-cli-plan.v2']).recipes.length,
+      receipt: p.providerCliOperation(receipt, expected), badReceipts: [
+        { verified_file: { failure: 'unknown' } }, { verified_file: { size: -1, sha256: 'f'.repeat(64) } },
+        { prefix_modified: 'yes' }, { step: 10 }, { status: 'succeeded', exit_code: 0 },
+        { status: 'unknown' }, { status: 'timed_out' }, { error_code: 'provider_cli_version_mismatch' }, { error_code: undefined },
+        { verified_file: { size: 1024, sha256: '0'.repeat(64) } },
+        { status: 'succeeded', exit_code: 0, prefix_modified: false, verified_file: undefined },
+      ].map(patch => p.providerCliOperation({ ...receipt, ...patch }, expected)) }
+  }, nativeRecipe)
+  expect(result.valid?.recipes[0].plan).toHaveLength(9)
+  expect(result.invalid).toEqual(Array(22).fill(null))
+  expect(result.oldSchema).toBeNull(); expect(result.unknownSchema).toBeNull()
+  expect(result.hidden).toBe(0); expect(result.shown).toBe(1)
+  expect(result.receipt?.prefix_modified).toBe(true)
+  expect(result.receipt?.verified_file).toEqual({ failure: 'entry_link' })
+  expect(result.receipt).not.toHaveProperty('max_steps')
+  expect(result.badReceipts).toEqual(Array(11).fill(null))
+})

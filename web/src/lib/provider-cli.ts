@@ -1,10 +1,11 @@
 // Human-only provider CLI API consumer: no browser-generated installer argv.
 export const PROVIDER_CLI_CAPABILITY = "machine.provider-cli-install.v2"
+export const PROVIDER_CLI_PLAN_CAPABILITY = "machine.provider-cli-plan.v2"
 export type ProviderCliAction = "install" | "replace" | "noop"
 export type ProviderCliRelation = "upgrade" | "downgrade" | "unknown" | "incomparable" | null
 export interface ProviderCliObservation {
   state: "absent" | "installed" | "unknown"; current_version: string | null; version_text: string | null
-  executable: string | null; found_in_prefix: boolean
+  executable: string | null; found_in_prefix: boolean; node_arch?: string
   probe: { exit_code: number | null; timed_out: boolean; cleanup_confirmed: boolean; error_code: string | null }
 }
 export interface ProviderCliObservedSummary {
@@ -22,6 +23,7 @@ export interface ProviderCliOperation extends ProviderCliRecipeIdentity {
   operation_id: string; machine_id: string; status: ProviderCliStatus; step: number | null
   elapsed_ms: number; exit_code: number | null; timed_out: boolean
   stdout: string; stderr: string; truncated: boolean; error_code?: string; steps?: ProviderCliStepResult[]
+  prefix_modified?: boolean; verified_file?: { size?: number; sha256?: string; failure?: string }
   observed_before?: ProviderCliObservedSummary
 }
 const statuses: readonly string[] = ["queued", "running", "succeeded", "failed", "timed_out", "unknown"]
@@ -29,15 +31,15 @@ const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof
 const integer = (v: unknown): v is number => Number.isSafeInteger(v)
 const nonnegative = (v: unknown): v is number => integer(v) && v >= 0
 const exit = (v: unknown): v is number | null => v === null || integer(v)
-const step = (v: unknown): v is number => integer(v) && v >= 1 && v <= 5
+const step = (v: unknown, max = 5): v is number => integer(v) && v >= 1 && v <= max
 const tail = (v: unknown): v is string => typeof v === "string" && v.length <= 32768
 const code = (v: unknown): v is string => typeof v === "string" && /^[a-z][a-z0-9_]{0,127}$/.test(v)
 // Scope every poll response to the operation/machine/recipe the human chose.
 // Project known fields so accidental token fields never enter view state.
-export function providerCliOperation(v: unknown, expected: ProviderCliRecipeIdentity & { operation_id: string; machine_id: string }): ProviderCliOperation | null {
+export function providerCliOperation(v: unknown, expected: ProviderCliRecipeIdentity & { operation_id: string; machine_id: string; max_steps?: number; verified_pin?: { size: number; sha256: string } }): ProviderCliOperation | null {
   if (!record(v) || v.operation_id !== expected.operation_id || v.machine_id !== expected.machine_id ||
     v.recipe_id !== expected.recipe_id || v.recipe_version !== expected.recipe_version || v.recipe_hash !== expected.recipe_hash ||
-    typeof v.status !== "string" || !statuses.includes(v.status) || (v.step != null && !step(v.step) && !(v.step === 0 && v.status === "failed" && v.error_code === "provider_cli_state_changed")) ||
+    typeof v.status !== "string" || !statuses.includes(v.status) || (v.step != null && !step(v.step, expected.max_steps ?? 5) && !(v.step === 0 && v.status === "failed" && v.error_code === "provider_cli_state_changed")) ||
     !nonnegative(v.elapsed_ms) || !exit(v.exit_code) || typeof v.timed_out !== "boolean" ||
     !tail(v.stdout) || !tail(v.stderr) || typeof v.truncated !== "boolean" || (v.error_code !== undefined && !code(v.error_code))) return null
   if ((v.status === "queued" || v.status === "running") && (v.stdout !== "" || v.stderr !== "" || v.steps !== undefined)) return null
@@ -53,18 +55,30 @@ export function providerCliOperation(v: unknown, expected: ProviderCliRecipeIden
   }
   let steps: ProviderCliStepResult[] | undefined
   if (v.steps !== undefined) {
-    if (!Array.isArray(v.steps) || v.steps.length > 5) return null
+    if (!Array.isArray(v.steps) || v.steps.length > (expected.max_steps ?? 5)) return null
     steps = []
     let last = 0
     for (const item of v.steps) {
-      if (!record(item) || !step(item.step) || item.step <= last || !exit(item.exit_code) || !tail(item.stdout) || !tail(item.stderr) ||
+      if (!record(item) || !step(item.step, expected.max_steps ?? 5) || item.step <= last || !exit(item.exit_code) || !tail(item.stdout) || !tail(item.stderr) ||
         typeof item.truncated !== "boolean" || !nonnegative(item.duration_ms)) return null
       last = item.step
       steps.push({ step: item.step, exit_code: item.exit_code, stdout: item.stdout, stderr: item.stderr, truncated: item.truncated, duration_ms: item.duration_ms })
     }
   }
   if (v.step === 0 && steps?.length) return null
-  return { ...expected, status: v.status as ProviderCliStatus, step: (v.step ?? null) as number | null, elapsed_ms: v.elapsed_ms,
+  if (v.prefix_modified !== undefined && typeof v.prefix_modified !== "boolean" || v.status === "succeeded" && v.prefix_modified === true) return null
+  let verified: ProviderCliOperation["verified_file"]
+  if (v.verified_file != null) {
+    const f = v.verified_file
+    if (!record(f) || f.size !== undefined && (!nonnegative(f.size) || f.size > 1073741824) || f.sha256 !== undefined && !hash(f.sha256) ||
+      f.failure !== undefined && !["native_content", "entry_link", "not_regular", "path_refused"].includes(f.failure as string) ||
+      f.failure === undefined && (f.size === undefined || f.sha256 === undefined) || v.status === "succeeded" && f.failure !== undefined || !providerCliTerminal(v.status as ProviderCliStatus)) return null
+    if (f.failure !== undefined && (v.status !== "failed" || v.error_code !== "provider_cli_binary_mismatch")) return null
+    verified = { ...(f.size === undefined ? {} : { size: f.size as number }), ...(f.sha256 === undefined ? {} : { sha256: f.sha256 as string }), ...(f.failure === undefined ? {} : { failure: f.failure as string }) }
+  }
+  if (expected.verified_pin && verified && !verified.failure && (verified.size !== expected.verified_pin.size || verified.sha256 !== expected.verified_pin.sha256)) return null
+  if (expected.verified_pin && v.status === "succeeded" && (!verified || verified.failure)) return null
+  return { operation_id: expected.operation_id, machine_id: expected.machine_id, ...providerCliRef(expected), ...(v.prefix_modified === undefined ? {} : { prefix_modified: v.prefix_modified as boolean }), ...(verified ? { verified_file: verified } : {}), status: v.status as ProviderCliStatus, step: (v.step ?? null) as number | null, elapsed_ms: v.elapsed_ms,
     exit_code: v.exit_code, timed_out: v.timed_out, stdout: v.stdout, stderr: v.stderr, truncated: v.truncated,
     ...(v.error_code === undefined ? {} : { error_code: v.error_code as string }), ...(steps === undefined ? {} : { steps }), ...(observed ? { observed_before: observed } : {}) }
 }
@@ -84,10 +98,17 @@ export function matchingProviderRecipe<T extends { supported: boolean; binary_na
 export type ProviderCliPlanStep =
   | { step: number; kind: "command"; purpose: string; executable: string; args: string[] }
   | { step: number; kind: "verify"; purpose: string; algorithm: string; expected: string }
+  | { step: number; kind: "verify_file"; purpose: string; rule: string; relative_path: string; entry: string; expected_size: number; expected_sha256: string; prefix_from_step: number }
   | { step: number; kind: "resolve"; purpose: string; rule: string; binary: string; args: string[]; prefix_from_step: number }
+export interface ProviderCliLifecycleReview {
+  reviewed_at: string; reviewer: string; files: { member: string; sha256: string }[]
+  scripts: Record<string, string>; runs: string[]; closure: { packages: number; with_scripts: string[] }
+}
+export interface ProviderCliNativeBinary { package: string; version: string; integrity: string; member: string; size: number; sha256: string; unpacked_size: number }
 export interface ProviderCliRecipe extends ProviderCliRecipeIdentity {
   provider_id: string; platform: string; binary_names: string[]; supported: boolean; official_docs: string; login_hint: string
-  unsupported_reason?: string; node_min?: number; lifecycle_scripts?: { enabled: boolean }
+  unsupported_reason?: string; node_min?: number; lifecycle_scripts?: { enabled: boolean; review?: ProviderCliLifecycleReview }
+  expected_version?: string; deadline_seconds?: number; node_arch?: string; native_binary?: ProviderCliNativeBinary
   package?: { name: string; version: string; integrity: string; registry: string }; plan?: ProviderCliPlanStep[]
 }
 export interface ProviderCliRecipes { schema_version: number; machine_id: string; platform: string; controller_source_sha: string; table_hash: string; recipes: ProviderCliRecipe[] }
@@ -102,6 +123,10 @@ const slug = (v: unknown): v is string => typeof v === "string" && /^[a-z0-9][a-
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 64 && v.every(item => text(item))
 const observationState = (v: unknown): v is ProviderCliObservation["state"] => ["absent", "installed", "unknown"].includes(v as string)
 const nullableVersion = (v: unknown): v is string | null => v === null || text(v, 256)
+const relativePath = (v: unknown): v is string => text(v, 512) && /^[A-Za-z0-9@._/-]+$/.test(v) && v.split("/").every(part => part !== "" && part !== "." && part !== "..")
+const binaryName = (v: unknown): v is string => text(v, 128) && /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/.test(v)
+const semver = (v: unknown): v is string => text(v, 128) && /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(v)
+const integrity = (v: unknown): v is string => text(v, 256) && /^sha512-[A-Za-z0-9+/]+={0,2}$/.test(v)
 export function providerCliObservation(v: unknown): ProviderCliObservation | null {
   // Serde omits None fields in the v2 wire DTO. Normalize only those optional
   // fields; required evidence and unknown enum values still fail closed.
@@ -114,20 +139,40 @@ export function providerCliObservation(v: unknown): ProviderCliObservation | nul
     !(v.probe.error_code === null || code(v.probe.error_code))) return null
   if (v.state === "absent" && (v.found_in_prefix || v.current_version !== null)) return null
   if (v.state === "installed" && (!v.found_in_prefix || !v.current_version || v.probe.exit_code !== 0 || v.probe.timed_out || !v.probe.cleanup_confirmed)) return null
-  return { state: v.state, current_version: v.current_version, version_text: v.version_text, executable: v.executable, found_in_prefix: v.found_in_prefix,
+  if (v.node_arch !== undefined && !["arm64", "x64"].includes(v.node_arch as string)) return null
+  return { ...(v.node_arch === undefined ? {} : { node_arch: v.node_arch as string }), state: v.state, current_version: v.current_version, version_text: v.version_text, executable: v.executable, found_in_prefix: v.found_in_prefix,
     probe: { exit_code: v.probe.exit_code, timed_out: v.probe.timed_out, cleanup_confirmed: v.probe.cleanup_confirmed, error_code: v.probe.error_code } }
 }
 export function providerCliPlan(v: unknown): ProviderCliPlanStep[] | null {
-  if (!Array.isArray(v) || v.length !== 5) return null
+  if (!Array.isArray(v) || ![5, 9].includes(v.length)) return null
+  const extended = v.length === 9
+  const prefix = extended ? 7 : 4
+  const purposes = extended ? ["node-arch", "pack", "pack-native", "integrity", "integrity-native", "install", "prefix", "verify-file", "check"] : ["pack", "integrity", "install", "prefix", "check"]
   const plan: ProviderCliPlanStep[] = []
   for (const [i, item] of v.entries()) {
-    if (!record(item) || item.step !== i + 1 || !text(item.purpose, 128)) return null
+    if (!record(item) || item.step !== i + 1 || item.purpose !== purposes[i]) return null
+    const expectedKind = item.purpose.startsWith("integrity") ? "verify" : item.purpose === "verify-file" ? "verify_file" : item.purpose === "check" ? "resolve" : "command"
+    if (item.kind !== expectedKind) return null
     if (item.kind === "command" && text(item.executable) && strings(item.args)) plan.push({ step: item.step, kind: item.kind, purpose: item.purpose, executable: item.executable, args: item.args })
-    else if (item.kind === "verify" && item.step === 2 && item.algorithm === "sha512" && text(item.expected, 256)) plan.push({ step: item.step, kind: item.kind, purpose: item.purpose, algorithm: item.algorithm, expected: item.expected })
-    else if (item.kind === "resolve" && item.step === 5 && item.prefix_from_step === 4 && text(item.rule) && text(item.binary, 128) && strings(item.args)) plan.push({ step: item.step, kind: item.kind, purpose: item.purpose, rule: item.rule, binary: item.binary, args: item.args, prefix_from_step: 4 })
+    else if (item.kind === "verify" && item.algorithm === "sha512" && text(item.expected, 256)) plan.push({ step: item.step, kind: item.kind, purpose: item.purpose, algorithm: item.algorithm, expected: item.expected })
+    else if (item.kind === "resolve" && item.prefix_from_step === prefix && text(item.rule) && binaryName(item.binary) && strings(item.args)) plan.push({ step: item.step, kind: item.kind, purpose: item.purpose, rule: item.rule, binary: item.binary, args: item.args, prefix_from_step: prefix })
+    else if (item.kind === "verify_file" && item.prefix_from_step === prefix && text(item.rule) && relativePath(item.relative_path) && binaryName(item.entry) &&
+      integer(item.expected_size) && item.expected_size > 0 && item.expected_size <= 1073741824 && hash(item.expected_sha256)) plan.push({ step: item.step, kind: item.kind, purpose: item.purpose, rule: item.rule, relative_path: item.relative_path, entry: item.entry, expected_size: item.expected_size, expected_sha256: item.expected_sha256, prefix_from_step: prefix })
     else return null
   }
   return plan
+}
+function lifecycleReview(v: unknown): ProviderCliLifecycleReview | null {
+  if (!record(v) || !text(v.reviewed_at, 128) || !text(v.reviewer, 512) || !Array.isArray(v.files) || !v.files.length || v.files.length > 16 ||
+    !record(v.scripts) || !Object.keys(v.scripts).length || Object.keys(v.scripts).length > 16 || !Object.entries(v.scripts).every(([key, value]) => code(key) && text(value, 4096)) ||
+    !strings(v.runs) || v.runs.length !== 1 || v.runs[0] !== "postinstall" || !text(v.scripts.postinstall, 4096) ||
+    !record(v.closure) || v.closure.packages !== 2 || !strings(v.closure.with_scripts) || v.closure.with_scripts.length !== 1) return null
+  const files: ProviderCliLifecycleReview["files"] = []
+  for (const file of v.files) {
+    if (!record(file) || !relativePath(file.member) || !hash(file.sha256) || files.some(other => other.member === file.member)) return null
+    files.push({ member: file.member, sha256: file.sha256 })
+  }
+  return { reviewed_at: v.reviewed_at, reviewer: v.reviewer, files, scripts: Object.fromEntries(Object.entries(v.scripts)) as Record<string, string>, runs: v.runs, closure: { packages: 2, with_scripts: v.closure.with_scripts } }
 }
 export function providerCliRecipe(v: unknown, platform: string): ProviderCliRecipe | null {
   if (!record(v) || !slug(v.provider_id) || !slug(v.recipe_id) || !integer(v.recipe_version) || v.recipe_version < 1 || !hash(v.recipe_hash) ||
@@ -140,19 +185,40 @@ export function providerCliRecipe(v: unknown, platform: string): ProviderCliReci
   const plan = providerCliPlan(v.plan)
   if (!plan || !record(v.package) || !text(v.package.name, 256) || !text(v.package.version, 128) || !text(v.package.integrity, 256) ||
     !text(v.package.registry) || !record(v.lifecycle_scripts) || typeof v.lifecycle_scripts.enabled !== "boolean" || !integer(v.node_min)) return null
-  return { ...base, node_min: v.node_min, lifecycle_scripts: { enabled: v.lifecycle_scripts.enabled },
+  const optional: Pick<ProviderCliRecipe, "expected_version" | "deadline_seconds" | "node_arch" | "native_binary"> = {}
+  if (v.expected_version !== undefined) {
+    if (!semver(v.expected_version) || v.expected_version !== v.package.version) return null
+    optional.expected_version = v.expected_version
+  }
+  if (v.deadline_seconds !== undefined) {
+    if (!integer(v.deadline_seconds) || v.deadline_seconds < 60 || v.deadline_seconds > 900) return null
+    optional.deadline_seconds = v.deadline_seconds
+  }
+  let review: ProviderCliLifecycleReview | null = null
+  if (plan.length === 9) {
+    const pin = v.native_binary, file = plan[7]
+    review = lifecycleReview(v.lifecycle_scripts.review)
+    if (!optional.expected_version || !["arm64", "x64"].includes(v.node_arch as string) || !record(pin) || !text(pin.package, 256) || pin.version !== optional.expected_version ||
+      !integrity(pin.integrity) || !relativePath(pin.member) || !nonnegative(pin.size) || pin.size === 0 || !nonnegative(pin.unpacked_size) || pin.size > pin.unpacked_size || pin.unpacked_size > 1073741824 || !hash(pin.sha256) ||
+      !v.lifecycle_scripts.enabled || !review || review.closure.with_scripts[0] !== v.package.name || file.kind !== "verify_file" || file.expected_size !== pin.size || file.expected_sha256 !== pin.sha256 ||
+      file.relative_path !== `lib/node_modules/${v.package.name}/bin/${file.entry}.exe` || !v.binary_names.includes(file.entry) ||
+      plan[4].kind !== "verify" || plan[4].expected !== pin.integrity || plan[3].kind !== "verify" || plan[3].expected !== v.package.integrity) return null
+    optional.node_arch = v.node_arch as string
+    optional.native_binary = { package: pin.package, version: pin.version as string, integrity: pin.integrity, member: pin.member, size: pin.size, sha256: pin.sha256, unpacked_size: pin.unpacked_size }
+  } else if (v.native_binary !== undefined || v.node_arch !== undefined || v.lifecycle_scripts.enabled) return null
+  return { ...base, ...optional, node_min: v.node_min, lifecycle_scripts: { enabled: v.lifecycle_scripts.enabled, ...(review ? { review } : {}) },
     package: { name: v.package.name, version: v.package.version, integrity: v.package.integrity, registry: v.package.registry }, plan }
 }
 export function providerCliRecipes(v: unknown, machineId: string): ProviderCliRecipes | null {
-  if (!record(v) || v.schema_version !== 1 || v.machine_id !== machineId || !text(v.platform, 128) || !text(v.controller_source_sha, 128) ||
+  if (!record(v) || ![1, 2].includes(v.schema_version as number) || v.machine_id !== machineId || !text(v.platform, 128) || !text(v.controller_source_sha, 128) ||
     !hash(v.table_hash) || !Array.isArray(v.recipes) || v.recipes.length > 64) return null
   const recipes: ProviderCliRecipe[] = []
   for (const item of v.recipes) {
     const recipe = providerCliRecipe(item, v.platform)
-    if (!recipe || recipes.some(other => other.recipe_id === recipe.recipe_id)) return null
+    if (!recipe || v.schema_version === 1 && recipe.plan?.length === 9 || v.schema_version === 2 && recipe.supported && !recipe.expected_version || recipes.some(other => other.recipe_id === recipe.recipe_id)) return null
     recipes.push(recipe)
   }
-  return { schema_version: 1, machine_id: machineId, platform: v.platform, controller_source_sha: v.controller_source_sha, table_hash: v.table_hash, recipes }
+  return { schema_version: v.schema_version as number, machine_id: machineId, platform: v.platform, controller_source_sha: v.controller_source_sha, table_hash: v.table_hash, recipes }
 }
 export function providerCliPrepared(v: unknown, recipes: ProviderCliRecipes, selected: ProviderCliRecipe): ProviderCliPrepared | null {
   if (!record(v)) return null
@@ -175,5 +241,8 @@ export function providerCliPrepared(v: unknown, recipes: ProviderCliRecipes, sel
   return { ...(v.action === "noop" ? {} : { confirmation_token: v.confirmation_token as string, expires_at: v.expires_at as string }),
     machine_id: recipes.machine_id, table_hash: recipes.table_hash, recipe, action: v.action as ProviderCliAction,
     version_relation: v.version_relation as ProviderCliRelation, target_version: v.target_version as string, observation, observation_hash: v.observation_hash }
+}
+export function providerCliAvailableRecipes(catalog: ProviderCliRecipes, capabilities: readonly string[]): ProviderCliRecipes {
+  return { ...catalog, recipes: catalog.recipes.filter(recipe => recipe.plan?.length !== 9 || capabilities.includes(PROVIDER_CLI_PLAN_CAPABILITY)) }
 }
 export const providerCliRef = (recipe: ProviderCliRecipeIdentity): ProviderCliRecipeIdentity => ({ recipe_id: recipe.recipe_id, recipe_version: recipe.recipe_version, recipe_hash: recipe.recipe_hash })
