@@ -19,6 +19,7 @@ use crate::self_update::{
     handoff::{AuthenticatedPeer, LauncherFrame},
     images::digest_file,
     launcher_arbitration::{Arbitration, Binding, Decision},
+    verified_image::VerifiedImage,
 };
 
 /// Only this leaf's exclusive registration writer can mint this non-Clone
@@ -60,6 +61,7 @@ struct Registration {
 pub struct RegisteredSupervisor<'plan, 'owner> {
     intent: RecordedIntent<'plan, 'owner>,
     image: ProcessImage,
+    expected: &'plan VerifiedImage<'plan>,
     file: File,
     name: &'static str,
     bytes: Vec<u8>,
@@ -71,13 +73,23 @@ pub struct RegisteredSupervisor<'plan, 'owner> {
 impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
     /// Derive identity from an unreaped, live Child actually held by the caller,
     /// never an incoming PID/image claim. This does not authenticate the child's
-    /// IPC connection, approve its executable or start that process.
+    /// IPC connection or start that process. Require the expected authenticated
+    /// executable, and call only after the intended supervisor's ready barrier.
+    /// This image check does not itself prove that application-level readiness.
     /// Any existing registration requires recovery; a new attempt cannot replace
     /// it. Consume the fresh intent capability even on a persistence failure.
-    pub fn register_supervisor(
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "supervisor lifecycle wiring is not implemented yet"
+        )
+    )]
+    pub(in crate::self_update) fn register_supervisor(
         self,
         attempt: Uuid,
         child: &mut Child,
+        expected: &'plan VerifiedImage<'plan>,
     ) -> Result<RegisteredSupervisor<'plan, 'owner>> {
         let result = (|| -> Result<_> {
             if attempt.is_nil() {
@@ -86,7 +98,7 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             self.verify()?;
             require_live_child(child)?;
             let image = ProcessImage::capture(child.id())?;
-            image.verify_private_session()?;
+            expected.verify_process(&image)?;
             require_live_child(child)?;
             let intent_metadata = self.file.metadata()?;
             let image_metadata = image.executable().metadata()?;
@@ -119,14 +131,14 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             // The intent participates in the registration transaction, rather
             // than only an earlier preflight. All uncertainty preserves evidence.
             self.verify()?;
-            image.verify_private_session()?;
+            expected.verify_process(&image)?;
             require_live_child(child)?;
             let mut file = self.invocation.journal.directory.create_file(name)?;
             file.write_all(&bytes)?;
             file.sync_all()?;
             self.invocation.journal.directory.sync()?;
             self.verify()?;
-            image.verify_private_session()?;
+            expected.verify_process(&image)?;
             require_live_child(child)?;
             let binding = Binding::new(
                 attempt,
@@ -139,6 +151,7 @@ impl<'plan, 'owner> RecordedIntent<'plan, 'owner> {
             let proof = RegisteredSupervisor {
                 intent: self,
                 image,
+                expected,
                 file,
                 name,
                 bytes,
@@ -168,7 +181,7 @@ impl RegisteredSupervisor<'_, '_> {
     pub fn verify(&self) -> Result<()> {
         let result = (|| -> Result<()> {
             self.intent.verify()?;
-            self.image.verify_private_session()?;
+            self.expected.verify_process(&self.image)?;
             if digest_file(self.image.executable())? != self.image_sha256 {
                 bail!("update_recovery_required");
             }

@@ -466,10 +466,53 @@ mod tests {
         use std::io::Read;
         let mut byte = [0];
         let _ = std::io::stdin().read(&mut byte);
+        if let Some(next) = std::env::var_os("TREER_TEST_REGISTRATION_EXEC") {
+            use std::os::unix::process::CommandExt;
+            let error = std::process::Command::new(next)
+                .args([
+                    "--exact",
+                    "self_update::launcher_invocation::tests::supervisor_registration_child",
+                    "--ignored",
+                ])
+                .env_clear()
+                // The session survives exec; do not call setsid twice.
+                .env("TREER_TEST_REGISTRATION_NOT_PRIVATE", "1")
+                .env(
+                    "TREER_TEST_REGISTRATION_READY",
+                    std::env::var_os("TREER_TEST_REGISTRATION_EXEC_READY").unwrap(),
+                )
+                .exec();
+            panic!("fixture exec failed: {error}");
+        }
     }
 
     #[test]
     fn supervisor_registration_binds_durable_intent_and_rejects_changed_evidence() {
+        supervisor_registration_cases(&[
+            "ok",
+            "replacement",
+            "mutation",
+            "intent",
+            "second_attempt",
+            "lost_gate",
+            "exit",
+            "existing_empty",
+            "existing_corrupt",
+            "existing_symlink",
+            "nil",
+            "not_private",
+            "already_exited",
+            "wrong_image",
+            "pre_exec",
+        ]);
+    }
+
+    #[test]
+    fn supervisor_registration_retains_expected_image_and_rejects_path_replacement() {
+        supervisor_registration_cases(&["expected_replaced"]);
+    }
+
+    fn supervisor_registration_cases(faults: &[&str]) {
         use std::{
             io::Write,
             os::unix::fs::{symlink, MetadataExt, PermissionsExt},
@@ -484,21 +527,7 @@ mod tests {
                 let _ = self.0.wait();
             }
         }
-        for fault in [
-            "ok",
-            "replacement",
-            "mutation",
-            "intent",
-            "second_attempt",
-            "lost_gate",
-            "exit",
-            "existing_empty",
-            "existing_corrupt",
-            "existing_symlink",
-            "nil",
-            "not_private",
-            "already_exited",
-        ] {
+        for &fault in faults {
             let f = Fixture::standard_config();
             f.enrollment("srv_a", "ws_a", &f.bin.join(Binary::Controller.name()));
             let (selected, owned, journal) = bind(&f, "ws_a");
@@ -524,24 +553,55 @@ mod tests {
             let intent_digest = intent.sha256().unwrap().to_owned();
             let intent_metadata = std::fs::metadata(&intent_path).unwrap();
             let ready = job.join("test-ready");
+            let exec_ready = job.join("test-exec-ready");
+            let executable = std::env::current_exe().unwrap().canonicalize().unwrap();
+            let copied = job.join("test-supervisor");
+            if matches!(fault, "wrong_image" | "pre_exec" | "expected_replaced") {
+                // Identical bytes at a different inode must not pass identity.
+                std::fs::copy(&executable, &copied).unwrap();
+                std::fs::set_permissions(&copied, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            let expected_path = if matches!(fault, "pre_exec" | "expected_replaced") {
+                &copied
+            } else {
+                &executable
+            };
+            let expected_directory =
+                InstallationDirectory::open(expected_path.parent().unwrap()).unwrap();
+            let expected_digest = crate::self_update::images::digest_file(
+                &std::fs::File::open(expected_path).unwrap(),
+            )
+            .unwrap();
+            let expected = crate::self_update::verified_image::VerifiedImage::open(
+                &expected_directory,
+                expected_path,
+                &expected_digest,
+            )
+            .unwrap();
             let mut child = Child(
-                Command::new(std::env::current_exe().unwrap())
-                    .args([
-                        "--exact",
-                        "self_update::launcher_invocation::tests::supervisor_registration_child",
-                        "--ignored",
-                    ])
-                    .env_clear()
-                    .env("TREER_TEST_REGISTRATION_READY", &ready)
-                    .envs(
-                        (fault == "not_private")
-                            .then_some(("TREER_TEST_REGISTRATION_NOT_PRIVATE", "1")),
-                    )
-                    .stdin(Stdio::piped())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .unwrap(),
+                Command::new(if matches!(fault, "wrong_image" | "expected_replaced") {
+                    &copied
+                } else {
+                    &executable
+                })
+                .args([
+                    "--exact",
+                    "self_update::launcher_invocation::tests::supervisor_registration_child",
+                    "--ignored",
+                ])
+                .env_clear()
+                .env("TREER_TEST_REGISTRATION_READY", &ready)
+                .envs((fault == "pre_exec").then_some(("TREER_TEST_REGISTRATION_EXEC", &copied)))
+                .env("TREER_TEST_REGISTRATION_EXEC_READY", &exec_ready)
+                .envs(
+                    (fault == "not_private")
+                        .then_some(("TREER_TEST_REGISTRATION_NOT_PRIVATE", "1")),
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .unwrap(),
             );
             let deadline = Instant::now() + Duration::from_secs(5);
             while !ready.exists() {
@@ -565,9 +625,12 @@ mod tests {
             } else {
                 uuid::Uuid::new_v4()
             };
-            let result = intent.register_supervisor(attempt, &mut child.0);
+            let result = intent.register_supervisor(attempt, &mut child.0, &expected);
             if fault.starts_with("existing")
-                || matches!(fault, "nil" | "not_private" | "already_exited")
+                || matches!(
+                    fault,
+                    "nil" | "not_private" | "already_exited" | "wrong_image" | "pre_exec"
+                )
             {
                 assert_eq!(
                     result.err().unwrap().to_string(),
@@ -577,8 +640,28 @@ mod tests {
                 if fault == "existing_corrupt" {
                     assert_eq!(std::fs::read(&path).unwrap(), b"partial private evidence");
                 }
-                if matches!(fault, "nil" | "not_private" | "already_exited") {
+                if matches!(
+                    fault,
+                    "nil" | "not_private" | "already_exited" | "wrong_image" | "pre_exec"
+                ) {
                     assert!(!path.exists());
+                }
+                if fault == "pre_exec" {
+                    // Only now release the real same-PID exec transition. The
+                    // earlier private-session image was not the expected image.
+                    child.0.stdin.as_mut().unwrap().write_all(b"x").unwrap();
+                    let deadline = Instant::now() + Duration::from_secs(5);
+                    while !exec_ready.exists() {
+                        assert!(Instant::now() < deadline);
+                        assert!(child.0.try_wait().unwrap().is_none());
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    expected
+                        .verify_process(&ProcessImage::capture(child.0.id()).unwrap())
+                        .unwrap();
+                    assert!(!path.exists());
+                    assert!(intent_path.exists());
+                    assert_eq!(journal.read().unwrap(), before);
                 }
                 continue;
             }
@@ -599,7 +682,7 @@ mod tests {
                 std::fs::rename(&intent_path, job.join("saved-intent")).unwrap();
                 let next = plan.record_start_intent().unwrap();
                 assert_eq!(
-                    next.register_supervisor(attempt, &mut child.0)
+                    next.register_supervisor(attempt, &mut child.0, &expected)
                         .err()
                         .unwrap()
                         .to_string(),
@@ -658,6 +741,14 @@ mod tests {
                 None
             };
             match fault {
+                "expected_replaced" => {
+                    // The running image is unchanged, but its retained expected
+                    // pathname now names a byte-identical different inode.
+                    std::fs::rename(&copied, job.join("saved-supervisor")).unwrap();
+                    std::fs::copy(&executable, &copied).unwrap();
+                    std::fs::set_permissions(&copied, std::fs::Permissions::from_mode(0o700))
+                        .unwrap();
+                }
                 "replacement" => {
                     let inode = std::fs::metadata(&path).unwrap().ino();
                     std::fs::rename(&path, job.join("saved-registration")).unwrap();
@@ -683,7 +774,8 @@ mod tests {
                     // existing registration for this operation.
                     std::fs::rename(&intent_path, job.join("saved-intent")).unwrap();
                     let next = plan.record_start_intent().unwrap();
-                    let result = next.register_supervisor(uuid::Uuid::new_v4(), &mut child.0);
+                    let result =
+                        next.register_supervisor(uuid::Uuid::new_v4(), &mut child.0, &expected);
                     assert_eq!(
                         result.err().unwrap().to_string(),
                         "update_recovery_required"

@@ -491,22 +491,26 @@ the image internally, and rechecks the owned child before writing, after sync
 and before returning the registration. The caller retains Child lifecycle
 ownership; registration never signals the child or transfers its process handle.
 `RegisteredSupervisor` retains the intent, process
-image and record FD; verification and binding access recheck those records and
-live image/session. Drop preserves evidence. Isolated Rust subprocess tests cover
+image, expected authenticated `VerifiedImage` and record FD; verification and
+binding access recheck those records and live image/session. Drop preserves
+evidence. Isolated Rust subprocess tests cover
 valid registration, replacement/mutation, changed intent, child exit, existing
 entries, already-reaped children, real non-private-session children, and refusal
 to replace a registration even with a fresh intent/attempt.
-This narrows supervisor identity provenance to an owned Child at registration;
-it is not approval of its executable, authenticated IPC, proof of the permit
-owner's parent relationship or an all-descendants containment guarantee.
-Before lifecycle wiring, extend registration to require the expected trusted
-supervisor executable's retained file identity (dev/inode and exact SHA256),
-and compare the captured child's executable against that identity. Invoke this
+Registration now additionally requires the expected authenticated supervisor
+`VerifiedImage`, retaining its checked file and installation parent. The captured
+child executable must match that retained dev/inode and exact SHA256 before
+writing, after sync and during later verification. A byte-identical executable
+at another inode fails closed. Isolated children cover a wrong-image copy,
+pre-ready rejection followed by a barrier-controlled same-PID exec into the
+expected copy, and replacement of the expected path after registration.
+This narrows identity to an owned Child running the expected executable; it is
+not authenticated IPC, proof of the permit owner's parent relationship or an
+all-descendants containment guarantee. Production lifecycle wiring must invoke this
 only after the supervisor's ready barrier confirms its intended image is running;
 owning a live Child or observing a private session alone does not establish that.
-Add isolated wrong-image Child and pre-ready/exec-transition regressions, requiring
-fixed refusal without creating execution authority. A later image mismatch
-failing closed is not a substitute for this initial expected-image check.
+The fixture ready markers are not production readiness authority. No production
+ready endpoint or lifecycle caller exists yet.
 Registration alone authorizes no permit/noexec/ACK or installer
 execution. Its private in-memory gate is described below; the real supervisor
 entry, authenticated lifecycle connection and recovery/death matrix remain

@@ -87,6 +87,26 @@ impl<'a> VerifiedImage<'a> {
         self.parent.join(self.name)
     }
 
+    /// Match an OS-observed process to this retained authenticated inode and
+    /// exact bytes. A caller-supplied PID or matching file contents alone is
+    /// insufficient; ownership and ready-barrier provenance live at the caller.
+    pub(super) fn verify_process(
+        &self,
+        process: &treer_platform::process_image::ProcessImage,
+    ) -> Result<()> {
+        self.verify()?;
+        process.verify_private_session()?;
+        let expected = self.file.metadata()?;
+        let actual = process.executable().metadata()?;
+        if (expected.dev(), expected.ino()) != (actual.dev(), actual.ino())
+            || digest_file(process.executable())? != self.digest
+        {
+            bail!("update_image_conflict");
+        }
+        process.verify_private_session()?;
+        self.verify()
+    }
+
     pub(super) fn verify(&self) -> Result<()> {
         let checked = (|| -> Result<()> {
             let parent = InstallationDirectory::open(self.parent)?;
