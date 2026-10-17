@@ -437,12 +437,24 @@ Proposed layout: a private fixture root contains `image/` and `records/`. The
 `image/` directory contains only the pinned Controller copy and remains its cwd.
 The `records/` directory contains only fixed intent and registration filenames;
 neither paths nor filenames arrive over the pipe. The child derives the fixture
-root from its OS-observed executable location, pins all directory handles and
-validates non-reparse ownership/DACLs. Directories are created atomically with
+root from the retained final path of its OS-observed executable, pins all directory
+handles and verifies that `image/` and `records/` are siblings under the same
+private root. The entire chain must satisfy the same owner/protected-DACL and
+non-reparse rules. No record path comes from pipe data, environment or argv beyond
+the fixed selector. Directories are created atomically with
 explicit owner/protected DACL descriptors, including in the new fixture. This
 also makes the pending foreign-owner, BA/AU, conditional/callback, null-DACL and
 deny-then-allow negative cases part of preparation acceptance, not a request to
 weaken the one-image invariant.
+
+The `records/` contents must equal the exact fixed filename set expected at each
+publication phase, and exactly the two record names once published. Reject extra
+entries and reparse points. Recheck at write time, before resume, during the
+child's independent read, before Hello/Reply and before exchange completion.
+Records use a separate fixed-size binary schema with distinct magic, version,
+declared lengths and fixed fields; reject unknown versions, mismatched lengths
+and trailing bytes. No free text or JSON parser handles these bytes, and record
+bytes cannot be parsed as pipe frames (or vice versa).
 
 The owner must retain a suspended child before publishing registration: split
 the current spawn operation into a private suspended-process guard and a
@@ -468,10 +480,22 @@ different process, attempt or image must fail before Hello/Reply.
 The fixture design should replace per-phase timing with one handoff deadline
 chosen before image validation and child creation, covering record preparation,
 resume, parent attestation and exchange. Cross-process deadline encoding needs an
-explicit same-boot monotonic clock contract (for example bounded
-`GetTickCount64` start/expiry with checked arithmetic), not serialized Rust
-`Instant`, wall-clock time or a new budget on receipt. No deadline extension or
-restart reconstruction is allowed. Process creation identity still binds this
+explicit same-boot monotonic clock contract: encode `GetTickCount64` start/expiry
+in milliseconds with checked arithmetic. Microsoft's
+[Windows time contract](https://learn.microsoft.com/en-us/windows/win32/sysinfo/windows-time)
+states that this clock includes sleep and hibernation; this is the required
+behavior on supported builds, rather than a clock that excludes suspended time.
+If that contract cannot be established for a build, refuse support for the
+fixture there; never substitute a working-time-only clock. Refuse backward
+readings, arithmetic overflow, a start later than local now, expiry before start,
+or a span greater than a hard maximum budget fixed in code. Both child and owner
+after read-back compute `effective_expiry = min(record_expiry, local_now + max_budget)`
+with checked arithmetic and retain it without extension. A corrupted record may
+shorten but must never enlarge the original owner deadline or the code budget.
+Recheck this clock after every blocking phase and wake, even if an asynchronous
+timer has not fired. Do not serialize Rust `Instant`, use wall-clock time or grant
+a new budget on receipt. No deadline extension or restart reconstruction is
+allowed. Process creation identity still binds this
 record to the original live processes; clock data cannot recreate that identity.
 
 Acceptance cases include missing/truncated/oversized/unknown-version records,
@@ -483,6 +507,12 @@ use only its original process handle for cleanup, preserve uncertain evidence,
 and produce no authority token. Native hosted runs are required for the file
 security, sharing, process and pipe behavior. The current pure model completion
 continues to grant nothing.
+
+Implementation evidence must include ordinary tests and exact-SHA hosted native
+runs on Server 2022 and 2025. Inject sync/read-back failures at the narrow I/O
+boundary where possible, and distinguish injected refusal coverage from actual
+OS failures. Report any OS failure that cannot be injected explicitly; successful
+flush/read-back tests do not demonstrate power-loss durability.
 
 Locks, real-installation record reads/writes, once-only permit, durable dispatch
 decision and installer work remain outside this proposed slice. Their design
