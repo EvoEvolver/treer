@@ -1,328 +1,328 @@
-//! Bounded framing and mutually authenticated, direction-specific sessions.
-//!
-//! Callers must provide CSPRNG nonces, reject expired handshakes, check peer UID
-//! and private file/socket ownership, and recheck binding generation per operation.
-//! The pure protocol deliberately performs no filesystem or Treer operations.
-use hmac::{Hmac, Mac};
+//! Core authenticates sender IDs; these envelopes provide framing, not identity.
+//! A daemon must dispatch on the outer Core sender before parsing control text.
+use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
-use std::io::{Read, Write};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 use thiserror::Error;
 
-type HmacSha256 = Hmac<Sha256>;
-pub const MAX_FRAME: usize = 128 * 1024;
-pub const MAX_BODY: usize = 60_000;
-const MAX_ID: usize = 256;
-const DOMAIN: &[u8] = b"treer.endpoint.v1";
+pub const MAX_BODY: usize = 32_768;
+pub const MAX_ENVELOPE: usize = 256 * 1024;
+pub const PART_BYTES: usize = 18_000;
+pub const MAX_PARTS: usize = 16;
+const PROTOCOL: &str = "treer.endpoint/v1";
 
 #[derive(Debug, Error)]
 pub enum Error {
-    #[error("invalid protocol frame")]
+    #[error("invalid message envelope")]
     Invalid,
-    #[error("authentication failed")]
-    Authentication,
-    #[error("protocol connection unavailable")]
-    Io(#[source] std::io::Error),
+    #[error("message sender unavailable")]
+    Sender,
+    #[error("recipient unavailable")]
+    Recipient,
+    #[error("fragment conflict")]
+    Conflict,
 }
 
-/// Binding keys intentionally do not implement Debug, Clone or Serialize.
-pub struct BindingKey([u8; 32]);
-impl BindingKey {
-    pub fn new(bytes: [u8; 32]) -> Self {
-        Self(bytes)
-    }
-}
-
-/// Nonces must be independently random for every connection, including retries.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Transcript {
-    pub version: u32,
-    pub endpoint_id: String,
-    pub generation: u64,
-    pub hub_nonce: [u8; 32],
-    pub endpoint_nonce: [u8; 32],
-}
-impl Transcript {
-    fn bytes(&self) -> Result<Vec<u8>, Error> {
-        if self.version != 1 || self.generation == 0 || !valid_id(&self.endpoint_id) {
-            return Err(Error::Invalid);
-        }
-        let mut bytes = Vec::with_capacity(350);
-        // Length-prefix all variable fields; use network byte order for integers.
-        bytes.extend_from_slice(&self.version.to_be_bytes());
-        bytes.extend_from_slice(&(self.endpoint_id.len() as u32).to_be_bytes());
-        bytes.extend_from_slice(self.endpoint_id.as_bytes());
-        bytes.extend_from_slice(&self.generation.to_be_bytes());
-        bytes.extend_from_slice(&self.hub_nonce);
-        bytes.extend_from_slice(&self.endpoint_nonce);
-        Ok(bytes)
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum Role {
-    Endpoint,
-    Hub,
-}
-impl Role {
-    fn label(self) -> &'static [u8] {
-        match self {
-            Self::Endpoint => b"endpoint-proof",
-            Self::Hub => b"hub-proof",
-        }
-    }
-}
-
-fn mac(key: &[u8], label: &[u8], data: &[u8]) -> HmacSha256 {
-    // HMAC accepts arbitrary key lengths, including the fixed 32-byte keys here.
-    let mut result = HmacSha256::new_from_slice(key).expect("HMAC accepts 32-byte keys");
-    result.update(DOMAIN);
-    result.update(&(label.len() as u32).to_be_bytes());
-    result.update(label);
-    result.update(data);
-    result
-}
-
-pub fn proof(key: &BindingKey, role: Role, transcript: &Transcript) -> Result<[u8; 32], Error> {
-    Ok(mac(&key.0, role.label(), &transcript.bytes()?)
-        .finalize()
-        .into_bytes()
-        .into())
-}
-
-pub fn verify_proof(
-    key: &BindingKey,
-    role: Role,
-    transcript: &Transcript,
-    received: &[u8; 32],
-) -> Result<(), Error> {
-    mac(&key.0, role.label(), &transcript.bytes()?)
-        .verify_slice(received)
-        .map_err(|_| Error::Authentication)
-}
-
-/// Construct only after verifying the opposite side's proof. Callers own the
-/// 5-second challenge lifetime and one-use handshake state.
-pub struct Session {
-    send_key: [u8; 32],
-    receive_key: [u8; 32],
-    send_sequence: u64,
-    receive_sequence: u64,
-    failed: bool,
-}
-impl Session {
-    pub fn authenticated(
-        key: &BindingKey,
-        role: Role,
-        transcript: &Transcript,
-        remote_proof: &[u8; 32],
-    ) -> Result<Self, Error> {
-        let opposite = match role {
-            Role::Endpoint => Role::Hub,
-            Role::Hub => Role::Endpoint,
-        };
-        verify_proof(key, opposite, transcript, remote_proof)?;
-        let bytes = transcript.bytes()?;
-        let endpoint_key: [u8; 32] = mac(&key.0, b"endpoint-frame-key", &bytes)
-            .finalize()
-            .into_bytes()
-            .into();
-        let hub_key: [u8; 32] = mac(&key.0, b"hub-frame-key", &bytes)
-            .finalize()
-            .into_bytes()
-            .into();
-        let (send_key, receive_key) = match role {
-            Role::Endpoint => (endpoint_key, hub_key),
-            Role::Hub => (hub_key, endpoint_key),
-        };
-        Ok(Self {
-            send_key,
-            receive_key,
-            send_sequence: 0,
-            receive_sequence: 0,
-            failed: false,
-        })
-    }
-
-    pub fn seal(&mut self, payload: &[u8]) -> Result<Vec<u8>, Error> {
-        if self.failed || payload.is_empty() || payload.len() > MAX_FRAME - 40 {
-            self.failed = true;
-            return Err(Error::Invalid);
-        }
-        let Some(next) = self.send_sequence.checked_add(1) else {
-            self.failed = true;
-            return Err(Error::Invalid);
-        };
-        let mut bytes = Vec::with_capacity(payload.len() + 40);
-        bytes.extend_from_slice(&next.to_be_bytes());
-        bytes.extend_from_slice(payload);
-        let tag = mac(&self.send_key, b"frame", &bytes)
-            .finalize()
-            .into_bytes();
-        bytes.extend_from_slice(&tag);
-        self.send_sequence = next;
-        Ok(bytes)
-    }
-
-    pub fn open<'a>(&mut self, frame: &'a [u8]) -> Result<&'a [u8], Error> {
-        let result = self.open_inner(frame);
-        if result.is_err() {
-            self.failed = true;
-        }
-        result
-    }
-
-    fn open_inner<'a>(&mut self, frame: &'a [u8]) -> Result<&'a [u8], Error> {
-        if self.failed || frame.len() <= 40 || frame.len() > MAX_FRAME {
-            return Err(Error::Invalid);
-        }
-        let sequence = u64::from_be_bytes(frame[..8].try_into().map_err(|_| Error::Invalid)?);
-        if Some(sequence) != self.receive_sequence.checked_add(1) {
-            return Err(Error::Authentication);
-        }
-        let end = frame.len() - 32;
-        mac(&self.receive_key, b"frame", &frame[..end])
-            .verify_slice(&frame[end..])
-            .map_err(|_| Error::Authentication)?;
-        self.receive_sequence = sequence;
-        Ok(&frame[8..end])
-    }
-}
-
-/// The wire frame length is bounded before allocating payload storage. Transport
-/// callers must set read/write deadlines; generic Read/Write cannot enforce them.
-pub fn read_frame(reader: &mut impl Read) -> Result<Vec<u8>, Error> {
-    let mut header = [0; 4];
-    reader.read_exact(&mut header).map_err(Error::Io)?;
-    let length = u32::from_be_bytes(header) as usize;
-    if length == 0 || length > MAX_FRAME {
-        return Err(Error::Invalid);
-    }
-    let mut bytes = vec![0; length];
-    reader.read_exact(&mut bytes).map_err(Error::Io)?;
-    Ok(bytes)
-}
-
-pub fn write_frame(writer: &mut impl Write, bytes: &[u8]) -> Result<(), Error> {
-    if bytes.is_empty() || bytes.len() > MAX_FRAME {
-        return Err(Error::Invalid);
-    }
-    writer
-        .write_all(&(bytes.len() as u32).to_be_bytes())
-        .and_then(|()| writer.write_all(bytes))
-        .map_err(Error::Io)
-}
-
-fn valid_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= MAX_ID && !id.chars().any(char::is_control)
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    Outbound,
+    Inbound,
 }
 
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Fragment {
+    pub protocol: String,
+    pub direction: Direction,
+    pub generation: u64,
+    pub transfer_id: String,
+    pub payload_digest: String,
+    pub part: u16,
+    pub parts: u16,
+    pub data: String,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Sender {
     pub kind: SenderKind,
     pub id: String,
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SenderKind {
     Human,
     Agent,
     Service,
+    Machine,
 }
 
-/// Exact tagged variants reject unknown fields and duplicate recognized fields;
-/// no generic JSON maps allow hidden identity/target overrides.
 #[derive(Serialize, Deserialize)]
-#[serde(tag = "op", rename_all = "snake_case", deny_unknown_fields)]
-pub enum Request {
-    Submit {
-        request_id: String,
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum Envelope {
+    Outbound {
         delivery_id: String,
         message_id: String,
-        sender: Sender,
+        original_sender: Sender,
         body: String,
         context_ids: Vec<String>,
-        created_at: String,
     },
-    Pull {
-        request_id: String,
-        wait_ms: u32,
-    },
-    Complete {
-        request_id: String,
+    Deliver {
         job_id: String,
-        lease_token: String,
-        core_message_id: String,
+        recipient: String,
+        body: String,
+        context_ids: Vec<String>,
+        source: ExternalSource,
     },
-    Defer {
-        request_id: String,
-        job_id: String,
-        lease_token: String,
-        reason: DeferReason,
-    },
-    Status {
-        request_id: String,
-    },
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExternalSource {
+    pub channel: Channel,
+    pub account_id: String,
+    pub conversation_id: String,
+    pub message_id: String,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DeferReason {
-    CoreUnavailable,
-    CoreRejected,
-    AmbiguousSend,
+pub enum Channel {
+    Telegram,
+    Email,
+    Http,
 }
 
-impl Request {
-    pub fn parse(bytes: &[u8]) -> Result<Self, Error> {
-        if bytes.is_empty() || bytes.len() > MAX_FRAME - 40 {
-            return Err(Error::Invalid);
+fn valid_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
+}
+fn digest(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+fn digest_id(label: &str, endpoint: &str, generation: u64, source: &str) -> String {
+    // Length-prefix IDs to avoid delimiter ambiguity.
+    let mut hash = Sha256::new();
+    for value in [label, endpoint, &generation.to_string(), source] {
+        hash.update((value.len() as u64).to_be_bytes());
+        hash.update(value.as_bytes());
+    }
+    hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+impl Envelope {
+    pub fn direction(&self) -> Direction {
+        match self {
+            Self::Outbound { .. } => Direction::Outbound,
+            Self::Deliver { .. } => Direction::Inbound,
         }
-        let request: Self = serde_json::from_slice(bytes).map_err(|_| Error::Invalid)?;
-        let (request_id, valid) = match &request {
-            Self::Submit {
-                request_id,
+    }
+    pub fn validate(&self) -> Result<(), Error> {
+        let (body, contexts, ids) = match self {
+            Self::Outbound {
                 delivery_id,
                 message_id,
-                sender,
+                original_sender,
                 body,
                 context_ids,
-                created_at,
             } => (
-                request_id,
-                valid_id(delivery_id)
-                    && valid_id(message_id)
-                    && valid_id(&sender.id)
-                    && body.len() <= MAX_BODY
-                    && context_ids.len() <= 32
-                    && context_ids.iter().all(|id| valid_id(id))
-                    && valid_id(created_at),
+                body,
+                context_ids,
+                vec![delivery_id, message_id, &original_sender.id],
             ),
-            Self::Pull {
-                request_id,
-                wait_ms,
-            } => (request_id, *wait_ms <= 250),
-            Self::Complete {
-                request_id,
+            Self::Deliver {
                 job_id,
-                lease_token,
-                core_message_id,
+                recipient,
+                body,
+                context_ids,
+                source,
             } => (
-                request_id,
-                valid_id(job_id) && valid_id(lease_token) && valid_id(core_message_id),
+                body,
+                context_ids,
+                vec![
+                    job_id,
+                    recipient,
+                    &source.account_id,
+                    &source.conversation_id,
+                    &source.message_id,
+                ],
             ),
-            Self::Defer {
-                request_id,
-                job_id,
-                lease_token,
-                ..
-            } => (request_id, valid_id(job_id) && valid_id(lease_token)),
-            Self::Status { request_id } => (request_id, true),
         };
-        if !valid_id(request_id) || !valid {
+        if body.trim().is_empty()
+            || body.len() > MAX_BODY
+            || contexts.len() > 32
+            || !contexts.iter().all(|id| valid_id(id))
+            || !ids.iter().all(|id| valid_id(id))
+        {
             return Err(Error::Invalid);
         }
-        Ok(request)
+        Ok(())
+    }
+
+    /// Splitting handles wrapper escaping even when original body already fills
+    /// Core's 32KiB limit. Persist/retry the exact returned part bytes.
+    pub fn fragments(
+        &self,
+        endpoint: &str,
+        generation: u64,
+        source: &str,
+    ) -> Result<Vec<String>, Error> {
+        self.validate()?;
+        if !valid_id(endpoint) || !valid_id(source) || generation == 0 {
+            return Err(Error::Invalid);
+        }
+        let payload = serde_json::to_vec(self).map_err(|_| Error::Invalid)?;
+        if payload.len() > MAX_ENVELOPE {
+            return Err(Error::Invalid);
+        }
+        let direction = self.direction();
+        let label = if direction == Direction::Outbound {
+            "outbound"
+        } else {
+            "inbound"
+        };
+        let transfer = digest_id(label, endpoint, generation, source);
+        let hash = digest(&payload);
+        let count = payload.len().div_ceil(PART_BYTES);
+        if count > MAX_PARTS {
+            return Err(Error::Invalid);
+        }
+        payload
+            .chunks(PART_BYTES)
+            .enumerate()
+            .map(|(index, chunk)| {
+                let frame = Fragment {
+                    protocol: PROTOCOL.into(),
+                    direction,
+                    generation,
+                    transfer_id: transfer.clone(),
+                    payload_digest: hash.clone(),
+                    part: index as u16,
+                    parts: count as u16,
+                    data: STANDARD.encode(chunk),
+                };
+                let text = serde_json::to_string(&frame).map_err(|_| Error::Invalid)?;
+                if text.len() > MAX_BODY {
+                    return Err(Error::Invalid);
+                }
+                Ok(text)
+            })
+            .collect()
+    }
+}
+
+impl Fragment {
+    pub fn parse(text: &str) -> Result<Self, Error> {
+        if text.is_empty() || text.len() > MAX_BODY {
+            return Err(Error::Invalid);
+        }
+        let frame: Self = serde_json::from_str(text).map_err(|_| Error::Invalid)?;
+        if frame.protocol != PROTOCOL
+            || frame.generation == 0
+            || frame.parts == 0
+            || usize::from(frame.parts) > MAX_PARTS
+            || frame.part >= frame.parts
+            || !hex_digest(&frame.transfer_id)
+            || !hex_digest(&frame.payload_digest)
+            || frame.data.len() > PART_BYTES.div_ceil(3) * 4
+        {
+            return Err(Error::Invalid);
+        }
+        let raw = STANDARD.decode(&frame.data).map_err(|_| Error::Invalid)?;
+        if raw.is_empty() || raw.len() > PART_BYTES {
+            return Err(Error::Invalid);
+        }
+        Ok(frame)
+    }
+    pub fn idempotency_key(&self) -> String {
+        format!("ep-{}-{}", self.transfer_id, self.part)
+    }
+}
+fn hex_digest(text: &str) -> bool {
+    text.len() == 64
+        && text
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// One bounded transfer assembly. Caller also caps number/total bytes of
+/// simultaneous assemblies and persists hub parts before acknowledging Core.
+pub struct Assembly {
+    transfer: String,
+    hash: String,
+    generation: u64,
+    direction: Direction,
+    count: u16,
+    bytes: usize,
+    parts: BTreeMap<u16, Vec<u8>>,
+}
+impl Assembly {
+    pub fn new(first: &Fragment) -> Self {
+        Self {
+            transfer: first.transfer_id.clone(),
+            hash: first.payload_digest.clone(),
+            generation: first.generation,
+            direction: first.direction,
+            count: first.parts,
+            bytes: 0,
+            parts: BTreeMap::new(),
+        }
+    }
+    pub fn push(&mut self, frame: &Fragment) -> Result<Option<Envelope>, Error> {
+        // Validate even frames constructed directly rather than through parse.
+        let text = serde_json::to_string(frame).map_err(|_| Error::Invalid)?;
+        let frame = Fragment::parse(&text)?;
+        if frame.transfer_id != self.transfer
+            || frame.payload_digest != self.hash
+            || frame.generation != self.generation
+            || frame.direction != self.direction
+            || frame.parts != self.count
+        {
+            return Err(Error::Conflict);
+        }
+        let bytes = STANDARD.decode(&frame.data).map_err(|_| Error::Invalid)?;
+        if let Some(previous) = self.parts.get(&frame.part) {
+            if *previous != bytes {
+                return Err(Error::Conflict);
+            }
+        } else {
+            if self.bytes + bytes.len() > MAX_ENVELOPE {
+                return Err(Error::Invalid);
+            }
+            self.bytes += bytes.len();
+            self.parts.insert(frame.part, bytes);
+        }
+        if self.parts.len() != usize::from(self.count) {
+            return Ok(None);
+        }
+        let mut complete = Vec::with_capacity(self.bytes);
+        for part in self.parts.values() {
+            complete.extend_from_slice(part);
+        }
+        if digest(&complete) != self.hash {
+            return Err(Error::Conflict);
+        }
+        let envelope: Envelope = serde_json::from_slice(&complete).map_err(|_| Error::Invalid)?;
+        envelope.validate()?;
+        if envelope.direction() != self.direction {
+            return Err(Error::Conflict);
+        }
+        Ok(Some(envelope))
+    }
+}
+
+/// Trusted sender comes ONLY from the outer authenticated Core delivery, never
+/// from envelope fields. Non-hub text remains ordinary outbound, even if JSON.
+pub fn from_hub(sender: &Sender, pinned_hub: &str) -> bool {
+    sender.kind == SenderKind::Agent && sender.id == pinned_hub
+}
+
+pub fn check_recipient(envelope: &Envelope, local_allowlist: &[String]) -> Result<(), Error> {
+    match envelope {
+        Envelope::Deliver { recipient, .. } if local_allowlist.contains(recipient) => Ok(()),
+        _ => Err(Error::Recipient),
     }
 }

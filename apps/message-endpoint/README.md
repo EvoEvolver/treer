@@ -186,8 +186,8 @@ Retire old Apps only after acceptance. Backups include SQLite/config/secrets,
 0700/0600, encrypted storage, never repository/log; delete after rollback window.
 No author push/deploy/restart. Cross-owner packaging/CI requests go to owners.
 
-Current library's socket code at d155bc62 is superseded and is being removed;
-queue tests at405ace1d use in-memory SQLite, not production crash-durability proof.
+The active protocol library now contains Core Message envelopes/fragments, not
+sockets/HMAC. Queue tests use in-memory SQLite, not production crash-durability proof.
 Production DB opener/WAL recovery, Core relay, transports and UI are unfinished.
 Offline focused checks: `python3 apps/message-endpoint/tests/run.py` (stripped
 Treer/harness environment, private HOME/temp, private worktree target). Independent

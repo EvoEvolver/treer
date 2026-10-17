@@ -1,175 +1,159 @@
-use std::io::Cursor;
-use treer_message_endpoint::protocol::{
-    proof, read_frame, verify_proof, write_frame, BindingKey, Request, Role, Session, Transcript,
-    MAX_FRAME,
-};
-
-fn transcript() -> Transcript {
-    Transcript {
-        version: 1,
-        endpoint_id: "ag_test".into(),
-        generation: 1,
-        hub_nonce: [7; 32],
-        endpoint_nonce: [9; 32],
+use treer_message_endpoint::protocol::*;
+fn outbound(body: String) -> Envelope {
+    Envelope::Outbound {
+        delivery_id: "del_one".into(),
+        message_id: "msg_one".into(),
+        original_sender: Sender {
+            kind: SenderKind::Human,
+            id: "human".into(),
+        },
+        body,
+        context_ids: vec![],
     }
 }
-fn sessions() -> (Session, Session) {
-    let key = BindingKey::new([42; 32]);
-    let t = transcript();
-    (
-        Session::authenticated(
-            &key,
-            Role::Endpoint,
-            &t,
-            &proof(&key, Role::Hub, &t).unwrap(),
-        )
-        .unwrap(),
-        Session::authenticated(
-            &key,
-            Role::Hub,
-            &t,
-            &proof(&key, Role::Endpoint, &t).unwrap(),
-        )
-        .unwrap(),
-    )
-}
-
 #[test]
-fn proofs_bind_identity_generation_both_nonces_version_and_direction() {
-    let key = BindingKey::new([42; 32]);
-    let t = transcript();
-    let p = proof(&key, Role::Endpoint, &t).unwrap();
-    verify_proof(&key, Role::Endpoint, &t, &p).unwrap();
-    assert!(verify_proof(&key, Role::Hub, &t, &p).is_err());
-    assert!(verify_proof(&BindingKey::new([41; 32]), Role::Endpoint, &t, &p).is_err());
-    for change in 0..5 {
-        let mut changed = t.clone();
-        match change {
-            0 => changed.endpoint_id = "ag_other".into(),
-            1 => changed.generation += 1,
-            2 => changed.hub_nonce[0] ^= 1,
-            3 => changed.endpoint_nonce[0] ^= 1,
-            _ => changed.version += 1,
-        }
-        assert!(verify_proof(&key, Role::Endpoint, &changed, &p).is_err());
-    }
-    assert!(Session::authenticated(&key, Role::Hub, &t, &[0; 32]).is_err());
-}
-
-#[test]
-fn directional_sessions_exchange_exact_bytes_and_reject_reflection() {
-    let (mut endpoint, mut hub) = sessions();
-    let submit = endpoint
-        .seal(br#"{"op":"status","request_id":"1"}"#)
+fn maximal_escaped_body_fragments_fit_core_and_reassemble_out_of_order() {
+    let original = "\u{0001}".repeat(MAX_BODY);
+    let parts = outbound(original.clone())
+        .fragments("ag_endpoint", 1, "del_one")
         .unwrap();
+    assert!(parts.len() > 1);
+    assert!(parts.iter().all(|text| text.len() <= MAX_BODY));
+    let first = Fragment::parse(&parts[0]).unwrap();
+    let mut assembly = Assembly::new(&first);
+    let mut complete = None;
+    for part in parts.iter().rev() {
+        complete = assembly.push(&Fragment::parse(part).unwrap()).unwrap();
+    }
+    match complete.unwrap() {
+        Envelope::Outbound { body, .. } => assert_eq!(body, original),
+        _ => panic!("wrong direction"),
+    }
+}
+#[test]
+fn fragment_retry_same_key_conflicting_payload_rejected() {
+    let parts = outbound("hello".into())
+        .fragments("ag_one", 1, "del_one")
+        .unwrap();
+    let first = Fragment::parse(&parts[0]).unwrap();
+    let key = first.idempotency_key();
     assert_eq!(
-        hub.open(&submit).unwrap(),
-        br#"{"op":"status","request_id":"1"}"#
+        parts,
+        outbound("hello".into())
+            .fragments("ag_one", 1, "del_one")
+            .unwrap()
     );
-    let response = hub.seal(br#"{"ok":true}"#).unwrap();
-    assert_eq!(endpoint.open(&response).unwrap(), br#"{"ok":true}"#);
-    let (mut endpoint, _) = sessions();
-    let reflected = endpoint.seal(b"private").unwrap();
-    assert!(endpoint.open(&reflected).is_err());
+    let mut assembly = Assembly::new(&first);
+    assert!(assembly.push(&first).unwrap().is_some());
+    assert!(assembly.push(&first).unwrap().is_some());
+    let changed = outbound("changed".into())
+        .fragments("ag_one", 1, "del_one")
+        .unwrap();
+    let changed = Fragment::parse(&changed[0]).unwrap();
+    assert_eq!(changed.idempotency_key(), key);
+    assert!(assembly.push(&changed).is_err());
 }
-
 #[test]
-fn replay_gap_and_tampering_poison_connection() {
-    let (mut endpoint, mut hub) = sessions();
-    let first = endpoint.seal(b"first").unwrap();
-    let second = endpoint.seal(b"second").unwrap();
-    assert!(hub.open(&second).is_err());
-    assert!(hub.open(&first).is_err());
-
-    let (mut endpoint, mut hub) = sessions();
-    let frame = endpoint.seal(b"payload").unwrap();
-    hub.open(&frame).unwrap();
-    assert!(hub.open(&frame).is_err());
-
-    for position in [0, 8, 46] {
-        let (mut endpoint, mut hub) = sessions();
-        let original = endpoint.seal(b"payload").unwrap();
-        let mut corrupt = original.clone();
-        corrupt[position] ^= 1;
-        assert!(hub.open(&corrupt).is_err());
-        assert!(hub.open(&original).is_err());
-    }
-}
-
-#[test]
-fn fresh_challenge_separates_reconnection_keys() {
-    let key = BindingKey::new([42; 32]);
-    let old = transcript();
-    let mut new = old.clone();
-    new.hub_nonce[0] ^= 1;
-    let mut old_session = Session::authenticated(
-        &key,
-        Role::Endpoint,
-        &old,
-        &proof(&key, Role::Hub, &old).unwrap(),
-    )
-    .unwrap();
-    let mut new_session = Session::authenticated(
-        &key,
-        Role::Hub,
-        &new,
-        &proof(&key, Role::Endpoint, &new).unwrap(),
-    )
-    .unwrap();
-    assert!(new_session
-        .open(&old_session.seal(b"stale").unwrap())
-        .is_err());
-}
-
-#[test]
-fn bounded_frames_reject_length_before_reading_payload() {
-    for n in [0, MAX_FRAME as u32 + 1, u32::MAX] {
-        let mut reader = Cursor::new(n.to_be_bytes());
-        assert!(read_frame(&mut reader).is_err());
-        assert_eq!(reader.position(), 4);
-    }
-    let mut wire = vec![];
-    write_frame(&mut wire, b"valid").unwrap();
-    assert_eq!(read_frame(&mut Cursor::new(&wire)).unwrap(), b"valid");
-    wire.pop();
-    assert!(read_frame(&mut Cursor::new(wire)).is_err());
-    assert!(write_frame(&mut vec![], &[]).is_err());
-    assert!(write_frame(&mut vec![], &vec![0; MAX_FRAME + 1]).is_err());
-}
-
-#[test]
-fn strict_requests_reject_duplicate_fields_unknowns_overrides_and_trailing_data() {
-    for bytes in [
-        r#"{"op":"status","request_id":"a","request_id":"b"}"#,
-        r#"{"op":"status","op":"pull","request_id":"a","wait_ms":0}"#,
-        r#"{"op":"status","request_id":"a","endpoint_id":"ag_other"}"#,
-        r#"{"op":"pull","request_id":"a","wait_ms":251}"#,
-        r#"{"op":"pull","request_id":"a","wait_ms":-1}"#,
-        r#"{"op":"status","request_id":""}"#,
-        r#"{"op":"exec","request_id":"a","command":"bad"}"#,
-        r#"{"op":"status","request_id":"a"} {}"#,
+fn endpoint_generation_direction_and_source_isolate_transfer_keys() {
+    let first = outbound("hello".into())
+        .fragments("ag_one", 1, "d1")
+        .unwrap();
+    for (id, generation, source) in [
+        ("ag_two", 1, "d1"),
+        ("ag_one", 2, "d1"),
+        ("ag_one", 1, "d2"),
     ] {
-        assert!(
-            Request::parse(bytes.as_bytes()).is_err(),
-            "accepted {bytes}"
+        let other = outbound("hello".into())
+            .fragments(id, generation, source)
+            .unwrap();
+        assert_ne!(
+            Fragment::parse(&first[0]).unwrap().idempotency_key(),
+            Fragment::parse(&other[0]).unwrap().idempotency_key()
         );
     }
-    assert!(Request::parse(b"\xff").is_err());
-    assert!(Request::parse(br#"{"op":"status","request_id":"a"}"#).is_ok());
 }
-
 #[test]
-fn submit_limits_are_utf8_bytes_and_context_count() {
-    let mut value = serde_json::json!({"op":"submit","request_id":"r",
-        "delivery_id":"d","message_id":"m","sender":{"kind":"human","id":"h"},
-        "body":"hello","context_ids":[],"created_at":"2026-10-17T00:00:00Z"});
-    assert!(Request::parse(&serde_json::to_vec(&value).unwrap()).is_ok());
-    value["body"] = serde_json::json!("界".repeat(20_001));
-    assert!(Request::parse(&serde_json::to_vec(&value).unwrap()).is_err());
-    value["body"] = serde_json::json!("ok");
-    value["context_ids"] = serde_json::json!(vec!["context"; 33]);
-    assert!(Request::parse(&serde_json::to_vec(&value).unwrap()).is_err());
-    value["context_ids"] = serde_json::json!([]);
-    value["sender"]["token"] = serde_json::json!("synthetic");
-    assert!(Request::parse(&serde_json::to_vec(&value).unwrap()).is_err());
+fn forged_body_never_selects_inbound_path() {
+    assert!(!from_hub(
+        &Sender {
+            kind: SenderKind::Agent,
+            id: "ag_attacker".into()
+        },
+        "ag_hub"
+    ));
+    assert!(!from_hub(
+        &Sender {
+            kind: SenderKind::Human,
+            id: "ag_hub".into()
+        },
+        "ag_hub"
+    ));
+    assert!(from_hub(
+        &Sender {
+            kind: SenderKind::Agent,
+            id: "ag_hub".into()
+        },
+        "ag_hub"
+    ));
+}
+#[test]
+fn local_recipient_pin_is_independent_of_hub_envelope() {
+    let mut envelope = Envelope::Deliver {
+        job_id: "job1".into(),
+        recipient: "ag_allowed".into(),
+        body: "hello".into(),
+        context_ids: vec![],
+        source: ExternalSource {
+            channel: Channel::Telegram,
+            account_id: "bot".into(),
+            conversation_id: "chat".into(),
+            message_id: "external".into(),
+        },
+    };
+    check_recipient(&envelope, &["ag_allowed".into()]).unwrap();
+    if let Envelope::Deliver { recipient, .. } = &mut envelope {
+        *recipient = "ag_other".into();
+    }
+    assert!(check_recipient(&envelope, &["ag_allowed".into()]).is_err());
+}
+#[test]
+fn strict_fragment_json_size_base64_and_unknown_fields() {
+    let parts = outbound("hello".into())
+        .fragments("ag_one", 1, "d1")
+        .unwrap();
+    let text = &parts[0];
+    let duplicate = text.replacen('{', "{\"part\":0,", 1);
+    assert!(Fragment::parse(&duplicate).is_err());
+    let unknown = text.replacen('{', "{\"hub_id\":\"ag_fake\",", 1);
+    assert!(Fragment::parse(&unknown).is_err());
+    assert!(Fragment::parse(&(text.to_owned() + " {} ")).is_err());
+    assert!(Fragment::parse(&"x".repeat(MAX_BODY + 1)).is_err());
+    let mut frame = Fragment::parse(text).unwrap();
+    frame.data = "!not_base64".into();
+    assert!(Fragment::parse(&serde_json::to_string(&frame).unwrap()).is_err());
+}
+#[test]
+fn fragment_corruption_and_direction_mismatch_rejected() {
+    let parts = outbound("hello".into())
+        .fragments("ag_one", 1, "d1")
+        .unwrap();
+    let mut frame = Fragment::parse(&parts[0]).unwrap();
+    frame.payload_digest = "0".repeat(64);
+    assert!(Assembly::new(&frame).push(&frame).is_err());
+    let mut frame = Fragment::parse(&parts[0]).unwrap();
+    frame.direction = Direction::Inbound;
+    assert!(Assembly::new(&frame).push(&frame).is_err());
+}
+#[test]
+fn oversized_body_and_contexts_fail_before_send() {
+    assert!(outbound("a".repeat(MAX_BODY + 1))
+        .fragments("ag_one", 1, "d")
+        .is_err());
+    assert!(outbound("   ".into()).fragments("ag_one", 1, "d").is_err());
+    assert!(outbound("hi".into()).fragments("ag_one", 0, "d").is_err());
+    let mut envelope = outbound("hi".into());
+    if let Envelope::Outbound { context_ids, .. } = &mut envelope {
+        *context_ids = vec!["ctx".into(); 33];
+    }
+    assert!(envelope.fragments("ag_one", 1, "d").is_err());
 }

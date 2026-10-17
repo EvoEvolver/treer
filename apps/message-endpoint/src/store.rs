@@ -145,7 +145,7 @@ impl Store {
         if !valid_id(delivery)
             || !valid_id(message)
             || payload.is_empty()
-            || payload.len() > 128 * 1024 - 40
+            || payload.len() > super::protocol::MAX_ENVELOPE
         {
             return Err(Error::Invalid);
         }

@@ -1,6 +1,4 @@
-//! App-owned endpoint protocol. No Core credentials, runtime connections or
-//! activation path exist in this library.
+//! App-owned Core Message envelope/queue helpers. No runtime activation yet.
 #![forbid(unsafe_code)]
-
 pub mod protocol;
 pub mod store;
