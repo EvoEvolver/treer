@@ -580,7 +580,12 @@ Console `embed_origin` for the launcher parent-message check. These hints grant 
 Proxy session cookies remain required; an unauthenticated or cross-site-cookie-blocked request must fail closed,
 never fall back to a URL token. The launcher top-level response must retain its restrictive Permissions-Policy,
 Referrer-Policy and CSP through the Proxy tunnel. Top-level pages do not have the iframe sandbox restrictions;
-this remains trusted workspace UI on the Proxy origin, pending per-Agent origin isolation.
+the standalone page and embedded page share the same origin and authority. This remains trusted workspace UI
+on the Proxy origin, pending per-Agent origin isolation. Deployments rejected by Core's separate-origin check
+return `503 embedded_ui_requires_separate_app_origin` at this route, including top-level navigation; opening
+a new tab cannot bypass this restriction. No token fallback or automatic retry is attempted. Agent-interface
+frame-embedding policy currently depends on the served page's own CSP; the App UI proxy's frame policy does
+not apply to this separate route (tracked as an existing Core hardening gap in #143).
 
 Creating an Agent from Overview starts at the workspace root and shows no Tree folder hint.
 Creating from a folder in the Tree shows that folder’s full path and reserves placement there.

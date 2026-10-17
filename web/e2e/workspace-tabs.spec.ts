@@ -530,7 +530,7 @@ test.describe('workload deep links and new-tab entry points', () => {
     if (mobile) { await page.getByRole('button', { name: /^More actions/ }).first().click() }
     else await page.getByRole('tab', { name: 'Tab /Alpha', exact: true }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    await expect.poll(() => new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
+    await expect.poll(() => new URL(popup.url()).pathname).toBe('/api/workspaces/map-workspace/agents/tab-1/interface/ui/')
     expect(popup.url()).not.toMatch(/token|key|secret/i)
     await popup.close()
   })
@@ -546,8 +546,8 @@ test.describe('workload deep links and new-tab entry points', () => {
 })
 
 test.describe('workload rows are real links: modifier-click and middle-click open a new browser tab natively', () => {
-  const expected = `${workspaceUrl}/workloads/tab-1`
-  const where = (url: string) => new URL(url).pathname + new URL(url).search
+  const expected = '/api/workspaces/map-workspace/agents/tab-1/interface/ui/'
+  const where = (url: string) => new URL(url).pathname
   for (const how of ['ctrl', 'middle'] as const) {
     test(`overview rows and tree rows have the deep-link href and open natively (${how})`, async ({ page, context }) => {
       await page.setViewportSize({ width: 1360, height: 900 })
@@ -578,7 +578,7 @@ test.describe('workload rows are real links: modifier-click and middle-click ope
     await gotoWorkspace(page)
     await page.getByRole('button', { name: 'Expand tree map' }).click()
     const block = page.getByRole('dialog').getByRole('link', { name: /Alpha/ }).first()
-    await expect(block).toHaveAttribute('href', expected)
+    expect(new URL((await block.getAttribute('href'))!).pathname).toBe(expected)
     const [popup] = await Promise.all([context.waitForEvent('page'), block.click({ modifiers: ['ControlOrMeta'] })])
     await expect.poll(() => where(popup.url())).toBe(expected)
     await popup.close()
@@ -594,7 +594,7 @@ test.describe('workload links: semantics and keyboard', () => {
     const overviewLink = page.getByRole('link', { name: 'Open /Alpha', exact: true })
     const treeLink = page.getByRole('tree').getByRole('link', { name: /^Alpha/ })
     for (const link of [overviewLink, treeLink]) {
-      await expect(link).toHaveAttribute('href', `${workspaceUrl}/workloads/tab-1`)
+      expect(new URL((await link.getAttribute('href'))!).pathname).toBe('/api/workspaces/map-workspace/agents/tab-1/interface/ui/')
       await expect(link.locator('a,button,input,select,textarea,[tabindex],[role=button],[role=link]')).toHaveCount(0)
     }
     // The row's own actions button is a sibling of the link, not inside it.
@@ -668,14 +668,25 @@ test.describe('an App opens on its own ingress URL in a new browser tab', () => 
     await popup.close()
   })
 
-  test('Agents keep the Console deep link', async ({ page, context }) => {
+  test('Agents with UI open the fixed standalone Proxy route', async ({ page, context }) => {
     await withAppUrl(page, own)
-    await expect(page.getByRole('link', { name: 'Open /Alpha', exact: true })).toHaveAttribute('href', `${workspaceUrl}/workloads/tab-1`)
-    await expect(page.getByRole('link', { name: 'Open /Alpha', exact: true })).not.toHaveAttribute('rel', /.*/)
+    expect(new URL((await page.getByRole('link', { name: 'Open /Alpha', exact: true }).getAttribute('href'))!).pathname).toBe('/api/workspaces/map-workspace/agents/tab-1/interface/ui/')
+    await expect(page.getByRole('link', { name: 'Open /Alpha', exact: true })).toHaveAttribute('rel', 'noopener noreferrer')
     await open(page, 'Alpha')
     await page.getByRole('tab', { name: 'Tab /Alpha', exact: true }).click({ button: 'right' })
     const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
-    await expect.poll(() => new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
+    await expect.poll(() => new URL(popup.url()).pathname).toBe('/api/workspaces/map-workspace/agents/tab-1/interface/ui/')
+    await popup.close()
+  })
+
+  test('an Agent without UI keeps the focus-mode Console fallback', async ({ page, context }) => {
+    await withAppUrl(page, own)
+    await expect(page.getByRole('link', { name: 'Open /Terminal', exact: true })).toHaveAttribute('href', `${workspaceUrl}/workloads/tab-0`)
+    await open(page, 'Terminal')
+    await page.getByRole('tab', { name: 'Tab /Terminal', exact: true }).click({ button: 'right' })
+    const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
+    await expect.poll(() => new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-0?focus=1`)
+    expect(await popup.evaluate(() => window.opener)).toBeNull()
     await popup.close()
   })
 
