@@ -1,6 +1,7 @@
 //! Retained identity for trusted OS dependencies (for example a Node interpreter).
 //! No byte authentication, PATH lookup, canonicalization, or process execution.
 //! Same-account writers remain trusted; path verification and exec are not atomic.
+//! Trust checks inspect Unix uid/mode bits, not ACL-granted access or file flags.
 use std::{
     ffi::OsString,
     fs::File,

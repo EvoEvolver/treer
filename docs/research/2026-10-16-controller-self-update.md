@@ -378,6 +378,26 @@ this identity-only guarantee. Source-only/package/network acceptance, Node22
 validation, actual spawn/completion wiring and durable child lifecycle remain
 pending, so this helper does not authorize installation.
 
+Known permission boundary (security2545): these checks inspect Unix owner/mode
+bits only. They do not inspect macOS/POSIX ACL-granted write access or platform
+file flags (including Linux immutable flags). A passing check is not proof that
+an ACL grants no other account write access; operators must enforce that policy
+with the OS. This primitive does not add an ACL isolation guarantee.
+
+Executor diagnostics must distinguish initial trust-validation refusal
+(`update_launcher_node_untrusted_location`) from failure to revalidate a retained
+identity (`update_launcher_node_changed`), without exposing raw paths or errors.
+The latter means revalidation failed, not proof of an attack. These mappings
+remain executor work; the platform helper still returns one fixed diagnostic.
+Resolved Homebrew/admin-group-writable directories and group-writable
+`/usr/local` ancestors are examples that fail the unchanged `0o022` check, even
+when they are intentional local package-manager layouts. A machine administrator
+must provision Node22+ in a supported fixed location with trusted resolved
+ancestors and audit/remove unintended group/other write permissions; intentional
+shared-write layouts remain unsupported by this updater. Neither the updater
+nor an Agent should chmod those directories automatically, bypass the check or
+substitute an ambient interpreter to make installation proceed.
+
 Tests exercise the same walker under a private fixture-root handle, avoiding
 system-directory writes and a real Node dependency; only the private test seam
 can choose that root, while the public entry always starts at `/`. They cover
