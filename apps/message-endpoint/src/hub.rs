@@ -75,6 +75,8 @@ pub struct View {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Status {
+    #[serde(default)]
+    forwarded_evictions: u64,
     protocol: String,
     generation: i64,
     release_sha256: String,
@@ -162,6 +164,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             own_id: own_id.into(),
         };
         hub.notice_schema()?;
+        hub.hold_schema()?;
         let telegram: bool = hub.store.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_chunks')",
             [],
@@ -414,6 +417,7 @@ impl<M: Mailbox + Directory> Hub<M> {
     /// Workers call periodically, independent from channel network requests.
     pub fn maintenance(&mut self, now: i64) -> Result<(), Error> {
         self.store.recheck_private_storage()?;
+        self.cleanup_holds(now)?;
         self.store.cleanup_transfers(now)?;
         self.store.prune_completed(now)?;
         self.cleanup_failure_notices(now)?;
@@ -493,7 +497,18 @@ impl<M: Mailbox + Directory> Hub<M> {
                 }
             }
         }
-        self.active(id, now)?;
+        if self.active(id, now).is_err() {
+            return match self.hold_delivery(delivery, now) {
+                Err(Error::Binding) => self.record_rejection(
+                    id,
+                    view.binding.generation,
+                    delivery,
+                    FailureReason::InvalidEnvelope,
+                    now,
+                ),
+                result => result,
+            };
+        }
         match self.store.save_fragment(
             id,
             view.binding.generation,
@@ -509,6 +524,7 @@ impl<M: Mailbox + Directory> Hub<M> {
                 now,
             )?,
             Ok(_) => {}
+            Err(StorageError::Full) => self.hold_delivery(delivery, now)?,
             Err(StorageError::Invalid | StorageError::Conflict) => self.record_rejection(
                 id,
                 view.binding.generation,
@@ -605,16 +621,8 @@ impl<M: Mailbox + Directory> Hub<M> {
             FailureReason::TransportRejected => crate::protocol::NoticeCode::TransportRejected,
             _ => crate::protocol::NoticeCode::TransportRetriesExhausted,
         };
-        if let Err(error) =
-            crate::notices::insert_notice(&tx, &binding, &envelope, transfer, notice_code, now)
-        {
-            tx.rollback()?;
-            if matches!(error, Error::FailureBudget) {
-                self.store
-                    .db
-                    .execute("UPDATE hub_identity SET blocked=1 WHERE singleton=1", [])?;
-            }
-            return Err(error);
+        if added == 1 {
+            crate::notices::insert_notice(&tx, &binding, &envelope, transfer, notice_code, now)?;
         }
         if added == 1 {
             tx.execute(
@@ -872,25 +880,27 @@ mod tests {
         assert_eq!(fake.acks.borrow().len(), wire.len());
     }
     #[test]
-    fn paused_or_stale_binding_never_acks_work_and_unknown_sender_cannot_route() {
+    fn paused_or_stale_binding_holds_before_ack_and_unknown_sender_cannot_route() {
         let (mut hub, fake) = fixture();
         let wire = outbound("body").remove(0);
         fake.deliveries
             .borrow_mut()
             .push(delivery("del_paused", "ag_endpoint", &wire));
-        assert!(hub.receive_once(NOW).is_err());
-        assert!(fake.acks.borrow().is_empty());
+        hub.receive_once(NOW).unwrap();
+        assert_eq!(fake.acks.borrow().as_slice(), ["del_paused"]);
+        assert_eq!(hub.hold_summary("ag_endpoint").unwrap().held_fragments, 1);
         activate(&mut hub);
         fake.deliveries
             .borrow_mut()
             .push(delivery("del_stale", "ag_endpoint", &wire));
-        assert!(hub.receive_once(NOW + READBACK_TTL + 1).is_err());
-        assert!(fake.acks.borrow().is_empty());
+        hub.receive_once(NOW + READBACK_TTL + 1).unwrap();
+        assert_eq!(fake.acks.borrow().len(), 2);
+        assert_eq!(hub.hold_summary("ag_endpoint").unwrap().held_fragments, 2);
         fake.deliveries
             .borrow_mut()
             .push(delivery("del_unknown", "ag_unknown", &wire));
         hub.receive_once(NOW + 1).unwrap();
-        assert_eq!(*fake.acks.borrow(), vec!["del_unknown"]);
+        assert_eq!(fake.acks.borrow().last().unwrap(), "del_unknown");
         assert!(hub
             .ready_outbound("ag_endpoint", NOW + 1)
             .unwrap()

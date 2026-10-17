@@ -4,6 +4,8 @@
 pub mod core;
 pub mod failures;
 #[cfg(unix)]
+pub mod holds;
+#[cfg(unix)]
 pub mod hub;
 #[cfg(unix)]
 pub mod notices;

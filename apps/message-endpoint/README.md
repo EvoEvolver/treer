@@ -288,8 +288,9 @@ container. In particular, descriptor checks and SQLite's later path-based open
 are not atomic against same-UID path replacement. Do not run the App with
 elevated privileges. Lifecycle APIs require Unix epoch seconds (at least 30 days
 after epoch for cleanup); a bad clock must surface a visible cleanup error.
-Paused bindings retain unacked Core deliveries and their visible backlog until
-the human resumes them; a pause is not successful delivery.
+Paused bindings durably hold a small bounded backlog before Core ack. Beyond
+that capacity the hub records visible rejections/counters and acks to keep other
+endpoints moving; a pause or local hold is never successful external delivery.
 
 
 ## Development relay executable (Unix)
@@ -481,9 +482,12 @@ transfer was fully accepted by Core and originated from that recipient Agent.
 Unrecorded or unfinished transfers are ignored. Relay notice keys use the
 original transfer ID, and a durable notified bit prevents a second status even
 if the hub sends a different wrapper/job ID. Relay provenance is metadata only,
-capped at 10000 records; full capacity leaves new outbound messages unacked
-before attempting Core sends. Completed provenance prunes after 30 days; notices
-for older transfers are ignored. A draft relay's older, unrecorded forwards
+capped at 10000 records. Completed provenance expires 48 hours after first Core
+acceptance. At capacity the relay evicts the oldest accepted-and-notified record
+first, then the oldest accepted record; it refuses before send/ack only when all
+records remain unfinished. A saturating eviction count is included in its
+endpoint-asserted startup diagnostic (not a delivery or security claim). Notices
+for expired/evicted transfers are ignored. A draft relay's older, unrecorded forwards
 cannot gain notice authority retroactively.
 There is no arbitrary body, context list or `external_source` in this envelope:
 hub-generated status must not impersonate an external human. It is normal Core
@@ -498,8 +502,11 @@ stale; the owner still sees the parked failure immediately. Owner retry/repark
 does not generate another notice or rewrite its first reason/attempt count.
 
 The notice budget is separate from pending plaintext capacity, capped at 1000
-per endpoint and 10000 globally. Full budget persistently blocks admission and
-keeps the original work; it never silently drops payload to make room. Pending
+per endpoint and 10000 globally. At full budget the original transfer still
+parks, but its notice is unavailable and a per-binding skip counter increments.
+It never blocks the hub or discards original payload to make notification space.
+Repeating an existing park does not increment again; an explicit owner retry
+followed by a new park can count another unavailable attempt. Pending
 notices are not pruned. Terminal notice dedup markers remain while the original
 transfer exists, then prune after the 30-day terminal retention window. This
 prevents long-lived parked work generating a second notice after retention.
@@ -516,8 +523,34 @@ its bounded 10-delivery page. Backlog is not a receive cursor: only ack moves th
 oldest-first window. The future scheduler must drain bounded zero-wait pages and
 yield between ticks. Core currently has no sender skip, nack or recipient cap.
 Leaving a paused endpoint unacked can block other endpoints; multi-endpoint
-activation is gated on bounded per-endpoint holds, capped capacity receipts and
-visible overflow counters. Those hold/refetch operations are not implemented yet.
+activation is gated on scheduler integration and audited owner refetch. The
+state-only hold/capacity implementation below does not establish real runtime
+fairness or successful recovery by itself.
+
+Valid bound fragments for a paused/stale binding, or for a full active queue,
+commit to a separate hold before ack. Holds are capped at 20 fragments/256 KiB
+per endpoint and 400 fragments/5 MiB globally; they do not consume active queue
+or failure-ledger quotas. Duplicate deliveries retain their original one-hour
+expiry. Promotion requires a current active/fresh binding, revalidates generation
+and hashes through the normal fragment store, processes at most ten rows FIFO,
+and deletes only after its durable commit. Accepted state replay is deduplicated
+after a crash between commit and deletion. Expired or old-generation holds turn
+into metadata rejection receipts before plaintext is removed, never into work.
+
+At capacity, the hub **drops the fragment body by design** after durably recording
+its rejection, then permits Core ack. Metadata receipts contain Core delivery ID,
+message ID, endpoint/generation, fixed reason and time: at most 1000 per endpoint
+and 10000 globally. Further rejection attempts only increment per-binding
+counters, so individual refetch is unavailable for them; retrying an ack beyond
+the receipt cap can count the same message again. Receipt-known duplicates do
+not increment counters. The hub-wide hold ceiling also sets a persistent visible
+capacity-exceeded flag; it still records/acks overflow rather than blocking the
+Core window or poisoning the fault ledger. Metadata receipt reads paginate by
+opaque delivery ID, with at most 100 per page. Receipt/counter archival, explicit
+owner clear and audited refetch remain activation requirements. Storage failure
+returns no ack permission and preserves the prior hold; counters are not a
+substitute for a successful disk commit. Holds use the same private plaintext
+database, backup and encryption requirements as other message state.
 
 `Core::get_bound_message` is a network primitive for future owner-authorized
 receipt recovery. It invokes only `treer message get -- <stored-message-id>` under

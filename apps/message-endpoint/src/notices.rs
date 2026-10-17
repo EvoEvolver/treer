@@ -52,7 +52,12 @@ pub(crate) fn insert_notice(
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
     if global >= 10_000 || local >= 1000 {
-        return Err(Error::FailureBudget);
+        tx.execute(
+            "INSERT OR IGNORE INTO hub_notice_health(endpoint,generation) VALUES(?1,?2)",
+            params![endpoint, generation],
+        )?;
+        tx.execute("UPDATE hub_notice_health SET budget_skips=CASE WHEN budget_skips<9223372036854775807 THEN budget_skips+1 ELSE budget_skips END WHERE endpoint=?1 AND generation=?2",params![endpoint,generation])?;
+        return Ok(());
     }
     let eligible = matches!(envelope,Envelope::Outbound{original_sender,..} if original_sender.kind==SenderKind::Agent && original_sender.id==recipient);
     let chunks: bool = tx.query_row(
@@ -77,7 +82,8 @@ fn valid_token(token: &str) -> bool {
 
 impl<M: Mailbox + Directory> Hub<M> {
     pub(crate) fn notice_schema(&self) -> Result<(), Error> {
-        self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_failure_notices(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,recipient TEXT,code TEXT NOT NULL,transport_attempts INTEGER NOT NULL,created_at INTEGER NOT NULL,state INTEGER NOT NULL DEFAULT 0,handoff_attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER NOT NULL DEFAULT 0,core_id TEXT,terminal_at INTEGER,PRIMARY KEY(endpoint,generation,transfer));")?;
+        self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_notice_health(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,budget_skips INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(endpoint,generation));
+        CREATE TABLE IF NOT EXISTS hub_failure_notices(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,recipient TEXT,code TEXT NOT NULL,transport_attempts INTEGER NOT NULL,created_at INTEGER NOT NULL,state INTEGER NOT NULL DEFAULT 0,handoff_attempts INTEGER NOT NULL DEFAULT 0,next_attempt INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER NOT NULL DEFAULT 0,core_id TEXT,terminal_at INTEGER,PRIMARY KEY(endpoint,generation,transfer));")?;
         Ok(())
     }
     /// Internal worker only; fresh CSPRNG lease tokens never come from a browser.
@@ -177,6 +183,19 @@ impl<M: Mailbox + Directory> Hub<M> {
             .ok_or(Error::Binding)?;
         self.store.db.execute("UPDATE hub_failure_notices SET lease_until=0,next_attempt=?5 WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND lease_token=?4 AND state=0",params![intent.endpoint,intent.generation,intent.transfer,intent.token,next])?;
         Ok(())
+    }
+    pub fn notice_budget_skips(&self, endpoint: &str) -> Result<i64, Error> {
+        let generation = self.view(endpoint)?.binding.generation;
+        Ok(self
+            .store
+            .db
+            .query_row(
+                "SELECT budget_skips FROM hub_notice_health WHERE endpoint=?1 AND generation=?2",
+                params![endpoint, generation],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(0))
     }
     pub fn failure_notices(&self, endpoint: &str, limit: u32) -> Result<Vec<NoticeView>, Error> {
         if limit == 0 || limit > 100 {
@@ -469,7 +488,7 @@ mod tests {
         assert_eq!(hub.failure_notices("ag_endpoint", 10).unwrap().len(), 1);
     }
     #[test]
-    fn full_notice_budget_blocks_safely_without_discarding_transfer() {
+    fn full_notice_budget_counts_unavailable_but_still_parks_without_blocking_hub() {
         let (mut hub, id) = memory();
         hub.recover_parked("ag_endpoint", 4, &id, Recovery::Retry, "human_owner", NOW)
             .unwrap();
@@ -478,22 +497,30 @@ mod tests {
             .execute("DELETE FROM hub_failure_notices", [])
             .unwrap();
         hub.store.db.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<1000) INSERT INTO hub_failure_notices(endpoint,generation,transfer,code,transport_attempts,created_at,state) SELECT 'ag_endpoint',1,'synthetic-'||i,'transport_rejected',1,0,2 FROM n;").unwrap();
-        assert!(matches!(
-            hub.park_transport(
-                "ag_endpoint",
-                1,
-                &id,
-                crate::failures::FailureReason::TransportRejected,
-                NOW
-            ),
-            Err(Error::FailureBudget)
-        ));
-        assert!(hub.blocked().unwrap());
+        hub.park_transport(
+            "ag_endpoint",
+            1,
+            &id,
+            crate::failures::FailureReason::TransportRejected,
+            NOW,
+        )
+        .unwrap();
+        assert!(!hub.blocked().unwrap());
+        assert_eq!(hub.notice_budget_skips("ag_endpoint").unwrap(), 1);
+        hub.park_transport(
+            "ag_endpoint",
+            1,
+            &id,
+            crate::failures::FailureReason::TransportRejected,
+            NOW,
+        )
+        .unwrap();
+        assert_eq!(hub.notice_budget_skips("ag_endpoint").unwrap(), 1);
         assert!(hub
             .store
             .transfer_payload("ag_endpoint", 1, Direction::Outbound, &id)
             .is_ok());
-        assert!(hub.parked_transfers("ag_endpoint", 10).unwrap().is_empty());
+        assert_eq!(hub.parked_transfers("ag_endpoint", 10).unwrap().len(), 1);
     }
     #[test]
     fn notice_write_failure_rolls_back_park_without_losing_original() {

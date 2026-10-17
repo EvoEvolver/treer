@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use thiserror::Error;
+const FORWARDED_TTL: i64 = 48 * 60 * 60;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -178,6 +179,28 @@ impl<M: Mailbox> Relay<M> {
         let transaction = store.db.transaction().map_err(StoreError::from)?;
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS relay_pins (singleton INTEGER PRIMARY KEY CHECK(singleton=1), pins TEXT NOT NULL); CREATE TABLE IF NOT EXISTS relay_status (singleton INTEGER PRIMARY KEY CHECK(singleton=1), failure_budget_exhausted INTEGER NOT NULL DEFAULT 0); INSERT OR IGNORE INTO relay_status(singleton) VALUES(1)").map_err(StoreError::from)?;
         transaction.execute_batch("CREATE TABLE IF NOT EXISTS relay_forwarded(transfer TEXT PRIMARY KEY,digest TEXT NOT NULL,recipient TEXT,accepted INTEGER NOT NULL DEFAULT 0,notified INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL);").map_err(StoreError::from)?;
+        let columns = transaction
+            .prepare("PRAGMA table_info(relay_forwarded)")
+            .map_err(StoreError::from)?
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(StoreError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        if !columns.iter().any(|name| name == "accepted_at") {
+            transaction
+                .execute_batch("ALTER TABLE relay_forwarded ADD COLUMN accepted_at INTEGER")
+                .map_err(StoreError::from)?;
+        }
+        let columns = transaction
+            .prepare("PRAGMA table_info(relay_status)")
+            .map_err(StoreError::from)?
+            .query_map([], |r| r.get::<_, String>(1))
+            .map_err(StoreError::from)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(StoreError::from)?;
+        if !columns.iter().any(|name| name == "forwarded_evictions") {
+            transaction.execute_batch("ALTER TABLE relay_status ADD COLUMN forwarded_evictions INTEGER NOT NULL DEFAULT 0").map_err(StoreError::from)?;
+        }
         let existing: Option<String> = transaction
             .query_row("SELECT pins FROM relay_pins WHERE singleton=1", [], |r| {
                 r.get(0)
@@ -249,16 +272,17 @@ impl<M: Mailbox> Relay<M> {
         } else {
             "running"
         };
+        let evictions = self.forwarded_evictions()?;
         let body =
             json!({"protocol":"treer.endpoint.status/v1","state":state,"generation":self.config.generation,
             "release_sha256":self.config.release_sha256,"actual_sha256":actual,
-            "version":env!("CARGO_PKG_VERSION")})
+            "version":env!("CARGO_PKG_VERSION"),"forwarded_evictions":evictions})
             .to_string();
         let key = protocol::digest_id(
             "startup-status",
             &self.config.endpoint_id,
             self.config.generation as u64,
-            &format!("{boot_nonce}-{state}"),
+            &format!("{boot_nonce}-{state}-{evictions}"),
         );
         self.mailbox.send(
             &self.config.hub_id,
@@ -279,8 +303,8 @@ impl<M: Mailbox> Relay<M> {
         self.store
             .db
             .execute(
-                "DELETE FROM relay_forwarded WHERE accepted=1 AND created_at<=?1",
-                [now - crate::transfers::TOMBSTONE_TTL],
+                "DELETE FROM relay_forwarded WHERE accepted=1 AND COALESCE(accepted_at,created_at)<=?1",
+                [now - FORWARDED_TTL],
             )
             .map_err(StoreError::from)?;
         if self.failure_budget_exhausted()? {
@@ -312,6 +336,17 @@ impl<M: Mailbox> Relay<M> {
         }
     }
 
+    fn forwarded_evictions(&self) -> Result<u64, Error> {
+        self.store
+            .db
+            .query_row(
+                "SELECT forwarded_evictions FROM relay_status WHERE singleton=1",
+                [],
+                |r| r.get(0),
+            )
+            .map_err(StoreError::from)
+            .map_err(Error::from)
+    }
     fn failure_budget_exhausted(&self) -> Result<bool, Error> {
         self.store
             .db
@@ -454,8 +489,8 @@ impl<M: Mailbox> Relay<M> {
             self.store
                 .db
                 .execute(
-                    "UPDATE relay_forwarded SET accepted=1 WHERE transfer=?1",
-                    [&first.transfer_id],
+                    "UPDATE relay_forwarded SET accepted=1,accepted_at=COALESCE(accepted_at,?2) WHERE transfer=?1",
+                    rusqlite::params![first.transfer_id,now],
                 )
                 .map_err(StoreError::from)?;
             // Core's acceptance of all fragments is durable. Ambiguous/failed
@@ -472,6 +507,12 @@ impl<M: Mailbox> Relay<M> {
         now: i64,
     ) -> Result<(), Error> {
         let tx = self.store.db.transaction().map_err(StoreError::from)?;
+        if now < 0 {
+            return Err(Error::Configuration);
+        }
+        if now >= FORWARDED_TTL {
+            tx.execute("DELETE FROM relay_forwarded WHERE accepted=1 AND COALESCE(accepted_at,created_at)<=?1",[now-FORWARDED_TTL]).map_err(StoreError::from)?;
+        }
         let existing: Option<(String, Option<String>)> = tx
             .query_row(
                 "SELECT digest,recipient FROM relay_forwarded WHERE transfer=?1",
@@ -489,7 +530,11 @@ impl<M: Mailbox> Relay<M> {
                 .query_row("SELECT COUNT(*) FROM relay_forwarded", [], |r| r.get(0))
                 .map_err(StoreError::from)?;
             if count >= 10_000 {
-                return Err(StoreError::Full.into());
+                let removed=tx.execute("DELETE FROM relay_forwarded WHERE transfer IN (SELECT transfer FROM relay_forwarded WHERE accepted=1 ORDER BY notified DESC,COALESCE(accepted_at,created_at),transfer LIMIT 1)",[]).map_err(StoreError::from)?;
+                if removed != 1 || count > 10_000 {
+                    return Err(StoreError::Full.into());
+                }
+                tx.execute("UPDATE relay_status SET forwarded_evictions=CASE WHEN forwarded_evictions<9223372036854775807 THEN forwarded_evictions+1 ELSE forwarded_evictions END WHERE singleton=1",[]).map_err(StoreError::from)?;
             }
             tx.execute("INSERT INTO relay_forwarded(transfer,digest,recipient,created_at) VALUES(?1,?2,?3,?4)",rusqlite::params![frame.transfer_id,frame.payload_digest,recipient,now]).map_err(StoreError::from)?;
         }
@@ -755,6 +800,39 @@ mod tests {
         assert_eq!(sent[0], sent[1]);
         assert!(sent[0].1.ends_with(&frame.transfer_id));
         assert!(relay.mailbox.externals.borrow().iter().all(Option::is_none));
+    }
+    #[test]
+    fn accepted_provenance_cap_evicts_and_48_hour_window_does_not_block_the_10001st_send() {
+        let mut relay = fixture();
+        relay.store.db.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO relay_forwarded(transfer,digest,accepted,accepted_at,notified,created_at) SELECT 'synthetic-'||i,'synthetic',1,5000000,CASE WHEN i=1 THEN 1 ELSE 0 END,5000000 FROM n;").unwrap();
+        relay
+            .handle(delivery("del_10001", "ag_target", "new outbound"), NOW + 1)
+            .unwrap();
+        assert_eq!(relay.forwarded_evictions().unwrap(), 1);
+        let first: i64 = relay
+            .store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM relay_forwarded WHERE transfer='synthetic-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(first, 0);
+        assert_eq!(relay.mailbox.acked.borrow().as_slice(), ["del_10001"]);
+        relay
+            .handle(
+                delivery("del_after_window", "ag_target", "later outbound"),
+                NOW + FORWARDED_TTL + 2,
+            )
+            .unwrap();
+        let remaining: i64 = relay
+            .store
+            .db
+            .query_row("SELECT COUNT(*) FROM relay_forwarded", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(remaining, 1);
+        assert_eq!(relay.mailbox.acked.borrow().len(), 2);
     }
     #[test]
     fn provenance_budget_refuses_outbound_before_core_send_or_ack() {
