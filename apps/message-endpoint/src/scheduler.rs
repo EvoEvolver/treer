@@ -49,6 +49,10 @@ fn increment(counter: &AtomicU64) {
 }
 #[derive(Default, Serialize)]
 pub struct WorkerStatus {
+    pub inbound_core_handoffs: u64,
+    pub notice_core_handoffs: u64,
+    pub handoff_failures: u64,
+    pub handoffs_stopped: bool,
     pub receive_pages: u64,
     pub core_acked: u64,
     pub failures: u64,
@@ -125,6 +129,10 @@ impl CoreWorkers {
     pub fn status(&self) -> WorkerStatus {
         let c = &self.shared;
         WorkerStatus {
+            inbound_core_handoffs: 0,
+            notice_core_handoffs: 0,
+            handoff_failures: 0,
+            handoffs_stopped: false,
             receive_pages: c.pages.load(Ordering::Relaxed),
             core_acked: c.acked.load(Ordering::Relaxed),
             failures: c.failures.load(Ordering::Relaxed),

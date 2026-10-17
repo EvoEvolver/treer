@@ -107,6 +107,10 @@ pub fn run(config: Config) -> Result<(), Error> {
     let workers = Arc::new(Mutex::new(
         CoreWorkers::start(hub.clone()).map_err(|_| Error::Runtime)?,
     ));
+    let handoffs = Arc::new(Mutex::new(
+        crate::handoffs::CoreHandoffs::start(hub.clone()).map_err(|_| Error::Runtime)?,
+    ));
+    let snapshot_handoffs = handoffs.clone();
     let snapshot_hub = hub.clone();
     let snapshot_workers = workers.clone();
     let snapshot = Arc::new(move || {
@@ -117,7 +121,12 @@ pub fn run(config: Config) -> Result<(), Error> {
             .into_iter()
             .map(|id| hub.view(&id).map(Into::into).map_err(|_| ()))
             .collect::<Result<Vec<_>, _>>()?;
-        let status = snapshot_workers.lock().map_err(|_| ())?.status();
+        let mut status = snapshot_workers.lock().map_err(|_| ())?.status();
+        let hs = snapshot_handoffs.lock().map_err(|_| ())?.status();
+        status.inbound_core_handoffs = hs.inbound_core_handoffs;
+        status.notice_core_handoffs = hs.notice_core_handoffs;
+        status.handoff_failures = hs.handoff_failures;
+        status.handoffs_stopped = hs.handoffs_stopped;
         let (audit_full, emergency_pause_bindings) = hub.owner_audit_capacity().map_err(|_| ())?;
         Ok(SettingsSnapshot {
             endpoints,
@@ -171,6 +180,9 @@ pub fn run(config: Config) -> Result<(), Error> {
     };
     let result = serve();
     // Stop only the threads owned by this process. No external signals/restarts.
+    if let Ok(mut handoffs) = handoffs.lock() {
+        handoffs.stop();
+    }
     if let Ok(mut workers) = workers.lock() {
         workers.stop();
     }

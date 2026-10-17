@@ -874,7 +874,7 @@ Startup requires its injected `TREER_AGENT_ID` to equal the configured App
 runtime ID and requires the injected `TREER_WORKSPACE_ID` to match (no optional
 workspace fallback). It verifies the CLI
 hash before opening state. The listener defaults to loopback and refuses
-wildcard/public addresses and `access:public`. It starts its own Core inbox,
+wildcard/public addresses and `access:public`. It starts its own Core inbox, per-endpoint inbound/failure-report Core handoffs,
 metadata-refresh and maintenance workers and stops only these owned threads on
 SIGINT. Invalid configuration/storage/listener failures return nonzero with
 fixed error codes, never raw configuration or credentials. A changed CLI hash
@@ -1015,3 +1015,36 @@ confirmation and an exact revision. Verification/storage failure can still stop
 any request; this is not an OS-level emergency stop or a durability promise under
 disk failure. System pause reasons are visible as current state, but a separate
 historical system-audit stream is still not implemented.
+
+
+### Owned Core handoff loops
+
+The executable now starts a handoff supervisor and at most one worker per bound
+endpoint (20 maximum). Every worker alternates the inbound queue and body-free
+failure notices. It persists a fresh private CSPRNG lease before sending only to
+that stable endpoint through the hub's own Core identity. It does not impersonate
+the endpoint or the original sender. The endpoint relay still applies its own
+local pins before authoring any onward message. Outer Core sends have no borrowed
+contexts or external-author metadata. Only after **all** fixed-key fragments have
+been accepted by Core is the queue/notice handoff committed; this is not endpoint
+or recipient delivery/read confirmation. Ambiguous Core outcomes retry the same
+idempotency keys after the durable lease/backoff, never mark them delivered.
+
+All Core CLI calls run outside the state mutex. One slow endpoint cannot stop
+another endpoint, metadata refresh, maintenance or HTTP settings. Each fragment
+checks current active/fresh readback, unchanged revision and failure-budget state
+before its send. Pause/stop prevents subsequent fragments, but an already-started
+Core call may still be accepted; accepted final results may commit after pause,
+fenced by generation and private lease. A partial handoff remains uncompleted.
+Core CLI calls have their existing 15-second deadline; stop is checked between
+fragments and only joins owned threads. A healthy partial transport may require
+multiple bounded CLI calls; shutdown is not a recall of accepted messages.
+
+No-work checks yield; failures back off 1..30 seconds independently per endpoint.
+Failure notices retain their durable eight-attempt/backoff policy. Unexpected
+worker termination or a poisoned actor stops this owned worker group rather than
+hot-respawning. The owner snapshot/UI shows inbound handoffs, notice handoffs,
+failures and stopped state; no raw CLI errors or message bodies are exposed.
+This connects only Core handoff from already admitted hub state. Telegram account
+poll/send workers, account-secret configuration and owner resume remain separate
+unfinished work, so no channel is ready for activation.

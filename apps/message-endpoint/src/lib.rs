@@ -42,3 +42,6 @@ mod verification_gate;
 
 #[cfg(all(unix, feature = "hub"))]
 pub mod configuration;
+
+#[cfg(all(unix, feature = "hub"))]
+pub mod handoffs;
