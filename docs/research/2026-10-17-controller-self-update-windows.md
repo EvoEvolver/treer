@@ -463,11 +463,17 @@ in the same test process, delaying Reply and ACK past the owner's short window
 while the child's longer window remains valid. The owner must fail in both
 cases. This tests transport/clock refusal, not cross-process authentication.
 The child's actual window validity is recorded inside the delayed verification,
-before writing to the pipe closed by the owner. That write must cause an I/O
-refusal and poison the child's attempt; the test must not expect that poisoned
-attempt to remain usable. Private fixture diagnostics preserve the first refusal
-category, allowing the test to distinguish the owner's clock/timer refusal from
-the child's I/O refusal while outward errors remain fixed.
+before writing. The owner must refuse with its first clock/timer failure in both
+variants. The child may either observe pipe closure (an I/O refusal that poisons
+its attempt), or finish a buffered ACK write before the owner future is polled
+and closes the server. In the latter case its local clock remains valid and its
+completion is diagnostic only; it does not establish owner ACK acceptance or
+joint completion. Do not require a peer to observe closure synchronously with
+the owner's deadline. Private diagnostics preserve the first refusal category;
+outward errors remain fixed. The hosted 5ca87485 run demonstrated the overly
+strict child-error assertion on both Server 2022 and 2025 (17 ordinary passes,
+one failure; the actual-process fixture separately passed), so that SHA is not
+accepted as a passing integration run.
 `native_owner_round_trip` remains the hosted actual-process proof test. All such
 changes require their own exact-SHA native evidence; the prior clock-adapter run
 does not cover this integration.

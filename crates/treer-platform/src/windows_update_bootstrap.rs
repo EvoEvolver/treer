@@ -786,12 +786,21 @@ mod tests {
             ));
             assert!(owner_clock.remaining().is_err());
             assert!(child_valid_before_write.load(Ordering::SeqCst));
-            assert_eq!(
-                child_result.unwrap_err().kind(),
-                io::ErrorKind::PermissionDenied
-            );
-            assert_eq!(child_clock.refusal, Some(tick_deadline::Refusal::Io));
-            assert!(child_clock.remaining().is_err());
+            match child_result {
+                // An ACK write can finish into the buffer before the owner
+                // future is polled and drops the server. Child-only completion
+                // is diagnostic, never evidence that the owner accepted ACK.
+                Ok(()) => {
+                    assert_eq!(delayed_receive, 1, "late Reply cannot receive Finish");
+                    assert_eq!(child_clock.refusal, None);
+                    assert!(child_clock.remaining().is_ok());
+                }
+                Err(error) => {
+                    assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+                    assert_eq!(child_clock.refusal, Some(tick_deadline::Refusal::Io));
+                    assert!(child_clock.remaining().is_err());
+                }
+            }
             assert!(count.load(Ordering::SeqCst) > delayed_receive);
         }
     }
