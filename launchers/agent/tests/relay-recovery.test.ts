@@ -109,6 +109,7 @@ for (const state of ["systemError", "systemError-empty", "not-materialized"]) te
     assert.equal(queue.submission(second.id)?.state, "queued");
     assert.equal((await queue.submit("second", "queue", { operationId: "second" })).id, second.id);
     assert.equal(queue.submission(first.id)?.state, "failed");
+    assert.equal(runtime.snapshot().thread?.turns.find(turn => turn.id === "relay-1")?.status, "failed");
     const calls = readFileSync(join(root, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line));
     assert.equal(calls.filter(call => call.method === "turn/start").length, 1);
   } finally { queue.close(); await runtime.stop(); process.env = previous; rmSync(root, { recursive: true, force: true }); }

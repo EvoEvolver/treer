@@ -509,7 +509,13 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
         preview?: string;
       };
       const statusType = record.status && typeof record.status === "object" ? record.status.type : null;
-      if (Array.isArray(record.turns)) this.fullTurns = record.turns.map((turn) => mapTurn(turn));
+      if (statusType != null && !["idle", "active"].includes(statusType)) {
+        // An unusable native snapshot must not erase the last confirmed error
+        // or failed history while it also cannot authorize a recovery turn.
+        this.thread.status = "error"; this.emit("state"); return false;
+      }
+      if (!Array.isArray(record.turns)) return false;
+      this.fullTurns = record.turns.map((turn) => mapTurn(turn));
       // A turn cut off by a restart stays "inProgress" in the persisted history
       // forever. Only the newest turn can be live, and only while the thread is
       // active (or its status is unknown); every other stale turn was interrupted.
@@ -530,7 +536,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
         cwd: record.cwd || this.thread.cwd,
         model: this.thread.model,
         reasoningEffort: this.thread.reasoningEffort,
-        status: running ? "running" : statusType === "systemError" || newest?.status === "failed" ? "error" : "idle",
+        status: running ? "running" : newest?.status === "failed" ? "error" : "idle",
         activeTurnId,
         // Historical failed turns remain in the transcript, not runtime.error.
         lastError: newest?.status === "failed" ? providerError(newest.error) : newest?.status === "inProgress" ? this.thread.lastError : null,
@@ -543,7 +549,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       // systemError, unknown native states and absent turn data cannot attest
       // dispatchability. Missing status is supported by older app-servers only
       // when their returned turn history confirms there is no active turn.
-      return !running && Array.isArray(record.turns) && (statusType == null || statusType === "idle");
+      return !running && (statusType == null || statusType === "idle");
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (message.includes("not materialized")) {
