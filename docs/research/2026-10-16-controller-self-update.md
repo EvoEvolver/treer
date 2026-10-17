@@ -831,8 +831,20 @@ reader must return `update_handoff_peer_changed` and leave arbitration
 descriptor ownership conversion, external CLI, installer or fixed port is used.
 Existing nix `fs` support is enabled only as a Unix dev dependency for fixture
 descriptor flags. This establishes the image-change read-window regression;
-attempt/intent/registered-identity binding and sealed lifecycle integration
-remain unimplemented and require their own combined tests.
+sealed lifecycle integration remains unimplemented and requires its own combined
+tests.
+
+The authenticated read entry now also compares a complete frame's attempt,
+intent digest and registered-identity digest with the pending arbitration's
+binding, after the post-read image check. A mismatch returns the fixed
+`update_launcher_attempt_mismatch`, invalidates Pending to Uncertain and cannot
+be retried or subsequently accepted with current metadata. Matching input still
+leaves Pending and returns raw data, without ACK, persistence or execution.
+Integration regressions authenticate actual same-PID socketpair peers and send
+valid matching, previous/future-attempt, changed-intent and changed-identity
+frames. This closes metadata equality at the read boundary only: the binding is
+still caller-constructible, not derived from an authenticated durable supervisor
+registration. That derivation and sealed receiver-bound proofs remain required.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the

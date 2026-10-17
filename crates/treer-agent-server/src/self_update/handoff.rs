@@ -221,6 +221,9 @@ impl AuthenticatedPeer {
 
     /// Revalidate this exact connected peer before a single raw launcher read,
     /// and its creation identity/image again before returning successful input.
+    /// Complete frames must match the pending arbitration's exact binding.
+    /// This compares metadata only: the future supervisor must derive that
+    /// binding from verified durable records, not from incoming frame contents.
     /// Every failure invalidates pending arbitration, including cancellation and
     /// repeat reads. Success does not accept a permit or establish authenticated
     /// EOF/all-writers-gone evidence; the peer may die while the read drains.
@@ -250,6 +253,9 @@ impl AuthenticatedPeer {
                 // borrows the receiver: a same-PID exec during reading must
                 // not turn raw input into a successfully verified observation.
                 revalidate_launcher_image(&self.image, arbitration)?;
+                if let Some(binding) = observation.binding() {
+                    arbitration.match_binding(binding)?;
+                }
                 Ok(observation)
             }
             Err(error) => {
@@ -391,6 +397,65 @@ mod tests {
         assert_eq!(arbitration.decision(), Decision::Pending);
         assert!(peer.read_launcher_frame(&mut arbitration, &cancel).is_err());
         assert_eq!(arbitration.decision(), Decision::Uncertain);
+    }
+
+    #[test]
+    fn authenticated_launcher_read_rejects_foreign_attempt_intent_and_identity() {
+        use super::super::launcher_arbitration::{transport::Kind, Arbitration, Binding, Decision};
+        use std::net::Shutdown;
+
+        let image = ProcessImage::capture(std::process::id()).unwrap();
+        let digest = digest_file(image.executable()).unwrap();
+        let expected =
+            Binding::new(uuid::Uuid::from_u128(7), &"a".repeat(64), &"b".repeat(64)).unwrap();
+        for (attempt, intent, identity, matches) in [
+            (7, b'a', b'b', true),
+            (6, b'a', b'b', false), // Previous attempt with identical digests.
+            (8, b'a', b'b', false), // Another attempt is not current either.
+            (7, b'c', b'b', false),
+            (7, b'a', b'd', false),
+        ] {
+            let (stream, mut writer) = UnixStream::pair().unwrap();
+            // Authenticate the actual connected same-PID peer, including image
+            // inode and digest. These fixtures test binding equality, not a
+            // supervisor's still-unimplemented durable registration protocol.
+            let mut peer =
+                AuthenticatedPeer::authenticate(stream, &image, image.executable(), &digest)
+                    .unwrap();
+            let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+            let mut frame = Vec::from(&b"TRLP\x01\0\0\0"[..]);
+            frame.extend_from_slice(uuid::Uuid::from_u128(attempt).as_bytes());
+            frame.extend_from_slice(&[intent; 64]);
+            frame.extend_from_slice(&[identity; 64]);
+            writer.write_all(&frame).unwrap();
+            writer.shutdown(Shutdown::Write).unwrap();
+            let mut arbitration = Arbitration::new(expected.clone());
+            let result = peer.read_launcher_frame(&mut arbitration, &cancel);
+            if matches {
+                let observation = result.unwrap();
+                assert_eq!(observation.kind(), Kind::Permit);
+                assert!(observation.binding() == Some(&expected));
+                drop(observation);
+                // Reading a matching frame does not accept it, ACK it, or
+                // establish durable authority to execute anything.
+                assert_eq!(arbitration.decision(), Decision::Pending);
+            } else {
+                assert_eq!(
+                    result.err().unwrap().to_string(),
+                    "update_launcher_attempt_mismatch"
+                );
+                assert_eq!(arbitration.decision(), Decision::Uncertain);
+                assert!(arbitration.accept(&expected).is_err());
+            }
+            assert_eq!(
+                peer.read_launcher_frame(&mut arbitration, &cancel)
+                    .err()
+                    .unwrap()
+                    .to_string(),
+                "update_recovery_required"
+            );
+            assert_eq!(arbitration.decision(), Decision::Uncertain);
+        }
     }
 
     #[test]

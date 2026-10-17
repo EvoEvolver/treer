@@ -75,7 +75,9 @@ impl Arbitration {
         self.decision
     }
 
-    fn match_binding(&mut self, observed: &Binding) -> Result<()> {
+    // Used by the authenticated read boundary as well as the pure decision
+    // model. Equality rejects stale metadata; it does not attest its origin.
+    pub(super) fn match_binding(&mut self, observed: &Binding) -> Result<()> {
         if self.binding != *observed {
             if self.decision == Decision::Pending {
                 self.decision = Decision::Uncertain;
