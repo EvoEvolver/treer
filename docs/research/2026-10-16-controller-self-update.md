@@ -793,6 +793,39 @@ cleanup command removes only journal-registered, validated exact job directories
 retain any job whose safety cannot be established. Backup paths live in the Treer
 reserved namespace denied by machine file transfer.
 
+TMPDIR recovery requirements (security2569): an existing `launcher-tmp` remains
+a refusal, not permission to retry creation or adopt its contents. The explicit
+recovery entry must report `update_recovery_required`, retain evidence and stop
+automatic activation while reconciling the original journal, attested ownership
+and durable child identity, including an accepted start whose ACK was lost.
+Only after proving all relevant children quiescent may the controlled recovery
+flow move the exact validated directory to a private, journal-recorded archive
+under the same retained job handle, sync the move and record its outcome. Never
+infer quiescence from worker death or a missing PID. An ambiguous archive move
+must itself be reconciled before another mutation. A later explicitly authorized
+attempt may create new exclusive storage only after recovery has validated the
+job phase and recorded that disposition; it must not reuse the archived inode
+or replay the previous installer implicitly. Unprovable ownership/quiescence
+keeps the job unresolved and exposes the fixed recovery-required status for
+operator intervention, rather than looping or silently discarding evidence.
+This recovery entry and archive protocol are requirements, not implemented by
+`LauncherTemporary::create` or Drop.
+
+The state-tree TMPDIR may contain payload copies, installer logs or other
+sensitive material. Treat it and recovery archives as equally sensitive as
+credential-bearing backups: keep private owner/permissions, exclude contents
+from receipts/diagnostics and apply the same protected backup policy. Count
+archives and TMPDIR bytes toward both per-job and aggregate retained-job disk
+budgets. Before production installer dispatch, enforce finite configured quotas
+covering active and failed jobs, and refuse new work at exhaustion with evidence
+preserved. A free-space precheck alone is not a quota or protection against
+growth during installation. Completed-job cleanup includes these directories
+and archives within the latest-three-transaction retention limit; unresolved
+jobs are never automatically evicted to make room. They continue consuming the
+aggregate budget and require explicit safe recovery/cleanup. Quota enforcement,
+bounded cleanup accounting and its exhaustion/recovery tests remain unimplemented
+acceptance gates; the current storage primitive does not bound installer writes.
+
 Signed-channel P4 adds a durable highest accepted release sequence per trusted
 key/channel and signed monotonic metadata; current version strings do not supply
 that property. Reject replay/downgrade before executing staged code. Transaction
