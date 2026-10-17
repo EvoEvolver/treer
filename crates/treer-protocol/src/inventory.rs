@@ -113,6 +113,11 @@ pub struct AgentInterfaceDescriptor {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_path: Option<String>,
     pub registered_at: DateTime<Utc>,
+    /// Proxy read models only (#143 Phase 2): the standalone origin of this
+    /// interface UI (`https://ag-<id>.<apps domain>/`), present when the
+    /// requesting member passes the interface gate. Controllers never set it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_url: Option<String>,
 }
 
 impl AgentInterfaceDescriptor {

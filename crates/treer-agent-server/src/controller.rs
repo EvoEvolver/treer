@@ -2758,6 +2758,7 @@ impl ControllerRuntime {
             .map(validate_interface_ui_path)
             .transpose()?;
         let descriptor = AgentInterfaceDescriptor {
+            origin_url: None,
             protocol: request.protocol,
             instance_id: request.instance_id,
             port: request.port,

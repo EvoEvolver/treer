@@ -270,7 +270,7 @@ pub(in crate::api) async fn agent_update_service_ingress(
         .find(|i| i.ingress_id == ingress_id)
         .ok_or_else(|| ApiFailure::bad_request("ingress_not_found", "ingress not found"))?;
     let service = auth
-        .resolve_machine_service(&workspace, &ingress.service_id)
+        .resolve_machine_service(&workspace, ingress_service_id(&ingress)?)
         .await?;
     require_service_owner(&subject, &service)?;
     policy
@@ -305,7 +305,7 @@ pub(in crate::api) async fn agent_delete_service_ingress(
         .find(|i| i.ingress_id == ingress_id)
         .ok_or_else(|| ApiFailure::bad_request("ingress_not_found", "ingress not found"))?;
     let service = auth
-        .resolve_machine_service(&workspace, &ingress.service_id)
+        .resolve_machine_service(&workspace, ingress_service_id(&ingress)?)
         .await?;
     require_service_owner(&subject, &service)?;
     policy
@@ -318,4 +318,16 @@ pub(in crate::api) async fn agent_delete_service_ingress(
         .await?;
     auth.delete_service_ingress(&workspace, &ingress_id).await?;
     Ok(Json(json!({"deleted":true})))
+}
+
+/// Agent-managed ingress operations act on service ingresses only; an Agent
+/// interface origin (#143 Phase 2) has no machine service behind it.
+fn ingress_service_id(ingress: &treer_protocol::ServiceIngress) -> Result<&str, ApiFailure> {
+    ingress.service_id.as_deref().ok_or_else(|| ApiFailure {
+        status: axum::http::StatusCode::CONFLICT,
+        error: treer_protocol::ProtocolError::new(
+            "ingress_target_not_switchable",
+            "an Agent interface origin has no machine service",
+        ),
+    })
 }

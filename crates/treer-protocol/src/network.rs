@@ -307,7 +307,17 @@ pub enum ServiceIngressAccess {
 pub struct ServiceIngress {
     pub ingress_id: String,
     pub workspace_id: String,
-    pub service_id: String,
+    /// The machine service behind a `service` ingress; `None` for an
+    /// `agent_interface` ingress (#143 Phase 2).
+    #[serde(default)]
+    pub service_id: Option<String>,
+    /// What the hostname fronts: a registered machine service, or one Agent's
+    /// registered interface UI on its own origin.
+    #[serde(default)]
+    pub target_kind: ServiceIngressTargetKind,
+    /// The Agent whose interface UI this hostname fronts (`agent_interface`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
     pub hostname: String,
     pub access: ServiceIngressAccess,
     pub enabled: bool,
@@ -325,6 +335,35 @@ pub struct ServiceIngress {
 /// ingress is rate-limited, body-capped, time-limited and forwards the
 /// verified client IP.
 pub const CAPABILITY_INGRESS_PROTECTION: &str = "ingress.protection.v1";
+/// Advertised once each Agent interface UI is reachable on its own origin
+/// (`ag-<id>.<apps domain>`, #143 Phase 2) and the Agent read models carry
+/// `interface.origin_url` for members who pass the interface gate.
+pub const CAPABILITY_AGENT_INTERFACE_ORIGIN: &str = "agent.interface-origin.v1";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceIngressTargetKind {
+    #[default]
+    Service,
+    AgentInterface,
+}
+
+impl ServiceIngressTargetKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Service => "service",
+            Self::AgentInterface => "agent_interface",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "service" => Some(Self::Service),
+            "agent_interface" => Some(Self::AgentInterface),
+            _ => None,
+        }
+    }
+}
 /// Set by the Proxy on every forwarded public-ingress request after client
 /// `x-treer-*` headers are stripped; Apps trust only this header for the
 /// client address.

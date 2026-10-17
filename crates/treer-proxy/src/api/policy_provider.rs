@@ -122,7 +122,7 @@ pub(super) async fn set_policy_provider(
         .await?
         .iter()
         .any(|ingress| {
-            ingress.service_id == app.service_id
+            ingress.service_id.as_deref() == Some(app.service_id.as_str())
                 && ingress.enabled
                 && ingress.access == ServiceIngressAccess::Public
         });

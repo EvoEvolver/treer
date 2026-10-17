@@ -622,12 +622,24 @@ impl AuthStore {
         }))
     }
 
-    pub(super) async fn logout(&self, token: &str) -> Result<(), AuthFailure> {
+    pub(crate) async fn logout(&self, token: &str) -> Result<(), AuthFailure> {
+        let mut transaction = self.pool.begin().await.map_err(AuthFailure::database)?;
+        // Workspace ingress sessions (service and Agent interface origins) are
+        // derived from the Console session, so they end with it (#143).
+        sqlx::query(
+            "DELETE FROM ingress_sessions WHERE user_id IN \
+             (SELECT user_id FROM sessions WHERE token = $1)",
+        )
+        .bind(token)
+        .execute(&mut *transaction)
+        .await
+        .map_err(AuthFailure::database)?;
         sqlx::query("DELETE FROM sessions WHERE token = $1")
             .bind(token)
-            .execute(&self.pool)
+            .execute(&mut *transaction)
             .await
             .map_err(AuthFailure::database)?;
+        transaction.commit().await.map_err(AuthFailure::database)?;
         Ok(())
     }
 
@@ -969,7 +981,7 @@ impl AuthStore {
             "github": self.oauth.github.is_some(),
             "google": self.oauth.google.is_some(),
             "invitation_required": self.oauth.invitation_required,
-            "capabilities": [treer_protocol::ORGANIZATION_INVITATION_CAPABILITY, treer_protocol::WORKSPACE_AUDIT_CAPABILITY, treer_protocol::AUDIT_MAINTENANCE_CAPABILITY, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION],
+            "capabilities": [treer_protocol::ORGANIZATION_INVITATION_CAPABILITY, treer_protocol::WORKSPACE_AUDIT_CAPABILITY, treer_protocol::AUDIT_MAINTENANCE_CAPABILITY, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION, treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN],
         })
     }
 

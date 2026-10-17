@@ -410,6 +410,15 @@ impl AuthStore {
         .execute(&mut *transaction)
         .await
         .map_err(AuthFailure::database)?;
+        // The Agent's interface origin (#143 Phase 2) and every browser
+        // session on it end with the Agent; the credential row is only revoked,
+        // so the foreign key alone would not remove them.
+        sqlx::query("DELETE FROM service_ingresses WHERE agent_id = $1 AND workspace_id = $2")
+            .bind(agent_id)
+            .bind(workspace_id)
+            .execute(&mut *transaction)
+            .await
+            .map_err(AuthFailure::database)?;
         if let Some(user_id) = reservation_actor {
             let organization: String =
                 sqlx::query_scalar("SELECT organization_id FROM workspaces WHERE workspace_id=$1")
@@ -437,6 +446,7 @@ impl AuthStore {
         }
         transaction.commit().await.map_err(AuthFailure::database)?;
         self.agent_credentials.write().await.remove(agent_id);
+        self.forget_agent_interface_ingress(agent_id).await;
         Ok(false)
     }
 

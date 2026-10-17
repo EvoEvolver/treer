@@ -135,6 +135,7 @@ async fn recovery_inventory_and_controller_replacement_retain_exited_output() {
                 .unwrap()
                 .info
                 .interface = Some(AgentInterfaceDescriptor {
+                origin_url: None,
                 protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.into(),
                 instance_id: "legacy".into(),
                 port: 1,

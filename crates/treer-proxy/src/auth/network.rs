@@ -518,6 +518,14 @@ impl AuthStore {
             .filter(|resolved| resolved.ingress.workspace_id == workspace_id)
             .map(|resolved| resolved.ingress.clone())
             .collect::<Vec<_>>();
+        ingresses.extend(
+            self.agent_ingresses
+                .read()
+                .await
+                .values()
+                .filter(|ingress| ingress.workspace_id == workspace_id)
+                .cloned(),
+        );
         ingresses.sort_by(|left, right| left.hostname.cmp(&right.hostname));
         Ok(ingresses)
     }
@@ -620,7 +628,9 @@ impl AuthStore {
             .get(&hostname)
             .map(|entry| entry.ingress.clone());
         if let Some(existing) = existing {
-            if existing.workspace_id != workspace_id || existing.service_id != service.service_id {
+            if existing.workspace_id != workspace_id
+                || existing.service_id.as_deref() != Some(service.service_id.as_str())
+            {
                 return Err(AuthFailure::conflict(
                     "ingress_exists",
                     "platform domain is already allocated",
@@ -649,7 +659,9 @@ impl AuthStore {
         let ingress = ServiceIngress {
             ingress_id: format!("ing_{}", Uuid::new_v4().simple()),
             workspace_id: workspace_id.to_string(),
-            service_id: service.service_id.clone(),
+            service_id: Some(service.service_id.clone()),
+            target_kind: ServiceIngressTargetKind::Service,
+            agent_id: None,
             hostname: hostname.clone(),
             access: request.access,
             enabled: true,
@@ -717,7 +729,7 @@ impl AuthStore {
         let _update = self.service_ingresses_update.lock().await;
         let hostname = platform_service_hostname(&app.service_id, base_domain)?;
         if let Some(existing) = self.service_ingresses.read().await.get(&hostname) {
-            return if existing.ingress.service_id == app.service_id
+            return if existing.ingress.service_id.as_deref() == Some(app.service_id.as_str())
                 && (requested_access.is_none() || requested_access == Some(existing.ingress.access))
             {
                 Ok(existing.ingress.clone())
@@ -733,7 +745,9 @@ impl AuthStore {
         let ingress = ServiceIngress {
             ingress_id: format!("ing_{}", Uuid::new_v4().simple()),
             workspace_id: app.workspace_id.clone(),
-            service_id: app.service_id.clone(),
+            service_id: Some(app.service_id.clone()),
+            target_kind: ServiceIngressTargetKind::Service,
+            agent_id: None,
             hostname: hostname.clone(),
             access,
             enabled: true,
@@ -766,7 +780,7 @@ impl AuthStore {
                 .resolve_service_ingress_hostname(&hostname)
                 .await?
                 .filter(|resolved| {
-                    resolved.ingress.service_id == app.service_id
+                    resolved.ingress.service_id.as_deref() == Some(app.service_id.as_str())
                         && (requested_access.is_none()
                             || requested_access == Some(resolved.ingress.access))
                 })
@@ -840,7 +854,7 @@ impl AuthStore {
                 .await;
         };
         if existing.ingress.workspace_id != app.workspace_id
-            || existing.ingress.service_id != app.service_id
+            || existing.ingress.service_id.as_deref() != Some(app.service_id.as_str())
         {
             return Err(AuthFailure::conflict(
                 "ingress_exists",
@@ -867,6 +881,8 @@ impl AuthStore {
         request: UpdateServiceIngressRequest,
     ) -> Result<ServiceIngress, AuthFailure> {
         let _update = self.service_ingresses_update.lock().await;
+        self.refuse_agent_interface_target(workspace_id, target)
+            .await?;
         let current = self.resolve_service_ingress(workspace_id, target).await?;
         let mut ingress = current.ingress;
         if request.access.unwrap_or(ingress.access) == ingress.access
@@ -918,6 +934,23 @@ impl AuthStore {
         target: &str,
     ) -> Result<ServiceIngress, AuthFailure> {
         let _update = self.service_ingresses_update.lock().await;
+        if let Some(agent_ingress) = self.agent_interface_ingress(workspace_id, target).await {
+            // A member may drop an Agent origin row; the next authorized
+            // access recreates it, its sessions cascade away now.
+            sqlx::query(
+                "DELETE FROM service_ingresses WHERE workspace_id = $1 AND ingress_id = $2",
+            )
+            .bind(workspace_id)
+            .bind(&agent_ingress.ingress_id)
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+            self.agent_ingresses
+                .write()
+                .await
+                .remove(&agent_ingress.hostname.to_ascii_lowercase());
+            return Ok(agent_ingress);
+        }
         let resolved = self.resolve_service_ingress(workspace_id, target).await?;
         let deleted = sqlx::query(
             "DELETE FROM service_ingresses WHERE workspace_id = $1 AND ingress_id = $2",
@@ -967,10 +1000,217 @@ impl AuthStore {
                 .map_err(|error| anyhow::anyhow!(error.into_parts().1.message))?;
             refreshed.insert(resolved.ingress.hostname.to_ascii_lowercase(), resolved);
         }
+        let agent_rows = sqlx::query(
+            "SELECT i.ingress_id, i.workspace_id, i.agent_id, i.hostname, i.enabled, \
+             i.created_at, i.created_by, i.updated_at, i.updated_by \
+             FROM service_ingresses i JOIN workspaces w ON w.workspace_id = i.workspace_id \
+             WHERE i.target_kind = 'agent_interface' AND w.deleted_at IS NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut agents = HashMap::new();
+        for row in agent_rows {
+            let ingress = agent_interface_ingress_from_row(row)
+                .map_err(|error| anyhow::anyhow!(error.into_parts().1.message))?;
+            agents.insert(ingress.hostname.to_ascii_lowercase(), ingress);
+        }
         *self.service_ingresses.write().await = refreshed;
+        *self.agent_ingresses.write().await = agents;
         self.service_ingresses_complete
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
+    }
+
+    /// The Agent interface origin row for a hostname (#143 Phase 2), from the
+    /// snapshot or, before the first refresh completes, the database.
+    pub async fn resolve_agent_interface_hostname(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<ServiceIngress>, AuthFailure> {
+        if let Some(ingress) = self
+            .agent_ingresses
+            .read()
+            .await
+            .get(&hostname.to_ascii_lowercase())
+            .cloned()
+        {
+            return Ok(Some(ingress));
+        }
+        if self
+            .service_ingresses_complete
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Ok(None);
+        }
+        let row = sqlx::query(
+            "SELECT i.ingress_id, i.workspace_id, i.agent_id, i.hostname, i.enabled, \
+             i.created_at, i.created_by, i.updated_at, i.updated_by \
+             FROM service_ingresses i JOIN workspaces w ON w.workspace_id = i.workspace_id \
+             WHERE i.target_kind = 'agent_interface' AND lower(i.hostname) = lower($1) \
+             AND w.deleted_at IS NULL",
+        )
+        .bind(hostname)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let Some(row) = row else { return Ok(None) };
+        let ingress = agent_interface_ingress_from_row(row)?;
+        self.agent_ingresses
+            .write()
+            .await
+            .insert(ingress.hostname.to_ascii_lowercase(), ingress.clone());
+        Ok(Some(ingress))
+    }
+
+    /// An Agent interface origin row in `workspace_id` by ingress id or hostname.
+    pub async fn agent_interface_ingress(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Option<ServiceIngress> {
+        self.agent_ingresses
+            .read()
+            .await
+            .values()
+            .find(|ingress| {
+                ingress.workspace_id == workspace_id
+                    && (ingress.ingress_id == target
+                        || ingress.hostname.eq_ignore_ascii_case(target))
+            })
+            .cloned()
+    }
+
+    /// Agent interface origins are workspace-only and carry no public limits:
+    /// the access switch and the limits editor refuse them (#143 Phase 2).
+    pub async fn refuse_agent_interface_target(
+        &self,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<(), AuthFailure> {
+        if self
+            .agent_interface_ingress(workspace_id, target)
+            .await
+            .is_some()
+        {
+            return Err(AuthFailure::conflict(
+                "ingress_target_not_switchable",
+                "an Agent interface origin is workspace-only and has no public limits",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Creates the origin row for an Agent's interface UI the first time a
+    /// member passes the interface gate (#143 Phase 2); idempotent, one row
+    /// per Agent, audited with the actor. Never touches access or limits.
+    pub async fn ensure_agent_interface_ingress(
+        &self,
+        workspace_id: &str,
+        agent_id: &str,
+        actor: &str,
+        base_domain: &str,
+    ) -> Result<ServiceIngress, AuthFailure> {
+        let _update = self.service_ingresses_update.lock().await;
+        let hostname = platform_agent_hostname(agent_id, base_domain)?;
+        if let Some(existing) = self.resolve_agent_interface_hostname(&hostname).await? {
+            if existing.workspace_id != workspace_id
+                || existing.agent_id.as_deref() != Some(agent_id)
+            {
+                return Err(AuthFailure::conflict(
+                    "ingress_exists",
+                    "generated Agent interface hostname already exists",
+                ));
+            }
+            return Ok(existing);
+        }
+        let now = Utc::now();
+        let ingress = ServiceIngress {
+            ingress_id: format!("ing_{}", Uuid::new_v4().simple()),
+            workspace_id: workspace_id.to_string(),
+            service_id: None,
+            target_kind: ServiceIngressTargetKind::AgentInterface,
+            agent_id: Some(agent_id.to_string()),
+            hostname: hostname.clone(),
+            access: ServiceIngressAccess::Workspace,
+            enabled: true,
+            created_at: now,
+            created_by: actor.to_string(),
+            updated_at: now,
+            updated_by: actor.to_string(),
+            limits: Default::default(),
+        };
+        let inserted = sqlx::query(
+            "INSERT INTO service_ingresses(\
+             ingress_id, workspace_id, service_id, target_kind, agent_id, hostname, access, enabled, \
+             created_at, created_by, updated_at, updated_by) \
+             SELECT $1, $2, NULL, 'agent_interface', $3, $4, 'workspace', TRUE, $5, $6, $7, $8 \
+             FROM agent_credentials c JOIN workspaces w ON w.workspace_id = c.workspace_id \
+             WHERE c.agent_id = $3 AND c.workspace_id = $2 AND c.revoked_at IS NULL AND w.deleted_at IS NULL \
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&ingress.ingress_id)
+        .bind(workspace_id)
+        .bind(agent_id)
+        .bind(&ingress.hostname)
+        .bind(ingress.created_at.to_rfc3339())
+        .bind(&ingress.created_by)
+        .bind(ingress.updated_at.to_rfc3339())
+        .bind(&ingress.updated_by)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        if inserted.rows_affected() == 0 {
+            // Either a concurrent creator won (re-read it) or the Agent is gone.
+            return self
+                .resolve_agent_interface_hostname(&hostname)
+                .await?
+                .filter(|existing| {
+                    existing.workspace_id == workspace_id
+                        && existing.agent_id.as_deref() == Some(agent_id)
+                })
+                .ok_or_else(|| AuthFailure::not_found("agent_not_found", "agent does not exist"));
+        }
+        audit::mutation_best_effort(
+            &self.pool,
+            workspace_id,
+            "agent.interface.origin.create",
+            "agent",
+            agent_id,
+        )
+        .await;
+        self.agent_ingresses
+            .write()
+            .await
+            .insert(hostname.to_ascii_lowercase(), ingress.clone());
+        Ok(ingress)
+    }
+
+    /// The workspace and machine of an unrevoked Agent credential, for an
+    /// `ag-<id>` hostname that names it (#143 Phase 2). `None` is "no such
+    /// Agent"; callers decide existence only after authentication.
+    pub async fn agent_interface_target(
+        &self,
+        agent_id: &str,
+    ) -> Result<Option<(String, String)>, AuthFailure> {
+        let row = sqlx::query(
+            "SELECT c.workspace_id, c.server_id FROM agent_credentials c \
+             JOIN workspaces w ON w.workspace_id = c.workspace_id \
+             WHERE c.agent_id = $1 AND c.revoked_at IS NULL AND w.deleted_at IS NULL",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(row.map(|row| (row.get("workspace_id"), row.get("server_id"))))
+    }
+
+    /// Forgets an Agent's origin from the snapshot after its row was deleted
+    /// in the Agent deletion transaction (the row itself cascades).
+    pub async fn forget_agent_interface_ingress(&self, agent_id: &str) {
+        self.agent_ingresses
+            .write()
+            .await
+            .retain(|_, ingress| ingress.agent_id.as_deref() != Some(agent_id));
     }
 
     /// Owner override of the public ingress protection limits (#146). Values
@@ -984,6 +1224,8 @@ impl AuthStore {
         request: &treer_protocol::UpdateIngressLimitsRequest,
     ) -> Result<ServiceIngress, AuthFailure> {
         let _update = self.service_ingresses_update.lock().await;
+        self.refuse_agent_interface_target(workspace_id, ingress_id)
+            .await?;
         let current = self
             .resolve_service_ingress(workspace_id, ingress_id)
             .await?;

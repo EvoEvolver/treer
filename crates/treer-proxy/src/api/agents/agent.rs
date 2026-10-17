@@ -40,15 +40,18 @@ pub(crate) async fn list_agents(
     Ok(Json(json!({ "agents": agents })))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn get_agent(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    Extension(ingress): Extension<IngressConfig>,
+    session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
-    let agent = resolve_workload_at(
+    let mut agent = resolve_workload_at(
         &state,
         &auth,
         &workspace_id,
@@ -70,6 +73,19 @@ pub(crate) async fn get_agent(
         subject.as_ref(),
         ACTION_AGENT_METADATA_READ,
         agent_policy_resource(&agent),
+    )
+    .await?;
+    // Humans are admitted by membership, not as control-route subjects; the
+    // interface origin is gated per human (#143 Phase 2).
+    let human = session.as_deref().map(|session| PolicySubject::Human {
+        user_id: session.user_id.clone(),
+    });
+    super::super::network::hydrate_agent_interface_origin(
+        &policy,
+        &ingress,
+        &workspace_id,
+        human.as_ref(),
+        &mut agent,
     )
     .await?;
     let mut value = serde_json::to_value(&agent)?;

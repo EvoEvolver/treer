@@ -674,10 +674,9 @@ impl AuthStore {
         }
         transaction.commit().await.map_err(AuthFailure::database)?;
         self.agent_credentials.write().await.remove(runtime_id);
-        self.service_ingresses
-            .write()
-            .await
-            .retain(|_, resolved| resolved.ingress.service_id != deployment.service_id);
+        self.service_ingresses.write().await.retain(|_, resolved| {
+            resolved.ingress.service_id.as_deref() != Some(deployment.service_id.as_str())
+        });
         drop(update_guard);
         self.refresh_virtual_network_hosts()
             .await

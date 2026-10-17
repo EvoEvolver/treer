@@ -256,6 +256,16 @@ impl IngressConfig {
         Ok(url)
     }
 
+    /// The standalone origin of an Agent's interface UI (#143 Phase 2), or
+    /// `None` without a configured apps domain.
+    pub(in crate::api) fn agent_interface_origin_url(&self, agent_id: &str) -> Option<String> {
+        let base = self.base_domain.as_deref()?;
+        let hostname = crate::auth::platform_agent_hostname(agent_id, base).ok()?;
+        self.url_for_hostname(&hostname)
+            .ok()
+            .map(|url| url.to_string())
+    }
+
     fn ingress_cookie_name(&self) -> &'static str {
         if self
             .public_url
@@ -444,7 +454,7 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 
 async fn health() -> Json<Value> {
     Json(
-        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION] }),
+        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION, treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN] }),
     )
 }
 
@@ -467,6 +477,9 @@ async fn verify_workload_identity(
         .into_response()
 }
 
+#[cfg(test)]
+#[path = "api/agent_origin_tests.rs"]
+mod agent_origin_tests;
 #[cfg(test)]
 #[path = "api/app_dist_tests.rs"]
 mod app_dist_tests;

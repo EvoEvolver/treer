@@ -324,6 +324,23 @@ async fn main() -> anyhow::Result<()> {
         if created > 0 {
             info!(created, %base_domain, "created missing managed App ingresses");
         }
+        // Agent interface origins (#143 Phase 2) are same-site with the Console
+        // when the apps domain shares its registrable domain (last two labels;
+        // a heuristic that does not know the public suffix list). Cookie
+        // SameSite and Origin checks hold, but a separate registrable domain
+        // is the recommended deployment.
+        let registrable = |host: &str| {
+            let labels: Vec<&str> = host.trim_end_matches('.').rsplit('.').take(2).collect();
+            labels.join(".")
+        };
+        let apps_site = registrable(base_domain);
+        for (name, url) in [("console", &app_public_url), ("proxy", &proxy_public_url)] {
+            if let Some(host) = url.host_str() {
+                if registrable(host).eq_ignore_ascii_case(&apps_site) {
+                    warn!(code = "agent_origins_share_site", %base_domain, %host, "the Agent interface origins share a registrable domain with the {name} host; same-site browser requests are refused by the Proxy, but a separate registrable domain for the apps domain is recommended");
+                }
+            }
+        }
     }
     let instance_id = args
         .proxy_instance_id

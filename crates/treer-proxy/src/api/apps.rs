@@ -101,7 +101,7 @@ pub(super) fn attach_app_public_url(
     });
     let ingress = ingresses.iter().find(|ingress| {
         managed_hostname.as_deref() == Some(ingress.hostname.as_str())
-            && ingress.service_id == app.service_id
+            && ingress.service_id.as_deref() == Some(app.service_id.as_str())
             && ingress.enabled
     });
     app.access = ingress.map(|ingress| ingress.access);
@@ -187,7 +187,10 @@ pub(super) async fn update_app_ingress_limits(
         .list_service_ingresses(&workspace_id)
         .await?
         .into_iter()
-        .find(|ingress| ingress.service_id == app.service_id && ingress.hostname == hostname)
+        .find(|ingress| {
+            ingress.service_id.as_deref() == Some(app.service_id.as_str())
+                && ingress.hostname == hostname
+        })
         .ok_or_else(|| {
             ApiFailure::not_found("ingress_not_found", "the App has no managed ingress")
         })?;
