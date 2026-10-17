@@ -552,7 +552,7 @@ workload (replace, no history entry), so it can be copied, reloaded and shared; 
 "not found, or you do not have access" and nothing else is selected. The same applies when the organization or workspace in the link is unavailable (no default workspace is substituted) and when the `/workloads/` segment is malformed. URLs carry IDs only, never tokens, and the
 new page is the same Console origin with the same session. The iframe sandbox and CSRF rules are unchanged.
 
-`?focus=1` is focus mode: only that workload fills the window, with a narrow bar to open the full Console. Plain
+`?focus=1` is focus mode: only that workload fills the window, with a narrow bar to open the full Console. Returning to the full Console preserves the live workload; deep-link initialization commits the workload selection before synchronizing the URL, so a stale empty selection cannot erase the target and later restore an old focus query. Plain
 links open the full Console. **Open in new browser tab** (tab menu, and the phone menu) opens the focus-mode URL with
 `window.open(..., "noopener,noreferrer")` when no standalone UI is registered.
 
