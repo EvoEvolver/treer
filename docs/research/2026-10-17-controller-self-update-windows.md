@@ -231,12 +231,30 @@ before launch and connection proof. They do not isolate the current account or
 SYSTEM: either can change its own ACL/content between checks. The adapter never
 repairs permissions on a supplied path.
 
+The future preparation coordinator must create the job directory atomically with
+`CreateDirectoryW` and explicit `SECURITY_ATTRIBUTES`: owner is the current token
+user SID, with a protected DACL granting only that SID and SYSTEM. Creating it
+first and repairing security later, as the disposable test fixture does, is not
+a production preparation strategy. Set the owner explicitly even for elevated
+tokens, whose default owner may be the Administrators group. Default inherited
+ACLs under `%LOCALAPPDATA%` may grant other groups write access and will correctly
+fail validation. Choose a location where this exact private descriptor can be
+installed; do not loosen validation to accommodate inherited permissions.
+
+The supervisor must not write scratch files into its image/working directory:
+the one-image content invariant remains active at later verification points.
+Any future scratch storage needs a separate job-private directory with the same
+ownership and DACL validation and an explicitly reviewed content policy.
+
 Native fixtures create a separate current-user-owned directory with protected
 current-user/SYSTEM DACLs and one copied helper image. Cases reject world-write
 grants on the directory or image and an extra DLL entry, including a change after
 pinning. Fixture cleanup names only its two exact files and empty directory;
 there is no recursive deletion. Native results are still required for these
 checks; cross compilation is not execution evidence.
+Additional caller-slice negative coverage remains required for Administrators
+and Authenticated Users write grants, conditional/callback ACEs, a null DACL,
+foreign directory ownership and a deny-then-allow grant (which must still refuse).
 
 The owner endpoint generates a 128-bit selector using the Windows system CSPRNG
 and derives one fixed private pipe name from its 32-character lowercase hex
