@@ -42,14 +42,28 @@ local-account check, **not endpoint identity**.
 
 Human local provisioning creates 32 random bytes per binding generation in a
 private exclusive no-follow file, without returning it through settings HTTP.
-Hub stores its SHA-256 fingerprint, endpoint ID, generation and scope; endpoint
-gets that file through a minimal private mount/path. The socket's random 32-byte
-challenge is valid on that connection for 5 seconds, once only. Endpoint sends
-`hello {version:1, endpoint_id, generation, challenge, credential}`; the hub hashes
-and constant-time compares the credential and checks the challenge. Token travels
-only on this local protected socket, never in URL/argv/env/logs/browser responses.
-After authentication the hub binds the connection to one ID/generation, ignoring
-no supplied override: later frames containing identity/routing overrides fail.
+Both hub and endpoint retain the raw binding key in separate owned 0600 files
+under 0700 directories; the DB holds a fingerprint and key-file reference only.
+This is a hub-specific credential, never a Treer workload credential. Encryption
+at rest is an operator storage responsibility; a stolen hub key authenticates
+as that endpoint. Hash-only key storage is withdrawn because mutual HMAC needs
+a secret verifier; do not treat a public fingerprint as that verifier.
+
+Hub sends a random 32-byte challenge; endpoint supplies its own random 32-byte
+nonce, endpoint ID, generation, and HMAC-SHA-256 of the domain-separated,
+length-prefixed transcript (protocol version, hub challenge, endpoint nonce,
+endpoint ID, generation). Hub checks client proof and returns a differently
+domain-separated HMAC over the same transcript; endpoint verifies before sending
+any delivery. Challenges are single-use, connection-bound, expire after 5 seconds.
+No raw key is transmitted. Derive distinct client/server frame-MAC keys from the
+transcript and binding key; authenticate direction, strictly increasing u64
+sequence and exact frame bytes. Reject replay, counter overflow and tampering;
+reconnect with new nonces, never resume sequence state. A fake hub cannot harvest
+a credential or obtain data without proving key possession. Mutual proof does
+not protect against same-UID file theft or an already-compromised real hub.
+Tokens/keys never enter URL/argv/env/log/browser responses; zero key buffers where
+practical, no claim of complete memory zeroization. Every transaction rechecks
+binding generation. Later frames cannot override authenticated endpoint identity.
 No JWT or Core workload token is accepted as a hub binding credential.
 
 The endpoint verifies the hub peer/account and private socket path; this is not
@@ -117,7 +131,8 @@ SQLite WAL with foreign keys and `synchronous=FULL`; acknowledge only after comm
 A sole hub writer owns these tables; short transactions, no network/CLI while
 holding a transaction. Private online backup includes pending jobs/mappings,
 configuration and token files. Backups are plaintext: use encrypted storage and
-0700/0600 copies, never repository/log artifacts.
+0700/0600 copies, never repository/log artifacts; remove after the approved
+rollback window.
 
 Schema v1: `schema_migrations`; `accounts` (channel, secret-file reference,
 admission configuration); `endpoints` (stable ID, account/target, admitted inbound
@@ -194,7 +209,12 @@ API lets an ordinary hub do those readbacks without retaining an owner token or
 being the Policy Provider? Ask Core to confirm exact routes/credentials/resource
 shapes. Do not grant owner login, `agent.create`, Policy write, or Provider binding
 as a workaround. If Core change is necessary, stop and ask leader as #159 requires.
-Until resolved, fake/inactive contract tests only, no live activation/migration.
+Security3470 permits hermetic protocol/store/relay work after this contract
+revision, with fake transport only. Core/readback is still a blocker for live
+activation, real bots and migration; leader must decide any Core change first.
+A small App-scoped read-only route is a possible resolution, not an assumed
+existing API or an authorized Core modification. No owner-attested timestamp
+substitutes for ongoing verification.
 
 ## Integrated private settings
 
@@ -229,8 +249,15 @@ journal/rollback with no dual polling; no old App retirement before acceptance.
 
 Pin an independent Cargo.lock; audit dependencies, forbid unsafe in App code,
 review transitive build scripts and keep reproducible React dist build inputs.
+Record SHA-256 of both release binaries in the release manifest; the human
+provisioning step verifies the installed immutable files against that manifest
+before creating a profile. Display the pinned release/hash in status; separately
+verify command and release integrity during drift checks. Hashes establish
+artifact identity, not reproducibility; retain #151 provenance limitations.
 Parser depth/length caps apply to both socket and transport JSON; adapter failures
-are contained and surfaced without exposing raw request/response/exception text.
+are caught per adapter and surfaced without exposing raw request/response/exception
+text. Test a stalled and a failed adapter while settings and another adapter
+remain responsive; no panic crosses a handler, no unbounded retry/spawn.
 
 Use private worktree Cargo target and closed test environment. No shared target,
 real credentials or production transport in tests. No push/deploy/restart is
