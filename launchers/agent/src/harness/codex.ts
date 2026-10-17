@@ -200,7 +200,7 @@ export class CodexRuntime extends EventEmitter implements HarnessRuntime {
       return;
     }
     const input = [...(text ? [{ type: "text", text, text_elements: [] }] : []), ...images.map((image) => ({ type: "localImage", path: image.path }))];
-    if (this.thread.status === "running" && this.thread.activeTurnId) {
+    if (this.thread.activeTurnId) {
       const steer = (expectedTurnId: string) => this.client!.request<{ turnId: string }>(
         "turn/steer",
         { threadId: this.thread!.id, expectedTurnId, input },

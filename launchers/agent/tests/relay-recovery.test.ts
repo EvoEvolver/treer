@@ -94,6 +94,22 @@ test("provider error classification never returns supplier text", () => {
   assert.match(providerError({ message: "502 Bad Gateway", httpStatusCode: 401 }), /^provider_auth_required:/);
 });
 
+test("steer still targets the active native turn when the cached status is error", async () => {
+  const root = mkdtempSync(join(realpathSync.native(tmpdir()), "relay-steer-"));
+  const previous = process.env;
+  process.env = hermeticEnv({ FAKE_CODEX_LIVE: "1", FAKE_CODEX_STATUS: "active", FAKE_CODEX_CALLS: join(root, "calls") });
+  const runtime = new CodexRuntime(resolve(import.meta.dirname, "fake-codex.mjs"), root);
+  const queue = new PromptQueue(runtime, () => {});
+  try {
+    await runtime.start(); runtime.thread!.status = "error";
+    const receipt = await queue.submit("steer existing", "steer");
+    assert.equal(receipt.disposition, "steered");
+    const calls = readFileSync(join(root, "calls"), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(calls.filter(call => call.method === "turn/start").length, 0);
+    assert.equal(calls.find(call => call.method === "turn/steer")?.params.expectedTurnId, "turn-live");
+  } finally { queue.close(); await runtime.stop(); process.env = previous; rmSync(root, { recursive: true, force: true }); }
+});
+
 for (const state of ["systemError", "systemError-empty", "not-materialized"]) test(`unconfirmed native ${state} never dispatches recovery`, async () => {
   const root = mkdtempSync(join(realpathSync.native(tmpdir()), "relay-unconfirmed-"));
   const previous = process.env;
