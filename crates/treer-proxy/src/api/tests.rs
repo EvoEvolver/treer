@@ -3216,7 +3216,7 @@ async fn app_lifecycle_start_and_restart_enforce_each_policy_action_before_dispa
     }
 }
 
-fn test_config() -> BootstrapConfig {
+pub(super) fn test_config() -> BootstrapConfig {
     BootstrapConfig::new(
         Url::parse("https://treer.example/").expect("valid URL"),
         PathBuf::from("dist"),
@@ -3297,7 +3297,9 @@ fn app_public_url_reports_the_managed_ingress_access() {
     let ingress = ServiceIngress {
         ingress_id: "ing_docs".to_string(),
         workspace_id: "default".to_string(),
-        service_id: app.service_id.clone(),
+        service_id: Some(app.service_id.clone()),
+        target_kind: treer_protocol::ServiceIngressTargetKind::Service,
+        agent_id: None,
         hostname,
         access: ServiceIngressAccess::Public,
         enabled: true,
@@ -4040,6 +4042,10 @@ async fn workspace_ingress_redirects_humans_to_proxy_authorization() {
     let response = proxy_service_ingress(
         State(AppState::new()),
         Extension(auth),
+        Extension(PolicyEngine::new(
+            crate::policy::PolicyDecision::Allow,
+            vec![],
+        )),
         Extension(test_ingress_config()),
         Extension(identity),
         request,
@@ -5558,6 +5564,10 @@ async fn public_ingress_preserves_application_auth_and_strips_treer_headers() {
     let response = proxy_service_ingress(
         State(state),
         Extension(auth),
+        Extension(PolicyEngine::new(
+            crate::policy::PolicyDecision::Allow,
+            vec![],
+        )),
         Extension(test_ingress_config()),
         Extension(identity),
         request,

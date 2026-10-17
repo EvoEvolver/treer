@@ -26,7 +26,7 @@ use treer_protocol::{
     AgentServerSnapshot, ApiError, AppDeployment, AppDeploymentStatus, AppDesiredState,
     CreateAgentLaunchProfileRequest, CreateAppDeploymentRequest, CreateMachineServiceRequest,
     CreateServiceIngressRequest, MachineService, MachineServiceProtocol, OrganizationAuditEvent,
-    ProtocolError, ServerInfo, ServiceIngress, ServiceIngressAccess,
+    ProtocolError, ServerInfo, ServiceIngress, ServiceIngressAccess, ServiceIngressTargetKind,
     UpdateAgentLaunchProfileRequest, UpdateMachineServiceRequest, UpdateServiceIngressRequest,
     VirtualNetworkHost, WorkspaceHuman, WorkspaceInfo, AGENT_ID_HEADER, WORKLOAD_CREDENTIAL_HEADER,
 };
@@ -92,6 +92,9 @@ pub struct AuthStore {
     virtual_hosts_revision: Arc<AtomicU64>,
     agent_credentials: Arc<tokio::sync::RwLock<HashMap<String, AgentCredentialRecord>>>,
     service_ingresses: Arc<tokio::sync::RwLock<HashMap<String, ResolvedServiceIngress>>>,
+    /// Agent interface origins (#143 Phase 2) by lowercase hostname; share the
+    /// update lock and the completeness flag with the service map.
+    agent_ingresses: Arc<tokio::sync::RwLock<HashMap<String, ServiceIngress>>>,
     service_ingresses_update: Arc<tokio::sync::Mutex<()>>,
     /// True once the ingress cache holds a full snapshot; from then on an
     /// unknown hostname is answered from the cache (refreshed every few
@@ -663,6 +666,7 @@ impl AuthStore {
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
             agent_credentials: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             service_ingresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            agent_ingresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             service_ingresses_update: Arc::new(tokio::sync::Mutex::new(())),
             service_ingresses_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
@@ -727,6 +731,7 @@ impl AuthStore {
             virtual_hosts_revision: Arc::new(AtomicU64::new(0)),
             agent_credentials: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             service_ingresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            agent_ingresses: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             service_ingresses_update: Arc::new(tokio::sync::Mutex::new(())),
             service_ingresses_complete: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };

@@ -616,6 +616,21 @@ Owner overrides are nullable `limit_*` columns on `service_ingresses`
 effective limits and rejection counters in the ingress listing; the capability
 is `ingress.protection.v1`.
 
+Agent interface origins (#143 Phase 2) reuse the `service_ingresses` table with
+a nullable `service_id`, `target_kind` (`service` | `agent_interface`) and a
+unique `agent_id` (CHECK: an `agent_interface` row has an Agent, no service and
+workspace access). `AuthStore` keeps them in a separate `agent_ingresses`
+snapshot; `agent_id_from_platform_hostname` recognises a well-formed `ag-` label
+without any lookup, `ensure_agent_interface_ingress` creates the row
+idempotently from the authorize step (audited `agent.interface.origin.create`),
+`delete_agent` removes it with its sessions, and the service update/limits
+routes answer `409 ingress_target_not_switchable`. The registry lists the rows
+with their `target_kind` and `agent_id`; `AgentInterfaceDescriptor.origin_url`
+is hydrated on the Agent and snapshot read models for humans who pass the gate
+(`hydrate_agent_interface_origin`, with a five-second per-member, per-Agent
+result window bounding evaluation under interface churn). The capability is
+`agent.interface-origin.v1`.
+
 Workspace-shared Overview pins (#140) live under
 `/api/workspaces/{ws}/pins` (`GET`, `PUT /{kind}/{id}`, `DELETE /{kind}/{id}`,
 human sessions only; capability `workspace.pins.v1` in the Proxy health
@@ -1021,7 +1036,11 @@ Core uses three protected headers for the registered interface endpoint:
 
 The authenticated Agent UI route validates browser Origin through the existing
 BrowserAccess check, removes cookies/platform authorization and every client
-`x-treer-*` header, then injects its own target-bound provenance. Origin is
+`x-treer-*` header, then injects its own target-bound provenance. The standalone
+Agent interface origin (`ag-<id>.<apps domain>`, #143 Phase 2, served by
+`proxy_service_ingress` through `proxy_agent_interface_origin`) shares this
+preparation and injects the same `proxy-ui` provenance; both routes evaluate
+the interface gate (`agent.output.read` and `agent.prompt`) per request. Origin is
 preserved as browser context, not used as the provenance token. HTTP and WebSocket
 upgrades share this preparation. Ordinary virtual-host, App UI and public ingress
 tunnels remove these headers and never inject interface provenance. The Controller

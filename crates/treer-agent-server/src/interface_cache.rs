@@ -178,6 +178,7 @@ mod tests {
             pid: 42,
             started_at: Utc::now(),
             interface: AgentInterfaceDescriptor {
+                origin_url: None,
                 protocol: AGENT_INTERFACE_PROTOCOL_V1.to_string(),
                 instance_id: "test-interface".to_string(),
                 port: 4180,

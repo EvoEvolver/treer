@@ -949,6 +949,7 @@ fn agent_interface_command_and_transcript_round_trip() {
     );
 
     let descriptor = AgentInterfaceDescriptor {
+        origin_url: None,
         protocol: AGENT_INTERFACE_PROTOCOL_V1.to_string(),
         instance_id: "pi-one".to_string(),
         port: 4180,

@@ -101,7 +101,9 @@ pub(in crate::api) async fn update_service_ingress(
             .map_err(|error| {
                 ApiFailure::internal("policy_provider_store_failed", &error.to_string())
             })?
-            .is_some_and(|provider| provider.service_id == current.ingress.service_id)
+            .is_some_and(|provider| {
+                Some(provider.service_id.as_str()) == current.ingress.service_id.as_deref()
+            })
         {
             return Err(ApiFailure::bad_request(
                 "policy_provider_must_be_private",

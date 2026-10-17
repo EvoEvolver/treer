@@ -548,7 +548,7 @@ async fn managed_app_owns_a_stable_service_and_virtual_host_across_runtime_resta
         )
         .await
         .expect("create App ingress");
-    assert_eq!(ingress.service_id, app.service_id);
+    assert_eq!(ingress.service_id.as_deref(), Some(app.service_id.as_str()));
     assert_eq!(ingress.access, ServiceIngressAccess::Workspace);
     assert_eq!(
         ingress.hostname,

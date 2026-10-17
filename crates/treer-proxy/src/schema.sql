@@ -936,6 +936,29 @@ CREATE UNIQUE INDEX IF NOT EXISTS workspace_pins_folder ON workspace_pins(worksp
 CREATE INDEX IF NOT EXISTS workspace_pins_order ON workspace_pins(workspace_id, pinned_at DESC);
 
 -- #146: owner overrides for public ingress protection (NULL = Proxy default).
+-- #143 Phase 2: an ingress hostname may front one Agent's interface UI
+-- instead of a machine service. Agent rows never carry a service and go away
+-- with the Agent's credential row.
+ALTER TABLE service_ingresses ALTER COLUMN service_id DROP NOT NULL;
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS target_kind TEXT NOT NULL DEFAULT 'service';
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS agent_id TEXT REFERENCES agent_credentials(agent_id) ON DELETE CASCADE;
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'service_ingresses'::regclass
+          AND conname = 'service_ingresses_target_check'
+    ) THEN
+        ALTER TABLE service_ingresses ADD CONSTRAINT service_ingresses_target_check
+            CHECK(
+                (target_kind = 'service' AND service_id IS NOT NULL AND agent_id IS NULL)
+                OR (target_kind = 'agent_interface' AND agent_id IS NOT NULL AND service_id IS NULL AND access = 'workspace')
+            );
+    END IF;
+END
+$$;
+CREATE UNIQUE INDEX IF NOT EXISTS service_ingresses_agent_id
+    ON service_ingresses(agent_id) WHERE agent_id IS NOT NULL;
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_rate_per_minute BIGINT;
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_rate_burst BIGINT;
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_concurrency BIGINT;

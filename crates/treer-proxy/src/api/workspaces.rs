@@ -74,10 +74,13 @@ pub(super) async fn delete_workspace(
     Ok(Json(serde_json::to_value(&deleted)?))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn workspace_snapshot(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
+    Extension(ingress): Extension<IngressConfig>,
+    session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     headers: HeaderMap,
     Path(workspace_id): Path<String>,
@@ -119,6 +122,23 @@ pub(super) async fn workspace_snapshot(
             }
         }
         snapshot.agents = visible;
+    }
+    // Humans are not control-route Policy subjects (membership admits them),
+    // but the interface origin is gated per human (#143 Phase 2).
+    if let Some(session) = session.as_deref() {
+        let human = PolicySubject::Human {
+            user_id: session.user_id.clone(),
+        };
+        for agent in &mut snapshot.agents {
+            super::network::hydrate_agent_interface_origin(
+                &policy,
+                &ingress,
+                &workspace_id,
+                Some(&human),
+                agent,
+            )
+            .await?;
+        }
     }
     Ok(Json(serde_json::to_value(snapshot)?))
 }

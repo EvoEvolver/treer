@@ -161,6 +161,76 @@ pub(crate) fn platform_service_hostname(
     Ok(hostname)
 }
 
+/// An Agent interface origin (#143 Phase 2): `ag-<32 hex>.<base>`; the label
+/// is 35 bytes and never collides with the `svc-` service prefix.
+pub(crate) fn platform_agent_hostname(
+    agent_id: &str,
+    base_domain: &str,
+) -> Result<String, AuthFailure> {
+    let Some(hex) = agent_id.strip_prefix("ag_") else {
+        return Err(AuthFailure::bad_request(
+            "invalid_agent_identity",
+            "agent ID cannot form a platform address",
+        ));
+    };
+    if hex.len() != 32 || !hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(AuthFailure::bad_request(
+            "invalid_agent_identity",
+            "agent ID cannot form a platform address",
+        ));
+    }
+    let hostname = format!("ag-{}.{}", hex.to_ascii_lowercase(), base_domain);
+    if hostname.len() > 253 {
+        return Err(AuthFailure::bad_request(
+            "invalid_service_domain",
+            "platform address exceeds DNS length",
+        ));
+    }
+    Ok(hostname)
+}
+
+/// The Agent ID behind a well-formed `ag-<32 hex>.<base>` hostname, or `None`
+/// for anything else (no database access, so the answer reveals nothing).
+pub(crate) fn agent_id_from_platform_hostname(hostname: &str, base_domain: &str) -> Option<String> {
+    let host = hostname.to_ascii_lowercase();
+    let label = host
+        .strip_suffix(&format!(".{}", base_domain.to_ascii_lowercase()))?
+        .strip_prefix("ag-")?;
+    (label.len() == 32
+        && label
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()))
+    .then(|| format!("ag_{label}"))
+}
+
+/// Row mapper for `agent_interface` ingress rows (no service join).
+pub(crate) fn agent_interface_ingress_from_row(
+    row: sqlx::postgres::PgRow,
+) -> Result<ServiceIngress, AuthFailure> {
+    let agent_id: Option<String> = row.get("agent_id");
+    if agent_id.is_none() {
+        return Err(AuthFailure::internal(
+            "database_error",
+            "agent interface ingress row has no agent".to_string(),
+        ));
+    }
+    Ok(ServiceIngress {
+        ingress_id: row.get("ingress_id"),
+        workspace_id: row.get("workspace_id"),
+        service_id: None,
+        target_kind: ServiceIngressTargetKind::AgentInterface,
+        agent_id,
+        hostname: row.get("hostname"),
+        access: ServiceIngressAccess::Workspace,
+        enabled: row.get("enabled"),
+        created_at: parse_database_timestamp(&row, "created_at", "agent interface ingress")?,
+        created_by: row.get("created_by"),
+        updated_at: parse_database_timestamp(&row, "updated_at", "agent interface ingress")?,
+        updated_by: row.get("updated_by"),
+        limits: Default::default(),
+    })
+}
+
 pub(crate) fn validate_ingress_return_path(value: &str) -> Result<String, AuthFailure> {
     if !value.starts_with('/')
         || value.starts_with("//")
@@ -225,10 +295,18 @@ pub(crate) fn ingress_limits_from_row(
 pub(crate) fn resolved_service_ingress_from_row(
     row: sqlx::postgres::PgRow,
 ) -> Result<ResolvedServiceIngress, AuthFailure> {
+    let service_id: String = row.get::<Option<String>, _>("service_id").ok_or_else(|| {
+        AuthFailure::internal(
+            "database_error",
+            "service ingress row has no service".to_string(),
+        )
+    })?;
     let ingress = ServiceIngress {
         ingress_id: row.get("ingress_id"),
         workspace_id: row.get("workspace_id"),
-        service_id: row.get("service_id"),
+        service_id: Some(service_id.clone()),
+        target_kind: ServiceIngressTargetKind::Service,
+        agent_id: None,
         hostname: row.get("hostname"),
         access: match row.get::<String, _>("access").as_str() {
             "public" => ServiceIngressAccess::Public,
@@ -254,7 +332,7 @@ pub(crate) fn resolved_service_ingress_from_row(
         )
     })?;
     let service = MachineService {
-        service_id: ingress.service_id.clone(),
+        service_id,
         workspace_id: ingress.workspace_id.clone(),
         name: row.get("service_name"),
         server_id: row.get("server_id"),

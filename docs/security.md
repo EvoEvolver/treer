@@ -1087,6 +1087,70 @@ limits same-site sibling origins from framing the authenticated Agent UI, but
 does not isolate Agent JavaScript from the Proxy authority described above.
 Embedded content remains trusted workspace code, not an isolation boundary.
 
+### Agent interface origins
+
+When wildcard ingress is configured, an Agent's registered interface UI is also
+reachable standalone on its own origin, `https://ag-<32 hex>.<apps domain>/`
+(#143 Phase 2). The origin is a workspace-access row in `service_ingresses`
+with `target_kind = agent_interface`; it cannot be switched to public, has no
+owner-editable limits, is created only by the authorize step below, and is
+deleted with the Agent together with every ingress session on it. Console
+logout ends the user's ingress sessions on every workspace host.
+
+The origin accepts only a workspace ingress session cookie: `Treer-Authorization`
+Bearer tokens are refused (`401 ingress_authentication_required`), so an Agent
+or service token never reaches another Agent's UI this way. Before any session
+exists, every well-formed `ag-` hostname behaves identically (a top-level
+navigation redirects to the Proxy authorize endpoint, a subresource is refused,
+Bearer is refused) whether or not the Agent exists; existence is decided only
+after the Console session is authenticated. Authorize then requires current
+workspace membership and the interface gate, `agent.output.read` **and**
+`agent.prompt` on that Agent for the human subject, before it creates the
+origin row and issues the single-use, browser-bound code. The gate runs again on
+every request to the origin, so a later Policy denial or membership revocation
+refuses the existing session; the same gate now protects the Proxy-origin
+`/agents/{id}/interface/ui` tunnel for humans and machines. Hydrating
+`interface.origin_url` on the Agent and snapshot read models uses the same gate
+and never creates the row; its result is remembered per (workspace, member,
+Agent, Policy revision) for five seconds on each Proxy instance (a bounded
+cache, cleared when it exceeds ten thousand entries), so an interface
+re-registering in a loop cannot turn every member's Console refetch into
+unbounded Policy evaluation. The revision is the one the Policy evaluators
+would apply now, so a published Policy is re-evaluated as soon as the engine
+sees it; one member's result is never served to another; allowed and denied
+results share the window, a failed evaluation is never remembered, and when
+the Policy document cannot be loaded the cache is bypassed entirely. The
+authorize step, every request on the origin and the Proxy-origin tunnel
+evaluate the gate uncached.
+
+Requests are tunnelled with the Agent UI provenance (`proxy-ui`, the resolved
+Agent ID, the registered instance; cookies and gateway authorization stripped,
+client `x-treer-*` removed) to the registered loopback endpoint under the
+registered `ui_path`. Responses keep the Agent's CSP untouched (no
+`frame-ancestors` rewrite: the standalone origin is not embedded) and receive
+`X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` when the
+Agent did not set them.
+
+Agent origins are siblings of every other ingress host under the apps domain,
+so the ingress gateway refuses browser requests that could ride the ingress
+cookie from a sibling: on every ingress host an unsafe method or WebSocket
+upgrade with `Sec-Fetch-Site: same-site` is rejected (`403
+ingress_request_rejected`, counted); workspace hosts also reject `cross-site`,
+while public hosts keep accepting cross-site API callers under their own CORS.
+An upgrade's `Origin`, when present, must name the request host. Requests
+without Fetch Metadata (non-browser clients, `same-origin`, user-initiated
+`none`) pass. An Agent origin is never a trusted Console origin: Console
+cookie-authenticated writes and the event-stream upgrade reject it with
+`403 csrf_denied`, with or without `Sec-Fetch-Site: same-site`. Deploy the apps
+domain under a registrable domain separate from the Console and Proxy; when it
+shares one, the Proxy warns `agent_origins_share_site` at startup (a last-two-
+labels heuristic without the public suffix list) and the SameSite=Strict
+Console cookie and these Origin checks are the remaining defence. Agent UI
+code on its origin is trusted workspace code: it can act on that Agent as the
+user, and this origin does not isolate one Agent's browser code from another
+Agent's origin beyond the browser's same-origin policy. Embedding the standalone
+origin in the Console is a separate follow-up (#156).
+
 When the Console and Proxy are configured on one origin, Core refuses embedded
 UI tunnels with `503 embedded_ui_requires_separate_app_origin`. The Console's
 Agent-link fallback supports this same-origin topology: after the user opens an

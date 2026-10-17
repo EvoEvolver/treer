@@ -174,7 +174,7 @@ async fn ingress_browser_binding_rejects_code_delivery_to_another_browser() {
             header::HOST,
             HeaderValue::from_static("proxy.treer.example"),
         );
-        let login = authorize_service_ingress(Extension(auth.clone()), Extension(config.clone()), headers.clone(),
+        let login = authorize_service_ingress(State(AppState::new()), Extension(auth.clone()), Extension(PolicyEngine::new(crate::policy::PolicyDecision::Allow, vec![])), Extension(config.clone()), headers.clone(),
             Query(serde_json::from_value(json!({"hostname":ingress.hostname,"return_path":"/issues?mine=1","browser_nonce_hash":challenge})).unwrap())).await.unwrap();
         let login_url = Url::parse(login.headers()[header::LOCATION].to_str().unwrap()).unwrap();
         let return_to = login_url
@@ -193,7 +193,7 @@ async fn ingress_browser_binding_rejects_code_delivery_to_another_browser() {
         );
         headers.insert("sec-fetch-mode", HeaderValue::from_static("navigate"));
         headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
-        let authorized = authorize_service_ingress(Extension(auth.clone()), Extension(config.clone()), headers,
+        let authorized = authorize_service_ingress(State(AppState::new()), Extension(auth.clone()), Extension(PolicyEngine::new(crate::policy::PolicyDecision::Allow, vec![])), Extension(config.clone()), headers,
             Query(serde_json::from_value(json!({"hostname":ingress.hostname,"return_path":"/issues?mine=1","browser_nonce_hash":challenge})).unwrap())).await.unwrap();
         let callback =
             Url::parse(authorized.headers()[header::LOCATION].to_str().unwrap()).unwrap();
@@ -618,6 +618,7 @@ async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips
                         exit_code: None,
                         output_revision: 0,
                         interface: Some(treer_protocol::AgentInterfaceDescriptor {
+                            origin_url: None,
                             protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.into(),
                             instance_id: "actual-instance".into(),
                             port: 12345,
@@ -905,7 +906,7 @@ async fn app_human_identity_workspace_ingress_issues_short_token_but_public_ingr
             &Url::parse("https://app.treer.example/").unwrap(),
         )
         .unwrap();
-        let response = proxy_service_ingress(State(state),Extension(auth),Extension(config),Extension(identity.clone()),
+        let response = proxy_service_ingress(State(state),Extension(auth),Extension(PolicyEngine::new(crate::policy::PolicyDecision::Allow, vec![])),Extension(config),Extension(identity.clone()),
             Request::builder().uri("/v1/me").header(header::HOST,&ingress.hostname)
                 .header(header::COOKIE,format!("__Host-treer_ingress={}; treer_session=login; treer_admin_session=admin; app_session=kept",session.session_token))
                 .header("x-treer-identity-token","forged").header("x-treer-spoofed","secret")
@@ -1013,6 +1014,10 @@ async fn app_human_identity_membership_revocation_role_changes_and_workspace_bou
     let denied = proxy_service_ingress(
         State(state.clone()),
         Extension(auth.clone()),
+        Extension(PolicyEngine::new(
+            crate::policy::PolicyDecision::Allow,
+            vec![],
+        )),
         Extension(config),
         Extension(identity.clone()),
         Request::builder()
@@ -1066,6 +1071,10 @@ async fn app_human_identity_agent_ingress_preserves_its_original_token() {
     let response = proxy_service_ingress(
         State(state),
         Extension(auth),
+        Extension(PolicyEngine::new(
+            crate::policy::PolicyDecision::Allow,
+            vec![],
+        )),
         Extension(config),
         Extension(identity.clone()),
         Request::builder()

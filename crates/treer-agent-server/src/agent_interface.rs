@@ -312,6 +312,7 @@ mod tests {
             }
         });
         let interface = AgentInterfaceDescriptor {
+            origin_url: None,
             protocol: AGENT_INTERFACE_PROTOCOL_V1.into(),
             instance_id: "instance".into(),
             port,
@@ -384,6 +385,7 @@ mod tests {
                 .expect("write response");
         });
         let descriptor = AgentInterfaceDescriptor {
+            origin_url: None,
             protocol: AGENT_INTERFACE_PROTOCOL_V1.to_string(),
             instance_id: "pi-test".to_string(),
             port,
@@ -433,6 +435,7 @@ mod tests {
                 .expect("write response");
         });
         let descriptor = AgentInterfaceDescriptor {
+            origin_url: None,
             protocol: AGENT_INTERFACE_PROTOCOL_V1.to_string(),
             instance_id: "pi-test".to_string(),
             port,

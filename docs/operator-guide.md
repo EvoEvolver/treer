@@ -266,6 +266,22 @@ as a fallback.
 Managed Apps do not add a new security boundary or secret store. More complex
 Apps may still use an external supervisor and register ordinary Treer services.
 
+With wildcard ingress, every Agent that registers an interface UI is also
+reachable standalone at `https://ag-<id>.<apps domain>/` (`ag-` followed by the
+32 hex digits of its Agent ID). Opening it sends the browser through the Proxy
+authorize step: a Console login, current workspace membership and Policy
+`agent.output.read` plus `agent.prompt` on that Agent are required, after which
+the origin receives its own 12-hour ingress session. The URL appears as
+`interface.origin_url` on `treer agent show` and in the Console for members who
+pass that gate; Bearer tokens are refused on these origins. Put the apps
+domain under a registrable domain separate from the Console and Proxy hosts
+(for example `treer-apps.example` next to `console.example.com`); when the
+Proxy sees them sharing one it logs `agent_origins_share_site` at startup. That
+check compares the last two labels only, so a public-suffix host such as
+`example.co.uk` can be reported either way; the recommendation stands
+regardless. Deleting the Agent deletes its origin and sessions; Console logout
+ends the user's ingress sessions.
+
 Apps receive `TREER_PROXY_URL` from the Controller's configured Proxy base URL
 (HTTP(S) origin with URL credentials, query and fragment removed), overriding
 an inherited value. This is public routing configuration, not an identity token.

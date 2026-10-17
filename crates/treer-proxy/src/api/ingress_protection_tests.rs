@@ -17,16 +17,16 @@ use treer_protocol::{
 
 const HOSTS: &str = "https://apps.treer.example/";
 
-struct Fixture {
-    auth: AuthStore,
-    identity: IdentityIssuer,
-    app: AppDeployment,
-    state: AppState,
-    connection: Uuid,
-    rx: Option<tokio::sync::mpsc::UnboundedReceiver<SocketFrame>>,
+pub(super) struct Fixture {
+    pub(super) auth: AuthStore,
+    pub(super) identity: IdentityIssuer,
+    pub(super) app: AppDeployment,
+    pub(super) state: AppState,
+    pub(super) connection: Uuid,
+    pub(super) rx: Option<tokio::sync::mpsc::UnboundedReceiver<SocketFrame>>,
 }
 
-async fn fixture() -> Fixture {
+pub(super) async fn fixture() -> Fixture {
     let auth = AuthStore::for_test("test").await;
     auth.seed_test_workspace("default").await;
     let now = Utc::now();
@@ -96,7 +96,7 @@ async fn fixture() -> Fixture {
     }
 }
 
-fn config(guard: Option<IngressGuard>) -> IngressConfig {
+pub(super) fn config(guard: Option<IngressGuard>) -> IngressConfig {
     let config = IngressConfig::new(
         Some(Url::parse(HOSTS).unwrap()),
         &Url::parse("https://proxy.treer.example/").unwrap(),
@@ -110,7 +110,7 @@ fn config(guard: Option<IngressGuard>) -> IngressConfig {
 }
 
 #[derive(Clone, Copy)]
-enum Upstream {
+pub(super) enum Upstream {
     /// Answer 200 after reading the request head (and body up to a sentinel).
     Immediate,
     /// Answer 200 after the delay.
@@ -122,7 +122,7 @@ enum Upstream {
 /// Fake machine side of the tunnel: serves every stream the Proxy opens.
 /// Returns the request heads it saw (headers only, bodies dropped) and a
 /// count of streams served.
-fn upstream(
+pub(super) fn upstream(
     state: AppState,
     connection: Uuid,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
@@ -207,7 +207,7 @@ fn upstream(
     (heads_out, served_out)
 }
 
-fn with_peer(mut request: Request<Body>, peer: &str) -> Request<Body> {
+pub(super) fn with_peer(mut request: Request<Body>, peer: &str) -> Request<Body> {
     let address: IpAddr = peer.parse().unwrap();
     request
         .extensions_mut()
@@ -223,6 +223,10 @@ async fn send(
     proxy_service_ingress(
         State(fixture.state.clone()),
         Extension(fixture.auth.clone()),
+        Extension(PolicyEngine::new(
+            crate::policy::PolicyDecision::Allow,
+            vec![],
+        )),
         Extension(config.clone()),
         Extension(fixture.identity.clone()),
         request,
@@ -491,6 +495,10 @@ async fn public_ingress_caps_bodies_refuses_ambiguous_framing_and_keeps_permits_
             let response = proxy_service_ingress(
                 State(fixture_state),
                 Extension(auth),
+                Extension(PolicyEngine::new(
+                    crate::policy::PolicyDecision::Allow,
+                    vec![],
+                )),
                 Extension(config),
                 Extension(identity),
                 get(&host, "203.0.113.20"),
@@ -516,6 +524,10 @@ async fn public_ingress_caps_bodies_refuses_ambiguous_framing_and_keeps_permits_
             let response = proxy_service_ingress(
                 State(fixture_state),
                 Extension(auth),
+                Extension(PolicyEngine::new(
+                    crate::policy::PolicyDecision::Allow,
+                    vec![],
+                )),
                 Extension(config),
                 Extension(identity),
                 get(&host, "203.0.113.21"),
@@ -1015,6 +1027,10 @@ async fn public_ingress_thirty_second_long_poll_passes_the_default_timeout() {
             let response = proxy_service_ingress(
                 State(state),
                 Extension(auth),
+                Extension(PolicyEngine::new(
+                    crate::policy::PolicyDecision::Allow,
+                    vec![],
+                )),
                 Extension(config),
                 Extension(identity),
                 request,
@@ -1150,6 +1166,7 @@ async fn websocket_upgrade_through_the_real_server_strips_client_address_headers
     let router = Router::new()
         .fallback(axum::routing::any(proxy_service_ingress))
         .layer(Extension(fixture.auth.clone()))
+        .layer(Extension(PolicyEngine::allow_all()))
         .layer(Extension(config.clone()))
         .layer(Extension(fixture.identity.clone()))
         .with_state(fixture.state.clone());

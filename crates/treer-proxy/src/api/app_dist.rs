@@ -22,6 +22,7 @@ use super::network::{proxy_service_ingress, request_hostname};
 use super::{BootstrapConfig, IngressConfig};
 use crate::auth::AuthStore;
 use crate::identity::IdentityIssuer;
+use crate::policy::PolicyEngine;
 use crate::state::AppState;
 
 /// Path prefixes that belong to Core routes. An unmatched request below them
@@ -284,6 +285,7 @@ pub(in crate::api) async fn host_routing(
 pub(in crate::api) async fn app_or_ingress_fallback(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
     Extension(ingress): Extension<IngressConfig>,
     Extension(identity): Extension<IdentityIssuer>,
     Extension(bootstrap): Extension<BootstrapConfig>,
@@ -294,6 +296,7 @@ pub(in crate::api) async fn app_or_ingress_fallback(
         return proxy_service_ingress(
             State(state),
             Extension(auth),
+            Extension(policy),
             Extension(ingress),
             Extension(identity),
             request,

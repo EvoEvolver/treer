@@ -90,32 +90,227 @@ pub(in crate::api) async fn proxy_virtual_network_host(
     .await
 }
 
+/// The interface UI shows the transcript and can prompt the Agent, so every
+/// human or machine caller must hold both `agent.output.read` and
+/// `agent.prompt` on the Agent (#143 Phase 2); evaluated per request.
+pub(in crate::api) async fn require_agent_interface_access(
+    policy: &PolicyEngine,
+    workspace_id: &str,
+    subject: &PolicySubject,
+    agent: &AgentInfo,
+) -> Result<(), ApiFailure> {
+    for action in [ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT] {
+        policy
+            .authorize(&PolicyRequest::new(
+                workspace_id,
+                subject.clone(),
+                action,
+                agent_policy_resource(agent),
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+/// Bounded `origin_url` evaluation (#143 Phase 2): the read-model gate result
+/// per (workspace, member, Agent, Policy revision) is remembered for a short
+/// window, so Console refetch churn (an interface re-registering in a loop
+/// makes every member refetch the snapshot) costs at most one Policy
+/// evaluation pair per member per Agent per window on this Proxy instance.
+/// The revision in the key is the one the evaluators would apply now, so a
+/// published Policy is re-evaluated as soon as the engine itself sees it;
+/// allowed and denied results share the window, a failed evaluation is never
+/// remembered, an unavailable revision (Policy document not loadable) bypasses
+/// the cache entirely, and the authorize step and every request on the origin
+/// evaluate the gate uncached.
+const ORIGIN_GATE_WINDOW: Duration = Duration::from_secs(5);
+const ORIGIN_GATE_CACHE_CAP: usize = 10_000;
+static ORIGIN_GATE_WINDOW_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(ORIGIN_GATE_WINDOW.as_millis() as u64);
+type OriginGateKey = (String, String, String, Option<u64>);
+static ORIGIN_GATE_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<OriginGateKey, (bool, std::time::Instant)>>,
+> = std::sync::OnceLock::new();
+
+fn origin_gate_window() -> Duration {
+    Duration::from_millis(ORIGIN_GATE_WINDOW_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+#[cfg(test)]
+pub(in crate::api) fn set_origin_gate_window_for_test(window: Duration) {
+    ORIGIN_GATE_WINDOW_MS.store(
+        window.as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+fn origin_gate_cached(key: &OriginGateKey) -> Option<bool> {
+    let window = origin_gate_window();
+    if window.is_zero() {
+        return None;
+    }
+    let cache = ORIGIN_GATE_CACHE.get_or_init(Default::default);
+    let cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    cache
+        .get(key)
+        .filter(|(_, at)| at.elapsed() < window)
+        .map(|(allowed, _)| *allowed)
+}
+
+fn origin_gate_remember(key: OriginGateKey, allowed: bool) {
+    let window = origin_gate_window();
+    if window.is_zero() {
+        return;
+    }
+    let cache = ORIGIN_GATE_CACHE.get_or_init(Default::default);
+    let mut cache = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if cache.len() >= ORIGIN_GATE_CACHE_CAP {
+        cache.retain(|_, (_, at)| at.elapsed() < window);
+        if cache.len() >= ORIGIN_GATE_CACHE_CAP {
+            cache.clear();
+        }
+    }
+    cache.insert(key, (allowed, std::time::Instant::now()));
+}
+
+/// Fills `interface.origin_url` on a read model for a human member who passes
+/// the interface gate (#143 Phase 2); other subjects and denied members see no
+/// origin, and a Policy denial is not an error here.
+pub(in crate::api) async fn hydrate_agent_interface_origin(
+    policy: &PolicyEngine,
+    config: &crate::api::IngressConfig,
+    workspace_id: &str,
+    subject: Option<&PolicySubject>,
+    agent: &mut AgentInfo,
+) -> Result<(), ApiFailure> {
+    let Some(subject @ PolicySubject::Human { user_id }) = subject else {
+        return Ok(());
+    };
+    if agent.interface.is_none() {
+        return Ok(());
+    }
+    let Some(origin_url) = config.agent_interface_origin_url(&agent.agent_id) else {
+        return Ok(());
+    };
+    let key = match policy.policy_revision(workspace_id).await {
+        crate::policy::PolicyRevision::Known(revision) => Some((
+            workspace_id.to_owned(),
+            user_id.clone(),
+            agent.agent_id.clone(),
+            Some(revision),
+        )),
+        crate::policy::PolicyRevision::Unrevisioned => Some((
+            workspace_id.to_owned(),
+            user_id.clone(),
+            agent.agent_id.clone(),
+            None,
+        )),
+        crate::policy::PolicyRevision::Unavailable => None,
+    };
+    let cached = key.as_ref().and_then(origin_gate_cached);
+    let allowed = match cached {
+        Some(allowed) => allowed,
+        None => {
+            let allowed =
+                match require_agent_interface_access(policy, workspace_id, subject, agent).await {
+                    Ok(()) => true,
+                    Err(error) if error.error.code == "policy_denied" => false,
+                    Err(error) => return Err(error),
+                };
+            if let Some(key) = key {
+                origin_gate_remember(key, allowed);
+            }
+            allowed
+        }
+    };
+    if !allowed {
+        return Ok(());
+    }
+    if let Some(interface) = agent.interface.as_mut() {
+        interface.origin_url = Some(origin_url);
+    }
+    Ok(())
+}
+
+/// The Policy subject behind a Proxy-origin interface UI request: the human
+/// session, else the authenticated machine or Agent; never anonymous.
+async fn interface_ui_subject(
+    state: &AppState,
+    session: Option<&CurrentSession>,
+    machine: Option<&MachineSession>,
+    headers: &HeaderMap,
+    workspace_id: &str,
+) -> Result<PolicySubject, ApiFailure> {
+    if let Some(session) = session {
+        return Ok(PolicySubject::Human {
+            user_id: session.user_id.clone(),
+        });
+    }
+    control_policy_subject(state, machine, headers, workspace_id)
+        .await?
+        .ok_or_else(|| {
+            ApiFailure::forbidden("identity_required", "authenticated identity is required")
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
 pub(in crate::api) async fn proxy_agent_interface_ui_root(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
     Extension(browser): Extension<BrowserAccess>,
     Extension(bootstrap): Extension<BootstrapConfig>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
     Path((workspace_id, agent_id)): Path<(String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
     // App content must never run on the Console's origin (#132).
     bootstrap.app_dist().require_embedding_allowed()?;
     browser.validate_tunnel_if_present(request.headers())?;
+    let subject = interface_ui_subject(
+        &state,
+        session.as_deref(),
+        machine.as_deref(),
+        request.headers(),
+        &workspace_id,
+    )
+    .await?;
+    let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+    require_agent_interface_access(&policy, &workspace_id, &subject, &agent).await?;
     let mut response =
         proxy_agent_interface_ui(state, workspace_id, agent_id, String::new(), request).await?;
     crate::api::app_ui::allow_control_plane_frame(response.headers_mut(), &browser)?;
     Ok(response)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::api) async fn proxy_agent_interface_ui_path(
     State(state): State<AppState>,
+    Extension(policy): Extension<PolicyEngine>,
     Extension(browser): Extension<BrowserAccess>,
     Extension(bootstrap): Extension<BootstrapConfig>,
+    session: Option<Extension<CurrentSession>>,
+    machine: Option<Extension<MachineSession>>,
     Path((workspace_id, agent_id, path)): Path<(String, String, String)>,
     request: Request<Body>,
 ) -> Result<Response, ApiFailure> {
     // App content must never run on the Console's origin (#132).
     bootstrap.app_dist().require_embedding_allowed()?;
     browser.validate_tunnel_if_present(request.headers())?;
+    let subject = interface_ui_subject(
+        &state,
+        session.as_deref(),
+        machine.as_deref(),
+        request.headers(),
+        &workspace_id,
+    )
+    .await?;
+    let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+    require_agent_interface_access(&policy, &workspace_id, &subject, &agent).await?;
     let mut response =
         proxy_agent_interface_ui(state, workspace_id, agent_id, path, request).await?;
     crate::api::app_ui::allow_control_plane_frame(response.headers_mut(), &browser)?;
@@ -235,7 +430,7 @@ pub(in crate::api) async fn tunnel_http_request(
     Ok(Response::from_parts(parts, Body::new(body)))
 }
 
-fn sanitize_agent_interface_headers(
+pub(in crate::api) fn sanitize_agent_interface_headers(
     headers: &mut HeaderMap,
     upgraded: bool,
     agent_id: &str,
@@ -408,6 +603,7 @@ mod provenance_tests {
     #[test]
     fn agent_ui_replaces_spoofed_provenance_for_http_and_websocket() {
         let interface = treer_protocol::AgentInterfaceDescriptor {
+            origin_url: None,
             protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.into(),
             instance_id: "registered-instance".into(),
             port: 12345,

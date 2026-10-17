@@ -16,7 +16,9 @@ pub(in crate::api) fn default_ingress_return_path() -> String {
 }
 
 pub(in crate::api) async fn authorize_service_ingress(
+    State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
     Extension(config): Extension<IngressConfig>,
     headers: HeaderMap,
     Query(query): Query<IngressAuthorizeQuery>,
@@ -33,21 +35,101 @@ pub(in crate::api) async fn authorize_service_ingress(
     if !request_host.eq_ignore_ascii_case(proxy_host) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
-    let resolved = auth
-        .resolve_service_ingress_hostname(&query.hostname)
-        .await?
-        .filter(|resolved| resolved.ingress.enabled)
-        .ok_or_else(|| ApiFailure::not_found("ingress_not_found", "service ingress not found"))?;
-    if resolved.ingress.access != ServiceIngressAccess::Workspace {
-        return Ok(Redirect::to(
-            config
-                .url_for_hostname(&resolved.ingress.hostname)?
-                .as_str(),
+    // An Agent interface origin (#143 Phase 2) is authorized like a workspace
+    // service ingress, but existence is decided only after authentication and
+    // the interface gate runs before any row or session exists.
+    let agent_origin = config
+        .base_domain_if_configured()
+        .and_then(|base| auth::agent_id_from_platform_hostname(&query.hostname, base));
+    let (ingress, hostname) = if let Some(agent_id) = agent_origin {
+        let hostname = query.hostname.to_ascii_lowercase();
+        let session =
+            match authenticate_or_login_redirect(&auth, &config, &headers, &hostname, &query)
+                .await?
+            {
+                Ok(session) => session,
+                Err(redirect) => return Ok(redirect),
+            };
+        let (workspace_id, _server_id) = auth
+            .agent_interface_target(&agent_id)
+            .await?
+            .ok_or_else(|| ApiFailure::not_found("agent_not_found", "agent does not exist"))?;
+        auth.require_workspace_member(&workspace_id, &session.user_id)
+            .await?;
+        let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+        require_agent_interface_access(
+            &policy,
+            &workspace_id,
+            &PolicySubject::Human {
+                user_id: session.user_id.clone(),
+            },
+            &agent,
         )
-        .into_response());
-    }
-    let session = match auth::authenticate_request(&auth, &headers).await {
-        Ok(session) => session,
+        .await?;
+        let base = config.base_domain()?;
+        let ingress = auth
+            .ensure_agent_interface_ingress(&workspace_id, &agent_id, &session.user_id, base)
+            .await?;
+        let code = auth
+            .create_ingress_auth_code(
+                &ingress,
+                &session.user_id,
+                &query.return_path,
+                &query.browser_nonce_hash,
+            )
+            .await?;
+        return ingress_callback_redirect(
+            &config,
+            &ingress.hostname,
+            &code,
+            &query.browser_nonce_hash,
+        );
+    } else {
+        let resolved = auth
+            .resolve_service_ingress_hostname(&query.hostname)
+            .await?
+            .filter(|resolved| resolved.ingress.enabled)
+            .ok_or_else(|| {
+                ApiFailure::not_found("ingress_not_found", "service ingress not found")
+            })?;
+        if resolved.ingress.access != ServiceIngressAccess::Workspace {
+            return Ok(Redirect::to(
+                config
+                    .url_for_hostname(&resolved.ingress.hostname)?
+                    .as_str(),
+            )
+            .into_response());
+        }
+        let hostname = resolved.ingress.hostname.clone();
+        (resolved.ingress, hostname)
+    };
+    let session =
+        match authenticate_or_login_redirect(&auth, &config, &headers, &hostname, &query).await? {
+            Ok(session) => session,
+            Err(redirect) => return Ok(redirect),
+        };
+    let code = auth
+        .create_ingress_auth_code(
+            &ingress,
+            &session.user_id,
+            &query.return_path,
+            &query.browser_nonce_hash,
+        )
+        .await?;
+    ingress_callback_redirect(&config, &ingress.hostname, &code, &query.browser_nonce_hash)
+}
+
+/// The Console session behind an authorize request, or the login redirect
+/// (with a return to this authorize URL) when there is none.
+async fn authenticate_or_login_redirect(
+    auth: &AuthStore,
+    config: &IngressConfig,
+    headers: &HeaderMap,
+    hostname: &str,
+    query: &IngressAuthorizeQuery,
+) -> Result<Result<CurrentSession, Response>, ApiFailure> {
+    match auth::authenticate_request(auth, headers).await {
+        Ok(session) => Ok(Ok(session)),
         Err(error) => {
             let (status, error) = error.into_parts();
             if status != StatusCode::UNAUTHORIZED {
@@ -58,7 +140,7 @@ pub(in crate::api) async fn authorize_service_ingress(
             authorize_url.set_query(None);
             authorize_url
                 .query_pairs_mut()
-                .append_pair("hostname", &resolved.ingress.hostname)
+                .append_pair("hostname", hostname)
                 .append_pair("return_path", &query.return_path)
                 .append_pair("browser_nonce_hash", &query.browser_nonce_hash);
             let mut login_url = config.app_public_url.clone();
@@ -66,24 +148,24 @@ pub(in crate::api) async fn authorize_service_ingress(
             login_url
                 .query_pairs_mut()
                 .append_pair("return_to", authorize_url.as_str());
-            return Ok(Redirect::to(login_url.as_str()).into_response());
+            Ok(Err(Redirect::to(login_url.as_str()).into_response()))
         }
-    };
-    let code = auth
-        .create_ingress_auth_code(
-            &resolved.ingress,
-            &session.user_id,
-            &query.return_path,
-            &query.browser_nonce_hash,
-        )
-        .await?;
-    let mut callback = config.url_for_hostname(&resolved.ingress.hostname)?;
+    }
+}
+
+fn ingress_callback_redirect(
+    config: &IngressConfig,
+    hostname: &str,
+    code: &str,
+    browser_nonce_hash: &str,
+) -> Result<Response, ApiFailure> {
+    let mut callback = config.url_for_hostname(hostname)?;
     callback.set_path("/.treer/callback");
     callback.set_query(None);
     callback
         .query_pairs_mut()
-        .append_pair("code", &code)
-        .append_pair("browser_nonce_hash", &query.browser_nonce_hash);
+        .append_pair("code", code)
+        .append_pair("browser_nonce_hash", browser_nonce_hash);
     let mut response = Redirect::to(callback.as_str()).into_response();
     response
         .headers_mut()
@@ -102,6 +184,7 @@ pub(in crate::api) async fn authorize_service_ingress(
 pub(in crate::api) async fn proxy_service_ingress(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
+    Extension(policy): Extension<PolicyEngine>,
     Extension(config): Extension<IngressConfig>,
     Extension(identity): Extension<IdentityIssuer>,
     mut request: Request<Body>,
@@ -115,6 +198,15 @@ pub(in crate::api) async fn proxy_service_ingress(
         .extensions()
         .get::<axum::extract::ConnectInfo<std::net::SocketAddr>>()
         .map(|info| info.0.ip());
+    if let Some(agent_id) = config
+        .base_domain_if_configured()
+        .and_then(|base| auth::agent_id_from_platform_hostname(&hostname, base))
+    {
+        return proxy_agent_interface_origin(
+            state, auth, policy, config, hostname, agent_id, request,
+        )
+        .await;
+    }
     let resolved = auth
         .resolve_service_ingress_hostname(&hostname)
         .await?
@@ -161,6 +253,10 @@ pub(in crate::api) async fn proxy_service_ingress(
         ));
     }
     let upgraded = request.headers().contains_key(header::UPGRADE);
+    if let Err(error) = enforce_ingress_fetch_metadata(&request, &hostname, public) {
+        guard.record(&ingress_id, Rejection::RequestRejected);
+        return Err(error);
+    }
     let mut admission = None;
     if public {
         // No peer address means no socket (tests): treat it as a local peer.
@@ -338,6 +434,207 @@ const RESPONSE_IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// A non-upgraded response holds its in-flight permit at most this long,
 /// even when the client never reads it; the stream itself may continue.
 const PERMIT_LEASE: Duration = Duration::from_secs(300);
+
+/// Serves one request on an Agent interface origin (`ag-<id>.<apps domain>`,
+/// #143 Phase 2): workspace ingress session only (Bearer refused), the
+/// interface gate on every request, then the same tunnel and provenance
+/// headers as the Proxy-origin interface route. Unauthenticated requests to
+/// any well-formed label redirect to authorize before existence is decided.
+#[allow(clippy::too_many_arguments)]
+async fn proxy_agent_interface_origin(
+    state: AppState,
+    auth: AuthStore,
+    policy: PolicyEngine,
+    config: IngressConfig,
+    hostname: String,
+    agent_id: String,
+    mut request: Request<Body>,
+) -> Result<Response, ApiFailure> {
+    if request.uri().path() == "/.treer/callback" {
+        require_ingress_navigation(request.headers())?;
+        return complete_ingress_authorization(
+            &auth,
+            &config,
+            &hostname,
+            request.uri(),
+            request.headers(),
+        )
+        .await;
+    }
+    if request.uri().path().starts_with("/.treer/") {
+        return Err(ApiFailure::not_found("route_not_found", "route not found"));
+    }
+    if request.headers().contains_key(header::CONTENT_LENGTH)
+        && request.headers().contains_key(header::TRANSFER_ENCODING)
+    {
+        return Err(ApiFailure::bad_request(
+            "ingress_request_rejected",
+            "request carries both Content-Length and Transfer-Encoding",
+        ));
+    }
+    if ingress_bearer_token(request.headers())?.is_some() {
+        return Err(ApiFailure::unauthorized(
+            "ingress_authentication_required",
+            "Agent interface origins accept only a workspace browser session",
+        ));
+    }
+    enforce_ingress_fetch_metadata(&request, &hostname, false)?;
+    let user_id = if auth.authentication_disabled() {
+        None
+    } else {
+        let session = cookie_value(request.headers(), config.ingress_cookie_name());
+        let user_id = match session {
+            Some(token) => auth.authenticate_ingress_session(&hostname, &token).await?,
+            None => None,
+        };
+        let Some(user_id) = user_id else {
+            require_ingress_navigation(request.headers())?;
+            return redirect_to_ingress_authorization(
+                &config,
+                &hostname,
+                request.uri(),
+                request.headers(),
+            );
+        };
+        Some(user_id)
+    };
+    // Authenticated: existence and authority are decided now, per request.
+    let (workspace_id, _server_id) = auth
+        .agent_interface_target(&agent_id)
+        .await?
+        .ok_or_else(|| ApiFailure::not_found("agent_not_found", "agent does not exist"))?;
+    let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
+    if let Some(user_id) = &user_id {
+        require_agent_interface_access(
+            &policy,
+            &workspace_id,
+            &PolicySubject::Human {
+                user_id: user_id.clone(),
+            },
+            &agent,
+        )
+        .await?;
+    }
+    let interface = agent
+        .interface
+        .as_ref()
+        .ok_or_else(|| ApiFailure::not_found("agent_interface_not_found", &agent.agent_id))?;
+    let ui_path = interface
+        .ui_path
+        .as_deref()
+        .ok_or_else(|| ApiFailure::not_found("agent_interface_ui_unavailable", &agent.agent_id))?;
+    let path = request.uri().path().trim_start_matches('/').to_string();
+    let target_path = if path.is_empty() {
+        ui_path.to_string()
+    } else if ui_path == "/" {
+        format!("/{path}")
+    } else {
+        format!("{}/{path}", ui_path.trim_end_matches('/'))
+    };
+    let target = request.uri().query().map_or(target_path.clone(), |query| {
+        format!("{target_path}?{query}")
+    });
+    *request.uri_mut() = target
+        .parse::<Uri>()
+        .map_err(|error| ApiFailure::bad_gateway("invalid_tunnel_uri", &error.to_string()))?;
+    *request.version_mut() = Version::HTTP_11;
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    sanitize_agent_interface_headers(request.headers_mut(), upgraded, &agent.agent_id, interface)?;
+    let mut response = tunnel_http_request(
+        state,
+        &workspace_id,
+        &agent.server_id,
+        Some(&agent.agent_id),
+        "127.0.0.1",
+        interface.port,
+        request,
+        true,
+        "Agent interface origin",
+        TrafficClass::AgentInterface,
+        None,
+    )
+    .await?;
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        let headers = response.headers_mut();
+        headers
+            .entry("x-content-type-options")
+            .or_insert(HeaderValue::from_static("nosniff"));
+        headers
+            .entry(header::REFERRER_POLICY)
+            .or_insert(HeaderValue::from_static("no-referrer"));
+    }
+    Ok(response)
+}
+
+/// Same-site sibling defence for every ingress host (#143 Phase 2 V4): a
+/// browser's unsafe method or WebSocket upgrade must come from this origin
+/// (`Sec-Fetch-Site` same-origin or absent for non-browser clients) and an
+/// upgrade's `Origin` must be this host. Workspace hosts, whose cookie carries
+/// authority, also refuse cross-site; public hosts are internet APIs and keep
+/// accepting cross-site under their own CORS, refusing only same-site.
+fn enforce_ingress_fetch_metadata(
+    request: &Request<Body>,
+    hostname: &str,
+    public: bool,
+) -> Result<(), ApiFailure> {
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    let unsafe_method = !matches!(
+        *request.method(),
+        axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::OPTIONS
+    );
+    if !upgraded && !unsafe_method {
+        return Ok(());
+    }
+    let rejected = || {
+        ApiFailure::forbidden(
+            "ingress_request_rejected",
+            "browser requests to this host must originate from this host",
+        )
+    };
+    let sites: Vec<&str> = request
+        .headers()
+        .get_all("sec-fetch-site")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+    if sites.len() > 1 {
+        return Err(rejected());
+    }
+    if let Some(site) = sites.first() {
+        let allowed = match *site {
+            "same-origin" | "none" => true,
+            "cross-site" => public,
+            _ => false,
+        };
+        if !allowed {
+            return Err(rejected());
+        }
+    }
+    if upgraded {
+        let origins: Vec<&str> = request
+            .headers()
+            .get_all(header::ORIGIN)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .collect();
+        if origins.len() > 1 {
+            return Err(rejected());
+        }
+        if let Some(origin) = origins.first() {
+            let host_matches = url::Url::parse(origin)
+                .ok()
+                .and_then(|url| {
+                    url.host_str()
+                        .map(|host| host.eq_ignore_ascii_case(hostname))
+                })
+                .unwrap_or(false);
+            if !host_matches {
+                return Err(rejected());
+            }
+        }
+    }
+    Ok(())
+}
 
 fn declared_content_length(headers: &HeaderMap) -> Option<u64> {
     headers
