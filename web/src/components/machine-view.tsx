@@ -1,3 +1,4 @@
+import { ProviderCliInstaller } from "@/components/provider-cli-installer"
 import { agentPath } from "@/lib/workload-path"
 import { EmptyState, MachineRecovery, Status } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
@@ -59,6 +60,7 @@ export function MachineOverviewView({ machine, agents, services, virtualHosts, t
       <Button variant="outline" className="shrink-0" onClick={onClose}>{t("org.close")}</Button>
     </div>
 
+    {workspaceId && <div className="mb-6"><ProviderCliInstaller key={`${workspaceId}/${machine.server_id}`} workspaceId={workspaceId} machine={machine} /></div>}
     <div className="grid gap-10 md:grid-cols-2">
       <section className="space-y-3 rounded-md border p-4">
         <h2 className="text-sm font-semibold">{t("machine.build")}</h2>

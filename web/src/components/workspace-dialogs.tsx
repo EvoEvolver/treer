@@ -1,3 +1,4 @@
+import { ProviderCliInstaller } from "@/components/provider-cli-installer"
 import { AgentReservationRecovery } from "@/components/agent-reservation-recovery"
 import type { AgentCreationFailure } from "@/lib/agent-creation-failure"
 import { Field,SimpleNameDialog } from "@/components/control-plane-ui"
@@ -19,6 +20,7 @@ import { t } from "@/i18n"
 interface WorkspaceDialogsProps {
   reservationCleaned: boolean
   creationFailure: AgentCreationFailure | null
+  creationCommandMissing: boolean
   onReservationCleaned: () => void
   state: ReturnType<typeof useWorkspaceDialogState>
   user: User
@@ -51,7 +53,7 @@ interface WorkspaceDialogsProps {
   confirmDeleteWorkspace: () => Promise<void>
 }
 
-export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadToAgentMachine, selectedAgentMachine, selectedAgent, selectedAgentMachineOnline, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
+export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadToAgentMachine, selectedAgentMachine, selectedAgent, selectedAgentMachineOnline, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
   const {
     settingsOpen, setSettingsOpen, createOrganizationOpen, setCreateOrganizationOpen,
     createWorkspaceOpen, setCreateWorkspaceOpen, deleteWorkspaceOpen, setDeleteWorkspaceOpen,
@@ -117,6 +119,7 @@ export function WorkspaceDialogs({ reservationCleaned, creationFailure, onReserv
           {createAgentError && <p role="alert" className="break-words text-sm text-destructive">{createAgentError}</p>}
           {creationFailure?.creation_state === "identity_removed" && <p role="status" className="text-sm">{t("provider.identity_removed")}</p>}
           {creationFailure && creationFailure.creation_state !== "identity_removed" && workspace && <AgentReservationRecovery key={`${workspace.workspace_id}/${creationFailure.agent_id}`} workspaceId={workspace.workspace_id} failure={creationFailure} onCleaned={onReservationCleaned} />}
+          {createAgentOpen && creationCommandMissing && creationFailure?.creation_state === "identity_removed" && creationFailure.command && creationFailure.machine_id === agentServerId && workspace && snapshot?.servers.find(item => item.server_id === agentServerId) && <ProviderCliInstaller key={`${workspace.workspace_id}/${agentServerId}/${creationFailure.agent_id}`} workspaceId={workspace.workspace_id} machine={snapshot.servers.find(item => item.server_id === agentServerId)!} command={creationFailure.command} />}
           <DialogFooter>
             <Button type="button" variant="outline" onClick={() => setCreateAgentOpen(false)}>{t("common.cancel")}</Button>
             <Button type="submit" disabled={creatingAgent || Boolean(creationFailure && creationFailure.creation_state !== "identity_removed") || !agentServerId || (agentProfileId === "manual" && !agentCommandLine.trim())}>{creatingAgent ? t("dialogs.starting") : agentProfileId === "terminal" ? t("dialogs.create_terminal") : t("dialogs.create_agent")}</Button>
