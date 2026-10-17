@@ -951,3 +951,91 @@ async fn unknown_hostnames_are_answered_from_the_snapshot_without_database_looku
     }
     assert_eq!(refused, 20);
 }
+
+/// #142's consumer requirement: a public-ingress long poll of a full 30 s
+/// (the App's maximum) passes the default 35 s response timeout through the
+/// real handler and tunnel, holding exactly one in-flight permit meanwhile.
+/// Deliberately takes 30 s of wall time; it is the evidence apps-dev asked for.
+#[tokio::test]
+async fn public_ingress_thirty_second_long_poll_passes_the_default_timeout() {
+    let mut fixture = fixture().await;
+    let ingress = fixture
+        .auth
+        .ensure_app_ingress(
+            &fixture.app,
+            "owner",
+            "apps.treer.example",
+            Some(ServiceIngressAccess::Public),
+        )
+        .await
+        .unwrap();
+    let (heads, served) = upstream(
+        fixture.state.clone(),
+        fixture.connection,
+        fixture.rx.take().unwrap(),
+        Upstream::Delayed(Duration::from_secs(30)),
+    );
+    let config = config(None);
+    let started = std::time::Instant::now();
+    let poll = tokio::spawn({
+        let (state, auth, identity, config, host) = (
+            fixture.state.clone(),
+            fixture.auth.clone(),
+            fixture.identity.clone(),
+            config.clone(),
+            ingress.hostname.clone(),
+        );
+        async move {
+            let request = with_peer(
+                Request::builder()
+                    .uri("/v1/outbox?after=0&timeout=30")
+                    .header(header::HOST, &host)
+                    .body(Body::empty())
+                    .unwrap(),
+                "203.0.113.60",
+            );
+            let response = proxy_service_ingress(
+                State(state),
+                Extension(auth),
+                Extension(config),
+                Extension(identity),
+                request,
+            )
+            .await
+            .unwrap();
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 64)
+                .await
+                .unwrap();
+            (status, body)
+        }
+    });
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert_eq!(
+        config.guard().in_flight(&ingress.ingress_id),
+        1,
+        "the poll holds one permit while it waits"
+    );
+    let (status, body) = poll.await.unwrap();
+    let elapsed = started.elapsed();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(&body[..], b"ok");
+    assert!(elapsed >= Duration::from_secs(30), "{elapsed:?}");
+    assert!(elapsed < Duration::from_secs(35), "{elapsed:?}");
+    assert_eq!(served.load(Ordering::SeqCst), 1);
+    let head = heads.lock().unwrap()[0].to_ascii_lowercase();
+    assert!(
+        head.starts_with("get /v1/outbox?after=0&timeout=30 http/1.1\r\n"),
+        "{head}"
+    );
+    assert!(head.contains("x-treer-client-ip: 203.0.113.60\r\n"));
+    tokio::task::yield_now().await;
+    assert_eq!(config.guard().in_flight(&ingress.ingress_id), 0);
+    assert_eq!(
+        config
+            .guard()
+            .counters(&ingress.ingress_id)
+            .upstream_timeout,
+        0
+    );
+}
