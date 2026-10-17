@@ -2,7 +2,8 @@
 //! authenticated durable record, not an untrusted peer. No permit or IO API.
 use std::time::Instant;
 
-pub(super) const FRAME_SIZE: usize = 113;
+const MAGIC_VERSION: &[u8; 5] = b"TRUB\x01";
+pub(super) const FRAME_SIZE: usize = 118;
 pub(super) type Frame = [u8; FRAME_SIZE];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,7 +35,10 @@ pub(super) struct Exchange {
 
 impl Exchange {
     pub(super) fn new(binding: Binding, nonce: [u8; 16], owner: bool, deadline: Instant) -> Self {
-        let valid = nonce != [0; 16] && binding.attempt != [0; 16];
+        let valid = nonce != [0; 16]
+            && binding.attempt != [0; 16]
+            && binding.intent != [0; 32]
+            && binding.registration != [0; 32];
         Self {
             binding,
             local: nonce,
@@ -53,12 +57,13 @@ impl Exchange {
 
     fn frame(&self, tag: u8) -> Frame {
         let mut bytes = [0; FRAME_SIZE];
-        bytes[0] = tag;
-        bytes[1..17].copy_from_slice(&self.binding.attempt);
-        bytes[17..49].copy_from_slice(&self.binding.intent);
-        bytes[49..81].copy_from_slice(&self.binding.registration);
-        bytes[81..97].copy_from_slice(&self.owner);
-        bytes[97..113].copy_from_slice(&self.child);
+        bytes[..5].copy_from_slice(MAGIC_VERSION);
+        bytes[5] = tag;
+        bytes[6..22].copy_from_slice(&self.binding.attempt);
+        bytes[22..54].copy_from_slice(&self.binding.intent);
+        bytes[54..86].copy_from_slice(&self.binding.registration);
+        bytes[86..102].copy_from_slice(&self.owner);
+        bytes[102..118].copy_from_slice(&self.child);
         bytes
     }
 
@@ -78,15 +83,16 @@ impl Exchange {
         let prior = std::mem::replace(&mut self.state, State::Refused);
         if now >= self.deadline
             || bytes.len() != FRAME_SIZE
-            || bytes[1..17] != self.binding.attempt
-            || bytes[17..49] != self.binding.intent
-            || bytes[49..81] != self.binding.registration
+            || &bytes[..5] != MAGIC_VERSION
+            || bytes[6..22] != self.binding.attempt
+            || bytes[22..54] != self.binding.intent
+            || bytes[54..86] != self.binding.registration
         {
             return Err(());
         }
-        let owner: [u8; 16] = bytes[81..97].try_into().map_err(|_| ())?;
-        let child: [u8; 16] = bytes[97..113].try_into().map_err(|_| ())?;
-        match (prior, bytes[0]) {
+        let owner: [u8; 16] = bytes[86..102].try_into().map_err(|_| ())?;
+        let child: [u8; 16] = bytes[102..118].try_into().map_err(|_| ())?;
+        match (prior, bytes[5]) {
             (State::ChildHello, 1)
                 if owner != [0; 16] && child == [0; 16] && owner != self.local =>
             {
@@ -163,7 +169,7 @@ mod tests {
             // but must fail when echoed to the owner that selected the original.
             match child.receive(&bad, now) {
                 Ok(Some(reply)) => {
-                    assert!((81..97).contains(&offset));
+                    assert!((86..102).contains(&offset));
                     assert!(owner.receive(&reply, now).is_err());
                     assert!(owner.receive(&reply, now).is_err());
                 }
@@ -196,5 +202,35 @@ mod tests {
         let (mut owner, _, now) = pair();
         assert!(owner.start(now + Duration::from_secs(5)).is_err());
         assert!(owner.start(now).is_err());
+    }
+
+    #[test]
+    fn refuses_empty_binding_inputs_and_wrong_format_before_exchange() {
+        let (mut valid, _, now) = pair();
+        let hello = valid.start(now).unwrap();
+        for missing in 0..4 {
+            let mut binding = valid.binding;
+            let mut nonce = [5; 16];
+            match missing {
+                0 => binding.attempt = [0; 16],
+                1 => binding.intent = [0; 32],
+                2 => binding.registration = [0; 32],
+                _ => nonce = [0; 16],
+            }
+            for owner in [false, true] {
+                let mut invalid = Exchange::new(binding, nonce, owner, valid.deadline);
+                if owner {
+                    assert!(invalid.start(now).is_err());
+                }
+                assert!(invalid.receive(&hello, now).is_err());
+            }
+        }
+        for header in [*b"NOPE\x01", *b"TRUB\x00", *b"TRUB\x02"] {
+            let (_, mut child, _) = pair();
+            let mut wrong = hello;
+            wrong[..5].copy_from_slice(&header);
+            assert!(child.receive(&wrong, now).is_err());
+            assert!(child.receive(&hello, now).is_err());
+        }
     }
 }

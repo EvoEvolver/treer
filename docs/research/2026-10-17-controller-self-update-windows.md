@@ -381,10 +381,12 @@ the outside-Job native round trip on Server 2022/20348 and Server 2025/26100.
 This satisfies that development-only condition; final product gaps remain.
 
 `update_binding` is private and compiled only for tests on all platforms. It
-models a fixed 113-byte frame: one tag, 16-byte attempt, 32-byte intent digest,
+models a fixed 118-byte frame: magic `TRUB`, version byte `1`, one tag,
+16-byte attempt, 32-byte intent digest,
 32-byte registration digest, 16-byte owner challenge and 16-byte child challenge.
 The ordered exchange is owner Hello, child Reply, owner Finish, child Ack.
-Both sides require exact attempt/intent/registration binding on every frame;
+Both sides reject empty attempt/intent/registration bindings and require exact
+magic, version and attempt/intent/registration binding on every frame;
 Reply echoes the owner's challenge, and Finish/Ack echo both. The first Hello
 requires an empty child challenge. Zero challenges and reflection of one side's
 challenge back as the other's are refused. Each modeled exchange receives an
