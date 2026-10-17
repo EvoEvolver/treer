@@ -315,22 +315,36 @@ else:
         self.assertEqual(result["error_code"], "persisted_agent_missing")
         self.assertEqual(result["error_agent_ids"], ["ag_persisted"])
         self.assertIn(self.old, (self.bindir / "treer-agent-server").read_text())
-        self.assertEqual(update.persisted_agent_ids(str(store)), frozenset({"ag_persisted"}))
-        self.assertEqual(update.persisted_agent_ids(str(self.home / "absent.json")), frozenset())
-        self.assertEqual(update.persisted_agent_ids(None), frozenset())
+        self.assertEqual(update.persisted_agent_ids(str(store)), (frozenset({"ag_persisted"}), []))
+        self.assertEqual(update.persisted_agent_ids(str(self.home / "absent.json")), (frozenset(), []))
+        self.assertEqual(update.persisted_agent_ids(None), (frozenset(), []))
+        # An unreadable store fails closed: every stopped row is protected and
+        # the receipt warns; the persisted check never silently turns off.
+        store.write_text("{not json")
+        self.assertEqual(update.persisted_agent_ids(str(store)), (None, ["startup_store_unreadable"]))
+        state = json.loads(self.state.read_text())
+        state["agents"].append({"agent_id": "ag_stopped_unknown", "pid": None, "run_generation": 1})
+        self.state.write_text(json.dumps(state))
+        code, result = self.invoke()
+        self.assertEqual(code, 1)
+        self.assertEqual(result["error_code"], "persisted_agent_missing")
+        self.assertEqual(result["error_agent_ids"], ["ag_stopped_unknown"])
+        self.assertIn("startup_store_unreadable", result["warnings"])
+        with self.assertRaises(update.InventoryError):
+            update.check_agents({"a": {"pid": 1, "generation": 1}, "s": {"pid": None, "generation": 1}},
+                                {"a": {"pid": 1, "generation": 1}}, persisted=None)
 
     def test_receipts_carry_fixed_text_only_and_keep_detail_in_the_private_log(self):
-        for unsafe in ["multiple local installs; select --workspace explicitly. Candidates:\n/Users/x/.config",
-                       "failed to start /usr/local/bin/treer-agent-server",
-                       "C:\\Users\\x\\treer.exe missing", "see https://proxy.example/x",
-                       "user@host unreachable", "x" * 201]:
-            self.assertEqual(update.safe_receipt_text(unsafe), update.UNSAFE_RECEIPT_TEXT, unsafe)
-        for safe in ["Agent PID/generation changed during hot update", "another update holds the binary lock",
-                     "treer-agent-server operation failed (exit 4)", "SHA256SUMS differs from the canary_passed release receipt"]:
-            self.assertEqual(update.safe_receipt_text(safe), safe)
+        # Allowlist, not heuristics: only InventoryError text reaches a receipt.
+        for raw in [RuntimeError("No such file: config.json"), OSError("connect to build-host-17 failed"),
+                    RuntimeError("multiple local installs; select --workspace explicitly. Candidates:\n/Users/x/.config"),
+                    ValueError("x" * 500)]:
+            entry = update.receipt_error(raw)
+            self.assertEqual(entry, {"code": type(raw).__name__, "message": update.UNSAFE_RECEIPT_TEXT}, raw)
         entry = update.receipt_error(update.InventoryError("live_agent_missing", "fixed", ["b", "a"]))
         self.assertEqual(entry, {"code": "live_agent_missing", "message": "fixed", "agent_ids": ["a", "b"], "agent_count": 2})
-        self.assertEqual(update.receipt_error(OSError("/private/path"))["message"], update.UNSAFE_RECEIPT_TEXT)
+        self.assertEqual(update.receipt_error(update.UpdateError("redirect refused; use the exact Canary artifact endpoint")),
+                         {"code": "UpdateError", "message": "redirect refused; use the exact Canary artifact endpoint"})
         # A worker failure with path-bearing text: receipt fixed, detail private.
         (self.configdir / "second-controller.json").write_text(json.dumps({"workspace": "ws_other",
             "server_id": "srv_other", "listen": "127.0.0.1:1", "install_hostname": socket.gethostname(),
@@ -340,10 +354,18 @@ else:
         self.assertEqual(code, 1)
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["error"], update.UNSAFE_RECEIPT_TEXT)
+        self.assertEqual(result["error_code"], "RuntimeError")
         self.assertNotIn(str(self.configdir), json.dumps(result))
+        self.assertNotIn("Candidates", json.dumps(result))
         log = (self.job / "error.log").read_text()
         self.assertIn("Candidates", log)
         self.assertEqual(oct((self.job / "error.log").stat().st_mode & 0o777), "0o600")
+        # error.log is never written through a symlink.
+        link_job = self.home / "job-link"
+        link_job.mkdir()
+        (link_job / "error.log").symlink_to(self.home / "elsewhere.log")
+        update.write_private_error_log(link_job, "test", RuntimeError("x"))
+        self.assertFalse((self.home / "elsewhere.log").exists())
 
     def test_rollback_after_exited_records_vanish_is_rolled_back_with_a_verdict(self):
         state = json.loads(self.state.read_text())

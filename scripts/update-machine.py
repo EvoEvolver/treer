@@ -35,20 +35,20 @@ def clean_env(home, bin_dir=None):
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, *_):
-        raise RuntimeError("redirect refused; use the exact Canary artifact endpoint")
+        raise UpdateError("redirect refused; use the exact Canary artifact endpoint")
 
 
 def validate_url(url):
     parsed = urllib.parse.urlsplit(url)
     if parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise RuntimeError("URL must not contain credentials, queries or fragments")
+        raise UpdateError("URL must not contain credentials, queries or fragments")
     loopback = parsed.hostname == "localhost"
     try:
         loopback |= ipaddress.ip_address(parsed.hostname or "").is_loopback
     except ValueError:
         pass
     if parsed.scheme != "https" and not (parsed.scheme == "http" and loopback):
-        raise RuntimeError("HTTPS required except loopback test servers")
+        raise UpdateError("HTTPS required except loopback test servers")
 
 
 def fetch(url, headers=None, limit=256 * 1024 * 1024):
@@ -57,7 +57,7 @@ def fetch(url, headers=None, limit=256 * 1024 * 1024):
     with opener.open(urllib.request.Request(url, headers=headers or {}), timeout=20) as response:
         data = response.read(limit + 1)
         if len(data) > limit:
-            raise RuntimeError("response exceeds size limit")
+            raise UpdateError("response exceeds size limit")
         return data
 
 
@@ -66,10 +66,10 @@ def manifest(data):
     for line in data.decode("ascii").splitlines():
         match = re.fullmatch(r"([0-9a-fA-F]{64}) [ *](treer(?:-agent-(?:server|host))?)", line)
         if not match or match[2] in rows:
-            raise RuntimeError("invalid or duplicate SHA256SUMS entry")
+            raise UpdateError("invalid or duplicate SHA256SUMS entry")
         rows[match[2]] = match[1].lower()
     if set(rows) != set(BINARIES):
-        raise RuntimeError("SHA256SUMS must list exactly the three machine binaries")
+        raise UpdateError("SHA256SUMS must list exactly the three machine binaries")
     return rows
 
 
@@ -91,7 +91,7 @@ def run(argv, home, timeout=20, bin_dir=None, config_dir=None):
     if config_dir:
         directory = Path(config_dir)
         if directory.parts[-2:] != ("treer", "agent-servers"):
-            raise RuntimeError("config directory must end in treer/agent-servers")
+            raise UpdateError("config directory must end in treer/agent-servers")
         environment["XDG_CONFIG_HOME"] = str(directory.parent.parent)
     if bin_dir and sys.platform == "linux":
         # systemctl --user needs the target user's own bus even under env -i.
@@ -110,21 +110,21 @@ def run(argv, home, timeout=20, bin_dir=None, config_dir=None):
                             capture_output=True, text=True, timeout=timeout)
     if result.returncode:
         # Do not persist command output, which can contain machine configuration.
-        raise RuntimeError(f"{Path(argv[0]).name} operation failed (exit {result.returncode})")
+        raise UpdateError(f"{Path(argv[0]).name} operation failed (exit {result.returncode})")
     return result.stdout.strip()
 
 
 def version(path, home):
     value = run([str(path), "--version"], home)
     if len(value) > 512 or not re.search(r"\b[0-9]+\.[0-9]+\.[0-9]+\b", value):
-        raise RuntimeError("binary did not return a bounded package version")
+        raise UpdateError("binary did not return a bounded package version")
     return value
 
 
 def source_commit(value):
     match = re.search(r"\b[0-9a-f]{7,40}\b", value)
     if not match:
-        raise RuntimeError("binary version must include its source commit")
+        raise UpdateError("binary version must include its source commit")
     return match[0]
 
 
@@ -157,16 +157,16 @@ def installed(config_dir, workspace=None, accept_shared_binaries=False, machine=
         raise RuntimeError("multiple local installs; select --workspace explicitly. Candidates:\n" + "\n".join(choices))
     matches = [(path, config) for path, config in configs if not workspace or config["workspace"] == workspace]
     if len(matches) != 1:
-        raise RuntimeError("workspace selection must match exactly one local install; no binaries were changed")
+        raise UpdateError("workspace selection must match exactly one local install; no binaries were changed")
     if len(configs) > 1:
         print(SHARED_BINARIES_NOTICE, file=sys.stderr, flush=True)
         if accept_shared_binaries is not True:
-            raise RuntimeError("multiple local installs require --accept-shared-binaries; no binaries were changed")
+            raise UpdateError("multiple local installs require --accept-shared-binaries; no binaries were changed")
     path, config = matches[0]
     host, _, port = config["listen"].rpartition(":")
     host = host.strip("[]")
     if not ipaddress.ip_address(host).is_loopback or not port.isdigit():
-        raise RuntimeError("Controller health must use a loopback listen address")
+        raise UpdateError("Controller health must use a loopback listen address")
     return path, config
 
 
@@ -177,7 +177,7 @@ def local_document(config_path, route, operator=False):
     value = json.loads(fetch(f"http://{config['listen']}{route}", headers, limit=4 * 1024 * 1024))
     if route == "/api/health" and (value.get("service") != "treer-agent-server" or
             value.get("workspace_id") != config["workspace"] or value.get("server_id") != config["server_id"]):
-        raise RuntimeError("health identity does not match installed workspace/server")
+        raise UpdateError("health identity does not match installed workspace/server")
     return value
 
 
@@ -194,6 +194,12 @@ MAX_RECEIPT_IDS = 32
 UNSAFE_RECEIPT_TEXT = "operation_failed_see_private_error_log"
 
 
+class UpdateError(RuntimeError):
+    """An updater failure with a fixed, operator-facing message: raised only
+    with literal text or names from the fixed binary set, so receipts may
+    carry it. Anything else stays a plain exception and is redacted."""
+
+
 class InventoryError(RuntimeError):
     """A preservation check failed; `code` and `message` are fixed receipt
     tokens and `agent_ids` is a bounded, ids-only diagnostic."""
@@ -205,28 +211,25 @@ class InventoryError(RuntimeError):
         self.agent_count = len(agent_ids)
 
 
-def safe_receipt_text(text):
-    """Receipts on real machines carry fixed codes, hashes and ids only. Any
-    text that could embed a path, host, URL or account is replaced."""
-    text = str(text)
-    if "\n" in text or len(text) > 200 or re.search(r"(^|[\s:=,'\"(])/|\\\\|~|[A-Za-z]:\\|https?://|@|\x1b", text):
-        return UNSAFE_RECEIPT_TEXT
-    return text
-
-
 def receipt_error(error):
-    """Fixed-text receipt entry for an exception; the raw text is for error.log."""
+    """Fixed-text receipt entry: only InventoryError carries its (fixed) message
+    and bounded ids; every other exception is its class name plus a fixed
+    placeholder, because receipts on real machines must not embed paths, hosts
+    or account names. The raw text is for the private error.log only."""
     if isinstance(error, InventoryError):
         return {"code": error.code, "message": str(error),
                 "agent_ids": error.agent_ids, "agent_count": error.agent_count}
-    return {"code": type(error).__name__, "message": safe_receipt_text(error)}
+    if isinstance(error, UpdateError):
+        return {"code": "UpdateError", "message": str(error)}
+    return {"code": type(error).__name__, "message": UNSAFE_RECEIPT_TEXT}
 
 
 def write_private_error_log(job, stage, error):
     """Full exception text stays in the private (0700) job directory only."""
     try:
         path = Path(job) / "error.log"
-        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags, 0o600)
         with os.fdopen(descriptor, "a") as handle:
             handle.write(f"{stage}: {type(error).__name__}: {error}\n")
     except OSError:
@@ -236,19 +239,28 @@ def write_private_error_log(job, stage, error):
 def persisted_agent_ids(startup_store):
     """Agents persisted in the selected startup store: a Controller restores
     them, so a stopped one that disappears is a regression, not an exited
-    in-memory record. Missing or unreadable store: nothing is persisted."""
+    in-memory record. Returns (ids, warnings). No store configured or no file:
+    nothing is persisted. A file that exists but cannot be parsed is NOT
+    treated as empty: `None` makes every stopped row protected (fail closed)
+    and the receipt warns `startup_store_unreadable`."""
     if not startup_store:
-        return frozenset()
+        return frozenset(), []
+    path = Path(startup_store)
+    if not path.exists():
+        return frozenset(), []
     try:
-        document = json.loads(Path(startup_store).read_text())
-    except (OSError, ValueError):
-        return frozenset()
-    ids = set()
-    for entry in document.get("entries", []) if isinstance(document, dict) else []:
-        agent_id = entry.get("agent_id") or entry.get("spec", {}).get("agent_id")
-        if isinstance(agent_id, str):
-            ids.add(agent_id)
-    return frozenset(ids)
+        document = json.loads(path.read_text())
+        entries = document["entries"] if isinstance(document, dict) else None
+        if not isinstance(entries, list):
+            raise ValueError("startup store has no entries list")
+        ids = set()
+        for entry in entries:
+            agent_id = entry.get("agent_id") or entry.get("spec", {}).get("agent_id")
+            if isinstance(agent_id, str):
+                ids.add(agent_id)
+        return frozenset(ids), []
+    except (OSError, ValueError, AttributeError, TypeError):
+        return None, ["startup_store_unreadable"]
 
 
 def wait_ready(config_path, timeout, before_epoch=None):
@@ -262,7 +274,7 @@ def wait_ready(config_path, timeout, before_epoch=None):
         except (OSError, ValueError, RuntimeError):
             pass
         time.sleep(1)
-    raise RuntimeError("Controller did not reconnect with a fresh epoch before the deadline")
+    raise UpdateError("Controller did not reconnect with a fresh epoch before the deadline")
 
 
 def wait_agents(config_path, before, timeout, cold=False, persisted=frozenset()):
@@ -313,7 +325,10 @@ def check_agents(before, after, cold=False, persisted=frozenset()):
                                  "cold recovery did not recreate a previously live Agent", changed)
         raise InventoryError("agent_process_changed", "Agent PID/generation changed during hot update", changed)
     stopped = [key for key in before if key not in live]
-    persisted_missing = sorted(key for key in stopped if key in persisted and key not in after)
+    # `persisted is None`: the store exists but could not be read, so every
+    # stopped row is protected rather than assumed to be an exited record.
+    persisted_missing = sorted(key for key in stopped if key not in after
+                               and (persisted is None or key in persisted))
     if persisted_missing:
         raise InventoryError("persisted_agent_missing",
                              "Agent inventory changed during update: persisted stopped Agent(s) missing",
@@ -341,9 +356,9 @@ def transaction(job, config):
     sums = fetch(endpoint + "SHA256SUMS", limit=8192)
     published = manifest(sums)
     if config.get("expected_sums") and hashlib.sha256(sums).hexdigest() != config["expected_sums"]:
-        raise RuntimeError("SHA256SUMS differs from the canary_passed release receipt")
+        raise UpdateError("SHA256SUMS differs from the canary_passed release receipt")
     if config.get("expected_files") and published != config["expected_files"]:
-        raise RuntimeError("artifact checksums differ from the canary_passed release receipt")
+        raise UpdateError("artifact checksums differ from the canary_passed release receipt")
     stage = job / "stage"
     stage.mkdir(exist_ok=True)
     if config.get("artifacts"):
@@ -351,7 +366,7 @@ def transaction(job, config):
         if (source / config["platform"]).is_dir():
             source /= config["platform"]
         if manifest((source / "SHA256SUMS").read_bytes()) != published:
-            raise RuntimeError("local SHA256SUMS differs from Canary")
+            raise UpdateError("local SHA256SUMS differs from Canary")
     else:
         source = None
     staged_versions = {}
@@ -362,17 +377,17 @@ def transaction(job, config):
         else:
             destination.write_bytes(fetch(endpoint + name))
         if digest(destination) != published[name]:
-            raise RuntimeError("artifact SHA256 mismatch: " + name)
+            raise UpdateError("artifact SHA256 mismatch: " + name)
         destination.chmod(0o755)
         staged_versions[name] = version(destination, home)
     candidate = source_commit(staged_versions[names[0]])
     if config.get("expected_commit") and not config["expected_commit"].startswith(candidate):
-        raise RuntimeError("staged source commit differs from the pinned release")
+        raise UpdateError("staged source commit differs from the pinned release")
     if any(source_commit(v) != candidate for v in staged_versions.values()):
-        raise RuntimeError("staged binaries have different source commits")
+        raise UpdateError("staged binaries have different source commits")
     # Prevent a deployment race from mixing two published sets.
     if manifest(fetch(endpoint + "SHA256SUMS", limit=8192)) != published:
-        raise RuntimeError("Canary changed while staging; retry from the new manifest")
+        raise UpdateError("Canary changed while staging; retry from the new manifest")
     destinations = {name: bindir / name for name in names}
     if config.get("cli_path"):
         destinations["treer"] = Path(config["cli_path"])
@@ -387,14 +402,14 @@ def transaction(job, config):
     if config.get("startup_store"):
         startup = Path(config["startup_store"])
         if startup.is_symlink() or not startup.is_file():
-            raise RuntimeError("startup store must be an existing regular file")
+            raise UpdateError("startup store must be an existing regular file")
         shutil.copy2(startup, backup / "agent-startup.json")
         (backup / "agent-startup.json").chmod(0o600)
     write_json(backup / "receipt.json", {"workspace": service["workspace"], "versions": old_versions,
                                        "agents": before, "host_changed": config["host"]})
     changed = []
     activation_attempted = False
-    persisted = persisted_agent_ids(config.get("startup_store"))
+    persisted, store_warnings = persisted_agent_ids(config.get("startup_store"))
     controller = str(bindir / "treer-agent-server")
     action = "restart" if config["host"] else "restart-controller"
     command = [controller, "service", "--workspace", service["workspace"], action]
@@ -410,20 +425,20 @@ def transaction(job, config):
         verdict = wait_agents(config_path, before, config["timeout"], config["host"], persisted)
         reported = ready.get("controller_build", {}).get("git_commit", "")
         if not reported or not (reported.startswith(candidate) or candidate.startswith(reported)):
-            raise RuntimeError("running Controller build differs from staged candidate")
+            raise UpdateError("running Controller build differs from staged candidate")
         if config["host"]:
             host_commit = ready.get("host_build", {}).get("git_commit", "")
             if not host_commit or not (host_commit.startswith(candidate) or candidate.startswith(host_commit)):
-                raise RuntimeError("running Host build differs from staged candidate")
+                raise UpdateError("running Host build differs from staged candidate")
         # A new path-aware CLI must never precede its capable Controller.
         if "agent.path-targets.v1" not in ready.get("cli_capabilities", []):
-            raise RuntimeError("new Controller does not advertise path-target capability")
+            raise UpdateError("new Controller does not advertise path-target capability")
         replace_file(stage / "treer", destinations["treer"])
         changed.append("treer")
         verdict = wait_agents(config_path, before, config["timeout"], config["host"], persisted)
         for name in names:
             if digest(destinations[name]) != published[name] or version(destinations[name], home) != staged_versions[name]:
-                raise RuntimeError("installed binary verification failed")
+                raise UpdateError("installed binary verification failed")
     except Exception as error:
         # Restore, reactivate, then verify. Each stage reports its own reason:
         # a verified rollback is `rolled_back` even when exited records were not
@@ -452,12 +467,12 @@ def transaction(job, config):
                     "error": failure["message"], "error_code": failure["code"],
                     "error_agent_ids": failure.get("agent_ids", []), "error_agent_count": failure.get("agent_count", 0),
                     "rollback_error": rollback_error, "verification": verification,
-                    "warnings": (verification or {}).get("warnings", []), "backup": str(backup),
+                    "warnings": store_warnings + (verification or {}).get("warnings", []), "backup": str(backup),
                     "cold_restart_cannot_restore_original_processes": config["host"]})
         raise
     return {"status": "complete", "commit": candidate, "backup": str(backup),
             "versions": staged_versions, "agents": inventory(config_path), "inventory": verdict,
-            "warnings": verdict["warnings"], "host_changed": config["host"]}
+            "warnings": store_warnings + verdict["warnings"], "host_changed": config["host"]}
 
 
 def worker(job):
@@ -496,12 +511,12 @@ class Machine:
                     "--timeout", "25000", "--", *argv]
         result = subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30)
         if result.returncode:
-            raise RuntimeError("machine exec failed; no remote output was persisted")
+            raise UpdateError("machine exec failed; no remote output was persisted")
         value = result.stdout
         if self.name not in ("local", "本机"):
             envelope = json.loads(value)
             if envelope.get("truncated") or envelope.get("timed_out") or envelope.get("exit_code") != 0:
-                raise RuntimeError("remote exec failed, timed out or exceeded 64 KiB")
+                raise UpdateError("remote exec failed, timed out or exceeded 64 KiB")
             value = envelope["stdout"]
         return value.strip()
 
@@ -550,7 +565,7 @@ def main():
         system = {"Darwin": "darwin", "Linux": "linux"}.get(probe["system"])
         arch = {"arm64": "aarch64", "aarch64": "aarch64", "x86_64": "x86_64"}.get(probe["arch"])
         if not system or not arch or not probe["controller"]:
-            raise RuntimeError("require a Unix machine with python3 and installed treer-agent-server")
+            raise UpdateError("require a Unix machine with python3 and installed treer-agent-server")
         home = probe["home"]
         bindir = args.bin_dir or str(Path(probe["controller"]).parent)
         job = str(Path(home) / ".local/share/treer-updates" / ("job-" + uuid.uuid4().hex))
@@ -608,7 +623,7 @@ def main():
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
             pass  # Controller may be reconnecting; the detached worker owns rollback.
         time.sleep(2)
-    raise RuntimeError("poll timed out; worker continues independently; use --resume with the printed job path")
+    raise UpdateError("poll timed out; worker continues independently; use --resume with the printed job path")
 
 
 if __name__ == "__main__":

@@ -2139,8 +2139,14 @@ Agents persisted in the selected startup store (they must still be listed): a
 Controller restart, new or old build, does not relist exited Agents it only held
 in memory, so those are reported in `inventory`/`verification` with a top-level
 `warnings` entry (`exited_records_not_relisted`), never a failure. Receipts
-carry fixed codes, hashes, counts and at most 32 Agent IDs per list; the full
-exception text stays in the private job directory's `error.log`. The Windows
+carry fixed codes, hashes, counts and at most 32 Agent IDs per list: only the
+updater's own fixed messages reach a receipt, every other exception is reduced
+to its class name and a fixed placeholder, and the full text stays in the
+private job directory's `error.log`. An unreadable startup store never disables
+the persisted-Agent check: every stopped Agent is then protected and the receipt
+warns `startup_store_unreadable`. On Windows an inventory read that fails after
+the rollback restart is `rollback_failed` (`rollback_verification_unconfirmed`),
+never a silent success. The Windows
 updater applies the same live-row rule and warnings but has no startup-store
 persistence check. An interrupted caller
 can resume polling with the printed job path:

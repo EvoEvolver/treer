@@ -84,7 +84,12 @@ try {
     function Get-UpdateLocal($Config,$Route) {
         return [PSCustomObject]@{proxy_connected=$true;controller_epoch='before';controller_build=[PSCustomObject]@{git_commit=$script:oldCommit};host_build=[PSCustomObject]@{git_commit=$script:oldCommit}}
     }
-    function Get-UpdateAgents($Config) { return 'agent-fixture:123:7' }
+    $script:agentsReads = 0; $script:failAgentsReadAfter = 0
+    function Get-UpdateAgents($Config) {
+        $script:agentsReads++
+        if ($script:failAgentsReadAfter -gt 0 -and $script:agentsReads -gt $script:failAgentsReadAfter) { throw 'synthetic-agents-read-failure' }
+        return 'agent-fixture:123:7'
+    }
     function Get-UpdateVersion($Path) {
         if ([IO.File]::ReadAllText($Path).StartsWith('new')) { return $script:newCommit }
         return $script:oldCommit
@@ -100,8 +105,11 @@ try {
         Assert-UpdateTest ($Agents -ceq 'agent-fixture:123:7') 'inventory-snapshot'
         return [PSCustomObject]@{controller_epoch='after';host_build=[PSCustomObject]@{git_commit=$script:oldCommit}}
     }
-    foreach ($scenario in @('complete','rolled_back','rollback_failed','checksum_refused')) {
+    foreach ($scenario in @('complete','rolled_back','rollback_failed','checksum_refused','rollback_verification_unconfirmed')) {
         $script:events.Clear()
+        $script:agentsReads = 0
+        # Post-rollback inventory read throws: the first read (snapshot) succeeds.
+        $script:failAgentsReadAfter = if ($scenario -eq 'rollback_verification_unconfirmed') { 1 } else { 0 }
         $case = Join-Path $temporary $scenario
         $stage = Join-Path $case 'stage'; $bin = Join-Path $case 'bin'
         [IO.Directory]::CreateDirectory($stage) | Out-Null; [IO.Directory]::CreateDirectory($bin) | Out-Null
@@ -115,7 +123,7 @@ try {
         }
         $checksums += (($digest) + '  treer-agent-host')
         [IO.File]::WriteAllText((Join-Path $stage 'SHA256SUMS'),($checksums -join "`n"))
-        $script:failCandidate = $scenario -in @('rolled_back','rollback_failed')
+        $script:failCandidate = $scenario -in @('rolled_back','rollback_failed','rollback_verification_unconfirmed')
         $script:failRollback = $scenario -eq 'rollback_failed'
         if ($scenario -eq 'checksum_refused') { [IO.File]::AppendAllText((Join-Path $stage 'treer.exe'),'tampered') }
         $script:fixtureBin = $bin
@@ -128,7 +136,16 @@ try {
             Assert-UpdateTest ($script:events.Count -eq 0 -and [IO.File]::ReadAllText((Join-Path $bin 'treer-agent-server.exe')).StartsWith('old')) 'checksum-before-mutation'
         } else {
             $receipt = Get-Content -LiteralPath (Join-Path $stage 'result.json') -Raw | ConvertFrom-Json
-            Assert-UpdateTest ($receipt.status -ceq $scenario -and !$receipt.host_changed) ('receipt-' + $scenario)
+            $expectedStatus = if ($scenario -eq 'rollback_verification_unconfirmed') { 'rollback_failed' } else { $scenario }
+            Assert-UpdateTest ($receipt.status -ceq $expectedStatus -and !$receipt.host_changed) ('receipt-' + $scenario)
+            if ($scenario -eq 'rollback_verification_unconfirmed') {
+                Assert-UpdateTest ($receipt.rollback_error.code -ceq 'rollback_verification_unconfirmed' -and $receipt.rollback_error.message -ceq 'see_private_error_log' -and $null -eq $receipt.verification) 'unconfirmed-rollback-verification'
+                Assert-UpdateTest (([IO.File]::ReadAllText((Join-Path $stage 'error.log'))) -match 'synthetic-agents-read-failure') 'private-error-log'
+                Assert-UpdateTest (((Get-Content -LiteralPath (Join-Path $stage 'result.json') -Raw)) -notmatch 'synthetic-agents-read-failure') 'receipt-has-no-raw-text'
+            }
+            if ($scenario -eq 'rolled_back') {
+                Assert-UpdateTest ($null -ne $receipt.verification -and $receipt.verification.live_preserved -eq 1 -and @($receipt.warnings).Count -eq 0) 'rolled-back-verified'
+            }
             $prefix = if ($scenario -eq 'complete') {'new'} else {'old'}
             foreach ($name in @('treer-agent-server','treer')) {
                 Assert-UpdateTest ([IO.File]::ReadAllText((Join-Path $bin ($name+'.exe'))).StartsWith($prefix)) ('restored-or-updated-' + $name)

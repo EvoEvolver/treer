@@ -347,16 +347,25 @@ function Invoke-UpdateTransaction($Job, $Stage) {
             $rollbackError = @{ code=$code; message='see_private_error_log' }
             try { [IO.File]::AppendAllText((Join-Path $Stage 'error.log'), ('rollback: ' + $_.Exception.Message + "`n")) } catch { }
         }
-        $verification = $null
+        $verification = $null; $warnings = @()
         if ($rollback -eq 'rolled_back') {
+            # A rollback is verified only by a successful final inventory read:
+            # an unreadable inventory is rollback_failed, never a silent success.
             try {
                 $afterRollback = Get-UpdateAgents $config
                 $rollbackFailure = Get-UpdateAgentFailure $agents $afterRollback
                 if ($rollbackFailure) { $rollback = 'rollback_failed'; $rollbackError = @{ code=$rollbackFailure.code; message='live_agent_not_preserved_after_rollback'; agent_ids=$rollbackFailure.agent_ids; agent_count=$rollbackFailure.agent_count } }
-                else { $verification = Get-UpdateAgentVerdict $agents $afterRollback }
-            } catch { }
+                else {
+                    $verification = Get-UpdateAgentVerdict $agents $afterRollback
+                    if ($verification.stopped_not_relisted_count -gt 0) { $warnings = @('exited_records_not_relisted') }
+                }
+            } catch {
+                $rollback = 'rollback_failed'
+                $rollbackError = @{ code='rollback_verification_unconfirmed'; message='see_private_error_log' }
+                try { [IO.File]::AppendAllText((Join-Path $Stage 'error.log'), ('rollback-verification: ' + $_.Exception.Message + "`n")) } catch { }
+            }
         }
-        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status=$rollback; error=$failure; error_agent_ids=$failureIds; error_agent_count=$failureCount; rollback_error=$rollbackError; verification=$verification; backup=$backup; host_changed=$false; host_commit=$hostCommit }
+        Write-UpdateJson (Join-Path $Stage 'result.json') @{ status=$rollback; error=$failure; error_agent_ids=$failureIds; error_agent_count=$failureCount; rollback_error=$rollbackError; verification=$verification; warnings=$warnings; backup=$backup; host_changed=$false; host_commit=$hostCommit }
         throw 'update_activation_failed_inspect_receipt'
     }
 }
