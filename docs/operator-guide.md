@@ -1419,6 +1419,24 @@ treer service publish SERVICE_ID --access public
 treer service unpublish SERVICE_ID
 ```
 
+**Hosting behind Railway.** Railway documents `X-Real-IP` as its client-address
+header but publishes no proxy address ranges and no overwrite or append rule for
+client-supplied copies, and its support answers disagree; a range observed today
+(for example `100.64.0.0/10`, which is shared address space) is not a contract
+and may change. Treer therefore does not trust Railway's edge: on Railway leave
+`TREER_INGRESS_TRUSTED_PROXIES` and `TREER_INGRESS_CLIENT_IP_HEADER` unset and do
+not use `--ingress-allow-wide-trust`. The consequences are by design: the
+per-client request limit and the per-peer connection cap are off (the Proxy
+logs the fixed warning once); the per-service limits and the global connection
+budget are the protection; and `X-Treer-Client-IP` carries the TCP peer, which
+is Railway's private edge address for every client, so it is not a client
+address there. An App must not use it for per-client accounting on such a
+deployment (treat a private, loopback or link-local value as "no client
+address"); lockouts and budgets keyed by handle or global counters still work.
+A deployment that wants per-client limits needs a front with a published
+address range and a documented overwrite rule; then set the two variables to
+exactly that range and header.
+
 The Proxy assigns `svc-<service-id>.<base-domain>`; no custom host or slug is
 accepted for new publication. The default `workspace` access requires current
 membership or a service-audience token. `public` accepts anonymous traffic, so
