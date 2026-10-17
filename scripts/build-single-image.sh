@@ -8,8 +8,11 @@ command -v docker >/dev/null 2>&1 || fail 'Docker is missing; install Docker wit
 command -v git >/dev/null 2>&1 || fail 'Git is missing; run this script from a Treer checkout.'
 # Resolve only the local Docker transport from the user's context. Build calls
 # below use a private HOME and a whitelist, not Agent/cloud/Git credentials.
-endpoint=$(env -i PATH="$PATH" HOME="$HOME" docker context inspect --format '{{.Endpoints.docker.Host}}') \
-  || fail 'Cannot resolve Docker context; start Docker and select a local context.'
+endpoint=${DOCKER_HOST:-}
+if [ -z "$endpoint" ]; then
+  endpoint=$(env -i PATH="$PATH" HOME="$HOME" docker context inspect --format '{{.Endpoints.docker.Host}}') \
+    || fail 'Cannot resolve Docker context; start Docker and select a local context.'
+fi
 case "$endpoint" in unix://*) ;; *) fail 'Select a local Unix-socket Docker context.';; esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
