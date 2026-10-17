@@ -5,10 +5,11 @@ use crate::{
     hub::Hub,
     owner_auth::OwnerAuth,
     scheduler::CoreWorkers,
-    settings_http::Settings,
+    settings_http::{Settings, SettingsSnapshot},
     store::{Limits, Store},
 };
 use serde::Deserialize;
+#[cfg(test)]
 use serde_json::json;
 use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
@@ -38,6 +39,8 @@ pub struct Config {
     public_url: String,
     /// Explicit assertion checked at startup; public settings unsupported.
     access: String,
+    #[serde(default)]
+    virtual_hostname: Option<String>,
     cli: PathBuf,
     cli_sha256: String,
     state_directory: PathBuf,
@@ -60,7 +63,7 @@ impl Config {
             || !self.hub_id.starts_with("app_")
             || !crate::store::valid_id(&self.hub_id)
             || !crate::store::valid_id(&self.workspace_id)
-            || injected_workspace.is_some_and(|id| id != self.workspace_id)
+            || injected_workspace != Some(self.workspace_id.as_str())
             || self.access != "workspace"
             || !self.listen.ip().is_loopback()
             || self.listen.port() == 0
@@ -111,18 +114,29 @@ pub fn run(config: Config) -> Result<(), Error> {
             .binding_ids()
             .map_err(|_| ())?
             .into_iter()
-            .map(|id| hub.view(&id).map_err(|_| ()))
+            .map(|id| hub.view(&id).map(Into::into).map_err(|_| ()))
             .collect::<Result<Vec<_>, _>>()?;
         let status = snapshot_workers.lock().map_err(|_| ())?.status();
-        Ok(json!({"endpoints":endpoints,"workers":status}))
+        Ok(SettingsSnapshot {
+            endpoints,
+            workers: status,
+        })
     });
     let serve = || -> Result<(), Error> {
         let settings = Settings::new(auth, snapshot, include_str!("../dist/index.html"))
+            .map_err(|_| Error::Configuration)?
+            .with_loopback_listener(config.listen)
             .map_err(|_| Error::Configuration)?
             .with_assets(
                 include_str!("../dist/app.js"),
                 include_str!("../dist/app.css"),
             );
+        let settings = match &config.virtual_hostname {
+            Some(host) => settings
+                .with_virtual_host(host)
+                .map_err(|_| Error::Configuration)?,
+            None => settings,
+        };
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .max_blocking_threads(16)

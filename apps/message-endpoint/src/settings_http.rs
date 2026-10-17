@@ -12,9 +12,10 @@ use axum::{
     response::Response,
     Router,
 };
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    collections::HashSet,
+    collections::{BTreeSet, HashSet},
     net::SocketAddr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -24,7 +25,69 @@ use tokio::sync::Semaphore;
 const SESSION: &str = "__Host-treer-endpoint-session";
 const BROWSER: &str = "__Host-treer-endpoint-login";
 const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings and endpoint status. Browsers receive the human interface.\n\n## Inspect\n\n`GET /health` reports process health. `GET /api/settings` requires a current verified workspace human owner and returns bounded endpoint metadata.\n\n## Authentication\n\nTreer-injected App identity takes precedence; an invalid supplied identity is rejected. Without an identity, open this App in a browser and use Treer OAuth. Opaque sessions remain HttpOnly; never paste tokens into URLs. This settings service does not accept Agent administration credentials.\n\nNo transport activation or configuration mutation route is exposed in this increment. State contains sensitive metadata: keep this Managed App workspace-only, use a dedicated OS user or container, and protect backups.\n";
-type Snapshot = dyn Fn() -> Result<Value, ()> + Send + Sync;
+#[derive(Default, Serialize)]
+pub struct SettingsSnapshot {
+    pub endpoints: Vec<EndpointSnapshot>,
+    pub workers: crate::scheduler::WorkerStatus,
+}
+#[derive(Serialize)]
+pub struct EndpointSnapshot {
+    binding: BindingSnapshot,
+    revision: i64,
+    paused: bool,
+    reason: String,
+    observed: Option<ObservedSnapshot>,
+    diagnostic: Option<DiagnosticSnapshot>,
+}
+#[derive(Serialize)]
+struct BindingSnapshot {
+    endpoint_id: String,
+    generation: i64,
+    recipient: String,
+    expected_path: String,
+    expected_server_id: String,
+}
+#[derive(Serialize)]
+struct ObservedSnapshot {
+    path: Option<String>,
+}
+#[derive(Serialize)]
+struct DiagnosticSnapshot {
+    version: String,
+    state: String,
+}
+impl From<crate::hub::View> for EndpointSnapshot {
+    fn from(view: crate::hub::View) -> Self {
+        Self {
+            binding: BindingSnapshot {
+                endpoint_id: view.binding.endpoint_id,
+                generation: view.binding.generation,
+                recipient: view.binding.recipient,
+                expected_path: view.binding.expected_path,
+                expected_server_id: view.binding.expected_server_id,
+            },
+            revision: view.revision,
+            paused: view.paused,
+            reason: view.reason,
+            observed: view.observed.map(|v| ObservedSnapshot { path: v.path }),
+            diagnostic: view.diagnostic.map(|d| DiagnosticSnapshot {
+                version: d.version,
+                state: d.state,
+            }),
+        }
+    }
+}
+fn snapshot_value(owner: &str, snapshot: SettingsSnapshot) -> Result<Value, ()> {
+    if snapshot.endpoints.len() > 20 {
+        return Err(());
+    }
+    let value = json!({"owner_id":owner,"settings":snapshot});
+    if value.to_string().len() > 512 * 1024 {
+        return Err(());
+    }
+    Ok(value)
+}
+type Snapshot = dyn Fn() -> Result<SettingsSnapshot, ()> + Send + Sync;
 /// The snapshot closure must only read bounded App state, never perform network
 /// calls or return message bodies/secrets. Authentication happens before it.
 pub struct Settings {
@@ -35,6 +98,7 @@ pub struct Settings {
     html: &'static str,
     javascript: &'static str,
     stylesheet: &'static str,
+    allowed_hosts: BTreeSet<String>,
 }
 impl Settings {
     pub fn new(
@@ -47,6 +111,19 @@ impl Settings {
         if !auth.dedicated_settings_origin() {
             return Err(Error::Configuration);
         }
+        let url = auth.settings_url();
+        let host = url.host_str().ok_or(Error::Configuration)?;
+        let authority = match url.port() {
+            Some(port) => format!("{host}:{port}"),
+            None => host.to_string(),
+        };
+        let mut allowed_hosts = BTreeSet::from([authority]);
+        if url.port().is_none() {
+            allowed_hosts.insert(format!(
+                "{host}:{}",
+                url.port_or_known_default().ok_or(Error::Configuration)?
+            ));
+        }
         Ok(Self {
             auth: Arc::new(auth),
             vault: OAuthVault::default(),
@@ -55,7 +132,33 @@ impl Settings {
             html,
             javascript: "",
             stylesheet: "",
+            allowed_hosts,
         })
+    }
+    /// Explicit trusted configuration, never a forwarded header. Core replaces
+    /// ingress/tunnel Host with the App's registered virtual hostname.
+    pub fn with_virtual_host(mut self, host: &str) -> Result<Self, Error> {
+        if host.len() > 253
+            || !host.ends_with(".treer")
+            || !host.split('.').all(|label| {
+                !label.is_empty()
+                    && label.len() <= 63
+                    && label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            })
+        {
+            return Err(Error::Configuration);
+        }
+        self.allowed_hosts.insert(host.to_ascii_lowercase());
+        Ok(self)
+    }
+    pub fn with_loopback_listener(mut self, listener: SocketAddr) -> Result<Self, Error> {
+        if !listener.ip().is_loopback() || listener.port() == 0 {
+            return Err(Error::Configuration);
+        }
+        self.allowed_hosts.insert(listener.to_string());
+        Ok(self)
     }
     pub fn with_assets(mut self, javascript: &'static str, stylesheet: &'static str) -> Self {
         self.javascript = javascript;
@@ -201,10 +304,6 @@ async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
 ) -> Response {
-    let permit = match app.slots.clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(_) => return secure(error(Error::RateLimited)),
-    };
     let (parts, body) = request.into_parts();
     if parts.headers.len() > 128
         || parts
@@ -219,21 +318,50 @@ async fn handle(
             "headers_too_large",
         ));
     }
-    // No current route accepts request bodies. Bound chunked as well as declared
-    // lengths, and reject bodies rather than ignoring ambiguous input.
+    // Refuse framed bodies before waiting for bytes or consuming verification
+    // capacity. This includes chunked zero-byte bodies and slow-drip clients.
+    if parts.headers.contains_key("transfer-encoding")
+        || parts
+            .headers
+            .get_all("content-length")
+            .iter()
+            .any(|v| v.as_bytes() != b"0")
+    {
+        return secure(fixed(StatusCode::BAD_REQUEST, "request_body_not_allowed"));
+    }
     match tokio::time::timeout(std::time::Duration::from_secs(3), to_bytes(body, 1024)).await {
         Ok(Ok(bytes)) if bytes.is_empty() => {}
         _ => return secure(fixed(StatusCode::BAD_REQUEST, "request_body_not_allowed")),
     }
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|v| i64::try_from(v.as_secs()).ok());
+    let Some(now) = now else {
+        return secure(error(Error::Proxy));
+    };
+    let expensive = parts.method == Method::GET
+        && matches!(
+            parts.uri.path(),
+            "/api/settings" | "/api/auth/start" | "/api/auth/callback"
+        );
+    if !expensive {
+        return secure(dispatch(
+            &app,
+            parts.method,
+            parts.uri.path(),
+            parts.uri.query(),
+            &parts.headers,
+            peer,
+            now,
+        ));
+    }
+    let permit = match app.slots.clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => return secure(error(Error::RateLimited)),
+    };
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        let now = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .and_then(|v| i64::try_from(v.as_secs()).ok());
-        let Some(now) = now else {
-            return secure(error(Error::Proxy));
-        };
         secure(dispatch(
             &app,
             parts.method,
@@ -261,6 +389,14 @@ fn dispatch(
 ) -> Response {
     if method == Method::GET && path == "/health" && query.is_none() {
         return response(StatusCode::OK, json!({"status":"running"}));
+    }
+    let mut hosts = headers.get_all("host").iter();
+    let valid_host = hosts
+        .next()
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|host| app.allowed_hosts.contains(&host.to_ascii_lowercase()));
+    if !valid_host || hosts.next().is_some() {
+        return fixed(StatusCode::BAD_REQUEST, "host_not_allowed");
     }
     let values: Result<Vec<_>, _> = headers
         .iter()
@@ -340,6 +476,22 @@ fn dispatch(
             .insert("vary", HeaderValue::from_static("Accept, User-Agent"));
         return r;
     }
+    // Logout revokes only the opaque cookie that this browser already holds.
+    // It needs CSRF, but no Proxy authority: expired/revoked owners must still
+    // be able to discard their local session and clear their browser cookie.
+    if method == Method::POST && path == "/api/auth/logout" {
+        if let Err(e) = app.auth.check_mutation(&values) {
+            return error(e);
+        }
+        if let Some(raw) = session {
+            if let Err(e) = app.vault.logout(&raw) {
+                return error(e);
+            }
+        }
+        let mut r = response(StatusCode::OK, json!({"logged_out":true}));
+        cookie(&mut r, SESSION, "", 0);
+        return r;
+    }
     let token = match session
         .as_deref()
         .map(|s| app.vault.session_token(s, now))
@@ -369,9 +521,7 @@ fn dispatch(
     }
     // Unknown routes and methods never become an HTML shell or perform Proxy
     // verification. In particular POST on a static URL cannot mutate state.
-    if !((method == Method::GET && path == "/api/settings")
-        || (method == Method::POST && path == "/api/auth/logout"))
-    {
+    if !(method == Method::GET && path == "/api/settings") {
         return fixed(StatusCode::NOT_FOUND, "route_not_found");
     }
     let owner = match app
@@ -381,24 +531,11 @@ fn dispatch(
         Ok(o) => o,
         Err(e) => return error(e),
     };
-    if method == Method::POST {
-        if let Err(e) = app.auth.check_mutation(&values) {
-            return error(e);
-        }
-        if let Some(raw) = session {
-            if let Err(e) = app.vault.logout(&raw) {
-                return error(e);
-            }
-        }
-        let mut r = response(StatusCode::OK, json!({"logged_out":true}));
-        cookie(&mut r, SESSION, "", 0);
-        return r;
-    }
     match (app.snapshot)() {
-        Ok(snapshot) => response(
-            StatusCode::OK,
-            json!({"owner_id":owner.id(), "settings":snapshot}),
-        ),
+        Ok(snapshot) => match snapshot_value(owner.id(), snapshot) {
+            Ok(value) => response(StatusCode::OK, value),
+            Err(()) => fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable"),
+        },
         Err(_) => fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable"),
     }
 }
@@ -415,7 +552,7 @@ mod tests {
     fn app(proxy: &str) -> Settings {
         Settings::new(
             OwnerAuth::new(proxy, "svc_hub", "ws_test", "https://hub.example/").unwrap(),
-            Arc::new(|| Ok(json!({"endpoints":[]}))),
+            Arc::new(|| Ok(SettingsSnapshot::default())),
             "<!doctype html><title>Endpoints</title>",
         )
         .unwrap()
@@ -427,12 +564,16 @@ mod tests {
         query: Option<&str>,
         headers: &HeaderMap,
     ) -> Response {
+        let mut headers = headers.clone();
+        if !headers.contains_key("host") {
+            headers.insert("host", HeaderValue::from_static("hub.example"));
+        }
         secure(dispatch(
             app,
             method,
             path,
             query,
-            headers,
+            &headers,
             "127.0.0.1:1234".parse().unwrap(),
             1000,
         ))
@@ -509,7 +650,7 @@ mod tests {
         )
         .unwrap();
         assert!(matches!(
-            Settings::new(auth, Arc::new(|| Ok(json!({}))), ""),
+            Settings::new(auth, Arc::new(|| Ok(SettingsSnapshot::default())), ""),
             Err(Error::Configuration)
         ));
         let shared = OwnerAuth::new(
@@ -519,7 +660,110 @@ mod tests {
             "https://proxy.example/",
         )
         .unwrap();
-        assert!(Settings::new(shared, Arc::new(|| Ok(json!({}))), "").is_err());
+        assert!(Settings::new(shared, Arc::new(|| Ok(SettingsSnapshot::default())), "").is_err());
+    }
+    #[test]
+    fn snapshots_are_fixed_metadata_projection_bounded_to_twenty_and_512k() {
+        let endpoint = |size| {
+            EndpointSnapshot::from(crate::hub::View {
+                binding: crate::hub::Binding {
+                    endpoint_id: "ag_demo".into(),
+                    generation: 1,
+                    recipient: "ag_recipient".into(),
+                    expected_path: format!("/team/{}", "x".repeat(size)),
+                    expected_cwd: "PRIVATE-CWD-UNRENDERED".into(),
+                    expected_server_id: "machine_fixture".into(),
+                },
+                revision: 1,
+                paused: true,
+                reason: "owner_paused".into(),
+                observed: None,
+                checked_at: None,
+                diagnostic: None,
+            })
+        };
+        let value = snapshot_value(
+            "user_owner",
+            SettingsSnapshot {
+                endpoints: (0..20).map(|_| endpoint(4096)).collect(),
+                workers: Default::default(),
+            },
+        )
+        .unwrap();
+        assert!(value.to_string().len() < 512 * 1024);
+        assert!(!value.to_string().contains("PRIVATE-CWD-UNRENDERED"));
+        assert!(!value.to_string().contains("expected_cwd"));
+        assert!(snapshot_value(
+            "user_owner",
+            SettingsSnapshot {
+                endpoints: (0..21).map(|_| endpoint(1)).collect(),
+                workers: Default::default()
+            }
+        )
+        .is_err());
+        assert!(snapshot_value(
+            "user_owner",
+            SettingsSnapshot {
+                endpoints: vec![endpoint(512 * 1024)],
+                workers: Default::default()
+            }
+        )
+        .is_err());
+    }
+    #[test]
+    fn host_check_accepts_only_configured_dedicated_virtual_and_loopback_names() {
+        let app = app("https://proxy.example/")
+            .with_virtual_host("message-hub.treer")
+            .unwrap()
+            .with_loopback_listener("127.0.0.1:8786".parse().unwrap())
+            .unwrap();
+        for host in [
+            "hub.example",
+            "hub.example:443",
+            "message-hub.treer",
+            "127.0.0.1:8786",
+        ] {
+            assert_eq!(
+                invoke(
+                    &app,
+                    Method::GET,
+                    "/api/settings",
+                    None,
+                    &headers(&[("host", host)])
+                )
+                .status(),
+                StatusCode::UNAUTHORIZED
+            );
+        }
+        for host in [
+            "evil.example",
+            "127.0.0.1:9999",
+            "hub.example.evil",
+            "hub.example:8443",
+        ] {
+            assert_eq!(
+                invoke(
+                    &app,
+                    Method::GET,
+                    "/api/settings",
+                    None,
+                    &headers(&[("host", host)])
+                )
+                .status(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+        assert_eq!(
+            invoke(
+                &app,
+                Method::GET,
+                "/api/settings",
+                None,
+                &headers(&[("host", "hub.example"), ("host", "message-hub.treer")])
+            )
+            .status(),
+            StatusCode::BAD_REQUEST
+        );
     }
     #[test]
     fn root_negotiates_manual_or_browser_with_quality_and_order() {
@@ -613,6 +857,21 @@ mod tests {
         );
         assert_eq!(replay.status(), StatusCode::FORBIDDEN);
         assert!(!replay.headers().contains_key("set-cookie"));
+        let secret = session.split_once('=').unwrap().1;
+        assert!(app.vault.session_token(secret, 1000).unwrap().is_some());
+        let logout = invoke(
+            &app,
+            Method::POST,
+            "/api/auth/logout",
+            None,
+            &headers(&[
+                ("cookie", &session),
+                ("origin", "https://hub.example"),
+                ("x-endpoint-request", "1"),
+            ]),
+        );
+        assert_eq!(logout.status(), StatusCode::OK);
+        assert!(app.vault.session_token(secret, 1000).unwrap().is_none());
         join.join().unwrap();
     }
     #[test]
@@ -711,9 +970,8 @@ mod tests {
         assert_eq!(missing.status(), StatusCode::UNAUTHORIZED);
     }
     #[test]
-    fn logout_needs_csrf_and_clears_host_session_cookie_only_on_success() {
-        let (base, join) = proxy([verified(), verified()].concat());
-        let app = app(&base);
+    fn logout_needs_csrf_but_clears_expired_session_without_proxy_authority() {
+        let app = app("https://proxy.example/");
         let bad = invoke(
             &app,
             Method::POST,
@@ -744,7 +1002,6 @@ mod tests {
             .to_str()
             .unwrap()
             .contains("Max-Age=0"));
-        join.join().unwrap();
     }
     #[test]
     fn unknown_routes_and_wrong_methods_never_become_html_or_redirects() {
@@ -802,7 +1059,9 @@ mod tests {
             .build()
             .unwrap();
         let result = client.get(format!("{base}/health")).send().unwrap();
-        assert_eq!(result.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(result.status(), StatusCode::OK);
+        let limited = client.get(format!("{base}/api/settings")).send().unwrap();
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
         drop(occupied);
         let result = client.get(format!("{base}/health")).send().unwrap();
         assert_eq!(result.status(), StatusCode::OK);
@@ -818,6 +1077,17 @@ mod tests {
             .send()
             .unwrap();
         assert_eq!(result.status(), StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE);
+        let address = base.strip_prefix("http://").unwrap();
+        let mut drip = std::net::TcpStream::connect(address).unwrap();
+        drip.set_read_timeout(Some(std::time::Duration::from_millis(500)))
+            .unwrap();
+        write!(drip,"POST /api/auth/logout HTTP/1.1\r\nHost: hub.example\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+        let mut reply = [0; 256];
+        let read = drip.read(&mut reply).unwrap();
+        assert!(std::str::from_utf8(&reply[..read])
+            .unwrap()
+            .starts_with("HTTP/1.1 400"));
+        drop(drip);
         stop.send(()).unwrap();
         server.join().unwrap();
     }

@@ -83,8 +83,8 @@ pub struct Status {
     generation: i64,
     release_sha256: String,
     actual_sha256: String,
-    version: String,
-    state: String,
+    pub(crate) version: String,
+    pub(crate) state: String,
 }
 impl Status {
     fn valid(&self, generation: i64) -> bool {

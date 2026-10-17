@@ -819,9 +819,11 @@ health reports process liveness, not working channels. Root negotiates Markdown
 and HTML; only the two named committed asset paths are served, with unknown
 API/static routes remaining JSON 404s. No CORS is enabled.
 
-The router shares at most 16 in-flight requests, rejects bodies (including
-chunked bodies), bounds headers to 16 KiB/128 entries and body reads to three
-seconds, and retains its permit until a blocking Proxy verification finishes,
+The router shares at most 16 in-flight Proxy-capable requests. Health, static
+assets and local logout remain available when that budget is occupied. It rejects
+nonzero Content-Length and all Transfer-Encoding immediately, bounds headers to
+16 KiB/128 entries and any remaining body read to three seconds, and retains its
+permit until a blocking Proxy verification finishes,
 even when the browser disconnects. Its source is the actual socket peer, never
 X-Forwarded-For. This does not cap the HTTP listener's idle TCP connections;
 keep the hub behind private Treer workspace ingress and upstream connection
@@ -837,8 +839,9 @@ mismatch does not erase another valid login; successful exchange clears the
 login nonce, sets only an opaque session cookie, and redirects to the fixed
 configured App root without the code/state. Token/PKCE data stays server-side.
 All responses use no-store, no-referrer and nosniff, with a self-only script/style
-CSP and no inline code. Logout requires current owner verification plus the same
-Origin/custom-header checks as all future management mutations. Upstream request
+CSP and no inline code. Logout requires the same Origin/custom-header CSRF checks as future management
+mutations, but intentionally makes no Proxy call: expired or revoked sessions can
+still clear their opaque cookie and vault entry. It cannot change configuration. Upstream request
 logging must not record callback query strings; this program installs no logger.
 
 ### Locally runnable hub preview
@@ -858,6 +861,7 @@ installation or activation instruction):
   "proxy_url": "https://PROXY_HOST/",
   "public_url": "https://DEDICATED_PRIVATE_APP_HOST/",
   "access": "workspace",
+  "virtual_hostname": "message-hub.treer",
   "cli": "/absolute/release/treer",
   "cli_sha256": "64-lowercase-hex-sha256-of-the-CLI",
   "state_directory": "/absolute/private/hub-state",
@@ -866,7 +870,8 @@ installation or activation instruction):
 ```
 
 Startup requires its injected `TREER_AGENT_ID` to equal the configured App
-runtime ID and, when injected, the workspace ID to match. It verifies the CLI
+runtime ID and requires the injected `TREER_WORKSPACE_ID` to match (no optional
+workspace fallback). It verifies the CLI
 hash before opening state. The listener defaults to loopback and refuses
 wildcard/public addresses and `access:public`. It starts its own Core inbox,
 metadata-refresh and maintenance workers and stops only these owned threads on
@@ -898,3 +903,24 @@ identity rejection are covered. Tests do not contact real machines or bots.
 `python3 tests/run.py` also runs the executable API/private-permission test in a
 closed environment. Native RSS, executable Policy isolation and live bot
 acceptance remain release-owned/unverified; no product-readiness claim is made.
+
+The trusted config can name the App's registered `virtual_hostname` (`NAME.treer`).
+Core replaces Host with that name for both workspace ingress and the embedded
+tunnel. Settings requests accept only this explicit virtual name, the configured
+dedicated public host (with its configured/default port), or the exact configured
+loopback listener address. Other/missing/duplicate Host values fail before
+verification; health is a fixed liveness exception. No X-Forwarded-Host is trusted.
+The `access:workspace` file field is an **operator assertion**, not evidence of the
+actual Proxy ingress setting: release must separately confirm the Managed App is
+workspace-only; the preview does not claim an ingress self-check.
+
+The settings snapshot has a fixed typed projection and a 20-endpoint/512-KiB
+serialized-response ceiling. It includes stable endpoint/recipient/machine IDs,
+expected/current Tree display paths, pause/revision/reason, relay version/state
+assertions and worker counters. It excludes cwd, full Core metadata, message
+bodies, transport configuration/secrets and full relay diagnostic hashes. Tree
+paths remain presentation/drift information, never routing authorization. The
+CLI hash check is currently startup-only; periodic integrity monitoring, a
+listener header-read timeout and the dated Rust/npm dependency audit remain
+pre-activation work. Versioned release files must be immutable to untrusted OS
+users; neither a hash nor 0600 protects against another process under the same UID.

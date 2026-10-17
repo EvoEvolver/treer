@@ -47,7 +47,7 @@ fn increment(counter: &AtomicU64) {
         Some(n.saturating_add(1))
     });
 }
-#[derive(Serialize)]
+#[derive(Default, Serialize)]
 pub struct WorkerStatus {
     pub receive_pages: u64,
     pub core_acked: u64,
