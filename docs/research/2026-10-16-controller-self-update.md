@@ -671,6 +671,24 @@ Production-wiring requirements from security3133:
   no constructor reachable outside the fresh-session leaf. Include compiler/API
   boundary tests as well as the source tripwire.
 
+Inherited-channel evidence checkpoint: the real exec-child test in
+`handoff/socketpair_tests.rs` passes one anonymous socketpair end through
+Command's stdin descriptor adapter, restores CLOEXEC there and on its retained
+clone, and holds the owned child alive in a private session. Its transcript is
+test observation data, never an authentication claim. Both sides' OS
+credentials are compared to the independent owned Child/ProcessImage identity.
+On the tested Linux kernel, SO_PEERCRED still names the socketpair creator at
+both ends after child exec and data exchange; the existing AuthenticatedPeer
+correctly rejects that parent endpoint as a child connection. On tested macOS,
+LOCAL_PEERPID on the parent end names the actual child after its data exchange,
+and the child observes the creator/actual parent; the existing image-bound
+authentication succeeds. These differing semantics prohibit blindly reusing
+the named-socket authentication wrapper for an inherited Linux channel. Linux
+needs a separately reviewed OS-backed peer attestation primitive before wiring,
+with no named-socket, UID-only or message-PID fallback. This fixture does not
+implement the production channel, prove descriptor exclusivity against all
+forks/writers, or grant gate/bootstrap/installer authority.
+
 Proposed handshake order, all over the same retained authenticated connection:
 
 1. The owner persists intent and spawns the verified Rust supervisor with birth

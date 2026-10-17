@@ -273,6 +273,9 @@ fn revalidate_launcher_image(
 }
 
 #[cfg(test)]
+mod socketpair_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::{
