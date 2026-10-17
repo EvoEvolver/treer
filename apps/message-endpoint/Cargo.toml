@@ -5,6 +5,11 @@ edition = "2021"
 license = "Apache-2.0"
 publish = false
 
+[[bin]]
+name = "treer-message-hub"
+path = "src/bin/treer-message-hub.rs"
+required-features = ["hub"]
+
 # This App is released independently; do not add it to the Core workspace.
 [workspace]
 

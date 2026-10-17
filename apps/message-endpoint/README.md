@@ -840,3 +840,61 @@ All responses use no-store, no-referrer and nosniff, with a self-only script/sty
 CSP and no inline code. Logout requires current owner verification plus the same
 Origin/custom-header checks as all future management mutations. Upstream request
 logging must not record callback query strings; this program installs no logger.
+
+### Locally runnable hub preview
+
+`cargo build --locked --features hub --bin treer-message-hub` embeds the three
+committed React files from `dist/`; Node is build tooling only. Run the binary
+with `--config /absolute/private/config.json`. The config is a 0600 owned,
+single-link regular file inside a 0700 directory outside source control, read
+with the same no-follow checks as relay profiles. Example field shape (not an
+installation or activation instruction):
+
+```json
+{
+  "hub_id": "app_RUNTIME_ID",
+  "workspace_id": "WORKSPACE_ID",
+  "service_id": "svc_SERVICE_ID",
+  "proxy_url": "https://PROXY_HOST/",
+  "public_url": "https://DEDICATED_PRIVATE_APP_HOST/",
+  "access": "workspace",
+  "cli": "/absolute/release/treer",
+  "cli_sha256": "64-lowercase-hex-sha256-of-the-CLI",
+  "state_directory": "/absolute/private/hub-state",
+  "listen": "127.0.0.1:8786"
+}
+```
+
+Startup requires its injected `TREER_AGENT_ID` to equal the configured App
+runtime ID and, when injected, the workspace ID to match. It verifies the CLI
+hash before opening state. The listener defaults to loopback and refuses
+wildcard/public addresses and `access:public`. It starts its own Core inbox,
+metadata-refresh and maintenance workers and stops only these owned threads on
+SIGINT. Invalid configuration/storage/listener failures return nonzero with
+fixed error codes, never raw configuration or credentials. A changed CLI hash
+requires a human-reviewed config update. No transport account workers or owner
+configuration writes are connected yet, so **this is a status-only development
+preview, not ready for activation/migration**. An empty preview cannot create,
+bind or resume endpoints. Existing configured state is shown read-only.
+
+The React page follows the initial injected identity automatically, keeps OAuth
+as the no-identity fallback on the dedicated App URL, and treats invalid supplied
+identity as an error. It has en/zh, light/dark, keyboard-visible focus and 44px
+controls. All metadata is React text, including names containing HTML. It labels
+relay diagnostics as assertions and shows Core worker backlog/failure counters
+without message content. Refresh is explicit; no aggressive UI polling.
+
+UI tooling: `npm ci --ignore-scripts`, `npm run build:ui`, `npm run check`.
+The deterministic check rebuilds and compares every committed artifact, enforces
+a 400 KB total budget and checks source HTML/code sinks. Current dist is about
+235 KB. The focused browser driver is
+`node tests/browser.mjs HUB_BINARY PLAYWRIGHT_MODULE BROWSER_CACHE SCREENSHOT_DIR`.
+Its real Rust hub runs with a private temporary HOME/state, a fixed fake CLI,
+and a loopback fake identity Proxy; separate forwarding fixtures exercise
+wildcard and the real iframe tunnel prefix. These reproduce forwarding contracts,
+not production Proxy internals or real OAuth/bot delivery. Desktop/390px in both
+themes, long-name/XSS text, injected identity, no-identity OAuth link and forged
+identity rejection are covered. Tests do not contact real machines or bots.
+`python3 tests/run.py` also runs the executable API/private-permission test in a
+closed environment. Native RSS, executable Policy isolation and live bot
+acceptance remain release-owned/unverified; no product-readiness claim is made.
