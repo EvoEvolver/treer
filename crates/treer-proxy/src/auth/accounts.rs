@@ -584,6 +584,25 @@ impl AuthStore {
         })
     }
 
+    /// The lookup `authenticate_request` performs, for callers that hold a
+    /// long-lived connection and must notice logout, expiry or user deletion
+    /// after the request that opened it (#141). `None` means the session is
+    /// gone; the disabled-auth local session never expires.
+    pub(crate) async fn revalidate_session(
+        &self,
+        token: &str,
+    ) -> Result<Option<CurrentSession>, AuthFailure> {
+        if self.disabled {
+            return Ok(Some(CurrentSession {
+                token: token.to_string(),
+                user_id: "local".to_string(),
+                email: "local@treer.invalid".to_string(),
+                preferred_name: "Local user".to_string(),
+            }));
+        }
+        self.session(token).await
+    }
+
     pub(super) async fn session(&self, token: &str) -> Result<Option<CurrentSession>, AuthFailure> {
         let now = Utc::now().to_rfc3339();
         let row = sqlx::query(

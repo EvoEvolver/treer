@@ -5633,3 +5633,359 @@ async fn app_email_requires_owned_managed_app_identity_and_policy() {
         StatusCode::UNAUTHORIZED
     );
 }
+
+/// Keys a streamed `AgentInfo` may carry (#141): the member-visible flat
+/// inventory. `path` is tolerated only as null; folders, placements and pins
+/// never appear on the stream.
+const STREAMED_AGENT_KEYS: [&str; 17] = [
+    "path",
+    "agent_id",
+    "workspace_id",
+    "server_id",
+    "kind",
+    "name",
+    "cwd",
+    "status",
+    "pid",
+    "run_generation",
+    "started_at",
+    "updated_at",
+    "exited_at",
+    "exit_code",
+    "output_revision",
+    "interface",
+    "interface_port",
+];
+const STREAMED_SERVER_KEYS: [&str; 13] = [
+    "server_id",
+    "workspace_id",
+    "name",
+    "hostname",
+    "root",
+    "controller_build",
+    "host_build",
+    "supervision",
+    "labels",
+    "available_agents",
+    "status",
+    "connected_at",
+    "last_seen_at",
+];
+const STREAM_DENIED_KEYS: [&str; 7] = [
+    "folder",
+    "folder_id",
+    "folders",
+    "placement",
+    "placements",
+    "pins",
+    "pinned_by",
+];
+
+fn assert_no_denied_keys(value: &Value, context: &str) {
+    match value {
+        Value::Object(map) => {
+            for (key, inner) in map {
+                assert!(
+                    !STREAM_DENIED_KEYS.contains(&key.as_str()),
+                    "{context}: Tree data key {key} on the stream"
+                );
+                if key == "path" {
+                    assert!(inner.is_null(), "{context}: a path reached the stream");
+                }
+                assert_no_denied_keys(inner, context);
+            }
+        }
+        Value::Array(items) => items
+            .iter()
+            .for_each(|item| assert_no_denied_keys(item, context)),
+        _ => {}
+    }
+}
+
+fn assert_streamed_agent(agent: &Value, context: &str) {
+    let keys = agent
+        .as_object()
+        .unwrap_or_else(|| panic!("{context}: agent object"));
+    for key in keys.keys() {
+        assert!(
+            STREAMED_AGENT_KEYS.contains(&key.as_str()),
+            "{context}: unexpected AgentInfo field {key} on the stream; extend the documented inventory or redact it"
+        );
+    }
+    assert_no_denied_keys(agent, context);
+}
+
+/// Every workspace event kind carries only the documented member-visible
+/// inventory: flat agent facts (including cwd and pid), machine facts, IDs.
+pub(super) fn assert_stream_event_shape(event: &WorkspaceEvent) {
+    let context = format!("event {}", event.event);
+    assert_no_denied_keys(&event.data, &context);
+    match event.event.as_str() {
+        "workspace.snapshot" => {
+            let mut keys: Vec<&str> = event
+                .data
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            keys.sort_unstable();
+            assert_eq!(keys, ["agents", "revision", "servers", "workspace"]);
+            for agent in event.data["agents"].as_array().unwrap() {
+                assert_streamed_agent(agent, &context);
+            }
+            for server in event.data["servers"].as_array().unwrap() {
+                for key in server.as_object().unwrap().keys() {
+                    assert!(
+                        STREAMED_SERVER_KEYS.contains(&key.as_str()),
+                        "{context}: server field {key}"
+                    );
+                }
+            }
+        }
+        kind if kind.starts_with("agent.") => assert_streamed_agent(&event.data, &context),
+        kind if kind.starts_with("server.") => {
+            for key in event.data.as_object().unwrap().keys() {
+                assert!(
+                    STREAMED_SERVER_KEYS.contains(&key.as_str()),
+                    "{context}: server field {key}"
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+#[tokio::test]
+async fn workspace_event_payloads_carry_only_the_flat_inventory() {
+    let state = state_with_managed_agent().await;
+    let mut events = state.subscribe();
+    let snapshot = state.snapshot("default").await.unwrap();
+    assert_stream_event_shape(&WorkspaceEvent {
+        revision: snapshot.revision,
+        workspace_id: "default".into(),
+        event: "workspace.snapshot".into(),
+        data: serde_json::to_value(&snapshot).unwrap(),
+    });
+    assert!(snapshot.agents.iter().all(|agent| agent.path.is_none()));
+    state
+        .rename_agent("default", "agent-a", "renamed".into())
+        .await
+        .unwrap();
+    state
+        .rename_server("default", "machine-a", "machine-renamed".into())
+        .await
+        .unwrap();
+    state
+        .publish_workspace_signal("default", "workspace.pins.changed", |revision| {
+            json!({"revision": revision, "kind": "agent", "id": "agent-a", "action": "pin"})
+        })
+        .await
+        .unwrap();
+    let mut kinds = Vec::new();
+    for _ in 0..3 {
+        let event = events.recv().await.unwrap();
+        assert_stream_event_shape(&event);
+        kinds.push(event.event);
+    }
+    assert_eq!(
+        kinds,
+        ["agent.renamed", "server.renamed", "workspace.pins.changed"]
+    );
+}
+
+async fn connect_event_stream(
+    addr: std::net::SocketAddr,
+    token: &str,
+) -> tokio_tungstenite::WebSocketStream<tokio::net::TcpStream> {
+    let request = Request::builder()
+        .uri(format!("ws://{addr}/api/workspaces/default/events"))
+        .header(header::HOST, addr.to_string())
+        .header(header::ORIGIN, "https://app.treer.example")
+        .header(header::COOKIE, format!("treer_session={token}"))
+        .header(header::CONNECTION, "Upgrade")
+        .header(header::UPGRADE, "websocket")
+        .header(header::SEC_WEBSOCKET_VERSION, "13")
+        .header(
+            header::SEC_WEBSOCKET_KEY,
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .unwrap();
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let (socket, response) = tokio_tungstenite::client_async(request, stream)
+        .await
+        .expect("websocket upgrade");
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+    socket
+}
+
+async fn next_stream_message(
+    socket: &mut tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>,
+) -> tokio_tungstenite::tungstenite::Message {
+    tokio::time::timeout(Duration::from_secs(5), socket.next())
+        .await
+        .expect("timely stream message")
+        .expect("open stream")
+        .expect("stream frame")
+}
+
+fn stream_event(message: &tokio_tungstenite::tungstenite::Message) -> WorkspaceEvent {
+    let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+        panic!("expected a text event, got {message:?}");
+    };
+    serde_json::from_str(text).expect("workspace event")
+}
+
+fn close_code(message: &tokio_tungstenite::tungstenite::Message) -> u16 {
+    let tokio_tungstenite::tungstenite::Message::Close(Some(frame)) = message else {
+        panic!("expected a close frame, got {message:?}");
+    };
+    assert!(frame.reason.is_empty(), "close reason must stay empty");
+    u16::from(frame.code)
+}
+
+/// #141: a subscriber keeps receiving only while its session and workspace
+/// membership hold. Revocation takes effect before the next delivery after
+/// the re-check window, or on the idle tick, with fixed close codes and no
+/// detail. Tree read never gates the flat inventory, so a Tree-read-denied
+/// member receives agent events while GET /workload-tree answers 403.
+#[tokio::test]
+async fn workspace_event_stream_closes_on_revoked_membership_and_ended_session() {
+    super::events::set_stream_revalidation_for_test(
+        Duration::from_millis(200),
+        Duration::from_millis(400),
+    );
+    let auth = AuthStore::for_test("admin-password").await;
+    auth.seed_test_workspace("default").await;
+    sqlx::query("INSERT INTO users(id,email,preferred_name,password_hash,created_at) VALUES('member','member@example.test','Member','fixture','now'),('other','other@example.test','Other','fixture','now')")
+        .execute(&auth.pool()).await.unwrap();
+    for user in ["member", "other"] {
+        sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_default',$1,'member','now')")
+            .bind(user).execute(&auth.pool()).await.unwrap();
+        sqlx::query("INSERT INTO sessions(token,user_id,created_at,expires_at) VALUES($1,$2,'2026-01-01T00:00:00Z','2999-01-01T00:00:00Z')")
+            .bind(format!("tok-{user}")).bind(user).execute(&auth.pool()).await.unwrap();
+    }
+    let messages = MessageStore::open(auth.pool()).await.unwrap();
+    let identity = IdentityIssuer::load(&auth, &Url::parse("https://treer.example/").unwrap())
+        .await
+        .unwrap();
+    let state = state_with_managed_agent().await;
+    // Policy denies everything, including agent.tree.read: the flat inventory
+    // is membership-based and still flows; the Tree route refuses.
+    let denied = PolicyEngine::new(
+        crate::policy::PolicyDecision::Deny(crate::policy::PolicyDenial::new(
+            "policy_denied",
+            "denied by fixture",
+        )),
+        vec![],
+    );
+    let app = router(
+        state.clone(),
+        test_config(),
+        auth.clone(),
+        denied,
+        identity,
+        // The cookie CSRF check and the browser-origin check must agree on
+        // the Console origin, which the test auth store sets to app.treer.example.
+        BrowserAccess::new(
+            &Url::parse("https://app.treer.example/").unwrap(),
+            &Url::parse("https://proxy.treer.example/").unwrap(),
+        )
+        .unwrap(),
+        test_ingress_config(),
+        messages,
+        CapabilityRollout::all_enabled(),
+        crate::updater::UpdaterClient::disabled(),
+        crate::voice::VoiceServices::disabled(),
+    );
+    let tree = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/workspaces/default/workload-tree")
+                .header(header::COOKIE, "treer_session=tok-member")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(tree.status(), StatusCode::FORBIDDEN);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+
+    // A member sees the flat inventory and live agent events, no Tree data.
+    let mut member = connect_event_stream(addr, "tok-member").await;
+    let initial = stream_event(&next_stream_message(&mut member).await);
+    assert_eq!(initial.event, "workspace.snapshot");
+    assert_eq!(initial.workspace_id, "default");
+    assert_stream_event_shape(&initial);
+    assert_eq!(initial.data["agents"].as_array().unwrap().len(), 2);
+    state
+        .rename_agent("default", "agent-a", "renamed".into())
+        .await
+        .unwrap();
+    let renamed = stream_event(&next_stream_message(&mut member).await);
+    assert_eq!(renamed.event, "agent.renamed");
+    assert_eq!(renamed.data["name"], "renamed");
+    assert_stream_event_shape(&renamed);
+
+    // Membership revoked: the next delivery after the window is a 4403 close
+    // and the event itself never reaches the former member.
+    sqlx::query("DELETE FROM organization_members WHERE user_id='member'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    state
+        .publish_workspace_signal("default", "workspace.pins.changed", |revision| {
+            json!({"revision": revision, "kind": "agent", "id": "agent-a", "action": "pin"})
+        })
+        .await
+        .unwrap();
+    assert_eq!(close_code(&next_stream_message(&mut member).await), 4403);
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), member.next())
+            .await
+            .map(|frame| frame.is_none() || frame.is_some_and(|f| f.is_err()))
+            .unwrap_or(false),
+        "nothing follows the close frame"
+    );
+
+    // An ended session is noticed on the idle tick even without events.
+    let mut other = connect_event_stream(addr, "tok-other").await;
+    assert_eq!(
+        stream_event(&next_stream_message(&mut other).await).event,
+        "workspace.snapshot"
+    );
+    sqlx::query("DELETE FROM sessions WHERE token='tok-other'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(close_code(&next_stream_message(&mut other).await), 4401);
+
+    // A fresh connection with the ended session is refused at the upgrade.
+    let request = Request::builder()
+        .uri(format!("ws://{addr}/api/workspaces/default/events"))
+        .header(header::HOST, addr.to_string())
+        .header(header::ORIGIN, "https://app.treer.example")
+        .header(header::COOKIE, "treer_session=tok-other")
+        .header(header::CONNECTION, "Upgrade")
+        .header(header::UPGRADE, "websocket")
+        .header(header::SEC_WEBSOCKET_VERSION, "13")
+        .header(
+            header::SEC_WEBSOCKET_KEY,
+            tokio_tungstenite::tungstenite::handshake::client::generate_key(),
+        )
+        .body(())
+        .unwrap();
+    let stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+    let refused = tokio_tungstenite::client_async(request, stream).await;
+    assert!(
+        matches!(refused, Err(tokio_tungstenite::tungstenite::Error::Http(ref response)) if response.status() == StatusCode::UNAUTHORIZED),
+        "{refused:?}"
+    );
+}
