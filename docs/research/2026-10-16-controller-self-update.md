@@ -528,6 +528,14 @@ reject schema 1, and compare every owner identity field against the independentl
 retained/OS-attested owner evidence. Current verification compares the original
 exact record bytes and live retained owner; no recovery reader exists yet, and
 parsing these fields must never reconstruct an accept-capable gate.
+A separate delayed-acceptance regression authenticates a real same-UID,
+same-image child which sends a complete permit with the exact registered
+binding. The generic authenticated reader returns the connection-bound frame
+while both model and registered gates remain Pending; the registered acceptor
+must still reject that frame because its peer is not the retained parent.
+Rejection leaves the child alive, the registered gate irreversibly Uncertain,
+and the journal/registration bytes unchanged. This test does not create a
+production gate or establish supervisor process handoff.
 Production lifecycle wiring must invoke this
 only after the supervisor's ready barrier confirms its intended image is running;
 owning a live Child or observing a private session alone does not establish that.

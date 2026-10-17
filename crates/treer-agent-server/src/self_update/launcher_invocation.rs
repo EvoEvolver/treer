@@ -458,7 +458,7 @@ mod tests {
         if std::env::var_os("TREER_TEST_REGISTRATION_NOT_PRIVATE").is_none() {
             treer_platform::process_image::enter_private_session().unwrap();
         }
-        let _owner_socket = std::env::var_os("TREER_TEST_REGISTRATION_OWNER_SOCKET")
+        let mut owner_socket = std::env::var_os("TREER_TEST_REGISTRATION_OWNER_SOCKET")
             .map(|path| std::os::unix::net::UnixStream::connect(path).unwrap());
         std::fs::write(
             std::env::var_os("TREER_TEST_REGISTRATION_READY").unwrap(),
@@ -468,6 +468,16 @@ mod tests {
         use std::io::Read;
         let mut byte = [0];
         let _ = std::io::stdin().read(&mut byte);
+        if byte == [b'P'] {
+            use std::io::Write;
+            let mut wire = [0; 152];
+            std::io::stdin().read_exact(&mut wire).unwrap();
+            let socket = owner_socket.as_mut().unwrap();
+            socket.write_all(&wire).unwrap();
+            socket.shutdown(std::net::Shutdown::Write).unwrap();
+            // Stay alive until the parent has attempted delayed acceptance.
+            let _ = std::io::stdin().read(&mut byte);
+        }
         if let Some(next) = std::env::var_os("TREER_TEST_REGISTRATION_EXEC") {
             use std::os::unix::process::CommandExt;
             let error = std::process::Command::new(next)
@@ -517,6 +527,11 @@ mod tests {
     #[test]
     fn supervisor_registration_rejects_an_authenticated_child_as_permit_owner() {
         supervisor_registration_cases(&["wrong_owner"]);
+    }
+
+    #[test]
+    fn supervisor_registration_rejects_a_foreign_owner_frame_at_acceptance() {
+        supervisor_registration_cases(&["wrong_frame_owner"]);
     }
 
     fn supervisor_registration_cases(faults: &[&str]) {
@@ -593,7 +608,7 @@ mod tests {
             .unwrap();
             // A separate short private directory avoids sockaddr_un's limit
             // even with a long macOS TMPDIR or deeply nested job directory.
-            let owner_directory = (fault == "wrong_owner").then(|| {
+            let owner_directory = matches!(fault, "wrong_owner" | "wrong_frame_owner").then(|| {
                 let path =
                     std::path::Path::new("/tmp").join(format!("tu-{}", uuid::Uuid::new_v4()));
                 std::fs::DirBuilder::new()
@@ -605,7 +620,7 @@ mod tests {
             let owner_socket = owner_directory
                 .as_ref()
                 .map(|directory| directory.0.join("s"));
-            let owner_listener = (fault == "wrong_owner").then(|| {
+            let owner_listener = owner_directory.as_ref().map(|_| {
                 std::os::unix::net::UnixListener::bind(owner_socket.as_ref().unwrap()).unwrap()
             });
             let mut child = Child(
@@ -715,6 +730,37 @@ mod tests {
                     AuthenticatedPeer::authenticate(stream, &image, image.executable(), &digest)
                         .unwrap();
                 let (cancel, _writer) = UnixStream::pair().unwrap();
+                if fault == "wrong_frame_owner" {
+                    use crate::self_update::launcher_arbitration::{transport::Kind, Arbitration};
+                    let mut wire = b"TRLP\x01\0\0\0".to_vec();
+                    wire.extend_from_slice(attempt.as_bytes());
+                    wire.extend_from_slice(intent_digest.as_bytes());
+                    wire.extend_from_slice(format!("{:x}", Sha256::digest(&bytes)).as_bytes());
+                    let stdin = child.0.stdin.as_mut().unwrap();
+                    stdin.write_all(b"P").unwrap();
+                    stdin.write_all(&wire).unwrap();
+                    let mut model = Arbitration::new(registered.binding().unwrap().clone());
+                    // The generic reader authenticates the real child and
+                    // matches every binding byte, but grants no owner proof.
+                    let frame = peer.read_launcher_frame(&mut model, &cancel).unwrap();
+                    assert_eq!(frame.kind(), Kind::Permit);
+                    assert_eq!(model.decision(), Decision::Pending);
+                    assert_eq!(registered.decision(), Decision::Pending);
+                    assert_eq!(
+                        registered
+                            .accept_launcher_frame(frame)
+                            .unwrap_err()
+                            .to_string(),
+                        "update_recovery_required"
+                    );
+                    assert!(child.0.try_wait().unwrap().is_none());
+                    assert_eq!(registered.decision(), Decision::Uncertain);
+                    assert!(registered.read_launcher_frame(&mut peer, &cancel).is_err());
+                    assert_eq!(registered.decision(), Decision::Uncertain);
+                    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+                    assert_eq!(journal.read().unwrap(), before);
+                    continue;
+                }
                 // Real authenticated peer, same UID/image, correct registered
                 // child: still not its retained parent. Refuse before reading.
                 assert_eq!(
