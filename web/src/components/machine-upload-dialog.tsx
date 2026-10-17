@@ -21,6 +21,8 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
   const [error, setError] = useState('')
   const [discoverRevision, setDiscoverRevision] = useState(0)
   const engine = useRef<MachineUpload | null>(null)
+  const fileInput = useRef<HTMLInputElement>(null)
+  const directoryInput = useRef<HTMLInputElement>(null)
   const machineCapability = Array.isArray(machine.capabilities) ? machine.capabilities.includes(UPLOAD_CAPABILITY) ? 'supported' : 'absent' : 'unknown'
   const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.server_id)}`
   useEffect(() => {
@@ -77,16 +79,16 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
   const problem = error || (view.phase === 'paused' ? view.uncertain ? t('upload.outcome_unknown') : uploadErrorMessage(view.error) : '')
   const percentage = view.phase === 'succeeded' ? 100 : view.total ? Math.min(100, Math.floor(view.loaded / view.total * 100)) : 0
   return <Dialog open onOpenChange={(open) => { if (!open && !busy && !retained) onClose() }}>
-    <DialogContent className={`max-h-[calc(100dvh-2rem)] overflow-y-auto ${busy || retained ? '[&>button]:hidden' : ''}`}>
+    <DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); const input = directoryInput.current; input?.focus(); input?.setSelectionRange(input.value.length, input.value.length) }} className={`max-h-[calc(100dvh-2rem)] overflow-y-auto ${busy || retained ? '[&>button]:hidden' : ''}`}>
       <form onSubmit={submit} className="min-w-0 space-y-4">
         <DialogHeader><DialogTitle>{t('surface.upload_file')}</DialogTitle><DialogDescription>{t('dialogs.upload_to', { machine: machineName(machine) })}</DialogDescription></DialogHeader>
-        <Field label={t('dialogs.destination_directory')}><Input aria-label={t('dialogs.destination_directory')} value={directory} onChange={(event) => setDirectory(event.target.value)} required disabled={locked} className="font-mono" /></Field>
-        <Field label={t('dialogs.file')}><Input aria-label={t('dialogs.file')} type="file" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setError(''); if (!locked) setView({ phase: 'idle', loaded: 0, total: 0 }) }} disabled={locked} className="min-h-11" /></Field>
+        <Field label={t('dialogs.destination_directory')}><Input ref={directoryInput} onSelect={(event) => { const input = event.currentTarget; if (locked && input.selectionStart !== input.selectionEnd) input.setSelectionRange(input.value.length, input.value.length) }} aria-label={t('dialogs.destination_directory')} value={directory} onChange={(event) => setDirectory(event.target.value)} required disabled={locked} className="font-mono" /></Field>
+        <Field label={t('dialogs.file')}><div className="flex min-w-0 items-center gap-2"><input ref={fileInput} aria-label={t('dialogs.file')} type="file" tabIndex={-1} className="sr-only" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setError(''); if (!locked) setView({ phase: 'idle', loaded: 0, total: 0 }) }} disabled={locked} /><Button type="button" variant="outline" className="min-h-11 shrink-0" disabled={locked} onClick={() => fileInput.current?.click()}>{t('upload.choose_file')}</Button><span className="min-w-0 break-all text-xs text-muted-foreground" title={file?.name}>{file?.name || t('upload.no_file')}</span></div></Field>
         <label className="flex min-h-11 items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" className="size-4 accent-foreground" checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} disabled={locked} />{t('dialogs.replace_an_existing_file_with')}</label>
         <p className="text-xs text-muted-foreground">{t(mode === 'legacy' ? 'upload.legacy_limit' : 'upload.limit')}</p>
         {mode === 'unknown' && <p role="status" className="text-xs text-muted-foreground">{t(discoveryError ? 'upload.discovery_failed' : 'upload.checking')}</p>}
         {view.phase !== 'idle' && <div className="space-y-2">
-          <div role="progressbar" aria-label={t('upload.progress_label')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percentage} aria-valuetext={`${formatBytes(view.loaded)} / ${formatBytes(view.total)}`} className="h-2 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${percentage}%` }} /></div>
+          <div className="flex items-center gap-2"><div role="progressbar" aria-label={t('upload.progress_label')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percentage} aria-valuetext={`${formatBytes(view.loaded)} / ${formatBytes(view.total)}`} className="h-2 flex-1 overflow-hidden rounded-full bg-muted"><div className="h-full bg-primary" style={{ width: `${percentage}%` }} /></div><span aria-hidden="true" className="text-xs tabular-nums text-muted-foreground">{percentage}%</span></div>
           <p role="status" className="break-words text-xs text-foreground">{message}</p>
         </div>}
         {problem && <p role="alert" className="break-words text-xs text-status-attention">{problem}</p>}
@@ -96,7 +98,7 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
           {canCancel && <Button type="button" variant="outline" className="min-h-11" onClick={() => void engine.current?.cancel()}>{t('upload.cancel')}</Button>}
           {discoveryError && <Button type="button" className="min-h-11" onClick={() => setDiscoverRevision((value) => value + 1)}>{t('upload.retry_discovery')}</Button>}
           {view.phase === 'paused' ? view.resumable && <Button type="button" className="min-h-11" disabled={busy || machine.status !== 'online'} onClick={() => void engine.current?.resume()}>{t(view.uncertain ? 'upload.check_result' : 'upload.resume')}</Button>
-            : <Button type="submit" className="min-h-11" disabled={!file || busy || mode === 'unknown' || machine.status !== 'online'}><Upload />{busy ? t('dialogs.uploading') : t('dialogs.upload')}</Button>}
+            : (!busy || mode !== 'resumable') && <Button type="submit" className="min-h-11" disabled={!file || busy || mode === 'unknown' || machine.status !== 'online'}><Upload />{busy ? t('dialogs.uploading') : t('dialogs.upload')}</Button>}
         </DialogFooter>
       </form>
     </DialogContent>

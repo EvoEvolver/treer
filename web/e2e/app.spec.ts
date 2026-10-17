@@ -3103,13 +3103,13 @@ test.describe('resumable machine upload', () => {
     await page.route('**/api/auth/config', (route) => ok(route, { capabilities: ['machine.upload.v3'] }))
     await page.route('**/api/workspaces/ws-1/snapshot', (route) => ok(route, { ...snapshot, servers: snapshot.servers.map((machine) => ({ ...machine, capabilities: ['machine.upload.v3'] })) }))
   }
-  async function open(page: Page, size = 3 * mib, name = 'payload.bin') {
+  async function open(page: Page, size = 3 * mib, name = 'payload.bin', limit = '128') {
     await page.goto('/')
     await browseTreeOnMobile(page)
     await page.getByRole('link', { name: /^api-server(\s|$)/ }).click()
     await tabAction(page, 'Upload file')
     const dialog = page.getByRole('dialog')
-    await expect(dialog.getByText('Maximum 128 MiB.', { exact: false })).toBeVisible()
+    await expect(dialog.getByText(`Maximum ${limit} MiB`, { exact: false })).toBeVisible()
     // Synthetic file created in-browser; avoid shipping a 128 MiB fixture through
     // Playwright or retaining large buffers in source/artifacts.
     await dialog.locator('input[type=file]').evaluate((input, { size, name }) => {
@@ -3125,7 +3125,7 @@ test.describe('resumable machine upload', () => {
     }, { size, name })
     return dialog
   }
-  function fixture(page: Page, options: { dropPart?: boolean; failures?: number; commitDrop?: boolean; commitHold?: Promise<void>; partHold?: Promise<void>; abortPending?: boolean; denied?: boolean; beginDrop?: boolean; unreconciled?: boolean; rateLimit?: boolean; abortBusy?: boolean; abortCommitted?: boolean; hashConflict?: boolean; sizeMismatch?: boolean; unknownFailure?: boolean; commitFailure?: boolean } = {}) {
+  function fixture(page: Page, options: { dropPart?: boolean; failures?: number; commitDrop?: boolean; commitHold?: Promise<void>; partHold?: Promise<void>; partHoldAfter?: number; abortPending?: boolean; denied?: boolean; beginDrop?: boolean; unreconciled?: boolean; rateLimit?: boolean; rateAfter?: string; abortBusy?: boolean; abortCommitted?: boolean; hashConflict?: boolean; sizeMismatch?: boolean; unknownFailure?: boolean; commitFailure?: boolean } = {}) {
     const calls = { begin: [] as string[], offsets: [] as number[], lengths: [] as number[], hashes: [] as string[], statuses: 0, commits: 0, aborts: 0 }
     let size = 0, committed = 0, state = 'active', dropped = false, attempts = 0
     const receipt = () => ({ server_id: 'srv-a', path: 'repo/payload.bin', bytes_written: size, sha256: '0'.repeat(64), committed_at: new Date().toISOString() })
@@ -3155,11 +3155,11 @@ test.describe('resumable machine upload', () => {
         const { createHash } = await import('node:crypto')
         expect(calls.hashes.at(-1)).toBe(createHash('sha256').update(data).digest('hex'))
         expect(data.length).toBeLessThanOrEqual(8 * mib)
-        if (options.rateLimit && attempts++ === 0) return route.fulfill({ status: 429, headers: { 'Retry-After': '1' }, json: { error: { code: 'machine_upload_busy' } } })
+        if (options.rateLimit && attempts++ === 0) return route.fulfill({ status: 429, headers: { 'Retry-After': options.rateAfter ?? '1' }, json: { error: { code: 'machine_upload_busy' } } })
         if (options.hashConflict) return route.fulfill({ status: 409, json: { error: { code: 'upload_part_conflict' } } })
         if (options.denied) return route.fulfill({ status: 403, json: { error: { code: 'policy_denied' } } })
         if (attempts++ < (options.failures ?? 0)) return route.abort('connectionreset')
-        await options.partHold
+        if (calls.offsets.length > (options.partHoldAfter ?? 0)) await options.partHold
         committed = offset + data.length
         if (options.dropPart && !dropped) { dropped = true; return route.abort('connectionreset') }
         return ok(route, { size, committed_offset: committed })
@@ -3355,14 +3355,14 @@ test.describe('resumable machine upload', () => {
     await support(page)
     let release!: () => void
     const hold = new Promise<void>((resolve) => { release = resolve })
-    const { calls, ready } = fixture(page, { partHold: hold }); await ready
+    const { calls, ready } = fixture(page, { partHold: hold, partHoldAfter: 1 }); await ready
     // Open with English names, then switch the dictionary without reloading.
     await page.addInitScript(() => localStorage.setItem('treer-lang', 'en'))
     const dialog = await open(page)
     await page.evaluate(async (locale) => { const { setLocale } = await import('/src/i18n/index.ts'); setLocale(locale as 'en' | 'zh') }, lang)
     await dialog.getByRole('button', { name: lang === 'en' ? 'Upload' : '上传', exact: true }).click()
-    await expect.poll(() => calls.offsets.length).toBe(1)
-    await expect(dialog.getByRole('progressbar')).toBeVisible()
+    await expect.poll(() => calls.offsets.length).toBe(2)
+    await expect(dialog.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '33')
     await expect(dialog.getByRole('button', { name: lang === 'en' ? 'Cancel upload' : '取消上传' })).toBeVisible()
     await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
     await page.screenshot({ path: info.outputPath(`upload-${width}-${theme}-${lang}.png`) })
@@ -3393,5 +3393,47 @@ test.describe('resumable machine upload', () => {
     await expect(dialog.getByRole('alert')).toContainText('A file with this name already exists')
     await expect(dialog.getByText('Uploaded repo/payload.bin', { exact: false })).toHaveCount(0)
     expect(calls.commits).toBe(1)
+  })
+  for (const width of [1360, 390]) for (const lang of width === 390 ? ['en', 'zh'] : ['en']) for (const scenario of ['waiting', 'unknown', 'pending', 'too-large', 'success', 'failure']) test(`upload state ${scenario} (${width}, ${lang})`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 })
+    await support(page)
+    let release!: () => void
+    const hold = new Promise<void>((resolve) => { release = resolve })
+    const { calls, ready } = fixture(page, { rateLimit: scenario === 'waiting', rateAfter: '10', commitFailure: scenario === 'unknown', abortPending: scenario === 'pending', partHold: scenario === 'pending' ? hold : undefined, denied: scenario === 'failure' }); await ready
+    const dialog = await open(page, scenario === 'too-large' ? 128 * mib + 1 : 3 * mib)
+    await page.evaluate(async (locale) => { const { setLocale } = await import('/src/i18n/index.ts'); setLocale(locale as 'en' | 'zh') }, lang)
+    await dialog.getByRole('button', { name: lang === 'en' ? 'Upload' : '上传', exact: true }).click()
+    if (scenario === 'pending') {
+      await expect.poll(() => calls.offsets.length).toBe(1)
+      await dialog.getByRole('button', { name: lang === 'en' ? 'Cancel upload' : '取消上传' }).click()
+    }
+    const copy: Record<string, [string, string]> = {
+      waiting: ['Waiting to reconnect or retry…', '正在等待重新连接或重试…'],
+      unknown: ['The upload result is not yet confirmed.', '上传结果尚未确认。'],
+      pending: ['Upload stopped. Temporary file cleanup is pending on the machine.', '上传已停止，机器上的临时文件待清理。'],
+      'too-large': ['Files must be 128 MiB or smaller.', '文件不能超过 128 MiB。'],
+      success: ['Uploaded repo/payload.bin (3.00 MB).', '已上传 repo/payload.bin(3.00 MB)。'],
+      failure: ['Upload is not permitted.', '没有上传权限。'],
+    }
+    await expect(dialog.getByText(copy[scenario][lang === 'en' ? 0 : 1], { exact: false })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: info.outputPath(`upload-${scenario}-${width}-${lang}.png`) })
+    release()
+  })
+  test('legacy files over 16 MiB are rejected before transfer', async ({ page }) => {
+    await page.route('**/api/auth/config', (route) => ok(route, {}))
+    const { calls, ready } = fixture(page); await ready
+    const dialog = await open(page, 17 * mib, 'payload.bin', '16')
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('needs a newer Proxy and Controller')
+    expect(calls.begin).toHaveLength(0)
+  })
+  test('control characters in a file name are rejected before begin', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page); await ready
+    const dialog = await open(page, 0, 'bad\u0001.bin')
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('without slashes or control characters')
+    expect(calls.begin).toHaveLength(0)
   })
 })

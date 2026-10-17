@@ -2,6 +2,8 @@ import type { Messages } from "./en"
 
 // 简体中文。键必须与 en.ts 完全一致(缺键会导致类型检查失败)。术语沿用 launcher 的中英对照。
 export const zh: Messages = {
+  "upload.choose_file": "选择文件",
+  "upload.no_file": "尚未选择文件",
   "upload.limit": "最大 128 MiB。保留此对话框可在连接中断后续传。",
   "upload.legacy_limit": "当前版本最大 16 MiB。升级 Proxy 和 Controller 后可上传 128 MiB。",
   "upload.upgrade_limit": "此上传需要新版 Proxy 和 Controller。旧版支持不超过 16 MiB 的文件。",

@@ -1,6 +1,8 @@
 // English is the source dictionary. zh.ts must define every key (checked by the type system).
 // Keys are namespaced by screen. Values may contain {name} placeholders filled by t(key, { name }).
 export const en = {
+  "upload.choose_file": "Choose file",
+  "upload.no_file": "No file selected",
   "upload.limit": "Maximum 128 MiB. Uploads resume after a connection drop while this dialog stays open.",
   "upload.legacy_limit": "Maximum 16 MiB on this version. Update the Proxy and Controller for 128 MiB uploads.",
   "upload.upgrade_limit": "This upload needs a newer Proxy and Controller. Files up to 16 MiB work on older versions.",
