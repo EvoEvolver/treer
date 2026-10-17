@@ -507,9 +507,19 @@ start, restart and recovery prepares the three Treer levels with mode 0700 (a
 protected current-user DACL on Windows), re-verifies them and the canonical
 ancestors, and injects `TREER_AGENT_PRIVATE_STATE_DIR`. The variable is omitted
 with a fixed log code when a level is unsafe (`agent_private_state_unsafe`), the
-directory cannot be prepared (`agent_private_state_unavailable`) or it would be
-inside the workload cwd (`agent_private_state_inside_cwd`); the Agent still
-starts and launchers keep private-state features disabled. The inherited
+directory cannot be prepared (`agent_private_state_unavailable`), or it would
+be inside the workload cwd on a non-hidden path (`agent_private_state_inside_cwd`)
+or inside a version-controlled tree
+(`agent_private_state_inside_vcs_worktree`: a `.git`/`.hg`/`.jj`/`.svn`/
+`.bzr`/`.sl` marker of any file type at the private directory or any of its
+ancestors up to the filesystem root, regardless of the cwd, inspected without
+following links and failing closed). A hidden, repository-free state path under
+the cwd (cwd = HOME with `~/.local/state/treer`) is allowed; a cwd equal to the
+private directory is refused; the verdict is recomputed on every
+start, restart and report, and refusals carry a fixed hint without paths. The
+agent-private root also holds `.gitignore` and `.ignore` (`*`, 0600, never
+rewritten). The Agent still starts and launchers keep private-state features
+disabled; launchers mirror the same predicate. The inherited
 environment filter removes the variable, so only this explicit injection can
 supply it. Stop, restart, Controller replacement and startup updates never
 touch the directory.

@@ -627,11 +627,126 @@ async fn unsafe_private_directory_is_omitted_and_the_agent_still_starts() {
     assert_eq!(fixture.spawn_env(2)[VARIABLE], open.to_str().unwrap());
 }
 
+/// #133: a hidden state directory under a plain home is allowed; a repository
+/// anywhere from the private directory up to the filesystem root refuses with
+/// a distinct code and an actionable hint; the verdict is recomputed on every
+/// start, restart and report.
+#[tokio::test]
+async fn hidden_private_state_under_a_plain_home_is_injected_until_a_repository_appears() {
+    let fixture = fixture().await;
+    let private_root = fixture
+        .root
+        .join(".local/state/treer")
+        .join("agent-private");
+    let runtime = fixture
+        .runtime(fixture.config("srv_a", private_root.clone()))
+        .await
+        .unwrap();
+    create(&runtime, &fixture, "ag_home", ".").await;
+    let expected = private_root.join("srv_a").join("ag_home");
+    assert_eq!(fixture.spawn_env(0)[VARIABLE], expected.to_str().unwrap());
+    let report = runtime.private_state_report("ag_home").unwrap();
+    assert_eq!((report.status, report.hint), ("available", None));
+    // Defence in depth: ignore files in the agent-private root, private and
+    // never rewritten.
+    for name in [".gitignore", ".ignore"] {
+        let path = private_root.join(name);
+        assert_eq!(std::fs::read(&path).unwrap(), b"*\n", "{name}");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        std::fs::write(&path, b"custom\n").unwrap();
+    }
+    runtime.start("restart", "ag_home", true).await.unwrap();
+    assert_eq!(
+        std::fs::read(private_root.join(".gitignore")).unwrap(),
+        b"custom\n"
+    );
+    assert_eq!(fixture.spawn_env(1)[VARIABLE], expected.to_str().unwrap());
+    // git init in the home between two evaluations: the next report and the
+    // next start refuse with the VCS code; reservations refuse too.
+    std::fs::create_dir(fixture.root.join(".git")).unwrap();
+    let report = runtime.private_state_report("ag_home").unwrap();
+    assert_eq!(report.status, "agent_private_state_inside_vcs_worktree");
+    let hint = report.hint.expect("actionable hint");
+    assert!(hint.contains("version-controlled tree"), "{hint}");
+    assert!(!hint.contains('/'), "hints never carry paths: {hint}");
+    assert_eq!(
+        runtime
+            .reserve_private_state("ag_home", 1)
+            .unwrap_err()
+            .code,
+        "agent_private_state_inside_vcs_worktree"
+    );
+    runtime.start("restart", "ag_home", true).await.unwrap();
+    assert!(!fixture.spawn_env(2).contains_key(VARIABLE));
+    std::fs::remove_dir(fixture.root.join(".git")).unwrap();
+    // A `.git` FILE (worktree/submodule) and a symlinked marker count too.
+    std::fs::write(fixture.root.join(".git"), b"gitdir: ../elsewhere").unwrap();
+    assert_eq!(
+        runtime.private_state_report("ag_home").unwrap().status,
+        "agent_private_state_inside_vcs_worktree"
+    );
+    std::fs::remove_file(fixture.root.join(".git")).unwrap();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(
+            fixture.root.join("nowhere"),
+            fixture.root.join(".local/.hg"),
+        )
+        .unwrap();
+        assert_eq!(
+            runtime.private_state_report("ag_home").unwrap().status,
+            "agent_private_state_inside_vcs_worktree"
+        );
+        std::fs::remove_file(fixture.root.join(".local/.hg")).unwrap();
+    }
+    assert_eq!(
+        runtime.private_state_report("ag_home").unwrap().status,
+        "available"
+    );
+    // A cwd below a repository root: the marker sits at a cwd ANCESTOR.
+    std::fs::create_dir_all(fixture.root.join("home")).unwrap();
+    let nested_root = fixture.root.join("home/.local/state/treer/agent-private");
+    let nested = fixture
+        .runtime(fixture.config("srv_b", nested_root))
+        .await
+        .unwrap();
+    create(&nested, &fixture, "ag_nested", "home").await;
+    assert!(
+        fixture.spawn_env(3).contains_key(VARIABLE),
+        "no marker yet: allowed"
+    );
+    std::fs::create_dir(fixture.root.join(".jj")).unwrap();
+    assert_eq!(
+        nested.private_state_report("ag_nested").unwrap().status,
+        "agent_private_state_inside_vcs_worktree"
+    );
+    std::fs::remove_dir(fixture.root.join(".jj")).unwrap();
+    // The repository rule is independent of the cwd: an Agent whose cwd is a
+    // sibling project still loses attachments while the home is a repository.
+    create(&nested, &fixture, "ag_project", "repo").await;
+    assert!(fixture.spawn_env(4).contains_key(VARIABLE));
+    std::fs::create_dir(fixture.root.join(".git")).unwrap();
+    assert_eq!(
+        nested.private_state_report("ag_project").unwrap().status,
+        "agent_private_state_inside_vcs_worktree"
+    );
+    std::fs::remove_dir(fixture.root.join(".git")).unwrap();
+}
+
 #[tokio::test]
 async fn private_state_inside_the_workload_cwd_is_not_injected() {
     let fixture = fixture().await;
-    // A machine root that contains the Treer state directory (for example the
-    // home directory): the workload cwd "." would contain the private directory.
+    // A machine root that contains the Treer state directory on a NON-hidden
+    // path (root/state/...): the workload cwd "." contains the private
+    // directory in a tree tools would scan, so it stays refused (#133 keeps
+    // this; only a hidden, repository-free path is allowed).
     let private_root = fixture.root.join("state").join("agent-private");
     let runtime = fixture
         .runtime(fixture.config("srv_a", private_root.clone()))
@@ -646,6 +761,9 @@ async fn private_state_inside_the_workload_cwd_is_not_injected() {
     assert_eq!(env["TREER_AGENT_ID"], "ag_home");
     let report = runtime.private_state_report("ag_home").unwrap();
     assert_eq!(report.status, "agent_private_state_inside_cwd");
+    assert!(report
+        .hint
+        .is_some_and(|hint| hint.contains("set the Agent's cwd") && !hint.contains('/')));
     assert_eq!(
         runtime
             .reserve_private_state("ag_home", 1)

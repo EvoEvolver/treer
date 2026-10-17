@@ -32,6 +32,103 @@ use uuid::Uuid;
 pub const ENVIRONMENT_VARIABLE: &str = "TREER_AGENT_PRIVATE_STATE_DIR";
 /// Directory name below the Treer state directory.
 pub const ROOT_DIRECTORY_NAME: &str = "agent-private";
+/// Version-control markers (directory, file or link) that make a tree a
+/// worktree. `.git` may be a file (git worktrees/submodules).
+pub const VCS_MARKERS: [&str; 6] = [".git", ".hg", ".jj", ".svn", ".bzr", ".sl"];
+/// Defence in depth inside every agent-private root: tools and VCS that do
+/// look into hidden state ignore everything below it.
+const IGNORE_FILES: [&str; 2] = [".gitignore", ".ignore"];
+
+/// Where an Agent's private directory may live (#133, security ruling 2611).
+/// A version-controlled tree is refused wherever the cwd is: a marker at the
+/// private directory or any of its ancestors up to the filesystem root means a
+/// `git add -A` could collect attachments. Below the cwd, only a hidden first
+/// component is allowed (hidden OS state under a home is neither scanned nor
+/// committed); a non-hidden path, or a cwd equal to the private directory, is
+/// refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Placement {
+    /// Not below the working directory and not in any version-controlled tree.
+    Outside,
+    /// Below the working directory with a hidden first component and no VCS
+    /// marker from the private directory up to the filesystem root.
+    HiddenOutsideVcs,
+    /// Below (or equal to) the working directory on a non-hidden path.
+    InsideCwd,
+    /// A VCS marker exists at the private directory or one of its ancestors
+    /// (any file type, inspected with `lstat` only), or a marker could not be
+    /// inspected (fail closed). Independent of the working directory.
+    InsideVcsWorktree,
+}
+
+/// Both paths must already be canonical (physical) paths; canonicalization
+/// only resolves aliases and never replaces the private directory's own
+/// no-follow/ownership/mode checks. Markers are inspected with
+/// `symlink_metadata`: nothing is followed or read, a marker of any file type
+/// counts, and any error other than "not found" counts as a marker.
+pub fn private_directory_placement(cwd: &Path, private_dir: &Path) -> Placement {
+    for directory in private_dir.ancestors() {
+        for marker in VCS_MARKERS {
+            match fs::symlink_metadata(directory.join(marker)) {
+                Ok(_) => return Placement::InsideVcsWorktree,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    tracing::warn!(
+                        marker,
+                        kind = ?error.kind(),
+                        "VCS marker could not be inspected; treating the tree as version-controlled"
+                    );
+                    return Placement::InsideVcsWorktree;
+                }
+            }
+        }
+    }
+    let Ok(relative) = private_dir.strip_prefix(cwd) else {
+        return Placement::Outside;
+    };
+    let hidden_first = relative
+        .components()
+        .next()
+        .and_then(|component| component.as_os_str().to_str())
+        .is_some_and(|name| name.starts_with('.') && name != "." && name != "..");
+    if hidden_first {
+        Placement::HiddenOutsideVcs
+    } else {
+        // Includes cwd == private directory (empty relative path).
+        Placement::InsideCwd
+    }
+}
+
+/// `.gitignore` and `.ignore` containing `*` in the agent-private root,
+/// created exclusively with mode 0600 and never rewritten. Failure is logged:
+/// the root stays usable because placement is enforced independently.
+fn ensure_ignore_files(root: &Path) {
+    for name in IGNORE_FILES {
+        let path = root.join(name);
+        let mut options = fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        match options.open(&path) {
+            Ok(mut file) => {
+                if let Err(error) = io::Write::write_all(&mut file, b"*\n") {
+                    tracing::warn!(%error, file = name, "agent-private ignore file not written");
+                }
+                #[cfg(windows)]
+                {
+                    let _ = treer_platform::secure_file(&path);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(error) => {
+                tracing::warn!(%error, file = name, "agent-private ignore file not created");
+            }
+        }
+    }
+}
 const MAX_IDENTITY_LENGTH: usize = 128;
 /// Entries walked per Agent directory before the measurement is treated as
 /// over quota. Bounds Controller work on a runaway directory.
@@ -177,6 +274,7 @@ impl PrivateStateRoot {
     fn verify_levels(&self) -> Result<(), ProtocolError> {
         verify_ancestors(&self.root)?;
         ensure_private_directory(&self.root)?;
+        ensure_ignore_files(&self.root);
         ensure_private_directory(&self.server)
     }
 
@@ -744,6 +842,116 @@ impl QuotaLedger {
             ));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    fn scratch() -> PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("treer-placement-{}", uuid::Uuid::new_v4().simple()));
+        fs::create_dir_all(&path).unwrap();
+        fs::canonicalize(path).unwrap()
+    }
+
+    /// cwd = HOME with the state directory on a hidden path is allowed; any
+    /// VCS marker from the private directory up to the filesystem root, a
+    /// non-hidden relative path, or an uninspectable marker refuses.
+    #[test]
+    fn placement_allows_hidden_state_under_a_plain_home_and_refuses_repositories() {
+        let base = scratch();
+        let home = base.join("home");
+        let private = home.join(".local/state/treer/agent-private/srv_a/ag_a");
+        fs::create_dir_all(&private).unwrap();
+        fs::create_dir_all(home.join("projects/app")).unwrap();
+        assert_eq!(
+            private_directory_placement(&home, &private),
+            Placement::HiddenOutsideVcs
+        );
+        assert_eq!(
+            private_directory_placement(&home.join("projects/app"), &private),
+            Placement::Outside
+        );
+        // cwd equal to the private directory is "inside" (empty relative path).
+        assert_eq!(
+            private_directory_placement(&private, &private),
+            Placement::InsideCwd
+        );
+        // A repository anywhere above the private directory refuses even when
+        // the cwd is elsewhere entirely (git add -A could collect attachments).
+        fs::create_dir_all(base.join(".git")).unwrap();
+        assert_eq!(
+            private_directory_placement(&home.join("projects/app"), &private),
+            Placement::InsideVcsWorktree
+        );
+        fs::remove_dir_all(base.join(".git")).unwrap();
+        // Non-hidden relative path (root/state/...) is refused as inside cwd.
+        let visible = home.join("state/agent-private/srv_a/ag_a");
+        fs::create_dir_all(&visible).unwrap();
+        assert_eq!(
+            private_directory_placement(&home, &visible),
+            Placement::InsideCwd
+        );
+        // Markers at the private directory, between, at cwd, and at a cwd
+        // ancestor each refuse; any marker name and any file type counts.
+        for (where_, marker) in [
+            (private.clone(), ".git"),
+            (home.join(".local/state"), ".hg"),
+            (home.clone(), ".jj"),
+            (base.clone(), ".svn"),
+            (home.join(".local"), ".bzr"),
+            (home.clone(), ".sl"),
+        ] {
+            let path = where_.join(marker);
+            fs::create_dir_all(&path).unwrap();
+            assert_eq!(
+                private_directory_placement(&home, &private),
+                Placement::InsideVcsWorktree,
+                "{}",
+                path.display()
+            );
+            fs::remove_dir_all(&path).unwrap();
+        }
+        // `.git` as a file (worktrees, submodules) and as a dangling symlink.
+        fs::write(home.join(".git"), b"gitdir: elsewhere").unwrap();
+        assert_eq!(
+            private_directory_placement(&home, &private),
+            Placement::InsideVcsWorktree
+        );
+        fs::remove_file(home.join(".git")).unwrap();
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(base.join("absent-target"), home.join(".git")).unwrap();
+            assert_eq!(
+                private_directory_placement(&home, &private),
+                Placement::InsideVcsWorktree
+            );
+            fs::remove_file(home.join(".git")).unwrap();
+        }
+        assert_eq!(
+            private_directory_placement(&home, &private),
+            Placement::HiddenOutsideVcs
+        );
+        // A marker that cannot be inspected fails closed.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if rustix_like_not_root() {
+                let locked = home.join(".local/state");
+                fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+                let verdict = private_directory_placement(&home, &private);
+                fs::set_permissions(&locked, fs::Permissions::from_mode(0o700)).unwrap();
+                assert_eq!(verdict, Placement::InsideVcsWorktree);
+            }
+        }
+        fs::remove_dir_all(base).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn rustix_like_not_root() -> bool {
+        !nix::unistd::geteuid().is_root()
     }
 }
 
