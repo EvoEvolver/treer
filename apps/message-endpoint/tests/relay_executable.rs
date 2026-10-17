@@ -50,7 +50,7 @@ if args[:2]==['message','send']:
  result={{'message':{{'message_id':'msg_forwarded','sender':principal,'body':envelope['body']}}}}
 elif args[:2]==['message','receive']:
  time.sleep(0.02)
- result={{'deliveries':[] if state['acked'] else [{{'delivery_id':'del_user','recipient':principal,
+ result={{'remaining_unacknowledged':0,'deliveries':[] if state['acked'] else [{{'delivery_id':'del_user','recipient':principal,
   'message':{{'message_id':'msg_user','sender':{{'kind':'agent','id':'ag_sender','name':'Sender'}},'body':'synthetic only','context_ids':[]}}}}]}}
 elif args[:2]==['message','ack']:
  assert args[-2:]==['--','del_user']

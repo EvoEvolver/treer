@@ -509,6 +509,27 @@ the reviewed hub and relay artifacts together before activation. Scheduler,
 authenticated status/recovery UI and actual Core callback delivery tests remain
 required before deployment.
 
+## Core backlog and recovery primitives (development)
+
+`Core::receive_batch` preserves Core's `remaining_unacknowledged` count alongside
+its bounded 10-delivery page. Backlog is not a receive cursor: only ack moves the
+oldest-first window. The future scheduler must drain bounded zero-wait pages and
+yield between ticks. Core currently has no sender skip, nack or recipient cap.
+Leaving a paused endpoint unacked can block other endpoints; multi-endpoint
+activation is gated on bounded per-endpoint holds, capped capacity receipts and
+visible overflow counters. Those hold/refetch operations are not implemented yet.
+
+`Core::get_bound_message` is a network primitive for future owner-authorized
+receipt recovery. It invokes only `treer message get -- <stored-message-id>` under
+the hub's own identity and verifies exact message ID, workspace, bound endpoint
+Agent sender and the hub Agent's presence in Core's recipient list, plus size and
+context limits. It is not an HTTP API or owner authorization check. The future
+service must select IDs from a durable receipt, verify owner/CSRF/confirmation,
+audit the action and revalidate binding generation, freshness, fragment hashes
+and original delivery dedup before admission. Core content can remain readable
+after ack, but refetch may fail; no automatic refetch or successful-recovery
+claim is made by this helper.
+
 ## Development Bot API adapter (`hub` Cargo feature)
 
 The optional hub-only HTTP client uses one configured account and verified bot

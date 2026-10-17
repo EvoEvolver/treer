@@ -58,6 +58,12 @@ pub struct Message {
     pub context_ids: Vec<String>,
 }
 
+#[derive(Deserialize)]
+pub struct ReceiveBatch {
+    pub deliveries: Vec<Delivery>,
+    pub remaining_unacknowledged: u64,
+}
+
 #[derive(Clone)]
 pub struct Core {
     executable: PathBuf,
@@ -105,14 +111,16 @@ impl Core {
     }
 
     pub fn receive(&self, wait_ms: u32) -> Result<Vec<Delivery>, Error> {
+        Ok(self.receive_batch(wait_ms)?.deliveries)
+    }
+
+    /// Exact backlog metadata from Core; the scheduler can drain a bounded number
+    /// of zero-wait pages, yielding between ticks to maintenance and other work.
+    pub fn receive_batch(&self, wait_ms: u32) -> Result<ReceiveBatch, Error> {
         if wait_ms > 1000 {
             return Err(Error::Invalid);
         }
-        #[derive(Deserialize)]
-        struct Response {
-            deliveries: Vec<Delivery>,
-        }
-        let result: Response = serde_json::from_value(run(
+        let result: ReceiveBatch = serde_json::from_value(run(
             &self.executable,
             &[
                 "message".into(),
@@ -138,7 +146,74 @@ impl Core {
         {
             return Err(Error::Invalid);
         }
-        Ok(result.deliveries)
+        Ok(result)
+    }
+
+    /// Owner-recovery network primitive, not an owner authorization check.
+    /// Expected message/endpoint/workspace are from a durable rejection receipt,
+    /// never from arbitrary browser JSON. Core supplies recipient membership.
+    pub fn get_bound_message(
+        &self,
+        message_id: &str,
+        endpoint: &str,
+        workspace: &str,
+    ) -> Result<Message, Error> {
+        if !valid_id(message_id)
+            || !valid_id(endpoint)
+            || !valid_id(workspace)
+            || !(endpoint.starts_with("ag_") || endpoint.starts_with("app_"))
+        {
+            return Err(Error::Invalid);
+        }
+        #[derive(Deserialize)]
+        struct BoundMessage {
+            message_id: String,
+            workspace_id: String,
+            sender: Principal,
+            recipients: Vec<Principal>,
+            body: String,
+            #[serde(default)]
+            context_ids: Vec<String>,
+        }
+        #[derive(Deserialize)]
+        struct Response {
+            message: BoundMessage,
+        }
+        let result: Response = serde_json::from_value(run(
+            &self.executable,
+            &[
+                "message".into(),
+                "get".into(),
+                "--".into(),
+                message_id.into(),
+            ],
+            None,
+            Duration::from_secs(15),
+        )?)
+        .map_err(|_| Error::Invalid)?;
+        let m = result.message;
+        if m.message_id != message_id
+            || m.workspace_id != workspace
+            || m.sender.kind != SenderKind::Agent
+            || m.sender.id != endpoint
+            || m.recipients.len() > 32
+            || !m
+                .recipients
+                .iter()
+                .any(|p| p.kind == SenderKind::Agent && p.id == self.own_id)
+            || m.body.is_empty()
+            || m.body.len() > MAX_BODY
+            || m.context_ids.len() > 32
+            || !m.context_ids.iter().all(|id| valid_id(id))
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(Message {
+            message_id: m.message_id,
+            sender: m.sender,
+            body: m.body,
+            context_ids: m.context_ids,
+        })
     }
 
     /// Context IDs are option=value arguments; body and external metadata are
@@ -378,7 +453,7 @@ if args[:2]==['message','send']:
  assert '--context=msg_context' in args
  result={{'message':{{'message_id':'msg_sent','sender':principal,'body':envelope['body'],'context_ids':[]}}}}
 elif args[:2]==['message','receive']:
- result={{'deliveries':[{{'delivery_id':'del_received','recipient':principal,'message':{{'message_id':'msg_received','sender':principal,'body':'sensitive inbound','context_ids':[]}}}}]}}
+ result={{'remaining_unacknowledged':27,'deliveries':[{{'delivery_id':'del_received','recipient':principal,'message':{{'message_id':'msg_received','sender':principal,'body':'sensitive inbound','context_ids':[]}}}}]}}
 elif args[:2]==['message','ack']:
  assert args[-2:]==['--','del_received']
  result={{'acknowledged_delivery_ids':['del_received'],'already_acknowledged_delivery_ids':[]}}
@@ -402,7 +477,9 @@ print(json.dumps(result))
             .unwrap(),
             "msg_sent"
         );
-        let deliveries = core.receive(0).unwrap();
+        let batch = core.receive_batch(0).unwrap();
+        assert_eq!(batch.remaining_unacknowledged, 27);
+        let deliveries = batch.deliveries;
         assert_eq!(deliveries.len(), 1);
         assert_eq!(deliveries[0].recipient.id, "app_own");
         core.ack("del_received").unwrap();
@@ -431,6 +508,61 @@ print(json.dumps(result))
             run(&executable, &[], None, Duration::from_secs(5)),
             Err(Error::Rejected)
         ));
+    }
+    #[test]
+    fn refetch_get_uses_fixed_cli_and_verifies_message_workspace_sender_and_recipient() {
+        let response = json!({"message":{"message_id":"msg_recover","workspace_id":"ws_test","sender":{"kind":"agent","id":"ag_endpoint","path":"/display/only"},"recipients":[{"kind":"agent","id":"app_own"}],"body":"synthetic recovered fragment","context_ids":[]}});
+        let code = format!(
+            "import sys,json\nassert sys.argv[1:]==['message','get','--','msg_recover']\nprint({})",
+            serde_json::to_string(&response.to_string()).unwrap()
+        );
+        let (_tmp, executable) = fake(&code);
+        let core = Core::new(&executable, "app_own").unwrap();
+        assert_eq!(
+            core.get_bound_message("msg_recover", "ag_endpoint", "ws_test")
+                .unwrap()
+                .body,
+            "synthetic recovered fragment"
+        );
+        for (field, value) in [
+            ("message_id", json!("msg_other")),
+            ("workspace_id", json!("ws_other")),
+            ("sender", json!({"kind":"human","id":"ag_endpoint"})),
+            ("sender", json!({"kind":"agent","id":"ag_other"})),
+            ("recipients", json!([{"kind":"human","id":"app_own"}])),
+            ("recipients", json!([{"kind":"agent","id":"app_other"}])),
+            ("body", json!("x".repeat(MAX_BODY + 1))),
+        ] {
+            let mut invalid = response.clone();
+            invalid["message"][field] = value;
+            let (_tmp, executable) = fake(&format!(
+                "print({})",
+                serde_json::to_string(&invalid.to_string()).unwrap()
+            ));
+            assert!(matches!(
+                Core::new(&executable, "app_own")
+                    .unwrap()
+                    .get_bound_message("msg_recover", "ag_endpoint", "ws_test"),
+                Err(Error::Invalid)
+            ));
+        }
+    }
+    #[test]
+    fn receive_batch_refuses_missing_negative_or_malformed_backlog_metadata() {
+        for response in [
+            json!({"deliveries":[]}),
+            json!({"deliveries":[],"remaining_unacknowledged":-1}),
+            json!({"deliveries":[],"remaining_unacknowledged":"1"}),
+        ] {
+            let (_tmp, executable) = fake(&format!(
+                "print({})",
+                serde_json::to_string(&response.to_string()).unwrap()
+            ));
+            assert!(matches!(
+                Core::new(&executable, "app_own").unwrap().receive_batch(0),
+                Err(Error::Invalid)
+            ));
+        }
     }
     #[test]
     fn malformed_and_wrong_identity_output_fail_closed() {
