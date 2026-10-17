@@ -721,8 +721,24 @@ evidence: its unique attempt, intent digest and registered identity must match
 the CURRENT attempt exactly, even for the same job/operation. Recovery must use
 the fixed refusal `update_launcher_attempt_mismatch` for attempt mismatch;
 test previous-attempt and other-attempt records against a new explicitly
-authorized attempt. This diagnostic and arbitration protocol remain requirements,
-not implemented behavior or new receipt fields.
+authorized attempt. The full authenticated/durable arbitration protocol remains
+a requirement, not implemented behavior or new receipt fields.
+
+The standalone `launcher_arbitration` module now implements only its serialized
+in-memory decision rule. Metadata binds a unique attempt UUID, exact intent
+digest and registered identity-record digest; stale/foreign bindings return
+`update_launcher_attempt_mismatch` without echoing values. Only a pending gate
+can accept once or select closed-without-permit after an observation of empty
+authenticated EOF with all writers proved gone. Buffered/partial input, read
+errors, unknown writers or binding mismatch make a pending decision uncertain;
+terminal decisions never reopen or switch branches. Deterministic tests
+enumerate all 625 length-four interleavings of permit, empty EOF, uncertainty,
+buffered permit and partial-frame observations, plus stale bindings/read errors.
+These public observations are ordinary data, **not authenticated proof types**;
+constructing a binding or selecting a decision grants no execution, receipt or
+recovery authority. There is no production caller, OS/channel authentication,
+receiver drain/close, ACK handling, persistence or actual supervisor in this
+module. Real-process races and the complete fault matrix remain outstanding.
 
 Known permission boundary (security2545): these checks inspect Unix owner/mode
 bits only. They do not inspect macOS/POSIX ACL-granted write access or platform
