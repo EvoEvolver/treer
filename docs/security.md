@@ -969,7 +969,9 @@ role removed, group membership or user grant removed) or whose workspace was
 deleted gets 4403. The close frame carries the code only. Revocation therefore
 takes effect no later than the first event after 10 seconds or the 30 second
 idle tick, whichever comes first; a database failure during a re-check keeps
-the subscriber until the next check and grants nothing new. These
+the subscriber until the next check and grants nothing new, and if the session
+or membership cannot be re-verified for 120 seconds the stream closes with
+code 4503. These
 permissions grant shared workspace organization, including peer placement,
 without process-control authority. Browser membership authorization is
 unchanged. Folder moves cannot change a workload's machine,
