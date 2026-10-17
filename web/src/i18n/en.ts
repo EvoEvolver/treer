@@ -3,6 +3,7 @@
 export const en = {
   "pins.pin": "Pin to Overview",
   "pins.unpin": "Unpin",
+  "pins.shared": "Shared with the workspace",
   "pins.pinned": "Pinned",
   "pins.actions": "Actions for {path}",
   "pins.load_failed": "Unable to load workspace pins. Pin changes are unavailable.",

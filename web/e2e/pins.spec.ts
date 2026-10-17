@@ -226,3 +226,50 @@ test('pins follow stable Agent and folder IDs across moves', async ({page}) => {
   await expect(pinned(page).getByRole('button',{name:'Folder /Product/Research',exact:true})).toBeVisible()
   expect(api.writes).toEqual([])
 })
+
+
+for (const status of [404,503]) test(`unavailable capability discovery ${status} hides pins without unrelated errors`, async ({page}) => {
+  const api = await backend(page)
+  await page.route('**/auth/config', (route) => route.fulfill({status,json:{error:'unavailable'}}))
+  await page.goto('/')
+  await expect(overview(page).getByRole('link',{name:'Open /coordinator',exact:true})).toBeVisible()
+  await expect(pinned(page)).toHaveCount(0)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(api.reads).toBe(0)
+})
+
+for (const mobile of [false,true]) test(`pins menu and error state gallery ${mobile ? '390':'desktop'}`, async ({page},info) => {
+  await page.setViewportSize({width:mobile ? 390:1360,height:900})
+  const api = await backend(page)
+  await page.goto('/')
+  const shot = async (state:string) => {
+    await page.mouse.move(1,1)
+    await page.screenshot({path:info.outputPath(`pins-state-${state}-${mobile ? '390':'desktop'}.png`)})
+  }
+  const actions = () => overview(page).getByRole('button',{name:'Actions for /coordinator',exact:true})
+  await expect(actions()).toBeVisible()
+  await shot('empty')
+  await actions().click()
+  await expect(page.getByRole('menuitem',{name:'Pin to Overview',exact:true})).toBeVisible()
+  await shot('pin-menu')
+  await page.getByRole('menuitem',{name:'Pin to Overview',exact:true}).click()
+  await pinned(page).getByRole('button',{name:'Actions for /coordinator',exact:true}).click()
+  await expect(page.getByRole('menuitem',{name:'Unpin',exact:true})).toBeVisible()
+  await shot('unpin-menu')
+  await page.keyboard.press('Escape')
+  for (const status of [409,503,403]) {
+    api.setWriteFailure(status)
+    await actions().click()
+    await page.getByRole('menuitem',{name:'Unpin',exact:true}).click()
+    await expect(page.getByRole('alert').first()).toContainText(status === 409 ? '50-pin limit':'Unable to change')
+    await shot(`error-${status}`)
+  }
+  api.setWriteFailure(0);api.setCanPin(false)
+  await page.evaluate(() => dispatchEvent(new Event('focus')))
+  await expect(pinned(page)).toBeVisible()
+  await expect(actions()).toHaveCount(0)
+  await shot('read-only')
+  api.snapshot({...mapSnapshot,revision:10,agents:mapSnapshot.agents.filter((a) => a.agent_id !== 'leader')})
+  await expect(pinned(page)).toHaveCount(0)
+  await shot('deleted')
+})

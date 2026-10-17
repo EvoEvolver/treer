@@ -60,7 +60,9 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
           if (supported) await refresh()
         })
         .catch(() => {
-          if (active) setState((s) => ({ ...s, error: t('pins.load_failed') }))
+          // Capability discovery can fail on an older/unreachable Proxy.
+          // Do not show pin-specific errors before support is established.
+          supported = false
         })
     }
     window.addEventListener(PINS_EVENT, schedule)

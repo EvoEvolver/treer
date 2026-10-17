@@ -4,6 +4,7 @@ import type { Messages } from "./en"
 export const zh: Messages = {
   "pins.pin": "置顶到总览",
   "pins.unpin": "取消置顶",
+  "pins.shared": "与工作区共享",
   "pins.pinned": "已置顶",
   "pins.actions": "{path} 的操作",
   "pins.load_failed": "无法加载工作区置顶。暂时无法更改置顶。",
