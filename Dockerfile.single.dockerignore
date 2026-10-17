@@ -1,0 +1,15 @@
+.git
+.treer
+.references
+.vscode
+**/.DS_Store
+**/node_modules
+**/target
+**/dist
+**/__pycache__
+**/.pytest_cache
+**/.env
+**/.env.*
+**/*.sqlite
+**/*.sqlite3
+**/*.db

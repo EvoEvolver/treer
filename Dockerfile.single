@@ -1,0 +1,53 @@
+# Central server only. Native inputs must come from the exact-SHA release job.
+FROM node:22-bookworm@sha256:0e5f906573693feaa1e21057ebdcfdb5bd5021f050b2dc7c9deceb629c7da2a8 AS web
+WORKDIR /web
+RUN corepack enable
+COPY web/package.json web/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+COPY web ./
+RUN pnpm build
+
+# Pin the index (both amd64 and arm64) and its PG major/minor, not a floating apt PG.
+FROM postgres:17.11-bookworm@sha256:3645570cccdfa447589da9f57dd740faa29b30938e861289a5574b6ca6b03826 AS runtime-base
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 tini ca-certificates \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --gid 10001 treer \
+    && useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin treer \
+    && mkdir -p /app /data
+COPY deploy/single-container/supervisor.py /usr/local/lib/treer/supervisor.py
+COPY deploy/single-container/healthcheck.py /usr/local/lib/treer/healthcheck.py
+# No setuid/setgid programs are needed: the fixed supervisor drops users itself.
+RUN find / -xdev -type f -perm /6000 -exec chmod a-s {} + \
+    && dpkg-query -W > /app/system-packages.txt
+
+FROM runtime-base AS verified
+ARG TREER_BUILD_COMMIT
+ARG TREER_VERSION
+ARG TARGETARCH
+ARG TREER_NATIVE_INPUT_SHA256
+COPY .single-container-input /input
+COPY Cargo.toml /Cargo.toml
+COPY deploy/single-container/verify-inputs.py /verify-inputs.py
+RUN python3 -I /verify-inputs.py /input /verified "$TREER_BUILD_COMMIT" "$TREER_VERSION" "$TARGETARCH" /Cargo.toml "$TREER_NATIVE_INPUT_SHA256"
+
+FROM runtime-base AS assembled
+COPY --from=verified /verified /app
+RUN cd /app && sha256sum -c SHA256SUMS \
+    && ln -s /app/bin/treer-proxy /usr/local/bin/treer-proxy
+COPY --from=web /web/dist /app/web
+
+# Reset inherited postgres entrypoint and VOLUME: /data is the ONLY volume.
+FROM scratch
+COPY --from=assembled / /
+ARG TREER_VERSION
+ARG TREER_BUILD_COMMIT
+LABEL org.opencontainers.image.source="https://github.com/EvoEvolver/treer"
+LABEL org.opencontainers.image.version="${TREER_VERSION}"
+LABEL org.opencontainers.image.revision="${TREER_BUILD_COMMIT}"
+ENV PATH=/usr/local/bin:/usr/lib/postgresql/17/bin:/usr/bin:/bin LANG=C.UTF-8
+EXPOSE 8080
+VOLUME ["/data"]
+STOPSIGNAL SIGTERM
+HEALTHCHECK --interval=10s --timeout=3s --start-period=120s --retries=3 CMD ["python3", "-I", "/usr/local/lib/treer/healthcheck.py"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/bin/python3", "-I", "/usr/local/lib/treer/supervisor.py"]

@@ -74,6 +74,14 @@ publish SSH or local service ports.
 The hosted canary is the current place to try Treer. Self-hosting is covered in
 the [operator guide](docs/operator-guide.md).
 
+For a single-container self-hosted central server, use
+`docker run -d --name treer --stop-timeout 65 -p 127.0.0.1:8080:8080 -v treer-data:/data ghcr.io/evoevolver/treer:vX.Y.Z`
+with a published version tag. Open `http://console.treer.localhost:8080`; retrieve the generated
+admin password with `docker exec treer cat /data/private/admin-password` in a
+private terminal. Machines enroll separately. See
+[Single container](deploy/README.md#single-container) for hardened flags,
+two-origin public HTTPS setup, updates and backup/restore.
+
 1. Open the [canary console](https://app.canary.treer.ai/) and create or select a
    workspace.
 2. Choose **Add machine** and run the installer and enrollment commands the
