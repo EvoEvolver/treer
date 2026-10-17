@@ -68,22 +68,9 @@ async fn check_until(
     let cli_image = probe::within_budget(deadline, || {
         VerifiedImage::open(cli_directory, &cli_path, &receipt.cli_sha256)
     })?;
-    let controller = probe::version_until(
-        controller_directory,
-        selected.controller_path(),
-        Binary::Controller,
-        &receipt.controller_sha256,
-        deadline,
-    )
-    .await?;
-    let cli = probe::version_until(
-        cli_directory,
-        &cli_path,
-        Binary::Cli,
-        &receipt.cli_sha256,
-        deadline,
-    )
-    .await?;
+    let controller =
+        probe::version_retained(&controller_image, Binary::Controller, deadline).await?;
+    let cli = probe::version_retained(&cli_image, Binary::Cli, deadline).await?;
     probe::within_budget(deadline, || {
         controller_image.verify()?;
         cli_image.verify()?;

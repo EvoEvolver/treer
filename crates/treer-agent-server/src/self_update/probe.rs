@@ -96,32 +96,25 @@ async fn run(
     let deadline = tokio::time::Instant::now()
         .checked_add(timeout)
         .ok_or_else(|| anyhow::anyhow!("update_image_probe_timeout"))?;
-    version_until(
-        directory,
-        executable,
-        binary,
-        authenticated_sha256,
-        deadline,
-    )
-    .await
-}
-
-/// Internal multi-image preflight shares its original absolute budget with
-/// every hash and child, rather than resetting the budget between probes.
-pub(super) async fn version_until(
-    directory: &InstallationDirectory,
-    executable: &Path,
-    binary: Binary,
-    authenticated_sha256: &str,
-    deadline: tokio::time::Instant,
-) -> Result<ImageVersion> {
     let image = within_budget(deadline, || {
         VerifiedImage::open(directory, executable, authenticated_sha256)
     })?;
+    version_retained(&image, binary, deadline).await
+}
+
+/// Borrow the caller's SAME retained authentication object across construction,
+/// spawn and completion. Multi-image callers retain it across their whole stage;
+/// no second open/independent proof or separately supplied executable path.
+pub(super) async fn version_retained(
+    image: &VerifiedImage<'_>,
+    binary: Binary,
+    deadline: tokio::time::Instant,
+) -> Result<ImageVersion> {
+    let executable = image.executable();
     let parent = executable
         .parent()
         .ok_or_else(|| anyhow::anyhow!("unsafe_update_image_probe"))?;
-    let mut command = Command::new(executable);
+    let mut command = Command::new(&executable);
     command
         .arg("--version")
         .env_clear()
@@ -245,6 +238,39 @@ mod tests {
         fn drop(&mut self) {
             std::fs::remove_dir_all(&self.path).unwrap();
         }
+    }
+
+    #[tokio::test]
+    async fn retained_probe_rejects_inode_replacement_between_success_and_next_execution() {
+        let f = Fixture::new();
+        let script = format!(
+            "#!/bin/sh\nprintf ran > sentinel\nprintf 'treer-agent-server 1.2.3 ({})\\n'\n",
+            "a".repeat(40)
+        );
+        let (path, digest) = f.executable(&script);
+        let retained = VerifiedImage::open(&f.directory, &path, &digest).unwrap();
+        let deadline = tokio::time::Instant::now() + TIMEOUT;
+        version_retained(&retained, Binary::Controller, deadline)
+            .await
+            .unwrap();
+        assert!(f.path.join("sentinel").exists());
+        f.directory.remove_file("sentinel").unwrap();
+
+        // Same authenticated bytes at the same path, but a different inode
+        // after the successful probe. A fresh authentication object would
+        // accept them; the original retained object must refuse before spawn.
+        std::fs::copy(&path, f.path.join("replacement")).unwrap();
+        f.directory
+            .replace_executable("replacement", "verified-stage")
+            .unwrap();
+        let error = version_retained(&retained, Binary::Controller, deadline)
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "update_image_conflict");
+        assert!(!f.path.join("sentinel").exists());
+        // This is a fixed-version child stand-in for the execution boundary,
+        // not an installed launcher or worker-death recovery acceptance test.
     }
 
     #[test]

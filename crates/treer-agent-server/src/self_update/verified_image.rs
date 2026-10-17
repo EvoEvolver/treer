@@ -3,7 +3,7 @@
 use std::{
     fs::File,
     os::unix::fs::{MetadataExt, PermissionsExt},
-    path::{Component, Path},
+    path::{Component, Path, PathBuf},
 };
 
 use anyhow::{bail, Result};
@@ -79,6 +79,12 @@ impl<'a> VerifiedImage<'a> {
         };
         image.verify()?;
         Ok(image)
+    }
+
+    /// Derive the execution path from THIS retained authentication object;
+    /// callers cannot accidentally pair its proof with a different argv path.
+    pub(super) fn executable(&self) -> PathBuf {
+        self.parent.join(self.name)
     }
 
     pub(super) fn verify(&self) -> Result<()> {

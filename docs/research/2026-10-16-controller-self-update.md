@@ -304,7 +304,13 @@ The read-only `launcher_preflight::check` now binds both installed Controller an
 CLI images to that same sealed ownership and a CoreHealthy receipt, requiring
 Installed/Unchanged publication records. It authenticates both files before
 executing either fixed version probe, retains both original inodes across both
-probes, then rechecks the images and exact journal revision/content. Matching
+probes, then rechecks the images and exact journal revision/content. The probes
+borrow these same retained `VerifiedImage` objects directly, deriving their
+executable paths from them; there is no independently reopened inner proof.
+An isolated regression succeeds once, replaces that executable with identical
+bytes on a new inode, and proves the same retained object rejects a second
+version execution before its sentinel is written. This is an execution-boundary
+fixture, not installer or worker-death acceptance. Matching
 version text must agree between binaries and with the receipt's native artifact
 source, which may differ from the release wrapper SHA. A single absolute
 twenty-second budget covers both probes and synchronous authentication checks;
