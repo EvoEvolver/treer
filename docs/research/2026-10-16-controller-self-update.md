@@ -734,11 +734,13 @@ errors, unknown writers or binding mismatch make a pending decision uncertain;
 terminal decisions never reopen or switch branches. Deterministic tests
 enumerate all 625 length-four interleavings of permit, empty EOF, uncertainty,
 buffered permit and partial-frame observations, plus stale bindings/read errors.
-These public observations are ordinary data, **not authenticated proof types**;
-constructing a binding or selecting a decision grants no execution, receipt or
-recovery authority. There is no production caller, OS/channel authentication,
-authenticated receiver drain/close, ACK handling, persistence or actual supervisor in this
-module. Real-process races and the complete fault matrix remain outstanding.
+The noexec observations/transitions above are now private test-only model
+inputs: production has no way to select ClosedWithoutPermit until actual
+writer-closure evidence exists. Permit acceptance now consumes the authenticated
+connection-bound frame described below. Constructing metadata or selecting a
+decision grants no execution, receipt or recovery authority. There is no
+production lifecycle caller, ACK handling, persistence or actual supervisor in
+this module. Real-process races and the complete fault matrix remain outstanding.
 
 The raw `launcher_arbitration::transport` reader now separately bounds private
 permit framing: a fixed 152-byte frame plus one overflow-detection byte, under a
@@ -796,7 +798,7 @@ attempt per wrapper and requires pending arbitration. Identity/read failures
 (including cancellation), repeated reads and non-pending input invalidate any
 pending arbitration; terminal decisions remain unchanged. This connects the
 existing peer verifier to raw framing, not to execution: success leaves
-arbitration pending and returns only the raw observation borrowing the receiver.
+arbitration pending and returns a connection-bound observation borrowing the receiver.
 After a successful raw read it now checks the retained process creation
 identity/image again (security2748); the receiver's exclusive borrow prevents
 descriptor replacement and its connection UID/PID credentials were checked
@@ -844,7 +846,25 @@ Integration regressions authenticate actual same-PID socketpair peers and send
 valid matching, previous/future-attempt, changed-intent and changed-identity
 frames. This closes metadata equality at the read boundary only: the binding is
 still caller-constructible, not derived from an authenticated durable supervisor
-registration. That derivation and sealed receiver-bound proofs remain required.
+registration. That derivation and sealed writer-closure proofs remain required.
+
+The returned `LauncherFrame` now has private fields, no public constructor and
+no Clone implementation. It wraps the raw observation and retains both the
+actual receiver's exclusive borrow and the authenticated process image borrow.
+The public `Arbitration::accept` consumes that frame by value; Binding metadata
+or a raw transport observation alone cannot be passed to it. Acceptance checks
+the process image again (covering a caller delay after reading), rejects empty or
+partial observations, rechecks the exact pending binding and preserves terminal
+decisions. Metadata-only acceptance is private to the arbitration module; its
+pure transition tests still exercise the state machine independently. Integration
+tests cover successful acceptance, empty/partial rejection, a replaced binding,
+invalidation after reading, and two independently authenticated frames competing
+for one gate, where only the first can succeed. This does not establish that a
+supplied binding came from durable supervisor registration, prevent a caller
+from constructing another arbitration with the same metadata, or prove writer
+closure/owner ACK/durability. The real lifecycle must exclusively own one gate
+per registered attempt. Compile-fail boundary checks and delayed peer-exit/exec
+acceptance regressions remain required before lifecycle integration.
 
 Required before lifecycle integration (security2665): replace caller-constructible
 EOF observations with a sealed value whose constructor is restricted to the

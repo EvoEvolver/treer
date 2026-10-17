@@ -1,9 +1,11 @@
 //! Serialized in-memory permit arbitration only, NOT execution authority.
 //! The supervisor must authenticate inputs, prove writer closure, inspect EOF
 //! before closing its receiver, and durably register its identity separately.
-//! No production caller, authenticated transport, process launch, ACK, noexec
-//! record or receipt mutation is implemented here. The raw transport submodule
-//! reads framing only; public values are observations, not sealed proofs.
+//! No production lifecycle caller, process launch, ACK, noexec record or receipt
+//! mutation is implemented here. Permit acceptance consumes a connection-bound
+//! authenticated read; its metadata is not proof of durable registration. The
+//! raw transport submodule reads framing only. Noexec transitions remain a test
+//! model until authenticated writer-closure proofs exist.
 use anyhow::{bail, Result};
 use uuid::Uuid;
 
@@ -50,7 +52,8 @@ pub enum Decision {
 /// Summary of the still-open, authenticated receiver's bounded drain to EOF.
 /// A transport implementation must establish these facts, not infer them from
 /// an elapsed timeout, successful write, missing ACK, PID or available lock.
-pub enum EofObservation {
+#[cfg(test)]
+enum EofObservation {
     EmptyAndAllWritersProvenGone,
     BufferedPermit,
     PartialFrame,
@@ -87,9 +90,15 @@ impl Arbitration {
         Ok(())
     }
 
-    /// Accept exactly once at the supervisor's serialized decision point.
-    /// This is NOT the owner's acceptance observation: that needs a bound ACK.
-    pub fn accept(&mut self, observed: &Binding) -> Result<()> {
+    /// Consume exactly one authenticated connection-bound frame. Caller-created
+    /// Binding or raw framing alone cannot enter this boundary. This decision
+    /// still proves neither durable registration nor owner receipt of an ACK.
+    pub fn accept(&mut self, observed: super::handoff::LauncherFrame<'_>) -> Result<()> {
+        let binding = observed.permit_binding(self)?;
+        self.accept_binding(binding)
+    }
+
+    fn accept_binding(&mut self, observed: &Binding) -> Result<()> {
         self.match_binding(observed)?;
         if self.decision != Decision::Pending {
             bail!("update_recovery_required");
@@ -102,7 +111,8 @@ impl Arbitration {
     /// while the receiver still exists. The caller must subsequently close that
     /// receiver and persist/read back a bound noexec record before any recovery
     /// classification. This decision alone proves no durable terminal outcome.
-    pub fn finish_eof(&mut self, observed: &Binding, observation: EofObservation) -> Result<()> {
+    #[cfg(test)]
+    fn finish_eof(&mut self, observed: &Binding, observation: EofObservation) -> Result<()> {
         self.match_binding(observed)?;
         if self.decision != Decision::Pending {
             bail!("update_recovery_required");
@@ -150,7 +160,7 @@ mod tests {
                 let before = gate.decision();
                 let event = digits % 5;
                 let result = match event {
-                    0 => gate.accept(&expected),
+                    0 => gate.accept_binding(&expected),
                     1 => gate.finish_eof(&expected, EofObservation::EmptyAndAllWritersProvenGone),
                     2 => {
                         gate.invalidate();
@@ -192,14 +202,14 @@ mod tests {
                 let result = if eof {
                     gate.finish_eof(&foreign, EofObservation::EmptyAndAllWritersProvenGone)
                 } else {
-                    gate.accept(&foreign)
+                    gate.accept_binding(&foreign)
                 };
                 assert_eq!(
                     result.unwrap_err().to_string(),
                     "update_launcher_attempt_mismatch"
                 );
                 assert_eq!(gate.decision(), Decision::Uncertain);
-                assert!(gate.accept(&current).is_err());
+                assert!(gate.accept_binding(&current).is_err());
                 assert!(gate
                     .finish_eof(&current, EofObservation::EmptyAndAllWritersProvenGone)
                     .is_err());
@@ -232,14 +242,14 @@ mod tests {
         for accept in [false, true] {
             let mut gate = Arbitration::new(expected.clone());
             if accept {
-                gate.accept(&expected).unwrap();
+                gate.accept_binding(&expected).unwrap();
             } else {
                 gate.finish_eof(&expected, EofObservation::EmptyAndAllWritersProvenGone)
                     .unwrap();
             }
             let decision = gate.decision();
             assert_eq!(
-                gate.accept(&foreign).unwrap_err().to_string(),
+                gate.accept_binding(&foreign).unwrap_err().to_string(),
                 "update_launcher_attempt_mismatch"
             );
             assert_eq!(

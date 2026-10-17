@@ -163,6 +163,43 @@ pub struct AuthenticatedPeer {
     launcher_read_started: bool,
 }
 
+/// A single read from the actual authenticated connection, retaining its
+/// exclusive receiver borrow and process image. Only the authenticated reader
+/// below can construct it. No Clone, raw-stream accessor or public constructor.
+/// This is not proof of durable registration, owner ACK or writer death.
+pub struct LauncherFrame<'a> {
+    observation: super::launcher_arbitration::transport::Observation<'a>,
+    image: &'a ProcessImage,
+}
+
+impl LauncherFrame<'_> {
+    pub fn kind(&self) -> super::launcher_arbitration::transport::Kind {
+        self.observation.kind()
+    }
+
+    /// Ordinary metadata for diagnostics/comparison; copying it does not copy
+    /// this connection-bound observation or permit another acceptance.
+    pub fn binding(&self) -> Option<&super::launcher_arbitration::Binding> {
+        self.observation.binding()
+    }
+
+    pub(super) fn permit_binding(
+        &self,
+        arbitration: &mut super::launcher_arbitration::Arbitration,
+    ) -> Result<&super::launcher_arbitration::Binding> {
+        // A caller may delay acceptance after reading. Revalidate while the
+        // actual receiver is still borrowed, not just when the frame was read.
+        revalidate_launcher_image(self.image, arbitration)?;
+        match self.binding() {
+            Some(binding) => Ok(binding),
+            None => {
+                arbitration.invalidate();
+                bail!("update_recovery_required");
+            }
+        }
+    }
+}
+
 impl AuthenticatedPeer {
     /// `expected` must be captured from the coordinator's owned child/parent;
     /// `verified_image` is the checked job-local image held by the coordinator,
@@ -233,7 +270,7 @@ impl AuthenticatedPeer {
         &'a mut self,
         arbitration: &mut super::launcher_arbitration::Arbitration,
         cancellation: &UnixStream,
-    ) -> Result<super::launcher_arbitration::transport::Observation<'a>> {
+    ) -> Result<LauncherFrame<'a>> {
         use super::launcher_arbitration::{transport, Decision};
 
         if self.launcher_read_started || arbitration.decision() != Decision::Pending {
@@ -256,7 +293,10 @@ impl AuthenticatedPeer {
                 if let Some(binding) = observation.binding() {
                     arbitration.match_binding(binding)?;
                 }
-                Ok(observation)
+                Ok(LauncherFrame {
+                    observation,
+                    image: &self.image,
+                })
             }
             Err(error) => {
                 arbitration.invalidate();
@@ -435,17 +475,17 @@ mod tests {
                 let observation = result.unwrap();
                 assert_eq!(observation.kind(), Kind::Permit);
                 assert!(observation.binding() == Some(&expected));
-                drop(observation);
                 // Reading a matching frame does not accept it, ACK it, or
                 // establish durable authority to execute anything.
                 assert_eq!(arbitration.decision(), Decision::Pending);
+                arbitration.accept(observation).unwrap();
+                assert_eq!(arbitration.decision(), Decision::Accepted);
             } else {
                 assert_eq!(
                     result.err().unwrap().to_string(),
                     "update_launcher_attempt_mismatch"
                 );
                 assert_eq!(arbitration.decision(), Decision::Uncertain);
-                assert!(arbitration.accept(&expected).is_err());
             }
             assert_eq!(
                 peer.read_launcher_frame(&mut arbitration, &cancel)
@@ -454,8 +494,105 @@ mod tests {
                     .to_string(),
                 "update_recovery_required"
             );
+            assert_eq!(
+                arbitration.decision(),
+                if matches {
+                    Decision::Accepted
+                } else {
+                    Decision::Uncertain
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn authenticated_empty_or_partial_frames_cannot_be_accepted_as_permits() {
+        use super::super::launcher_arbitration::Decision;
+        let image = ProcessImage::capture(std::process::id()).unwrap();
+        let digest = digest_file(image.executable()).unwrap();
+        for payload in [&b""[..], &b"TRLP"[..]] {
+            let (stream, mut writer) = UnixStream::pair().unwrap();
+            let mut peer =
+                AuthenticatedPeer::authenticate(stream, &image, image.executable(), &digest)
+                    .unwrap();
+            writer.write_all(payload).unwrap();
+            writer.shutdown(std::net::Shutdown::Write).unwrap();
+            let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+            let mut arbitration = pending();
+            let frame = peer.read_launcher_frame(&mut arbitration, &cancel).unwrap();
+            assert!(frame.binding().is_none());
+            assert_eq!(
+                arbitration.accept(frame).unwrap_err().to_string(),
+                "update_recovery_required"
+            );
+            assert_eq!(arbitration.decision(), Decision::Uncertain);
+            assert!(peer.read_launcher_frame(&mut arbitration, &cancel).is_err());
             assert_eq!(arbitration.decision(), Decision::Uncertain);
         }
+    }
+
+    #[test]
+    fn accepting_a_frame_rechecks_binding_and_never_reopens_a_terminal_gate() {
+        use super::super::launcher_arbitration::{Arbitration, Binding, Decision};
+        let binding = |attempt| {
+            Binding::new(
+                uuid::Uuid::from_u128(attempt),
+                &"a".repeat(64),
+                &"b".repeat(64),
+            )
+            .unwrap()
+        };
+        let image = ProcessImage::capture(std::process::id()).unwrap();
+        let digest = digest_file(image.executable()).unwrap();
+        let make_peer = || {
+            let (stream, mut writer) = UnixStream::pair().unwrap();
+            let peer = AuthenticatedPeer::authenticate(stream, &image, image.executable(), &digest)
+                .unwrap();
+            let mut bytes = Vec::from(&b"TRLP\x01\0\0\0"[..]);
+            bytes.extend_from_slice(uuid::Uuid::from_u128(7).as_bytes());
+            bytes.extend_from_slice(&[b'a'; 64]);
+            bytes.extend_from_slice(&[b'b'; 64]);
+            writer.write_all(&bytes).unwrap();
+            writer.shutdown(std::net::Shutdown::Write).unwrap();
+            // Keep the half-closed writer descriptor alive: Darwin may stop
+            // reporting socketpair peer credentials after its full close.
+            (peer, writer)
+        };
+        let (cancel, _cancel_writer) = UnixStream::pair().unwrap();
+        for changed_binding in [false, true] {
+            let (mut peer, _writer) = make_peer();
+            let mut arbitration = Arbitration::new(binding(7));
+            let frame = peer.read_launcher_frame(&mut arbitration, &cancel).unwrap();
+            let expected_error = if changed_binding {
+                arbitration = Arbitration::new(binding(8));
+                "update_launcher_attempt_mismatch"
+            } else {
+                arbitration.invalidate();
+                "update_recovery_required"
+            };
+            assert_eq!(
+                arbitration.accept(frame).unwrap_err().to_string(),
+                expected_error
+            );
+            assert_eq!(arbitration.decision(), Decision::Uncertain);
+        }
+
+        let (mut first_peer, _first_writer) = make_peer();
+        let (mut second_peer, _second_writer) = make_peer();
+        let mut arbitration = Arbitration::new(binding(7));
+        let first = first_peer
+            .read_launcher_frame(&mut arbitration, &cancel)
+            .unwrap();
+        let second = second_peer
+            .read_launcher_frame(&mut arbitration, &cancel)
+            .unwrap();
+        arbitration.accept(first).unwrap();
+        assert_eq!(arbitration.decision(), Decision::Accepted);
+        assert_eq!(
+            arbitration.accept(second).unwrap_err().to_string(),
+            "update_recovery_required"
+        );
+        assert_eq!(arbitration.decision(), Decision::Accepted);
     }
 
     #[test]
