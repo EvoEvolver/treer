@@ -432,6 +432,17 @@ readings, including a suspension-sized jump; they do not acquire or validate the
 Windows clock, publish records, or wire the existing pipe exchange to this model.
 Native clock acquisition and the full fixture integration remain subsequent work.
 
+Integration must not treat the child's local window as evidence of the owner's
+remaining budget. A corrupted but internally valid record can leave the child
+unexpired after the owner's original deadline. Every owner-side ACK/permit
+acceptance must remain bounded by that original deadline; the stricter side wins.
+Add an integration case where the owner is expired and the child is not: joint
+completion must fail and no authority may result. Consider an authenticated owner
+expiry echo that lets the child further shorten its window; it cannot replace
+the owner's own checks or grant extra time. The first native clock-acquisition
+slice must check the sleep/hibernation assumption on hosted images where feasible
+and explicitly report any suspend mode or behavior that could not be tested.
+
 This is a design checkpoint, not an implementation or authority grant. The
 existing Unix registration writer in
 `crates/treer-agent-server/src/self_update/launcher_invocation/start/registration.rs`
