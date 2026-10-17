@@ -6,10 +6,12 @@ mod auth;
 mod cluster;
 mod event_bus;
 mod identity;
+mod ingress_guard;
 mod message_store;
 pub mod policy;
 mod policy_provider_store;
 mod policy_tree;
+mod server;
 mod state;
 mod traffic;
 mod updater;
@@ -55,6 +57,26 @@ struct Args {
         help = "Base URL for wildcard service ingress, for example https://apps.treer.ai/"
     )]
     ingress_public_url: Option<Url>,
+    #[arg(
+        long,
+        env = "TREER_INGRESS_TRUSTED_PROXIES",
+        value_delimiter = ',',
+        help = "CIDR ranges of the load balancer / CDN in front of public ingress; only peers inside them may supply the client IP header"
+    )]
+    ingress_trusted_proxies: Vec<String>,
+    #[arg(
+        long,
+        env = "TREER_INGRESS_CLIENT_IP_HEADER",
+        help = "The single header a trusted front uses for the client address (for example CF-Connecting-IP or X-Forwarded-For); requires --ingress-trusted-proxies"
+    )]
+    ingress_client_ip_header: Option<String>,
+    #[arg(
+        long,
+        env = "TREER_INGRESS_ALLOW_WIDE_TRUST",
+        default_value_t = false,
+        help = "Accept trusted proxy ranges wider than /8 (IPv4) or /32 (IPv6); /0 is never accepted"
+    )]
+    ingress_allow_wide_trust: bool,
     #[arg(
         long,
         env = "TREER_ARTIFACTS_DIR",
@@ -203,8 +225,26 @@ async fn main() -> anyhow::Result<()> {
         listen,
     )?;
     let app_public_url = app_public_url(args.app_public_url, &proxy_public_url)?;
+    let trusted_proxies = ingress_guard::TrustedProxies::parse(
+        &args.ingress_trusted_proxies,
+        args.ingress_client_ip_header.as_deref(),
+        args.ingress_allow_wide_trust,
+    )
+    .context("invalid public ingress trust configuration")?;
+    if trusted_proxies.configured() {
+        info!(
+            ranges = args.ingress_trusted_proxies.len(),
+            header = ?args.ingress_client_ip_header,
+            "public ingress trusts a front for the client address"
+        );
+    } else {
+        info!(
+            "public ingress uses the TCP peer as the client address (no trusted front configured)"
+        );
+    }
     let ingress =
-        api::IngressConfig::new(args.ingress_public_url, &proxy_public_url, &app_public_url)?;
+        api::IngressConfig::new(args.ingress_public_url, &proxy_public_url, &app_public_url)?
+            .with_guard(ingress_guard::IngressGuard::new(trusted_proxies));
     if !args.disable_auth && proxy_public_url.scheme() != "https" {
         warn!(%proxy_public_url, "authenticated proxy is using an insecure HTTP public URL");
     }
@@ -377,11 +417,10 @@ async fn main() -> anyhow::Result<()> {
         .with_context(|| format!("failed to bind proxy at {listen}"))?;
     info!(address = %listen, %proxy_public_url, %app_public_url, ingress = ?ingress.public_url(), %instance_id, distributed = cluster.is_distributed(), database = "postgresql", auth_disabled = args.disable_auth, core_messages_enabled = args.enable_core_messages, "treer proxy listening");
     let shutdown_traffic = traffic.clone();
-    let server = axum::serve(
-        listener,
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(async move {
+    // Served through hyper-util so header read timeouts and header size caps
+    // apply to every connection (#146); ConnectInfo and graceful shutdown
+    // behave as with axum::serve.
+    let server = server::serve(listener, app, server::ServerLimits::default(), async move {
         shutdown_signal().await;
         if let Err(error) = shutdown_traffic.flush_pending().await {
             warn!(%error, "failed to persist traffic usage counters during shutdown");

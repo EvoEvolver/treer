@@ -3253,6 +3253,7 @@ fn app_public_url_reports_the_managed_ingress_access() {
         created_by: "agent-a".to_string(),
         updated_at: now,
         updated_by: "agent-a".to_string(),
+        limits: Default::default(),
     };
 
     attach_app_public_url(&config, &[ingress], &mut app);

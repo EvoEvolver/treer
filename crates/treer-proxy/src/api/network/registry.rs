@@ -136,11 +136,27 @@ pub(in crate::api) fn service_ingress_json(
     ingress: ServiceIngress,
 ) -> Result<Value, ApiFailure> {
     let public_url = config.url_for_hostname(&ingress.hostname)?.to_string();
+    let effective = ingress.limits.effective();
+    let rejections = config.guard().counters(&ingress.ingress_id);
+    let since = config.guard().started_at();
     let mut value = serde_json::to_value(ingress)
         .map_err(|error| ApiFailure::internal("serialization_error", &error.to_string()))?;
-    value
+    let object = value
         .as_object_mut()
-        .expect("service ingress serializes as an object")
-        .insert("url".to_string(), Value::String(public_url));
+        .expect("service ingress serializes as an object");
+    object.insert("url".to_string(), Value::String(public_url));
+    object.insert(
+        "effective_limits".to_string(),
+        serde_json::to_value(effective).unwrap_or(Value::Null),
+    );
+    // Counts only, per Proxy instance since its start; cleared on restart.
+    object.insert(
+        "rejections".to_string(),
+        serde_json::to_value(rejections).unwrap_or(Value::Null),
+    );
+    object.insert(
+        "rejections_since".to_string(),
+        Value::String(since.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
+    );
     Ok(value)
 }

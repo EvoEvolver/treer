@@ -1403,6 +1403,11 @@ For HTTP publication, configure wildcard DNS and TLS once at the Proxy edge:
 
 ```bash
 export TREER_INGRESS_PUBLIC_URL='https://apps.treer.ai/'
+# Behind Cloudflare or a load balancer: name the front so public ingress
+# rate-limits real clients instead of the front's address (never trust raw
+# X-Forwarded-For). Without these the TCP peer is the client.
+export TREER_INGRESS_TRUSTED_PROXIES='173.245.48.0/20,103.21.244.0/22'
+export TREER_INGRESS_CLIENT_IP_HEADER='CF-Connecting-IP'
 treer service publish SERVICE_ID
 # Explicit anonymous access:
 treer service publish SERVICE_ID --access public

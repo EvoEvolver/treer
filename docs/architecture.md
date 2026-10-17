@@ -597,6 +597,21 @@ fixed text and records the failed creation without PATH, argv or output. A
 missing provider inside an already running launcher is a separate launcher
 status, not inferred from terminal output. This error contract installs nothing.
 
+Public ingress protection (#146) lives in `crates/treer-proxy/src/ingress_guard.rs`
+(per-instance token buckets, in-flight permits, trusted-front client address
+resolution, rejection counters), `api/network/ingress_body.rs` (capped and
+idle-bounded request bodies, permit-holding response bodies) and
+`server.rs` (hyper-util HTTP/1 serving with header read timeout, header size
+and count caps, `ConnectInfo` and graceful shutdown). `proxy_service_ingress`
+admits a public request (client bucket, service bucket, in-flight permit),
+caps and times its body, forwards the verified address as `X-Treer-Client-IP`
+and bounds the upstream response; workspace ingress gets only the time bounds.
+Owner overrides are nullable `limit_*` columns on `service_ingresses`
+(`ServiceIngressLimits`, `UpdateIngressLimitsRequest`), applied through
+`PATCH /api/workspaces/{ws}/apps/{app}/ingress-limits` and reported with the
+effective limits and rejection counters in the ingress listing; the capability
+is `ingress.protection.v1`.
+
 Workspace-shared Overview pins (#140) live under
 `/api/workspaces/{ws}/pins` (`GET`, `PUT /{kind}/{id}`, `DELETE /{kind}/{id}`,
 human sessions only; capability `workspace.pins.v1` in the Proxy health

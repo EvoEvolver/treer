@@ -175,6 +175,45 @@ pub(crate) fn validate_ingress_return_path(value: &str) -> Result<String, AuthFa
     Ok(value.to_string())
 }
 
+fn limit_u32(row: &sqlx::postgres::PgRow, column: &str) -> Result<Option<u32>, AuthFailure> {
+    let value: Option<i64> = row.try_get(column).map_err(AuthFailure::database)?;
+    value
+        .map(|value| {
+            u32::try_from(value).map_err(|_| {
+                AuthFailure::internal(
+                    "database_error",
+                    format!("service ingress limit {column} is out of range"),
+                )
+            })
+        })
+        .transpose()
+}
+
+/// The limit columns were added by #146; a row without them (older
+/// schema in a test fixture) reads as "all defaults".
+pub(crate) fn ingress_limits_from_row(
+    row: &sqlx::postgres::PgRow,
+) -> Result<treer_protocol::ServiceIngressLimits, AuthFailure> {
+    if row
+        .try_get::<Option<i64>, _>("limit_rate_per_minute")
+        .is_err()
+    {
+        return Ok(Default::default());
+    }
+    let max_body: Option<i64> = row
+        .try_get("limit_max_body_bytes")
+        .map_err(AuthFailure::database)?;
+    Ok(treer_protocol::ServiceIngressLimits {
+        rate_limit_per_minute: limit_u32(row, "limit_rate_per_minute")?,
+        rate_burst: limit_u32(row, "limit_rate_burst")?,
+        concurrency_limit: limit_u32(row, "limit_concurrency")?,
+        ip_rate_limit_per_minute: limit_u32(row, "limit_ip_rate_per_minute")?,
+        ip_rate_burst: limit_u32(row, "limit_ip_rate_burst")?,
+        max_body_bytes: max_body.map(|value| u64::try_from(value).unwrap_or(0)),
+        response_timeout_secs: limit_u32(row, "limit_response_timeout_secs")?,
+    })
+}
+
 pub(crate) fn resolved_service_ingress_from_row(
     row: sqlx::postgres::PgRow,
 ) -> Result<ResolvedServiceIngress, AuthFailure> {
@@ -198,6 +237,7 @@ pub(crate) fn resolved_service_ingress_from_row(
         created_by: row.get("created_by"),
         updated_at: parse_database_timestamp(&row, "updated_at", "service ingress")?,
         updated_by: row.get("updated_by"),
+        limits: ingress_limits_from_row(&row)?,
     };
     let target_port = u16::try_from(row.get::<i64, _>("target_port")).map_err(|error| {
         AuthFailure::internal(

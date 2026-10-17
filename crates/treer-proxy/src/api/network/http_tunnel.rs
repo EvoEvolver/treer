@@ -85,6 +85,7 @@ pub(in crate::api) async fn proxy_virtual_network_host(
         true,
         "virtual host",
         TrafficClass::VirtualHost,
+        None,
     )
     .await
 }
@@ -159,6 +160,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui(
         true,
         "Agent Interface UI",
         TrafficClass::AgentInterface,
+        None,
     )
     .await
 }
@@ -175,6 +177,7 @@ pub(in crate::api) async fn tunnel_http_request(
     strip_response_cookies: bool,
     route_kind: &'static str,
     traffic_class: TrafficClass,
+    upgrade_permit: Option<std::sync::Arc<crate::ingress_guard::Permit>>,
 ) -> Result<Response, ApiFailure> {
     let stream = state
         .open_browser_network_stream(
@@ -210,6 +213,9 @@ pub(in crate::api) async fn tunnel_http_request(
     }
     if let (Some(downstream), Some(target)) = (downstream_upgrade, target_upgrade) {
         tokio::spawn(async move {
+            // The in-flight permit (public ingress) lives as long as the
+            // upgraded connection does.
+            let _permit = upgrade_permit;
             let Ok(downstream) = downstream.await else {
                 return;
             };

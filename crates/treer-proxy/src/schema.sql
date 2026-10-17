@@ -934,3 +934,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS workspace_pins_agent ON workspace_pins(workspa
 CREATE UNIQUE INDEX IF NOT EXISTS workspace_pins_app ON workspace_pins(workspace_id, app_id) WHERE app_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS workspace_pins_folder ON workspace_pins(workspace_id, folder_id) WHERE folder_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS workspace_pins_order ON workspace_pins(workspace_id, pinned_at DESC);
+
+-- #146: owner overrides for public ingress protection (NULL = Proxy default).
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_rate_per_minute BIGINT;
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_rate_burst BIGINT;
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_concurrency BIGINT;
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_ip_rate_per_minute BIGINT;
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_ip_rate_burst BIGINT;
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_max_body_bytes BIGINT;
+ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_response_timeout_secs BIGINT;
