@@ -1,19 +1,14 @@
 //! Execute ONLY a previously authenticated image, without inherited credentials,
 //! proxies or loader hooks. Version output is bounded, parsed and never logged.
 //! This does not prove Host compatibility or restart any service.
-use std::{
-    path::{Component, Path},
-    process::Stdio,
-    time::Duration,
-};
+use std::{path::Path, process::Command, time::Duration};
 
 use anyhow::{bail, Result};
-use tokio::{io::AsyncReadExt, process::Command};
 use treer_platform::installation_directory::InstallationDirectory;
 
-use super::{artifacts::Binary, hex, images::digest_file};
+use super::{artifacts::Binary, hex, verified_image::VerifiedImage};
 
-const OUTPUT_LIMIT: u64 = 1024;
+const OUTPUT_LIMIT: usize = 1024;
 const TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, PartialEq, Eq)]
@@ -23,7 +18,7 @@ pub struct ImageVersion {
 }
 
 fn parse(binary: Binary, bytes: &[u8]) -> Result<ImageVersion> {
-    if bytes.len() as u64 > OUTPUT_LIMIT {
+    if bytes.len() > OUTPUT_LIMIT {
         bail!("invalid_update_image_version");
     }
     let text =
@@ -78,92 +73,39 @@ async fn run(
     authenticated_sha256: &str,
     timeout: Duration,
 ) -> Result<ImageVersion> {
-    if !hex(authenticated_sha256, 64)
-        || !executable.is_absolute()
-        || !executable
-            .components()
-            .all(|c| matches!(c, Component::RootDir | Component::Normal(_)))
-    {
-        bail!("unsafe_update_image_probe");
-    }
+    let image = VerifiedImage::open(directory, executable, authenticated_sha256)?;
     let parent = executable
         .parent()
         .ok_or_else(|| anyhow::anyhow!("unsafe_update_image_probe"))?;
-    let name = executable
-        .file_name()
-        .and_then(|s| s.to_str())
-        .ok_or_else(|| anyhow::anyhow!("unsafe_update_image_probe"))?;
-    // Command uses a filesystem path, so verify it still addresses the retained
-    // physical parent. Same-account processes remain one trust domain.
-    let current = InstallationDirectory::open(parent)
-        .map_err(|_| anyhow::anyhow!("unsafe_update_image_probe"))?;
-    if current.identity()? != directory.identity()? {
-        bail!("unsafe_update_image_probe");
-    }
-    let file = directory
-        .read_file(name)
-        .map_err(|_| anyhow::anyhow!("unsafe_update_image_probe"))?;
-    if digest_file(&file)? != authenticated_sha256 {
-        bail!("update_image_conflict");
-    }
-    use std::os::unix::fs::PermissionsExt;
-    if file.metadata()?.permissions().mode() & 0o100 == 0 {
-        bail!("update_image_not_executable");
-    }
-    let mut child = Command::new(executable)
+    let mut command = Command::new(executable);
+    command
         .arg("--version")
         .env_clear()
         .env("LANG", "C")
         .env("LC_ALL", "C")
-        .current_dir(parent)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|_| anyhow::anyhow!("update_image_probe_spawn_failed"))?;
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| anyhow::anyhow!("update_image_probe_failed"))?;
-    let result = tokio::time::timeout(timeout, async {
-        let mut bytes = Vec::new();
-        stdout
-            .take(OUTPUT_LIMIT + 1)
-            .read_to_end(&mut bytes)
+        .current_dir(parent);
+    // Keep authentication and path/retained-inode verification directly next
+    // to spawn. No ambient identity, loader hook, proxy or PATH survives.
+    image.verify()?;
+    let output =
+        treer_platform::bounded_child::output_quiescent(&mut command, timeout, OUTPUT_LIMIT)
             .await
-            .map_err(|_| anyhow::anyhow!("update_image_probe_failed"))?;
-        if bytes.len() as u64 > OUTPUT_LIMIT {
-            bail!("update_image_probe_output_limit");
-        }
-        let status = child
-            .wait()
-            .await
-            .map_err(|_| anyhow::anyhow!("update_image_probe_failed"))?;
-        if !status.success() {
-            bail!("update_image_probe_failed");
-        }
-        parse(binary, &bytes)
-    })
-    .await;
-    let result = match result {
-        Ok(result) => result,
-        Err(_) => Err(anyhow::anyhow!("update_image_probe_timeout")),
-    };
-    if result.is_err() {
-        // Kill/reap our child only. Never kill by name, restart a service or
-        // continue activation after timeout, excessive output or malformed data.
-        let _ = child.kill().await;
-        let _ = child.wait().await;
+            .map_err(|error| {
+                anyhow::anyhow!(match error.kind() {
+                    std::io::ErrorKind::TimedOut => "update_image_probe_timeout",
+                    _ if error.to_string() == "child output limit exceeded" =>
+                        "update_image_probe_output_limit",
+                    _ => "update_image_probe_failed",
+                })
+            })?;
+    // Successful output includes the strict group witness, not only leader
+    // exit. Recheck the same physical image BEFORE accepting even valid version
+    // text; same-byte replacement with a different inode also fails.
+    image.verify()?;
+    if !output.status().success() {
+        bail!("update_image_probe_failed");
     }
-    let version = result?;
-    let reopened = directory
-        .read_file(name)
-        .map_err(|_| anyhow::anyhow!("update_image_conflict"))?;
-    if digest_file(&reopened)? != authenticated_sha256 {
-        bail!("update_image_conflict");
-    }
-    Ok(version)
+    parse(binary, output.stdout())
 }
 
 /// Both installed images must identify the same native build. That build SHA
@@ -291,6 +233,94 @@ mod tests {
                 .is_err()
         );
         assert!(!f.path.join("sentinel").exists());
+    }
+
+    #[test]
+    fn retained_authentication_rejects_same_bytes_replaced_inode_and_permission_changes() {
+        let f = Fixture::new();
+        let script = "#!/bin/sh\nprintf executed > sentinel\n";
+        let (path, digest) = f.executable(script);
+        let image = VerifiedImage::open(&f.directory, &path, &digest).unwrap();
+        image.verify().unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            image.verify().err().unwrap().to_string(),
+            "update_image_conflict"
+        );
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        image.verify().unwrap();
+        std::fs::rename(&path, f.path.join("original")).unwrap();
+        f.executable(script);
+        assert_eq!(
+            image.verify().err().unwrap().to_string(),
+            "update_image_conflict"
+        );
+        assert!(!f.path.join("sentinel").exists());
+    }
+
+    #[tokio::test]
+    async fn valid_version_cannot_hide_replacement_of_the_authenticated_inode() {
+        let f = Fixture::new();
+        let sha = "a".repeat(40);
+        // Isolated fixture mimics a same-byte replacement during execution;
+        // no race with a real updater or installed executable is induced.
+        let script = format!("#!/bin/sh\n/bin/cp \"$0\" replacement && /bin/chmod 700 replacement && /bin/mv replacement \"$0\" || exit 9\nprintf '%s\\n' 'treer-agent-server 0.1.14 ({sha})'\n");
+        let (path, digest) = f.executable(&script);
+        assert_eq!(
+            version(&f.directory, &path, Binary::Controller, &digest)
+                .await
+                .err()
+                .unwrap()
+                .to_string(),
+            "update_image_conflict"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_completion_timeout_and_cancellation_prevent_descendant_late_writes() {
+        for outcome in ["success", "timeout", "cancel"] {
+            let f = Fixture::new();
+            let sha = "a".repeat(40);
+            let finish = if outcome == "success" {
+                format!("printf '%s\\n' 'treer-agent-server 0.1.14 ({sha})'; exit 0")
+            } else {
+                "while :; do :; done".into()
+            };
+            let script = format!("#!/bin/sh\n/bin/sh -c '/bin/sleep 0.4; printf leaked > late' &\nprintf ready > ready\n{finish}\n");
+            let (path, digest) = f.executable(&script);
+            if outcome == "cancel" {
+                let directory = InstallationDirectory::open(&f.path).unwrap();
+                let task = tokio::spawn(async move {
+                    run(&directory, &path, Binary::Controller, &digest, TIMEOUT).await
+                });
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !f.path.join("ready").exists() {
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                task.abort();
+                assert!(matches!(task.await, Err(error) if error.is_cancelled()));
+            } else {
+                let timeout = if outcome == "timeout" {
+                    Duration::from_millis(150)
+                } else {
+                    TIMEOUT
+                };
+                let result = run(&f.directory, &path, Binary::Controller, &digest, timeout).await;
+                if outcome == "timeout" {
+                    assert_eq!(
+                        result.err().unwrap().to_string(),
+                        "update_image_probe_timeout"
+                    );
+                } else {
+                    assert_eq!(result.unwrap().source_sha, sha);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(550)).await;
+            assert!(!f.path.join("late").exists());
+        }
     }
 
     #[tokio::test]

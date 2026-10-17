@@ -31,6 +31,7 @@ pub mod publication;
 pub mod safety;
 pub mod selection;
 pub mod startup_backup;
+mod verified_image;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod worker;
 

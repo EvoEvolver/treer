@@ -223,8 +223,9 @@ or failed inventories. Isolated subprocess tests cover normal exit with a live
 descendant, timeout, cancellation, excessive output, null streams, retention and
 reaping of the leader, and the Darwin singleton/multiple-member distinction.
 
-This helper authenticates no executable, argv, environment or receipt, and is not
-yet wired into the self-update worker or launcher. The caller must retain the
+This helper authenticates no executable, argv, environment or receipt. The
+authenticated version probe now uses its strict output path, but the self-update
+worker and launcher executor are not yet wired to it. The caller must retain the
 transaction locks and map uncertain/cancelled execution to recovery or Partial,
 never completion. Descendants must cooperate by retaining their inherited group;
 this is not a sandbox against a same-account process calling setsid/setpgid.
@@ -272,7 +273,26 @@ previous asynchronous I/O has finished. Authenticated command construction,
 durable child-start/worker-death recovery, no-global-reaper integration guards,
 final live health and journal completion are still separate pending obligations.
 The strict lifecycle fixture does not claim a launcher installation or whole P1
-completion, and no production self-update call site uses it yet.
+completion, and no production self-update dispatch uses it yet.
+
+The version probe retains a checked executable inode as an internal
+`VerifiedImage`, alongside its authenticated digest and physical installation
+parent. It rechecks the same inode, digest, executable permission and physical
+parent immediately before execution and after strict group quiescence. A
+same-byte replacement with a different inode fails. This is path-based execution,
+not an atomic verify-and-exec primitive or isolation from a malicious same-user
+writer. The probe supplies only `--version`, null input/error streams, a cleared
+environment with C locale and a checked working directory. Version text is
+accepted only after strict completion and image revalidation; OS errors and
+child diagnostics are reduced to fixed labels. Timeout and cancellation clean
+the owned process group without granting a result. The execution/quiescence
+budget remains ten seconds and stdout stays bounded at 1 KiB; synchronous image
+hashing and kernel operations have no hard wall-clock bound. Isolated fixtures
+cover descendant late writes on success/timeout/cancellation and a valid-version
+script replacing its own inode. They do not run a real launcher installation,
+persist child-start evidence or cover worker death. The future launcher executor
+must still bind both installed images to the owned receipt and build its fixed
+command/environment under the original locks.
 
 The worker-side `ImageBatch` now requires the sealed `OwnedActivation` and an
 exact matching Prepared receipt. It preflights both images' backups, original
