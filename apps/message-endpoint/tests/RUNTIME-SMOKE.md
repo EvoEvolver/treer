@@ -23,7 +23,8 @@ Release-only procedure, in the dedicated canary-e2e workspace/machine:
    ```
 
    Never pass a workload credential or another Agent ID. The process gets its
-   own runtime ID from Treer. The test may need an authorized human restart of
+   own runtime ID from Treer (`app_...` is valid, as is `ag_...`); the returned
+   message sender must equal that injected runtime ID. The test may need an authorized human restart of
    **only this newly created disposable App** after rules are installed; no
    existing process may be touched. Prefer preinstalled workspace test rules
    when possible. App starts failed if denied, with `/health` returning503.
@@ -36,15 +37,26 @@ Release-only procedure, in the dedicated canary-e2e workspace/machine:
    priority denies can still block it. If canary-tester is not owner or cannot
    apply rules, record that blocker and request leader action; no new accounts,
    borrowed owner token, changing provider or production policy edits.
-4. Inspect `/health` through the temporary App's workspace-auth ingress. Exact
+   For the approved #159 smoke fallback (comments 3516–3519), **skip this step**:
+   use the existing default-allow/monitor workspace without changing any Policy
+   or Provider. Report “Policy sufficiency and isolation untested.”
+4. Inspect `/health` through the temporary App's workspace-auth ingress, or by
+   authorized loopback inspection on its disposable machine. Exact
    passing response has `status:passed` and these seven checks:
    `self_send`, `same_key_same_id`, `authenticated_sender`, `receive_from_app`,
    `redelivery_before_ack`, `ack_replay`, `no_redelivery_after_ack`.
-   A failed check returns503 with no body/credential/raw CLI error disclosure.
+   A failed check returns503 with empty `checks` and only a fixed `failure`
+   code and `step` from the helper's `FAILURES`/`STEPS` allowlists. Never report
+   raw CLI output, exception text, paths, message content or credentials.
    Report App ID/runtime kind, frozen SHA, check names and outcome on #159.
 5. Delete only this temporary App and its test Policy rules and exported
    directory after result capture. Confirm no smoke processes remain. Keep no
    public App, real bot, transport secret or retained user messages.
+
+The e99c350d run failed before invoking the CLI because its ID guard incorrectly
+accepted only `ag_` runtimes (#159 comment 3518). Its temporary App and export
+were cleaned up. That failure remains recorded; a corrected helper needs a new
+release-run result and must not inherit a passing verdict from hermetic tests.
 
 This does **not** assert multi-hop routing, fragment assembly, relay/hub code,
 Policy template isolation or memory targets. Those get their own P2 code tests
