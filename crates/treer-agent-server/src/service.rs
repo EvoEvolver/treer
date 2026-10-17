@@ -480,7 +480,79 @@ pub fn new_enrollment_root(requested: Option<&Path>) -> Result<PathBuf> {
             }
         }
     };
-    fs::canonicalize(&root).with_context(|| format!("invalid workspace root {}", root.display()))
+    let root = fs::canonicalize(&root)
+        .with_context(|| format!("invalid workspace root {}", root.display()))?;
+    ensure_root_outside_state_dir(&root)?;
+    Ok(root)
+}
+
+/// The state directory is reserved for file transfer by identity and name, so a
+/// root equal to it or below it would make every transfer denied or the
+/// Controller's own files the workload tree. Refuse such a root with a fixed,
+/// actionable error at enrollment, relocation and Controller start instead of
+/// degrading silently. If the state directory cannot be resolved at all the
+/// caller fails closed through `state_dir()`.
+pub fn ensure_root_outside_state_dir(root: &Path) -> Result<()> {
+    root_outside_state_dir(root, &state_dir()?)
+}
+
+pub(crate) fn root_outside_state_dir(root: &Path, state: &Path) -> Result<()> {
+    let state = canonical_prefix(state);
+    let root = canonical_prefix(root);
+    if path_is_equal_or_below(&root, &state) {
+        bail!(
+            "root_inside_treer_state_directory: the workspace root must not be the Treer state directory or inside it ({}); choose another --root",
+            state.display()
+        );
+    }
+    Ok(())
+}
+
+/// Component-wise prefix test. On case-insensitive filesystems (macOS,
+/// Windows) a still-absent tail cannot be canonicalized, so its components are
+/// compared ASCII case-insensitively; elsewhere the comparison is exact.
+fn path_is_equal_or_below(path: &Path, ancestor: &Path) -> bool {
+    let mut path_components = path.components();
+    for expected in ancestor.components() {
+        let Some(actual) = path_components.next() else {
+            return false;
+        };
+        let (expected, actual) = (expected.as_os_str(), actual.as_os_str());
+        let same = if cfg!(any(target_os = "macos", windows)) {
+            expected
+                .to_string_lossy()
+                .eq_ignore_ascii_case(&actual.to_string_lossy())
+        } else {
+            expected == actual
+        };
+        if !same {
+            return false;
+        }
+    }
+    true
+}
+
+/// Canonicalizes the longest existing ancestor and re-appends the missing
+/// tail, so absent paths compare on the same physical prefix as existing ones
+/// (macOS `/var` versus `/private/var`, symlinked homes).
+fn canonical_prefix(path: &Path) -> PathBuf {
+    let mut existing = path;
+    let mut tail = Vec::new();
+    loop {
+        if let Ok(canonical) = fs::canonicalize(existing) {
+            return tail
+                .iter()
+                .rev()
+                .fold(canonical, |acc, component| acc.join(component));
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                tail.push(name.to_owned());
+                existing = parent;
+            }
+            _ => return path.to_path_buf(),
+        }
+    }
 }
 
 pub fn register(config: ServiceConfig) -> Result<()> {
@@ -939,6 +1011,7 @@ fn relocate_root_at(paths: &ServicePaths, config: &ServiceConfig, root: &Path) -
     let root = fs::canonicalize(root).context("new root must be an existing physical directory")?;
     treer_platform::machine_file::Root::open(&root, &[])
         .context("new root must not traverse symlinks/reparse points")?;
+    ensure_root_outside_state_dir(&root)?;
     let old_host_bytes = fs::read(&paths.host_config)?;
     let mut host: HostDaemonConfig = serde_json::from_slice(&old_host_bytes)?;
     let mut next = config.clone();
@@ -2178,7 +2251,10 @@ fn config_dir() -> Result<PathBuf> {
     treer_platform::config_directory().context("user configuration directory is unavailable")
 }
 
-fn state_dir() -> Result<PathBuf> {
+/// Canonical Treer state directory. Every file below it (startup stores,
+/// private state, provider CLI results, service logs, machine identity) is
+/// Controller-owned; the machine file-transfer root reserves it by identity.
+pub fn state_dir() -> Result<PathBuf> {
     #[cfg(windows)]
     return env::var_os("TREER_STATE_DIR")
         .map(PathBuf::from)

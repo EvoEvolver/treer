@@ -1284,6 +1284,112 @@ mod tests {
         f.execute(Request::Abort { id, read: false }).unwrap();
     }
 
+    /// #127: an enrolled root that contains the Treer state directory (root =
+    /// HOME with ~/.local/state/treer) must deny every read and write below
+    /// that directory by identity and name, independent of Policy, while a
+    /// sibling path stays transferable. Absent at open, the directory is still
+    /// reserved by name and stays denied once it appears.
+    #[test]
+    fn state_directory_inside_the_root_is_reserved_for_every_transfer() {
+        let mut f = Fixture::new(64);
+        let state = f.root.join(".local/state/treer");
+        f.transfers.protected.push(state.clone());
+        let deny = |f: &Fixture, path: &str| {
+            for request in [
+                Request::GetBegin {
+                    path: path.into(),
+                    limit: 64,
+                },
+                Request::PutBegin {
+                    path: path.into(),
+                    overwrite: true,
+                    mode: 0o600,
+                    size: None,
+                    limit: 64,
+                },
+            ] {
+                let error = f
+                    .transfers
+                    .execute(f.actor.clone(), path, request)
+                    .unwrap_err();
+                assert_eq!(error.code, "machine_file_denied", "{path}");
+            }
+        };
+        // Reserved by name before it exists.
+        deny(&f, ".local/state/treer/service.log");
+        deny(&f, ".local/state/TREER/service.log");
+        std::fs::create_dir_all(state.join("machines/host-key")).unwrap();
+        std::fs::write(state.join("service.log"), b"synthetic log").unwrap();
+        std::fs::write(
+            state.join("machines/host-key/machine-identity.json"),
+            b"{\"synthetic\":true}",
+        )
+        .unwrap();
+        std::fs::write(state.join("srv_x-agent-startup.json"), b"{}").unwrap();
+        for path in [
+            ".local/state/treer/service.log",
+            ".local/state/treer/machines/host-key/machine-identity.json",
+            ".local/state/treer/srv_x-agent-startup.json",
+            ".local/state/treer/future-per-server-file",
+            ".local/state/treer/future-dir/file",
+            ".local/state/Treer/service.log",
+        ] {
+            deny(&f, path);
+        }
+        assert_eq!(
+            std::fs::read(state.join("service.log")).unwrap(),
+            b"synthetic log",
+            "denied requests never touch the state directory"
+        );
+        // A hard-link alias of a state file elsewhere in the root is not an
+        // escape either: a transfer source must have exactly one link, so the
+        // alias is refused before any byte is read (invalid_machine_path).
+        #[cfg(unix)]
+        {
+            std::fs::hard_link(state.join("service.log"), f.root.join("alias-copy")).unwrap();
+            let error = f
+                .transfers
+                .execute(
+                    f.actor.clone(),
+                    "alias-copy",
+                    Request::GetBegin {
+                        path: "alias-copy".into(),
+                        limit: 64,
+                    },
+                )
+                .unwrap_err();
+            assert_eq!(error.code, "invalid_machine_path");
+            std::fs::remove_file(f.root.join("alias-copy")).unwrap();
+        }
+        // Siblings outside the state directory remain ordinary transfer targets.
+        std::fs::create_dir_all(f.root.join(".local/share")).unwrap();
+        std::fs::write(f.root.join(".local/share/notes.txt"), b"shareable").unwrap();
+        f.transfers
+            .execute(
+                f.actor.clone(),
+                ".local/share/notes.txt",
+                Request::GetBegin {
+                    path: ".local/share/notes.txt".into(),
+                    limit: 64,
+                },
+            )
+            .unwrap();
+        std::fs::create_dir_all(f.root.join(".local/state/other-tool")).unwrap();
+        f.transfers
+            .execute(
+                f.actor.clone(),
+                ".local/state/other-tool/log",
+                Request::PutBegin {
+                    path: ".local/state/other-tool/log".into(),
+                    overwrite: true,
+                    mode: 0o600,
+                    size: None,
+                    limit: 64,
+                },
+            )
+            .unwrap();
+    }
+
     #[test]
     fn absent_and_atomically_replaced_core_state_paths_are_reserved_before_io() {
         let mut f = Fixture::new(64);
