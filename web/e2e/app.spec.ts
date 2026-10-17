@@ -3095,3 +3095,277 @@ for (const [status, step, warning] of [['unknown', 9, true], ['timed_out', 6, tr
   expect(backend.requests.filter(r => r.path.endsWith('/install'))).toHaveLength(1)
   expect(backend.requests.filter(r => r.path.endsWith('/check'))).toHaveLength(0)
 })
+
+test.describe('resumable machine upload', () => {
+  const mib = 1024 * 1024
+  const uploadId = 'upl_0123456789abcdef0123456789abcdef'
+  async function support(page: Page) {
+    await page.route('**/api/auth/config', (route) => ok(route, { capabilities: ['machine.upload.v3'] }))
+    await page.route('**/api/workspaces/ws-1/snapshot', (route) => ok(route, { ...snapshot, servers: snapshot.servers.map((machine) => ({ ...machine, capabilities: ['machine.upload.v3'] })) }))
+  }
+  async function open(page: Page, size = 3 * mib, name = 'payload.bin') {
+    await page.goto('/')
+    await browseTreeOnMobile(page)
+    await page.getByRole('link', { name: /^api-server(\s|$)/ }).click()
+    await tabAction(page, 'Upload file')
+    const dialog = page.getByRole('dialog')
+    await expect(dialog.getByText('Maximum 128 MiB.', { exact: false })).toBeVisible()
+    // Synthetic file created in-browser; avoid shipping a 128 MiB fixture through
+    // Playwright or retaining large buffers in source/artifacts.
+    await dialog.locator('input[type=file]').evaluate((input, { size, name }) => {
+      const transfer = new DataTransfer()
+      transfer.items.add(new File([new Blob([new Uint8Array(size)])], name))
+      ;(input as HTMLInputElement).files = transfer.files
+      input.dispatchEvent(new Event('change', { bubbles: true }))
+      const original = File.prototype.arrayBuffer
+      File.prototype.arrayBuffer = function () {
+        if (this.size > 16 * 1024 * 1024) throw new Error('whole-file buffering is forbidden')
+        return original.call(this)
+      }
+    }, { size, name })
+    return dialog
+  }
+  function fixture(page: Page, options: { dropPart?: boolean; failures?: number; commitDrop?: boolean; commitHold?: Promise<void>; partHold?: Promise<void>; abortPending?: boolean; denied?: boolean; beginDrop?: boolean; unreconciled?: boolean; rateLimit?: boolean; abortBusy?: boolean; abortCommitted?: boolean; hashConflict?: boolean } = {}) {
+    const calls = { begin: [] as string[], offsets: [] as number[], lengths: [] as number[], hashes: [] as string[], statuses: 0, commits: 0, aborts: 0 }
+    let size = 0, committed = 0, state = 'active', dropped = false, attempts = 0
+    const receipt = () => ({ server_id: 'srv-a', path: 'repo/payload.bin', bytes_written: size, sha256: '0'.repeat(64), committed_at: new Date().toISOString() })
+    const status = () => ({ upload_id: uploadId, size, committed_offset: committed, part_bytes_max: 8 * mib, state, reconciled: !options.unreconciled, cleanup_pending: options.abortPending ?? false, result: state === 'committed' ? receipt() : undefined })
+    const ready = page.route('**/api/workspaces/ws-1/machines/srv-a/uploads**', async (route) => {
+      const request = route.request(), method = request.method(), url = new URL(request.url())
+      if (method === 'POST' && url.pathname.endsWith('/uploads')) {
+        size = request.postDataJSON().size
+        calls.begin.push(request.headers()['idempotency-key'])
+        if (options.beginDrop && calls.begin.length === 1) return route.abort('connectionreset')
+        return ok(route, status())
+      }
+      if (method === 'GET') { calls.statuses++; return ok(route, url.pathname.endsWith('/uploads') ? { uploads: [status()] } : status()) }
+      if (method === 'DELETE') {
+        calls.aborts++
+        if (options.abortBusy && calls.aborts === 1) return route.fulfill({ status: 409, headers: { 'Retry-After': '1' }, json: { error: { code: 'upload_busy' } } })
+        if (options.abortCommitted) { state = 'committed'; return route.fulfill({ status: 409, headers: { 'Retry-After': '1' }, json: { error: { code: 'upload_committed' } } }) }
+        state = 'aborted'; return ok(route, status())
+      }
+      if (method === 'PUT') {
+        const offset = Number(url.searchParams.get('offset')), data = request.postDataBuffer()!
+        calls.offsets.push(offset); calls.lengths.push(data.length); calls.hashes.push(request.headers()['x-treer-part-sha256'])
+        const { createHash } = await import('node:crypto')
+        expect(calls.hashes.at(-1)).toBe(createHash('sha256').update(data).digest('hex'))
+        expect(data.length).toBeLessThanOrEqual(8 * mib)
+        if (options.rateLimit && attempts++ === 0) return route.fulfill({ status: 429, headers: { 'Retry-After': '1' }, json: { error: { code: 'machine_upload_busy' } } })
+        if (options.hashConflict) return route.fulfill({ status: 409, json: { error: { code: 'upload_part_conflict' } } })
+        if (options.denied) return route.fulfill({ status: 403, json: { error: { code: 'policy_denied' } } })
+        if (attempts++ < (options.failures ?? 0)) return route.abort('connectionreset')
+        await options.partHold
+        committed = offset + data.length
+        if (options.dropPart && !dropped) { dropped = true; return route.abort('connectionreset') }
+        return ok(route, { size, committed_offset: committed })
+      }
+      if (method === 'POST' && url.pathname.endsWith('/commit')) {
+        calls.commits++
+        await options.commitHold
+        state = 'committed'
+        if (options.commitDrop && calls.commits === 1) return route.abort('connectionreset')
+        return ok(route, receipt())
+      }
+      return route.abort()
+    })
+    return { calls, ready }
+  }
+  test('exactly 128 MiB uses bounded raw parts and SHA-256, not whole-file base64', async ({ page }) => {
+    test.setTimeout(60_000)
+    await support(page)
+    const { calls, ready } = fixture(page); await ready
+    const dialog = await open(page, 128 * mib)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (128.0 MB).')).toBeVisible({ timeout: 45_000 })
+    expect(calls.lengths.reduce((a, b) => a + b, 0)).toBe(128 * mib)
+    expect(calls.lengths[0]).toBe(mib)
+    expect(calls.lengths.some((length) => length > mib)).toBe(true)
+    expect(calls.begin).toHaveLength(1)
+    expect(calls.commits).toBe(1)
+    await expect(dialog.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100')
+  })
+  test('128 MiB + 1 is rejected before begin', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page); await ready
+    const dialog = await open(page, 128 * mib + 1)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toHaveText('Files must be 128 MiB or smaller.')
+    expect(calls.begin).toHaveLength(0)
+  })
+  test('lost begin replays the same idempotency key; zero-byte file commits without parts', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { beginDrop: true }); await ready
+    const dialog = await open(page, 0)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (0 B).')).toBeVisible()
+    expect(calls.begin).toHaveLength(2)
+    expect(calls.begin[0]).toMatch(/^[A-Za-z0-9_-]{32,128}$/)
+    expect(calls.begin[1]).toBe(calls.begin[0])
+    expect(calls.offsets).toHaveLength(0)
+    await expect(dialog.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100')
+  })
+  test('lost part response queries committed offset and continues without duplicate bytes', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { dropPart: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MB).')).toBeVisible()
+    expect(calls.offsets.slice(0, 2)).toEqual([0, mib])
+    expect(calls.statuses).toBeGreaterThanOrEqual(2)
+  })
+  test('transport retries are bounded, then Resume retains the same upload id', async ({ page }) => {
+    test.setTimeout(30_000)
+    await support(page)
+    const { calls, ready } = fixture(page, { failures: 4 }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Resume upload' })).toBeVisible({ timeout: 15_000 })
+    expect(calls.offsets).toHaveLength(4)
+    await expect(dialog.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '0')
+    await dialog.getByRole('button', { name: 'Resume upload' }).click()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MB).')).toBeVisible()
+    expect(calls.begin).toHaveLength(1)
+  })
+  test('Policy refusal is not retried or downgraded', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { denied: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Upload is not permitted')
+    expect(calls.offsets).toHaveLength(1)
+    await expect(dialog.getByRole('button', { name: 'Resume upload' })).toHaveCount(0)
+  })
+  test('commit in flight disables cancellation; lost response recovers the receipt', async ({ page }) => {
+    await support(page)
+    let release!: () => void
+    const hold = new Promise<void>((resolve) => { release = resolve })
+    const { calls, ready } = fixture(page, { commitHold: hold, commitDrop: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByText('Finishing upload. Waiting for the machine to confirm.')).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0)
+    await expect(dialog.getByRole('button', { name: 'Close', exact: true })).toBeDisabled()
+    release()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MB).')).toBeVisible()
+    expect(calls.commits).toBe(1)
+    expect(calls.statuses).toBeGreaterThanOrEqual(2)
+  })
+  for (const pending of [false, true]) test(`cancel waits for server cleanup acknowledgement (pending=${pending})`, async ({ page }) => {
+    await support(page)
+    let release!: () => void
+    const hold = new Promise<void>((resolve) => { release = resolve })
+    const { calls, ready } = fixture(page, { partHold: hold, abortPending: pending }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect.poll(() => calls.offsets.length).toBe(1)
+    await dialog.getByRole('button', { name: 'Cancel upload' }).click()
+    await expect(dialog.getByText(pending ? 'Upload stopped. Temporary file cleanup is pending on the machine.' : 'Upload cancelled. The temporary file was removed.')).toBeVisible()
+    expect(calls.aborts).toBe(1)
+    expect(calls.commits).toBe(0)
+    release()
+  })
+  test('rate limits wait and reconcile without starting a new upload', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { rateLimit: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByText('Waiting to reconnect or retry…')).toBeVisible()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (3.00 MB).')).toBeVisible()
+    expect(calls.offsets.slice(0, 2)).toEqual([0, 0])
+    expect(calls.begin).toHaveLength(1)
+  })
+  test('an unreconciled offset never permits a part or commit', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { unreconciled: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('button', { name: 'Resume upload' })).toBeVisible()
+    expect(calls.offsets).toHaveLength(0)
+    expect(calls.commits).toBe(0)
+  })
+  test('conflicting part hash is not retried', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { hashConflict: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toBeVisible()
+    expect(calls.offsets).toHaveLength(1)
+    await expect(dialog.getByRole('button', { name: 'Resume upload' })).toHaveCount(0)
+  })
+  for (const committed of [false, true]) test(`cancel resolves a server race (committed=${committed})`, async ({ page }) => {
+    await support(page)
+    let release!: () => void
+    const hold = new Promise<void>((resolve) => { release = resolve })
+    const { calls, ready } = fixture(page, { partHold: hold, abortBusy: !committed, abortCommitted: committed }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect.poll(() => calls.offsets.length).toBe(1)
+    await dialog.getByRole('button', { name: 'Cancel upload' }).click()
+    if (!committed) {
+      await expect.poll(() => calls.aborts).toBe(1)
+      await expect(dialog.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0)
+      await expect(dialog.getByText('Cancelling and removing the temporary file…')).toBeVisible()
+    }
+    await expect(dialog.getByText(committed ? 'Uploaded repo/payload.bin (3.00 MB).' : 'Upload cancelled. The temporary file was removed.')).toBeVisible()
+    expect(calls.aborts).toBe(committed ? 1 : 2)
+    release()
+  })
+  test('workspace navigation disposes the upload and never sends its next part', async ({ page }) => {
+    await support(page)
+    let release!: () => void
+    const hold = new Promise<void>((resolve) => { release = resolve })
+    const { calls, ready } = fixture(page, { partHold: hold }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect.poll(() => calls.offsets.length).toBe(1)
+    await page.evaluate(() => { history.pushState(null, '', '/orgs/org-2/workspaces/ws-2'); window.dispatchEvent(new PopStateEvent('popstate')) })
+    await expect(dialog).toHaveCount(0)
+    release()
+    await expect(page.getByText('Uploaded repo/payload.bin', { exact: false })).toHaveCount(0)
+    expect(calls.commits).toBe(0)
+    expect(calls.aborts).toBe(0) // Never issue a mutation using the next scope's credentials.
+    expect(calls.offsets).toHaveLength(1)
+  })
+  test('failed capability discovery never silently falls back to base64', async ({ page }) => {
+    await support(page)
+    await page.route('**/api/auth/config', (route) => route.fulfill({ status: 503, json: { error: { code: 'unavailable' } } }))
+    const dialog = await open(page)
+    await expect(dialog.getByText('Cannot check upload support. Retry before uploading.')).toBeVisible()
+    await expect(dialog.getByRole('button', { name: 'Upload', exact: true })).toBeDisabled()
+    await expect(dialog.getByText('Maximum 16 MiB', { exact: false })).toHaveCount(0)
+  })
+  test('missing secure hashing is rejected before begin', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page); await ready
+    await page.addInitScript(() => Object.defineProperty(crypto, 'subtle', { value: undefined }))
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Secure hashing is unavailable')
+    expect(calls.begin).toHaveLength(0)
+  })
+  for (const width of [1360, 390]) for (const theme of ['light', 'dark']) for (const lang of ['en', 'zh']) test(`upload progress fits (${width}, ${theme}, ${lang})`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 })
+    await page.addInitScript(({ theme, lang }) => { localStorage.setItem('treer-theme', theme); localStorage.setItem('treer-lang', lang) }, { theme, lang })
+    await support(page)
+    let release!: () => void
+    const hold = new Promise<void>((resolve) => { release = resolve })
+    const { calls, ready } = fixture(page, { partHold: hold }); await ready
+    // Open with English names, then switch the dictionary without reloading.
+    await page.addInitScript(() => localStorage.setItem('treer-lang', 'en'))
+    const dialog = await open(page)
+    await page.evaluate(async (locale) => { const { setLocale } = await import('/src/i18n/index.ts'); setLocale(locale as 'en' | 'zh') }, lang)
+    await dialog.getByRole('button', { name: lang === 'en' ? 'Upload' : '上传', exact: true }).click()
+    await expect.poll(() => calls.offsets.length).toBe(1)
+    await expect(dialog.getByRole('progressbar')).toBeVisible()
+    await expect(dialog.getByRole('button', { name: lang === 'en' ? 'Cancel upload' : '取消上传' })).toBeVisible()
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+    await page.screenshot({ path: info.outputPath(`upload-${width}-${theme}-${lang}.png`) })
+    await page.keyboard.press('Escape')
+    await expect(dialog).toBeVisible()
+    await dialog.getByRole('button', { name: lang === 'en' ? 'Cancel upload' : '取消上传' }).focus()
+    await page.keyboard.press('Enter')
+    await expect(dialog.getByText(lang === 'en' ? 'Upload cancelled. The temporary file was removed.' : '上传已取消，临时文件已移除。')).toBeVisible()
+    release()
+  })
+})

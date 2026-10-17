@@ -35,9 +35,9 @@ import { WorkloadTree,type NewAgentFolder } from "@/components/workload-tree"
 import { useWorkspaceDialogState } from "@/components/workspace-dialog-state"
 import { WorkspaceDialogs } from "@/components/workspace-dialogs"
 import { WorkspaceSettingsView } from "@/components/workspace-settings-view"
-import { ApiError,api,machineName,proxyUrl,type Agent,type AgentLaunchProfile,type AppDeployment,type MachineFileUpload,type Organization,type Snapshot,type User,type WorkloadTreeState,type Workspace } from "@/lib/api"
+import { ApiError,api,machineName,proxyUrl,type Agent,type AgentLaunchProfile,type AppDeployment,type Organization,type Snapshot,type User,type WorkloadTreeState,type Workspace } from "@/lib/api"
 import { formatCommandLine,parseCommandLine } from "@/lib/command-line"
-import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,activeStatuses,arrayBufferToBase64,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,formatBytes,initials,machineOnline,replaceWorkspace ,workloadPath,isWorkloadDeepLink } from "@/lib/control-plane"
+import { MainView,PREVIEW_CONNECT,PREVIEW_INSTALL,PREVIEW_ORG,PREVIEW_PROFILES,PREVIEW_USER,PREVIEW_WORKSPACE,RenameTarget,activeStatuses,authorizationReturnUrl,controlCharacter,defaultAgentName,defaultProfileAgentName,formatBytes,initials,machineOnline,replaceWorkspace ,workloadPath,isWorkloadDeepLink } from "@/lib/control-plane"
 import { clearFirstRunTour,firstRunTourMode,shouldAutoStartFirstRunTour,startFirstRunTour,stopFirstRunTour,type FirstRunTourHost } from "@/lib/first-run-tour"
 import { readTheme,subscribeTheme,type Theme } from "@/lib/theme"
 import { cn } from "@/lib/utils"
@@ -109,8 +109,7 @@ function WorkspaceAppContent() {
     setCreateAgentError, creatingAgent, setCreatingAgent, deletingApp, setDeletingApp,
     setProfileEditorOpen, editingLaunchProfile, setEditingLaunchProfile, launchingProfile,
     setLaunchingProfile, deletingProfile, setDeletingProfile, setInstallOpen, setInviteOpen,
-    setUploadOpen, uploadDirectory, setUploadDirectory, uploadFile, setUploadFile, overwriteUpload,
-    setOverwriteUpload, setUploading, setUploadInputKey, setUploadMessage, setUploadError, renameTarget,
+    setUploadOpen, renameTarget,
     setRenameTarget, deleteTarget, setDeleteTarget, createOrganizationName, setCreateOrganizationName,
     createWorkspaceName, setCreateWorkspaceName, agentName, setAgentName, agentNameCustomized,
     setAgentNameCustomized, agentProfileId, setAgentProfileId, agentServerId, setAgentServerId, agentCwd,
@@ -944,43 +943,7 @@ function WorkspaceAppContent() {
   function openUpload(agent: Agent) {
     setUploadAgent(agent)
     closeMobileSurface()
-    setUploadDirectory(".")
-    setUploadFile(null)
-    setOverwriteUpload(false)
-    setUploadMessage("")
-    setUploadError("")
-    setUploadInputKey((value) => value + 1)
     setUploadOpen(true)
-  }
-
-  async function uploadToAgentMachine(event: FormEvent) {
-    event.preventDefault()
-    if (!workspaceId || !uploadAgent || !uploadFile) return
-    if (uploadFile.size > 16 * 1024 * 1024) {
-      setUploadError(t("app.files_must_be_16_mib"))
-      return
-    }
-    setUploading(true)
-    setUploadMessage("")
-    setUploadError("")
-    try {
-      const result = await api<MachineFileUpload>(`/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(uploadAgent.server_id)}/files`, {
-        method: "POST",
-        body: JSON.stringify({
-          directory: uploadDirectory,
-          file_name: uploadFile.name,
-          content_base64: arrayBufferToBase64(await uploadFile.arrayBuffer()),
-          overwrite: overwriteUpload,
-        }),
-      })
-      setUploadMessage(t("app.uploaded", { path: result.path, size: formatBytes(result.bytes_written) }))
-      setUploadFile(null)
-      setUploadInputKey((value) => value + 1)
-    } catch (reason) {
-      setUploadError(reason instanceof Error ? reason.message : t("app.upload_failed"))
-    } finally {
-      setUploading(false)
-    }
   }
 
   async function submitRename(event: FormEvent) {
@@ -1143,10 +1106,8 @@ function WorkspaceAppContent() {
       submitRename={submitRename}
       snapshot={snapshot}
       workloadTree={workloadTree}
-      uploadToAgentMachine={uploadToAgentMachine}
+      uploadScopeActive={route.workspaceId === workspaceId && route.organizationId === organizationId}
       selectedAgentMachine={uploadMachine}
-      selectedAgent={uploadAgent}
-      selectedAgentMachineOnline={machineOnline(uploadMachine)}
       confirmDelete={confirmDelete}
       workspaceMachineCount={workspaceMachineCount}
       workspace={workspace}
