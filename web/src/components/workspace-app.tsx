@@ -1,3 +1,4 @@
+import { agentUiIsRefused, useAgentUiFallback } from "@/components/use-agent-ui-fallback"
 import { useWorkspacePins } from "@/components/use-workspace-pins"
 import { agentCreationFailure, type AgentCreationFailure } from "@/lib/agent-creation-failure"
 import { WorkloadSurface } from "@/components/workload-surface"
@@ -269,6 +270,14 @@ function WorkspaceAppContent() {
   const interfaceWorkspace = workspaceId ? encodeURIComponent(workspaceId) : null
   const agentOwnUrls = new Map(interfaceWorkspace ? workloads.filter((agent) => agent.kind !== "app" && agent.interface?.ui_path && !apps.some((app) => (app.runtime_agent_id ?? app.app_id) === agent.agent_id)).map((agent) => [agent.agent_id,
     withEmbedTheme(proxyUrl(`/api/workspaces/${interfaceWorkspace}/agents/${encodeURIComponent(agent.agent_id)}/interface/ui/`), theme, readEmbedAppearance())]) : [])
+  const probeAgent = mainView === "terminal" ? workloads.find((agent) => agent.agent_id === selectedAgentId && agentOwnUrls.has(agent.agent_id) &&
+    snapshot?.servers.some((machine) => machine.server_id === agent.server_id && machine.status === "online")) : undefined
+  const probePath = probeAgent && interfaceWorkspace
+    ? proxyUrl(`/api/workspaces/${interfaceWorkspace}/agents/${encodeURIComponent(probeAgent.agent_id)}/interface/ui/`) : undefined
+  const uiProbeScope = JSON.stringify([user?.user_id, workspaceId, proxyUrl("/"), preview]) + ":"
+  useAgentUiFallback(`${uiProbeScope}${probeAgent?.agent_id}`,
+    preview ? undefined : probePath, user?.user_id)
+  for (const id of agentOwnUrls.keys()) if (agentUiIsRefused(`${uiProbeScope}${id}`)) agentOwnUrls.delete(id)
   const workloadHref = (id: string) => appOwnUrls.get(id) ?? agentOwnUrls.get(id) ?? workloadPath(organizationId, workspaceId, id)
   // Synchronous to preserve the user gesture; session authentication stays in
   // cookies. No credential or caller-supplied navigation URL is added.

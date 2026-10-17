@@ -703,3 +703,69 @@ test.describe('an App opens on its own ingress URL in a new browser tab', () => 
     })
   }
 })
+
+for (const width of [1360, 390]) test(`explicit same-origin refusal falls back to Console links and menus (${width})`, async ({ page, context }) => {
+  await page.setViewportSize({ width, height: 900 })
+  await fixture(page)
+  let probes = 0
+  await page.route('**/agents/*/interface/ui/**', route => {
+    if (route.request().resourceType() === 'fetch') probes++
+    return route.fulfill({ status: 503, json: { error: { code: 'embedded_ui_requires_separate_app_origin' } } })
+  })
+  await gotoWorkspace(page)
+  await open(page, 'Alpha', width === 390)
+  await expect.poll(() => probes).toBe(1)
+  await switchTab(page, 'Overview', width === 390)
+  const link = page.getByRole('link', { name: 'Open /Alpha', exact: true })
+  await expect(link).toHaveAttribute('href', /\/workloads\/tab-1$/)
+  await expect(page.getByRole('link', { name: 'Open /Beta', exact: true })).toHaveAttribute('href', /\/agents\/tab-2\/interface\/ui\//)
+  await open(page, 'Alpha', width === 390)
+  await openTabMenu(page)
+  const [popup] = await Promise.all([context.waitForEvent('page'), page.getByRole('menuitem', { name: 'Open in new browser tab' }).click()])
+  await expect.poll(() => new URL(popup.url()).pathname + new URL(popup.url()).search).toBe(`${workspaceUrl}/workloads/tab-1?focus=1`)
+  expect(await popup.evaluate(() => window.opener)).toBeNull()
+  expect(probes).toBeLessThanOrEqual(2)
+  await popup.close()
+})
+for (const [status, code] of [[503, 'unavailable'], [403, 'embedded_ui_requires_separate_app_origin'], [200, 'embedded_ui_requires_separate_app_origin']] as const) test(`standalone fallback requires exact refusal: ${status}/${code}`, async ({ page }) => {
+  await fixture(page)
+  let probed = false
+  await page.route('**/agents/*/interface/ui/**', route => { probed = true; return route.fulfill({ status, json: { error: { code } } }) })
+  await gotoWorkspace(page)
+  await open(page, 'Alpha')
+  await expect.poll(() => probed).toBe(true)
+  await switchTab(page, 'Overview')
+  await expect(page.getByRole('link', { name: 'Open /Alpha', exact: true })).toHaveAttribute('href', /\/agents\/tab-1\/interface\/ui\//)
+})
+
+for (const failure of ['network', 'oversized', 'malformed', 'redirect', 'non-json']) test(`standalone availability ${failure} leaves native links unchanged without polling`, async ({ page }) => {
+  await fixture(page)
+  let followed = 0
+  await page.route('**/probe-must-not-follow', route => {followed++;return route.fulfill({body:''})})
+  let probes = 0
+  await page.route('**/agents/*/interface/ui/**', route => {
+    if (route.request().resourceType() !== 'fetch') return route.fulfill({ contentType: 'text/html', body: '<p>Agent UI</p>' })
+    probes++
+    {
+      expect(route.request().method()).toBe('GET')
+      expect(new URL(route.request().url()).search).toBe('')
+      expect(route.request().headers()['authorization']).toBeUndefined()
+    }
+    if (failure === 'network') return route.abort()
+    if (failure === 'redirect') return route.fulfill({status:302,headers:{Location:'/probe-must-not-follow'}})
+    if (failure === 'non-json') return route.fulfill({status:503,contentType:'text/html',body:'embedded_ui_requires_separate_app_origin'})
+    return route.fulfill({ status: 503, contentType: 'application/json', body: failure === 'oversized' ? JSON.stringify({ error: { code: 'embedded_ui_requires_separate_app_origin' }, padding: 'x'.repeat(5000) }) : '{invalid' })
+  })
+  await gotoWorkspace(page)
+  expect(probes).toBe(0) // No availability probe before the user selects an Agent.
+  await open(page, 'Alpha')
+  await expect.poll(() => probes).toBeGreaterThanOrEqual(1)
+  await switchTab(page, 'Overview')
+  const link = page.getByRole('link', { name: 'Open /Alpha', exact: true })
+  await expect(link).toHaveAttribute('href', /\/agents\/tab-1\/interface\/ui\//)
+  await page.getByRole('link', { name: 'Open /Terminal', exact: true }).click()
+  await switchTab(page, 'Overview')
+  await expect(link).toHaveAttribute('href', /\/agents\/tab-1\/interface\/ui\//)
+  expect(probes).toBe(1)
+  expect(followed).toBe(0)
+})

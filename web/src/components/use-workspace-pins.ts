@@ -4,13 +4,14 @@ import { PINS_CAPABILITY, PINS_EVENT, parseWorkspacePins, type WorkspacePin, typ
 import { t } from '@/i18n'
 
 const empty: WorkspacePins = { pins: [], limit: 50, can_pin: false, revision: 0 }
+const canRetry = (error: unknown) => !(error instanceof ApiError) || [408, 425, 429].includes(error.status) || error.status >= 500
 
 export function useWorkspacePins(userId: string | null, workspaceId: string | null, preview: boolean) {
   const [retry, setRetry] = useState(0)
   const scope = `${userId ?? ''}:${workspaceId ?? ''}:${preview}`
   const current = useRef(scope)
   current.current = scope
-  const [state, setState] = useState({ scope, data: empty, supported: false, busy: false, error: '' })
+  const [state, setState] = useState({ scope, data: empty, supported: false, busy: false, error: '', retryable: false })
   const refreshRef = useRef<() => Promise<void>>(async () => {})
   const writeLock = useRef(false)
   const invalidateRead = useRef(() => {})
@@ -21,7 +22,7 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
     let generation = 0
     let timer: ReturnType<typeof setTimeout> | undefined
     const controller = new AbortController()
-    setState({ scope, data: empty, supported: false, busy: false, error: '' })
+    setState({ scope, data: empty, supported: false, busy: false, error: '', retryable: false })
     writeLock.current = false
     const base = `/api/workspaces/${encodeURIComponent(workspaceId ?? '')}/pins`
 
@@ -31,7 +32,7 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
       try {
         const data = parseWorkspacePins(await api<unknown>(base, { signal: controller.signal, cache: 'no-store' }))
         if (active && current.current === scope && request === generation) {
-          setState((s) => ({ ...s, scope, data, supported: true, error: '' }))
+          setState((s) => ({ ...s, scope, data, supported: true, error: '', retryable: false }))
         }
       } catch (error) {
         if (!active || current.current !== scope || request !== generation) return
@@ -40,6 +41,7 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
           ...s,
           data: denied ? empty : { ...s.data, can_pin: false },
           error: t('pins.load_failed'),
+          retryable: canRetry(error),
         }))
       }
     }
@@ -79,13 +81,13 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
   }, [scope, userId, workspaceId, preview, retry])
 
   // Hide the previous workspace's data immediately, before the effect resets it.
-  const visible = state.scope === scope ? state : { scope, data: empty, supported: false, busy: false, error: '' }
+  const visible = state.scope === scope ? state : { scope, data: empty, supported: false, busy: false, error: '', retryable: false }
   async function toggle(target: Pick<WorkspacePin, 'kind' | 'id'>) {
     if (!visible.data.can_pin || visible.busy || writeLock.current || !workspaceId) return
     const requestScope = scope
     invalidateRead.current()
     writeLock.current = true
-    setState((s) => ({ ...s, busy: true, error: '' }))
+    setState((s) => ({ ...s, busy: true, error: '', retryable: false }))
     try {
       const pinned = visible.data.pins.some((pin) => pin.kind === target.kind && pin.id === target.id)
       await api(`/api/workspaces/${encodeURIComponent(workspaceId)}/pins/${target.kind}/${encodeURIComponent(target.id)}`, {
@@ -100,6 +102,7 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
         setState((s) => ({
           ...s,
           data: denied ? empty : s.data,
+          retryable: canRetry(error),
           error: t(error instanceof ApiError && error.status === 409 ? 'pins.limit_reached' : 'pins.write_failed'),
         }))
       }
@@ -115,6 +118,7 @@ export function useWorkspacePins(userId: string | null, workspaceId: string | nu
     supported: visible.supported,
     busy: visible.busy,
     error: visible.error,
+    retryable: visible.retryable,
     toggle,
     refresh: () => visible.supported ? refreshRef.current() : setRetry((n) => n + 1),
   }
