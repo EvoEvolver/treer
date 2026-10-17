@@ -113,17 +113,20 @@ pub(in crate::api) async fn require_agent_interface_access(
 }
 
 /// Bounded `origin_url` evaluation (#143 Phase 2): the read-model gate result
-/// per (workspace, member, Agent) is remembered for a short window, so Console
-/// refetch churn (an interface re-registering in a loop makes every member
-/// refetch the snapshot) costs at most one Policy evaluation pair per member
-/// per Agent per window on this Proxy instance. Only the link in the read
-/// model can lag a Policy change by that window; the authorize step and every
-/// request on the origin evaluate the gate uncached.
+/// per (workspace, member, Agent, Policy revision) is remembered for a short
+/// window, so Console refetch churn (an interface re-registering in a loop
+/// makes every member refetch the snapshot) costs at most one Policy
+/// evaluation pair per member per Agent per window on this Proxy instance.
+/// The revision in the key is the one the evaluators would apply now, so a
+/// published Policy is re-evaluated as soon as the engine itself sees it;
+/// allowed and denied results share the window, a failed evaluation is never
+/// remembered, and the authorize step and every request on the origin
+/// evaluate the gate uncached.
 const ORIGIN_GATE_WINDOW: Duration = Duration::from_secs(5);
 const ORIGIN_GATE_CACHE_CAP: usize = 10_000;
 static ORIGIN_GATE_WINDOW_MS: std::sync::atomic::AtomicU64 =
     std::sync::atomic::AtomicU64::new(ORIGIN_GATE_WINDOW.as_millis() as u64);
-type OriginGateKey = (String, String, String);
+type OriginGateKey = (String, String, String, Option<u64>);
 static ORIGIN_GATE_CACHE: std::sync::OnceLock<
     std::sync::Mutex<std::collections::HashMap<OriginGateKey, (bool, std::time::Instant)>>,
 > = std::sync::OnceLock::new();
@@ -196,6 +199,7 @@ pub(in crate::api) async fn hydrate_agent_interface_origin(
         workspace_id.to_owned(),
         user_id.clone(),
         agent.agent_id.clone(),
+        policy.policy_revision(workspace_id).await,
     );
     let allowed = match origin_gate_cached(&key) {
         Some(allowed) => allowed,

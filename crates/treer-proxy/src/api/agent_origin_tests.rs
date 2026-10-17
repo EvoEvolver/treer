@@ -1067,41 +1067,86 @@ async fn agent_origin_url_is_hydrated_only_for_members_passing_the_gate() {
     }
     // Hydration never creates the origin row; only authorize does.
     assert_eq!(agent_rows(&fixture).await, 0);
-    // With the window on, a member's result is reused: the denying engine
-    // still shows the origin granted moments ago by the allowing one, and the
-    // bound is per member and Agent (a fresh member is evaluated).
+    // With the window on, a member's result is reused only for the same
+    // Policy revision: the allowing revision 2 is remembered, a published
+    // revision 3 denying prompt is re-evaluated at once by a fresh engine
+    // (fresh evaluator cache), and the bound is per member (the owner is
+    // evaluated afresh under the remembered revision).
     super::network::set_origin_gate_window_for_test(Duration::from_secs(60));
-    let app = build(allow());
-    let response = app.oneshot(get(&agent_path)).await.unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let app = build(PolicyEngine::durable(store.clone()));
-    let response = app.clone().oneshot(get(&agent_path)).await.unwrap();
-    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
-        .await
-        .unwrap();
-    let agent: Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(
-        agent["interface"]["origin_url"].as_str(),
-        Some(expected.as_str()),
-        "cached within the window"
-    );
-    let response = app
-        .oneshot(
-            Request::builder()
-                .uri(&agent_path)
-                .header(header::HOST, "proxy.treer.example")
-                .header(header::COOKIE, "treer_session=tok-owner")
-                .body(Body::empty())
-                .unwrap(),
+    let read = |app: Router, token: &str| {
+        let request = Request::builder()
+            .uri(&agent_path)
+            .header(header::HOST, "proxy.treer.example")
+            .header(header::COOKIE, format!("treer_session={token}"))
+            .body(Body::empty())
+            .unwrap();
+        async move {
+            let response = app.oneshot(request).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+                .await
+                .unwrap();
+            let agent: Value = serde_json::from_slice(&body).unwrap();
+            agent["interface"]["origin_url"].as_str().map(str::to_owned)
+        }
+    };
+    let allow_all_document = WorkspacePolicyDocument {
+        schema_version: POLICY_SCHEMA_VERSION,
+        defaults: BTreeMap::new(),
+        groups: BTreeMap::new(),
+        rules: vec![],
+    };
+    let owner = PolicyPrincipalRef {
+        kind: PolicyPrincipalKind::Human,
+        id: "owner".into(),
+    };
+    store
+        .replace(
+            "default",
+            1,
+            PolicyMode::Enforce,
+            allow_all_document,
+            owner.clone(),
         )
         .await
         .unwrap();
-    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+    assert_eq!(
+        read(build(PolicyEngine::durable(store.clone())), "tok-member").await,
+        Some(expected.clone()),
+        "revision 2 allows"
+    );
+    let deny_prompt = WorkspacePolicyDocument {
+        schema_version: POLICY_SCHEMA_VERSION,
+        defaults: BTreeMap::from([(
+            crate::policy::ACTION_AGENT_PROMPT.into(),
+            PolicyEffect::Deny,
+        )]),
+        groups: BTreeMap::new(),
+        rules: vec![],
+    };
+    store
+        .replace("default", 2, PolicyMode::Enforce, deny_prompt, owner)
         .await
         .unwrap();
-    let agent: Value = serde_json::from_slice(&body).unwrap();
     assert_eq!(
-        agent["interface"]["origin_url"].as_str(),
+        read(build(PolicyEngine::durable(store.clone())), "tok-member").await,
+        None,
+        "revision 3 is a new key: denied without waiting for the window"
+    );
+    // The remembered allow for revision 2 is never served to another member.
+    let fixed_revision_two = PolicyEngine::new(crate::policy::PolicyDecision::Allow, vec![]);
+    assert_eq!(
+        read(build(fixed_revision_two.clone()), "tok-member").await,
+        Some(expected.clone()),
+        "an engine without a revision has its own key and is evaluated"
+    );
+    assert_eq!(
+        read(build(deny()), "tok-member").await,
+        Some(expected.clone()),
+        "within the window, the same member, Agent and (absent) revision reuse the result"
+    );
+    assert_eq!(
+        read(build(deny()), "tok-owner").await,
         None,
         "another member is evaluated afresh"
     );

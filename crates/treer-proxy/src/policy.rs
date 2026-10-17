@@ -251,6 +251,17 @@ pub trait PolicyEvaluator: Send + Sync {
     }
     fn evaluate<'a>(&'a self, request: &'a PolicyRequest) -> PolicyFuture<'a>;
 
+    /// The revision of the workspace Policy this evaluator would apply now,
+    /// when it has one; durable and Provider evaluators answer from the same
+    /// bounded cache their decisions use, so a cache key built on it changes
+    /// exactly when their decisions can.
+    fn revision<'a>(
+        &'a self,
+        _workspace_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<u64>> + Send + 'a>> {
+        Box::pin(async { None })
+    }
+
     fn evaluate_batch<'a>(&'a self, requests: &'a [PolicyRequest]) -> PolicyBatchFuture<'a> {
         Box::pin(async move {
             let mut evaluations = Vec::with_capacity(requests.len());
@@ -415,6 +426,19 @@ impl PolicyEngine {
             tree_pool: None,
             records: Arc::new(Mutex::new(VecDeque::new())),
         }
+    }
+
+    /// The first evaluator-reported workspace Policy revision (#143 Phase 2):
+    /// callers that remember a decision key it with this value so a published
+    /// revision is seen as soon as the evaluators themselves see it. `None`
+    /// for engines without a revisioned document (fixed test engines).
+    pub async fn policy_revision(&self, workspace_id: &str) -> Option<u64> {
+        for evaluator in self.evaluators.iter() {
+            if let Some(revision) = evaluator.revision(workspace_id).await {
+                return Some(revision);
+            }
+        }
+        None
     }
 
     pub async fn invalidate_provider(&self, workspace_id: &str) {
@@ -968,6 +992,18 @@ fn cached_provider_result(
 }
 
 impl PolicyEvaluator for ProviderPolicyEvaluator {
+    fn revision<'a>(
+        &'a self,
+        workspace_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<u64>> + Send + 'a>> {
+        Box::pin(async move {
+            self.compiled(workspace_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|policy| policy.revision)
+        })
+    }
     fn explain<'a>(
         &'a self,
         request: &'a PolicyRequest,
@@ -1093,6 +1129,18 @@ impl DurablePolicyEvaluator {
 }
 
 impl PolicyEvaluator for DurablePolicyEvaluator {
+    fn revision<'a>(
+        &'a self,
+        workspace_id: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<u64>> + Send + 'a>> {
+        Box::pin(async move {
+            self.compiled(workspace_id)
+                .await
+                .ok()
+                .flatten()
+                .map(|policy| policy.revision)
+        })
+    }
     fn explain<'a>(
         &'a self,
         request: &'a PolicyRequest,

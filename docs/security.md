@@ -1112,11 +1112,15 @@ refuses the existing session; the same gate now protects the Proxy-origin
 `/agents/{id}/interface/ui` tunnel for humans and machines. Hydrating
 `interface.origin_url` on the Agent and snapshot read models uses the same gate
 and never creates the row; its result is remembered per (workspace, member,
-Agent) for five seconds on each Proxy instance (a bounded cache, cleared when it
-exceeds ten thousand entries), so an interface re-registering in a loop cannot
-turn every member's Console refetch into unbounded Policy evaluation. Only the
-link in the read model can lag a Policy change by that window; the authorize
-step and every request on the origin evaluate the gate uncached.
+Agent, Policy revision) for five seconds on each Proxy instance (a bounded
+cache, cleared when it exceeds ten thousand entries), so an interface
+re-registering in a loop cannot turn every member's Console refetch into
+unbounded Policy evaluation. The revision is the one the Policy evaluators
+would apply now, so a published Policy is re-evaluated as soon as the engine
+sees it; one member's result is never served to another; allowed and denied
+results share the window and a failed evaluation is never remembered. The
+authorize step, every request on the origin and the Proxy-origin tunnel
+evaluate the gate uncached.
 
 Requests are tunnelled with the Agent UI provenance (`proxy-ui`, the resolved
 Agent ID, the registered instance; cookies and gateway authorization stripped,
