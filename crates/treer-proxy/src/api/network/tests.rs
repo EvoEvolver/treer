@@ -80,15 +80,36 @@ async fn relay_fixture(
     )
 }
 
+/// Readiness waits for a Controller-bound frame the test caused. Under correct
+/// behavior the frame arrives; its absence is exactly what the test must still
+/// detect, so the bound is one generous absolute deadline per expected
+/// condition that excludes a hung test without pacing a loaded machine (#128:
+/// fixed 5 s waits elapsed at a load average of 16 while the suite took
+/// 249 s). The deadline is computed once per condition and passed through
+/// every skip loop, so irrelevant frames never extend the condition's budget.
+/// Nothing is retried and no assertion changes.
+const CONTROLLER_FRAME_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn frame_deadline() -> tokio::time::Instant {
+    tokio::time::Instant::now() + CONTROLLER_FRAME_DEADLINE
+}
+
+async fn await_frame(
+    receiver: &mut tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+    deadline: tokio::time::Instant,
+) -> SocketFrame {
+    tokio::time::timeout_at(deadline, receiver.recv())
+        .await
+        .expect("the Controller-bound frame this test caused did not arrive before its deadline")
+        .expect("the fixture Controller connection stays open")
+}
+
 async fn next_frame(
     receiver: &mut tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+    deadline: tokio::time::Instant,
 ) -> NetworkBinaryFrame {
     loop {
-        match tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
-            .await
-            .unwrap()
-            .unwrap()
-        {
+        match await_frame(receiver, deadline).await {
             SocketFrame::Binary(data) => return NetworkBinaryFrame::decode(&data).unwrap(),
             _ => continue,
         }
@@ -239,11 +260,9 @@ async fn machine_restore_route_authenticates_scopes_and_reports_waiting_endpoint
     let server_id = service.server_id.clone();
     let responder = tokio::spawn(async move {
         let mut actions = Vec::new();
+        let deadline = frame_deadline();
         while actions.len() < 2 {
-            let frame = tokio::time::timeout(std::time::Duration::from_secs(5), receiver.recv())
-                .await
-                .unwrap()
-                .unwrap();
+            let frame = await_frame(&mut receiver, deadline).await;
             let SocketFrame::Text(encoded) = frame else {
                 continue;
             };
@@ -360,7 +379,7 @@ async fn private_service_transport_revocation(websocket: bool) {
                 .unwrap())
         }
     });
-    let open = next_frame(&mut receiver).await;
+    let open = next_frame(&mut receiver, frame_deadline()).await;
     assert_eq!(open.kind, NetworkBinaryKind::Open);
     let connect: treer_protocol::NetworkConnectRequest =
         serde_json::from_slice(&open.payload).unwrap();
@@ -381,12 +400,15 @@ async fn private_service_transport_revocation(websocket: bool) {
                 .send(WireMessage::Binary(b"ping".to_vec().into()))
                 .await
                 .unwrap();
-            assert_eq!(next_frame(&mut receiver).await.payload, b"ping");
+            assert_eq!(
+                next_frame(&mut receiver, frame_deadline()).await.payload,
+                b"ping"
+            );
             client
                 .send(WireMessage::Text(treer_protocol::SERVICE_STREAM_EOF.into()))
                 .await
                 .unwrap();
-            let half_close = next_frame(&mut receiver).await;
+            let half_close = next_frame(&mut receiver, frame_deadline()).await;
             assert_eq!(half_close.kind, NetworkBinaryKind::HalfClose);
             relay(
                 &state,
@@ -409,8 +431,9 @@ async fn private_service_transport_revocation(websocket: bool) {
                 closed,
                 None | Some(Err(_)) | Some(Ok(WireMessage::Close(_)))
             ));
+            let deadline = frame_deadline();
             let reset = loop {
-                let frame = next_frame(&mut receiver).await;
+                let frame = next_frame(&mut receiver, deadline).await;
                 if frame.kind == NetworkBinaryKind::Reset {
                     break frame;
                 }
@@ -424,7 +447,10 @@ async fn private_service_transport_revocation(websocket: bool) {
     assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
     let mut client = response.upgrade().await.unwrap();
     client.write_all(b"ping").await.unwrap();
-    assert_eq!(next_frame(&mut receiver).await.payload, b"ping");
+    assert_eq!(
+        next_frame(&mut receiver, frame_deadline()).await.payload,
+        b"ping"
+    );
     revoked.store(true, Ordering::SeqCst);
     let mut byte = [0];
     assert_eq!(
@@ -434,8 +460,9 @@ async fn private_service_transport_revocation(websocket: bool) {
             .unwrap(),
         0
     );
+    let deadline = frame_deadline();
     let reset = loop {
-        let frame = next_frame(&mut receiver).await;
+        let frame = next_frame(&mut receiver, deadline).await;
         if frame.kind == NetworkBinaryKind::Reset {
             break frame;
         }
@@ -557,7 +584,7 @@ async fn public_tcp_allocation_is_stable_and_explicitly_revocable() {
     let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .unwrap();
-    let open = next_frame(&mut receiver).await;
+    let open = next_frame(&mut receiver, frame_deadline()).await;
     relay(
         &state,
         &service,
@@ -568,10 +595,13 @@ async fn public_tcp_allocation_is_stable_and_explicitly_revocable() {
     )
     .await;
     client.write_all(b"request").await.unwrap();
-    assert_eq!(next_frame(&mut receiver).await.payload, b"request");
+    assert_eq!(
+        next_frame(&mut receiver, frame_deadline()).await.payload,
+        b"request"
+    );
     client.shutdown().await.unwrap();
     assert_eq!(
-        next_frame(&mut receiver).await.kind,
+        next_frame(&mut receiver, frame_deadline()).await.kind,
         NetworkBinaryKind::HalfClose
     );
     relay(
@@ -606,8 +636,9 @@ async fn public_tcp_allocation_is_stable_and_explicitly_revocable() {
     let mut client = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .unwrap();
+    let deadline = frame_deadline();
     let open = loop {
-        let frame = next_frame(&mut receiver).await;
+        let frame = next_frame(&mut receiver, deadline).await;
         if frame.kind == NetworkBinaryKind::Open {
             break frame;
         }
