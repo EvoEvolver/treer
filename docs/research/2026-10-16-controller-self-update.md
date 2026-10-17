@@ -464,6 +464,77 @@ transitions, durable attested child identity and worker-death/accepted-before-AC
 reconciliation still must be wired before any installer dispatch. An intent
 without completion remains ambiguous, never proof that no child ran.
 
+Status intent policy (security2596): this is the updater's one-shot post-install
+status verification, not an intent requirement for ordinary `treer launcher
+status`. Its conservative marker is intentional: a supposedly read-only command
+still starts an interpreter and may leave descendants. Until a separate durable
+completion/quiescence record exists, a second updater status probe for the same
+job is refused. Explicit recovery may archive its validated intent and related
+storage only after proving either that the closed execution gate never opened
+and no unregistered runner remains, or that the registered child/group is
+quiescent. Preserve the outcome and archive disposition durably; a subsequent
+explicit attempt must use a new attempt identity, never replay the old operation
+ID. Normal successful completion should eventually record this disposition
+without requiring manual recovery. None of that completion/archive lifecycle is
+implemented by the current exclusive intent writer.
+
+Proposed birth-to-execution protocol (security2596; NOT implemented or accepted
+as recoverable startup yet): use a trusted Rust supervisor with a closed,
+one-shot execution gate. A discoverable environment string alone is not an
+ownership or quiescence proof. The implementation must establish this order:
+
+1. Under the original job/installation/enrollment ownership, create an exclusive
+   attempt and acquire its dedicated OS birth lock. Persist the intent first.
+   Use a process-shared lock whose same open-file description is inherited by
+   the runner atomically at fork, before it can run user code. Merely locking
+   after exec or sending the lock later over IPC leaves the original gap open.
+2. The trusted runner starts with the gate closed and the inherited birth-lock
+   descriptor retained, using a clean environment and fixed private bootstrap.
+   It authenticates the job/intent and its parent through OS evidence and the
+   private one-shot channel. It must not launch Node, execute installer code,
+   release the birth lock or create unregistered descendants at this stage.
+   Exec/bootstrap failure closes the inherited descriptor; EOF/timeout or an
+   invalid permit makes the runner exit without executing the installer.
+3. Before any permit, persist a strict child identity record bound to the exact
+   intent/attempt and OS boot, PID, creation identity, session/group and verified
+   supervisor image. Establish the intended group/session first, then validate
+   those facts against the OS. Sync the identity file and parent directory and
+   read it back under retained handles; an acknowledgement alone is insufficient.
+   Record format, authentication and atomic descriptor inheritance still need
+   implementation and Mac/Linux evidence, not a child-self-reported PID.
+4. Only after that durable identity and current image/receipt checks may the
+   parent send the one-shot execution permit. The runner verifies the binding
+   again before opening the gate. Its identity is already durable if the parent
+   dies after permit delivery but before observing an ACK. Neither side retries
+   a permit or installer launch after an ambiguous result. Retaining the birth
+   lock until this boundary prevents an unregistered runner escaping recovery.
+5. Recovery first proves the original owner cannot issue another permit. For an
+   unregistered attempt it must acquire the same birth lock exclusively; failure
+   means a possibly live owner/runner, so keep `update_recovery_required`. A lock
+   acquired by the parent and inherited at fork covers the crash window even
+   before the child executes its first instruction. Successful acquisition plus
+   validated closed-gate records can prove no unregistered runner can execute;
+   lock availability or absence of a PID/record alone cannot. Corrupt, partial,
+   contradictory or unavailable gate/identity evidence remains unresolved.
+6. With a durable identity, including after a lost ACK, reconcile actual OS
+   identity and the complete group without replaying startup or capturing a new
+   baseline. Require a quiescence witness before completion, archive, cleanup or
+   rollback. If the supervisor dies while descendants may remain, retain the
+   durable identity/evidence and fail closed until the platform can prove the
+   group safe; disappearance of the leader is insufficient.
+
+Required isolated fault tests must kill the worker/runner at each boundary:
+before fork, before child registration, during partial identity write/sync,
+after durable identity before permit, after permit before ACK, and while a
+descendant survives its leader. Assert that no installer sentinel is written
+before the durable gate, missing identity cannot authorize replay/cleanup,
+an inherited birth lock blocks unregistered-runner recovery, and lost-ACK
+reconciliation never starts a second child. Include status completion/archive
+and repeat-attempt disposition. These tests and the protocol are outstanding;
+`record_start_intent` alone is not a recoverable launch prerequisite or permission
+to start the installer. The existing generic bounded subprocess helper does not
+implement this startup handshake or atomically inherited birth lock.
+
 Known permission boundary (security2545): these checks inspect Unix owner/mode
 bits only. They do not inspect macOS/POSIX ACL-granted write access or platform
 file flags (including Linux immutable flags). A passing check is not proof that
