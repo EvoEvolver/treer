@@ -556,16 +556,28 @@ the Web UI alone does not provide it.
 ### Provider CLI installation (capability-gated)
 
 The machine overview's **Install agent CLIs** entry uses the human-session
-`machine.provider-cli-install.v1` routes. Old Proxies/Controllers hide the entry;
-there is no generic-exec fallback. A structured `command_not_found` creation
+`machine.provider-cli-install.v2` capability for observed consent. An old Proxy
+hides the entry; a v1-only Controller's explicit refusal asks the operator to
+update that machine. There is no unobserved or generic-exec fallback. A structured `command_not_found` creation
 failure offers the same flow only for a unique, supported server-declared bare
 binary, on the selected machine, with the reserved identity proven removed.
 Unconfirmed reservations retain the explicit cleanup flow and block creation.
 
-Choosing a provider fetches a fresh, 120-second confirmation. The database clock owns expiry; the browser uses a relative display timeout so local wall-clock skew does not reject a fresh token. The dialog displays
+Choosing a provider fetches Core's observation, current and pinned target versions,
+and authoritative action: install, replace or noop. A same-version noop has no
+token or install button and says **self-reported version**, not verified integrity.
+Replacement warnings distinguish upgrade, downgrade, unreadable version and
+incomparable versions. The last three require an extra explicit checkbox;
+installation sends only the token and its matching `acknowledged_relation`.
+Cancellation or a new preparation resets that acknowledgement. Core remains
+responsible for version comparison and binding the observation into consent.
+Web does not independently classify downgrades or compare semver; it gates
+acknowledgement exclusively on Core's authoritative `version_relation`.
+
+For a mutation, prepare fetches a fresh, 120-second confirmation. The database clock owns expiry; the browser uses a relative display timeout so local wall-clock skew does not reject a fresh token. The dialog displays
 Core's complete ordered plan, integrity digest, target machine/platform and
 network/global-prefix effects. The browser sends recipe ID/version/hash to
-prepare/check and only the in-memory confirmation token to install. Cancellation
+prepare/check and the in-memory confirmation token (plus the required acknowledgement) to install. Cancellation
 or closing discards the token; neither tokens nor output enter browser storage,
 URLs or logs. Output is React text, never HTML or terminal input. Polling is
 read-only, once per second while viewed, and stops at terminal/unknown outcomes.
@@ -574,6 +586,11 @@ in-memory operation ID. An explicit status refresh can resolve an unknown result
 installation requests are never automatically replayed. Page reload/navigation
 loses that local operation reference, so inspect the machine before another
 installation. No browser operation-history endpoint is provided in this version.
+If Core detects installation state changed after consent, the dialog compares
+the confirmed observation with the fresh path-free summary, and offers an
+explicit **Review new plan** action. It never automatically prepares or installs
+again. Core performs the checks; the browser cannot guarantee the absence of a
+race between a final observation and the package manager writing to disk.
 
 Success means the version probe in npm's global prefix passed. It does **not**
 prove that directory is on the Controller PATH. Check the installed version to

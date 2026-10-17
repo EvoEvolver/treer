@@ -2469,10 +2469,11 @@ const providerRecipe = {
     { step: 5, kind: 'resolve', purpose: 'check', rule: '<npm prefix --global>/bin/codex --version', binary: 'codex', args: ['--version'], prefix_from_step: 4 },
   ],
 }
-async function mockProviderApi(page: Page, options: { capability?: boolean; status?: string; prepareStatus?: number; oldMachine?: boolean; installStatus?: number; abortInstall?: boolean; output?: string } = {}) {
+const providerConsent = { action: 'install', target_version: '1.2.3', observation_hash: 'd'.repeat(64), observation: { state: 'absent', executable: '/opt/global/bin/codex', found_in_prefix: false, probe: { exit_code: null, timed_out: false, cleanup_confirmed: true } } }
+async function mockProviderApi(page: Page, options: { capability?: boolean; status?: string; prepareStatus?: number; oldMachine?: boolean; installStatus?: number; abortInstall?: boolean; output?: string; consent?: Record<string, unknown>; stateChanged?: boolean } = {}) {
   const requests: { path: string; body: unknown }[] = []
   let polls = 0
-  await page.route('**/api/auth/config', route => ok(route, { capabilities: options.capability === false ? [] : ['machine.provider-cli-install.v1'] }))
+  await page.route('**/api/auth/config', route => ok(route, { capabilities: options.capability === false ? [] : ['machine.provider-cli-install.v2'] }))
   await page.route('**/api/workspaces/ws-1/machines/*/provider-clis/**', async route => {
     const path = new URL(route.request().url()).pathname
     if (route.request().method() === 'POST') requests.push({ path, body: route.request().postDataJSON() })
@@ -2483,7 +2484,7 @@ async function mockProviderApi(page: Page, options: { capability?: boolean; stat
     }] })
     if (path.endsWith('/prepare')) {
       if (options.prepareStatus) return route.fulfill({ status: options.prepareStatus, json: { error: { message: 'Do not echo a raw server secret' } } })
-      return ok(route, { confirmation_token: 'fixture-confirmation-token', expires_at: new Date(Date.now() + 120000).toISOString(), machine_id: 'srv-a', table_hash: 'b'.repeat(64), recipe: providerRecipe })
+      return ok(route, { ...providerConsent, confirmation_token: 'fixture-confirmation-token', expires_at: new Date(Date.now() + 120000).toISOString(), machine_id: 'srv-a', table_hash: 'b'.repeat(64), recipe: providerRecipe, ...options.consent })
     }
     if (path.endsWith('/install')) {
       if (options.abortInstall) return route.abort('connectionreset')
@@ -2492,9 +2493,10 @@ async function mockProviderApi(page: Page, options: { capability?: boolean; stat
     }
     if (path.includes('/operations/')) {
       polls++
-      const status = options.status ?? 'succeeded'
+      const status = options.stateChanged ? 'failed' : options.status ?? 'succeeded'
       return ok(route, { operation_id: 'op-fixture', machine_id: 'srv-a', recipe_id: providerRecipe.recipe_id, recipe_version: 1, recipe_hash: providerRecipe.recipe_hash,
-        status, step: status === 'running' ? 3 : 5, elapsed_ms: 1000, exit_code: status === 'succeeded' ? 0 : status === 'failed' ? 7 : null, timed_out: status === 'timed_out',
+        ...(options.stateChanged ? { error_code: 'provider_cli_state_changed', observed_before: { state: 'installed', current_version: '9.0.0', found_in_prefix: true, observation_hash: 'e'.repeat(64) }, steps: [] } : {}),
+        status, step: options.stateChanged ? 0 : status === 'running' ? 3 : 5, elapsed_ms: 1000, exit_code: status === 'succeeded' ? 0 : status === 'failed' ? 7 : null, timed_out: status === 'timed_out',
         stdout: status === 'running' ? '' : options.output ?? '<img src=x onerror="window.providerXss=1"> fixture output', stderr: '', truncated: status === 'failed' })
     }
     if (path.endsWith('/check')) return ok(route, { installed: true, found_in_prefix: true, version: 'codex 1.2.3', executable: '/opt/global/bin/codex', exit_code: 0, timed_out: false, stdout: 'codex 1.2.3', stderr: '', truncated: false })
@@ -2716,7 +2718,7 @@ test('provider installer expired confirmation cannot dispatch', async ({ page })
 })
 test('provider installer rejects a mismatched prepared machine', async ({ page }) => {
   const backend = await mockProviderApi(page)
-  await page.route('**/provider-clis/prepare', route => ok(route, { confirmation_token: 'foreign-fixture-token', expires_at: new Date(Date.now() + 120000).toISOString(), machine_id: 'srv-b', table_hash: 'b'.repeat(64), recipe: providerRecipe }))
+  await page.route('**/provider-clis/prepare', route => ok(route, { ...providerConsent, confirmation_token: 'foreign-fixture-token', expires_at: new Date(Date.now() + 120000).toISOString(), machine_id: 'srv-b', table_hash: 'b'.repeat(64), recipe: providerRecipe }))
   await openProviderMachine(page)
   await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
   await page.getByRole('button', { name: 'Install codex', exact: true }).click()
@@ -2745,4 +2747,138 @@ test('provider installer escapes terminal and bidirectional controls in technica
   await page.getByRole('button', { name: 'Confirm and install', exact: true }).click()
   await page.getByText('Technical details and output', { exact: true }).click()
   await expect(page.getByRole('dialog').locator('pre')).toHaveText('\\u001b[31mred\\u0007\\u200b\\u200f\\u202a\\u202e\\u2066\\u2069\\ufeff\nplain\ttext')
+})
+
+const installedObservation = (version: string | null, unknown = false) => ({
+  state: unknown ? 'unknown' : 'installed', current_version: version, version_text: version,
+  executable: '/opt/global/bin/codex', found_in_prefix: true,
+  probe: { exit_code: unknown ? 1 : 0, timed_out: false, cleanup_confirmed: true, error_code: unknown ? 'provider_cli_version_unparsed' : null },
+})
+for (const width of [1280, 390]) for (const theme of ['light', 'dark']) for (const locale of ['en', 'zh']) test(`provider consent downgrade (${width}, ${theme}, ${locale})`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 })
+  await page.addInitScript(value => localStorage.setItem('treer-theme', value), theme)
+  const backend = await mockProviderApi(page, { consent: { action: 'replace', version_relation: 'downgrade', observation: installedObservation('2.0.0') } })
+  await openProviderMachine(page)
+  if (locale === 'zh') await page.evaluate(async () => {
+    // @ts-expect-error Vite browser module.
+    const { setLocale } = await import('/src/i18n/index.ts'); setLocale('zh')
+  })
+  await page.getByRole('button', { name: locale === 'en' ? 'Install agent CLIs' : '安装 Agent CLI', exact: true }).click()
+  await page.getByRole('button', { name: locale === 'en' ? 'Install codex' : '安装 codex', exact: true }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog.getByRole('alert')).toContainText(locale === 'en' ? 'Downgrade' : '降级')
+  await expect(dialog.getByText(/2\.0\.0/)).toBeVisible()
+  const confirm = dialog.getByRole('button', { name: locale === 'en' ? 'Confirm and install' : '确认并安装', exact: true })
+  await expect(confirm).toBeDisabled()
+  await page.screenshot({ path: info.outputPath(`consent-${width}-${theme}-${locale}.png`) })
+  await dialog.getByRole('checkbox').scrollIntoViewIfNeeded()
+  await expect(dialog.getByRole('checkbox')).not.toBeChecked()
+  await expect(dialog.getByText(locale === 'en' ? 'Tick the box to enable installation.' : '勾选确认后才能安装。')).toBeVisible()
+  await page.screenshot({ path: info.outputPath(`consent-unchecked-${width}-${theme}-${locale}.png`) })
+  await dialog.getByRole('checkbox').focus(); await page.keyboard.press('Space')
+  await expect(confirm).toBeEnabled()
+  await page.screenshot({ path: info.outputPath(`consent-ack-${width}-${theme}-${locale}.png`) })
+  await confirm.click()
+  await expect.poll(() => backend.requests.filter(item => item.path.endsWith('/install')).length).toBe(1)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))[0].body).toEqual({ confirmation_token: 'fixture-confirmation-token', acknowledged_relation: 'downgrade' })
+  await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+})
+for (const relation of ['upgrade', 'unknown', 'incomparable']) test(`provider consent acknowledgement ${relation}`, async ({ page }) => {
+  const backend = await mockProviderApi(page, { consent: { action: 'replace', version_relation: relation, observation: installedObservation(relation === 'unknown' ? null : '1.0.0', relation === 'unknown') } })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  const confirm = page.getByRole('button', { name: 'Confirm and install', exact: true })
+  if (relation === 'upgrade') await expect(page.getByRole('checkbox')).toHaveCount(0)
+  else { await expect(confirm).toBeDisabled(); await page.locator('label').filter({ has: page.getByRole('checkbox') }).click({ position: { x: 80, y: 20 } }); await expect(page.getByRole('checkbox')).toBeChecked() }
+  await confirm.click()
+  await expect.poll(() => backend.requests.filter(item => item.path.endsWith('/install')).length).toBe(1)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))[0].body).toEqual({ confirmation_token: 'fixture-confirmation-token', ...(relation === 'upgrade' ? {} : { acknowledged_relation: relation }) })
+})
+for (const width of [1280, 390]) test(`provider consent noop (${width})`, async ({ page }, info) => {
+  await page.setViewportSize({ width, height: 900 })
+  const backend = await mockProviderApi(page, { consent: { action: 'noop', version_relation: undefined, observation: installedObservation('1.2.3'), confirmation_token: undefined, expires_at: undefined } })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Already installed', exact: true })).toBeVisible()
+  await expect(page.getByText('Current: installed, self-reported version 1.2.3')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+  await page.screenshot({ path: info.outputPath(`consent-noop-${width}.png`) })
+})
+for (const consent of [{ action: 'invented' }, { action: 'noop', observation: installedObservation('1.2.3') }, { observation: { ...installedObservation(null), state: 'invented' } }, { action: 'replace', version_relation: 'downgrade' }]) test(`provider consent malformed ${JSON.stringify(consent)}`, async ({ page }) => {
+  const backend = await mockProviderApi(page, { consent })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect(page.getByRole('dialog').getByRole('alert')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})
+test('provider consent state changed requires a fresh plan without automatic replay', async ({ page }) => {
+  const backend = await mockProviderApi(page, { stateChanged: true })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await page.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(page.getByRole('dialog').getByRole('alert')).toContainText('installation state changed')
+  await expect(page.getByText('Current: installed, self-reported version 9.0.0')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Check installed version' })).toHaveCount(0)
+  expect(backend.requests.filter(item => item.path.endsWith('/prepare'))).toHaveLength(1)
+  await page.getByRole('button', { name: 'Review a new plan', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toBeVisible()
+  expect(backend.requests.filter(item => item.path.endsWith('/prepare'))).toHaveLength(2)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(1)
+})
+
+test('provider consent cancelled acknowledgement does not survive a fresh preparation', async ({ page }) => {
+  const backend = await mockProviderApi(page, { consent: { action: 'replace', version_relation: 'downgrade', observation: installedObservation('2.0.0') } })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await page.getByRole('checkbox').check()
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect(page.getByRole('checkbox')).not.toBeChecked()
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toBeDisabled()
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})
+
+test('provider consent v1-only Proxy never offers unobserved installation', async ({ page }) => {
+  const backend = await mockProviderApi(page)
+  await page.route('**/api/auth/config', route => ok(route, { capabilities: ['machine.provider-cli-install.v1'] }))
+  await openProviderMachine(page)
+  await expect(page.getByRole('button', { name: 'Install agent CLIs', exact: true })).toHaveCount(0)
+  expect(backend.requests).toHaveLength(0)
+})
+
+test('provider consent outdated Controller explains update without fallback', async ({ page }) => {
+  const backend = await mockProviderApi(page)
+  await page.route('**/provider-clis/prepare', route => route.fulfill({ status: 409, json: { error: { code: 'provider_cli_controller_outdated', message: 'must not echo raw server details' } } }))
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await expect(page.getByRole('alert')).toContainText(/update/i)
+  await expect(page.getByRole('alert')).not.toContainText('raw server details')
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
+  expect(backend.requests.filter(item => item.path.endsWith('/install'))).toHaveLength(0)
+})
+
+for (const code of ['provider_cli_acknowledgement_required', 'provider_cli_acknowledgement_mismatch']) test(`provider consent ${code} asks for fresh consent without replay`, async ({ page }) => {
+  await mockProviderApi(page, { consent: { action: 'replace', version_relation: 'downgrade', observation: installedObservation('2.0.0') } })
+  let installs = 0
+  await page.route('**/provider-clis/install', route => {
+    installs++
+    return route.fulfill({ status: 400, json: { error: { code, message: 'Do not echo raw server details' } } })
+  })
+  await openProviderMachine(page)
+  await page.getByRole('button', { name: 'Install agent CLIs', exact: true }).click()
+  await page.getByRole('button', { name: 'Install codex', exact: true }).click()
+  await page.getByRole('checkbox').check()
+  await page.getByRole('button', { name: 'Confirm and install', exact: true }).click()
+  await expect(page.getByRole('alert')).toHaveText('Installation was not accepted. Review a new plan and tick the required acknowledgement before confirming.')
+  await expect(page.getByRole('button', { name: 'Confirm and install', exact: true })).toHaveCount(0)
+  expect(installs).toBe(1)
 })

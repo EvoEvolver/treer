@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react"
+import { AlertTriangle } from "lucide-react"
 import { api, ApiError, machineName, type Machine } from "@/lib/api"
-import { matchingProviderRecipe, PROVIDER_CLI_CAPABILITY, providerCliBase, providerCliOperation, providerCliPrepared, providerCliRecipes, providerCliRef, providerCliTerminal,
-  type ProviderCliOperation, type ProviderCliPrepared, type ProviderCliRecipe, type ProviderCliRecipes } from "@/lib/provider-cli"
+import { matchingProviderRecipe, PROVIDER_CLI_CAPABILITY, providerCliBase, providerCliNeedsAcknowledgement, providerCliOperation, providerCliPrepared, providerCliRecipes, providerCliRef, providerCliTerminal,
+  type ProviderCliObservation, type ProviderCliObservedSummary, type ProviderCliOperation, type ProviderCliPrepared, type ProviderCliRecipe, type ProviderCliRecipes } from "@/lib/provider-cli"
 import { t } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
@@ -15,6 +16,8 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState("")
   const [prepared, setPrepared] = useState<Omit<ProviderCliPrepared, "confirmation_token"> | null>(null)
+  const [acknowledged, setAcknowledged] = useState(false)
+  const [confirmedObservation, setConfirmedObservation] = useState<ProviderCliObservation | null>(null)
   const token = useRef<string | null>(null)
   const confirmationHeading = useRef<HTMLHeadingElement>(null)
   const trigger = useRef<HTMLButtonElement>(null)
@@ -89,8 +92,11 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
     finally { pending.current = false; if (live.current) setBusy(false) }
   }
 
-  async function prepare(recipe: ProviderCliRecipe) {
-    if (!catalog || pending.current || tracked || unconfirmed) return
+  async function prepare(recipe: ProviderCliRecipe, stateChanged = false) {
+    if (!catalog || pending.current || (tracked && !stateChanged) || unconfirmed) return
+    if (stateChanged && operation?.error_code !== "provider_cli_state_changed") return
+    if (stateChanged) { setTracked(null); setOperation(null) }
+    token.current = null; setPrepared(null); setAcknowledged(false)
     pending.current = true; setBusy(true); setError(""); setProbe(null)
     const epoch = ++generation.current
     try {
@@ -98,7 +104,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
       if (!live.current || generation.current !== epoch) return
       if (!result) throw new Error("invalid_response")
       const { confirmation_token, ...display } = result
-      token.current = confirmation_token
+      token.current = confirmation_token ?? null
       // The server's DB clock owns token expiry. A local wall-clock offset
       // must not reject a fresh confirmation; this is only a relative UX cap.
       expires.current = performance.now() + 120_000
@@ -108,13 +114,17 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
   }
 
   async function install() {
-    if (pending.current || !prepared || !token.current || performance.now() >= expires.current) return
+    if (pending.current || !prepared || prepared.action === "noop" || !token.current || performance.now() >= expires.current ||
+      providerCliNeedsAcknowledgement(prepared.version_relation) && !acknowledged) return
     const confirmation = token.current
     token.current = null // discard before dispatch; even an ambiguous failure cannot retry it
     const recipe = prepared.recipe
+    const relation = prepared.version_relation
+    setConfirmedObservation(prepared.observation)
     setPrepared(null); setError(""); pending.current = true; setBusy(true)
     try {
-      const result = await api<{ operation_id: string; machine_id: string; status: string }>(`${base}/install`, { method: "POST", body: JSON.stringify({ confirmation_token: confirmation }) })
+      const result = await api<{ operation_id: string; machine_id: string; status: string }>(`${base}/install`, { method: "POST", body: JSON.stringify({ confirmation_token: confirmation,
+        ...(providerCliNeedsAcknowledgement(relation) ? { acknowledged_relation: relation } : {}) }) })
       if (!live.current) return
       if (result.machine_id !== machine.server_id || !/^[A-Za-z0-9_-]{1,128}$/.test(result.operation_id) ||
         !["queued", "running", "succeeded", "failed", "timed_out", "unknown"].includes(result.status)) throw new Error("invalid_response")
@@ -174,7 +184,17 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
           {error && <p role="alert" className="break-words text-destructive">{error}</p>}
           {error && !tracked && !unconfirmed && !prepared && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void reloadRecipes()}>{t("cli.reload_recipes")}</Button>}
           {prepared ? <>
-            <h3 ref={confirmationHeading} tabIndex={-1} className="font-semibold outline-none">{t("cli.confirm", { provider: prepared.recipe.provider_id })}</h3>
+            <h3 ref={confirmationHeading} tabIndex={-1} className="font-semibold outline-none">{prepared.action === "noop" ? t("cli.noop") : t("cli.confirm", { provider: prepared.recipe.provider_id })}</h3>
+            <div className="space-y-2 rounded-md border bg-muted/30 p-3">
+              <p className="font-semibold">{t(`cli.action_${prepared.action}`)}</p>
+              <ObservationView observation={prepared.observation} />
+              <p>{t("cli.target_version", { version: prepared.target_version })}</p>
+            </div>
+            {prepared.action === "noop" ? <><p role="status">{t("cli.noop_hint")}</p><Button type="button" variant="outline" className="max-md:min-h-11" onClick={cancel}>{t("org.close")}</Button></> : <>
+            {prepared.action === "replace" && <div role="alert" className={`flex items-start gap-2 rounded-md border p-3 font-semibold ${providerCliNeedsAcknowledgement(prepared.version_relation) ? "border-destructive/50 bg-destructive/10 text-foreground" : ""}`}>
+              {providerCliNeedsAcknowledgement(prepared.version_relation) && <AlertTriangle aria-hidden="true" className="mt-0.5 size-4 shrink-0 text-status-attention" />}
+              <p>{t(`cli.replace_${prepared.version_relation ?? "unknown"}`)}</p>
+            </div>}
             <p>{t("cli.warning", { registry: prepared.recipe.package!.registry })}</p>
             <p>{t("cli.npm_config")}</p>
             <p>{t("cli.transitive")}</p>
@@ -185,10 +205,19 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
                 : item.kind === "verify" ? <p className="mt-1 break-all font-mono text-xs">{item.algorithm}: {item.expected}</p>
                 : <p className="mt-1 break-all font-mono text-xs">{item.rule}</p>}
             </li>)}</ol>
-            <p className="text-xs text-muted-foreground">{t("cli.expires", { time: new Date(prepared.expires_at).toLocaleTimeString() })}</p>
-            <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="max-md:min-h-11" onClick={cancel}>{t("common.cancel")}</Button><Button type="button" className="max-md:min-h-11" disabled={busy || now >= expires.current} onClick={() => void install()}>{t("cli.confirm_install")}</Button></div>
+            {providerCliNeedsAcknowledgement(prepared.version_relation) && <label className="flex min-h-11 cursor-pointer items-start gap-3 rounded-md border p-3"><input type="checkbox" className="mt-1 size-5 shrink-0 accent-primary" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /><span>{t(`cli.ack_${prepared.version_relation}`)}</span></label>}
+            {providerCliNeedsAcknowledgement(prepared.version_relation) && !acknowledged && <p className="text-sm text-muted-foreground">{t("cli.ack_hint")}</p>}
+            <p className="text-xs text-muted-foreground">{t("cli.expires", { time: new Date(prepared.expires_at!).toLocaleTimeString() })}</p>
+            <div className="flex flex-wrap justify-end gap-2"><Button type="button" variant="outline" className="max-md:min-h-11" onClick={cancel}>{t("common.cancel")}</Button><Button type="button" className="max-md:min-h-11" disabled={busy || now >= expires.current || providerCliNeedsAcknowledgement(prepared.version_relation) && !acknowledged} onClick={() => void install()}>{t("cli.confirm_install")}</Button></div>
+            </>}
           </> : tracked || unconfirmed ? <>
             <div role="status" className="rounded-md border bg-muted/30 p-3 font-semibold">{unconfirmed ? t("cli.unknown") : probe ? t("cli.checked", { version: probe.version }) : t(`cli.state_${operation?.status ?? "running"}`)}</div>
+            {operation?.error_code === "provider_cli_state_changed" && <div className="space-y-3 rounded-md border p-3">
+              <p role="alert" className="font-semibold">{t("cli.state_changed")}</p>
+              {confirmedObservation && <div><h4 className="font-medium">{t("cli.confirmed_before")}</h4><ObservationView observation={confirmedObservation} /></div>}
+              <div><h4 className="font-medium">{t("cli.observed_now")}</h4>{operation.observed_before ? <ObservationView observation={operation.observed_before} /> : <p>{t("cli.observation_unavailable")}</p>}</div>
+              <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void prepare(tracked!.recipe, true)}>{t("cli.prepare_again")}</Button>
+            </div>}
             {probe && <code className="block break-all">{probe.executable}</code>}
             {(probe || operation?.status === "succeeded") && <><p>{t("cli.path_warning")}</p><p className="whitespace-pre-wrap break-words">{tracked?.recipe.login_hint}</p></>}
             {tracked && <details className="min-w-0 rounded-md border p-3 text-muted-foreground"><summary className="cursor-pointer py-1 text-sm">{t("cli.details")}</summary><code className="mt-3 block break-all text-xs">{tracked.operation_id}</code>
@@ -198,7 +227,7 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
               {(operation.steps ?? [{ step: operation.step ?? 1, stdout: operation.stdout, stderr: operation.stderr, truncated: operation.truncated }]).map(item => <div key={item.step} className="min-w-0 space-y-1"><h4>{t("cli.step", { step: item.step })}</h4><pre className="max-h-48 overflow-auto whitespace-pre-wrap break-all rounded-md border bg-muted/30 p-3 text-xs">{visibleOutput(item.stdout)}{item.stderr ? `\n${visibleOutput(item.stderr)}` : ""}</pre>{item.truncated && <p>{t("cli.truncated")}</p>}</div>)}
             </div>}</details>}
             {tracked && (unconfirmed || operation?.status === "unknown") && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void refreshResult()}>{t("cli.refresh_result")}</Button>}
-            {tracked && (unconfirmed || operation && providerCliTerminal(operation.status)) && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void check()}>{t("cli.check")}</Button>}
+            {tracked && operation?.error_code !== "provider_cli_state_changed" && (unconfirmed || operation && providerCliTerminal(operation.status)) && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void check()}>{t("cli.check")}</Button>}
             <p className="text-xs text-muted-foreground">{t("cli.close_hint")}</p>
           </> : <div className="space-y-3">{recipes.map(recipe => <div key={recipe.recipe_id} className="flex flex-wrap items-center justify-between gap-3 rounded-md border p-3"><div className="min-w-0"><h3 className="font-medium">{recipe.provider_id}</h3><p className="break-words text-xs text-muted-foreground">{recipe.supported ? `${recipe.package!.version} · Node ≥ ${recipe.node_min}` : unsupportedText(recipe.unsupported_reason)}</p></div>{recipe.supported && <Button type="button" variant="outline" className="max-md:min-h-11" disabled={busy} onClick={() => void prepare(recipe)}>{t("cli.install_provider", { provider: recipe.provider_id })}</Button>}</div>)}</div>}
         </div>
@@ -206,6 +235,12 @@ export function ProviderCliInstaller({ workspaceId, machine, command }: { worksp
       </DialogContent>
     </Dialog>
   </>
+}
+function ObservationView({ observation }: { observation: ProviderCliObservation | ProviderCliObservedSummary }) {
+  return <div className="space-y-1 break-words">
+    <p>{observation.state === "absent" ? t("cli.current_absent") : observation.state === "installed" ? t("cli.current_installed", { version: visibleOutput(observation.current_version ?? "") }) : t("cli.current_unknown")}</p>
+    {"executable" in observation && observation.executable && <code className="block break-all text-xs">{visibleOutput(observation.executable)}</code>}
+  </div>
 }
 function breakable(value: string) {
   return value.split(/(?<=[/=-])/).map((part, i) => <span key={i}>{part}<wbr /></span>)
@@ -216,6 +251,9 @@ function visibleOutput(value: string) {
 }
 function failureText(reason: unknown) {
   if (reason instanceof ApiError) {
+    if (["provider_cli_acknowledgement_required", "provider_cli_acknowledgement_mismatch"].includes(reason.code ?? "")) return t("cli.ack_refused")
+    if (reason.code === "provider_cli_controller_outdated") return t("cli.controller_outdated")
+    if (reason.code === "provider_cli_state_unobservable") return t("cli.observation_unavailable")
     if (reason.status === 403) return t("cli.denied")
     if (reason.status === 409) return t("cli.changed")
     if (reason.status === 429) return t("cli.limited")
