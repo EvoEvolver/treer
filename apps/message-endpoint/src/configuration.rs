@@ -8,17 +8,24 @@ use crate::{
     scheduler::SharedHub,
     telegram::Target,
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Command {
+    PreviewCreate {
+        endpoint_id: String,
+        generation: i64,
+        recipient: String,
+    },
     Create {
         endpoint_id: String,
         generation: i64,
         recipient: String,
         confirm: bool,
+        expected: Preview,
     },
     Pause {
         endpoint_id: String,
@@ -31,6 +38,86 @@ pub enum Command {
         target: Target,
         confirm: bool,
     },
+}
+impl Command {
+    pub(crate) fn consumes_write_quota(&self) -> bool {
+        !matches!(self, Self::PreviewCreate { .. } | Self::Pause { .. })
+    }
+}
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct Preview {
+    endpoint_id: String,
+    generation: i64,
+    recipient: String,
+    expected_path: String,
+    expected_cwd_sha256: String,
+    expected_server_id: String,
+    recipient_path: Option<String>,
+}
+#[derive(Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum Outcome {
+    Preview { preview: Preview },
+    Saved { revision: i64, paused: bool },
+}
+fn preview<D: Directory>(
+    directory: &D,
+    workspace: &str,
+    endpoint_id: &str,
+    generation: i64,
+    recipient: &str,
+) -> Result<(Preview, Binding), Failure> {
+    if generation <= 0
+        || endpoint_id == recipient
+        || !endpoint_id.starts_with("ag_")
+        || !recipient.starts_with("ag_")
+        || !crate::store::valid_id(endpoint_id)
+        || !crate::store::valid_id(recipient)
+    {
+        return Err(Failure::Invalid);
+    }
+    let endpoint = directory
+        .metadata(endpoint_id)
+        .map_err(|_| Failure::Unavailable)?;
+    let recipient_meta = directory
+        .metadata(recipient)
+        .map_err(|_| Failure::Unavailable)?;
+    if endpoint.agent_id != endpoint_id
+        || recipient_meta.agent_id != recipient
+        || endpoint.workspace_id != workspace
+        || recipient_meta.workspace_id != workspace
+        || endpoint.kind != "command"
+        || recipient_meta.kind != "command"
+    {
+        return Err(Failure::Invalid);
+    }
+    let path = endpoint.path.ok_or(Failure::Invalid)?;
+    let preview = Preview {
+        endpoint_id: endpoint_id.into(),
+        generation,
+        recipient: recipient.into(),
+        expected_path: path.clone(),
+        expected_cwd_sha256: format!("{:x}", Sha256::digest(endpoint.cwd.as_bytes())),
+        expected_server_id: endpoint.server_id.clone(),
+        recipient_path: recipient_meta.path,
+    };
+    let binding = Binding {
+        endpoint_id: endpoint_id.into(),
+        generation,
+        recipient: recipient.into(),
+        expected_path: path,
+        expected_cwd: endpoint.cwd,
+        expected_server_id: endpoint.server_id,
+    };
+    Ok((preview, binding))
+}
+fn saved<M: Mailbox + Directory>(hub: &crate::hub::Hub<M>, id: &str) -> Result<Outcome, Failure> {
+    let view = hub.view(id).map_err(map_hub)?;
+    Ok(Outcome::Saved {
+        revision: view.revision,
+        paused: view.paused,
+    })
 }
 #[derive(Clone, Copy)]
 pub enum Failure {
@@ -68,52 +155,38 @@ pub fn execute<M: Mailbox + Directory, D: Directory>(
     workspace: &str,
     owner: &Owner,
     command: Command,
-) -> Result<(), Failure> {
+) -> Result<Outcome, Failure> {
     check_owner(owner)?;
     match command {
+        Command::PreviewCreate {
+            endpoint_id,
+            generation,
+            recipient,
+        } => {
+            let (preview, _) = preview(directory, workspace, &endpoint_id, generation, &recipient)?;
+            check_owner(owner)?;
+            Ok(Outcome::Preview { preview })
+        }
         Command::Create {
             endpoint_id,
             generation,
             recipient,
             confirm,
+            expected,
         } => {
-            if !confirm
-                || generation <= 0
-                || endpoint_id == recipient
-                || !endpoint_id.starts_with("ag_")
-                || !recipient.starts_with("ag_")
-                || !crate::store::valid_id(&endpoint_id)
-                || !crate::store::valid_id(&recipient)
-            {
+            if !confirm {
                 return Err(Failure::Invalid);
             }
-            let endpoint = directory
-                .metadata(&endpoint_id)
-                .map_err(|_| Failure::Unavailable)?;
-            let recipient_meta = directory
-                .metadata(&recipient)
-                .map_err(|_| Failure::Unavailable)?;
-            if endpoint.agent_id != endpoint_id
-                || recipient_meta.agent_id != recipient
-                || endpoint.workspace_id != workspace
-                || recipient_meta.workspace_id != workspace
-                || endpoint.kind != "command"
-                || recipient_meta.kind != "command"
-            {
-                return Err(Failure::Invalid);
+            let (current, binding) =
+                preview(directory, workspace, &endpoint_id, generation, &recipient)?;
+            if expected != current {
+                return Err(Failure::Conflict);
             }
-            let binding = Binding {
-                endpoint_id,
-                generation,
-                recipient,
-                expected_path: endpoint.path.ok_or(Failure::Invalid)?,
-                expected_cwd: endpoint.cwd,
-                expected_server_id: endpoint.server_id,
-            };
             let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
             let now = check_owner(owner)?;
             hub.add_binding_audited(binding, owner.id(), now)
-                .map_err(map_hub)
+                .map_err(map_hub)?;
+            saved(&hub, &endpoint_id)
         }
         Command::Pause {
             endpoint_id,
@@ -126,7 +199,8 @@ pub fn execute<M: Mailbox + Directory, D: Directory>(
             let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
             let now = check_owner(owner)?;
             hub.pause_audited(&endpoint_id, revision, owner.id(), now)
-                .map_err(map_hub)
+                .map_err(map_hub)?;
+            saved(&hub, &endpoint_id)
         }
         Command::BindTelegram {
             endpoint_id,
@@ -149,7 +223,8 @@ pub fn execute<M: Mailbox + Directory, D: Directory>(
                     crate::telegram::Error::Conflict => Failure::Conflict,
                     crate::telegram::Error::Invalid => Failure::Invalid,
                     _ => Failure::Unavailable,
-                })
+                })?;
+            saved(&hub, &endpoint_id)
         }
     }
 }
@@ -157,6 +232,6 @@ pub fn core_executor(
     shared: SharedHub<Core>,
     core: Core,
     workspace: String,
-) -> impl Fn(&Owner, Command) -> Result<(), Failure> + Send + Sync {
+) -> impl Fn(&Owner, Command) -> Result<Outcome, Failure> + Send + Sync {
     move |owner, command| execute(&shared, &core, &workspace, owner, command)
 }

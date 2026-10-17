@@ -178,7 +178,8 @@ impl<M: Mailbox + Directory> Hub<M> {
         Ok(hub)
     }
     /// Internal owner-service boundary only. New bindings always start paused.
-    pub fn add_binding(&mut self, binding: Binding) -> Result<(), Error> {
+    #[cfg(test)]
+    pub(crate) fn add_binding(&mut self, binding: Binding) -> Result<(), Error> {
         self.add_binding_inner(binding, None)
     }
     pub fn add_binding_audited(
@@ -342,7 +343,8 @@ impl<M: Mailbox + Directory> Hub<M> {
     }
     /// Owner-service internal API: authenticate owner/CSRF/confirmation first,
     /// fetch Core metadata outside state access, then submit this exact revision.
-    pub fn resume_after_readback(
+    #[cfg(test)]
+    pub(crate) fn resume_after_readback(
         &mut self,
         id: &str,
         revision: i64,
@@ -403,7 +405,8 @@ impl<M: Mailbox + Directory> Hub<M> {
         tx.commit()?;
         Ok(())
     }
-    pub fn pause(&mut self, id: &str, revision: i64) -> Result<(), Error> {
+    #[cfg(test)]
+    pub(crate) fn pause(&mut self, id: &str, revision: i64) -> Result<(), Error> {
         self.pause_inner(id, revision, None)
     }
     pub fn pause_audited(
@@ -939,9 +942,15 @@ mod tests {
         let view = hub.view("ag_endpoint").unwrap();
         assert!(view.paused);
         assert_eq!(view.revision, 1);
-        assert!(hub
-            .pause_audited("ag_endpoint", 1, "user_owner", NOW)
-            .is_err());
+        hub.pause_audited("ag_endpoint", 1, "user_owner", NOW)
+            .unwrap();
+        assert_eq!(hub.view("ag_endpoint").unwrap().revision, 2);
+        hub.pause_audited("ag_endpoint", 2, "user_owner", NOW + 1)
+            .unwrap();
+        assert_eq!(hub.owner_audit_capacity().unwrap(), (true, 1));
+        let emergency:(String,i64,i64,i64)=hub.store.db.query_row("SELECT actor,revision,at,count FROM hub_emergency_pauses WHERE endpoint='ag_endpoint'",[],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap();
+        assert_eq!(emergency, ("user_owner".into(), 2, NOW + 1, 2));
+        assert_eq!(hub.owner_audit(None, 100).unwrap().len(), 100);
         let mut another = binding();
         another.endpoint_id = "ag_other".into();
         assert!(hub.add_binding_audited(another, "user_owner", NOW).is_err());

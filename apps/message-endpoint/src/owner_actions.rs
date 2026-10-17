@@ -29,6 +29,13 @@ pub(crate) fn record(
     };
     let count: i64 = tx.query_row("SELECT COUNT(*) FROM hub_owner_audit", [], |r| r.get(0))?;
     if count >= crate::recovery::AUDIT_LIMIT {
+        if action == "pause_binding" {
+            // One fixed row per existing binding (at most 20), no append-only
+            // emergency quota to exhaust. Keep the latest actor/revision/time
+            // and a saturating count in the same pause transaction.
+            tx.execute("INSERT INTO hub_emergency_pauses(endpoint,actor,revision,at,count) VALUES(?1,?2,?3,?4,1) ON CONFLICT(endpoint) DO UPDATE SET actor=excluded.actor,revision=excluded.revision,at=excluded.at,count=CASE WHEN count<9223372036854775807 THEN count+1 ELSE count END",params![endpoint,context.actor,revision,context.now])?;
+            return Ok(());
+        }
         return Err(StorageError::Full.into());
     }
     tx.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES(?1,?2,?3,'',?4,?5)",params![context.actor,action,endpoint,revision,context.now])?;

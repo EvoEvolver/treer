@@ -942,14 +942,19 @@ metadata refresh never resumes a paused endpoint.
 
 Every accepted configuration change and its body-free audit row commit in one
 SQLite transaction. The row includes actor, action, endpoint, previous revision
-and time. The shared 10,000-row audit limit refuses configuration changes until
-an explicit owner archive/clear workflow is implemented; the preview has no
-silent audit pruning. Audit insert failure, a later SQL error, an immutable
+and time. The shared 10,000-row audit limit refuses create/bind/resume and recovery
+changes until an explicit owner archive/clear workflow is implemented; the
+preview has no silent audit pruning. Safety pause bypasses the full append-only
+audit through one separate row per existing binding (at most 20 rows): the latest
+actor/revision/time and a saturating count commit with the pause. Repeated pauses
+cannot exhaust another emergency allowance. The status page reports audit-full
+and the number of bindings with such emergency records. Other SQL/storage
+failures still fail closed; disk failure cannot promise durable safety actions. Audit insert failure, a later SQL error, an immutable
 retarget conflict, an obsolete revision or invalid input leaves configuration
 and its audit unchanged. A resume may still record its independently obtained
 metadata observation (or automatically pause on drift) before the activation
-transaction; an audit failure cannot activate it. Existing state-only primitives
-remain for worker/test internals and must not be exposed through HTTP.
+transaction; an audit failure cannot activate it. The unaudited create/bind/pause/resume helper methods exist only in test builds;
+production owner configuration exposes the audited forms.
 
 
 `POST /api/configuration` accepts only `Content-Type: application/json`, one
@@ -958,12 +963,20 @@ Host/Origin, `X-Endpoint-Request: 1`, Sec-Fetch-Site when supplied, and current
 workspace human owner verification precede JSON body reads. One shared admission
 slot stays held through verification, a three-second body deadline, fresh Core
 queries and the transaction, including disconnected blocking callers. Unknown
-fields/actions, duplicate fields and `confirm:false` are rejected. No actor,
-Core readback, expected path/cwd/machine or token can be supplied in the JSON.
+fields/actions, duplicate fields and `confirm:false` are rejected. No actor, full Core readback, raw cwd or token can be supplied in the JSON.
+Create requires the untrusted expected pin values from the preview; these are
+compared with a new Core lookup and never used as authoritative metadata.
 
-Supported command objects (all require `confirm:true`):
+Supported command objects (writes require `confirm:true`):
 
-- `{"action":"create","endpoint_id":"ag_endpoint","generation":1,"recipient":"ag_recipient","confirm":true}`.
+- `{"action":"preview_create","endpoint_id":"ag_endpoint","generation":1,"recipient":"ag_recipient"}`
+  returns `status:preview` and a preview of the current endpoint path, machine,
+  cwd SHA-256, recipient ID/path, and generation. It changes no binding or audit.
+- `create` takes those same IDs/generation, `confirm:true`, and an `expected`
+  object containing the complete preview. The server repeats the Core lookup;
+  any path, machine, cwd hash or recipient-path change returns 409 before any
+  mutation. The UI displays the preview before confirmation and invalidates it
+  when an input changes.
   The hub queries both stable IDs through its own Core identity outside the state
   mutex, requires command Agents in its workspace and a placed endpoint, and
   derives expected path/cwd/machine from Core. Creation is paused at revision 1.
@@ -972,8 +985,8 @@ Supported command objects (all require `confirm:true`):
   The binding must be paused. This pins target metadata only, never accepts a bot
   token or verifies an account. Binding does not enable receiving or sending.
 
-Successful writes return only `{"saved":true}`. Reload `/api/settings` for the
-new revision. Stale revisions return 409; malformed input 400; unavailable Core,
+Successful writes return `{"status":"saved","revision":N,"paused":true}`.
+Reload `/api/settings` for the current complete projection. Stale revisions return 409; malformed input 400; unavailable Core,
 storage or audit capacity 503, all with fixed body-free error codes. Owner proof
 expiry is rechecked after Core queries and mutex waits before committing. These
 routes do not expose resume, retarget, deletion, generation replacement, transport
@@ -990,3 +1003,15 @@ remain visible, and forms wrap at 390px. A stale save shows the fixed conflict
 error and requires refresh/reconfirmation rather than silently retrying. The UI
 never accepts a bot token. Account setup, channel readiness and resume controls
 are still absent; these forms do not claim a functioning channel.
+
+
+Create and target-binding commands also have a per-verified-owner limit of ten
+attempts per 60 seconds, counted before state/Core execution, including rejected
+commands. The fixed error is `owner_write_rate_limited` (429); slots for at most
+128 owner IDs expire after 60 seconds. Preview is read-only and uses the normal
+verification/admission limits. Safety pause deliberately bypasses the write quota
+and the append-only audit capacity, while still requiring current owner, CSRF,
+confirmation and an exact revision. Verification/storage failure can still stop
+any request; this is not an OS-level emergency stop or a durability promise under
+disk failure. System pause reasons are visible as current state, but a separate
+historical system-audit stream is still not implemented.

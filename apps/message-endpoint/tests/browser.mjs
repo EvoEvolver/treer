@@ -60,6 +60,8 @@ try {
  const create=edit.locator('form').first();
  await create.getByLabel('Endpoint Agent ID',{exact:true}).fill('ag_new');
  await create.getByLabel('Recipient Agent ID',{exact:true}).fill('ag_recipient');
+ await create.getByRole('button',{name:'Preview binding from Core'}).click();
+ await create.getByRole('heading',{name:'Confirm these current objects'}).waitFor();
  if(!await create.getByRole('button',{name:'Create paused binding'}).isDisabled())throw new Error('creation did not require confirmation');
  await create.getByRole('checkbox').check();await create.getByRole('button',{name:'Create paused binding'}).click();
  const card=edit.locator('section').filter({has:edit.locator('code').filter({hasText:/^ag_new$/})});

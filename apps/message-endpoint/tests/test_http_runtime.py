@@ -39,6 +39,11 @@ class Runtime(unittest.TestCase):
             def write(command, headers=None, path='/api/configuration'):
                 return request(path,trusted if headers is None else headers,method='POST',body=json.dumps(command).encode())[0]
             create={'action':'create','endpoint_id':'ag_new','generation':1,'recipient':'ag_recipient','confirm':True}
+            preview_status,_,preview_body=request('/api/configuration',trusted,method='POST',body=json.dumps({'action':'preview_create','endpoint_id':'ag_new','generation':1,'recipient':'ag_recipient'}).encode())
+            self.assertEqual(preview_status,200)
+            create['expected']=json.loads(preview_body)['preview']
+            self.assertNotIn('expected_cwd',create['expected'])
+            self.assertEqual(write({**create,'expected':{**create['expected'],'expected_cwd_sha256':'0'*64}}),409)
             self.assertEqual(write(create,{'Content-Type':'application/json'}),403)
             self.assertEqual(write(create,{**trusted,'X-Treer-Identity-Token':'forged'}),401)
             self.assertEqual(write(create,{**trusted,'Origin':'https://evil.example'}),403)
@@ -55,7 +60,8 @@ class Runtime(unittest.TestCase):
             self.assertTrue(endpoint['paused'])
             self.assertEqual(endpoint['binding']['expected_path'],'/team/ag_new')
             bind={'action':'bind_telegram','endpoint_id':'ag_new','revision':1,'confirm':True,'target':{'account_id':'bot_fixture','chat_id':123,'topic_id':None,'allowed_senders':[456]}}
-            self.assertEqual(write(bind),200)
+            saved=json.loads(request('/api/configuration',trusted,method='POST',body=json.dumps(bind).encode())[2])
+            self.assertEqual(saved,{'status':'saved','revision':2,'paused':True})
             self.assertEqual(write(bind),409)
             self.assertEqual(write({'action':'pause','endpoint_id':'ag_new','revision':2,'confirm':True}),200)
             self.assertEqual(write({'action':'resume','endpoint_id':'ag_new','revision':3,'confirm':True}),400)
@@ -68,5 +74,13 @@ class Runtime(unittest.TestCase):
             self.assertEqual(write({'action':'pause','endpoint_id':'ag_new','revision':3,'confirm':True}),503)
             self.assertEqual(db.execute("SELECT revision FROM hub_bindings WHERE endpoint='ag_new'").fetchone()[0],3)
             self.assertEqual(db.execute('SELECT COUNT(*) FROM hub_owner_audit').fetchone()[0],3)
+            db.execute('DROP TRIGGER deny_owner_audit')
+            db.execute("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<9997) INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) SELECT 'user_owner','fixture','ag_new','',1,1 FROM n")
+            db.commit()
+            self.assertEqual(write({'action':'pause','endpoint_id':'ag_new','revision':3,'confirm':True}),200)
+            self.assertEqual(db.execute('SELECT actor,revision,count FROM hub_emergency_pauses').fetchall(),[('user_owner',3,1)])
+            snapshot=json.loads(request('/api/settings',{'X-Treer-Identity-Token':TOKEN})[2])
+            self.assertTrue(snapshot['settings']['audit_full'])
+            self.assertEqual(snapshot['settings']['emergency_pause_bindings'],1)
             db.close()
 if __name__=='__main__':unittest.main()

@@ -46,8 +46,22 @@ pub struct Audit {
 }
 
 impl<M: Mailbox + Directory> Hub<M> {
+    pub fn owner_audit_capacity(&self) -> Result<(bool, i64), Error> {
+        self.recovery_schema()?;
+        let count: i64 =
+            self.store
+                .db
+                .query_row("SELECT COUNT(*) FROM hub_owner_audit", [], |r| r.get(0))?;
+        let emergency: i64 =
+            self.store
+                .db
+                .query_row("SELECT COUNT(*) FROM hub_emergency_pauses", [], |r| {
+                    r.get(0)
+                })?;
+        Ok((count >= AUDIT_LIMIT, emergency))
+    }
     pub(crate) fn recovery_schema(&self) -> Result<(), Error> {
-        self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_owner_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,endpoint TEXT NOT NULL,transfer TEXT NOT NULL,revision INTEGER NOT NULL,at INTEGER NOT NULL);")?;
+        self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_owner_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,endpoint TEXT NOT NULL,transfer TEXT NOT NULL,revision INTEGER NOT NULL,at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS hub_emergency_pauses(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),actor TEXT NOT NULL,revision INTEGER NOT NULL,at INTEGER NOT NULL,count INTEGER NOT NULL);")?;
         Ok(())
     }
     pub fn parked_transfers(&self, endpoint: &str, limit: u32) -> Result<Vec<Parked>, Error> {

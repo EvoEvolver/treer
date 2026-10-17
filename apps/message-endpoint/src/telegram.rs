@@ -104,7 +104,8 @@ fn lease_token_valid(token: &str) -> bool {
 impl<M: Mailbox + Directory> Hub<M> {
     /// Called only after owner authorization and confirmation; target is immutable
     /// for this binding generation. Retargeting requires a reviewed drain/rebind.
-    pub fn bind_telegram(
+    #[cfg(test)]
+    pub(crate) fn bind_telegram(
         &mut self,
         endpoint: &str,
         revision: i64,

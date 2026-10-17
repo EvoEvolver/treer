@@ -118,9 +118,12 @@ pub fn run(config: Config) -> Result<(), Error> {
             .map(|id| hub.view(&id).map(Into::into).map_err(|_| ()))
             .collect::<Result<Vec<_>, _>>()?;
         let status = snapshot_workers.lock().map_err(|_| ())?.status();
+        let (audit_full, emergency_pause_bindings) = hub.owner_audit_capacity().map_err(|_| ())?;
         Ok(SettingsSnapshot {
             endpoints,
             workers: status,
+            audit_full,
+            emergency_pause_bindings,
         })
     });
     let mutation = Arc::new(crate::configuration::core_executor(

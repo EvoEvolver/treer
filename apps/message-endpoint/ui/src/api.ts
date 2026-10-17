@@ -25,4 +25,5 @@ export async function saveConfiguration(command:unknown) {
  const response=await fetch('api/configuration',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Endpoint-Request':'1'},body:JSON.stringify(command)});
  const value=await response.json();
  if(!response.ok)throw new Error(typeof value?.error?.code==='string'?value.error.code:'configuration_unavailable');
+ return value;
 }

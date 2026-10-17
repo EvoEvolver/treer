@@ -15,10 +15,10 @@ use axum::{
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::{
-    collections::{BTreeSet, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     net::SocketAddr,
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    sync::{Arc, Mutex},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Semaphore;
 
@@ -29,6 +29,8 @@ const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings 
 pub struct SettingsSnapshot {
     pub endpoints: Vec<EndpointSnapshot>,
     pub workers: crate::scheduler::WorkerStatus,
+    pub audit_full: bool,
+    pub emergency_pause_bindings: i64,
 }
 #[derive(Serialize)]
 pub struct EndpointSnapshot {
@@ -87,7 +89,31 @@ fn snapshot_value(owner: &str, snapshot: SettingsSnapshot) -> Result<Value, ()> 
     }
     Ok(value)
 }
-type Mutation = dyn Fn(&Owner, crate::configuration::Command) -> Result<(), crate::configuration::Failure>
+#[derive(Default)]
+struct WriteGate(Mutex<HashMap<String, (Instant, u32)>>);
+impl WriteGate {
+    fn admit(&self, owner: &str, now: Instant) -> bool {
+        let Ok(mut slots) = self.0.lock() else {
+            return false;
+        };
+        slots.retain(|_, (start, _)| {
+            now.saturating_duration_since(*start) < Duration::from_secs(60)
+        });
+        if !slots.contains_key(owner) && slots.len() >= 128 {
+            return false;
+        }
+        let (_, count) = slots.entry(owner.into()).or_insert((now, 0));
+        if *count >= 10 {
+            return false;
+        }
+        *count += 1;
+        true
+    }
+}
+type Mutation = dyn Fn(
+        &Owner,
+        crate::configuration::Command,
+    ) -> Result<crate::configuration::Outcome, crate::configuration::Failure>
     + Send
     + Sync;
 type Snapshot = dyn Fn() -> Result<SettingsSnapshot, ()> + Send + Sync;
@@ -99,6 +125,7 @@ pub struct Settings {
     snapshot: Arc<Snapshot>,
     mutation: Option<Arc<Mutation>>,
     slots: Arc<Semaphore>,
+    writes: WriteGate,
     html: &'static str,
     javascript: &'static str,
     stylesheet: &'static str,
@@ -134,6 +161,7 @@ impl Settings {
             snapshot,
             mutation: None,
             slots: Arc::new(Semaphore::new(16)),
+            writes: WriteGate::default(),
             html,
             javascript: "",
             stylesheet: "",
@@ -474,18 +502,21 @@ async fn configuration_request(
         Ok(Ok(b)) if Some(b.len()) == size => b,
         _ => return secure(fixed(StatusCode::BAD_REQUEST, "invalid_configuration_body")),
     };
-    let command = match serde_json::from_slice(&bytes) {
+    let command: crate::configuration::Command = match serde_json::from_slice(&bytes) {
         Ok(c) => c,
         Err(_) => return secure(fixed(StatusCode::BAD_REQUEST, "invalid_configuration_body")),
     };
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        if command.consumes_write_quota() && !app.writes.admit(owner.id(), Instant::now()) {
+            return fixed(StatusCode::TOO_MANY_REQUESTS, "owner_write_rate_limited");
+        }
         match (app
             .mutation
             .as_ref()
             .expect("checked configuration service"))(&owner, command)
         {
-            Ok(()) => response(StatusCode::OK, json!({"saved":true})),
+            Ok(outcome) => response(StatusCode::OK, json!(outcome)),
             Err(crate::configuration::Failure::Invalid) => {
                 fixed(StatusCode::BAD_REQUEST, "invalid_configuration")
             }
@@ -767,6 +798,25 @@ mod tests {
         ]
     }
     #[test]
+    fn owner_write_quota_is_bounded_and_resets_without_blocking_safety_pause() {
+        let gate = WriteGate::default();
+        let now = Instant::now();
+        for _ in 0..10 {
+            assert!(gate.admit("user_owner", now));
+        }
+        assert!(!gate.admit("user_owner", now));
+        assert!(gate.admit("user_other", now));
+        assert!(gate.admit("user_owner", now + Duration::from_secs(60)));
+        assert_eq!(gate.0.lock().unwrap().len(), 1);
+        let pause: crate::configuration::Command = serde_json::from_value(
+            json!({"action":"pause","endpoint_id":"ag_demo","revision":1,"confirm":true}),
+        )
+        .unwrap();
+        assert!(!pause.consumes_write_quota());
+        let bind:crate::configuration::Command=serde_json::from_value(json!({"action":"bind_telegram","endpoint_id":"ag_demo","revision":1,"confirm":true,"target":{"account_id":"bot_demo","chat_id":123,"topic_id":null,"allowed_senders":[456]}})).unwrap();
+        assert!(bind.consumes_write_quota());
+    }
+    #[test]
     fn host_cookie_scope_requires_a_dedicated_root_url() {
         let auth = OwnerAuth::new(
             "https://proxy.example/",
@@ -813,6 +863,8 @@ mod tests {
             SettingsSnapshot {
                 endpoints: (0..20).map(|_| endpoint(4096)).collect(),
                 workers: Default::default(),
+                audit_full: false,
+                emergency_pause_bindings: 0,
             },
         )
         .unwrap();
@@ -823,7 +875,9 @@ mod tests {
             "user_owner",
             SettingsSnapshot {
                 endpoints: (0..21).map(|_| endpoint(1)).collect(),
-                workers: Default::default()
+                workers: Default::default(),
+                audit_full: false,
+                emergency_pause_bindings: 0
             }
         )
         .is_err());
@@ -831,7 +885,9 @@ mod tests {
             "user_owner",
             SettingsSnapshot {
                 endpoints: vec![endpoint(512 * 1024)],
-                workers: Default::default()
+                workers: Default::default(),
+                audit_full: false,
+                emergency_pause_bindings: 0
             }
         )
         .is_err());
