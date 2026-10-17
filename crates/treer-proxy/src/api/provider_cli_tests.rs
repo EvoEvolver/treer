@@ -1547,6 +1547,22 @@ async fn provider_cli_prepare_binds_observed_state_and_requires_acknowledgement(
         "unobservable"
     );
 
+    // A probe that left a process behind is not evidence: 409, no token.
+    let mut unconfirmed = observation(None, true);
+    unconfirmed.probe.cleanup_confirmed = false;
+    unconfirmed.probe.error_code = Some("cleanup_unconfirmed".into());
+    *observed.lock().unwrap() = unconfirmed;
+    let error = prepare().await.unwrap_err();
+    assert_eq!(
+        (error.status, error.error.code.as_str()),
+        (StatusCode::CONFLICT, "provider_cli_probe_unconfirmed")
+    );
+    assert_eq!(token_rows().await, 0);
+    assert_eq!(
+        audit_actions(&auth, "provider_cli.prepare").await[2]["outcome"],
+        "probe_unconfirmed"
+    );
+
     // Newer version installed: replace with a downgrade relation.
     *observed.lock().unwrap() = observation(Some("0.164.0"), true);
     let downgrade = prepare().await.unwrap().0;

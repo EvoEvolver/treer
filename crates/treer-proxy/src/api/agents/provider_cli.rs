@@ -78,6 +78,18 @@ fn controller_outdated() -> ApiFailure {
     }
 }
 
+/// The machine's observation left a process behind: its output is not
+/// evidence, and no consent is issued on it.
+fn probe_unconfirmed() -> ApiFailure {
+    ApiFailure {
+        status: StatusCode::CONFLICT,
+        error: ProtocolError::new(
+            "provider_cli_probe_unconfirmed",
+            "The machine's version probe left a process behind, so the existing installation state is not confirmed; nothing was issued",
+        ),
+    }
+}
+
 fn state_unobservable() -> ApiFailure {
     ApiFailure {
         status: StatusCode::CONFLICT,
@@ -324,15 +336,27 @@ pub(crate) async fn provider_cli_prepare(
         controller_observation(&state, &workspace_id, &server_id, &reference).await?;
     let observation_hash = observation.hash(&reference.recipe_hash, &target_version);
     let Some(decision) = decide_provider_cli_action(&observation, &target_version) else {
+        let unconfirmed = !observation.probe.cleanup_confirmed;
         let mut payload = observation_payload(&observation);
-        payload["outcome"] = Value::String("unobservable".into());
+        payload["outcome"] = Value::String(
+            if unconfirmed {
+                "probe_unconfirmed"
+            } else {
+                "unobservable"
+            }
+            .into(),
+        );
         if let Err(error) = auth
             .provider_cli_audit_outcome(&scope, "provider_cli.prepare", &reference, payload)
             .await
         {
             tracing::warn!(code = error.code(), %workspace_id, %server_id, "failed to record provider CLI prepare audit event");
         }
-        return Err(state_unobservable());
+        return Err(if unconfirmed {
+            probe_unconfirmed()
+        } else {
+            state_unobservable()
+        });
     };
     let mut response = ProviderCliPrepareResponse {
         confirmation_token: None,

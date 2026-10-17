@@ -641,10 +641,14 @@ relation for `downgrade`, `incomparable` and `unknown` (400 otherwise, token
 left usable), then consumes it and inserts the single active operation per
 machine (PostgreSQL partial unique index) in one transaction before
 dispatching exactly once with the consent. The Controller re-observes before
-any step and again immediately before the install step and fails the
-operation as `provider_cli_state_changed` (reporting the path-free
-`observed_before` summary) on any difference, including the action having
-become `noop`. Provider CLI commands are never
+any step and again immediately before the install step under the operation's
+deadline (unconfirmed cleanup ends the operation `unknown`, a spent budget
+ends it timed out, nothing spawns past the deadline) and fails the operation
+as `provider_cli_state_changed` (reporting the path-free `observed_before`
+summary) on any other difference, including the action having become `noop`.
+Truncated probe output never yields a version, and an observation whose probe
+left a process behind is refused at `prepare` (409
+`provider_cli_probe_unconfirmed`). Provider CLI commands are never
 replayed to a replacement Controller; a lost dispatch, a silent Controller past
 a ten-minute grace or a missing Controller record ends as `unknown`, which only
 the machine's own later report may resolve. Output lives only in the

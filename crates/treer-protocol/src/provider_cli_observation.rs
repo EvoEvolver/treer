@@ -163,13 +163,14 @@ pub struct ProviderCliObservation {
 
 /// Every probe error code a Controller may report; anything else is a
 /// malformed response.
-pub const PROVIDER_CLI_PROBE_ERROR_CODES: [&str; 8] = [
+pub const PROVIDER_CLI_PROBE_ERROR_CODES: [&str; 9] = [
     "provider_cli_prefix_unresolved",
     "provider_cli_stat_failed",
     "provider_cli_binary_not_found",
     "provider_cli_binary_outside_prefix",
     "provider_cli_probe_failed",
     "provider_cli_probe_timed_out",
+    "provider_cli_probe_output_truncated",
     "provider_cli_version_unparsed",
     "cleanup_unconfirmed",
 ];
@@ -212,6 +213,13 @@ impl ProviderCliObservation {
             if !PROVIDER_CLI_PROBE_ERROR_CODES.contains(&code.as_str()) {
                 return Err("probe.error_code is unknown");
             }
+        }
+        // Process cleanup is a fact of its own: unconfirmed cleanup is always
+        // reported as such, and only then.
+        if self.probe.cleanup_confirmed
+            == (self.probe.error_code.as_deref() == Some("cleanup_unconfirmed"))
+        {
+            return Err("probe.cleanup_confirmed disagrees with probe.error_code");
         }
         match self.state {
             ProviderCliObservedState::Absent => {
@@ -338,11 +346,15 @@ impl ProviderCliConsent {
 }
 
 /// Maps an observation to the action it allows. `None` when the prefix is
-/// unobservable; the caller refuses with `provider_cli_state_unobservable`.
+/// unobservable or the observation's own processes were not confirmed gone:
+/// an observation that may still be running is not evidence for consent.
 pub fn decide_provider_cli_action(
     observation: &ProviderCliObservation,
     target_version: &str,
 ) -> Option<ProviderCliDecision> {
+    if !observation.probe.cleanup_confirmed {
+        return None;
+    }
     match observation.state {
         ProviderCliObservedState::Absent => Some(ProviderCliDecision {
             action: ProviderCliAction::Install,
@@ -785,6 +797,21 @@ mod tests {
         let unobservable = observation(ProviderCliObservedState::Unknown, None, false);
         assert!(unobservable.unobservable());
         assert_eq!(decide_provider_cli_action(&unobservable, target), None);
+        // A probe whose descendants were not confirmed gone decides nothing,
+        // whatever it printed.
+        let mut unconfirmed = observation(ProviderCliObservedState::Unknown, None, true);
+        unconfirmed.probe.cleanup_confirmed = false;
+        unconfirmed.probe.error_code = Some("cleanup_unconfirmed".into());
+        assert_eq!(decide_provider_cli_action(&unconfirmed, target), None);
+        let mut truncated = observation(ProviderCliObservedState::Unknown, None, true);
+        truncated.probe.error_code = Some("provider_cli_probe_output_truncated".into());
+        assert_eq!(
+            decide_provider_cli_action(&truncated, target)
+                .unwrap()
+                .version_relation,
+            Some(ProviderCliVersionRelation::Unknown),
+            "truncated output never yields a version relation without acknowledgement"
+        );
         // Installed without a parsed version is a contract violation; no action.
         let inconsistent = observation(ProviderCliObservedState::Installed, None, true);
         assert_eq!(decide_provider_cli_action(&inconsistent, target), None);
@@ -979,6 +1006,25 @@ mod tests {
             ..installed.clone()
         };
         assert_eq!(windows.validate(), Ok(()));
+        let mut unconfirmed = unknown.clone();
+        unconfirmed.probe.cleanup_confirmed = false;
+        unconfirmed.probe.error_code = Some("cleanup_unconfirmed".into());
+        assert_eq!(unconfirmed.validate(), Ok(()));
+        let mut bad = unknown.clone();
+        bad.probe.cleanup_confirmed = false;
+        assert!(bad.validate().is_err(), "unconfirmed cleanup must say so");
+        let mut bad = unknown.clone();
+        bad.probe.error_code = Some("cleanup_unconfirmed".into());
+        assert!(
+            bad.validate().is_err(),
+            "confirmed cleanup cannot claim otherwise"
+        );
+        let mut bad = installed.clone();
+        bad.probe.cleanup_confirmed = false;
+        assert!(
+            bad.validate().is_err(),
+            "installed requires confirmed cleanup"
+        );
     }
 
     #[test]

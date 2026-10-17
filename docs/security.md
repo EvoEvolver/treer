@@ -253,8 +253,13 @@ What Core does promise:
   wins, so extra output cannot spoof a version into an upgrade), and
   `unknown` otherwise with the reason named (`provider_cli_prefix_unresolved`,
   `provider_cli_binary_outside_prefix`, `provider_cli_probe_failed`,
-  `provider_cli_probe_timed_out`, `provider_cli_version_unparsed`,
-  `cleanup_unconfirmed`). The action shown and bound is `install`, `replace`
+  `provider_cli_probe_timed_out`, `provider_cli_probe_output_truncated`,
+  `provider_cli_version_unparsed`, `cleanup_unconfirmed`). Output that
+  exceeded the retained tail has no trustworthy first line and never yields a
+  version, so a crafted tail cannot turn a newer installation into an
+  "upgrade" or a "noop". A probe whose descendants were not confirmed gone is
+  not evidence at all: `prepare` refuses it (409
+  `provider_cli_probe_unconfirmed`) and issues nothing. The action shown and bound is `install`, `replace`
   (relation `upgrade`, `downgrade`, `incomparable` or `unknown`) or `noop`;
   `noop` issues no token and nothing runs, an unobservable prefix refuses the
   prepare, and a spoofed probe that prints the pinned version only ever yields
@@ -263,15 +268,22 @@ What Core does promise:
   different value is 400 and leaves the token usable, so no client can confirm
   a downgrade blindly.
 - The Controller re-derives the action from a fresh observation before any
-  step and again immediately before the install step and compares hash,
-  action and relation strictly; any difference (a prefix that moved, a binary
-  that appeared, changed or became unreadable, an action that became `noop`)
-  fails the operation as `provider_cli_state_changed` with nothing written to
-  the prefix and the job directory removed. The residual window is between
-  that second observation and npm writing the prefix, milliseconds inside the
-  same account's trust domain. Tokens minted before observation existed are
-  never accepted, and a v1-only Controller is refused with
-  `provider_cli_controller_outdated` rather than served unobserved.
+  step and again immediately before the install step, under the operation's
+  single five-minute deadline (each observation process gets at most the probe
+  budget, never beyond that deadline, and nothing spawns once it has passed).
+  Process facts are decided first: an observation whose descendants were not
+  confirmed gone ends the operation `unknown` (`cleanup_unconfirmed`) with
+  nothing executed after it, and a spent budget ends it timed out
+  (`provider_cli_deadline`). Only then are hash, action and relation compared
+  strictly; any difference (a prefix that moved, a binary that appeared,
+  changed or became unreadable, an action that became `noop`) fails the
+  operation as `provider_cli_state_changed` with nothing written to the prefix
+  and the job directory removed. What remains is a time-of-check/time-of-use
+  window between the second observation and npm writing the prefix: it is
+  bounded by the remaining operation budget, not by any millisecond promise,
+  and lies inside the same account's trust domain. Tokens minted before
+  observation existed are never accepted, and a v1-only Controller is refused
+  with `provider_cli_controller_outdated` rather than served unobserved.
 - The Controller's observation is treated as input, not truth: the Proxy
   validates its shape before storing, auditing or showing it (canonical strict
   version, bounded control-free text, bounded absolute executable path, a

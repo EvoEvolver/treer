@@ -96,8 +96,12 @@ case "$1" in
   pack)
     for a in "$@"; do case "$a" in --pack-destination=*) dest=${a#--pack-destination=};; esac; done
     cp "$dir/tarball.tgz" "$dest/openai-codex-0.163.0.tgz"
+    if [ -f "$dir/slow-pack" ]; then sleep 2; fi
     if [ -f "$dir/plant-on-pack" ]; then
       printf '#!/bin/sh\necho codex-cli 9.9.9\n' > "$dir/prefix/bin/codex"; chmod 755 "$dir/prefix/bin/codex"
+    fi
+    if [ -f "$dir/plant-on-pack-detach" ]; then
+      printf '#!/bin/sh\nperl -MPOSIX -e '"'"'POSIX::setsid(); exec "sleep", "20"'"'"' &\necho codex-cli 0.162.0\n' > "$dir/prefix/bin/codex"; chmod 755 "$dir/prefix/bin/codex"
     fi
     ;;
   install)
@@ -110,6 +114,7 @@ case "$1" in
     ;;
   prefix)
     if [ -f "$dir/break-prefix" ]; then echo "prefix fixture broken" >&2; exit 1; fi
+    if [ -f "$dir/slow-prefix-after-pack" ] && [ -f "$dir/log/argv-pack" ]; then sleep 3; fi
     printf '%s\n' "$dir/prefix"
     ;;
 esac
@@ -1176,6 +1181,200 @@ async fn detached_descendant_holding_output_turns_operation_unknown() {
         report.steps.as_ref().unwrap().len(),
         3,
         "an unconfirmed step stops the plan"
+    );
+}
+
+/// A probe whose output exceeds the retained tail has no trustworthy first
+/// line: a crafted tail must not turn a newer installation into an "upgrade"
+/// or a "noop". Truncated output is unknown and needs acknowledgement.
+#[cfg(unix)]
+#[tokio::test]
+async fn truncated_probe_output_never_yields_a_version() {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    // Real first line 9.0.0 (newer than the target); the retained 32 KiB tail
+    // starts with a line claiming 0.1.0 (older) and then the target itself.
+    write_executable(
+        &fixture.prefix_binary(),
+        "#!/bin/sh\nprintf 'codex-cli 9.0.0\\n'\nhead -c 40000 /dev/zero | tr '\\0' x\nprintf '\\ncodex-cli 0.1.0\\ncodex-cli 0.163.0\\n'\n",
+    );
+    let service = fixture.service();
+    let response = service.check(&fixture.codex_ref()).await.unwrap();
+    assert!(response.truncated, "{response:?}");
+    assert_eq!(response.exit_code, Some(0));
+    let observation = response.observation.unwrap();
+    assert_eq!(observation.validate(), Ok(()));
+    assert_eq!(observation.state, ProviderCliObservedState::Unknown);
+    assert_eq!(observation.current_version, None);
+    assert_eq!(
+        observation.probe.error_code.as_deref(),
+        Some("provider_cli_probe_output_truncated")
+    );
+    let decision = decide_provider_cli_action(&observation, PINNED).unwrap();
+    assert_eq!(decision.action, ProviderCliAction::Replace);
+    assert_eq!(
+        decision.version_relation,
+        Some(ProviderCliVersionRelation::Unknown),
+        "never upgrade or noop from a truncated tail"
+    );
+}
+
+/// Process facts come before consent: an observation whose probe left a
+/// detached pipe holder is not evidence at prepare time, and at either gate
+/// it stops the operation as `unknown` (`cleanup_unconfirmed`) with nothing
+/// executed after it. Takes two descendant grace periods (about twenty
+/// seconds).
+#[cfg(unix)]
+#[tokio::test]
+async fn unconfirmed_probe_cleanup_issues_no_consent_and_stops_the_operation() {
+    assert!(
+        std::process::Command::new("perl")
+            .arg("-MPOSIX")
+            .arg("-e")
+            .arg("1")
+            .output()
+            .map(|output| output.status.success())
+            .unwrap_or(false),
+        "this regression needs perl with POSIX to detach a descendant; do not skip it"
+    );
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let codex = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CODEX)
+        .unwrap();
+    let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
+    // Consent given on an empty prefix.
+    let consent = fixture.consent(&service).await;
+    assert_eq!(consent.action, ProviderCliAction::Install);
+
+    // Prepare-time: the probe detaches a holder of its stdout.
+    fixture.install_binary(
+        "codex-cli 0.162.0; perl -MPOSIX -e 'POSIX::setsid(); exec \"sleep\", \"20\"' &",
+    );
+    let response = service.check(&fixture.codex_ref()).await.unwrap();
+    let observation = response.observation.unwrap();
+    assert_eq!(observation.validate(), Ok(()));
+    assert!(!observation.probe.cleanup_confirmed);
+    assert_eq!(
+        observation.probe.error_code.as_deref(),
+        Some("cleanup_unconfirmed")
+    );
+    assert_eq!(observation.state, ProviderCliObservedState::Unknown);
+    assert_eq!(
+        observation.current_version, None,
+        "its output is not evidence"
+    );
+    assert_eq!(
+        decide_provider_cli_action(&observation, PINNED),
+        None,
+        "no consent can be issued on an unconfirmed probe"
+    );
+    assert!(!response.installed);
+
+    // Second gate: the binary planted during pack detaches at probe time.
+    fs::remove_file(fixture.prefix_binary()).unwrap();
+    fs::write(fixture.fixture.join("plant-on-pack-detach"), b"").unwrap();
+    let id = operation_id(12);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::Unknown,
+        "{report:?}"
+    );
+    assert_eq!(report.error_code.as_deref(), Some("cleanup_unconfirmed"));
+    assert_eq!(report.step, Some(3));
+    assert!(fixture.log("argv-pack").is_some());
+    assert!(
+        fixture.log("argv-install").is_none(),
+        "nothing spawns after an unconfirmed observation"
+    );
+    assert_eq!(report.steps.as_ref().unwrap().len(), 2);
+    let observed = report.observed_before.unwrap();
+    assert_eq!(observed.state, ProviderCliObservedState::Unknown);
+    assert_eq!(observed.current_version, None);
+}
+
+/// Observations inherit the operation's absolute deadline: when the budget is
+/// spent during the second gate, the install step is never spawned and the
+/// operation ends timed out, not changed or succeeded.
+#[cfg(unix)]
+#[tokio::test]
+async fn consent_gate_inherits_the_operation_deadline() {
+    let fixture = fixture(table_with_codex_integrity(&integrity_of(TARBALL)));
+    fs::write(fixture.fixture.join("slow-pack"), b"").unwrap();
+    fs::write(fixture.fixture.join("slow-prefix-after-pack"), b"").unwrap();
+    let service = fixture.service();
+    let recipes = service.recipes().unwrap();
+    let codex = recipes
+        .recipes
+        .iter()
+        .find(|view| view.recipe_id == CODEX)
+        .unwrap();
+    let argv_hash = plan_argv_hash(codex.plan.as_ref().unwrap());
+    let consent = fixture.consent(&service).await;
+    // Budget: the first gate and the two-second pack fit; the second gate's
+    // three-second prefix resolution crosses the deadline.
+    service.set_operation_budget(Duration::from_secs(4));
+    let id = operation_id(13);
+    service
+        .install(
+            &id,
+            &fixture.codex_ref(),
+            &recipes.table_hash,
+            &argv_hash,
+            &consent,
+        )
+        .unwrap();
+    let report = wait_terminal(&service, &id).await;
+    assert_eq!(
+        report.status,
+        ProviderCliOperationStatus::TimedOut,
+        "{report:?}"
+    );
+    assert_eq!(report.error_code.as_deref(), Some("provider_cli_deadline"));
+    assert!(report.timed_out);
+    assert!(fixture.log("argv-pack").is_some());
+    assert!(
+        fixture.log("argv-install").is_none(),
+        "an exhausted budget spawns nothing"
+    );
+    assert_eq!(report.steps.as_ref().unwrap().len(), 2);
+    assert!(!fixture.root.join("jobs").join(CODEX).exists());
+
+    // run_step itself refuses to spawn once the deadline has passed.
+    let step = ProviderCliPlanStep::Command {
+        step: 9,
+        purpose: "prefix".into(),
+        executable: fixture.fixture.join("bin/npm").display().to_string(),
+        args: vec!["expired-probe".into()],
+    };
+    let environment = step_environment(
+        BTreeMap::new(),
+        fixture.root.as_path(),
+        Some(fixture.search_path.as_os_str()),
+    );
+    let outcome = run_step(
+        &step,
+        &environment,
+        fixture.fixture.as_path(),
+        Instant::now() - Duration::from_millis(1),
+    )
+    .await;
+    assert!(outcome.timed_out && outcome.cleanup_confirmed && !outcome.spawn_failed);
+    assert!(
+        fixture.log("argv-expired-probe").is_none(),
+        "no process was started"
     );
 }
 
