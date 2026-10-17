@@ -1,6 +1,6 @@
 # Message endpoint — implementation contract (#159)
 
-Status: **P1 review draft; not runnable or deployed**. Implements research
+Status: **P1 review draft + hermetic library slices; not runnable or deployed**. Implements research
 [design E](../../docs/research/2026-10-17-message-endpoint-hub-design.md) approved
 in #159. The contract below is normative for the new implementation; existing
 Telegram, HTTP and email Apps remain unchanged until reviewed migration.
@@ -262,3 +262,17 @@ remain responsive; no panic crosses a handler, no unbounded retry/spawn.
 Use private worktree Cargo target and closed test environment. No shared target,
 real credentials or production transport in tests. No push/deploy/restart is
 part of author work. Root workspace/CI packaging changes, if needed, go to owners.
+
+## Current development slice
+
+The Rust library currently implements pure framing/session authentication and
+an in-memory SQLite queue test harness. There are no program entry points,
+production file opener, socket listener, transport worker, settings UI or
+activation API yet. The in-memory store tests transaction semantics; they do not
+prove filesystem crash durability. Production WAL/recovery/permissions, generation
+rotation, context maps, audit and retention remain implementation work.
+
+Run the focused offline checks with `python3 apps/message-endpoint/tests/run.py`.
+The runner strips inherited Treer/harness credentials, gives tests a private
+HOME/temp directory, and uses this worktree's target directory. It needs existing
+Rust tooling/dependency cache; it does not download dependencies or invoke Treer.
