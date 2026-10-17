@@ -504,7 +504,21 @@ async fn fixture() -> (
 fn observe(
     state: AppState,
     connection: Uuid,
+    rx: tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+) -> tokio::task::JoinHandle<String> {
+    observe_response(
+        state,
+        connection,
+        rx,
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+    )
+}
+
+fn observe_response(
+    state: AppState,
+    connection: Uuid,
     mut rx: tokio::sync::mpsc::UnboundedReceiver<SocketFrame>,
+    response: &'static [u8],
 ) -> tokio::task::JoinHandle<String> {
     tokio::spawn(async move {
         let open = loop {
@@ -545,8 +559,7 @@ fn observe(
                 NetworkBinaryFrame {
                     kind: NetworkBinaryKind::Data,
                     stream_id: open.stream_id.clone(),
-                    payload: b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
-                        .to_vec(),
+                    payload: response.to_vec(),
                 },
             )
             .await
@@ -566,6 +579,209 @@ fn observe(
             .unwrap();
         request
     })
+}
+
+#[tokio::test]
+async fn agent_ui_frame_policy_real_router_preserves_launcher_headers_and_strips_forgery() {
+    // HTTP over the real machine-stream tunnel, with a synthetic Controller.
+    // No launcher, browser session or enrolled machine is contacted.
+    for kind in [
+        "agent-root",
+        "agent-slash",
+        "agent-asset",
+        "agent-websocket",
+        "virtual-host",
+        "app-ui",
+    ] {
+        let (auth, identity, app, state, connection, rx) = fixture().await;
+        let server = state.resolve_server("default", "machine-a").await.unwrap();
+        let now = Utc::now();
+        state
+            .apply_snapshot(
+                connection,
+                treer_protocol::AgentServerSnapshot {
+                    server,
+                    agents: vec![AgentInfo {
+                        path: None,
+                        run_generation: 0,
+                        agent_id: "agent-ui".into(),
+                        workspace_id: "default".into(),
+                        server_id: "machine-a".into(),
+                        kind: "codex".into(),
+                        name: "test".into(),
+                        cwd: ".".into(),
+                        status: treer_protocol::AgentStatus::Idle,
+                        pid: None,
+                        started_at: now,
+                        updated_at: now,
+                        exited_at: None,
+                        exit_code: None,
+                        output_revision: 0,
+                        interface: Some(treer_protocol::AgentInterfaceDescriptor {
+                            protocol: treer_protocol::AGENT_INTERFACE_PROTOCOL_V1.into(),
+                            instance_id: "actual-instance".into(),
+                            port: 12345,
+                            capabilities: vec![],
+                            ui_path: Some("/launcher/".into()),
+                            registered_at: now,
+                        }),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+        let websocket = kind == "agent-websocket";
+        let upstream: &'static [u8] = if websocket {
+            b"HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\r\n"
+        } else {
+            concat!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: 8\r\n",
+                "Content-Security-Policy: default-src 'self'; frame-ancestors 'none'; form-action 'none'\r\n",
+                "Content-Security-Policy: script-src 'self'; FRAME-ANCESTORS https://untrusted.example\r\n",
+                "Permissions-Policy: camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=(), clipboard-read=(), bluetooth=(), hid=(), serial=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), screen-wake-lock=()\r\n",
+                "Referrer-Policy: no-referrer\r\nX-Frame-Options: DENY\r\n",
+                "Set-Cookie: launcher=must-not-forward\r\nConnection: close\r\n\r\nlauncher",
+            ).as_bytes()
+        };
+        let observer = observe_response(state.clone(), connection, rx, upstream);
+        let proxy_url = Url::parse("https://proxy.treer.example/").unwrap();
+        let console_url = Url::parse("https://app.treer.example/").unwrap();
+        let messages = MessageStore::open(auth.pool()).await.unwrap();
+        let route = router(
+            state,
+            BootstrapConfig::new(
+                proxy_url.clone(),
+                PathBuf::from("dist"),
+                Url::parse("https://example.test/releases/").unwrap(),
+            ),
+            auth,
+            PolicyEngine::allow_all(),
+            identity,
+            BrowserAccess::new(&console_url, &proxy_url).unwrap(),
+            IngressConfig::new(None, &proxy_url, &console_url).unwrap(),
+            messages,
+            CapabilityRollout::all_enabled(),
+            crate::updater::UpdaterClient::disabled(),
+            crate::voice::VoiceServices::disabled(),
+        );
+        let path = match kind {
+            "agent-root" => "/api/workspaces/default/agents/agent-ui/interface/ui".into(),
+            "agent-slash" => "/api/workspaces/default/agents/agent-ui/interface/ui/".into(),
+            "agent-asset" => "/api/workspaces/default/agents/agent-ui/interface/ui/app.js".into(),
+            "agent-websocket" => "/api/workspaces/default/agents/agent-ui/interface/ui/ws".into(),
+            "virtual-host" => format!(
+                "/api/workspaces/default/virtual-hosts/{}/proxy/",
+                app.hostname
+            ),
+            "app-ui" => format!("/api/workspaces/default/apps/{}/ui/", app.app_id),
+            _ => unreachable!(),
+        };
+        let mut request = Request::builder();
+        if websocket {
+            request = request
+                .header(header::ORIGIN, "https://app.treer.example")
+                .header(header::CONNECTION, "Upgrade")
+                .header(header::UPGRADE, "websocket");
+        }
+        let response = tokio::time::timeout(
+            Duration::from_secs(30),
+            route.oneshot(
+                request
+                    .uri(path)
+                    .header(header::COOKIE, "treer_session=login")
+                    // Ordinary top-level navigations have no Origin header.
+                    .header("sec-fetch-mode", "navigate")
+                    .header("sec-fetch-dest", "document")
+                    .header("x-treer-interface-source", "controller-api")
+                    .header("x-treer-interface-instance", "forged-instance")
+                    .header("x-treer-agent-id", "forged-agent")
+                    .header("x-treer-identity-token", "forged-token")
+                    .header("x-treer-custom-identity", "forged-custom")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            response.status(),
+            if websocket {
+                StatusCode::SWITCHING_PROTOCOLS
+            } else {
+                StatusCode::OK
+            },
+            "{kind}"
+        );
+        let headers = response.headers();
+        if websocket {
+            assert_eq!(headers[header::UPGRADE], "websocket");
+            assert_eq!(headers[header::CONNECTION], "Upgrade");
+            assert_eq!(
+                headers[header::CONTENT_SECURITY_POLICY],
+                "frame-ancestors 'self' https://app.treer.example"
+            );
+            assert!(!headers.contains_key(header::X_FRAME_OPTIONS));
+            let forwarded = tokio::time::timeout(Duration::from_secs(30), observer)
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(forwarded.starts_with("GET /launcher/ws HTTP/1.1\r\n"));
+            assert!(!forwarded.to_ascii_lowercase().contains("forged"));
+            continue;
+        }
+        assert_eq!(
+            headers["permissions-policy"],
+            "camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=(), clipboard-read=(), bluetooth=(), hid=(), serial=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), screen-wake-lock=()"
+        );
+        assert_eq!(headers["referrer-policy"], "no-referrer");
+        assert_eq!(headers[header::CONTENT_TYPE], "text/html");
+        assert!(!headers.contains_key(header::SET_COOKIE));
+        let policies: Vec<_> = headers
+            .get_all(header::CONTENT_SECURITY_POLICY)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        if kind == "virtual-host" {
+            assert_eq!(
+                policies,
+                [
+                    "default-src 'self'; frame-ancestors 'none'; form-action 'none'",
+                    "script-src 'self'; FRAME-ANCESTORS https://untrusted.example"
+                ]
+            );
+            assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+        } else {
+            assert_eq!(policies, ["default-src 'self'; form-action 'none'; frame-ancestors 'self' https://app.treer.example",
+                "script-src 'self'; frame-ancestors 'self' https://app.treer.example"]);
+            assert!(!headers.contains_key(header::X_FRAME_OPTIONS));
+        }
+        assert_eq!(
+            axum::body::to_bytes(response.into_body(), 1024)
+                .await
+                .unwrap(),
+            "launcher"
+        );
+        let forwarded = tokio::time::timeout(Duration::from_secs(30), observer)
+            .await
+            .unwrap()
+            .unwrap();
+        let lower = forwarded.to_ascii_lowercase();
+        assert!(!lower.contains("forged"), "{kind}");
+        assert!(!lower.contains("cookie:"));
+        if kind.starts_with("agent-") {
+            let expected_target = if kind == "agent-asset" {
+                "/launcher/app.js"
+            } else {
+                "/launcher/"
+            };
+            assert!(forwarded.starts_with(&format!("GET {expected_target} HTTP/1.1\r\n")));
+            assert!(lower.contains("x-treer-interface-source: proxy-ui\r\n"));
+            assert!(lower.contains("x-treer-interface-instance: actual-instance\r\n"));
+            assert!(lower.contains("x-treer-agent-id: agent-ui\r\n"));
+            assert!(!lower.contains("x-treer-identity-token:"));
+        }
+    }
 }
 
 fn token_in(request: &str) -> Option<&str> {

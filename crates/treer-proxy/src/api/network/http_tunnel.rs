@@ -99,7 +99,10 @@ pub(in crate::api) async fn proxy_agent_interface_ui_root(
     // App content must never run on the Console's origin (#132).
     bootstrap.app_dist().require_embedding_allowed()?;
     browser.validate_tunnel_if_present(request.headers())?;
-    proxy_agent_interface_ui(state, workspace_id, agent_id, String::new(), request).await
+    let mut response =
+        proxy_agent_interface_ui(state, workspace_id, agent_id, String::new(), request).await?;
+    crate::api::app_ui::allow_control_plane_frame(response.headers_mut(), &browser)?;
+    Ok(response)
 }
 
 pub(in crate::api) async fn proxy_agent_interface_ui_path(
@@ -112,7 +115,10 @@ pub(in crate::api) async fn proxy_agent_interface_ui_path(
     // App content must never run on the Console's origin (#132).
     bootstrap.app_dist().require_embedding_allowed()?;
     browser.validate_tunnel_if_present(request.headers())?;
-    proxy_agent_interface_ui(state, workspace_id, agent_id, path, request).await
+    let mut response =
+        proxy_agent_interface_ui(state, workspace_id, agent_id, path, request).await?;
+    crate::api::app_ui::allow_control_plane_frame(response.headers_mut(), &browser)?;
+    Ok(response)
 }
 
 pub(in crate::api) async fn proxy_agent_interface_ui(
