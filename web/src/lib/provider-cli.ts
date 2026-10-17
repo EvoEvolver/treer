@@ -1,5 +1,17 @@
 // Human-only provider CLI API consumer: no browser-generated installer argv.
-export const PROVIDER_CLI_CAPABILITY = "machine.provider-cli-install.v1"
+export const PROVIDER_CLI_CAPABILITY = "machine.provider-cli-install.v2"
+export type ProviderCliAction = "install" | "replace" | "noop"
+export type ProviderCliRelation = "upgrade" | "downgrade" | "unknown" | "incomparable" | null
+export interface ProviderCliObservation {
+  state: "absent" | "installed" | "unknown"; current_version: string | null; version_text: string | null
+  executable: string | null; found_in_prefix: boolean
+  probe: { exit_code: number | null; timed_out: boolean; cleanup_confirmed: boolean; error_code: string | null }
+}
+export interface ProviderCliObservedSummary {
+  state: ProviderCliObservation["state"]; current_version: string | null; found_in_prefix: boolean; observation_hash: string
+}
+export const providerCliNeedsAcknowledgement = (relation: ProviderCliRelation) =>
+  relation === "downgrade" || relation === "unknown" || relation === "incomparable"
 export const providerCliBase = (workspaceId: string, machineId: string) =>
   `/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machineId)}/provider-clis`
 export type ProviderCliStatus = "queued" | "running" | "succeeded" | "failed" | "timed_out" | "unknown"
@@ -10,6 +22,7 @@ export interface ProviderCliOperation extends ProviderCliRecipeIdentity {
   operation_id: string; machine_id: string; status: ProviderCliStatus; step: number | null
   elapsed_ms: number; exit_code: number | null; timed_out: boolean
   stdout: string; stderr: string; truncated: boolean; error_code?: string; steps?: ProviderCliStepResult[]
+  observed_before?: ProviderCliObservedSummary
 }
 const statuses: readonly string[] = ["queued", "running", "succeeded", "failed", "timed_out", "unknown"]
 const record = (v: unknown): v is Record<string, unknown> => Boolean(v && typeof v === "object" && !Array.isArray(v))
@@ -24,11 +37,20 @@ const code = (v: unknown): v is string => typeof v === "string" && /^[a-z][a-z0-
 export function providerCliOperation(v: unknown, expected: ProviderCliRecipeIdentity & { operation_id: string; machine_id: string }): ProviderCliOperation | null {
   if (!record(v) || v.operation_id !== expected.operation_id || v.machine_id !== expected.machine_id ||
     v.recipe_id !== expected.recipe_id || v.recipe_version !== expected.recipe_version || v.recipe_hash !== expected.recipe_hash ||
-    typeof v.status !== "string" || !statuses.includes(v.status) || (v.step != null && !step(v.step)) ||
+    typeof v.status !== "string" || !statuses.includes(v.status) || (v.step != null && !step(v.step) && !(v.step === 0 && v.status === "failed" && v.error_code === "provider_cli_state_changed")) ||
     !nonnegative(v.elapsed_ms) || !exit(v.exit_code) || typeof v.timed_out !== "boolean" ||
     !tail(v.stdout) || !tail(v.stderr) || typeof v.truncated !== "boolean" || (v.error_code !== undefined && !code(v.error_code))) return null
   if ((v.status === "queued" || v.status === "running") && (v.stdout !== "" || v.stderr !== "" || v.steps !== undefined)) return null
   if (v.status === "succeeded" && (v.exit_code !== 0 || v.timed_out)) return null
+  let observed: ProviderCliObservedSummary | undefined
+  if (v.observed_before != null) {
+    if (!record(v.observed_before)) return null
+    const value: Record<string, unknown> = { ...v.observed_before, current_version: v.observed_before.current_version ?? null }
+    if (!record(value) || !observationState(value.state) || !nullableVersion(value.current_version) || typeof value.found_in_prefix !== "boolean" || !hash(value.observation_hash) ||
+      value.state === "absent" && (value.found_in_prefix || value.current_version !== null) ||
+      value.state === "installed" && (!value.found_in_prefix || !value.current_version)) return null
+    observed = { state: value.state, current_version: value.current_version, found_in_prefix: value.found_in_prefix, observation_hash: value.observation_hash }
+  }
   let steps: ProviderCliStepResult[] | undefined
   if (v.steps !== undefined) {
     if (!Array.isArray(v.steps) || v.steps.length > 5) return null
@@ -41,9 +63,10 @@ export function providerCliOperation(v: unknown, expected: ProviderCliRecipeIden
       steps.push({ step: item.step, exit_code: item.exit_code, stdout: item.stdout, stderr: item.stderr, truncated: item.truncated, duration_ms: item.duration_ms })
     }
   }
+  if (v.step === 0 && steps?.length) return null
   return { ...expected, status: v.status as ProviderCliStatus, step: (v.step ?? null) as number | null, elapsed_ms: v.elapsed_ms,
     exit_code: v.exit_code, timed_out: v.timed_out, stdout: v.stdout, stderr: v.stderr, truncated: v.truncated,
-    ...(v.error_code === undefined ? {} : { error_code: v.error_code as string }), ...(steps === undefined ? {} : { steps }) }
+    ...(v.error_code === undefined ? {} : { error_code: v.error_code as string }), ...(steps === undefined ? {} : { steps }), ...(observed ? { observed_before: observed } : {}) }
 }
 // Offer installation only for one exact supported server-declared binary, with
 // a proven removed identity on the machine still selected in the draft.
@@ -68,11 +91,32 @@ export interface ProviderCliRecipe extends ProviderCliRecipeIdentity {
   package?: { name: string; version: string; integrity: string; registry: string }; plan?: ProviderCliPlanStep[]
 }
 export interface ProviderCliRecipes { schema_version: number; machine_id: string; platform: string; controller_source_sha: string; table_hash: string; recipes: ProviderCliRecipe[] }
-export interface ProviderCliPrepared { confirmation_token: string; expires_at: string; machine_id: string; table_hash: string; recipe: ProviderCliRecipe }
+export interface ProviderCliPrepared {
+  confirmation_token?: string; expires_at?: string; machine_id: string; table_hash: string; recipe: ProviderCliRecipe
+  action: ProviderCliAction; version_relation: ProviderCliRelation; target_version: string
+  observation: ProviderCliObservation; observation_hash: string
+}
 const text = (v: unknown, max = 8192): v is string => typeof v === "string" && v.length > 0 && v.length <= max
 const hash = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64}$/.test(v)
 const slug = (v: unknown): v is string => typeof v === "string" && /^[a-z0-9][a-z0-9_-]{0,127}$/.test(v)
 const strings = (v: unknown): v is string[] => Array.isArray(v) && v.length <= 64 && v.every(item => text(item))
+const observationState = (v: unknown): v is ProviderCliObservation["state"] => ["absent", "installed", "unknown"].includes(v as string)
+const nullableVersion = (v: unknown): v is string | null => v === null || text(v, 256)
+export function providerCliObservation(v: unknown): ProviderCliObservation | null {
+  // Serde omits None fields in the v2 wire DTO. Normalize only those optional
+  // fields; required evidence and unknown enum values still fail closed.
+  if (!record(v)) return null
+  v = { ...v, current_version: v.current_version ?? null, version_text: v.version_text ?? null, executable: v.executable ?? null,
+    ...(record(v.probe) ? { probe: { ...v.probe, error_code: v.probe.error_code ?? null } } : {}) }
+  if (!record(v) || !observationState(v.state) || !nullableVersion(v.current_version) || !nullableVersion(v.version_text) ||
+    !(v.executable === null || text(v.executable) && v.executable.startsWith("/")) || typeof v.found_in_prefix !== "boolean" ||
+    !record(v.probe) || !exit(v.probe.exit_code) || typeof v.probe.timed_out !== "boolean" || typeof v.probe.cleanup_confirmed !== "boolean" ||
+    !(v.probe.error_code === null || code(v.probe.error_code))) return null
+  if (v.state === "absent" && (v.found_in_prefix || v.current_version !== null)) return null
+  if (v.state === "installed" && (!v.found_in_prefix || !v.current_version || v.probe.exit_code !== 0 || v.probe.timed_out || !v.probe.cleanup_confirmed)) return null
+  return { state: v.state, current_version: v.current_version, version_text: v.version_text, executable: v.executable, found_in_prefix: v.found_in_prefix,
+    probe: { exit_code: v.probe.exit_code, timed_out: v.probe.timed_out, cleanup_confirmed: v.probe.cleanup_confirmed, error_code: v.probe.error_code } }
+}
 export function providerCliPlan(v: unknown): ProviderCliPlanStep[] | null {
   if (!Array.isArray(v) || v.length !== 5) return null
   const plan: ProviderCliPlanStep[] = []
@@ -111,11 +155,25 @@ export function providerCliRecipes(v: unknown, machineId: string): ProviderCliRe
   return { schema_version: 1, machine_id: machineId, platform: v.platform, controller_source_sha: v.controller_source_sha, table_hash: v.table_hash, recipes }
 }
 export function providerCliPrepared(v: unknown, recipes: ProviderCliRecipes, selected: ProviderCliRecipe): ProviderCliPrepared | null {
-  if (!record(v) || v.machine_id !== recipes.machine_id || v.table_hash !== recipes.table_hash || !text(v.confirmation_token, 512) ||
-    !text(v.expires_at, 128) || !Number.isFinite(Date.parse(v.expires_at))) return null
+  if (!record(v)) return null
+  v = { ...v, version_relation: v.version_relation ?? null }
+  if (!record(v) || v.machine_id !== recipes.machine_id || v.table_hash !== recipes.table_hash || !hash(v.observation_hash) ||
+    !["install", "replace", "noop"].includes(v.action as string) || ![null, "upgrade", "downgrade", "unknown", "incomparable"].includes(v.version_relation as null | string)) return null
   const recipe = providerCliRecipe(v.recipe, recipes.platform)
   if (!recipe?.supported || recipe.recipe_id !== selected.recipe_id || recipe.recipe_version !== selected.recipe_version || recipe.recipe_hash !== selected.recipe_hash) return null
+  const observation = providerCliObservation(v.observation)
+  if (!observation || v.target_version !== recipe.package!.version) return null
+  if (v.action === "noop") {
+    if (v.confirmation_token !== undefined || v.expires_at !== undefined || observation.state !== "installed" || observation.current_version !== v.target_version || v.version_relation !== null) return null
+  } else {
+    if (!text(v.confirmation_token, 512) || !text(v.expires_at, 128) || !Number.isFinite(Date.parse(v.expires_at))) return null
+    if (v.action === "install" && (observation.state !== "absent" || v.version_relation !== null)) return null
+    if (v.action === "replace" && (!observation.found_in_prefix || v.version_relation === null || observation.state === "absent" ||
+      observation.state === "unknown" && v.version_relation !== "unknown" || observation.state === "installed" && (v.version_relation === "unknown" || observation.current_version === v.target_version))) return null
+  }
   // Always show the freshly prepared plan, including its machine-resolved paths.
-  return { confirmation_token: v.confirmation_token, expires_at: v.expires_at, machine_id: recipes.machine_id, table_hash: recipes.table_hash, recipe }
+  return { ...(v.action === "noop" ? {} : { confirmation_token: v.confirmation_token as string, expires_at: v.expires_at as string }),
+    machine_id: recipes.machine_id, table_hash: recipes.table_hash, recipe, action: v.action as ProviderCliAction,
+    version_relation: v.version_relation as ProviderCliRelation, target_version: v.target_version as string, observation, observation_hash: v.observation_hash }
 }
 export const providerCliRef = (recipe: ProviderCliRecipeIdentity): ProviderCliRecipeIdentity => ({ recipe_id: recipe.recipe_id, recipe_version: recipe.recipe_version, recipe_hash: recipe.recipe_hash })
