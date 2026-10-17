@@ -350,9 +350,12 @@ path or mismatch pauses; the old expected and current observed values remain
 visible, and later matching data never automatically resumes. Metadata older than
 30 seconds prevents work admission and transport job access until refreshed.
 
-Outer Core sender kind/ID selects the binding. Unknown/human senders get bounded
-body-free durable rejection receipts before ack; exhaustion persists a hub-wide
-blocked flag without ack. Bound poison uses the existing bounded failure ledger.
+Outer Core sender kind/ID selects the binding. Unknown/human senders get body-free durable aggregate counters before ack-and-drop:
+at most 128 sender/kind rows plus one overflow counter. Counts are receive attempts,
+so ack retries may count again. Unknown floods cannot exhaust an exact-delivery
+ledger and block bound work. Bound poison uses the existing bounded failure ledger;
+its exhaustion still persistently blocks without ack. A previously blocked
+scaffold database is not silently unblocked, since its cause may be bound poison.
 Valid outbound fragments commit before ack and reassemble into durable transport
 work; Core ack is not external delivery. Partial inboxes and binding/pause state
 survive reopening. Changing the hub runtime ID/workspace refuses existing state;

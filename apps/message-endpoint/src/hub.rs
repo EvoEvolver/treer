@@ -14,7 +14,7 @@ use thiserror::Error;
 
 const READBACK_TTL: i64 = 30;
 const STATUS_INTERVAL: i64 = 60;
-const UNKNOWN_BUDGET: i64 = 1000;
+const UNKNOWN_SENDER_SLOTS: i64 = 128;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -98,6 +98,7 @@ pub struct Hub<M> {
     pub(crate) store: Store,
     pub(crate) mailbox: M,
     workspace: String,
+    own_id: String,
 }
 fn stable(id: &str) -> bool {
     valid_id(id) && (id.starts_with("ag_") || id.starts_with("app_"))
@@ -129,7 +130,10 @@ impl<M: Mailbox + Directory> Hub<M> {
         let tx = store.db.transaction()?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);
-        CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);")?;
+        CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS hub_unknown_senders(kind TEXT NOT NULL,sender TEXT NOT NULL,attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL,PRIMARY KEY(kind,sender));
+        CREATE TABLE IF NOT EXISTS hub_unknown_overflow(singleton INTEGER PRIMARY KEY CHECK(singleton=1),attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL);
+        INSERT OR IGNORE INTO hub_unknown_overflow VALUES(1,0,0);")?;
         tx.execute(
             "INSERT OR IGNORE INTO hub_identity(singleton,agent,workspace) VALUES(1,?1,?2)",
             params![own_id, workspace],
@@ -147,6 +151,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             store,
             mailbox,
             workspace: workspace.into(),
+            own_id: own_id.into(),
         })
     }
     /// Internal owner-service boundary only. New bindings always start paused.
@@ -292,27 +297,34 @@ impl<M: Mailbox + Directory> Hub<M> {
         )?)
     }
     fn reject_unknown(&mut self, delivery: &Delivery, now: i64) -> Result<(), Error> {
-        // Bounded receipts, no body, body digest or arbitrary error strings.
+        // Unknown principals may never exhaust an exact-delivery ledger and
+        // block trusted endpoints. Bounded aggregates count receive attempts,
+        // not unique deliveries (an ack retry may count again). No body/digest.
+        let kind = match delivery.message.sender.kind {
+            SenderKind::Human => "human",
+            SenderKind::Agent => "agent",
+            SenderKind::Service => "service",
+            SenderKind::Machine => "machine",
+        };
+        let sender = &delivery.message.sender.id;
         let tx = self.store.db.transaction()?;
+        let changed=tx.execute("UPDATE hub_unknown_senders SET attempts=CASE WHEN attempts<9223372036854775807 THEN attempts+1 ELSE attempts END,last_seen=?3 WHERE kind=?1 AND sender=?2",params![kind,sender,now])?;
+        if changed == 0 {
+            let count: i64 =
+                tx.query_row("SELECT COUNT(*) FROM hub_unknown_senders", [], |r| r.get(0))?;
+            if count < UNKNOWN_SENDER_SLOTS {
+                tx.execute("INSERT INTO hub_unknown_senders(kind,sender,attempts,last_seen) VALUES(?1,?2,1,?3)",params![kind,sender,now])?;
+            } else {
+                tx.execute("UPDATE hub_unknown_overflow SET attempts=CASE WHEN attempts<9223372036854775807 THEN attempts+1 ELSE attempts END,last_seen=?1 WHERE singleton=1",[now])?;
+            }
+        }
+        // Old scaffold receipts have no sender information; prune them normally.
+        // A previously blocked hub is NOT silently unblocked by this migration:
+        // that bit might have been set by bound-endpoint poison as well.
         tx.execute(
             "DELETE FROM hub_rejections WHERE created_at<?1",
             [now - crate::transfers::TOMBSTONE_TTL],
         )?;
-        let known: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM hub_rejections WHERE delivery=?1)",
-            [&delivery.delivery_id],
-            |r| r.get(0),
-        )?;
-        if !known {
-            let count: i64 =
-                tx.query_row("SELECT COUNT(*) FROM hub_rejections", [], |r| r.get(0))?;
-            if count >= UNKNOWN_BUDGET {
-                tx.execute("UPDATE hub_identity SET blocked=1 WHERE singleton=1", [])?;
-                tx.commit()?;
-                return Err(Error::FailureBudget);
-            }
-            tx.execute("INSERT INTO hub_rejections(delivery,reason,created_at) VALUES(?1,'unbound_sender',?2)",params![delivery.delivery_id,now])?;
-        }
         tx.commit()?;
         self.mailbox.ack(&delivery.delivery_id)?;
         Ok(())
@@ -353,6 +365,9 @@ impl<M: Mailbox + Directory> Hub<M> {
         Ok(())
     }
     fn handle(&mut self, delivery: &Delivery, now: i64) -> Result<(), Error> {
+        if delivery.recipient.kind != SenderKind::Agent || delivery.recipient.id != self.own_id {
+            return Err(Error::Binding);
+        }
         let id = &delivery.message.sender.id;
         let bound: bool = self.store.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM hub_bindings WHERE endpoint=?1)",
@@ -689,7 +704,7 @@ mod tests {
         let count: i64 = hub
             .store
             .db
-            .query_row("SELECT COUNT(*) FROM hub_rejections", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM hub_unknown_senders", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 1);
         let mut human = delivery("del_human", "ag_endpoint", &wire);
@@ -762,24 +777,75 @@ mod tests {
                 .len(),
             1
         );
-        let tx = hub.store.db.transaction().unwrap();
-        for i in 0..UNKNOWN_BUDGET {
-            tx.execute(
-                "INSERT INTO hub_rejections VALUES(?1,'unbound_sender',?2)",
-                params![format!("del_unknown_{i}"), NOW],
-            )
-            .unwrap();
+        for i in 1..1000 {
+            hub.store
+                .record_failure(
+                    "ag_endpoint",
+                    1,
+                    &format!("del_poison_{i}"),
+                    b"bad",
+                    FailureReason::InvalidEnvelope,
+                    NOW,
+                )
+                .unwrap();
         }
-        tx.commit().unwrap();
         fake.deliveries
             .borrow_mut()
-            .push(delivery("del_full", "ag_unknown", "secret"));
+            .push(delivery("del_full", "ag_endpoint", "bad"));
         assert!(matches!(
             hub.receive_once(NOW + 1),
             Err(Error::FailureBudget)
         ));
         assert!(!fake.acks.borrow().contains(&"del_full".into()));
         assert!(hub.blocked().unwrap());
+    }
+    #[test]
+    fn unknown_flood_uses_bounded_sender_aggregates_without_blocking_bound_work() {
+        let (mut hub, fake) = fixture();
+        activate(&mut hub);
+        for i in 0..2000 {
+            fake.deliveries.borrow_mut().push(delivery(
+                &format!("del_unknown_{i}"),
+                &format!("ag_unknown_{i}"),
+                "untrusted",
+            ));
+        }
+        hub.receive_once(NOW).unwrap();
+        assert!(!hub.blocked().unwrap());
+        assert_eq!(fake.acks.borrow().len(), 2000);
+        let rows: i64 = hub
+            .store
+            .db
+            .query_row("SELECT COUNT(*) FROM hub_unknown_senders", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, UNKNOWN_SENDER_SLOTS);
+        let overflow: i64 = hub
+            .store
+            .db
+            .query_row("SELECT attempts FROM hub_unknown_overflow", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(overflow, 2000 - UNKNOWN_SENDER_SLOTS);
+        let wire = outbound("bound body").remove(0);
+        fake.deliveries
+            .borrow_mut()
+            .push(delivery("del_bound", "ag_endpoint", &wire));
+        hub.receive_once(NOW + 1).unwrap();
+        assert_eq!(hub.ready_outbound("ag_endpoint", NOW + 1).unwrap().len(), 1);
+        assert!(fake.acks.borrow().contains(&"del_bound".into()));
+    }
+    #[test]
+    fn wrong_recipient_never_routes_or_acks_even_under_faulty_mailbox_adapter() {
+        let (mut hub, fake) = fixture();
+        activate(&mut hub);
+        let wire = outbound("body").remove(0);
+        let mut wrong = delivery("del_wrong", "ag_endpoint", &wire);
+        wrong.recipient.id = "app_other".into();
+        fake.deliveries.borrow_mut().push(wrong);
+        assert!(hub.receive_once(NOW).is_err());
+        assert!(fake.acks.borrow().is_empty());
+        assert!(hub.ready_outbound("ag_endpoint", NOW).unwrap().is_empty());
     }
     #[test]
     fn restart_keeps_partial_fragments_pins_and_pause_state() {
