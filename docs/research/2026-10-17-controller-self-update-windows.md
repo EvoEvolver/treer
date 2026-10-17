@@ -422,6 +422,73 @@ frames, reordering, cross-session replay and deadline expiry without recovery.
 The Windows native fixture needs a fresh exact-SHA hosted run for the real pipe
 exchange; the prior `9f683383` results do not cover this new protocol model.
 
+## Proposed next slice: independent durable binding in disposable fixtures
+
+This is a design checkpoint, not an implementation or authority grant. The
+existing Unix registration writer in
+`crates/treer-agent-server/src/self_update/launcher_invocation/start/registration.rs`
+already binds intent bytes, actual child/owner process images and a fresh attempt,
+then writes/syncs registration before constructing its in-memory binding. Its
+Unix file/session identities cannot simply be reused on Windows. The proposed
+Windows slice remains private/test-only and creates records only under a fresh
+disposable fixture directory; it reads no installed configuration or transaction.
+
+Proposed layout: a private fixture root contains `image/` and `records/`. The
+`image/` directory contains only the pinned Controller copy and remains its cwd.
+The `records/` directory contains only fixed intent and registration filenames;
+neither paths nor filenames arrive over the pipe. The child derives the fixture
+root from its OS-observed executable location, pins all directory handles and
+validates non-reparse ownership/DACLs. Directories are created atomically with
+explicit owner/protected DACL descriptors, including in the new fixture. This
+also makes the pending foreign-owner, BA/AU, conditional/callback, null-DACL and
+deny-then-allow negative cases part of preparation acceptance, not a request to
+weaken the one-image invariant.
+
+The owner must retain a suspended child before publishing registration: split
+the current spawn operation into a private suspended-process guard and a
+consuming resume step. The guard owns the original process/thread handles and
+cleans up on every failure. Capture the child creation identity and image from
+those handles, derive the owner identity from the running owner process, and
+record both. Create each record exclusively with its explicit private security
+descriptor; bound the exact bytes, write fully, sync, close the writer, reopen
+read-only without write/delete sharing, and read back identity, bytes and hash.
+Any uncertainty preserves the fixture evidence and refuses resumption. No
+production durability/rename claim follows from a successful file flush alone;
+the native record-publication contract must be reviewed and tested separately.
+
+Only after read-back verification may the owner resume the child. The child
+opens the fixed records independently, checks size/version/allowed fields and
+exact intent digest, and verifies the registration's child identity against
+itself and owner identity against `ParentProof`. The owner checks the same
+registration against its retained child and own identity. Both construct the
+exchange binding from the exact locally read attempt/intent/registration bytes,
+never a digest or record supplied by the peer. Copied records referring to a
+different process, attempt or image must fail before Hello/Reply.
+
+The fixture design should replace per-phase timing with one handoff deadline
+chosen before image validation and child creation, covering record preparation,
+resume, parent attestation and exchange. Cross-process deadline encoding needs an
+explicit same-boot monotonic clock contract (for example bounded
+`GetTickCount64` start/expiry with checked arithmetic), not serialized Rust
+`Instant`, wall-clock time or a new budget on receipt. No deadline extension or
+restart reconstruction is allowed. Process creation identity still binds this
+record to the original live processes; clock data cannot recreate that identity.
+
+Acceptance cases include missing/truncated/oversized/unknown-version records,
+changed intent, changed registration, wrong owner/child creation or image,
+copied/duplicate attempts, extra directory entries, sync/read-back failure,
+parent death, timeout during each preparation/handshake phase, and cancellation
+while the child remains suspended. Each refusal must leave no executing child,
+use only its original process handle for cleanup, preserve uncertain evidence,
+and produce no authority token. Native hosted runs are required for the file
+security, sharing, process and pipe behavior. The current pure model completion
+continues to grant nothing.
+
+Locks, real-installation record reads/writes, once-only permit, durable dispatch
+decision and installer work remain outside this proposed slice. Their design
+review and leader authority decision must precede any production wiring; no
+fixture result may silently widen that boundary.
+
 ## Authority contract for the subsequent implementation review
 
 - Owner/supervisor communication uses a local private named pipe, restrictive
