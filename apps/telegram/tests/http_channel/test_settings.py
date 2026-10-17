@@ -127,3 +127,10 @@ class SettingsTests(unittest.TestCase):
         self.assertTrue(state['pair_backoff']['active'])
         self.assertTrue(state['pair_backoff']['expires_at'].endswith('Z'))
         self.assertNotIn('XXXXXXXXXX',str(state))
+
+    def test_drop_counts_and_reasons_are_visible_without_message_bodies(self):
+        for _ in range(3):self.a.unroutable('drop-fixture',99,'undeliverable_queue_full')
+        state=json.loads(self.request()[1])
+        self.assertEqual(state['drops']['total'],1)
+        self.assertEqual(state['drops']['by_reason'][0]['reason'],'undeliverable_queue_full')
+        self.assertTrue(state['drops']['by_reason'][0]['last_at'].endswith('Z'))

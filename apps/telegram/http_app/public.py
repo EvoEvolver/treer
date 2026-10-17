@@ -25,7 +25,7 @@ def wire(value):
         return [wire(item) for item in value]
     if isinstance(value, dict):
         return {key: datetime.fromtimestamp(item, timezone.utc).isoformat().replace("+00:00", "Z")
-                if key in ("at", "created_at", "expires_at", "failed_at") and type(item) in (int, float)
+                if key in ("at", "created_at", "expires_at", "failed_at", "last_at") and type(item) in (int, float)
                 else wire(item) for key, item in value.items()}
     return value
 

@@ -310,6 +310,10 @@ class AdminStore(Database, RegistryMixin):
                     client_id TEXT NOT NULL, creator TEXT NOT NULL, poc TEXT NOT NULL,
                     label TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL,
                     token_expires REAL, spent INTEGER NOT NULL DEFAULT 0);
+                CREATE TABLE IF NOT EXISTS http_drop_counts (
+                    reason TEXT PRIMARY KEY, count INTEGER NOT NULL, last_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS http_notice_limits (
+                    client_id TEXT PRIMARY KEY, last_at REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS http_undeliverable (
                     delivery_id TEXT PRIMARY KEY, first_at REAL NOT NULL,
                     attempts INTEGER NOT NULL, reason TEXT NOT NULL, size INTEGER NOT NULL);
@@ -444,6 +448,8 @@ class AdminStore(Database, RegistryMixin):
             attempts = row["attempts"] + 1 if row else 1
             should_ack = count >= 128 and row is None or (attempts >= 3 and (not grace or row is not None and self.clock() - row["first_at"] >= grace)) or row is not None and self.clock() - row["first_at"] >= 86400
             if should_ack:
+                db.execute("INSERT INTO http_drop_counts VALUES (?,1,?) ON CONFLICT(reason) DO UPDATE SET count=count+1,last_at=excluded.last_at",
+                           (reason, self.clock()))
                 db.execute("DELETE FROM http_undeliverable WHERE delivery_id=?", (delivery,))
                 self._audit(db, self.clock(), "drop:" + delivery, "bridge", "http", "undeliverable", "http", self.ACCOUNT,
                             None, None, f"bytes:{size}", reason)
@@ -451,6 +457,26 @@ class AdminStore(Database, RegistryMixin):
                 db.execute("INSERT INTO http_undeliverable VALUES (?,?,?,?,?) ON CONFLICT(delivery_id) DO UPDATE SET attempts=excluded.attempts",
                            (delivery, self.clock(), attempts, reason, size))
             return should_ack
+
+
+    def drop_summary(self):
+        with self._connect() as db:
+            rows = [dict(row) for row in db.execute('SELECT reason,count,last_at FROM http_drop_counts ORDER BY reason LIMIT 32')]
+        return {'total': sum(row['count'] for row in rows), 'by_reason': rows}
+
+    def claim_drop_notice(self, client):
+        # One per client/minute and twenty globally; reserve before CLI send.
+        # A crash may lose a diagnostic notice, never cause unlimited retries.
+        with self._connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT last_at FROM http_notice_limits WHERE client_id=?', (client,)).fetchone()
+            if row is not None and self.clock() - row[0] < 60:
+                return False
+            if db.execute('SELECT count(*) FROM http_notice_limits WHERE last_at>?', (self.clock()-60,)).fetchone()[0] >= 20:
+                return False
+            db.execute('INSERT INTO http_notice_limits VALUES (?,?) ON CONFLICT(client_id) DO UPDATE SET last_at=excluded.last_at',
+                       (client, self.clock()))
+            return True
 
 
 class PublicQueues:

@@ -155,3 +155,9 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual([i['body'] for i in self.q.poll(self.client,0)['items']],['oldest stays'])
         self.assertEqual([i['body'] for i in self.q.poll(other,0)['items']],['reply'])
         self.assertTrue(any(a['outcome']=='undeliverable_queue_full' for a in self.a.audit_list('http',self.a.ACCOUNT,100)))
+        summary=self.a.drop_summary()
+        self.assertEqual(summary['total'],20)
+        notices=[(args,stdin) for args,stdin in self.cli.calls if stdin and 'NOT delivered' in stdin]
+        self.assertEqual(len(notices),1,'drop notices are bounded per client, not per message')
+        self.assertEqual(notices[0][0][notices[0][0].index('--to')+1],'ag_poc')
+        self.assertIn('--stdin-envelope',notices[0][0])

@@ -202,6 +202,11 @@ acknowledged without exporting/storing their bodies. One invalid delivery never
 blocks the remainder of a received batch. For full/mapping-capacity/paused
 clients, replies not yet persisted have three attempts **and a 60-second grace**
 (or one day, or diagnostic capacity exhaustion), then metadata audit + Core ack.
+Cumulative drop counts/reasons appear in private settings state and UI. The
+bridge sends the bound POC a metadata-only Core notice, at most one/client/minute
+and 20/minute globally, using stdin and an idempotency key; a failed notice is
+audited and is not retried indefinitely. This diagnostic is best effort (a crash
+after reserving its rate slot can lose it); counters/audit remain authoritative.
 This can discard a legitimate reply while a client is offline/full/paused; it is
 not lossless delivery. Already persisted outbox items are never evicted. This
 bounds Core receive-window starvation from a single unavailable client. Inbound

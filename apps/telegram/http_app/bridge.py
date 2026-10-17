@@ -106,6 +106,7 @@ class Bridge:
                 # window forever. Keep already queued items; bound retries of
                 # replies that have NOT entered the outbox, with metadata audit.
                 if self.admin.unroutable(delivery_id, size, 'undeliverable_' + error.code, grace=60):
+                    self.drop_notice(client, binding.target_agent_id, core_id, delivery_id, error.code)
                     self.ack(delivery_id)
                 return False
             if self.admin.unroutable(delivery_id, size, 'undeliverable_client'):
@@ -116,6 +117,21 @@ class Bridge:
                           size=size, delivery='out:' + delivery_id)
         self.ack(delivery_id)
         return True
+
+    def drop_notice(self, client, poc, core_id, delivery, reason):
+        if not self.admin.claim_drop_notice(client):
+            return
+        body = ('HTTP reply was NOT delivered outside Treer. Client: ' + client +
+                '. Reason: ' + reason + '. Additional replies may be affected. '
+                'Ask an owner/admin to inspect HTTP endpoint settings drop counters and audit; '
+                'retry later with the original external-message context.')
+        try:
+            self.cli.run(['message', 'send', '--to', poc, '--context', core_id,
+                          '--idempotency-key', 'http-drop-' + digest(self.admin.ACCOUNT + '/' + delivery),
+                          '--stdin-envelope'], stdin=json.dumps({'body': body}))
+        except (BridgeError, OSError, ValueError, KeyError, TypeError):
+            self.admin.notice('bridge', 'drop.notice_failed', client, delivery='notice:' + delivery,
+                              reason='notice_unavailable')
 
     def outbound_once(self, wait=1000):
         response = self.cli.run(['message', 'receive', '--wait', str(wait), '--limit', '20'])

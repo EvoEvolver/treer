@@ -89,6 +89,7 @@ class Settings:
         return {'me': {k: principal.get(k) for k in ('id','name','role')}, 'endpoint_url': self.endpoint_url,
                 'paused': bool(row and row[0] == '1'), 'clients': list(clients.values()),
                 'agents': [{k: p.get(k) for k in ('id','name','path')} for p in directory if p.get('kind') == 'agent'],
+                'drops': self.admin.drop_summary(),
                 'pair_backoff': read_backoff(self.admin.path.parent),
                 'audit': self.admin.audit_list('http', self.admin.ACCOUNT, 50), 'per_ip_effective': False}
 

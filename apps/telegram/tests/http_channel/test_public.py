@@ -199,3 +199,20 @@ class PublicTests(unittest.TestCase):
             self.assertEqual(self.request('GET','/v1/outbox?timeout=1')[0],200)
         self.assertGreater(len(connections),4)
         self.assertTrue(all(c.closed for c in connections))
+
+    def test_slow_body_has_a_total_deadline_not_an_idle_timeout(self):
+        stop=threading.Event()
+        with socket.create_connection(self.server.server_address, timeout=8) as connection:
+            connection.settimeout(8)
+            connection.sendall(('POST /v1/inbox HTTP/1.1\r\nHost: fixture\r\nAuthorization: Bearer '+self.token+
+                                '\r\nContent-Type: application/json\r\nContent-Length: 1000\r\n\r\n{').encode())
+            def trickle():
+                while not stop.wait(.3):
+                    try:connection.sendall(b' ')
+                    except OSError:return
+            thread=threading.Thread(target=trickle,daemon=True);thread.start()
+            started=time.monotonic()
+            try:
+                self.assertIn(b'408',connection.recv(4096).split(b'\r\n')[0])
+                self.assertLess(time.monotonic()-started,7)
+            finally:stop.set();thread.join(1)
