@@ -130,6 +130,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         let tx = store.db.transaction()?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);
+        CREATE TABLE IF NOT EXISTS hub_parked(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(endpoint,generation,transfer));
         CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS hub_unknown_senders(kind TEXT NOT NULL,sender TEXT NOT NULL,attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL,PRIMARY KEY(kind,sender));
         CREATE TABLE IF NOT EXISTS hub_unknown_overflow(singleton INTEGER PRIMARY KEY CHECK(singleton=1),attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL);
@@ -147,12 +148,21 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(Error::Binding);
         }
         tx.commit()?;
-        Ok(Self {
+        let hub = Self {
             store,
             mailbox,
             workspace: workspace.into(),
             own_id: own_id.into(),
-        })
+        };
+        let telegram: bool = hub.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_chunks')",
+            [],
+            |r| r.get(0),
+        )?;
+        if telegram {
+            hub.telegram_schema()?;
+        }
+        Ok(hub)
     }
     /// Internal owner-service boundary only. New bindings always start paused.
     pub fn add_binding(&mut self, binding: Binding) -> Result<(), Error> {
@@ -443,6 +453,38 @@ impl<M: Mailbox + Directory> Hub<M> {
             result => Ok(result?),
         }
     }
+    /// Durable park keeps original fragments and queue capacity, but later jobs
+    /// can run. Owner UI must expose it; only owner may retry/discard explicitly.
+    pub(crate) fn park_transport(
+        &mut self,
+        id: &str,
+        generation: i64,
+        transfer: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let envelope =
+            self.store
+                .transfer_payload(id, generation, Direction::Outbound, transfer)?;
+        let bytes = serde_json::to_vec(&envelope).map_err(|_| Error::Binding)?;
+        match self.store.record_failure(
+            id,
+            generation,
+            &format!("transport-{transfer}"),
+            &bytes,
+            FailureReason::TransportRetriesExhausted,
+            now,
+        ) {
+            Err(StorageError::Full) => {
+                self.store
+                    .db
+                    .execute("UPDATE hub_identity SET blocked=1 WHERE singleton=1", [])?;
+                return Err(Error::FailureBudget);
+            }
+            other => other?,
+        }
+        self.store.db.execute("INSERT OR IGNORE INTO hub_parked(endpoint,generation,transfer,reason,created_at) VALUES(?1,?2,?3,'transport_retries_exhausted',?4)",params![id,generation,transfer,now])?;
+        Ok(())
+    }
     /// Transport worker owns these jobs until downstream acceptance, including
     /// ambiguous sends. It must never mark a job delivered merely after Core ack.
     pub fn ready_outbound(&self, id: &str, now: i64) -> Result<Vec<(String, Envelope)>, Error> {
@@ -450,9 +492,11 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(Error::FailureBudget);
         }
         let binding = self.active(id, now)?.binding;
-        self.store
-            .ready_transfers(id, binding.generation, Direction::Outbound)?
-            .into_iter()
+        let mut query=self.store.db.prepare("SELECT t.transfer FROM transfers t WHERE t.endpoint=?1 AND t.generation=?2 AND t.direction=0 AND t.state=1 AND NOT EXISTS(SELECT 1 FROM hub_parked p WHERE p.endpoint=t.endpoint AND p.generation=t.generation AND p.transfer=t.transfer) ORDER BY t.expires,t.rowid LIMIT 100")?;
+        let ids = query
+            .query_map(params![id, binding.generation], |r| r.get::<_, String>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        ids.into_iter()
             .map(|transfer| {
                 let payload = self.store.transfer_payload(
                     id,

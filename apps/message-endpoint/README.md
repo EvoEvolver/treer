@@ -404,3 +404,25 @@ retention functions followed by `cleanup_telegram`, which frees only metadata
 whose parent receipt/job has been pruned. Pending sources and polling offsets
 are retained. Pending queue limits do not bound all historical metadata volume
 within the 30-day retention window; monitor disk use and use encrypted backups.
+
+Worker integration now uses owned `CoreIntent` and `ChunkIntent` values:
+`prepare_telegram_forward/chunk` performs only state work, the caller releases
+state access before awaiting Core/HTTP, then `complete_telegram_forward/chunk`
+records accepted results. Synchronous send helpers exist only in tests. Chunk
+leases last 60 seconds; token/digest/generation fencing refuses stale results.
+Accepted results can commit after owner pause without admitting more work.
+Intent tokens are private capabilities, never JSON API/UI fields. This split
+allows independent channel tasks; actual scheduler/UI stall tests remain pending.
+
+Chunk reservations persist exponential retry delays (5, 10, 20, 40, 80, 160,
+300, 300 seconds) and cap at eight attempts, including reservations interrupted
+by a process crash. On exhaustion the hub saves a fixed-code failure receipt and
+parks the original transfer. Parked plaintext stays in the bounded pending queue
+for owner inspection/retry/discard, is not sent or pruned automatically, and does
+not block later transfers of that endpoint. A full bound-failure receipt budget
+still persistently blocks the hub without silently discarding work. Owner views,
+retry/discard and any routable failure callback are not implemented yet. Callbacks
+must pass through the pinned endpoint and its recipient allowlist; an arbitrary
+body-provided original sender can never expand hub send authority. Chunk lease/
+retry columns migrate on hub reopen while preserving accepted results; restore a
+stopped private backup with the corresponding old executable to roll back.

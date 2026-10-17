@@ -73,6 +73,30 @@ pub trait Transport {
     fn send(&self, target: &Target, text: &str) -> Result<i64, Error>;
 }
 
+/// Owned work leaves the SQLite actor before any network call. Lease fields are
+/// private capabilities and must not be serialized to a browser or external API.
+pub struct CoreIntent {
+    endpoint: String,
+    generation: i64,
+    job: i64,
+    token: String,
+    pub parts: Vec<(String, String)>,
+}
+pub struct ChunkIntent {
+    endpoint: String,
+    generation: i64,
+    transfer: String,
+    part: i64,
+    token: String,
+    digest: Vec<u8>,
+    last: bool,
+    pub target: Target,
+    pub text: String,
+}
+fn lease_token_valid(token: &str) -> bool {
+    token.len() == 64 && token.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 impl<M: Mailbox + Directory> Hub<M> {
     /// Called only after owner authorization and confirmation; target is immutable
     /// for this binding generation. Retargeting requires a reviewed drain/rebind.
@@ -101,11 +125,25 @@ impl<M: Mailbox + Directory> Hub<M> {
         tx.commit()?;
         Ok(())
     }
-    fn telegram_schema(&self) -> Result<(), Error> {
+    pub(crate) fn telegram_schema(&self) -> Result<(), crate::store::Error> {
         self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS telegram_accounts(account TEXT PRIMARY KEY,offset INTEGER NOT NULL,ignored INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS telegram_targets(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),account TEXT NOT NULL REFERENCES telegram_accounts(account),chat INTEGER NOT NULL,topic INTEGER NOT NULL,definition TEXT NOT NULL,UNIQUE(account,chat,topic));
         CREATE TABLE IF NOT EXISTS telegram_sources(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,external_id TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(endpoint,generation,external_id));
-        CREATE TABLE IF NOT EXISTS telegram_chunks(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,part INTEGER NOT NULL,digest BLOB NOT NULL,message_id INTEGER,attempts INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(endpoint,generation,transfer,part));")?;
+        CREATE TABLE IF NOT EXISTS telegram_chunks(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,part INTEGER NOT NULL,digest BLOB NOT NULL,message_id INTEGER,attempts INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER,next_attempt INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(endpoint,generation,transfer,part));")?;
+        let columns = self
+            .store
+            .db
+            .prepare("PRAGMA table_info(telegram_chunks)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|name| name == "lease_token") {
+            self.store.db.execute_batch("BEGIN IMMEDIATE; ALTER TABLE telegram_chunks ADD COLUMN lease_token TEXT; ALTER TABLE telegram_chunks ADD COLUMN lease_until INTEGER; COMMIT;")?;
+        }
+        if !columns.iter().any(|name| name == "next_attempt") {
+            self.store.db.execute_batch(
+                "ALTER TABLE telegram_chunks ADD COLUMN next_attempt INTEGER NOT NULL DEFAULT 0;",
+            )?;
+        }
         Ok(())
     }
     /// Call after the store's 30-day terminal pruning. Pending jobs/receipts
@@ -204,12 +242,12 @@ impl<M: Mailbox + Directory> Hub<M> {
     }
     /// One FIFO inbound item per call. `lease_token` is a fresh private random
     /// capability supplied by the worker, never a client idempotency key.
-    pub fn forward_telegram_one(
+    pub fn prepare_telegram_forward(
         &mut self,
         endpoint: &str,
         now: i64,
         lease_token: &str,
-    ) -> Result<bool, Error> {
+    ) -> Result<Option<CoreIntent>, Error> {
         if self.blocked()? {
             return Err(HubError::FailureBudget.into());
         }
@@ -218,7 +256,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             .store
             .lease(endpoint, view.binding.generation, now, lease_token)?
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let external_id: String = self.store.db.query_row(
             "SELECT external_id FROM inbound WHERE id=?1",
@@ -236,36 +274,72 @@ impl<M: Mailbox + Directory> Hub<M> {
         let parts = envelope
             .fragments(endpoint, view.binding.generation as u64)
             .map_err(|_| Error::Invalid)?;
-        let mut last = String::new();
-        for body in parts {
-            let frame = crate::protocol::Fragment::parse(&body).map_err(|_| Error::Invalid)?;
-            last = self
-                .mailbox
-                .send(endpoint, &frame.idempotency_key(), &body, &[], None)?;
-        }
+        let parts = parts
+            .into_iter()
+            .map(|body| {
+                let frame = crate::protocol::Fragment::parse(&body).map_err(|_| Error::Invalid)?;
+                Ok((frame.idempotency_key(), body))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Some(CoreIntent {
+            endpoint: endpoint.into(),
+            generation: view.binding.generation,
+            job: job.job_id,
+            token: lease_token.into(),
+            parts,
+        }))
+    }
+    /// Record only after ALL Core parts are accepted. Allowed after owner pause,
+    /// fenced by the same generation/job/lease capability as the queue store.
+    pub fn complete_telegram_forward(
+        &mut self,
+        intent: &CoreIntent,
+        last_core_id: &str,
+    ) -> Result<(), Error> {
         self.store.complete(
-            endpoint,
-            view.binding.generation,
-            job.job_id,
-            lease_token,
-            &last,
+            &intent.endpoint,
+            intent.generation,
+            intent.job,
+            &intent.token,
+            last_core_id,
         )?;
+        Ok(())
+    }
+    #[cfg(test)]
+    fn forward_telegram_one(
+        &mut self,
+        endpoint: &str,
+        now: i64,
+        token: &str,
+    ) -> Result<bool, Error> {
+        let Some(intent) = self.prepare_telegram_forward(endpoint, now, token)? else {
+            return Ok(false);
+        };
+        let mut last = String::new();
+        for (key, body) in &intent.parts {
+            last = self.mailbox.send(endpoint, key, body, &[], None)?;
+        }
+        self.complete_telegram_forward(&intent, &last)?;
         Ok(true)
     }
     /// One external chunk per invocation. Intent commits before network send;
     /// retries may duplicate if Telegram accepted a request whose response was lost.
     /// Previously committed chunks are skipped, and only all accepted chunks retire
     /// the durable transfer. Never invokes an external transport for stale/paused IDs.
-    pub fn send_telegram_one(
+    pub fn prepare_telegram_chunk(
         &mut self,
         endpoint: &str,
-        transport: &impl Transport,
         now: i64,
-    ) -> Result<bool, Error> {
+        token: &str,
+    ) -> Result<Option<ChunkIntent>, Error> {
+        if !lease_token_valid(token) {
+            return Err(Error::Invalid);
+        }
+        let until = now.checked_add(60).ok_or(Error::Invalid)?;
         let view = self.active(endpoint, now)?;
         let Some((transfer, envelope)) = self.ready_outbound(endpoint, now)?.into_iter().next()
         else {
-            return Ok(false);
+            return Ok(None);
         };
         let target: String = self.store.db.query_row(
             "SELECT definition FROM telegram_targets WHERE endpoint=?1",
@@ -295,7 +369,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             let digest = Sha256::digest(text.as_bytes()).to_vec();
             let tx = self.store.db.transaction()?;
             tx.execute("INSERT OR IGNORE INTO telegram_chunks(endpoint,generation,transfer,part,digest) VALUES(?1,?2,?3,?4,?5)",params![endpoint,view.binding.generation,transfer,part as i64,digest])?;
-            let (old,message):(Vec<u8>,Option<i64>)=tx.query_row("SELECT digest,message_id FROM telegram_chunks WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![endpoint,view.binding.generation,transfer,part as i64],|r|Ok((r.get(0)?,r.get(1)?)))?;
+            let (old,message,lease,attempts,next):(Vec<u8>,Option<i64>,Option<i64>,i64,i64)=tx.query_row("SELECT digest,message_id,lease_until,attempts,next_attempt FROM telegram_chunks WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![endpoint,view.binding.generation,transfer,part as i64],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
             if old != digest {
                 return Err(Error::Conflict);
             }
@@ -303,25 +377,34 @@ impl<M: Mailbox + Directory> Hub<M> {
                 tx.commit()?;
                 continue;
             }
-            tx.execute("UPDATE telegram_chunks SET attempts=MIN(attempts+1,9223372036854775807) WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![endpoint,view.binding.generation,transfer,part as i64])?;
+            if lease.is_some_and(|t| t > now) || next > now {
+                return Ok(None);
+            }
+            if attempts < 0 || next < 0 {
+                return Err(Error::Invalid);
+            }
+            if attempts >= 8 {
+                tx.commit()?;
+                self.park_transport(endpoint, view.binding.generation, &transfer, now)?;
+                return Ok(None);
+            }
+            let backoff = (5_i64 << attempts.min(6)).min(300);
+            let next = now.checked_add(backoff).ok_or(Error::Invalid)?;
+            tx.execute("UPDATE telegram_chunks SET attempts=CASE WHEN attempts<9223372036854775807 THEN attempts+1 ELSE attempts END,lease_token=?5,lease_until=?6,next_attempt=?7 WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![endpoint,view.binding.generation,transfer,part as i64,token,until,next])?;
             tx.commit()?;
-            let message = transport.send(&target, text)?;
-            if message <= 0 {
-                return Err(Error::Transport);
-            }
-            self.store.db.execute("UPDATE telegram_chunks SET message_id=?5 WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![endpoint,view.binding.generation,transfer,part as i64,message])?;
-            if part + 1 == chunks.len() {
-                self.store.finish_transfer(
-                    endpoint,
-                    view.binding.generation,
-                    crate::protocol::Direction::Outbound,
-                    &transfer,
-                    now,
-                )?;
-            }
-            return Ok(true);
+            return Ok(Some(ChunkIntent {
+                endpoint: endpoint.into(),
+                generation: view.binding.generation,
+                transfer,
+                part: part as i64,
+                token: token.into(),
+                digest,
+                last: part + 1 == chunks.len(),
+                target,
+                text: text.clone(),
+            }));
         }
-        // Recovery after last chunk result committed but before transfer retirement.
+        // Recovery after last result committed but before transfer retirement.
         self.store.finish_transfer(
             endpoint,
             view.binding.generation,
@@ -329,6 +412,72 @@ impl<M: Mailbox + Directory> Hub<M> {
             &transfer,
             now,
         )?;
+        Ok(None)
+    }
+    /// Accepted results may commit after pause; a stale lease or changed
+    /// generation may never overwrite newer work. This performs no network I/O.
+    pub fn complete_telegram_chunk(
+        &mut self,
+        intent: &ChunkIntent,
+        message: i64,
+        now: i64,
+    ) -> Result<(), Error> {
+        if message <= 0 {
+            return Err(Error::Transport);
+        }
+        let tx = self.store.db.transaction()?;
+        let current: i64 = tx.query_row(
+            "SELECT generation FROM endpoints WHERE id=?1",
+            [&intent.endpoint],
+            |r| r.get(0),
+        )?;
+        if current != intent.generation {
+            return Err(Error::Conflict);
+        }
+        let (token,previous,digest):(Option<String>,Option<i64>,Vec<u8>)=tx.query_row("SELECT lease_token,message_id,digest FROM telegram_chunks WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![intent.endpoint,intent.generation,intent.transfer,intent.part],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        if token.as_deref() != Some(intent.token.as_str())
+            || digest != intent.digest
+            || previous.is_some_and(|id| id != message)
+        {
+            return Err(Error::Conflict);
+        }
+        tx.execute("UPDATE telegram_chunks SET message_id=?5 WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![intent.endpoint,intent.generation,intent.transfer,intent.part,message])?;
+        tx.commit()?;
+        if intent.last {
+            self.store.finish_transfer(
+                &intent.endpoint,
+                intent.generation,
+                crate::protocol::Direction::Outbound,
+                &intent.transfer,
+                now,
+            )?;
+        }
+        Ok(())
+    }
+    /// Caller has finished the failed/ambiguous HTTP request before releasing;
+    /// apply retry backoff outside the state actor. This never marks delivery.
+    pub fn release_telegram_chunk(&mut self, intent: &ChunkIntent) -> Result<(), Error> {
+        self.store.db.execute("UPDATE telegram_chunks SET lease_until=0 WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4 AND lease_token=?5 AND message_id IS NULL",params![intent.endpoint,intent.generation,intent.transfer,intent.part,intent.token])?;
+        Ok(())
+    }
+    #[cfg(test)]
+    fn send_telegram_one(
+        &mut self,
+        endpoint: &str,
+        transport: &impl Transport,
+        now: i64,
+    ) -> Result<bool, Error> {
+        let Some(intent) = self.prepare_telegram_chunk(endpoint, now, &"e".repeat(64))? else {
+            return Ok(false);
+        };
+        let message = match transport.send(&intent.target, &intent.text) {
+            Ok(id) => id,
+            Err(error) => {
+                self.release_telegram_chunk(&intent)?;
+                return Err(error);
+            }
+        };
+        self.complete_telegram_chunk(&intent, message, now)?;
         Ok(true)
     }
 }
@@ -641,7 +790,7 @@ mod tests {
         assert_eq!(external.sent.borrow().len(), 2);
         *external.fail.borrow_mut() = false;
         assert!(hub
-            .send_telegram_one("ag_endpoint", &external, NOW)
+            .send_telegram_one("ag_endpoint", &external, NOW + 5)
             .unwrap());
         assert_eq!(external.sent.borrow()[1], external.sent.borrow()[2]);
         assert_ne!(external.sent.borrow()[0], external.sent.borrow()[1]);
@@ -698,6 +847,163 @@ mod tests {
             ));
         }
         assert_eq!(hub.telegram_offset("bot_test").unwrap(), 0);
+    }
+    #[test]
+    fn owned_intent_releases_state_access_and_stale_result_cannot_overwrite_new_lease() {
+        let (mut hub, fake) = fixture(Limits::default());
+        outward(&mut hub, &fake, "one chunk");
+        let first = hub
+            .prepare_telegram_chunk("ag_endpoint", NOW, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert!(hub
+            .prepare_telegram_chunk("ag_endpoint", NOW + 1, &"b".repeat(64))
+            .unwrap()
+            .is_none());
+        // Network may still be awaiting a response. State remains usable.
+        hub.refresh("ag_endpoint", NOW + 61).unwrap();
+        let newer = hub
+            .prepare_telegram_chunk("ag_endpoint", NOW + 61, &"b".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            hub.complete_telegram_chunk(&first, 1, NOW + 61),
+            Err(Error::Conflict)
+        ));
+        hub.pause("ag_endpoint", 3).unwrap();
+        hub.complete_telegram_chunk(&newer, 2, NOW + 62).unwrap();
+        // An already accepted result may commit after pause, not admit more work.
+        let (message,state):(i64,i64)=hub.store.db.query_row("SELECT c.message_id,t.state FROM telegram_chunks c JOIN transfers t USING(endpoint,generation,transfer)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
+        assert_eq!((message, state), (2, 2));
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+    }
+    #[test]
+    fn owned_core_intent_can_complete_after_pause_without_reacquiring_recipient_authority() {
+        let (mut hub, _) = fixture(Limits::default());
+        hub.admit_telegram("bot_test", vec![update(1)], NOW)
+            .unwrap();
+        let intent = hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        hub.pause("ag_endpoint", 3).unwrap();
+        hub.complete_telegram_forward(&intent, "msg_accepted")
+            .unwrap();
+        let pending: i64 = hub
+            .store
+            .db
+            .query_row("SELECT pending FROM inbound", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(pending, 0);
+        assert!(hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"b".repeat(64))
+            .is_err());
+    }
+    #[test]
+    fn scaffold_chunk_migration_preserves_results_and_adds_private_leases_on_reopen() {
+        let (mut hub, fake) = fixture(Limits::default());
+        outward(&mut hub, &fake, "chunk");
+        hub.send_telegram_one("ag_endpoint", &External::default(), NOW)
+            .unwrap();
+        hub.store.db.execute_batch("ALTER TABLE telegram_chunks DROP COLUMN lease_token; ALTER TABLE telegram_chunks DROP COLUMN lease_until;").unwrap();
+        let store = hub.store;
+        let hub = Hub::new(store, fake, "app_hub", "ws").unwrap();
+        let result: (i64, Option<String>, Option<i64>) = hub
+            .store
+            .db
+            .query_row(
+                "SELECT message_id,lease_token,lease_until FROM telegram_chunks",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(result, (1, None, None));
+    }
+    #[test]
+    fn retries_back_off_then_park_without_blocking_later_transfers_or_freeing_pending_capacity() {
+        let limits = Limits {
+            endpoint_count: 2,
+            ..Limits::default()
+        };
+        let (mut hub, fake) = fixture(limits);
+        outward(&mut hub, &fake, "permanent rejection");
+        let mut now = NOW;
+        for attempt in 0..8 {
+            hub.refresh("ag_endpoint", now).unwrap();
+            let intent = hub
+                .prepare_telegram_chunk("ag_endpoint", now, &format!("{:064x}", attempt + 1))
+                .unwrap()
+                .unwrap();
+            hub.release_telegram_chunk(&intent).unwrap();
+            assert!(hub
+                .prepare_telegram_chunk("ag_endpoint", now, &"c".repeat(64))
+                .unwrap()
+                .is_none());
+            let delay = (5_i64 << attempt.min(6)).min(300);
+            if delay > 1 {
+                assert!(hub
+                    .prepare_telegram_chunk("ag_endpoint", now + 1, &"c".repeat(64))
+                    .unwrap()
+                    .is_none());
+            }
+            now += delay;
+        }
+        hub.refresh("ag_endpoint", now).unwrap();
+        assert!(hub
+            .prepare_telegram_chunk("ag_endpoint", now, &"d".repeat(64))
+            .unwrap()
+            .is_none());
+        assert!(hub.ready_outbound("ag_endpoint", now).unwrap().is_empty());
+        let parked: i64 = hub
+            .store
+            .db
+            .query_row("SELECT COUNT(*) FROM hub_parked", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(parked, 1);
+        let failures = hub.store.recent_failures("ag_endpoint", 1, 100).unwrap();
+        assert_eq!(failures.len(), 1);
+        assert!(matches!(
+            failures[0].reason,
+            crate::failures::FailureReason::TransportRetriesExhausted
+        ));
+        for index in 0..2 {
+            let envelope = Envelope::Outbound {
+                delivery_id: format!("del_later_{index}"),
+                message_id: format!("msg_later_{index}"),
+                original_sender: Sender {
+                    kind: SenderKind::Agent,
+                    id: "ag_origin".into(),
+                },
+                body: "later".into(),
+                context_ids: vec![],
+            };
+            let wire = envelope.fragments("ag_endpoint", 1).unwrap().remove(0);
+            let result = hub.store.save_fragment(
+                "ag_endpoint",
+                1,
+                crate::protocol::Direction::Outbound,
+                &wire,
+                now,
+            );
+            if index == 0 {
+                result.unwrap();
+            } else {
+                assert!(matches!(result, Err(crate::store::Error::Full)));
+            }
+        }
+        let next = hub
+            .prepare_telegram_chunk("ag_endpoint", now, &"f".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert!(next.text.contains("later"));
+        let pending: i64 = hub
+            .store
+            .db
+            .query_row("SELECT COUNT(*) FROM transfers WHERE state=1", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(pending, 2);
     }
     #[test]
     fn retention_frees_orphan_metadata_but_never_pending_sources_or_offsets() {
