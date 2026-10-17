@@ -157,7 +157,9 @@ State changes also require a trusted configured App/Proxy Origin,
 
 The human UI supports English/Chinese, light/dark, narrow screens, native
 keyboard controls and text-only rendering. It never stores credentials in
-browser storage; dismiss/reload clears the one-time code. Pausing does not
+browser storage; dismiss/reload clears the one-time code. Queue writes check the
+current token generation inside their transaction; a rotation between header
+authentication and body parsing cannot commit an old request. Pausing does not
 cancel an already accepted in-flight Core send.
 
 ## Limits, retention and backup

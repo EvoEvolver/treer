@@ -157,3 +157,18 @@ class PublicTests(unittest.TestCase):
         for body in (b'{"body":"one","body":"two","idempotency_key":"one"}',
                      b'{"body":"one","idempotency_key":NaN}', b'\xff'):
             self.assertIn(b'400', raw('Content-Type: application/json\r\nContent-Length: '+str(len(body))+'\r\n',body))
+
+    def test_rotation_between_auth_and_mutation_rejects_stale_generation(self):
+        self.q.outbound(self.client,'core-race','delivery-race','reply')
+        self.q.poll(self.client,0)
+        original=self.app.authenticate
+        def rotate_after_auth(headers):
+            result=original(headers)
+            self.q.install_token(self.client,secrets.token_urlsafe(32))
+            return result
+        self.app.authenticate=rotate_after_auth
+        self.assertEqual(self.request('POST','/v1/inbox',{'body':'stale','idempotency_key':'stale'})[0],401)
+        self.assertIsNone(self.q.lease())
+        self.q.install_token(self.client,self.token)
+        self.assertEqual(self.request('POST','/v1/outbox/ack',{'up_to':1})[0],401)
+        self.assertEqual(len(self.q.poll(self.client,0)['items']),1)

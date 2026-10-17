@@ -76,7 +76,10 @@ test('workspace UI opens inside the real iframe prefix without a login click',as
   await page.goto(f.url+'/console');const frame=page.frameLocator('iframe');
   await frame.locator('#identity').filter({hasText:'owner'}).waitFor();
   await frame.locator('#label').fill('Embedded client');await frame.locator('#poc').selectOption('ag_poc');
-  await frame.locator('#create').click();await frame.locator('#code-box').waitFor({state:'visible'});
+  await frame.locator('#create').focus();await page.keyboard.press('Enter');await frame.locator('#code-box').waitFor({state:'visible'});
+  await page.keyboard.press('Tab');assert.equal(await frame.locator('#copy').evaluate(el=>el===document.activeElement),true);
+  await page.keyboard.press('Tab');await page.keyboard.press('Enter');await frame.locator('#code-box').waitFor({state:'hidden'});
+  assert.equal(await frame.locator('#create').evaluate(el=>el===document.activeElement),true);
   assert.equal(await frame.getByText(/Sign in|OAuth/).count(),0);
   assert.equal(await page.evaluate(()=>document.cookie),'');
  }finally{await browser.close();f.fixture.kill('SIGTERM');await once(f.fixture,'exit');f.lines.close();}

@@ -136,7 +136,7 @@ class QueueStore(Database):
         if total_count >= 10000 or row[0] >= self.max_items or row[1] + size > self.max_client_bytes or total + size > self.max_total_bytes:
             raise Error(429, "queue_full", "Queue capacity reached", 60)
 
-    def enqueue(self, client, value, admit=None):
+    def enqueue(self, client, value, admit=None, expected_generation=None):
         fields(value, ("body", "idempotency_key"), ("context",))
         body = text(value["body"], MAX_BODY)
         key = text(value["idempotency_key"], 128)
@@ -146,7 +146,9 @@ class QueueStore(Database):
         hashed = digest(json.dumps({"body": body, "context": context}, sort_keys=True, ensure_ascii=False))
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            self.available(db, client)
+            current = self.available(db, client)
+            if expected_generation is not None and current['generation'] != expected_generation:
+                raise invalid()
             existing = db.execute("SELECT message_id,content_hash FROM inbox WHERE client_id=? AND idem_hash=?",
                                   (client, digest(key))).fetchone()
             if existing:
@@ -244,12 +246,14 @@ class QueueStore(Database):
                 db.execute("UPDATE clients SET served_seq=max(served_seq,?) WHERE id=?", (items[-1]["seq"], client))
         return {"items": items, "next_after": items[-1]["seq"] if items else after}
 
-    def ack(self, client, up_to):
+    def ack(self, client, up_to, expected_generation=None):
         if type(up_to) is not int or up_to < 0:
             raise Error(400, "invalid_cursor", "Invalid cursor")
         with self._lock, self._connect() as db:
             db.execute("BEGIN IMMEDIATE")
             row = self.available(db, client)
+            if expected_generation is not None and row['generation'] != expected_generation:
+                raise invalid()
             if up_to > row["served_seq"]:
                 raise Error(400, "invalid_cursor", "Cannot acknowledge unseen messages")
             db.execute("UPDATE outbox SET acked_at=coalesce(acked_at,?) WHERE client_id=? AND seq<=?", (self.clock(), client, up_to))

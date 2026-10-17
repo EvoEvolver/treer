@@ -219,11 +219,12 @@ class Handler(BaseHTTPRequestHandler):
                 raise Error(400, "invalid_request", "Unexpected query")
             body = self.body()
             if url.path == "/v1/inbox":
-                message = app.queues.enqueue(client_id, body, admit=lambda: app.admit_message(client_id))
+                message = app.queues.enqueue(client_id, body, admit=lambda: app.admit_message(client_id),
+                                             expected_generation=client["generation"])
                 self.reply(202, {"message_id": message})
             else:
                 fields(body, ("up_to",))
-                app.queues.ack(client_id, body["up_to"])
+                app.queues.ack(client_id, body["up_to"], expected_generation=client["generation"])
                 self.reply(200, {"ok": True})
         except Error as error:
             self.reply(error.status, {"error": {"code": error.code, "message": error.message}}, error.retry)
