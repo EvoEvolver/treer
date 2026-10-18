@@ -60,6 +60,30 @@ test('Rust serves its manifest while Controller registration probes it',{skip:us
   assert.equal(manifest.protocol,'treer.agent-interface/v1');
 });
 
+test('Rust canonicalizes a configured cwd alias and reports root failures without paths',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t);
+  await writeFile(join(s.root,'cwd/alias-proof.txt'),'accepted through canonical cwd');
+  const alias=join(s.root,'cwd-alias');
+  await symlink(join(s.root,'cwd'),alias);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({AGENT_UI_CWD:alias});
+  const preview=await fetch(restarted.base+'/v1/files?path=alias-proof.txt').then(r=>r.json());
+  assert.equal(preview.content,'accepted through canonical cwd');
+  const missing=join(s.root,'synthetic-root-do-not-echo');
+  const regular=join(s.root,'synthetic-regular-do-not-echo');
+  await writeFile(regular,'not a directory');
+  for(const target of [missing,regular]) {
+    const child=spawn(binary,[],{cwd:join(s.root,'cwd'),env:hermeticEnv({HOME:s.root,AGENT_UI_CWD:target}),stdio:['ignore','ignore','pipe']});
+    s.trackChild(child);
+    let stderr='';child.stderr.on('data',chunk=>stderr+=chunk);
+    const [code]=await once(child,'close');
+    assert.equal(code,1);
+    assert.match(stderr,/workspace_file_root_unavailable/);
+    assert.doesNotMatch(stderr,/synthetic-(root|regular)-do-not-echo/);
+    assert.ok(!stderr.includes(s.root));
+  }
+});
+
 test('many-turn history limit stops provider, preserves receipts and remains readable',{skip:useNode,timeout:60000},async t=>{
   const s=await fixture(t,{
     CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),

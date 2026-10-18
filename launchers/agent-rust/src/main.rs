@@ -61,12 +61,15 @@ async fn main() -> Result<()> {
     if !cfg!(target_os = "macos") && !cfg!(target_os = "linux") {
         bail!("POSIX experiment only")
     }
-    let cwd = std::fs::canonicalize(
-        env("AGENT_UI_CWD")
-            .map(PathBuf::from)
-            .unwrap_or(std::env::current_dir()?),
-    )?;
-    let files = files::Files::new(cwd.clone())?;
+    let configured_cwd = match env("AGENT_UI_CWD") {
+        Some(path) => PathBuf::from(path),
+        None => std::env::current_dir()
+            .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?,
+    };
+    let cwd = std::fs::canonicalize(configured_cwd)
+        .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?;
+    let files = files::Files::new(cwd.clone())
+        .map_err(|_| anyhow::anyhow!("workspace_file_root_unavailable"))?;
     let agent = env("TREER_AGENT_ID").unwrap_or_default();
     if agent.len() > 128
         || !agent

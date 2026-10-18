@@ -28,6 +28,11 @@ final symlinks or opening FIFO/device entries. Canonical path resolution still
 selects permitted in-workspace symlink targets, but enumeration, metadata and
 file bytes never reopen an admitted absolute path. A concurrent rename can
 produce a partial/stale listing; it cannot retarget the descriptor to a new tree.
+The entry point canonicalizes the configured cwd once, so stable aliases such
+as macOS `/tmp` are accepted. Only the resulting canonical path is passed to
+the descriptor opener; a component swapped to a symlink after canonicalization
+is refused rather than canonicalized again. Resolution/open/type failures use
+the fixed startup error `workspace_file_root_unavailable`, without path details.
 
 M2 transcript admission retains at most 10,000 provider turns and 16 MiB of
 serialized turn content (excluding the outer array separators). Each turn
