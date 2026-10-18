@@ -626,7 +626,10 @@ only to that origin. The code stays out of URLs, storage, DOM attributes and log
 The bootstrap redeems it for a host-only partitioned session and replaces itself
 with the Agent UI. The existing sandbox grants are unchanged. Tab hiding and
 appearance changes preserve the frame; reload, interface replacement, origin
-revocation and workspace/account changes cancel its handshake.
+revocation and workspace/account changes cancel its handshake. The handshake
+and UI-load deadline is 20 seconds, including hidden tabs; a slow or backgrounded
+load that misses it fails closed with a timeout message and can be retried by
+reloading the tab. A successfully loaded frame stays mounted while hidden.
 
 A cookie failure must match the accepted bootstrap hash within the handshake
 window. It never automatically switches to the shared-origin Proxy tunnel: after
