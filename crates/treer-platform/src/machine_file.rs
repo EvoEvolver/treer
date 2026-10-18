@@ -525,17 +525,12 @@ mod unix {
                     sys::RenameFlags::NOREPLACE,
                 ) {
                     Ok(()) => true,
-                    Err(error)
-                        if matches!(
-                            error,
-                            rustix::io::Errno::NOSYS
-                                | rustix::io::Errno::INVAL
-                                | rustix::io::Errno::NOTSUP
-                                | rustix::io::Errno::OPNOTSUPP
-                        ) =>
-                    {
-                        false
-                    }
+                    // NOTSUP and OPNOTSUPP are one errno on Linux.
+                    Err(
+                        rustix::io::Errno::NOSYS
+                        | rustix::io::Errno::INVAL
+                        | rustix::io::Errno::NOTSUP,
+                    ) => false,
                     Err(error) => return Err(error.into()),
                 };
                 #[cfg(not(target_os = "linux"))]
