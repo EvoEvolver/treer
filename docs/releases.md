@@ -491,15 +491,23 @@ commit and the GitHub Release attaches those artifacts. Compare them with the
 Canary manifest (`machine_artifacts.files`) before uploading. For v0.1.14 the
 four Unix platforms were byte-identical to the Canary-tested build, while the
 `windows-x86_64` files had the same sizes and build metadata but different bytes:
-Windows PE output embeds build-specific data (the linker timestamp and debug
-identifier), so two runs of the same commit do not match. The Windows launcher/UI
-acceptance job passes on every native run, and the Canary machines are Linux, so
-no Canary evidence is lost, but the Windows hashes of a GitHub Release are those
-of the tag run, not of the Canary manifest. Record that in the release notes
-instead of presenting the manifest hash as the published one; do not edit
-artifacts or re-sign them to force equality. Reproducible Windows builds (pinned
-timestamp and a stripped debug identifier) are possible future work and would
-change the binaries, so they need their own gated release.
+The Windows build links with `/Brepro` (the only link argument, set through
+`RUSTFLAGS` in `build-release-artifacts.yml`), which replaces the linker timestamp
+with a content hash. Before upload the Windows job removes `target/release`,
+rebuilds the same three packages with the same flags and path, and fails closed
+unless all three rebuilt binaries match the staged ones byte for byte, so the
+hashes compared are the hashes published. `build-metadata.json` records
+`rustc -vV`, the `RUSTFLAGS` and the runner image version; a changed image or
+toolchain is a new baseline, not a failure of the claim.
+
+Reproducibility here means two hosted builds of the same source on the same
+pinned image produce the same bytes. It is not a signature or an attestation, it
+does not prove the source was the reviewed one, and it does not cover macOS,
+Linux or binaries shipped before this change. The Windows hashes of a GitHub
+Release are those of the tag run, which may differ from a Canary manifest built
+on another image; record that in the release notes and do not edit artifacts or
+re-sign them to force equality. Consumers still verify the exact published
+digest.
 
 ## Single-container image input and smoke
 
