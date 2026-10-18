@@ -30,6 +30,8 @@ export default {
     const resultHeaders = new Headers(response.headers)
     headers.forEach((value, key) => resultHeaders.set(key, value))
     const html = (resultHeaders.get('content-type') ?? '').includes('text/html')
+    // Console documents only: never apply this to API/config/asset responses.
+    if (html) resultHeaders.set('cross-origin-opener-policy', 'same-origin')
     if (html || pathname === '/config.json' || pathname === '/health') {
       resultHeaders.set('cache-control', 'no-store')
       resultHeaders.delete('etag')

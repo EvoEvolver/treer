@@ -22,6 +22,9 @@ test('actual local Worker protects shell, SPA, assets, config and errors', async
     expect(response.headers.get('referrer-policy')).toBe('no-referrer')
     expect(response.headers.get('x-content-type-options')).toBe('nosniff')
     expect(response.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
+    expect(response.headers.get('cross-origin-opener-policy')).toBe(
+      (response.headers.get('content-type') ?? '').includes('text/html') ? 'same-origin' : null)
+    expect(response.headers.get('cross-origin-embedder-policy')).toBeNull()
     if ((response.headers.get('content-type') ?? '').includes('text/html') || ['/health', '/config.json'].includes(path)) expect(response.headers.get('cache-control')).toBe('no-store')
   }
   const first = await fetch(origin)
