@@ -31,6 +31,14 @@ Only an explicit terminal turn matching a known accepted running submission can
 settle its receipt. Missing turns, an idle flag and read failures never complete
 a submission or clear the persisted uncertainty fence.
 
+The next M1 increment exposes native Codex goal create/edit, token budgets,
+pause/resume and clear through the browser state contract. A bounded goal-edit
+journal checkpoints native mutation intent and a separate idempotent prompt
+delivery. A lost native acknowledgement is reconciled by reading the goal;
+an unmatched result is retained as an error rather than replaying the mutation.
+This is still partial goal parity: non-null round budgets, slash commands and
+managed Agent goal-exit requests remain unsupported. Images remain disabled.
+
 Build and focused checks (a private `CARGO_TARGET_DIR` is required). Default
 builds require native tools: if `codex` on PATH is an npm script wrapper, set
 `TREER_SPIKE_BUILD_CODEX` at **build time** to the absolute native Codex binary.
@@ -141,7 +149,7 @@ and the exact experiment command. Before any team-Agent switch, both a full
 security review and the leader's decision are required. No team switch is part
 of P0–P2.
 
-Known gaps: goals and goal recovery; attachments and quota reservations;
+Known gaps: complete goals and goal recovery parity; attachments and quota reservations;
 session export/import; file browser/task-output APIs; Node's relay-error
 reconciliation/backoff; exact batched notification semantics; per-user resource
 admission; slow HTTP header/connection limits; containment of detached descendants;

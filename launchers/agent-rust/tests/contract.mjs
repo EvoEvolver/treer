@@ -96,6 +96,9 @@ test('mutating-route native versus browser authorization matrix matches Node',as
     ['POST','/api/settings',{model:'synthetic-model'},true],
     ['POST','/v1/abort',{},true],
     ['DELETE','/api/queue/missing',null,true],
+    ['PUT','/api/goal',{objective:'native goal',operationId:'auth-matrix-goal'},true],
+    ['DELETE','/api/goal',null,true],
+    ['POST','/api/goal/reconcile',{},true],
   ];
   for(const [method,path,body,nativeAllowed] of routes){
     for(const headers of [{origin:'null'},{'sec-fetch-mode':'cors'},{...s.headers,'x-treer-interface-instance':'stale'}])
@@ -188,6 +191,64 @@ test('Rust corrupt journal refuses startup before provider dispatch and preserve
   assert.doesNotMatch(logs,/private text|corruption-check/);
   assert.equal(await readFile(path,'utf8'),bytes);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
+});
+test('Rust goal edits persist native state and deduplicate model-context delivery across restart',{skip:useNode},async t=>{
+  const s=await fixture(t,{FAKE_CODEX_GOAL_ACTIVE:'1'});
+  const update=async (base,body,method='PUT')=>{
+    const response=await fetch(base+'/api/goal',{method,body:JSON.stringify(body)});
+    assert.equal(response.status,200,await response.clone().text());
+    return response.json();
+  };
+  const input={objective:'Ship Rust parity',tokenBudget:5000,operationId:'goal-one'};
+  const first=await update(s.base,input);
+  assert.equal(first.goal.objective,input.objective);
+  assert.equal(first.goal.tokenBudget,5000);
+  assert.equal(first.goalDelivery.status,'sent');
+  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='idle');
+  const id=first.goalDelivery.promptId;
+  assert.equal((await update(s.base,input)).goalDelivery.promptId,id);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({});
+  assert.equal((await update(restarted.base,input)).goalDelivery.promptId,id);
+  assert.equal((await update(restarted.base,{status:'paused',operationId:'goal-pause'})).goal.status,'paused');
+  await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='idle');
+  const unlimited=await update(restarted.base,{status:'active',tokenBudget:null,operationId:'goal-resume'});
+  assert.equal(unlimited.goal.tokenBudget,null);
+  await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='idle');
+  const cleared=await update(restarted.base,{operationId:'goal-clear'},'DELETE');
+  assert.equal(cleared.goal.status,'cleared');
+  for(const body of [{objective:' '},{tokenBudget:-1},{roundBudget:10001},{status:'done'}])
+    assert.equal((await fetch(restarted.base+'/api/goal',{method:'PUT',body:JSON.stringify(body)})).status,400);
+  const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(saved.records.filter(r=>r.operation==='goal-edit/goal-one/0').length,1);
+});
+test('Rust uncertain native goal update is observed on restart without repeating the mutation',{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv('goal-ack-lost'));
+  const response=await fetch(s.base+'/api/goal',{method:'PUT',body:JSON.stringify({objective:'Keep the exact goal',tokenBudget:5000,operationId:'goal-uncertain'})});
+  assert.equal(response.status,400);
+  let saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(saved.goals.edits[0].applying,true);
+  assert.equal(saved.goals.edits[0].applied,false);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({});
+  assert.equal((await fetch(restarted.base+'/api/goal/reconcile',{method:'POST',body:'{}'})).status,200);
+  saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(saved.goals.edits[0].sent,true);
+  const calls=(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(calls.filter(c=>c.method==='thread/goal/set').length,1);
+  assert.equal(calls.filter(c=>c.method==='turn/start').length,1);
+});
+test('Rust mismatching goal reconciliation refuses a stale native mutation',{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv('goal-ack-lost'));
+  assert.equal((await fetch(s.base+'/api/goal',{method:'PUT',body:JSON.stringify({objective:'Original objective',operationId:'goal-stale'})})).status,400);
+  await writeFile(join(s.root,'cwd','.fault-goal.json'),JSON.stringify({objective:'Changed elsewhere',status:'active'}));
+  assert.equal((await fetch(s.base+'/api/goal/reconcile',{method:'POST',body:'{}'})).status,400);
+  const calls=await providerCalls(s);
+  assert.equal(calls.filter(c=>c.method==='thread/goal/set').length,1);
+  assert.equal(calls.filter(c=>c.method==='turn/start').length,0);
+  const state=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.equal(state.goal.objective,'Changed elsewhere');
+  assert.equal(state.goalDelivery.status,'failed');
 });
 test('concurrent queued submissions are FIFO, queue cancellation differs from abort',async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_LIVE:'1',FAKE_CODEX_STATUS:'active'});

@@ -1,4 +1,5 @@
 use crate::{
+    goals::{self, Goals},
     model::{self, now, preview},
     rpc::Rpc,
     store::Store,
@@ -61,6 +62,8 @@ struct Runtime {
     turns: Vec<Value>,
     records: VecDeque<Record>,
     dispatch_blocked: bool,
+    goals: Goals,
+    goals_supported: bool,
     changed: watch::Sender<Arc<Value>>,
 }
 struct Notification {
@@ -83,6 +86,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
     // discard an invalid record: it may contain an uncertain dispatch intent.
     if let Some(saved) = &saved {
         decode_records(saved)?;
+        Goals::load(&saved["goals"])?;
     }
     let (rpc, mut child, mut events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd)?;
     let (commands, mut requests) = mpsc::channel::<Request>(64);
@@ -98,6 +102,8 @@ pub fn spawn(config: Config) -> Result<Handle> {
         turns: vec![],
         records: VecDeque::new(),
         dispatch_blocked: false,
+        goals: Goals::default(),
+        goals_supported: false,
         changed,
     };
     tokio::spawn(async move {
@@ -156,6 +162,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     None => break,
                 },
                 _ = tick.tick() => {
+                    if rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
+                        eprintln!("Rust spike: goal edit retained for reconciliation");
+                    }
                     if rt.drain().await.is_err() { eprintln!("Rust spike: queue dispatch failed; retained"); }
                     if !observation_pending && !rt.dispatch_blocked && rt.thread["activeTurnId"].is_string() {
                         observation_pending = observe_tx.try_send(rt.thread["id"].clone()).is_ok();
@@ -227,6 +236,7 @@ impl Runtime {
         if let Some(saved) = &saved {
             self.records = decode_records(saved)?;
             self.dispatch_blocked = saved["dispatchBlocked"].as_bool().unwrap_or(true);
+            self.goals = Goals::load(&saved["goals"])?;
         }
         self.rpc.request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Rust experiment","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
@@ -274,6 +284,19 @@ impl Runtime {
         if self.dispatch_blocked {
             self.thread["lastError"] = json!("Dispatch outcome uncertain; queue paused; no automatic recovery in this experiment");
         }
+        if let Ok(result) = self
+            .rpc
+            .request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+            .await
+        {
+            self.goals_supported = result.get("goal").is_some();
+            if !result["goal"].is_null() {
+                self.goals.goal = goals::map(&result["goal"], &self.goals.goal);
+            } else if self.goals.goal["status"] == "active" || self.goals.goal["status"] == "paused"
+            {
+                self.goals.goal = Value::Null;
+            }
+        }
         self.ready = true;
         self.persist()?;
         self.publish();
@@ -281,13 +304,13 @@ impl Runtime {
     }
     fn persist(&self) -> Result<()> {
         self.store
-            .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records}))
+            .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals}))
     }
     fn publish(&self) {
         let mut thread = self.thread.clone();
         thread["turns"] = json!(self.history());
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
-        self.changed.send_replace(Arc::new(json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"]},"harness":{"id":"codex","name":"Codex","capabilities":{"images":false,"steer":true,"backgroundTasks":false,"goal":null,"sessionTransfer":null}},"thread":thread,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":null,"goalDelivery":null,"history":{"limit":50},"attachmentsAvailable":false,"attachmentStorageStatus":"agent_private_state_unavailable"})));
+        self.changed.send_replace(Arc::new(json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"]},"harness":{"id":"codex","name":"Codex","capabilities":{"images":false,"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":thread,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":false,"attachmentStorageStatus":"agent_private_state_unavailable"})));
     }
     fn history(&self) -> Vec<Value> {
         // Provider snapshots may omit locally submitted user items. The journal
@@ -337,6 +360,31 @@ impl Runtime {
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
         match method {
+            "goal" => self.goal_edit(body).await,
+            "goal_reconcile" | "goal_retry" => {
+                if method == "goal_retry"
+                    && !self
+                        .goals
+                        .edits
+                        .iter()
+                        .any(|e| e.id == body["id"].as_str().unwrap_or(""))
+                {
+                    bail!("goal_edit_unknown");
+                }
+                let current = self
+                    .rpc
+                    .request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                    .await?;
+                if !current["goal"].is_null() {
+                    self.goals.goal = goals::map(&current["goal"], &self.goals.goal);
+                } else if [json!("active"), json!("paused")].contains(&self.goals.goal["status"]) {
+                    self.goals.goal = Value::Null;
+                }
+                self.persist()?;
+                self.flush_goals().await?;
+                self.publish();
+                Ok(json!({"accepted":true}))
+            }
             "submit" => self.submit(body).await,
             "queue" => Ok(json!({"submissions":self.submissions()})),
             "submission" => Ok(self
@@ -386,6 +434,193 @@ impl Runtime {
             }
             _ => bail!("unsupported operation"),
         }
+    }
+    async fn goal_edit(&mut self, body: Value) -> Result<Value> {
+        if !self.ready || !self.goals_supported {
+            bail!("goals_unavailable");
+        }
+        let input = if body["clear"] == true {
+            json!({"status":"cleared"})
+        } else {
+            goals::validate(&body)?
+        };
+        if input["roundBudget"].as_u64().is_some() {
+            bail!("goal_round_budget_not_yet_supported");
+        }
+        if [json!("blocked"), json!("stale"), json!("done")].contains(&input["status"])
+            && std::env::var("AGENT_UI_GOAL_AGENT_EXIT").as_deref() == Ok("0")
+        {
+            bail!("goal_exit_disabled");
+        }
+        if !input["objective"].is_string()
+            && self.goals.goal.is_null()
+            && input["status"] != "cleared"
+        {
+            bail!("goal_not_set");
+        }
+        // The UI's user-authored goal edits share the queue's durable context
+        // delivery. No goal changes are interpreted as trusted system input.
+        let id = body["operationId"]
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let previous = self.goals.clone();
+        self.goals.add(&id, input)?;
+        if let Err(e) = self.persist() {
+            self.goals = previous;
+            return Err(e);
+        }
+        self.flush_goals().await?;
+        self.publish();
+        Ok(json!({"accepted":true}))
+    }
+    async fn flush_goals(&mut self) -> Result<()> {
+        if !self.goals_supported {
+            bail!("goals_unavailable");
+        }
+        for i in 0..self.goals.edits.len() {
+            if self.goals.edits[i].sent {
+                continue;
+            }
+            let result = self.flush_goal(i).await;
+            if result.is_err() {
+                self.goals.edits[i].error = json!("goal_delivery_requires_reconciliation");
+                self.persist()?;
+                self.publish();
+                return result;
+            }
+        }
+        Ok(())
+    }
+    async fn flush_goal(&mut self, i: usize) -> Result<()> {
+        let edit = self.goals.edits[i].clone();
+        let clear = edit.input["status"] == "cleared"
+            || [json!("blocked"), json!("stale"), json!("done")].contains(&edit.input["status"]);
+        if !edit.applied {
+            let recovered = if edit.applying {
+                let current = self
+                    .rpc
+                    .request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                    .await?;
+                if clear {
+                    current["goal"].is_null()
+                } else {
+                    edit.input
+                        .as_object()
+                        .unwrap()
+                        .iter()
+                        .filter(|(k, _)| {
+                            !["roundBudget", "reason", "requiredAction"].contains(&k.as_str())
+                        })
+                        .all(|(k, v)| {
+                            current["goal"][k] == *v
+                                || k == "status"
+                                    && *v == "active"
+                                    && current["goal"]["status"] == "complete"
+                        })
+                }
+            } else {
+                false
+            };
+            if edit.applying && !recovered {
+                bail!("goal_mutation_uncertain");
+            }
+            if !recovered {
+                self.goals.edits[i].applying = true;
+                self.persist()?;
+                let mut params = edit.input.clone();
+                for key in ["roundBudget", "reason", "requiredAction"] {
+                    params.as_object_mut().unwrap().remove(key);
+                }
+                if edit.input["objective"].is_string()
+                    && edit.input["objective"] != self.goals.goal["objective"]
+                {
+                    if params.get("status").is_none() {
+                        params["status"] = json!("active");
+                    }
+                    if params.get("tokenBudget").is_none() {
+                        params["tokenBudget"] = Value::Null;
+                    }
+                }
+                if clear {
+                    params = json!({});
+                }
+                params["threadId"] = self.thread["id"].clone();
+                params["origin"] = json!("user");
+                let result = self
+                    .rpc
+                    .request(
+                        if clear {
+                            "thread/goal/clear"
+                        } else {
+                            "thread/goal/set"
+                        },
+                        params,
+                    )
+                    .await?;
+                if !clear {
+                    self.goals.goal = goals::map(&result["goal"], &self.goals.goal);
+                    if self.goals.goal.is_null() {
+                        bail!("goal_reply_invalid");
+                    }
+                }
+            } else if !clear {
+                let result = self
+                    .rpc
+                    .request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                    .await?;
+                self.goals.goal = goals::map(&result["goal"], &self.goals.goal);
+            }
+            if clear {
+                self.goals.goal = edit.previous.clone();
+                if self.goals.goal.is_object() {
+                    self.goals.goal["status"] = edit.input["status"].clone();
+                    self.goals.goal["reason"] = edit.input["reason"].clone();
+                    self.goals.goal["requiredAction"] = edit.input["requiredAction"].clone();
+                }
+            }
+            if edit.input.get("roundBudget").is_some() && self.goals.goal.is_object() {
+                self.goals.goal["roundBudget"] = edit.input["roundBudget"].clone();
+            }
+            self.goals.edits[i].goal = self.goals.goal.clone();
+            self.goals.edits[i].applied = true;
+            self.persist()?;
+        }
+        if self.goals.edits[i].mode.is_none() {
+            self.goals.edits[i].mode = Some(
+                if self.thread["activeTurnId"].is_string() {
+                    "steer"
+                } else {
+                    "queue"
+                }
+                .into(),
+            );
+            self.persist()?;
+        }
+        let edit = self.goals.edits[i].clone();
+        let result = self.submit(json!({"operation_id":format!("goal-edit/{}/{}",edit.id,edit.attempt),"text":goals::prompt(&edit.previous,&edit.goal),"delivery":edit.mode,"notify":{"on":[]}})).await?;
+        if self
+            .records
+            .iter()
+            .find(|r| r.submission["id"] == result["submission"]["id"])
+            .is_some_and(|r| {
+                r.submission["state"] == "failed" || r.submission["state"] == "interrupted"
+            })
+        {
+            self.goals.edits[i].attempt = edit
+                .attempt
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("goal_retry_limit"))?;
+            self.goals.edits[i].mode = None;
+            self.persist()?;
+            bail!("goal_prompt_failed");
+        }
+        self.goals.edits[i].sent = true;
+        self.goals.edits[i].prompt_id = result["submission"]["id"].clone();
+        self.goals.edits[i].error = Value::Null;
+        self.persist()?;
+        self.publish();
+        Ok(())
     }
     fn submissions(&self) -> Vec<Value> {
         let mut position = 0;
@@ -591,6 +826,18 @@ impl Runtime {
             return Ok(());
         }
         match method {
+            "thread/goal/updated" => {
+                self.goals.goal = goals::map(&p["goal"], &self.goals.goal);
+                self.persist()?;
+            }
+            "thread/goal/cleared" => {
+                if self.goals.goal.is_object()
+                    && [json!("active"), json!("paused")].contains(&self.goals.goal["status"])
+                {
+                    self.goals.goal["status"] = json!("cleared");
+                }
+                self.persist()?;
+            }
             "turn/started" => {
                 self.thread["status"] = json!("running");
                 self.thread["activeTurnId"] = p["turn"]["id"].clone();
@@ -766,7 +1013,8 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
                         .as_str()
                         .is_some_and(|s| !s.is_empty() && s.len() <= 1024))
                 || r.receipt["id"] != s["id"]
-                || r.fingerprint != json!([r.text, r.delivery, s["sender"], r.notify]).to_string()
+                || serde_json::from_str::<Value>(&r.fingerprint).ok()
+                    != Some(json!([r.text, r.delivery, s["sender"], r.notify]))
             {
                 bail!("invalid journal");
             }
@@ -776,44 +1024,6 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
     }
     // Do not expose parser fragments, prompt text, sender values or file paths.
     decode(saved).map_err(|_| anyhow!("private_state_invalid"))
-}
-#[cfg(test)]
-mod journal_tests {
-    use super::*;
-
-    #[test]
-    fn recovery_rejects_semantic_corruption_without_disclosing_values() {
-        let id = uuid::Uuid::new_v4().to_string();
-        let record = json!({"operation":"op", "fingerprint":json!(["secret", "queue", null, null]).to_string(),
-            "text":"secret", "delivery":"queue", "submission":{"id":id,"state":"running","created_at":now(),"turn_id":null,"sender":null},
-            "receipt":{"id":id},"notify":null});
-        let valid =
-            json!({"schema":1,"threadId":"thread","dispatchBlocked":true,"records":[record]});
-        assert_eq!(decode_records(&valid).unwrap().len(), 1);
-        for pointer in [
-            "/schema",
-            "/threadId",
-            "/dispatchBlocked",
-            "/records/0/submission/id",
-            "/records/0/submission/state",
-            "/records/0/submission/created_at",
-            "/records/0/submission/turn_id",
-            "/records/0/fingerprint",
-            "/records/0/receipt/id",
-            "/records/0/submission/sender",
-        ] {
-            let mut corrupt = valid.clone();
-            *corrupt.pointer_mut(pointer).unwrap() = json!({"secret":"never print this"});
-            assert_eq!(
-                decode_records(&corrupt).err().unwrap().to_string(),
-                "private_state_invalid",
-                "{pointer}"
-            );
-        }
-        let mut duplicate = valid.clone();
-        duplicate["records"].as_array_mut().unwrap().push(record);
-        assert!(decode_records(&duplicate).is_err());
-    }
 }
 fn validate_metadata(body: &Value) -> Result<()> {
     if !body["sender"].is_null() {
@@ -947,5 +1157,43 @@ pub async fn watch_messages(handle: Handle, agent: String) {
             }
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_rejects_semantic_corruption_without_disclosing_values() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let record = json!({"operation":"op", "fingerprint":json!(["secret", "queue", null, null]).to_string(),
+            "text":"secret", "delivery":"queue", "submission":{"id":id,"state":"running","created_at":now(),"turn_id":null,"sender":null},
+            "receipt":{"id":id},"notify":null});
+        let valid =
+            json!({"schema":1,"threadId":"thread","dispatchBlocked":true,"records":[record]});
+        assert_eq!(decode_records(&valid).unwrap().len(), 1);
+        for pointer in [
+            "/schema",
+            "/threadId",
+            "/dispatchBlocked",
+            "/records/0/submission/id",
+            "/records/0/submission/state",
+            "/records/0/submission/created_at",
+            "/records/0/submission/turn_id",
+            "/records/0/fingerprint",
+            "/records/0/receipt/id",
+            "/records/0/submission/sender",
+        ] {
+            let mut corrupt = valid.clone();
+            *corrupt.pointer_mut(pointer).unwrap() = json!({"secret":"never print this"});
+            assert_eq!(
+                decode_records(&corrupt).err().unwrap().to_string(),
+                "private_state_invalid",
+                "{pointer}"
+            );
+        }
+        let mut duplicate = valid.clone();
+        duplicate["records"].as_array_mut().unwrap().push(record);
+        assert!(decode_records(&duplicate).is_err());
     }
 }

@@ -1,6 +1,6 @@
 // Deliberately small, sealed provider for dispatch/outbox failure boundaries.
 import readline from 'node:readline';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 const mode=process.env.RUST_SPIKE_FAULT;
 if(mode==='descendant') {
@@ -16,6 +16,17 @@ for await(const line of readline.createInterface({input:process.stdin})) {
   if(!request.id)continue;
   if(!request.method)continue; // Response to a provider-initiated request.
   let result={};
+  if(mode==='goal-ack-lost'&&request.method.startsWith('thread/goal/')) {
+    const file='.fault-goal.json';
+    let goal=existsSync(file)?JSON.parse(readFileSync(file,'utf8')):null;
+    if(request.method==='thread/goal/set') {
+      const {threadId,origin,...input}=request.params;
+      if(origin!=='user')throw Error('goal origin');
+      goal={status:'active',...goal,...input};writeFileSync(file,JSON.stringify(goal));
+      console.log(JSON.stringify({id:request.id,error:{message:'sealed lost goal acknowledgement'}}));continue;
+    }
+    result={goal};
+  }
   if(request.method==='model/list')result={data:[]};
   if(['thread/start','thread/resume','thread/read'].includes(request.method))result={thread:{id:threadId,turns}};
   if(request.method==='thread/start'&&mode==='unknown-request')setTimeout(()=>console.log(JSON.stringify({id:'provider-unknown',method:'unsafe/unknown',params:{}})),100);
@@ -30,7 +41,7 @@ for await(const line of readline.createInterface({input:process.stdin})) {
       result={turn:{id:turn.id}};
       setTimeout(()=>{
         if(mode==='observe') turn.status='completed'; // no event; thread/read is authoritative
-        if(mode==='sparse') {
+        if(mode==='sparse'||mode==='goal-ack-lost') {
           turn.status='completed';
           turn.items=[{id:'answer',type:'agentMessage',text:'sparse answer'}];
           emit('turn/completed',{turn});

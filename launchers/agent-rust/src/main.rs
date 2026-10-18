@@ -1,4 +1,5 @@
 mod files;
+mod goals;
 mod model;
 mod rpc;
 mod runtime;
@@ -176,8 +177,9 @@ async fn main() -> Result<()> {
     {
         tokio::spawn(runtime::watch_messages(handle, agent));
     }
-    let serve = async {
-        axum::serve(files::IdleListener { listener, idle: files_idle }, router)
+    let serve =
+        async {
+            axum::serve(files::IdleListener { listener, idle: files_idle }, router)
         .with_graceful_shutdown(async {
             #[cfg(unix)]
             {
@@ -194,8 +196,8 @@ async fn main() -> Result<()> {
             }
         })
         .await?;
-        Ok::<_, anyhow::Error>(())
-    };
+            Ok::<_, anyhow::Error>(())
+        };
     tokio::try_join!(register, serve)?;
     Ok(())
 }
@@ -280,7 +282,15 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
     let path = if path.is_empty() { "/".into() } else { path };
     let method = request.method().to_string();
     if path == "/v1/files" || path == "/v1/files/tree" || path == "/v1/files/download" {
-        return app.files.handle(&method, request.uri().query().unwrap_or(""), request.headers(), &path).await;
+        return app
+            .files
+            .handle(
+                &method,
+                request.uri().query().unwrap_or(""),
+                request.headers(),
+                &path,
+            )
+            .await;
     }
     let queue_route = path == "/v1/prompts"
         || path == "/v1/queue"
@@ -376,7 +386,7 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         }
         return call(&app, "cancel", json!({"id":id}), StatusCode::OK).await;
     }
-    if method != "POST" {
+    if method != "POST" && !(path == "/api/goal" && (method == "PUT" || method == "DELETE")) {
         return failure(StatusCode::METHOD_NOT_ALLOWED, "unsupported_operation");
     }
     let attested = header(request.headers(), "x-treer-interface-source") == Some("controller-api");
@@ -397,6 +407,19 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         }
     };
     match path.as_str() {
+        "/api/goal" if method == "PUT" || method == "DELETE" => {
+            let limit = history_limit(&body);
+            body["clear"] = json!(method == "DELETE");
+            ui_call(&app, "goal", body, limit).await
+        }
+        "/api/goal/reconcile" => {
+            let limit = history_limit(&body);
+            ui_call(&app, "goal_reconcile", body, limit).await
+        }
+        "/api/goal/retry" => {
+            let limit = history_limit(&body);
+            ui_call(&app, "goal_retry", body, limit).await
+        }
         "/v1/prompts" | "/api/prompt" => {
             if !app.agent.is_empty() && private_status(&app.agent).await.is_err() {
                 return failure(StatusCode::SERVICE_UNAVAILABLE, "private_state_unavailable");
