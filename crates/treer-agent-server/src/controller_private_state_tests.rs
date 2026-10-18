@@ -9,13 +9,13 @@ use treer_host_protocol::{
     decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
 };
 
-struct Fixture {
-    root: PathBuf,
+pub(crate) struct Fixture {
+    pub(crate) root: PathBuf,
     bin: PathBuf,
-    state: PathBuf,
+    pub(crate) state: PathBuf,
     socket: PathBuf,
     sync: HostResponse,
-    spawns: Arc<Mutex<Vec<HostSpawnRequest>>>,
+    pub(crate) spawns: Arc<Mutex<Vec<HostSpawnRequest>>>,
     stops: Arc<Mutex<Vec<String>>>,
     host_task: tokio::task::JoinHandle<()>,
 }
@@ -39,7 +39,7 @@ fn executable_name(name: &str) -> String {
 /// A fake Host that answers Sync with its inventory, records every Spawn as
 /// a running process and marks Stop targets exited. Accepts reconnects so a
 /// replacement Controller can be built against the same inventory.
-async fn fixture() -> Fixture {
+pub(crate) async fn fixture() -> Fixture {
     let id = &Uuid::new_v4().simple().to_string()[..12];
     let root = std::env::temp_dir().join(format!("trr-private-{id}"));
     let state = std::env::temp_dir().join(format!("trr-private-state-{id}"));
@@ -179,7 +179,7 @@ async fn fixture() -> Fixture {
 }
 
 impl Fixture {
-    fn config(&self, server_id: &str, private_state_root: PathBuf) -> ControllerConfig {
+    pub(crate) fn config(&self, server_id: &str, private_state_root: PathBuf) -> ControllerConfig {
         ControllerConfig {
             protected_paths: vec![],
             workspace_id: "workspace".into(),
@@ -195,7 +195,10 @@ impl Fixture {
         }
     }
 
-    async fn runtime(&self, config: ControllerConfig) -> Result<ControllerRuntime, ProtocolError> {
+    pub(crate) async fn runtime(
+        &self,
+        config: ControllerConfig,
+    ) -> Result<ControllerRuntime, ProtocolError> {
         let (host, events) = HostClient::connect(&self.socket).await.unwrap();
         ControllerRuntime::from_sync(host, self.sync.clone(), events, config).map(|(r, _)| r)
     }
@@ -225,7 +228,7 @@ impl Fixture {
     }
 }
 
-async fn create(
+pub(crate) async fn create(
     runtime: &ControllerRuntime,
     fixture: &Fixture,
     agent_id: &str,
@@ -787,7 +790,7 @@ async fn only_proxy_confirmed_deletions_purge_and_running_agents_are_stopped_fir
         .runtime(fixture.config("srv_a", private_root.clone()))
         .await
         .unwrap();
-    create(&runtime, &fixture, "ag_gone", "repo").await;
+    let credential = create(&runtime, &fixture, "ag_gone", "repo").await;
     create(&runtime, &fixture, "ag_live", "repo").await;
     create(&runtime, &fixture, "ag_keep", "repo").await;
     let gone = private_root.join("srv_a").join("ag_gone");
@@ -808,6 +811,16 @@ async fn only_proxy_confirmed_deletions_purge_and_running_agents_are_stopped_fir
         std::os::unix::fs::symlink(&outside, gone.join("escape")).unwrap();
     }
     runtime.stop("stop", "ag_gone").await.unwrap();
+    let proxy_port = runtime
+        .inner
+        .workload_proxies
+        .ensure("ag_gone", &credential, None)
+        .unwrap();
+    assert!(
+        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, proxy_port))
+            .await
+            .is_ok()
+    );
     // Stop, restart and an empty confirmation never purge anything.
     assert!(runtime.purge_deleted_private_state(&[]).await.is_empty());
     assert!(gone.join("state.json").exists());
@@ -840,9 +853,20 @@ async fn only_proxy_confirmed_deletions_purge_and_running_agents_are_stopped_fir
     assert!(!results.iter().any(|(agent, _)| agent == "../bad"));
     assert!(!gone.exists());
     assert!(
+        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, proxy_port))
+            .await
+            .is_err()
+    );
+    assert!(runtime.authenticate_agent("ag_gone", &credential).is_err());
+    assert!(
         runtime.get_startup("ag_gone").is_err(),
         "stale startup entry removed"
     );
+    assert!(
+        runtime.get("ag_gone").is_err(),
+        "terminal registry entry removed"
+    );
+    assert!(runtime.inner.startup_store.is_denied("ag_gone").unwrap());
     assert!(
         live.join("state.json").exists(),
         "running Agents are not purged"
@@ -877,6 +901,55 @@ async fn only_proxy_confirmed_deletions_purge_and_running_agents_are_stopped_fir
         vec!["ag_keep".to_string()]
     );
     assert!(runtime.get_startup("ag_keep").is_ok());
+
+    // Repeated recovery must not re-register retained, exited Host inventory.
+    runtime.restore_runtime(&[]).await;
+    assert!(runtime.get("ag_gone").is_err());
+    assert!(runtime.get("ag_live").is_err());
+    let mut sync = runtime.inner.host.sync(Default::default()).await.unwrap();
+    if let HostResponse::Synced {
+        processes, replay, ..
+    } = &mut sync
+    {
+        for process in processes.iter().filter(|p| p.process_id != "ag_keep") {
+            assert_eq!(
+                runtime
+                    .upsert_process(process.clone(), None)
+                    .unwrap_err()
+                    .code,
+                "agent_identity_denied",
+                "late Host inventory is fenced"
+            );
+            replay.push(HostOutputReplay {
+                process_id: process.process_id.clone(),
+                stream_epoch: process.stream_epoch.clone(),
+                first_available_revision: 1,
+                next_revision: 1,
+                gap: false,
+                chunks: vec![],
+            });
+        }
+    }
+    let (host, events) = HostClient::connect(&fixture.socket).await.unwrap();
+    let (replacement, _) =
+        ControllerRuntime::from_sync(host, sync, events, fixture.config("srv_a", private_root))
+            .unwrap();
+    assert!(replacement.get("ag_gone").is_err());
+    assert!(replacement.get("ag_live").is_err());
+    assert!(replacement.get_startup("ag_gone").is_err());
+    assert_eq!(
+        replacement
+            .create(
+                "late-create",
+                "ag_gone".into(),
+                new_workload_credential(),
+                fixture.request("repo")
+            )
+            .await
+            .unwrap_err()
+            .code,
+        "agent_identity_denied"
+    );
 }
 
 #[tokio::test]

@@ -415,6 +415,15 @@ impl ControllerRuntime {
             .map(|replay| (replay.process_id.clone(), replay))
             .collect();
         for mut process in processes {
+            if !process.running
+                && runtime
+                    .inner
+                    .startup_store
+                    .is_denied(&process.process_id)
+                    .map_err(startup_store_error)?
+            {
+                continue;
+            }
             let Some(replay) = replays.get(&process.process_id) else {
                 continue;
             };
@@ -2353,15 +2362,41 @@ impl ControllerRuntime {
                 ));
                 continue;
             }
-            let result = root.purge(agent_id).and_then(|removed| {
-                // The disabled startup entry of a deleted Agent is stale. A
-                // denied-ID fence (startup store v2) is not an entry and stays.
+            // A missing exit event must not turn cleanup into a force-delete
+            // of a nonterminal local record. Refresh it from Host evidence.
+            if let Some(process) = inventory.iter().find(|p| p.process_id == *agent_id) {
+                let _ = self.upsert_process(process.clone(), None);
+            }
+            if self.get(agent_id).is_ok_and(|agent| {
+                agent
+                    .lock()
+                    .map_or(true, |agent| !agent.info.status.is_terminal())
+            }) {
+                results.push((
+                    agent_id.clone(),
+                    Err(ProtocolError::new(
+                        "agent_private_state_purge_deferred",
+                        "the deleted Agent registry entry is not terminal; purge retried later",
+                    )),
+                ));
+                continue;
+            }
+            let result = (|| {
+                // Persist the fence before forgetting credentials in memory.
+                // Host inventory can retain exited processes across reconnects.
                 self.inner
                     .startup_store
-                    .remove(agent_id)
+                    .remove_deleted(agent_id)
                     .map_err(startup_store_error)?;
-                Ok(removed)
-            });
+                self.inner
+                    .agents
+                    .write()
+                    .map_err(|_| ProtocolError::new("state_error", "agent registry lock poisoned"))?
+                    .remove(agent_id);
+                self.inner.workload_proxies.remove(agent_id);
+                self.remove_cached_interface(agent_id);
+                root.purge(agent_id)
+            })();
             if result.is_ok() {
                 if let Ok(mut ledger) = self.inner.private_state_ledger.lock() {
                     ledger.forget(agent_id);
@@ -3134,6 +3169,7 @@ impl ControllerRuntime {
         process: HostProcessInfo,
         restored_text: Option<String>,
     ) -> Result<AgentInfo, ProtocolError> {
+        self.require_not_denied(&process.process_id)?;
         let metadata: AgentMetadata = serde_json::from_str(&process.metadata)
             .map_err(|error| protocol_error("invalid_host_metadata", error))?;
         if let Ok(current) = self.get(&process.process_id) {
@@ -3152,17 +3188,6 @@ impl ControllerRuntime {
                 "host_identity_mismatch",
                 "host process metadata belongs to another controller",
             ));
-        }
-        if process.running {
-            if let Some(port) = metadata.http_proxy_port {
-                self.inner.workload_proxies.ensure(
-                    &metadata.agent_id,
-                    &metadata.workload_credential,
-                    Some(port),
-                )?;
-            }
-        } else {
-            self.inner.workload_proxies.remove(&metadata.agent_id);
         }
         let inventory_only = restored_text.is_none();
         let text = restored_text.unwrap_or_default();
@@ -3218,6 +3243,20 @@ impl ControllerRuntime {
                 self.inner.agents.write().map_err(|_| {
                     ProtocolError::new("state_error", "agent registry lock poisoned")
                 })?;
+            // Serialize the final fence check and proxy/registry publication
+            // with deletion cleanup; a delayed Host event cannot reinsert it.
+            self.require_not_denied(&metadata.agent_id)?;
+            if process.running {
+                if let Some(port) = metadata.http_proxy_port {
+                    self.inner.workload_proxies.ensure(
+                        &metadata.agent_id,
+                        &agent.workload_credential,
+                        Some(port),
+                    )?;
+                }
+            } else {
+                self.inner.workload_proxies.remove(&metadata.agent_id);
+            }
             if let Some(current) = agents.get(&metadata.agent_id) {
                 let mut current = current
                     .lock()
@@ -3559,7 +3598,7 @@ fn workload_credential_matches(expected: &str, supplied: &str) -> bool {
 
 #[cfg(test)]
 #[path = "controller_private_state_tests.rs"]
-mod private_state_tests;
+pub(crate) mod private_state_tests;
 #[cfg(test)]
 #[path = "controller_tests.rs"]
 mod tests;

@@ -545,7 +545,14 @@ plus every private directory under this server, and the Proxy answers
 `deleted_agent_ids` from `deleted_agents`. Under the recovery lock the
 Controller stops a still-running deleted Agent and defers, otherwise removes the
 directory (`remove_dir_all`, no symlink following, lstat before and after) and
-the stale startup entry. The directory itself is the pending record; an older
+the stale startup entry, terminal registry record and workload proxy. Removing
+the declaration atomically retains a durable denied-ID fence, so delayed creates
+and retained exited Host inventory cannot re-register the deleted identity,
+including after Controller replacement. Existing denial fences remain intact;
+if the bounded fence store (4096 IDs, no automatic eviction) is full or cannot
+persist, cleanup reports failure and retries without removing state. Private
+directory deletion follows persistence and registry cleanup. The directory or remaining
+startup declaration is the pending record; an older
 Proxy omits the field and nothing is purged. Directories under other server IDs
 are never touched.
 
