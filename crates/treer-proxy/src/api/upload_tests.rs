@@ -228,11 +228,11 @@ async fn fixture() -> Fixture {
     let auth = AuthStore::for_test("test").await;
     auth.seed_test_workspace("default").await;
     let now = Utc::now();
-    sqlx::query("INSERT INTO users(id,email,email_verified,preferred_name,password_hash,created_at) VALUES('member','member@example.test',TRUE,'Member','unused',$1),('other','other@example.test',TRUE,'Other','unused',$1)")
+    sqlx::query("INSERT INTO users(id,email,email_verified,preferred_name,password_hash,created_at) VALUES('member','member@example.test',TRUE,'Member','unused',$1),('other','other@example.test',TRUE,'Other','unused',$1),('outsider','outsider@example.test',TRUE,'Outsider','unused',$1)")
         .bind(now.to_rfc3339()).execute(&auth.pool()).await.unwrap();
     sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_default','member','member',$1),('org_default','other','member',$1)")
         .bind(now.to_rfc3339()).execute(&auth.pool()).await.unwrap();
-    for user in ["member", "other"] {
+    for user in ["member", "other", "outsider"] {
         sqlx::query("INSERT INTO sessions(token,user_id,created_at,expires_at) VALUES($1,$2,$3,'2999-01-01T00:00:00Z')")
             .bind(format!("tok-{user}")).bind(user).bind(now.to_rfc3339())
             .execute(&auth.pool()).await.unwrap();
@@ -249,6 +249,8 @@ async fn fixture() -> Fixture {
             [
                 CAPABILITY_MACHINE_UPLOAD.to_string(),
                 CAPABILITY_MACHINE_UPLOAD_V3.to_string(),
+                // Not read by the Web: must stay out of the read models (#173).
+                treer_protocol::CAPABILITY_MACHINE_EXEC.to_string(),
             ],
             tx,
         )
@@ -1190,10 +1192,26 @@ async fn read_models_keep_live_capabilities_after_a_controller_snapshot() {
             ],
             "{uri}"
         );
+        // machine-old models a Controller whose advertised set lacks v3 (the
+        // Windows gate-off): legacy only, field present.
         assert_eq!(
             capabilities("machine-old"),
             vec![CAPABILITY_MACHINE_UPLOAD.to_string()],
             "{uri}"
+        );
+        // A user outside the organization sees neither machine nor field.
+        let request = base("GET", uri.to_string(), "tok-outsider")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body, _) = json_of(fixture.app.clone().oneshot(request).await.unwrap()).await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "{uri}: outsider must not read the workspace"
+        );
+        assert!(
+            !body.to_string().contains("machine.upload"),
+            "{uri}: outsider response leaked capabilities: {body}"
         );
     }
 }

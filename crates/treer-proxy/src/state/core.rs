@@ -333,6 +333,28 @@ impl AppState {
         .await
     }
 
+    /// Capabilities the browser read models expose per machine. The Web only
+    /// decides between the legacy and the chunked upload route; every other
+    /// Controller capability stays in the connection table (#153 data
+    /// minimization, #173).
+    pub(crate) const READ_MODEL_CAPABILITIES: &'static [&'static str] = &[
+        treer_protocol::CAPABILITY_MACHINE_UPLOAD,
+        treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3,
+    ];
+
+    fn read_model_capabilities<'a>(
+        capabilities: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        let mut exposed: Vec<String> = capabilities
+            .into_iter()
+            .filter(|capability| Self::READ_MODEL_CAPABILITIES.contains(&capability.as_str()))
+            .cloned()
+            .collect();
+        exposed.sort();
+        exposed.dedup();
+        exposed
+    }
+
     pub async fn register_server_instance_with_capabilities(
         &self,
         mut server: ServerInfo,
@@ -361,8 +383,9 @@ impl AppState {
         server.connected_at = now;
         server.last_seen_at = now;
         let capabilities: Vec<String> = capabilities.into_iter().collect();
-        // The read models carry the live Controller's capabilities (#166).
-        server.capabilities = capabilities.clone();
+        // The read models carry the allow-listed live Controller capabilities
+        // (#166, #173); the full set stays on the connection for dispatch.
+        server.capabilities = Self::read_model_capabilities(&capabilities);
 
         let key = ServerKey {
             workspace_id: server.workspace_id.clone(),
@@ -456,12 +479,7 @@ impl AppState {
                 workspace_id: workspace_id.clone(),
                 server_id: server_id.clone(),
             })
-            .map(|connection| {
-                let mut capabilities: Vec<String> =
-                    connection.capabilities.iter().cloned().collect();
-                capabilities.sort();
-                capabilities
-            });
+            .map(|connection| Self::read_model_capabilities(&connection.capabilities));
         let event = {
             let mut workspaces = self.inner.workspaces.write().await;
             let workspace = workspaces
