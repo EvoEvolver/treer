@@ -42,7 +42,7 @@ cross-platform correctness. Author checks and the frozen SHA belong on #159.
 | `apps/message-endpoint/src/holds.rs` | P2 `88779477`, last original change `d63cc7fb` | Review 3893; fresh slice review pending |
 | `apps/message-endpoint/src/hub.rs` | Selected file patch from `a8d95a2d` on P2 | Review 3992; extraction needs fresh coverage |
 | `apps/message-endpoint/src/hub_runtime.rs` | Selected file patch from `c7e5ad17` on P2 | Review 3997; extraction needs fresh coverage |
-| `apps/message-endpoint/src/hub_runtime_fixture.rs` | Exact content from `b6bae7ca` | new joined relay/Telegram fixture; fresh review pending |
+| `apps/message-endpoint/src/hub_runtime_fixture.rs` | `b6bae7ca` content plus three rustfmt-only line breaks | new joined relay/Telegram fixture; fresh review pending |
 | `apps/message-endpoint/src/lib.rs` | P2 `88779477`, last original change `d63cc7fb` | Review 3893; fresh slice review pending |
 | `apps/message-endpoint/src/notices.rs` | P2 `88779477`, last original change `e2cfa6ef` | Review 3686; fresh slice review pending |
 | `apps/message-endpoint/src/oauth.rs` | P2 `88779477`, last original change `0b34f0c8` | Review 3761; fresh slice review pending |
@@ -100,3 +100,8 @@ identities. The operator gate remains false by default.
 
 See [the disposable acceptance checklist](tests/TELEGRAM-SMOKE.md) for release's
 real-bot, negative controls, drain, rollback and token-revocation obligations.
+
+The 47 P2-identical files are inherited, not a claim of a fresh complete line-by-
+line reread. The author re-examined the forwarding, admission, activation and
+test boundaries during extraction. No later P3 edits to those 47 files were
+carried into this slice; later P3 history may have modified the separate branch.
