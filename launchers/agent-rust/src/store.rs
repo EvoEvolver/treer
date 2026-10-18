@@ -142,7 +142,8 @@ impl Store {
         if data.len() > 32 * 1024 * 1024 {
             bail!("state too large");
         }
-        Ok(Some(serde_json::from_slice(&data)?))
+        Ok(Some(crate::bounded_json::decode(&data)
+            .map_err(|_| anyhow::anyhow!("private_state_invalid"))?))
     }
     pub fn recheck(&self) -> Result<()> {
         Self::open(&self.root, &self.cwd)?;
@@ -167,6 +168,8 @@ impl Store {
     pub fn save(&self, state: &Value) -> Result<()> {
         // Re-evaluate placement on each journal update; git init disables writes.
         Self::open(&self.root, &self.cwd)?;
+        crate::bounded_json::admit(state)
+            .map_err(|_| anyhow::anyhow!("private_state_invalid"))?;
         #[cfg(feature = "fixture-harness")]
         if fixture_checkpoint_failure(state) { bail!("fixture_checkpoint_failure"); }
         let data = serde_json::to_vec(state)?;
@@ -232,6 +235,36 @@ fn fixture_checkpoint_failure(state: &Value) -> bool {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn ambiguous_or_oversized_json_is_refused_without_rewriting_source() {
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap()
+            .join(format!("rust-json-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = base.join("private");
+        let cwd = base.join("cwd");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(&cwd).unwrap();
+        let store = Store::open(&root, &cwd).unwrap();
+        let path = root.join("rust-spike.json");
+        let ambiguous = br#"{"dispatchBlocked":true,"dispatchBlocked":false,"credential-canary":"synthetic"}"#;
+        fs::write(&path, ambiguous).unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(store.load().unwrap_err().to_string(), "private_state_invalid");
+        assert_eq!(fs::read(&path).unwrap(), ambiguous);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let mut deep = Value::Null;
+        for _ in 0..32 { deep = serde_json::json!([deep]); }
+        assert_eq!(store.save(&deep).unwrap_err().to_string(), "private_state_invalid");
+        assert_eq!(fs::read(&path).unwrap(), ambiguous);
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 1);
+        let valid = serde_json::json!({"schema":1,"dispatchBlocked":true,"records":[]});
+        store.save(&valid).unwrap();
+        assert_eq!(store.load().unwrap(), Some(valid));
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[test]
     fn failed_publication_removes_only_its_own_temp_and_preserves_primary_error() {

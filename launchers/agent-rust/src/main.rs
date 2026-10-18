@@ -1,4 +1,5 @@
 mod attachments;
+mod bounded_json;
 mod files;
 mod goals;
 mod http;

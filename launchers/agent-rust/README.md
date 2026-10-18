@@ -140,6 +140,15 @@ Journal recovery validates the schema, dispatch fence, record identities,
 metadata and payload fingerprints before starting the provider. Invalid state
 refuses startup with `private_state_invalid`, preserving the journal rather than
 dropping records or creating a fresh session.
+Private journal decoding also refuses duplicate JSON keys (including escaped
+equivalent names), more than 32 value levels or 500,000 values/keys. These limits
+are enforced during decoding before recovery consumes a JSON value, under the
+existing 32 MiB wire bound. Publication applies the same shape budget without
+allocating a second JSON tree, so it cannot write a checkpoint recovery would
+refuse. Limit failure follows the existing checkpoint rollback and dispatch stop.
+Diagnostics never include the offending key/value.
+This hardens existing state reads; it does not enable M4 envelope import or
+replace the separate envelope schema review and Controller handoff capability.
 Read-only reconciliation uses one bounded background `thread/read` operation.
 Only an explicit terminal turn matching a known accepted running submission can
 settle its receipt. Missing turns, an idle flag and read failures never complete
