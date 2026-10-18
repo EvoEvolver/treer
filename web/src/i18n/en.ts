@@ -11,6 +11,8 @@ export const en = {
   "upload.crypto_required": "Secure hashing is unavailable. Open the Console using HTTPS to upload.",
   "upload.checking": "Checking upload support…",
   "upload.discovery_failed": "Cannot check upload support. Retry before uploading.",
+  "upload.machine_support_unknown": "This machine has not reported support for resumable uploads. Retry the check, or choose compatibility upload for files up to 16 MiB.",
+  "upload.use_compatibility": "Use compatibility upload (up to 16 MiB)",
   "upload.retry_discovery": "Retry check",
   "upload.progress_label": "File upload progress",
   "upload.progress": "{sent} of {total} sent",

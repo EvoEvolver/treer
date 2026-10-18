@@ -17,30 +17,46 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
   const [overwrite, setOverwrite] = useState(false)
   const [mode, setMode] = useState<'unknown' | 'legacy' | 'resumable'>('unknown')
   const [discoveryError, setDiscoveryError] = useState(false)
+  const [missingMachineCapability, setMissingMachineCapability] = useState(false)
   const [view, setView] = useState<UploadView>({ phase: 'idle', loaded: 0, total: 0 })
   const [error, setError] = useState('')
   const [discoverRevision, setDiscoverRevision] = useState(0)
   const engine = useRef<MachineUpload | null>(null)
   const fileInput = useRef<HTMLInputElement>(null)
   const directoryInput = useRef<HTMLInputElement>(null)
-  const machineCapability = Array.isArray(machine.capabilities) ? machine.capabilities.includes(UPLOAD_CAPABILITY) ? 'supported' : 'absent' : 'unknown'
+  const machineCapability = uploadCapability(machine)
   const base = `/api/workspaces/${encodeURIComponent(workspaceId)}/machines/${encodeURIComponent(machine.server_id)}`
   useEffect(() => {
+    // An operation owns its protocol for the rest of this dialog lifetime.
+    if (engine.current) return
     const control = new AbortController()
     setDiscoveryError(false)
+    setMissingMachineCapability(false)
     setMode('unknown')
-    void api<{ capabilities?: string[] }>('/api/auth/config', { signal: control.signal, cache: 'no-store' }).then((config) => {
+    void Promise.all([
+      api<{ capabilities?: string[] }>('/api/auth/config', { signal: control.signal, cache: 'no-store' }).catch((reason) => {
+        if (reason instanceof ApiError && reason.status === 404) return { capabilities: [] as string[] }
+        throw reason
+      }),
+      discoverRevision > 0 ? api<{ servers: Machine[] }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/snapshot`, { signal: control.signal, cache: 'no-store' }).then((snapshot) => {
+        const refreshed = snapshot.servers.find((entry) => entry.server_id === machine.server_id)
+        if (!refreshed) throw new Error('machine unavailable')
+        return uploadCapability(refreshed)
+      }) : Promise.resolve(machineCapability),
+    ]).then(([config, capability]) => {
       if (control.signal.aborted) return
       const proxySupports = config.capabilities?.includes(UPLOAD_CAPABILITY) === true
-      const machineSupports = machineCapability === 'supported'
-      if (proxySupports && machineCapability === 'unknown') { setDiscoveryError(true); return }
+      const machineSupports = capability === 'supported'
+      if (proxySupports && (capability === 'missing' || capability === 'unknown')) {
+        setMissingMachineCapability(capability === 'missing')
+        setDiscoveryError(capability === 'unknown')
+        return
+      }
       // A successful older config/inventory is confirmed lack of support. A
       // network/Policy failure is unknown, never permission to silently fall back.
       setMode(proxySupports && machineSupports ? 'resumable' : 'legacy')
-    }).catch((reason) => {
-      if (control.signal.aborted) return
-      if (reason instanceof ApiError && reason.status === 404) setMode('legacy')
-      else setDiscoveryError(true)
+    }).catch(() => {
+      if (!control.signal.aborted) setDiscoveryError(true)
     })
     return () => control.abort()
   }, [base, discoverRevision, machineCapability])
@@ -87,7 +103,8 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
         <Field label={t('dialogs.file')}><div className="flex min-w-0 items-center gap-2"><input ref={fileInput} aria-label={t('dialogs.file')} type="file" tabIndex={-1} className="sr-only" onChange={(event) => { setFile(event.target.files?.[0] ?? null); setError(''); if (!locked) setView({ phase: 'idle', loaded: 0, total: 0 }) }} disabled={locked} /><Button type="button" variant="outline" className="min-h-11 shrink-0" disabled={locked} onClick={() => fileInput.current?.click()}>{t('upload.choose_file')}</Button><span className="min-w-0 break-all text-xs text-muted-foreground" title={file?.name}>{file?.name || t('upload.no_file')}</span></div></Field>
         <label className="flex min-h-11 items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" className="size-4 accent-foreground" checked={overwrite} onChange={(event) => setOverwrite(event.target.checked)} disabled={locked} />{t('dialogs.replace_an_existing_file_with')}</label>
         <p className="text-xs text-muted-foreground">{t(mode === 'legacy' ? 'upload.legacy_limit' : 'upload.limit')}</p>
-        {mode === 'unknown' && <p role="status" className="text-xs text-muted-foreground">{t(discoveryError ? 'upload.discovery_failed' : 'upload.checking')}</p>}
+        {mode === 'unknown' && <p role="status" className="text-xs text-muted-foreground">{t(missingMachineCapability ? 'upload.machine_support_unknown' : discoveryError ? 'upload.discovery_failed' : 'upload.checking')}</p>}
+        {mode === 'unknown' && missingMachineCapability && <Button type="button" variant="outline" className="min-h-11 w-full whitespace-normal" onClick={() => setMode('legacy')}>{t('upload.use_compatibility')}</Button>}
         {view.phase !== 'idle' && <div className="space-y-2">
           <div className="flex items-center gap-2"><div role="progressbar" aria-label={t('upload.progress_label')} aria-valuemin={0} aria-valuemax={100} aria-valuenow={percentage} aria-valuetext={`${uploadBytes(view.loaded)} / ${uploadBytes(view.total)}`} className="h-2 flex-1 overflow-hidden rounded-full bg-muted"><div className={`h-full ${view.uncertain || view.phase === 'paused' || view.phase === 'cleanup_pending' ? 'bg-muted-foreground' : 'bg-primary'}`} style={{ width: `${percentage}%` }} /></div><span aria-hidden="true" className="text-xs tabular-nums text-muted-foreground">{percentage}%</span></div>
           <p role="status" className="break-words text-xs text-foreground">{message}</p>
@@ -97,7 +114,7 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
         <DialogFooter className="gap-2">
           <Button type="button" variant="outline" className="min-h-11" onClick={onClose} disabled={busy || retained}>{t('org.close')}</Button>
           {canCancel && <Button type="button" variant="outline" className="min-h-11" onClick={() => void engine.current?.cancel()}>{t('upload.cancel')}</Button>}
-          {discoveryError && <Button type="button" className="min-h-11" onClick={() => setDiscoverRevision((value) => value + 1)}>{t('upload.retry_discovery')}</Button>}
+          {mode === 'unknown' && (discoveryError || missingMachineCapability) && <Button type="button" className="min-h-11" onClick={() => setDiscoverRevision((value) => value + 1)}>{t('upload.retry_discovery')}</Button>}
           {view.phase === 'paused' ? view.resumable && <Button type="button" className="min-h-11" disabled={busy || machine.status !== 'online'} onClick={() => void engine.current?.resume()}>{t(view.uncertain ? 'upload.check_result' : 'upload.resume')}</Button>
             : (!busy || mode !== 'resumable') && <Button type="submit" className="min-h-11" disabled={!file || tooLarge || busy || mode === 'unknown' || machine.status !== 'online'}><Upload />{busy ? t('dialogs.uploading') : t('dialogs.upload')}</Button>}
         </DialogFooter>
@@ -115,3 +132,7 @@ function uploadErrorMessage(code?: string) {
 }
 
 function uploadBytes(value: number) { return formatBytes(value).replace(/\b([KMGT])B\b/g, '$1iB') }
+
+function uploadCapability(machine: Machine) {
+  return Array.isArray(machine.capabilities) ? machine.capabilities.includes(UPLOAD_CAPABILITY) ? 'supported' : 'absent' : machine.capabilities === undefined ? 'missing' : 'unknown'
+}

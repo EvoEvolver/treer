@@ -12,6 +12,8 @@ export const zh: Messages = {
   "upload.crypto_required": "安全哈希不可用。请通过 HTTPS 打开控制台后上传。",
   "upload.checking": "正在检查上传支持…",
   "upload.discovery_failed": "无法检查上传支持。请重试后上传。",
+  "upload.machine_support_unknown": "此机器尚未报告断点续传支持。请重新检查，或选择兼容上传（文件最大 16 MiB）。",
+  "upload.use_compatibility": "使用兼容上传（最大 16 MiB）",
   "upload.retry_discovery": "重新检查",
   "upload.progress_label": "文件上传进度",
   "upload.progress": "已发送 {sent}，共 {total}",

@@ -721,7 +721,12 @@ starting at 1 MiB and adapting to measured throughput (up to the server's 8 MiB
 maximum). SHA-256 is computed per part using Web Crypto; the whole file is never
 read into a single buffer on this path. HTTPS (or a browser-trusted localhost)
 is required for Web Crypto. Older versions retain the base64 upload capped at
-16 MiB; failed capability discovery does not enable that fallback.
+16 MiB. If a successful machine inventory omits its capability field while the
+Proxy advertises resumable upload, the dialog offers an explicit **Use compatibility
+upload (up to 16 MiB)** choice; it never selects this automatically. Retrying the
+check can discover support after the machine inventory is corrected. A failed
+network or permission check does not offer compatibility upload, and an upload
+already begun with resumable parts never downgrades.
 
 The dialog reports overall bytes sent, then **Finishing upload** until the
 machine confirms publication. Temporary transport failures have three bounded
