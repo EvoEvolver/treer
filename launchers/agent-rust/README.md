@@ -25,6 +25,11 @@ on restart. The synthetic many-turn regression samples only its own launcher's
 RSS with a 384 MiB regression ceiling; this is not an OS memory quota or a heap
 profile. Provider frames/channels, the durable journal and HTTP snapshots have
 separate bounds, so the 16 MiB content budget is not a total RSS promise.
+Missing or non-string provider turn IDs are rejected rather than assigned a
+synthetic identity. During notifications this preserves accepted history and
+receipts, persists the dispatch fence, stops the provider and reports a fixed
+owner-visible error without echoing provider content. Startup rejects such
+history without rewriting the journal or falling back to a fresh thread.
 
 Native macOS **does not guarantee detached-descendant cleanup**. A provider or
 tool can immediately call `setsid` or reparent outside the verified process

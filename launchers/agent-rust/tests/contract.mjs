@@ -126,6 +126,27 @@ test('streaming deltas stop at admission limit without replacing accepted text',
   await until(async()=>{try{process.kill(pid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
 });
 
+test('invalid provider turn identity blocks dispatch without echoing provider content',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_INVALID_ID:'1'});
+  const receipt=await s.post({text:'malformed completion',operation_id:'invalid-id'}).then(r=>r.json());
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>state.runtime?.cleanup?.providerExit==='confirmed');
+  assert.equal(state.ready,false);
+  assert.equal(state.runtime.state,'blocked');
+  assert.match(state.runtime.error,/Invalid provider turn identity; queue paused/);
+  assert.doesNotMatch(JSON.stringify(state),/synthetic-do-not-echo/);
+  assert.equal(state.thread.turns.length,1,'malformed completion cannot append a turn');
+  assert.equal(state.thread.turns[0].id,'history-1','accepted turn identity is preserved');
+  assert.ok(state.thread.turns[0].items.some(item=>item.kind==='userMessage'&&item.text==='malformed completion'));
+  assert.ok(state.thread.turns[0].items.every(item=>item.kind!=='agentMessage'),'malformed completion cannot replace accepted content');
+  const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(saved.dispatchBlocked,true);
+  assert.equal(saved.records.find(r=>r.submission.id===receipt.submission.id).submission.state,'running');
+  assert.equal((await fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers})).status,200);
+  assert.ok((await s.post({text:'must not dispatch',operation_id:'after-invalid'})).status>=400);
+  const pid=Number(await readFile(join(s.root,'cwd/provider.pid'),'utf8'));
+  assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
+});
+
 test('oversized resumed history fails visibly without rewriting the durable journal',{skip:useNode,timeout:10000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;

@@ -88,12 +88,22 @@ pub fn item(raw: &Value, turn: &str, order: usize) -> Value {
 }
 pub fn turn(raw: &Value) -> Value {
     let id = raw["id"].as_str().unwrap_or("turn");
-    json!({"id":id,"status":raw["status"].as_str().unwrap_or("completed"),"startedAt":null,"error":raw["error"]["message"],"items":raw["items"].as_array().unwrap_or(&vec![]).iter().enumerate().map(|(n,i)|item(i,id,n)).collect::<Vec<_>>()})
+    json!({"id":raw["id"],"status":raw["status"].as_str().unwrap_or("completed"),"startedAt":null,"error":raw["error"]["message"],"items":raw["items"].as_array().unwrap_or(&vec![]).iter().enumerate().map(|(n,i)|item(i,id,n)).collect::<Vec<_>>()})
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn invalid_turn_identity_is_preserved_for_admission_rejection() {
+        for raw in [
+            json!({}),
+            json!({"id":123}),
+            json!({"id":{"secret":"never echo"}}),
+        ] {
+            assert!(!turn(&raw)["id"].is_string());
+        }
+    }
     #[test]
     fn plan_steps_use_browser_statuses() {
         let mapped = item(

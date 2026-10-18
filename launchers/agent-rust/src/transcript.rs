@@ -16,6 +16,15 @@ impl fmt::Display for HistoryLimit {
 }
 impl std::error::Error for HistoryLimit {}
 
+#[derive(Debug)]
+pub struct InvalidTurnIdentity;
+impl fmt::Display for InvalidTurnIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("Invalid provider turn identity; queue paused")
+    }
+}
+impl std::error::Error for InvalidTurnIdentity {}
+
 #[derive(Default)]
 pub struct Transcript {
     turns: Vec<Value>,
@@ -31,9 +40,7 @@ impl Deref for Transcript {
 }
 impl Transcript {
     pub fn insert(&mut self, turn: Value) -> Result<()> {
-        let id = turn["id"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("invalid turn identity"))?;
+        let id = turn["id"].as_str().ok_or(InvalidTurnIdentity)?;
         let index = self.positions.get(id).copied();
         let old_size = index.map(|i| self.sizes[i]).unwrap_or(0);
         if index.is_none() && self.turns.len() >= MAX_TURNS {
@@ -82,6 +89,22 @@ impl io::Write for Counter {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn invalid_identity_is_rejected_without_changing_history() {
+        let mut history = Transcript::default();
+        history.insert(json!({"id":"accepted"})).unwrap();
+        for id in [Value::Null, json!(123), json!({"secret":"never echo"})] {
+            let error = history.insert(json!({"id":id})).unwrap_err();
+            assert!(error.is::<InvalidTurnIdentity>());
+            assert_eq!(
+                error.to_string(),
+                "Invalid provider turn identity; queue paused"
+            );
+            assert_eq!(history.len(), 1);
+            assert_eq!(history[0]["id"], "accepted");
+        }
+    }
 
     #[test]
     fn repeated_replacements_charge_only_retained_bytes_and_reject_atomically() {

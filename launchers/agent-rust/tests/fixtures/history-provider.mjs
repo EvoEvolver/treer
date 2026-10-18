@@ -28,7 +28,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     setTimeout(() => {
       console.log(JSON.stringify({ method: 'turn/completed', params: {
-        threadId, turn: { id, status: 'completed', items: [
+        threadId, turn: { id: process.env.HISTORY_INVALID_ID === '1' ? { secret: 'synthetic-do-not-echo' } : id, status: 'completed', items: [
           { id: `answer-${id}`, type: 'agentMessage', text: 'x'.repeat(512 * 1024) },
         ] },
       } }));

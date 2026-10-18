@@ -4,7 +4,7 @@ use crate::{
     model::{self, now, preview},
     rpc::Rpc,
     store::Store,
-    transcript::{HistoryLimit, Transcript},
+    transcript::{HistoryLimit, InvalidTurnIdentity, Transcript},
 };
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
@@ -124,6 +124,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
             let reason = if error.is::<HistoryLimit>() {
                 rt.dispatch_blocked = true;
                 "Codex thread exceeds launcher history limit; use a launcher supporting larger history; no fresh-thread fallback"
+            } else if error.is::<InvalidTurnIdentity>() {
+                rt.dispatch_blocked = true;
+                "Invalid provider turn identity; no fresh-thread fallback"
             } else {
                 "Codex startup failed"
             };
@@ -388,7 +391,7 @@ impl Runtime {
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
         if self.history_failed && !matches!(method, "queue" | "submission") {
-            return Err(HistoryLimit.into());
+            anyhow::bail!("Provider history unavailable; queue paused");
         }
         match method {
             "goal" => self.goal_edit(body).await,
@@ -891,11 +894,14 @@ impl Runtime {
         self.publish();
     }
     fn stop_for_history_limit(&mut self) -> Result<()> {
+        self.stop_for_history_error(HistoryLimit.to_string())
+    }
+    fn stop_for_history_error(&mut self, reason: String) -> Result<()> {
         self.history_failed = true;
         self.ready = false;
         self.dispatch_blocked = true;
         self.thread["status"] = json!("error");
-        self.thread["lastError"] = json!(HistoryLimit.to_string());
+        self.thread["lastError"] = json!(reason);
         // Keep all receipts, including running intents. No terminal outcome is
         // invented and no pending turn is automatically replayed on restart.
         let saved = self.persist();
@@ -912,6 +918,11 @@ impl Runtime {
             .is_err_and(|error| error.is::<HistoryLimit>())
         {
             self.stop_for_history_limit()?;
+        } else if result
+            .as_ref()
+            .is_err_and(|error| error.is::<InvalidTurnIdentity>())
+        {
+            self.stop_for_history_error(InvalidTurnIdentity.to_string())?;
         }
         result
     }

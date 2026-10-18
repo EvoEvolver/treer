@@ -7,7 +7,8 @@ not only the packages compiled on this Mac. Lockfile SHA-256:
 `14ecfafc8d0e474c1e4241c49b743be253a2714233bddbc4e4a345f716486c00`.
 
 The API returned 150 results, no pagination tokens, and zero vulnerability IDs.
-Only public package names and versions were sent. OSV lists the
+Only public package names and versions were sent to the third-party OSV
+service. OSV lists the
 [Rust Advisory Database among its sources](https://google.github.io/osv.dev/data/).
 
 This is a dated advisory-database query, not a source audit or a guarantee of
