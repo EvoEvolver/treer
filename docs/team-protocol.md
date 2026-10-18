@@ -124,6 +124,48 @@ tests and still broke a workspace-deletion test only the full suite runs. Releas
 keeps the final say and still runs the exact-SHA gate, CI, native, canary and
 the Policy check.
 
+### Cross-target check for platform code
+
+The author gate runs on one macOS machine, so it cannot see code that only
+compiles or lints on Linux or Windows. The chunked upload change (#166, main
+`41f1a32a`) passed `just check` twice on macOS and still broke CI and the
+Windows build in three ways: a `matches!` guard that clippy rejects on Linux
+(`Errno::NOTSUP` and `OPNOTSUPP` are the same value there), an import removed
+from a parent module that `cfg(windows)` code reached through `use super::*`,
+and a method that existed only in the Unix module.
+
+From now on a change under `crates/` that touches platform code (`cfg(unix)`,
+`cfg(windows)`, `cfg(target_os = ..)`, file, process or socket APIs, or imports
+that such code receives through `use super::*`) needs a cross-target check on
+top of the macOS gate, before the `[freeze]` comment:
+
+1. **Crates whose dependency graph has no `ring`** (check with
+   `cargo tree -p <crate> -i ring`; `treer-platform` is one): run, with a
+   private `CARGO_TARGET_DIR`,
+   `cargo clippy --locked -p <crate> --all-targets --target x86_64-unknown-linux-gnu -- -D warnings`
+   and the same with `--target x86_64-pc-windows-gnu`. Both targets are
+   installed on the shared Mac (`rustup target list --installed`). On `41f1a32a`
+   the Linux command for `treer-platform` reproduces the CI failure exactly.
+2. **Crates that depend on `ring`** (at least `treer-agent-server`, which is
+   where the Windows errors were, and `treer-cli`, `treer-proxy`): the local cross-check cannot run on the shared Mac, because
+   `ring`'s build script needs a cross C compiler (`x86_64-linux-gnu-gcc`,
+   `x86_64-w64-mingw32-gcc`) and fails with `ToolNotFound`. Do not install
+   toolchains on the shared machine for this. Ask release for a **hosted dry
+   run** on the exact SHA instead: a throwaway branch with a push-triggered
+   workflow that runs clippy with `-D warnings` on `ubuntu-latest` (the same as
+   CI) and `cargo check --locked --all-targets` on `windows-2022` and
+   `windows-2025`, with the checkout pinned to the SHA. It takes about ten
+   minutes and does not use the machine gate slot.
+3. The freeze comment lists the targets and commands that ran with their log
+   paths, or says "cross-target not run". Release runs the hosted check on the
+   exact combined candidate whenever the union touches platform files, before
+   pushing to `main`; a red hosted check blocks the push.
+
+Windows warnings that already exist on `main` (for example unused test imports)
+are not failures; new compile errors and new warnings in the changed code are.
+This rule is about catching platform breakage early. It does not replace the
+exact-SHA gate, CI, the five-platform native build or the Windows runner jobs.
+
 ## One full gate at a time on the shared machine
 
 Up to five agents used to run full gates (Rust with PostgreSQL/NATS, Playwright
