@@ -1132,3 +1132,17 @@ refuses new Core or Telegram admission and subsequent sends immediately on that
 gate. Repairing storage remains an operator action; the App never chmods an unsafe
 live file into apparent safety. Already in-flight network operations cannot be
 recalled, and no file mode can undo data that another OS process already read.
+
+### Persistent inbound Core failure limit
+
+An actual failed Core send for Telegram inbound work increments a durable streak
+once per private queue lease. Empty turns, failure-notice alternation and process
+restart do not reset it. Eight consecutive failed attempts pause only that binding
+with `core_handoff_failing`, increment its revision and retain its pending plaintext
+queue for owner recovery; metadata refresh does not resume it. Successful complete
+handoff resets the streak. A crash after queue completion but before resetting the
+streak conservatively retains failures. Replayed or stale lease callbacks cannot
+increment the streak or clear a later failure. The bounded health table has at most
+one row per binding, and worker settings expose only `core_send_unavailable`, never
+CLI stderr or message bodies. Automatic pause history remains a known limitation:
+this records the current durable safety state, not an append-only owner audit.

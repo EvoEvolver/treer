@@ -323,6 +323,39 @@ impl<M: Mailbox + Directory> Hub<M> {
             parts,
         }))
     }
+    /// Count an actual failed Core send once per private lease, never idle polls.
+    /// One bounded row per binding survives process restart. Queue data remains
+    /// pending; eight consecutive failures stop new work until owner recovery.
+    pub(crate) fn fail_telegram_forward(&mut self, intent: &CoreIntent) -> Result<(), Error> {
+        let tx = self.store.db.transaction()?;
+        let valid: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM inbound i JOIN endpoints e ON e.id=i.endpoint WHERE i.id=?1 AND i.endpoint=?2 AND i.generation=?3 AND e.generation=i.generation AND i.lease_token=?4 AND i.pending=1)",
+            params![intent.job,intent.endpoint,intent.generation,intent.token], |r|r.get(0))?;
+        if !valid {
+            return Err(Error::Conflict);
+        }
+        tx.execute("INSERT INTO hub_core_handoff_health(endpoint,generation,failures,last_job,last_token) VALUES(?1,?2,1,?3,?4) ON CONFLICT(endpoint) DO UPDATE SET failures=CASE WHEN generation=excluded.generation THEN MIN(failures+1,8) ELSE 1 END,generation=excluded.generation,last_job=excluded.last_job,last_token=excluded.last_token WHERE generation!=excluded.generation OR last_job!=excluded.last_job OR last_token!=excluded.last_token",
+            params![intent.endpoint,intent.generation,intent.job,intent.token])?;
+        let failures: i64 = tx.query_row(
+            "SELECT failures FROM hub_core_handoff_health WHERE endpoint=?1",
+            [&intent.endpoint],
+            |r| r.get(0),
+        )?;
+        if failures >= 8
+            && tx.execute(
+                "UPDATE endpoints SET paused=1 WHERE id=?1 AND generation=?2 AND paused=0",
+                params![intent.endpoint, intent.generation],
+            )? == 1
+        {
+            tx.execute("UPDATE hub_bindings SET revision=revision+1,reason='core_handoff_failing' WHERE endpoint=?1",[&intent.endpoint])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+    pub(crate) fn last_core_handoff_failure(&self) -> Result<Option<&'static str>, Error> {
+        let failed:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM hub_core_handoff_health h JOIN endpoints e ON e.id=h.endpoint AND e.generation=h.generation WHERE h.failures>0)",[],|r|r.get(0))?;
+        Ok(failed.then_some("core_send_unavailable"))
+    }
     /// Record only after ALL Core parts are accepted. Allowed after owner pause,
     /// fenced by the same generation/job/lease capability as the queue store.
     pub fn complete_telegram_forward(
@@ -330,6 +363,11 @@ impl<M: Mailbox + Directory> Hub<M> {
         intent: &CoreIntent,
         last_core_id: &str,
     ) -> Result<(), Error> {
+        let pending: bool = self.store.db.query_row(
+            "SELECT pending FROM inbound WHERE id=?1 AND endpoint=?2 AND generation=?3",
+            params![intent.job, intent.endpoint, intent.generation],
+            |r| r.get(0),
+        )?;
         self.store.complete(
             &intent.endpoint,
             intent.generation,
@@ -337,6 +375,14 @@ impl<M: Mailbox + Directory> Hub<M> {
             &intent.token,
             last_core_id,
         )?;
+        // A crash between completion and this reset is conservative: it retains
+        // the old failure streak rather than permitting more attempts.
+        if pending {
+            self.store.db.execute(
+                "UPDATE hub_core_handoff_health SET failures=0 WHERE endpoint=?1 AND generation=?2",
+                params![intent.endpoint, intent.generation],
+            )?;
+        }
         Ok(())
     }
     #[cfg(test)]
@@ -990,6 +1036,95 @@ mod tests {
         let (message,state):(i64,i64)=hub.store.db.query_row("SELECT c.message_id,t.state FROM telegram_chunks c JOIN transfers t USING(endpoint,generation,transfer)",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap();
         assert_eq!((message, state), (2, 2));
         assert!(hub.view("ag_endpoint").unwrap().paused);
+    }
+    #[test]
+    fn core_failures_survive_reopen_and_pause_without_dropping_pending_data() {
+        let (mut hub, fake) = fixture(Limits::default());
+        hub.admit_telegram("bot_test", vec![update(1)], NOW)
+            .unwrap();
+        for n in 0..7 {
+            hub.store
+                .db
+                .execute("UPDATE inbound SET lease_until=0", [])
+                .unwrap();
+            let intent = hub
+                .prepare_telegram_forward("ag_endpoint", NOW, &format!("{n:064x}"))
+                .unwrap()
+                .unwrap();
+            hub.fail_telegram_forward(&intent).unwrap();
+            hub.fail_telegram_forward(&intent).unwrap(); // duplicate callback is not another failure
+        }
+        assert!(!hub.view("ag_endpoint").unwrap().paused);
+        let mut hub = Hub::new(hub.store, fake, "app_hub", "ws").unwrap();
+        assert_eq!(
+            hub.last_core_handoff_failure().unwrap(),
+            Some("core_send_unavailable")
+        );
+        hub.store
+            .db
+            .execute("UPDATE inbound SET lease_until=0", [])
+            .unwrap();
+        let intent = hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"f".repeat(64))
+            .unwrap()
+            .unwrap();
+        hub.fail_telegram_forward(&intent).unwrap();
+        let view = hub.view("ag_endpoint").unwrap();
+        assert!(view.paused);
+        assert_eq!(view.reason, "core_handoff_failing");
+        assert_eq!(view.revision, 4);
+        hub.refresh("ag_endpoint", NOW).unwrap();
+        assert!(hub.view("ag_endpoint").unwrap().paused);
+        assert!(hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"e".repeat(64))
+            .is_err());
+        let pending: i64 = hub
+            .store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM inbound WHERE pending=1 AND length(body)>0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 1);
+    }
+    #[test]
+    fn failed_core_results_are_lease_fenced_and_success_resets_only_once() {
+        let (mut hub, _) = fixture(Limits::default());
+        hub.admit_telegram("bot_test", vec![update(1)], NOW)
+            .unwrap();
+        let first = hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        hub.fail_telegram_forward(&first).unwrap();
+        hub.store
+            .db
+            .execute("UPDATE inbound SET lease_until=0", [])
+            .unwrap();
+        let second = hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"b".repeat(64))
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            hub.fail_telegram_forward(&first),
+            Err(Error::Conflict)
+        ));
+        hub.complete_telegram_forward(&second, "msg_first").unwrap();
+        assert_eq!(hub.last_core_handoff_failure().unwrap(), None);
+        hub.admit_telegram("bot_test", vec![update(2)], NOW)
+            .unwrap();
+        let next = hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"c".repeat(64))
+            .unwrap()
+            .unwrap();
+        hub.fail_telegram_forward(&next).unwrap();
+        hub.complete_telegram_forward(&second, "msg_first").unwrap();
+        assert_eq!(
+            hub.last_core_handoff_failure().unwrap(),
+            Some("core_send_unavailable")
+        );
     }
     #[test]
     fn owned_core_intent_can_complete_after_pause_without_reacquiring_recipient_authority() {

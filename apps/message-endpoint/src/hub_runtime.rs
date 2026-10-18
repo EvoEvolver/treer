@@ -136,6 +136,7 @@ pub fn run(config: Config) -> Result<(), Error> {
         status.notice_core_handoffs = hs.notice_core_handoffs;
         status.handoff_failures = hs.handoff_failures;
         status.handoffs_stopped = hs.handoffs_stopped;
+        status.last_handoff_failure = hub.last_core_handoff_failure().map_err(|_| ())?;
         let (audit_full, emergency_pause_bindings) = hub.owner_audit_capacity().map_err(|_| ())?;
         Ok(SettingsSnapshot {
             endpoints,

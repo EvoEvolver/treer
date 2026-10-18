@@ -140,6 +140,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         let tx = store.db.transaction()?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);
+        CREATE TABLE IF NOT EXISTS hub_core_handoff_health(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),generation INTEGER NOT NULL,failures INTEGER NOT NULL,last_job INTEGER NOT NULL,last_token TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS hub_transport_health(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),consecutive_parks INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_parked(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(endpoint,generation,transfer));
         CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);

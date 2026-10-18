@@ -255,12 +255,12 @@ fn step<M: Mailbox + Directory>(
         match backend.send(endpoint, key, body, &[], None) {
             Ok(id) => last = id,
             Err(_) => {
-                if let Work::Notice(ref intent) = work {
-                    state
-                        .lock()
-                        .map_err(|_| ())?
-                        .fail_failure_notice(intent, now()?)
-                        .map_err(|_| ())?;
+                let mut hub = state.lock().map_err(|_| ())?;
+                match &work {
+                    Work::Notice(intent) => {
+                        hub.fail_failure_notice(intent, now()?).map_err(|_| ())?
+                    }
+                    Work::Inbound(intent) => hub.fail_telegram_forward(intent).map_err(|_| ())?,
                 }
                 return Err(());
             }
@@ -489,6 +489,39 @@ mod tests {
             assert_eq!(fragment.generation, 1);
             assert!(fragment.direction == crate::protocol::Direction::Inbound);
         }
+    }
+    #[test]
+    fn actual_inbound_send_errors_pause_at_eight_despite_idle_notice_turns() {
+        let (state, fake) = fixture("inbound");
+        let counters = Counters::default();
+        for n in 0..8 {
+            fake.calls.0.lock().unwrap().reject_once = true;
+            state
+                .lock()
+                .unwrap()
+                .store
+                .db
+                .execute(
+                    "UPDATE inbound SET lease_until=0 WHERE endpoint='ag_fast'",
+                    [],
+                )
+                .unwrap();
+            assert!(step(&state, &fake, "ag_fast", false, &counters).is_err());
+            assert!(!step(&state, &fake, "ag_fast", true, &counters).unwrap());
+            assert_eq!(
+                state.lock().unwrap().view("ag_fast").unwrap().paused,
+                n == 7
+            );
+        }
+        assert!(!step(&state, &fake, "ag_fast", false, &counters).unwrap());
+        let hub = state.lock().unwrap();
+        assert_eq!(hub.view("ag_fast").unwrap().reason, "core_handoff_failing");
+        assert_eq!(
+            hub.last_core_handoff_failure().unwrap(),
+            Some("core_send_unavailable")
+        );
+        assert!(fake.calls.0.lock().unwrap().sent.is_empty());
+        assert!(!hub.view("ag_blocked").unwrap().paused);
     }
     #[test]
     fn failure_notice_core_error_keeps_durable_retry_and_success_marks_handoff_only() {
