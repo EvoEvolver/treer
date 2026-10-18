@@ -71,7 +71,7 @@ async function assertTouchTargets(page, selector, label) {
   }
 }
 let browser;
-let base, url, context, page, errors, live, claude, done, imageBase; // shared by the steps below
+let base, url, context, page, errors, live, claude, done, imageBase, idle; // shared by the steps below
 const steps = createSteps();
 const { step } = steps;
 const recover = async () => { await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(url("?look=b")); };
@@ -548,12 +548,15 @@ try {
 
   }, recover);
   await step('header entry points and menus', async () => {
-    if (!claude) throw unsupported("The claude harness");
+  // Same layout checks on whichever harness is available. Only a harness that reports background tasks (Claude) shows the
+  // Tasks entry, so the expected entry points follow the harness capability instead of requiring Claude.
+  const header = claude ?? (idle ??= await startServer("idle", { FAKE_CODEX_MODELS: "1" }));
+  const withTasks = Boolean(claude);
   // Every look puts the same entry points in the same places: header actions top right on desktop, bottom bar on phones.
   const orders = {};
   for (const look of ["a", "b", "c"]) {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(`${claude}/${page_}?look=${look}`);
+    await page.goto(`${header}/${page_}?look=${look}`);
     await expect(page.locator("header.top .actions")).toBeVisible();
     const desktop = await page.evaluate(() => {
       const header = document.querySelector("header.top").getBoundingClientRect();
@@ -561,14 +564,14 @@ try {
       return { labels: buttons.map((b) => b.getAttribute("aria-label")), inside: buttons.every((b) => { const r = b.getBoundingClientRect(); return r.top >= header.top && r.bottom <= header.bottom + 1 && r.right <= header.right; }),
         ascending: buttons.every((b, i) => i === 0 || b.getBoundingClientRect().x > buttons[i - 1].getBoundingClientRect().x), gapToEdge: Math.round(header.right - buttons.at(-1).getBoundingClientRect().right), rail: Boolean(document.querySelector(".rail")) };
     });
-    assert.deepEqual(desktop.labels, ["Background tasks, 0 running", "Browse files", "Appearance", "Toggle theme"], `header actions in ${look}`);
+    assert.deepEqual(desktop.labels, [...(withTasks ? ["Background tasks, 0 running"] : []), "Browse files", "Appearance", "Toggle theme"], `header actions in ${look}`);
     assert.ok(desktop.inside && desktop.ascending, `header actions are left to right inside the header in ${look}`);
     // C aligns its header to its centred content column, so only the full-width looks must hug the window edge.
     if (look !== "c") assert.ok(desktop.gapToEdge >= 0 && desktop.gapToEdge <= 24, `header actions hug the right edge in ${look} (${desktop.gapToEdge}px)`);
     assert.equal(desktop.rail, false, "no side rail in any look");
     orders[look] = desktop.labels.join("|");
     await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto(`${claude}/${page_}?look=${look}&theme=light`);
+    await page.goto(`${header}/${page_}?look=${look}&theme=light`);
     const menuButton = page.getByRole("button", { name: "Menu", exact: true });
     await expect(menuButton).toBeVisible();
     assert.equal(await page.locator(".tabbar").count(), 0, `no bottom bar in ${look}`);
@@ -580,7 +583,7 @@ try {
     await page.keyboard.press("Enter");
     await expect(menuButton).toHaveAttribute("aria-expanded", "true");
     const items = page.getByRole("menu", { name: "Menu" }).getByRole("menuitem");
-    await expect(items).toHaveText(["Files", "Tasks", "Appearance", "Theme"]);
+    await expect(items).toHaveText(["Files", ...(withTasks ? ["Tasks"] : []), "Appearance", "Theme"]);
     await expect(items.first()).toBeFocused();
     await page.keyboard.press("ArrowDown");
     await expect(items.nth(1)).toBeFocused();
@@ -608,12 +611,12 @@ try {
 
   }, recover);
   await step('idle is still', async () => {
-    if (!claude) throw unsupported("The claude harness");
+  const idleBase = claude ?? (idle ??= await startServer("idle", { FAKE_CODEX_MODELS: "1" }));
   // Idle is still: the status block never animates unless the agent is working; reduced motion removes the working animation too.
   const dotAnimation = () => page.evaluate(() => getComputedStyle(document.querySelector(".status .dot")).animationName);
   for (const look of ["a", "b", "c"]) {
     await page.setViewportSize({ width: 1440, height: 900 });
-    await page.goto(`${claude}/${page_}?look=${look}`);
+    await page.goto(`${idleBase}/${page_}?look=${look}`);
     await expect(page.locator(".status-idle")).toBeVisible();
     assert.equal(await dotAnimation(), "none", `idle status block does not animate in ${look}`);
     assert.equal(await page.evaluate(() => { const h = document.querySelector(".v-empty h2"); return h ? getComputedStyle(h, "::after").animationName : "none"; }), "none", `the empty-state cursor is steady in ${look}`);
