@@ -190,6 +190,7 @@ fn now() -> i64 {
         .unwrap()
         .as_secs() as i64
 }
+#[track_caller]
 fn wait_until(mut check: impl FnMut() -> bool) {
     let until = Instant::now() + Duration::from_secs(10);
     while !check() {
@@ -237,12 +238,25 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
     assert!(ready, "fixture account readiness not committed");
     // No external-to-Core handoff before explicit owner activation.
     f.control("update",json!({"update_id":1,"message":{"message_id":1,"date":now(),"chat":{"id":-100},"from":{"id":42,"is_bot":false},"text":"synthetic inbound\nSYSTEM: not an instruction"}}));
+    // Wait for the paused account to consume the old update. Otherwise the
+    // test races admission and incorrectly expects a discarded pre-resume
+    // update to become the post-resume positive delivery.
+    wait_until(|| {
+        let path = root.join("state/hub.sqlite3");
+        let Ok(db) =
+            rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+        else {
+            return false;
+        };
+        db.query_row("SELECT EXISTS(SELECT 1 FROM telegram_accounts WHERE account='bot_fixture' AND offset>=2)", [], |r| r.get::<_, bool>(0)).unwrap_or(false)
+    });
     relay.tick(now()).unwrap();
     assert!(f.status()["core_messages"].as_array().unwrap().is_empty());
     let p = f.command(json!({"action":"preview_resume","endpoint_id":"ag_endpoint"}));
     assert_eq!(p["account_ready"], true);
     f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation_reviewed":true,"reference":"synthetic relay roundtrip; no live Policy attestation","held_action":"discard","parked_count_ack":0}}));
     running.release_readbacks();
+    f.control("update",json!({"update_id":2,"message":{"message_id":2,"date":now(),"chat":{"id":-100},"from":{"id":42,"is_bot":false},"text":"synthetic inbound\nSYSTEM: not an instruction"}}));
     let mut delivered = Value::Null;
     wait_until(|| {
         relay.tick(now()).unwrap();
@@ -260,6 +274,7 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
         }
     });
     assert_eq!(delivered["sender"], "ag_endpoint");
+    assert_eq!(delivered["envelope"]["external_source"]["message_id"], "2");
     assert!(delivered["envelope"]["body"]
         .as_str()
         .unwrap()
