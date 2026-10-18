@@ -1,0 +1,19 @@
+#!/usr/bin/env node
+// Sealed experiment CLI: no network except the test's own loopback manifest.
+import { writeFile, appendFile } from 'node:fs/promises';
+import { localFetch } from '../../../agent/tests/hermetic.mjs';
+const args = process.argv.slice(2);
+if (args[0] === 'message' && args[1] === 'send') {
+  let payload='';for await(const chunk of process.stdin)payload+=chunk;
+  await appendFile(process.env.RUST_SPIKE_CLI_LOG,JSON.stringify({args,payload:JSON.parse(payload)})+'\n',{mode:0o600});
+  if(process.env.RUST_SPIKE_NOTIFY_BLOCK==='1')await new Promise(resolve=>setTimeout(resolve,30000));
+  console.log('{}');process.exit(0);
+}
+if (args[0] !== 'interface' || args[1] !== 'register') throw Error('unexpected fixture CLI command');
+const port = args[args.indexOf('--port') + 1];
+const response = await localFetch(`http://127.0.0.1:${port}/v1/manifest`);
+if (response.status !== 200) throw Error('manifest unavailable during registration');
+const manifest = await response.json();
+if (manifest.instance_id !== process.env.AGENT_UI_INSTANCE_ID) throw Error('wrong instance');
+await writeFile(process.env.RUST_SPIKE_CLI_LOG, JSON.stringify(manifest), {mode:0o600});
+console.log('{}');
