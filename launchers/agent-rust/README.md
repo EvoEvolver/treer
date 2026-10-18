@@ -10,6 +10,21 @@ completion notification and Treer message receive → durable queue → ack. It
 serves the existing React assets from `../agent/public` unchanged. The semantic
 manifest is read from [the existing contract](../agent/interface-contract.json).
 This is a compatibility target, not a claim that all production tests pass.
+Provider notifications use a bounded eight-entry queue with lossless backpressure.
+The runtime continues processing events while awaiting RPC responses, prioritizes
+ready responses, and preserves early turn items/completion before the response
+identifies the accepted submission. Queue saturation does not close the stream.
+No automatic provider retry is performed. Fixed transport reasons (`open`,
+`stdout_eof`, `line_error`, `invalid_json`, `consumer_closed`) and independently
+observed child status/signal before cleanup appear in AIS diagnostics and the
+shutdown line. Stream closure alone is never called spontaneous provider exit.
+The last 8 KiB of raw stderr is retained in a bounded memory tail and saved at
+shutdown as 0600 `rust-provider-stderr.log` under the validated private root,
+atomically replacing the previous tail. This file may contain sensitive provider
+text: it is never served by AIS, printed to the terminal or copied into a ticket.
+Only the owner may inspect it locally and supply a reviewed excerpt. An abrupt
+launcher kill can lose this tail; capture failure is reported without its text.
+It is diagnostic retention, not Controller quota or detached-process containment.
 The completed experiment is assessed in [P3](P3-REPORT.md): continue a staged
 port, but do not switch team launchers. The real-browser send failure, missing
 durable user items and detached-child reaping are explicit port blockers.

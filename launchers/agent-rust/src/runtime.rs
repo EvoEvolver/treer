@@ -9,7 +9,7 @@ use crate::{
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{collections::VecDeque, path::PathBuf, process::Stdio, sync::Arc};
+use std::{collections::{HashSet, VecDeque}, path::PathBuf, process::Stdio, sync::Arc};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     process::Command,
@@ -71,6 +71,8 @@ struct Record {
 }
 struct Runtime {
     rpc: Rpc,
+    events: mpsc::Receiver<Value>,
+    rpc_completed_turns: HashSet<String>,
     store: Store,
     thread: Value,
     models: Value,
@@ -123,7 +125,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
             bail!("private_state_session_mismatch");
         }
     }
-    let (rpc, mut child, mut events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd)?;
+    let (rpc, mut child, events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd)?;
     let (commands, mut requests) = mpsc::channel::<Request>(64);
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_requested = shutdown.clone();
@@ -133,6 +135,8 @@ pub fn spawn(config: Config) -> Result<Handle> {
     ));
     let mut rt = Runtime {
         rpc,
+        events,
+        rpc_completed_turns: HashSet::new(),
         store,
         thread: Value::Null,
         models: json!([]),
@@ -217,7 +221,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     Some(request) => { let result = rt.command(&request.method, request.body).await; let _ = request.reply.send(result); }
                     None => break,
                 },
-                event = events.recv(), if !rt.history_failed => match event {
+                event = rt.events.recv(), if !rt.history_failed => match event {
                     Some(event) => {
                         if event["method"] == "spike/provider-exit" { rt.ready = false; rt.thread["status"] = json!("error"); rt.thread["lastError"] = json!("Codex disconnected"); rt.publish(); break; }
                         if rt.event(event).await.is_err() { eprintln!("Rust spike: provider event failed"); }
@@ -261,8 +265,8 @@ pub fn spawn(config: Config) -> Result<Handle> {
                 observer.0.abort();
                 rt.publish();
                 rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
-                events.close();
-                while events.try_recv().is_ok() {}
+                rt.events.close();
+                while rt.events.try_recv().is_ok() {}
                 provider_stopped = true;
             }
         }
@@ -283,13 +287,39 @@ pub fn spawn(config: Config) -> Result<Handle> {
         rt.publish();
         // Preserve uncertain receipts and queued work; do not invent completion.
         rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
-        eprintln!("Rust spike: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed", rt.provider_exit);
+        rt.rpc.stderr_saved(rt.store.save_stderr(&child.stderr_tail()).is_ok());
+        rt.publish();
+        let diagnostic = rt.rpc.diagnostics();
+        eprintln!("Rust spike: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed; transport={}; before_cleanup={}", rt.provider_exit, diagnostic["transport"].as_str().unwrap_or("unverified"), diagnostic["beforeCleanup"]);
         stopped_tx.send_replace(true);
     });
     Ok(Handle { commands, state, shutdown, stopped })
 }
 
 impl Runtime {
+    async fn provider_request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.rpc_completed_turns.clear();
+        let rpc = self.rpc.clone();
+        let response = rpc.request(method, params);
+        tokio::pin!(response);
+        loop {
+            tokio::select! {
+                biased;
+                result = &mut response => return result,
+                event = self.events.recv() => {
+                    let event = event.ok_or_else(|| anyhow!("Codex disconnected"))?;
+                    if event["method"] == "spike/provider-exit" { bail!("Codex disconnected"); }
+                    let completed = (event["method"] == "turn/completed"
+                        && event["params"]["threadId"] == self.thread["id"])
+                        .then(|| event["params"]["turn"]["id"].as_str().map(str::to_owned)).flatten();
+                    self.event(event).await?;
+                    if self.history_failed { bail!("runtime_blocked"); }
+                    // Validated transcript admission bounds these unique IDs.
+                    if let Some(id) = completed { self.rpc_completed_turns.insert(id); }
+                }
+            }
+        }
+    }
     async fn observe(&mut self, observed: Value) -> Result<()> {
         if self.history_failed
             || self.dispatch_blocked
@@ -327,11 +357,9 @@ impl Runtime {
             self.goals = Goals::load(&saved["goals"])?;
             self.checkpoint = (self.records.clone(), self.goals.clone());
         }
-        self.rpc.request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Rust experiment","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
+        self.provider_request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Rust experiment","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
-        self.models = self
-            .rpc
-            .request("model/list", json!({}))
+        self.models = self.provider_request("model/list", json!({}))
             .await
             .unwrap_or(json!({"data":[]}))["data"]
             .clone();
@@ -339,7 +367,7 @@ impl Runtime {
             .session
             .as_deref()
             .or_else(|| saved.as_ref().and_then(|s| s["threadId"].as_str()));
-        let result = self.rpc.request(if session.is_some() {"thread/resume"} else {"thread/start"}, json!({"threadId":session,"cwd":config.cwd,"approvalPolicy":"never","sandbox":"danger-full-access","experimentalRawEvents":false,"persistExtendedHistory":true})).await?;
+        let result = self.provider_request(if session.is_some() {"thread/resume"} else {"thread/start"}, json!({"threadId":session,"cwd":config.cwd,"approvalPolicy":"never","sandbox":"danger-full-access","experimentalRawEvents":false,"persistExtendedHistory":true})).await?;
         let id = result["thread"]["id"]
             .as_str()
             .ok_or_else(|| anyhow!("missing thread"))?;
@@ -370,9 +398,7 @@ impl Runtime {
         if self.dispatch_blocked {
             self.thread["lastError"] = json!("Dispatch outcome uncertain; queue paused; no automatic recovery in this experiment");
         }
-        if let Ok(result) = self
-            .rpc
-            .request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+        if let Ok(result) = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
             .await
         {
             self.goals_supported = result.get("goal").is_some();
@@ -421,6 +447,7 @@ impl Runtime {
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
+        snapshot["runtime"]["provider"] = self.rpc.diagnostics();
         self.changed.send_replace(Arc::new(snapshot));
     }
     fn history(&self) -> Vec<Value> {
@@ -490,9 +517,7 @@ impl Runtime {
                 {
                     bail!("goal_edit_unknown");
                 }
-                let current = self
-                    .rpc
-                    .request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                let current = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
                     .await?;
                 if !current["goal"].is_null() {
                     self.goals.goal = goals::map(&current["goal"], &self.goals.goal);
@@ -532,8 +557,7 @@ impl Runtime {
             }
             "abort" => {
                 if let Some(turn) = self.thread["activeTurnId"].as_str() {
-                    self.rpc
-                        .request(
+                    self.provider_request(
                             "turn/interrupt",
                             json!({"threadId":self.thread["id"],"turnId":turn}),
                         )
@@ -613,9 +637,7 @@ impl Runtime {
             || [json!("blocked"), json!("stale"), json!("done")].contains(&edit.input["status"]);
         if !edit.applied {
             let recovered = if edit.applying {
-                let current = self
-                    .rpc
-                    .request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                let current = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
                     .await?;
                 if clear {
                     current["goal"].is_null()
@@ -662,9 +684,7 @@ impl Runtime {
                 }
                 params["threadId"] = self.thread["id"].clone();
                 params["origin"] = json!("user");
-                let result = self
-                    .rpc
-                    .request(
+                let result = self.provider_request(
                         if clear {
                             "thread/goal/clear"
                         } else {
@@ -680,9 +700,7 @@ impl Runtime {
                     }
                 }
             } else if !clear {
-                let result = self
-                    .rpc
-                    .request("thread/goal/get", json!({"threadId":self.thread["id"]}))
+                let result = self.provider_request("thread/goal/get", json!({"threadId":self.thread["id"]}))
                     .await?;
                 self.goals.goal = goals::map(&result["goal"], &self.goals.goal);
             }
@@ -899,14 +917,13 @@ impl Runtime {
                 params["effort"] = self.thread["reasoningEffort"].clone();
             }
         }
-        let response = self
-            .rpc
-            .request(if busy { "turn/steer" } else { "turn/start" }, params)
+        let steering_turn = self.thread["activeTurnId"].clone();
+        let response = self.provider_request(if busy { "turn/steer" } else { "turn/start" }, params)
             .await;
         match response {
             Ok(response) => {
                 let turn = if busy {
-                    self.thread["activeTurnId"].clone()
+                    steering_turn
                 } else {
                     response["turn"]["id"].clone()
                 };
@@ -921,11 +938,33 @@ impl Runtime {
                 self.dispatch_blocked = false;
                 self.thread["activeTurnId"] = turn.clone();
                 self.thread["status"] = json!("running");
-                if !busy {
+                if !busy && !self.turns.iter().any(|t| t["id"] == turn) {
                     if let Err(error) = self.upsert_turn(json!({"id":turn,"status":"inProgress","startedAt":now(),"error":null,"items":[]})) {
                         self.stop_for_history_limit()?;
                         return Err(error);
                     }
+                }
+                // The cooperative RPC wait can consume start/delta/completion
+                // BEFORE the response identifies this accepted submission.
+                // Keep those items and now settle only an explicit terminal
+                // event for the returned identity, never an idle inference.
+                let terminal = self.turns.iter().find(|t| t["id"] == turn
+                    && turn.as_str().is_some_and(|id| self.rpc_completed_turns.contains(id))
+                    && matches!(t["status"].as_str(), Some("completed" | "failed" | "interrupted"))).cloned();
+                if let Some(terminal) = terminal {
+                    // Stored turns are browser models, not provider wire items.
+                    // Settle receipts directly without mapping those items twice.
+                    let status = match terminal["status"].as_str() {
+                        Some("failed") => "failed", Some("interrupted") => "interrupted", _ => "done",
+                    };
+                    let assistant = terminal["items"].as_array().into_iter().flatten().rev()
+                        .find(|item| item["kind"] == "agentMessage")
+                        .and_then(|item| item["text"].as_str()).map(|text| preview(text, 2048));
+                    self.records[index].submission["state"] = json!(status);
+                    self.records[index].submission["error"] = terminal["error"].clone();
+                    self.records[index].submission["assistant_preview"] = json!(assistant);
+                    self.thread["activeTurnId"] = Value::Null;
+                    self.thread["status"] = json!("idle");
                 }
             }
             Err(_) => {

@@ -30,10 +30,28 @@ for await(const line of readline.createInterface({input:process.stdin})) {
     result={goal};
   }
   if(request.method==='model/list')result={data:[]};
+  if(mode==='burst-startup'&&request.method==='initialize') {
+    process.stdout.write(Array.from({length:64},(_,n)=>JSON.stringify({method:'synthetic/startup',params:{n}})+'\n').join(''));
+  }
   if(['thread/start','thread/resume','thread/read'].includes(request.method))result={thread:{id:threadId,turns}};
   if(request.method==='thread/start'&&mode==='unknown-request')setTimeout(()=>console.log(JSON.stringify({id:'provider-unknown',method:'unsafe/unknown',params:{}})),100);
+  if(request.method==='thread/start'&&mode==='diagnostic-eof')setTimeout(()=>process.exit(7),150);
+  if(request.method==='thread/start'&&mode==='diagnostic-invalid')setTimeout(()=>{
+    process.stderr.write('sensitive-fixture-prefix'+'.'.repeat(10000)+'synthetic-private-tail');
+    setTimeout(()=>process.stdout.write('invalid synthetic-secret-do-not-echo\n'),30);
+  },150);
   if(request.method==='turn/start') {
     const turn={id:'fault-'+(++started),status:'inProgress',items:[]};turns.push(turn);
+    if(mode==='burst-turn') {
+      emit('turn/started',{turn});
+      emit('item/started',{turnId:turn.id,item:{id:'burst-item',type:'agentMessage',text:''}});
+      for(let n=0;n<200;n++)emit('item/agentMessage/delta',{turnId:turn.id,itemId:'burst-item',delta:'x'});
+      turn.status='completed';
+      // Sparse terminal frame must retain all the deltas consumed while the
+      // launcher waits for the turn/start response identifying the receipt.
+      emit('turn/completed',{turn:{...turn,items:[]}});
+      console.log(JSON.stringify({id:request.id,result:{turn:{id:turn.id}}}));continue;
+    }
     if(started===1&&['omit','timeout'].includes(mode)) {
       // Provider accepts the operation, but its identity/response is lost.
       setTimeout(()=>emit('turn/started',{turn}),300);

@@ -148,6 +148,22 @@ impl Store {
         Self::open(&self.root, &self.cwd)?;
         Ok(())
     }
+    pub fn save_stderr(&self, bytes: &[u8]) -> Result<()> {
+        self.recheck()?;
+        if bytes.len() > 8192 { bail!("stderr_tail_too_large"); }
+        let temp = self.root.join(format!(".rust-stderr-{}.tmp", uuid::Uuid::new_v4()));
+        let mut file = OpenOptions::new().write(true).create_new(true).mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW).open(&temp)?;
+        let result = (|| -> Result<()> {
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&temp, self.root.join("rust-provider-stderr.log"))?;
+            File::open(&self.root)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() { let _ = fs::remove_file(&temp); }
+        result
+    }
     pub fn save(&self, state: &Value) -> Result<()> {
         // Re-evaluate placement on each journal update; git init disables writes.
         Self::open(&self.root, &self.cwd)?;

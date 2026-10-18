@@ -745,6 +745,37 @@ test('Rust immutable queued receipt survives dispatch/restart while dynamic queu
   assert.equal(retry.duplicate,true);assert.deepEqual(retry.submission,b.submission);
 });
 
+test('Rust backpressure consumes 64 startup notifications before the first RPC response',{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv('burst-startup'));
+  const snapshot=await fetch(s.base+'/v1/state').then(r=>r.json());
+  assert.equal(snapshot.ready,true);
+  assert.equal(snapshot.runtime.provider.transport,'open');
+  assert.equal(snapshot.runtime.provider.beforeCleanup,null);
+});
+test('Rust backpressure preserves 200 mid-turn deltas and early completion before RPC response',{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv('burst-turn'));
+  const accepted=await s.post({text:'synthetic burst',operation_id:'burst'}).then(r=>r.json());
+  const queue=await until(()=>fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json()),x=>x.submissions?.find(r=>r.id===accepted.submission.id)?.state==='done');
+  const receipt=queue.submissions.find(r=>r.id===accepted.submission.id);
+  assert.equal(receipt.assistant_preview,'x'.repeat(200));
+  const snapshot=await fetch(s.base+'/v1/state').then(r=>r.json());
+  assert.equal(snapshot.thread.turns.find(t=>t.id===receipt.turn_id).items.find(i=>i.id==='burst-item').text,'x'.repeat(200));
+  assert.equal(snapshot.runtime.provider.transport,'open');
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+});
+for(const mode of ['diagnostic-eof','diagnostic-invalid'])test('Rust private provider diagnostics '+mode,{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv(mode));
+  const snapshot=await until(()=>fetch(s.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.provider?.stderrCapture==='saved');
+  assert.equal(snapshot.runtime.provider.transport,mode==='diagnostic-eof'?'stdout_eof':'invalid_json');
+  assert.equal(snapshot.runtime.provider.beforeCleanup.state,mode==='diagnostic-eof'?'exited':'running');
+  if(mode==='diagnostic-eof')assert.equal(snapshot.runtime.provider.beforeCleanup.code,7);
+  const file=join(s.state,'rust-provider-stderr.log');const stat=await lstat(file);
+  assert.equal(stat.mode&0o777,0o600);assert.ok(stat.size<=8192);
+  const captured=await readFile(file,'utf8');
+  if(mode==='diagnostic-invalid'){assert.ok(captured.endsWith('synthetic-private-tail'));assert.ok(!captured.includes('sensitive-fixture-prefix'));}
+  assert.ok(!JSON.stringify(snapshot.runtime).includes('synthetic-secret'));
+  assert.ok(!s.logs().includes('synthetic-private-tail'));assert.ok(!s.logs().includes('sensitive-fixture-prefix'));
+});
 test('Rust stalled notification worker permits continuous provider deltas and prompt abort',{skip:useNode},async t=>{
   const s=await fixture(t,{...faultEnv('stream'),PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,RUST_SPIKE_NOTIFY_BLOCK:'1'});
   await s.post({text:'notify on completion',operation_id:'notify',notify:{on:['done'],to:'ag_synthetic_recipient'}});
