@@ -184,7 +184,8 @@ restart authority. Error responses and cleanup status do not expose OS paths.
 A process-lifetime nonblocking file lock rejects a second Rust writer with
 `private_state_in_use`; its private 0600 inode is retained after exit rather
 than unlinked. This is an advisory Rust-only lock: Node does not participate;
-never run Node and Rust concurrently on the same state. A saved Rust thread cannot be overridden with a different resume
+never run Node and Rust concurrently on the same state. A saved Rust thread
+cannot be overridden with a different resume
 ID (`private_state_session_mismatch`), and refusal precedes provider startup.
 Node-to-Rust migration remains unsupported: finding the selected Agent's legacy
 `.treer/agents/ID` directory (including `standalone`), a linked/non-directory
@@ -214,7 +215,8 @@ The loopback HTTP/1 transport admits at most 128 live connections, including
 upgraded WebSockets; excess accepted sockets close immediately. Every request
 header has a ten-second absolute read deadline, at most 64 headers and a 32 KiB
 buffer. Body-consuming routes keep their existing ten-second/size limits.
-Accept errors retry after 50 ms rather than ending the provider/server.
+Accept errors retry after 50 ms rather than ending the provider/server;
+fixed diagnostics include an aggregate error count, at most once per five seconds.
 The write-idle wrapper does not time out reads: request-body routes enforce
 their own ten-second deadline. Silent upgraded WebSockets have no read-idle
 deadline and occupy a connection slot until disconnect or launcher shutdown;
@@ -232,7 +234,9 @@ slot retention is established by worker ownership in source; the HTTP regression
 currently covers entry rejection and concurrent state reads, not cancellation.
 These limits bound admission; they do not authenticate local callers or isolate
 a same-account filesystem writer. A blocked OS filesystem operation can still
-outlast the HTTP request; the two directory worker permits remain held.
+outlast the HTTP request; the two directory worker permits remain held. A
+stalled blocking worker can also delay Tokio runtime teardown; signal/HTTP-drain
+deadlines do not bound stalled OS filesystem calls.
 
 The inherited Agent identity is deliberately delegated to Codex and its Treer
 tools as in Node. It is never returned to the browser or written to the journal.

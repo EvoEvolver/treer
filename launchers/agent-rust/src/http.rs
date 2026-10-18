@@ -20,6 +20,8 @@ pub async fn serve(
     )));
     let mut connections = JoinSet::new();
     let mut inject_accept_error = fixture_accept_error();
+    let mut accept_errors_since_report = 0_u64;
+    let mut next_accept_report = tokio::time::Instant::now();
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
@@ -36,7 +38,13 @@ pub async fn serve(
                 let (stream, _) = match accepted {
                     Ok(accepted) => accepted,
                     Err(_) => {
-                        eprintln!("Rust spike: http_accept_retry");
+                        accept_errors_since_report = accept_errors_since_report.saturating_add(1);
+                        let now = tokio::time::Instant::now();
+                        if now >= next_accept_report {
+                            eprintln!("Rust spike: http_accept_retry attempts={accept_errors_since_report}");
+                            accept_errors_since_report = 0;
+                            next_accept_report = now + Duration::from_secs(5);
+                        }
                         tokio::time::sleep(Duration::from_millis(50)).await;
                         continue;
                     }
