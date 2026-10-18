@@ -347,7 +347,15 @@ source inspection and local Wrangler tests do not verify deployed Canary headers
 
 App/Agent Interface iframes remain trusted code with Proxy-origin user authority.
 Their sandbox is not a tenant or user-session security boundary. See the
-[security review](../docs/research/2026-10-12-security-web.md). The security suite
+[security review](../docs/research/2026-10-12-security-web.md).
+Embedded Agent/App interfaces may open ordinary top-level browser pages using
+`allow-popups allow-popups-to-escape-sandbox`, including their own full-page
+view. Interface authors should use `noopener,noreferrer` with `window.open`
+or `rel="noopener noreferrer"` on links; the Console cannot strip an opener
+from arbitrary cross-origin frame scripts. Console-owned new-tab actions
+continue to use `noopener,noreferrer`.
+
+The security suite
 starts its own local-only Wrangler and uses synthetic identities; build the
 bundle before running `pnpm test:e2e security.spec.ts --workers=1`.
 
