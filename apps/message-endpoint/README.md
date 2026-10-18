@@ -1189,3 +1189,8 @@ at the next actual failed attempt, without resetting the count. A delayed duplic
 callback cannot start, extend or trip the window. A completed handoff clears both
 count and timestamp. Clock rollback delays elapsed-time eligibility; it does not
 silently reset the streak or resume a paused endpoint.
+
+Retry and irreversible discard have independent per-transfer confirmations in the
+UI; confirming retry never enables discard. Confirmations clear on inspection or
+a successful mutation. The discard checkbox explicitly states that deletion cannot
+be undone, separate from the warning about potentially duplicate retries.

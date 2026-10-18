@@ -87,9 +87,14 @@ try {
  await recoveryCard.getByText('Recovery and audit',{exact:true}).click();
  await recoveryCard.getByRole('button',{name:'Load recovery records',exact:true}).click();
  await recoveryCard.getByText('fixture_transfer',{exact:true}).waitFor();
+ if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('parked recovery overflow at 390px');
+ if(!await recoveryCard.locator('.recovery button,.recovery input[type=checkbox]').evaluateAll(elements=>elements.every(el=>el.matches('input')||el.getBoundingClientRect().height>=44)))throw new Error('recovery touch target below 44px');
+ await edit.screenshot({path:join(screenshotPath,'owner-recovery-parked-390-light.png'),fullPage:true});
  const discard=recoveryCard.getByRole('button',{name:'Permanently discard',exact:true});
  if(!await discard.isDisabled())throw new Error('discard did not require explicit confirmation');
- await recoveryCard.getByLabel('Confirm the chosen operation on this transfer.',{exact:true}).check();
+ await recoveryCard.getByLabel('Confirm retrying this transfer’s unsent chunks.',{exact:true}).check();
+ if(!await discard.isDisabled())throw new Error('retry confirmation armed irreversible discard');
+ await recoveryCard.getByLabel('Confirm permanently deleting this transfer’s unsent content. This cannot be undone.',{exact:true}).check();
  await discard.click();await recoveryCard.getByText('Updated. The endpoint remains paused.',{exact:true}).waitFor();
  try {await recoveryCard.getByText('No parked transfers.',{exact:true}).waitFor({timeout:8000});} catch(error) {await edit.screenshot({path:join(screenshotPath,'recovery-failure.png'),fullPage:true});console.error('Synthetic recovery diagnostic:',await recoveryCard.innerText());throw error;}
  await recoveryCard.getByText('discard_parked',{exact:false}).waitFor();
