@@ -1,3 +1,4 @@
+import calendar
 import json
 import os
 import subprocess
@@ -201,6 +202,22 @@ class GateLockTest(unittest.TestCase):
         proc.communicate(timeout=20)
         self.assertEqual(list((self.directory / "queue").glob("*.json")), [])
         self.assertTrue((self.directory / "queue.seq").exists())
+
+
+    def test_holder_since_is_the_acquisition_time_not_the_start_of_the_wait(self):
+        holder = run(self.directory, sys.executable, "-c", "import time;time.sleep(2.2)", name="holder")
+        time.sleep(0.4)
+        started = time.time()
+        code = ("import json,os,sys;print(json.dumps(json.load(open(os.path.join(os.environ['TREER_GATE_DIR'],'gate.holder.json')))))")
+        waiter = run(self.directory, sys.executable, "-c", code, name="waiter")
+        out, err = waiter.communicate(timeout=30)
+        holder.communicate(timeout=30)
+        self.assertEqual(waiter.returncode, 0, err)
+        info = json.loads(out)
+        parse = lambda text: calendar.timegm(time.strptime(text, "%Y-%m-%dT%H:%M:%SZ"))
+        self.assertGreaterEqual(parse(info["since"]) - parse(info["queued_since"]), 1, info)
+        self.assertGreaterEqual(parse(info["since"]), started - 1)
+        self.assertEqual(info["name"], "waiter")
 
 
 if __name__ == "__main__":
