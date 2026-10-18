@@ -355,12 +355,7 @@ def main(argv=None):
         Digest(application.store, digest_link, os.environ.get('TREER_BIN', 'treer')).start()
         print('Issues change notifications enabled (ISSUES_NOTIFY=off disables)', flush=True)
     if reminders_enabled():
-        def link():
-            try:
-                return application.identity_provider().public_url
-            except Error:
-                return os.environ.get('ISSUES_PUBLIC_URL') or 'http://issues.treer/'
-        Reminders(application.store, link, os.environ.get('TREER_BIN', 'treer'), schedule=schedule).start()
+        Reminders(application.store, os.environ.get('TREER_BIN', 'treer'), schedule=schedule).start()
         print(f'Issues reminders enabled with exponential backoff first={schedule.first:g}s factor={schedule.factor:g} max={schedule.maximum:g}s '
               '(ISSUES_REMINDERS=off disables)', flush=True)
     server.serve_forever()
