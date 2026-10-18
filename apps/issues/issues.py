@@ -13,7 +13,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
-from notify import Digest, candidates, enabled as notify_enabled, hourly_limit, path_tokens
+from notify import Digest, candidates, digest_form, issue_ref, enabled as notify_enabled, hourly_limit, path_tokens
 from reminders import Reminders, backoff as reminder_backoff, enabled as reminders_enabled
 from store import Store, fields, fail
 
@@ -100,6 +100,44 @@ class Application:
                     resolved[path.lower()] = entry['id']
         return resolved
 
+    def deliver(self, token, issue_id, event_id, notice, send, directory, actor, now):
+        """One Message per recipient kind: Agents get a fixed CLI reference (no URL), people the browser link when the
+        App has a public URL. An unknown kind is treated as an Agent. Each group has its own idempotency key and a
+        failed group releases only its own recipients."""
+        humans = {p['id'] for p in directory if p.get('kind') == 'human'}
+        groups = [(key, members, text) for key, members, text in (
+            ('', [r for r in send if r not in humans], issue_ref(issue_id, True)),
+            ('-human', [r for r in send if r in humans], None)) if members]
+        failure = None
+        try:
+            auth = self.identity_provider()
+        except Error as exc:
+            auth, failure = None, exc
+        delivered = []
+        for suffix, members, tail in groups:
+            if auth is None:
+                self.store.release_notifications(issue_id, members, actor['id'], now)
+                continue
+            if tail is None:
+                url = getattr(auth, 'public_url', '') or ''
+                tail = f'{url}#issue={issue_id}' if url else ''
+            try:
+                auth.request('POST', f'/api/apps/{auth.service_id}/messages', token, body={
+                    'recipients': members, 'context_ids': [],
+                    'body': f"Issue #{issue_id} \u00b7 {notice}" + (f'\n{tail}' if tail else ''),
+                    'idempotency_key': f'issues-event-{event_id}{suffix}'})
+                delivered.extend(members)
+            except Error as exc:
+                failure = failure or exc
+                self.store.release_notifications(issue_id, members, actor['id'], now)
+        if delivered:
+            self.store.prove_notifications(delivered, actor['id'], now)
+        if failure is None:
+            return {'status': 'sent'}
+        return {'status': 'disabled' if failure.code == 'core_messages_disabled' else 'unavailable',
+                'code': failure.code, 'message': 'Change saved; Core Message notification was not delivered'
+                + (' to everyone' if delivered else '')}
+
     HEALTH_TTL = 2.0
 
     def deployment_health(self, clock=time.monotonic):
@@ -134,22 +172,11 @@ class Application:
             else:
                 # One Message per event: this is the only notification path, so nothing is sent twice.
                 now = self.store.clock()
-                send, merged, throttled = self.store.claim_notifications(issue_id, recipients, notice, now, actor['id'], hourly_limit())
+                send, merged, throttled = self.store.claim_notifications(issue_id, recipients, digest_form(notice), now, actor['id'], hourly_limit())
                 if not send:
                     notification = {'status': 'coalesced' if merged else 'throttled'}
                 else:
-                    try:
-                        auth = self.identity_provider()
-                        auth.request('POST', f'/api/apps/{auth.service_id}/messages', token, body={
-                            'recipients': send, 'context_ids': [],
-                            'body': f"Issue #{issue_id} · {notice}\n{auth.public_url}#issue={issue_id}",
-                            'idempotency_key': f'issues-event-{event_id}'})
-                        self.store.prove_notifications(send, actor['id'], now)
-                        notification = {'status': 'sent'}
-                    except Error as exc:
-                        self.store.release_notifications(issue_id, send, actor['id'], now)
-                        notification = {'status': 'disabled' if exc.code == 'core_messages_disabled' else 'unavailable',
-                                        'code': exc.code, 'message': 'Change saved; Core Message notification was not delivered'}
+                    notification = self.deliver(token, issue_id, event_id, notice, send, directory, actor, now)
                 if send and merged:
                     notification['coalesced'] = len(merged)
                 if throttled:

@@ -4,12 +4,14 @@ The first event for a (recipient, issue) in a five minute window is sent immedia
 with the actor's own token (Core applies the actor's Message Policy). Later events in the window are only
 recorded in SQLite; when the window ends this module sends ONE digest through `treer message send` under the
 App's identity and opens a new quiet window. Digest keys are stable per (recipient, issue, window start), a failed
-digest is retried at most three times, and Messages carry only issue IDs, short fixed summaries and a link -
-never titles, descriptions or comment bodies. No credential is read, logged or placed on a command line.
+digest is retried at most three times, and Messages carry only issue IDs, short fixed summaries and a reference
+(a CLI command for Agents, a link for people) - plus, for a comment that has one, its sanitized title (`clean_title`);
+never issue titles, descriptions or comment bodies. No credential is read, logged or placed on a command line.
 """
 import json
 import os
 import re
+import unicodedata
 import sys
 import threading
 import time
@@ -29,6 +31,58 @@ def enabled(environ=None):
     """ISSUES_NOTIFY=0|off|false|no|disabled turns every issue notification off (default on)."""
     value = (os.environ if environ is None else environ).get('ISSUES_NOTIFY', 'on').strip().lower()
     return value not in ('0', 'off', 'false', 'no', 'disabled')
+
+
+TITLE_LIMIT, DIGEST_TITLE_LIMIT, TITLE_BYTES = 120, 60, 400
+TITLE_MARK = ', title (untrusted): "'
+_WHITESPACE_CONTROLS = '\t\n\r\x0b\x0c\x85\u2028\u2029'
+_QUOTES = dict.fromkeys('"`\u201c\u201d\u201e\u201f\u00ab\u00bb\u2039\u203a\u300c\u300d\u300e\u300f\u301d\u301e\u301f\uff02\u2018\u2019\u201a\u201b\\', "'")
+_BRACKETS = str.maketrans('<[{>]}', '((()))')
+
+
+def clean_title(raw, limit=TITLE_LIMIT):
+    """A comment title as it may appear inside a Message: author text is untrusted data headed for other agents' prompts.
+    NFKC first (full-width quotes, at-signs and slashes lose their look-alike forms); then only printable letters, numbers,
+    punctuation, symbols, ordinary spaces and at most three combining marks in a row survive (no controls, format or
+    bidi characters, tag block, variation selectors, line/paragraph separators, private-use or unassigned code points);
+    quote-like characters become apostrophes, brackets become parentheses, '@' becomes 'at' and '://' is broken so no
+    mention, markdown link, HTML tag, code fence, template or URL can be formed; whitespace folds to single spaces;
+    the result is capped by code points and by bytes. Returns '' when nothing usable is left."""
+    if not isinstance(raw, str):
+        return ''
+    out, marks = [], 0
+    for char in unicodedata.normalize('NFKC', raw):
+        category, code = unicodedata.category(char), ord(char)
+        if char in _WHITESPACE_CONTROLS or category == 'Zs':
+            out.append(' ')
+            marks = 0
+        elif category in ('Cc', 'Cf', 'Zl', 'Zp', 'Co', 'Cs', 'Cn') or 0xFE00 <= code <= 0xFE0F or 0xE0100 <= code <= 0xE01EF:
+            continue
+        elif category[0] == 'M':
+            marks += 1
+            if marks <= 3:
+                out.append(char)
+        else:
+            marks = 0
+            out.append(_QUOTES.get(char, char))
+    text = ''.join(out).translate(_BRACKETS).replace('@', ' at ').replace('://', ' ://')
+    text = ' '.join(text.split())
+    if len(text) > limit:
+        text = text[:limit - 1].rstrip() + '\u2026'
+    while len(text.encode()) > TITLE_BYTES:
+        text = text[:-2].rstrip() + '\u2026'
+    return text
+
+
+def digest_form(notice, limit=DIGEST_TITLE_LIMIT):
+    """The same notice with its quoted title cut to the digest length (a sanitized title contains no double quote)."""
+    head, mark, rest = notice.partition(TITLE_MARK)
+    if not mark:
+        return notice
+    title, quote, tail = rest.partition('"')
+    if len(title) > limit:
+        title = title[:limit - 1].rstrip() + '\u2026'
+    return head + mark + title + quote + tail
 
 
 SAFE_NAME = re.compile(r'[A-Za-z0-9 ._/\-]{1,24}')
@@ -131,12 +185,15 @@ def recipients_for(action, issue, old_assignee, changed, mentions, actor_id):
     return sorted((people | set(mentions)) - {None, actor_id})
 
 
-def notice_for(action, actor, old, issue, changed, mentions, names):
+def notice_for(action, actor, old, issue, changed, mentions, names, comment_title=None):
     """One short fixed sentence. Returns None when nothing changed (no notification)."""
     if action == 'create':
         core = 'Issue created'
     elif action == 'comment':
         core = 'New comment'
+        title = clean_title(comment_title)
+        if title:
+            core += f'{TITLE_MARK}{title}"'
     else:
         parts = []
         if 'status' in changed:
@@ -155,14 +212,23 @@ def notice_for(action, actor, old, issue, changed, mentions, names):
     return text
 
 
-def digest_body(issue_id, summaries, link):
+def issue_ref(issue_id, agent):
+    """How to open an issue from a Message. Agents get a fixed command with a validated integer (no title text, no
+    URL, no tree path); people get the browser link, added by the caller when one is configured."""
+    return f'issues show {int(issue_id)} --titles' if agent else ''
+
+
+def digest_body(issue_id, summaries, link, agent=False):
     unique = list(dict.fromkeys(summaries))
     shown = '; '.join(unique[:4]) + (f'; +{len(unique) - 4} more' if len(unique) > 4 else '')
     noun = f'update{"s" if len(summaries) != 1 else ""}'
     if issue_id == 0:   # the per-recipient overflow digest: updates over the hourly limit, across issues
-        return f'Issues · {len(summaries)} more {noun} (over the hourly limit) in the last 5 minutes: {shown}' + (f'\n{link}' if link else '')
-    text = f'Issue #{issue_id} · {len(summaries)} more {noun} in the last 5 minutes: {shown}'
-    return text + (f'\n{link}#issue={issue_id}' if link else '')
+        text = f'Issues \u00b7 {len(summaries)} more {noun} (over the hourly limit) in the last 5 minutes: {shown}'
+        tail = 'issues list --assignee me --unresolved' if agent else link
+    else:
+        text = f'Issue #{issue_id} \u00b7 {len(summaries)} more {noun} in the last 5 minutes: {shown}'
+        tail = issue_ref(issue_id, True) if agent else (f'{link}#issue={issue_id}' if link else '')
+    return text + (f'\n{tail}' if tail else '')
 
 
 class Digest:
@@ -179,7 +245,8 @@ class Digest:
         link = None
         for row in self.store.due_digests(now):
             link = link if link is not None else safe_link(self.base_url)
-            status, _ = self.runner(['message', 'send', '--to', row['recipient'], '--body', digest_body(row['issue_id'], row['pending'], link),
+            agent = not row['recipient'].startswith('usr_')   # an unknown kind gets the Agent form (no link)
+            status, _ = self.runner(['message', 'send', '--to', row['recipient'], '--body', digest_body(row['issue_id'], row['pending'], link, agent),
                                      '--idempotency-key', f"issues-digest-{row['recipient']}-{row['issue_id']}-{row['actor'] or 'any'}-{int(row['start'])}"])
             if status == 0:
                 self.store.digest_done(row['recipient'], row['issue_id'], row['actor'], now)

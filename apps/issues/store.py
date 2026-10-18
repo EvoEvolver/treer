@@ -328,7 +328,7 @@ class Store:
             db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(issue), issue_id))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
             names = {p['id']: p.get('name', p['id']) for p in directory}
-            notice = notice_for(action, actor, before, issue, changed, mentions, names)
+            notice = notice_for(action, actor, before, issue, changed, mentions, names, body.get('title') if action == 'comment' else None)
             recipients = recipients_for(action, issue, old_assignee, changed, mentions, actor['id']) if notice else []
             missed = unresolved_mentions(mention_text, directory, paths) if mention_text != earlier else []
         return issue_id, event_id, event, recipients, notice, missed

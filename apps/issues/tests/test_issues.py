@@ -133,7 +133,7 @@ class IssuesTest(unittest.TestCase):
         _,result=self.req(f'v1/issues/{id}','PATCH',{'status':'in_progress'})
         self.assertEqual(result['notification']['status'],'sent')
         message=self.req('test/messages',base=self.proxy)[1]['messages'][-1]
-        self.assertEqual(message['recipients'],['ag_b']);self.assertIn(f'#issue={id}',message['body'])
+        self.assertEqual(message['recipients'],['ag_b']);self.assertIn(f'issues show {id} --titles',message['body']);self.assertNotIn('http',message['body'],'Agents get a CLI reference, not a URL')
         self.assertNotIn('SECRET',message['body']);self.assertTrue(message['idempotency_key'].startswith('issues-event-'))
         self.req('test/disable',base=self.proxy)
     def test_needs_me_view_filters(self):
