@@ -1,4 +1,5 @@
 use crate::{
+    attachments::Attachments,
     goals::{self, Goals},
     model::{self, now, preview},
     rpc::Rpc,
@@ -52,6 +53,8 @@ struct Record {
     notify: Value,
     #[serde(default)]
     notified: bool,
+    #[serde(default)]
+    images: Vec<Value>,
 }
 struct Runtime {
     rpc: Rpc,
@@ -64,6 +67,7 @@ struct Runtime {
     dispatch_blocked: bool,
     goals: Goals,
     goals_supported: bool,
+    attachments: Option<Arc<tokio::sync::Mutex<Attachments>>>,
     changed: watch::Sender<Arc<Value>>,
 }
 struct Notification {
@@ -78,6 +82,7 @@ pub struct Config {
     pub codex: String,
     pub codex_args: Vec<String>,
     pub session: Option<String>,
+    pub attachments: Option<Arc<tokio::sync::Mutex<Attachments>>>,
 }
 pub fn spawn(config: Config) -> Result<Handle> {
     let store = Store::open(&config.private_root, &config.cwd)?;
@@ -104,6 +109,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
         dispatch_blocked: false,
         goals: Goals::default(),
         goals_supported: false,
+        attachments: config.attachments.clone(),
         changed,
     };
     tokio::spawn(async move {
@@ -310,7 +316,7 @@ impl Runtime {
         let mut thread = self.thread.clone();
         thread["turns"] = json!(self.history());
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
-        self.changed.send_replace(Arc::new(json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"]},"harness":{"id":"codex","name":"Codex","capabilities":{"images":false,"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":thread,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":false,"attachmentStorageStatus":"agent_private_state_unavailable"})));
+        self.changed.send_replace(Arc::new(json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"]},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":thread,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}})));
     }
     fn history(&self) -> Vec<Value> {
         // Provider snapshots may omit locally submitted user items. The journal
@@ -345,6 +351,7 @@ impl Runtime {
                 matched.insert((id.to_string(), items[index]["id"].to_string()));
                 items[index]["sender"] = record.submission["sender"].clone();
                 items[index]["submissionId"] = record.submission["id"].clone();
+                items[index]["attachments"] = json!(record.images);
             } else {
                 // Keep accepted user input before the provider's response. The
                 // stable journal-derived ID survives completion and restart.
@@ -352,7 +359,7 @@ impl Runtime {
                     .iter()
                     .take_while(|i| i["kind"] == "userMessage")
                     .count();
-                items.insert(before, json!({"id":item_id,"kind":"userMessage","text":record.text,"sender":record.submission["sender"],"submissionId":record.submission["id"],"detailText":null,"sourceTurnId":id,"attachments":[]}));
+                items.insert(before, json!({"id":item_id,"kind":"userMessage","text":record.text,"sender":record.submission["sender"],"submissionId":record.submission["id"],"detailText":null,"sourceTurnId":id,"attachments":record.images}));
                 matched.insert((id.to_string(), json!(item_id).to_string()));
             }
         }
@@ -643,14 +650,28 @@ impl Runtime {
             bail!("runtime unavailable")
         }
         let text = body["text"].as_str().unwrap_or("").trim();
-        if text.is_empty()
-            || text.len() > 100_000
-            || body["attachment_ids"]
-                .as_array()
-                .is_some_and(|a| !a.is_empty())
-        {
-            bail!("text required; image experiment unsupported");
+        let ids = body.get("attachment_ids").cloned().unwrap_or(json!([]));
+        let has_images = ids.as_array().is_some_and(|ids| !ids.is_empty());
+        if text.len() > 100_000 || text.is_empty() && !has_images {
+            bail!("text or images required");
         }
+        let images = if has_images {
+            let store = self
+                .attachments
+                .as_ref()
+                .ok_or_else(|| anyhow!("attachments_unavailable"))?;
+            store
+                .lock()
+                .await
+                .resolve(&ids, self.thread["id"].as_str().unwrap_or(""))?
+                .into_iter()
+                .map(|(metadata, _)| metadata)
+                .collect::<Vec<_>>()
+        } else if !ids.is_array() {
+            bail!("attachment_invalid_ids");
+        } else {
+            vec![]
+        };
         let operation = body["operation_id"]
             .as_str()
             .filter(|s| !s.is_empty() && s.len() <= 1024)
@@ -660,7 +681,8 @@ impl Runtime {
             bail!("invalid delivery");
         }
         validate_metadata(&body)?;
-        let fingerprint = json!([text, delivery, body["sender"], body["notify"]]).to_string();
+        let fingerprint =
+            fingerprint(text, delivery, &body["sender"], &body["notify"], &images).to_string();
         if let Some(prior) = self.records.iter().find(|r| r.operation == operation) {
             if prior.fingerprint != fingerprint {
                 bail!("operation_id conflict");
@@ -705,7 +727,16 @@ impl Runtime {
             receipt: json!({"id":id,"disposition":disposition,"position":if disposition == "queued" {json!(position)} else {Value::Null}}),
             notify: body["notify"].clone(),
             notified: false,
+            images,
         };
+        if has_images {
+            self.attachments
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .retain(&ids, self.thread["id"].as_str().unwrap_or(""))?;
+        }
         self.records.push_back(record);
         if let Err(error) = self.persist() {
             self.records.pop_back();
@@ -726,6 +757,28 @@ impl Runtime {
             .iter()
             .position(|r| r.submission["state"] == "queued" && (!busy || r.delivery == "steer"));
         let Some(index) = next else { return Ok(()) };
+        let mut input = vec![];
+        if !self.records[index].text.is_empty() {
+            input.push(json!({"type":"text","text":self.records[index].text,"text_elements":[]}));
+        }
+        if !self.records[index].images.is_empty() {
+            let ids = json!(self.records[index]
+                .images
+                .iter()
+                .map(|m| m["id"].clone())
+                .collect::<Vec<_>>());
+            let store = self
+                .attachments
+                .as_ref()
+                .ok_or_else(|| anyhow!("attachments_unavailable"))?;
+            for (_, path) in store
+                .lock()
+                .await
+                .resolve(&ids, self.thread["id"].as_str().unwrap_or(""))?
+            {
+                input.push(json!({"type":"localImage","path":path}));
+            }
+        }
         // Persist intent BEFORE contacting the provider. No ambiguous replay.
         self.records[index].submission["state"] = json!("running");
         self.dispatch_blocked = true;
@@ -734,7 +787,7 @@ impl Runtime {
             self.dispatch_blocked = false;
             return Err(error);
         }
-        let mut params = json!({"threadId":self.thread["id"],"input":[{"type":"text","text":self.records[index].text,"text_elements":[]}]});
+        let mut params = json!({"threadId":self.thread["id"],"input":input});
         if busy {
             params["expectedTurnId"] = self.thread["activeTurnId"].clone();
         } else {
@@ -1020,7 +1073,7 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
                 || r.operation.is_empty()
                 || r.operation.len() > 1024
                 || !operations.insert(r.operation.clone())
-                || r.text.is_empty()
+                || r.text.is_empty() && r.images.is_empty()
                 || r.text.len() > 100_000
                 || !["queue", "steer"].contains(&r.delivery.as_str())
                 || !s["state"].as_str().is_some_and(|s| {
@@ -1033,16 +1086,48 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
                         .is_some_and(|s| !s.is_empty() && s.len() <= 1024))
                 || r.receipt["id"] != s["id"]
                 || serde_json::from_str::<Value>(&r.fingerprint).ok()
-                    != Some(json!([r.text, r.delivery, s["sender"], r.notify]))
+                    != Some(fingerprint(
+                        &r.text,
+                        &r.delivery,
+                        &s["sender"],
+                        &r.notify,
+                        &r.images,
+                    ))
             {
                 bail!("invalid journal");
             }
             validate_metadata(&json!({"sender":s["sender"],"notify":r.notify}))?;
+            if r.images.len() > crate::image_format::COUNT_LIMIT
+                || r.images.iter().any(|m| {
+                    !m["id"].as_str().is_some_and(crate::attachments::valid_id)
+                        || !m["size"]
+                            .as_u64()
+                            .is_some_and(|n| n > 0 && n <= crate::image_format::FILE_LIMIT as u64)
+                        || !m["mime"].as_str().is_some_and(|s| {
+                            ["image/png", "image/jpeg", "image/webp", "image/gif"].contains(&s)
+                        })
+                })
+            {
+                bail!("invalid journal");
+            }
         }
         Ok(records)
     }
     // Do not expose parser fragments, prompt text, sender values or file paths.
     decode(saved).map_err(|_| anyhow!("private_state_invalid"))
+}
+fn fingerprint(
+    text: &str,
+    delivery: &str,
+    sender: &Value,
+    notify: &Value,
+    images: &[Value],
+) -> Value {
+    if images.is_empty() {
+        json!([text, delivery, sender, notify])
+    } else {
+        json!([text, delivery, sender, notify, images])
+    }
 }
 fn validate_metadata(body: &Value) -> Result<()> {
     if !body["sender"].is_null() {

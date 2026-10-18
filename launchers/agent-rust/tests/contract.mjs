@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unlink, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -22,11 +22,11 @@ async function until(read, predicate) {
   while (Date.now() < end) { try {const value=await read();if(predicate(value))return value;}catch{} await new Promise(r=>setTimeout(r,20)); }
   throw Error('contract fixture deadline');
 }
-async function fixture(t, extra={}) {
+async function fixture(t, extra={}, controllerOptions={}) {
   const root=await realpath(await mkdtemp(join(tmpdir(),'rust158-')));
   const cwd=join(root,'cwd'), state=join(root,'private');
   await mkdir(cwd,{mode:0o700});await mkdir(state,{mode:0o700});
-  const controller=await fakePrivateState('ag_contract');
+  const controller=await fakePrivateState('ag_contract','fixture-only',controllerOptions);
   const portFile=join(root,'port');
   const env=hermeticEnv({ HOME:root, CODEX_HOME:join(root,'codex'), AGENT_UI_CWD:cwd, AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'), AGENT_UI_PORT_FILE:portFile, AGENT_UI_PORT:'0', TREER_AGENT_ID:'ag_contract', TREER_WORKLOAD_CREDENTIAL:'fixture-only', TREER_AGENT_SERVER_URL:controller.url, TREER_AGENT_PRIVATE_STATE_DIR:state, AGENT_UI_INSTANCE_ID:'contract-instance', AGENT_UI_MESSAGE_WATCH:'0', CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'), FAKE_CODEX_RELAY_RECOVERY:'1', ...extra });
   env.RUST_SPIKE_CLI_LOG=join(root,'registration.json');
@@ -45,7 +45,7 @@ async function fixture(t, extra={}) {
   const {child,base}=await launch({});
   const headers={'x-treer-interface-source':'controller-api','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'contract-instance',host:'agent-interface'};
   const post=body=>fetch(base+'/v1/prompts',{method:'POST',headers,body:JSON.stringify(body)});
-  return {base,post,headers,child,root,state,launch,logs:()=>logs};
+  return {base,post,headers,child,root,state,launch,controller,logs:()=>logs};
 }
 
 test('Rust serves its manifest while Controller registration probes it',{skip:useNode},async t=>{
@@ -259,6 +259,54 @@ test('Rust mismatching goal reconciliation refuses a stale native mutation',{ski
   const state=await fetch(s.base+'/api/state').then(r=>r.json());
   assert.equal(state.goal.objective,'Changed elsewhere');
   assert.equal(state.goalDelivery.status,'failed');
+});
+const imageGif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64');
+test('Rust images are validated, quota admitted, retained in history and durable across restart',{skip:useNode},async t=>{
+  const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_IMAGES:'1'});
+  for(const bad of [Buffer.from('MZfake'),imageGif.subarray(0,-1),Buffer.concat([imageGif,Buffer.from('MZ')])]) {
+    const r=await fetch(s.base+'/api/attachments',{method:'POST',body:bad});
+    assert.equal(r.status,400);assert.equal((await r.json()).error,'attachment_invalid_image');
+  }
+  const upload=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif});
+  assert.equal(upload.status,201,await upload.clone().text());
+  const {attachment}=await upload.json();
+  assert.deepEqual(Object.keys(attachment).sort(),['id','mime','size']);
+  assert.match(attachment.id,/^img_[a-f0-9]{32}$/);
+  const read=await fetch(s.base+'/api/attachments/'+attachment.id);
+  assert.equal(read.headers.get('content-type'),'image/gif');assert.equal(read.headers.get('x-content-type-options'),'nosniff');
+  assert.deepEqual(Buffer.from(await read.arrayBuffer()),imageGif);
+  const accepted=await s.post({text:'',attachment_ids:[attachment.id],operation_id:'image-only'}).then(r=>r.json());
+  assert.equal(accepted.accepted,true,JSON.stringify(accepted));
+  const check=async base=>{
+    const state=await until(()=>fetch(base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='idle');
+    const item=state.thread.turns.flatMap(t=>t.items).find(i=>i.submissionId===accepted.submission.id);
+    assert.equal(item.text,'');assert.deepEqual(item.attachments,[attachment]);
+    assert.equal(JSON.stringify(state).includes(s.state),false);
+  };
+  await check(s.base);
+  assert.equal((await fetch(s.base+'/api/attachments/'+attachment.id,{method:'DELETE'})).status,409);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({});await check(restarted.base);
+  assert.deepEqual(Buffer.from(await (await fetch(restarted.base+'/api/attachments/'+attachment.id)).arrayBuffer()),imageGif);
+  assert.ok(s.controller.events.some(e=>e.path.endsWith('/commit')));assert.equal(s.controller.reservations.size,0);
+});
+test('Rust failed image quota commit rolls back exact data and releases reservation',{skip:useNode},async t=>{
+  const s=await fixture(t,{}, {commitError:'private_state_reservation_expired'});
+  const r=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif});
+  assert.equal(r.status,503);
+  assert.equal(s.controller.reservations.size,0);
+  assert.ok(s.controller.events.some(e=>e.method==='DELETE'));
+  assert.equal((await readdir(join(s.state,'rust-images'))).some(n=>n.startsWith('img_')),false);
+});
+test('Rust image reads refuse replaced symlinks and preserve the outside sentinel',{skip:useNode},async t=>{
+  const s=await fixture(t);
+  const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
+  const sentinel=join(s.root,'outside-image');await writeFile(sentinel,'sentinel',{mode:0o600});
+  const path=join(s.state,'rust-images',attachment.id+'.gif');await unlink(path);await symlink(sentinel,path);
+  const r=await fetch(s.base+'/api/attachments/'+attachment.id);assert.equal(r.status,503);
+  assert.equal(await readFile(sentinel,'utf8'),'sentinel');
+  assert.equal((await fetch(s.base+'/api/attachments/'+attachment.id,{method:'DELETE'})).status,503);
+  assert.equal(await readFile(sentinel,'utf8'),'sentinel');
 });
 test('concurrent queued submissions are FIFO, queue cancellation differs from abort',async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_LIVE:'1',FAKE_CODEX_STATUS:'active'});

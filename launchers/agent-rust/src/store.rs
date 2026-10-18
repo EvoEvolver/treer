@@ -88,6 +88,10 @@ impl Store {
         }
         Ok(Some(serde_json::from_slice(&data)?))
     }
+    pub fn recheck(&self) -> Result<()> {
+        Self::open(&self.root, &self.cwd)?;
+        Ok(())
+    }
     pub fn save(&self, state: &Value) -> Result<()> {
         // Re-evaluate placement on each journal update; git init disables writes.
         Self::open(&self.root, &self.cwd)?;

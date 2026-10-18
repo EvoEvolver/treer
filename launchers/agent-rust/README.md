@@ -37,7 +37,20 @@ journal checkpoints native mutation intent and a separate idempotent prompt
 delivery. A lost native acknowledgement is reconciled by reading the goal;
 an unmatched result is retained as an error rather than replaying the mutation.
 This is still partial goal parity: non-null round budgets, slash commands and
-managed Agent goal-exit requests remain unsupported. Images remain disabled.
+managed Agent goal-exit requests remain unsupported.
+Managed Codex sessions support PNG, JPEG, WebP and GIF attachments through a
+separate `rust-images` directory under the Controller-provided private root.
+Container framing, CRC where applicable, dimensions, truncation and appended
+payloads are checked; this is not compressed pixel decoding. Uploads require
+Controller quota reservation and commit, with bounded rollback/release on error.
+Files are exclusive 0600, reads refuse symlinks/hardlinks and verify SHA-256;
+only opaque image metadata reaches browser state. Sent images are retained with
+the submission journal for reload and restart, including image-only prompts.
+Limits are 10 MiB per image, 8 images/24 MiB per prompt, 256 MiB local storage,
+8,192 entries, and two combined upload/download slots. Response buffers remain
+under a slot until consumed or disconnected. Drafts expire after one hour on
+the next upload. Orphan cleanup and native Windows storage verification remain
+M2 work; this POSIX spike does not migrate Node attachment state.
 Plan snapshots and updates normalize Codex's `in_progress` to the browser's
 `inProgress`. HTML carries the existing permissions policy and CSP; script and
 CSS assets declare UTF-8 without an HTML document policy.
@@ -152,7 +165,7 @@ and the exact experiment command. Before any team-Agent switch, both a full
 security review and the leader's decision are required. No team switch is part
 of P0–P2.
 
-Known gaps: complete goals and goal recovery parity; attachments and quota reservations;
+Known gaps: complete goals and goal recovery parity; attachment orphan cleanup;
 session export/import; file browser/task-output APIs; Node's relay-error
 reconciliation/backoff; exact batched notification semantics; per-user resource
 admission; slow HTTP header/connection limits; containment of detached descendants;

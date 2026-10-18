@@ -1,5 +1,7 @@
+mod attachments;
 mod files;
 mod goals;
+mod image_format;
 mod model;
 mod rpc;
 mod runtime;
@@ -46,6 +48,8 @@ struct App {
     instance: String,
     public: PathBuf,
     files: files::Files,
+    attachments: Option<Arc<tokio::sync::Mutex<attachments::Attachments>>>,
+    image_slots: Arc<tokio::sync::Semaphore>,
 }
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.is_empty())
@@ -86,6 +90,20 @@ async fn main() -> Result<()> {
     if !agent.is_empty() {
         private_status(&agent).await?;
     }
+    let attachments = if !agent.is_empty() {
+        Some(Arc::new(tokio::sync::Mutex::new(
+            attachments::Attachments::open(
+                &private_root,
+                &cwd,
+                agent.clone(),
+                &env("TREER_AGENT_SERVER_URL").unwrap_or_default(),
+                env("TREER_WORKLOAD_CREDENTIAL").unwrap_or_default(),
+            )
+            .map_err(|_| anyhow::anyhow!("attachment_storage_unavailable"))?,
+        )))
+    } else {
+        None
+    };
     let public = std::fs::canonicalize(
         env("AGENT_UI_PUBLIC_DIR")
             .map(PathBuf::from)
@@ -114,6 +132,7 @@ async fn main() -> Result<()> {
         },
         codex_args,
         session: env("AGENT_UI_SESSION_ID"),
+        attachments: attachments.clone(),
     })?;
     if let Some(file) = env("AGENT_UI_PORT_FILE") {
         use std::io::Write;
@@ -133,6 +152,8 @@ async fn main() -> Result<()> {
         instance: instance.clone(),
         public,
         files: files::Files::new(files_root),
+        attachments,
+        image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
     };
     let files_idle = app.files.idle;
     let router = Router::new().fallback(any(route)).with_state(app);
@@ -281,6 +302,9 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
     let path = request.uri().path().trim_end_matches('/').to_string();
     let path = if path.is_empty() { "/".into() } else { path };
     let method = request.method().to_string();
+    if path == "/api/attachments" || path.starts_with("/api/attachments/") {
+        return attachment_route(&app, request, &path, &method).await;
+    }
     if path == "/v1/files" || path == "/v1/files/tree" || path == "/v1/files/download" {
         return app
             .files
@@ -482,6 +506,121 @@ fn history_limit(body: &Value) -> usize {
         .filter(|n| n.is_finite())
         .map(|n| n.floor().clamp(50.0, 10000.0) as usize)
         .unwrap_or(50)
+}
+
+async fn attachment_route(app: &App, request: Request<Body>, path: &str, method: &str) -> Response {
+    let Some(store) = &app.attachments else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":"attachment_private_root_required"}),
+        );
+    };
+    let Ok(permit) = app.image_slots.clone().try_acquire_owned() else {
+        return json_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({"error":"attachment_busy"}),
+        );
+    };
+    let session = app.runtime.state.borrow()["thread"]["id"]
+        .as_str()
+        .unwrap_or("")
+        .to_owned();
+    if session.is_empty() {
+        return json_response(
+            StatusCode::CONFLICT,
+            json!({"error":"attachment_session_required"}),
+        );
+    }
+    if private_status(&app.agent).await.is_err() {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"error":"agent_private_state_unavailable"}),
+        );
+    }
+    if method == "POST" && path == "/api/attachments" {
+        let bytes = match tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            to_bytes(request.into_body(), image_format::FILE_LIMIT),
+        )
+        .await
+        {
+            Ok(Ok(bytes)) => bytes,
+            _ => {
+                return json_response(
+                    StatusCode::PAYLOAD_TOO_LARGE,
+                    json!({"error":"attachment_too_large"}),
+                )
+            }
+        };
+        return match store.lock().await.upload(&session, &bytes).await {
+            Ok(metadata) => json_response(StatusCode::CREATED, json!({"attachment":metadata})),
+            Err(e) => attachment_error(&e),
+        };
+    }
+    let id = path.trim_start_matches("/api/attachments/");
+    if method == "GET" {
+        return match store.lock().await.read(id, &session) {
+            Ok((metadata, bytes)) => {
+                let length = bytes.len();
+                // Keep the transfer slot while the response is backpressured;
+                // never create an unbounded queue of complete image buffers.
+                let chunks = futures_util::stream::unfold(
+                    (bytes, 0, permit),
+                    |(bytes, offset, permit)| async move {
+                        if offset == bytes.len() {
+                            return None;
+                        }
+                        let end = (offset + 64 * 1024).min(bytes.len());
+                        let chunk = bytes[offset..end].to_vec();
+                        Some((Ok::<_, std::io::Error>(chunk), (bytes, end, permit)))
+                    },
+                );
+                Response::builder()
+                    .status(200)
+                    .header(
+                        "content-type",
+                        metadata["mime"]
+                            .as_str()
+                            .unwrap_or("application/octet-stream"),
+                    )
+                    .header("content-length", length)
+                    .header("x-content-type-options", "nosniff")
+                    .header("content-security-policy", "default-src 'none'; sandbox")
+                    .header("cache-control", "private, no-store")
+                    .body(Body::from_stream(chunks))
+                    .unwrap()
+            }
+            Err(e) => attachment_error(&e),
+        };
+    }
+    if method == "DELETE" {
+        return match store.lock().await.discard(id, &session) {
+            Ok(()) => json_response(StatusCode::OK, json!({"removed":true})),
+            Err(e) => attachment_error(&e),
+        };
+    }
+    json_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        json!({"error":"method_not_allowed"}),
+    )
+}
+fn attachment_error(error: &anyhow::Error) -> Response {
+    let value = error.to_string();
+    let (status, code) = match value.as_str() {
+        "attachment_empty" | "attachment_invalid_image" | "attachment_invalid_ids" => {
+            (StatusCode::BAD_REQUEST, value.as_str())
+        }
+        "attachment_too_large" | "attachment_prompt_too_large" | "attachment_quota_exceeded" => {
+            (StatusCode::PAYLOAD_TOO_LARGE, value.as_str())
+        }
+        "attachment_not_found" => (StatusCode::NOT_FOUND, value.as_str()),
+        "attachment_already_sent" => (StatusCode::CONFLICT, value.as_str()),
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "attachment_storage_unavailable",
+        ),
+    };
+    json_response(status, json!({"error":code}))
 }
 
 // Legacy browser mutations return a state snapshot, whereas AIS mutations keep
