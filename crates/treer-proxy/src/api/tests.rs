@@ -4127,16 +4127,25 @@ async fn cors_preflight_allows_the_chunked_upload_headers_and_exposes_retry_afte
             .body(Body::empty())
             .expect("preflight request")
     };
+    // Every request shape of the chunked and legacy upload clients
+    // (security 4335 (4)); only begin and part carry custom headers, the
+    // rest preflight with content-type alone or not at all.
+    let upload = "/api/workspaces/default/machines/machine-a/uploads";
+    let one =
+        "/api/workspaces/default/machines/machine-a/uploads/upl_0123456789abcdef0123456789abcdef";
+    let parts = format!("{one}/parts?offset=0");
+    let commit = format!("{one}/commit");
     let cases = [
+        (upload, "POST", "content-type,idempotency-key"),
+        (parts.as_str(), "PUT", "content-type,x-treer-part-sha256"),
+        (one, "GET", "content-type"),
+        (upload, "GET", "content-type"),
+        (one, "DELETE", "content-type"),
+        (commit.as_str(), "POST", "content-type"),
         (
-            "/api/workspaces/default/machines/machine-a/uploads",
+            "/api/workspaces/default/machines/machine-a/files",
             "POST",
-            "content-type,idempotency-key",
-        ),
-        (
-            "/api/workspaces/default/machines/machine-a/uploads/upl_0123456789abcdef0123456789abcdef/parts?offset=0",
-            "PUT",
-            "content-type,x-treer-part-sha256",
+            "content-type",
         ),
     ];
     for (uri, method, requested) in cases {
@@ -4149,6 +4158,13 @@ async fn cors_preflight_allows_the_chunked_upload_headers_and_exposes_retry_afte
         assert_eq!(
             response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
             Some(&HeaderValue::from_static("https://app.treer.ai")),
+            "{method} {uri}"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_CREDENTIALS),
+            Some(&HeaderValue::from_static("true")),
             "{method} {uri}"
         );
         let allowed = response
@@ -4208,6 +4224,33 @@ async fn cors_preflight_allows_the_chunked_upload_headers_and_exposes_retry_afte
     assert_ne!(
         response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
         Some(&HeaderValue::from_static("https://evil.example"))
+    );
+    // An actual request from a foreign origin is refused by the server-side
+    // origin check regardless of CORS.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri(upload)
+                .header(header::ORIGIN, "https://other.treer.ai")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header("idempotency-key", "k".repeat(32))
+                .body(Body::from("{}"))
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .expect("body");
+    // Mutations hit the CSRF origin check first (csrf_denied); reads without
+    // that layer answer browser_origin_denied. Either way no handler runs.
+    let text = String::from_utf8_lossy(&body);
+    assert!(
+        text.contains("csrf_denied") || text.contains("browser_origin_denied"),
+        "{text}"
     );
     // Actual cross-origin responses expose Retry-After so the client can read
     // the hint on 409/429 replies.
