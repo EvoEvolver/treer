@@ -345,7 +345,15 @@ impl BrowserAccess {
                 header::CONTENT_TYPE,
                 header::AUTHORIZATION,
                 axum::http::HeaderName::from_static("x-treer-console"),
+                // Chunked machine upload (#166/#173): begin carries the
+                // Idempotency-Key, every part carries its SHA-256; the browser
+                // preflights both because the Console and the API are on
+                // different origins.
+                axum::http::HeaderName::from_static("idempotency-key"),
+                axum::http::HeaderName::from_static("x-treer-part-sha256"),
             ])
+            // The upload client reads the retry hint on 409/429 replies.
+            .expose_headers([header::RETRY_AFTER])
     }
 
     fn validate_if_present(&self, headers: &HeaderMap) -> Result<(), ApiFailure> {

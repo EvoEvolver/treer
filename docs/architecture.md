@@ -1068,7 +1068,7 @@ Host against its loopback listener authority (localhost/127.0.0.1/[::1] with the
 actual listener port; `agent-interface` only for Controller calls), and rejects
 unmarked browser requests: Origin or any Sec-Fetch-* header identifies a browser
 request, including simple POST, navigation/file GET, and WebSocket upgrades.
-Untrusted preflights receive no permissive CORS response. An arbitrary Host is
+Untrusted preflights receive no permissive CORS response. The Proxy's credentialed CORS allow-list for the Console origin names only the request headers browser clients send: `Content-Type`, `Authorization`, `X-Treer-Console`, and for chunked machine uploads `Idempotency-Key` and `X-Treer-Part-Sha256`; `Retry-After` is the only exposed response header (#173). An arbitrary Host is
 rejected even if the request has no Origin, closing the DNS-rebinding file path.
 Only `controller-api` without browser Origin may attest a queue submission's
 sender; `proxy-ui` must not turn user-supplied sender JSON into Controller identity.

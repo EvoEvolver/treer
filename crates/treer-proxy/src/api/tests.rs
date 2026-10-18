@@ -4090,6 +4090,148 @@ fn browser_access_accepts_only_the_configured_origin_when_present() {
 }
 
 #[tokio::test]
+async fn cors_preflight_allows_the_chunked_upload_headers_and_exposes_retry_after() {
+    // The Console (app origin) and the API (proxy origin) differ, so the
+    // browser preflights every chunked upload request that carries a custom
+    // header. Core tests used direct requests and missed this (#173).
+    let auth = AuthStore::for_test("admin-password").await;
+    let messages = MessageStore::open(auth.pool())
+        .await
+        .expect("message store");
+    let identity = IdentityIssuer::load(
+        &auth,
+        &Url::parse("https://proxy.treer.ai/").expect("proxy URL"),
+    )
+    .await
+    .expect("identity issuer");
+    let app = router(
+        AppState::new(),
+        test_config(),
+        auth,
+        PolicyEngine::allow_all(),
+        identity,
+        test_browser_access(),
+        test_ingress_config(),
+        messages,
+        CapabilityRollout::all_enabled(),
+        crate::updater::UpdaterClient::disabled(),
+        crate::voice::VoiceServices::disabled(),
+    );
+    let preflight = |uri: &str, method: &str, requested: &str| {
+        Request::builder()
+            .method(Method::OPTIONS)
+            .uri(uri)
+            .header(header::ORIGIN, "https://app.treer.ai")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, method)
+            .header(header::ACCESS_CONTROL_REQUEST_HEADERS, requested)
+            .body(Body::empty())
+            .expect("preflight request")
+    };
+    let cases = [
+        (
+            "/api/workspaces/default/machines/machine-a/uploads",
+            "POST",
+            "content-type,idempotency-key",
+        ),
+        (
+            "/api/workspaces/default/machines/machine-a/uploads/upl_0123456789abcdef0123456789abcdef/parts?offset=0",
+            "PUT",
+            "content-type,x-treer-part-sha256",
+        ),
+    ];
+    for (uri, method, requested) in cases {
+        let response = app
+            .clone()
+            .oneshot(preflight(uri, method, requested))
+            .await
+            .expect("preflight response");
+        assert_eq!(response.status(), StatusCode::OK, "{method} {uri}");
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static("https://app.treer.ai")),
+            "{method} {uri}"
+        );
+        let allowed = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        for name in requested.split(',') {
+            assert!(
+                allowed.split(',').any(|entry| entry.trim() == name),
+                "{method} {uri}: {name} missing from allow-headers {allowed}"
+            );
+        }
+        let methods = response
+            .headers()
+            .get(header::ACCESS_CONTROL_ALLOW_METHODS)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        assert!(methods.contains(method), "{method} {uri}: {methods}");
+    }
+    // An unlisted request header is still not granted.
+    let response = app
+        .clone()
+        .oneshot(preflight(
+            "/api/workspaces/default/machines/machine-a/uploads",
+            "POST",
+            "idempotency-key,x-not-allowed",
+        ))
+        .await
+        .expect("preflight response");
+    let allowed = response
+        .headers()
+        .get(header::ACCESS_CONTROL_ALLOW_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(!allowed.contains("x-not-allowed"), "{allowed}");
+    // A foreign origin receives no permissive answer.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method(Method::OPTIONS)
+                .uri("/api/workspaces/default/machines/machine-a/uploads")
+                .header(header::ORIGIN, "https://evil.example")
+                .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                .header(header::ACCESS_CONTROL_REQUEST_HEADERS, "idempotency-key")
+                .body(Body::empty())
+                .expect("preflight request"),
+        )
+        .await
+        .expect("preflight response");
+    // The layer never mirrors a foreign origin: the only value it ever names
+    // is the Console origin, which the browser then refuses to match.
+    assert_ne!(
+        response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+        Some(&HeaderValue::from_static("https://evil.example"))
+    );
+    // Actual cross-origin responses expose Retry-After so the client can read
+    // the hint on 409/429 replies.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::GET)
+                .uri("/api/workspaces/default/machines/machine-a/uploads")
+                .header(header::ORIGIN, "https://app.treer.ai")
+                .body(Body::empty())
+                .expect("request"),
+        )
+        .await
+        .expect("response");
+    let exposed = response
+        .headers()
+        .get(header::ACCESS_CONTROL_EXPOSE_HEADERS)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    assert!(exposed.contains("retry-after"), "expose-headers: {exposed}");
+}
+
+#[tokio::test]
 async fn cors_preflight_allows_the_configured_app_with_credentials() {
     let auth = AuthStore::for_test("admin-password").await;
     let messages = MessageStore::open(auth.pool())
