@@ -1,5 +1,18 @@
 # Quality And Maintenance
 
+### Windows self-update registration model
+
+The private `cfg(test)` platform module `update_registration` exercises a
+synthetic, fixed-size registration format before native record publication is
+implemented. Focused tests reject malformed headers, truncation/trailing bytes,
+pipe-frame confusion, altered attempt/intent/process identities and invalid
+deadline windows. Independent readers compare the decoded fields with separate
+synthetic observations; the owner retains its original expiry ceiling. These
+tests do not read or write files, acquire OS identity or time, enforce replay
+uniqueness, construct frame bindings, or grant update authority. Native record
+publication, suspended-child registration and real-machine acceptance remain
+separate gates. The byte layout is a fixture model, not a supported disk format.
+
 ### Organization invitation consent checks
 
 The PostgreSQL-backed Proxy invitation tests use synthetic invitations in

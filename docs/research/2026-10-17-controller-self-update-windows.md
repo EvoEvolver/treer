@@ -424,6 +424,21 @@ exchange; the prior `9f683383` results do not cover this new protocol model.
 
 ## Proposed next slice: independent durable binding in disposable fixtures
 
+The next inert substep, `update_registration`, models registration bytes only
+under `cfg(test)`. Its 184-byte fixture layout is little-endian: distinct `TURF`
+magic, version `u16`, total size `u16`, attempt (16 bytes), intent digest (32),
+owner and child identity (56 bytes each: PID `u32`, creation `u64`, volume `u32`,
+file identity `u64`, image digest (32)), then start/expiry ticks (`u64` each).
+Parsing rejects noncanonical headers/lengths, empty bindings and invalid process
+pairs. A separate comparison requires all fields to match independently supplied
+synthetic observations before the existing deadline model admits the window.
+The owner still supplies its original expiry ceiling. No bytes enter the pipe
+exchange, and no file, clock, process observation, real record, lock, permit or
+production caller is added. Exact field equality is not proof of provenance,
+process liveness or once-only use; copied bytes with identical observations are
+not a replay fence. Native publication and authenticated process binding remain
+subsequent authority-reviewed work. This is not a stable on-disk format.
+
 The first implementation substep is the private `cfg(test)` model in
 `crates/treer-platform/src/update_deadline.rs`: a fixed five-second window,
 independent reader validation, original-owner expiry ceiling and permanently

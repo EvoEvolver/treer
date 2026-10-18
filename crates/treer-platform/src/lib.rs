@@ -28,6 +28,8 @@ pub mod retained_executable;
 mod update_binding;
 #[cfg(test)]
 mod update_deadline;
+#[cfg(test)]
+mod update_registration;
 pub use environment::{
     clean_process_environment_before_threads, inherited_environment, inherited_variable_allowed,
     machine_exec_environment, machine_exec_variable_allowed,
