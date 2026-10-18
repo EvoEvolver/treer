@@ -325,8 +325,15 @@ impl<M: Mailbox + Directory> Hub<M> {
     }
     /// Count an actual failed Core send once per private lease, never idle polls.
     /// One bounded row per binding survives process restart. Queue data remains
-    /// pending; eight consecutive failures stop new work until owner recovery.
-    pub(crate) fn fail_telegram_forward(&mut self, intent: &CoreIntent) -> Result<(), Error> {
+    /// pending; at least eight failures spanning ten minutes stop new work until owner recovery.
+    pub(crate) fn fail_telegram_forward(
+        &mut self,
+        intent: &CoreIntent,
+        now: i64,
+    ) -> Result<(), Error> {
+        if now < 0 {
+            return Err(Error::Invalid);
+        }
         let tx = self.store.db.transaction()?;
         let valid: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM inbound i JOIN endpoints e ON e.id=i.endpoint WHERE i.id=?1 AND i.endpoint=?2 AND i.generation=?3 AND e.generation=i.generation AND i.lease_token=?4 AND i.pending=1)",
@@ -334,14 +341,19 @@ impl<M: Mailbox + Directory> Hub<M> {
         if !valid {
             return Err(Error::Conflict);
         }
-        tx.execute("INSERT INTO hub_core_handoff_health(endpoint,generation,failures,last_job,last_token) VALUES(?1,?2,1,?3,?4) ON CONFLICT(endpoint) DO UPDATE SET failures=CASE WHEN generation=excluded.generation THEN MIN(failures+1,8) ELSE 1 END,generation=excluded.generation,last_job=excluded.last_job,last_token=excluded.last_token WHERE generation!=excluded.generation OR last_job!=excluded.last_job OR last_token!=excluded.last_token",
-            params![intent.endpoint,intent.generation,intent.job,intent.token])?;
-        let failures: i64 = tx.query_row(
-            "SELECT failures FROM hub_core_handoff_health WHERE endpoint=?1",
+        let changed=tx.execute("INSERT INTO hub_core_handoff_health(endpoint,generation,failures,last_job,last_token,first_failure_at) VALUES(?1,?2,1,?3,?4,?5) ON CONFLICT(endpoint) DO UPDATE SET first_failure_at=CASE WHEN generation!=excluded.generation OR failures=0 OR first_failure_at=0 THEN excluded.first_failure_at ELSE first_failure_at END,failures=CASE WHEN generation=excluded.generation THEN MIN(failures+1,8) ELSE 1 END,generation=excluded.generation,last_job=excluded.last_job,last_token=excluded.last_token WHERE generation!=excluded.generation OR last_job!=excluded.last_job OR last_token!=excluded.last_token",
+            params![intent.endpoint,intent.generation,intent.job,intent.token,now])?;
+        if changed == 0 {
+            tx.commit()?;
+            return Ok(());
+        }
+        let (failures, first): (i64, i64) = tx.query_row(
+            "SELECT failures,first_failure_at FROM hub_core_handoff_health WHERE endpoint=?1",
             [&intent.endpoint],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         if failures >= 8
+            && now.saturating_sub(first) >= 600
             && tx.execute(
                 "UPDATE endpoints SET paused=1 WHERE id=?1 AND generation=?2 AND paused=0",
                 params![intent.endpoint, intent.generation],
@@ -379,7 +391,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         // the old failure streak rather than permitting more attempts.
         if pending {
             self.store.db.execute(
-                "UPDATE hub_core_handoff_health SET failures=0 WHERE endpoint=?1 AND generation=?2",
+                "UPDATE hub_core_handoff_health SET failures=0,first_failure_at=0 WHERE endpoint=?1 AND generation=?2",
                 params![intent.endpoint, intent.generation],
             )?;
         }
@@ -1051,8 +1063,8 @@ mod tests {
                 .prepare_telegram_forward("ag_endpoint", NOW, &format!("{n:064x}"))
                 .unwrap()
                 .unwrap();
-            hub.fail_telegram_forward(&intent).unwrap();
-            hub.fail_telegram_forward(&intent).unwrap(); // duplicate callback is not another failure
+            hub.fail_telegram_forward(&intent, NOW).unwrap();
+            hub.fail_telegram_forward(&intent, NOW).unwrap(); // duplicate callback is not another failure
         }
         assert!(!hub.view("ag_endpoint").unwrap().paused);
         let mut hub = Hub::new(hub.store, fake, "app_hub", "ws").unwrap();
@@ -1068,7 +1080,7 @@ mod tests {
             .prepare_telegram_forward("ag_endpoint", NOW, &"f".repeat(64))
             .unwrap()
             .unwrap();
-        hub.fail_telegram_forward(&intent).unwrap();
+        hub.fail_telegram_forward(&intent, NOW + 600).unwrap();
         let view = hub.view("ag_endpoint").unwrap();
         assert!(view.paused);
         assert_eq!(view.reason, "core_handoff_failing");
@@ -1090,6 +1102,60 @@ mod tests {
         assert_eq!(pending, 1);
     }
     #[test]
+    fn brief_outage_does_not_pause_and_legacy_health_starts_a_new_durable_window() {
+        let (mut hub, fake) = fixture(Limits::default());
+        hub.admit_telegram("bot_test", vec![update(1)], NOW)
+            .unwrap();
+        let mut last = None;
+        for n in 0..8 {
+            hub.store
+                .db
+                .execute("UPDATE inbound SET lease_until=0", [])
+                .unwrap();
+            let intent = hub
+                .prepare_telegram_forward("ag_endpoint", NOW, &format!("{n:064x}"))
+                .unwrap()
+                .unwrap();
+            hub.fail_telegram_forward(&intent, NOW + n).unwrap();
+            assert!(!hub.view("ag_endpoint").unwrap().paused);
+            last = Some(intent);
+        }
+        // A delayed duplicate result is not a new attempt and cannot trip it.
+        hub.fail_telegram_forward(last.as_ref().unwrap(), NOW + 10000)
+            .unwrap();
+        assert!(!hub.view("ag_endpoint").unwrap().paused);
+        hub.store
+            .db
+            .execute(
+                "ALTER TABLE hub_core_handoff_health DROP COLUMN first_failure_at",
+                [],
+            )
+            .unwrap();
+        let mut hub = Hub::new(hub.store, fake, "app_hub", "ws").unwrap();
+        for (token, at, paused) in [("e", NOW + 10000, false), ("f", NOW + 10600, true)] {
+            hub.store
+                .db
+                .execute("UPDATE inbound SET lease_until=0", [])
+                .unwrap();
+            let intent = hub
+                .prepare_telegram_forward("ag_endpoint", NOW, &token.repeat(64))
+                .unwrap()
+                .unwrap();
+            hub.fail_telegram_forward(&intent, at).unwrap();
+            assert_eq!(hub.view("ag_endpoint").unwrap().paused, paused);
+        }
+        let health: (i64, i64) = hub
+            .store
+            .db
+            .query_row(
+                "SELECT failures,first_failure_at FROM hub_core_handoff_health",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(health, (8, NOW + 10000));
+    }
+    #[test]
     fn failed_core_results_are_lease_fenced_and_success_resets_only_once() {
         let (mut hub, _) = fixture(Limits::default());
         hub.admit_telegram("bot_test", vec![update(1)], NOW)
@@ -1098,7 +1164,7 @@ mod tests {
             .prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
             .unwrap()
             .unwrap();
-        hub.fail_telegram_forward(&first).unwrap();
+        hub.fail_telegram_forward(&first, NOW).unwrap();
         hub.store
             .db
             .execute("UPDATE inbound SET lease_until=0", [])
@@ -1108,7 +1174,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(matches!(
-            hub.fail_telegram_forward(&first),
+            hub.fail_telegram_forward(&first, NOW),
             Err(Error::Conflict)
         ));
         hub.complete_telegram_forward(&second, "msg_first").unwrap();
@@ -1119,7 +1185,7 @@ mod tests {
             .prepare_telegram_forward("ag_endpoint", NOW, &"c".repeat(64))
             .unwrap()
             .unwrap();
-        hub.fail_telegram_forward(&next).unwrap();
+        hub.fail_telegram_forward(&next, NOW).unwrap();
         hub.complete_telegram_forward(&second, "msg_first").unwrap();
         assert_eq!(
             hub.last_core_handoff_failure().unwrap(),

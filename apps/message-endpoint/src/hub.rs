@@ -140,13 +140,20 @@ impl<M: Mailbox + Directory> Hub<M> {
         let tx = store.db.transaction()?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);
-        CREATE TABLE IF NOT EXISTS hub_core_handoff_health(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),generation INTEGER NOT NULL,failures INTEGER NOT NULL,last_job INTEGER NOT NULL,last_token TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS hub_core_handoff_health(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),generation INTEGER NOT NULL,failures INTEGER NOT NULL,last_job INTEGER NOT NULL,last_token TEXT NOT NULL,first_failure_at INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_transport_health(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),consecutive_parks INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_parked(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(endpoint,generation,transfer));
         CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
         CREATE TABLE IF NOT EXISTS hub_unknown_senders(kind TEXT NOT NULL,sender TEXT NOT NULL,attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL,PRIMARY KEY(kind,sender));
         CREATE TABLE IF NOT EXISTS hub_unknown_overflow(singleton INTEGER PRIMARY KEY CHECK(singleton=1),attempts INTEGER NOT NULL,last_seen INTEGER NOT NULL);
         INSERT OR IGNORE INTO hub_unknown_overflow VALUES(1,0,0);")?;
+        let health_columns = tx
+            .prepare("PRAGMA table_info(hub_core_handoff_health)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !health_columns.iter().any(|name| name == "first_failure_at") {
+            tx.execute("ALTER TABLE hub_core_handoff_health ADD COLUMN first_failure_at INTEGER NOT NULL DEFAULT 0",[])?;
+        }
         tx.execute(
             "INSERT OR IGNORE INTO hub_identity(singleton,agent,workspace) VALUES(1,?1,?2)",
             params![own_id, workspace],

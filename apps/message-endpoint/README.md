@@ -1137,8 +1137,8 @@ recalled, and no file mode can undo data that another OS process already read.
 
 An actual failed Core send for Telegram inbound work increments a durable streak
 once per private queue lease. Empty turns, failure-notice alternation and process
-restart do not reset it. Eight consecutive failed attempts pause only that binding
-with `core_handoff_failing`, increment its revision and retain its pending plaintext
+restart do not reset it. At least eight failed attempts spanning ten minutes
+pause only that binding with `core_handoff_failing`, increment its revision and retain its pending plaintext
 queue for owner recovery; metadata refresh does not resume it. Successful complete
 handoff resets the streak. A crash after queue completion but before resetting the
 streak conservatively retains failures. Replayed or stale lease callbacks cannot
@@ -1179,3 +1179,13 @@ A successful recovery returns the updated bounded recovery projection (including
 its audit row) in the same verified request. The UI does not issue a second
 verification just to discover the outcome. A failed inspection clears stale local
 results and offers a manual reload; verification limits are unchanged.
+
+The failure-window start is persisted alongside the capped count. A short Core
+outage cannot trip this breaker just because attempts are fast; both eight actual
+attempts and ten elapsed minutes are required. The private 60-second queue lease
+already spaces retries, independently of the worker backoff. The old health schema
+is upgraded transactionally; an old streak without a timestamp starts its window
+at the next actual failed attempt, without resetting the count. A delayed duplicate
+callback cannot start, extend or trip the window. A completed handoff clears both
+count and timestamp. Clock rollback delays elapsed-time eligibility; it does not
+silently reset the streak or resume a paused endpoint.

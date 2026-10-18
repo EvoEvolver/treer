@@ -260,7 +260,9 @@ fn step<M: Mailbox + Directory>(
                     Work::Notice(intent) => {
                         hub.fail_failure_notice(intent, now()?).map_err(|_| ())?
                     }
-                    Work::Inbound(intent) => hub.fail_telegram_forward(intent).map_err(|_| ())?,
+                    Work::Inbound(intent) => {
+                        hub.fail_telegram_forward(intent, now()?).map_err(|_| ())?
+                    }
                 }
                 return Err(());
             }
@@ -495,6 +497,18 @@ mod tests {
         let (state, fake) = fixture("inbound");
         let counters = Counters::default();
         for n in 0..8 {
+            if n == 7 {
+                state
+                    .lock()
+                    .unwrap()
+                    .store
+                    .db
+                    .execute(
+                        "UPDATE hub_core_handoff_health SET first_failure_at=unixepoch()-600",
+                        [],
+                    )
+                    .unwrap();
+            }
             fake.calls.0.lock().unwrap().reject_once = true;
             state
                 .lock()
