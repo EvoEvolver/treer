@@ -96,7 +96,7 @@ try {
  await card.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
  const resumeConfirm=card.getByLabel('Confirm resuming these exact objects and sending pending messages.',{exact:true});
  if(!await resumeConfirm.isDisabled())throw new Error('one owner declaration armed resume confirmation');
- await card.getByLabel('Isolation state (explicit choice required)',{exact:true}).selectOption('reviewed');
+ await card.getByRole('radio',{name:'OS/container separation and enforced Policy isolation were reviewed',exact:true}).check();
  await card.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('#159 synthetic release reference');
  await resumeConfirm.check();
  if(!await resumeButton.isDisabled())throw new Error('browser declarations bypassed default operator gate/unready account');
@@ -123,7 +123,7 @@ try {
  await cc.getByText('Resume endpoint',{exact:true}).click();
  await cc.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
  await cc.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
- await cc.getByLabel('Isolation state (explicit choice required)',{exact:true}).selectOption('reviewed');
+ await cc.getByRole('radio',{name:'OS/container separation and enforced Policy isolation were reviewed',exact:true}).check();
  await cc.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('synthetic conflict fixture');
  await cc.getByLabel('Confirm resuming these exact objects and sending pending messages.',{exact:true}).check();
  await cc.getByRole('button',{name:'Resume and send pending messages',exact:true}).click();
@@ -168,13 +168,13 @@ try {
   const section=page.locator('section').filter({has:page.locator('code').filter({hasText:/^ag_new$/})});
   await section.getByText('Resume endpoint',{exact:true}).click();
   await section.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
-  const isolation=section.getByLabel('Isolation state (explicit choice required)',{exact:true});
-  if(await isolation.inputValue()!=='')throw new Error('isolation choice defaulted');
+  const radios=section.getByRole('radio');
+  if(await radios.count()!==2||await radios.nth(0).isChecked()||await radios.nth(1).isChecked())throw new Error('isolation choice missing or defaulted');
   await section.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
   await section.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('isolation untested <script>window.injected=true</script>');
   const confirm=section.getByLabel('Confirm resuming these exact objects and sending pending messages.',{exact:true});
   if(!await confirm.isDisabled())throw new Error('missing isolation choice armed resume');
-  await isolation.selectOption(choice);
+  await section.getByRole('radio',{name:choice==='reviewed'?'OS/container separation and enforced Policy isolation were reviewed':'Running WITHOUT verified isolation; I accept the risk',exact:true}).check();
   for(const width of [390,1280])for(const theme of ['Light','Dark']) {
    await page.setViewportSize({width,height:900});
    if(await page.getByRole('button',{name:theme,exact:true}).count())await page.getByRole('button',{name:theme,exact:true}).click();

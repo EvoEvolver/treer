@@ -1302,9 +1302,10 @@ No expiry automatically resumes a paused binding.
 
 The private runtime configuration has `activation_enabled:false` by default.
 Only the operator's reviewed private configuration can turn it on; no browser or
-HTTP request can change it. It must remain false until release has real installed
-profile, enforced Policy isolation and channel acceptance evidence. No live
-activation/deployment has been performed as part of this implementation.
+HTTP request can change it. Turning it on requires an explicit operator/release
+decision and installed-profile checks; it never resumes a binding by itself.
+The owner subsequently records a truthful isolation choice before resume. A
+same-UID functional smoke is not verified isolation or production acceptance.
 
 **Resume endpoint** first calls `preview_resume` with the endpoint ID. The server
 reads current bindings, then queries Core by endpoint and recipient stable ID
