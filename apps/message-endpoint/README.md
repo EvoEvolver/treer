@@ -832,7 +832,7 @@ owner review/drain before activation. There has been no deployed hub/Bot worker.
 
 The `hub` feature now includes an Axum router (`settings_http::Settings`) with
 `GET /api/settings` (current human workspace owner), `GET /api/auth/start`,
-`GET /api/auth/callback`, `POST /api/auth/logout`, and the confirmed owner-only
+`GET /api/auth/callback`, `POST /api/endpoint/auth/logout`, and the confirmed owner-only
 `POST /api/configuration` described below. A snapshot is bounded metadata only;
 health reports process liveness, not working channels. Root negotiates Markdown
 and HTML; only the two named committed asset paths are served, with unknown
@@ -853,7 +853,7 @@ OAuth cookies are `__Host-`, Secure, HttpOnly, SameSite=Lax and Path=/; the
 settings URL must be a dedicated root origin different from the configured
 Proxy origin. An embedded page may inspect with the Proxy-injected identity,
 but OAuth fallback must open the dedicated App URL (returned by
-`GET /api/auth/config`), so cookies are not issued as shared Proxy-origin App
+`GET /api/endpoint/auth/config`), so cookies are not issued as shared Proxy-origin App
 credentials. Callback parameters and cookie names reject duplicates. A state
 mismatch does not erase another valid login; successful exchange clears the
 login nonce, sets only an opaque session cookie, and redirects to the fixed
@@ -1590,3 +1590,9 @@ choices are rejected, so an old client cannot silently accept risk. Existing
 bindings are not automatically resumed or modified. Auth, CSRF, rate limits,
 Core metadata, preview revision, bot readiness, held-content choice and audit
 capacity checks remain enforced for both isolation choices.
+
+The hub uses `/api/endpoint/auth/config` and `/api/endpoint/auth/logout` for
+App discovery and logout. The Proxy reserves `/api/auth/config` and
+`/api/auth/logout` even on wildcard App domains; those routes must not be used
+for hub operations. Dedicated-origin editing still requires a verified owner
+and the existing Origin/CSRF checks; embedded views remain read-only.
