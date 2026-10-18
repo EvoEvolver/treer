@@ -9,7 +9,7 @@ export interface UploadStatus {
   size: number
   committed_offset: number
   part_bytes_max: number
-  state: 'active' | 'committing' | 'committed' | 'aborted' | 'expired' | 'failed'
+  state: 'pending' | 'active' | 'committing' | 'committed' | 'aborted' | 'expired' | 'failed' | 'unknown'
   failure_code?: string
   result?: MachineFileUpload & { sha256: string; committed_at: string }
   reconciled: boolean
@@ -99,7 +99,7 @@ export class MachineUpload {
     this.update({ phase: this.cancelling ? 'cancelling' : this.commitStarted ? 'finishing' : 'waiting', loaded: this.committed })
     await wait(Math.max(error.retryAfter * 1000, Math.min(8000, 500 * 2 ** attempt)) + Math.random() * 200, signal)
   }
-  // Rate limiting has its own finite budget; normal 30 parts/min throttling must
+  // Rate limiting has its own finite budget; server throttling must
   // not exhaust the three retries reserved for an ambiguous transport failure.
   private async retry<T>(operation: () => Promise<T>, signal: AbortSignal): Promise<T> {
     let failures = 0, throttles = 0
@@ -113,6 +113,12 @@ export class MachineUpload {
   }
   private check(status: UploadStatus) {
     if (!this.file || status.size !== this.file.size || !Number.isSafeInteger(status.committed_offset) || status.committed_offset < 0 || status.committed_offset > status.size || status.upload_id !== this.id) throw new UploadError(400, 'upload_invalid_response')
+    // A forgotten receipt cannot prove that publication failed. Keep this
+    // distinct from a definitive Controller refusal, including on later polls.
+    if (status.state === 'unknown' || status.failure_code === 'outcome_unknown') {
+      this.commitStarted = true
+      throw new UploadError(409, 'outcome_unknown')
+    }
     if (status.state === 'committed') {
       if (!status.result || status.result.bytes_written !== this.file.size || typeof status.result.path !== 'string') throw new UploadError(400, 'upload_invalid_response')
       this.committed = this.file.size
@@ -147,6 +153,7 @@ export class MachineUpload {
     this.update({ phase: this.commitStarted ? 'finishing' : 'preparing', error: undefined, uncertain: this.commitStarted, resumable: false })
     this.running = this.run(this.control.signal).catch((error: unknown) => {
       if (isAbort(error) || this.disposed) return
+      if (error instanceof ApiError && error.code === 'outcome_unknown') this.commitStarted = true
       this.update({ phase: 'paused', loaded: this.committed, error: error instanceof ApiError ? error.code ?? 'upload_failed' : 'upload_failed', resumable: !this.legacy && (this.commitStarted || transient(error) || error instanceof UploadError && ['upload_busy', 'upload_committing', 'controller_unavailable'].includes(error.code ?? '')), uncertain: this.commitStarted || this.legacy })
     }).finally(() => { this.running = null })
     return this.running
@@ -167,7 +174,16 @@ export class MachineUpload {
     }
     if (!this.id) {
       const begun = await this.retry(() => request<UploadStatus>(`${this.base}/uploads`, 'POST', signal, JSON.stringify(this.parameters), { 'Idempotency-Key': this.key! }), signal)
-      if (typeof begun.upload_id !== 'string' || !/^upl_[a-f0-9]{32}$/.test(begun.upload_id)) throw new UploadError(400, 'upload_invalid_response')
+      if (typeof begun.upload_id !== 'string' || !/^upl_[a-f0-9]{32,64}$/.test(begun.upload_id)) {
+        // Begin may have created staging before returning an incompatible id.
+        // Only address a bounded Controller handle, never a path or URL, and
+        // use this dialog's original scope and cancellation signal.
+        if (typeof begun.upload_id === 'string' && /^[A-Za-z0-9_]{8,80}$/.test(begun.upload_id)) {
+          this.id = begun.upload_id
+          try { await request(`${this.base}/uploads/${encodeURIComponent(this.id)}`, 'DELETE', signal) } catch { /* Server expiry remains the backstop. */ }
+        }
+        throw new UploadError(400, 'upload_invalid_response')
+      }
       this.id = begun.upload_id
       // Begin's compact response does not contain state/reconciled; GET is the
       // authority for a replayed begin that may already have committed.

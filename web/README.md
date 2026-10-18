@@ -740,4 +740,10 @@ file. It reports cancellation only after cleanup is acknowledged; unreachable
 machines or a busy cleanup report **cleanup pending**. Cancellation is disabled
 once commit starts. A dropped commit response is resolved using the same upload's
 status/receipt, never by interpreting an existing destination file as success.
+An expired or forgotten receipt reported as `unknown` / `outcome_unknown` keeps
+the result uncertain: check the file on the machine before uploading again; it
+is not proof that publication failed. Upload handles accept `upl_` plus 32–64
+lowercase hex characters (Core currently generates 64). A rejected begin handle
+that still matches the Controller's bounded identifier syntax gets a scoped
+best-effort abort; unsafe strings are never used as request paths.
 See the operator guide for temporary-file visibility, expiry and server quotas.

@@ -21,6 +21,7 @@ export const en = {
   "upload.cancelled": "Upload cancelled. The temporary file was removed.",
   "upload.cleanup_pending": "Upload stopped. Temporary file cleanup is pending on the machine.",
   "upload.outcome_unknown": "The upload result is not yet confirmed. Check the result before trying another upload.",
+  "upload.outcome_unknown_terminal": "The upload result could not be confirmed. Check the file on the machine before uploading again.",
   "upload.failed": "Upload paused or failed. Retry to resume if available, or cancel before starting again.",
   "upload.exists": "A file with this name already exists. Cancel and enable replacement to upload again.",
   "upload.denied": "Upload is not permitted. Check your access before trying again.",

@@ -22,6 +22,7 @@ export const zh: Messages = {
   "upload.cancelled": "上传已取消，临时文件已移除。",
   "upload.cleanup_pending": "上传已停止，机器上的临时文件待清理。",
   "upload.outcome_unknown": "上传结果尚未确认。请先检查结果，再尝试其他上传。",
+  "upload.outcome_unknown_terminal": "无法确认上传结果。再次上传前，请先检查机器上的文件。",
   "upload.failed": "上传已暂停或失败。可续传时请重试，或先取消再重新上传。",
   "upload.exists": "已存在同名文件。请取消后勾选替换，再次上传。",
   "upload.denied": "没有上传权限。请先检查访问权限。",

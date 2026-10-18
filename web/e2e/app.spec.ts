@@ -3098,7 +3098,8 @@ for (const [status, step, warning] of [['unknown', 9, true], ['timed_out', 6, tr
 
 test.describe('resumable machine upload', () => {
   const mib = 1024 * 1024
-  const uploadId = 'upl_0123456789abcdef0123456789abcdef'
+  // Core generates upl_ + two Uuid::new_v4().simple() values (32 hex each).
+  const coreUploadId = 'upl_0123456789ab4def8123456789abcdef0123456789ab4def8123456789abcdef'
   async function support(page: Page) {
     await page.route('**/api/auth/config', (route) => ok(route, { capabilities: ['machine.upload.v3'] }))
     await page.route('**/api/workspaces/ws-1/snapshot', (route) => ok(route, { ...snapshot, servers: snapshot.servers.map((machine) => ({ ...machine, capabilities: ['machine.upload.v3'] })) }))
@@ -3125,11 +3126,12 @@ test.describe('resumable machine upload', () => {
     }, { size, name })
     return dialog
   }
-  function fixture(page: Page, options: { dropPart?: boolean; failures?: number; commitDrop?: boolean; commitHold?: Promise<void>; partHold?: Promise<void>; partHoldAfter?: number; abortPending?: boolean; denied?: boolean; beginDrop?: boolean; unreconciled?: boolean; rateLimit?: boolean; rateAfter?: string; abortBusy?: boolean; abortCommitted?: boolean; hashConflict?: boolean; sizeMismatch?: boolean; unknownFailure?: boolean; commitFailure?: boolean } = {}) {
-    const calls = { begin: [] as string[], offsets: [] as number[], lengths: [] as number[], hashes: [] as string[], statuses: 0, commits: 0, aborts: 0 }
+  function fixture(page: Page, options: { dropPart?: boolean; failures?: number; commitDrop?: boolean; commitHold?: Promise<void>; partHold?: Promise<void>; partHoldAfter?: number; abortPending?: boolean; denied?: boolean; beginDrop?: boolean; unreconciled?: boolean; rateLimit?: boolean; rateAfter?: string; abortBusy?: boolean; abortCommitted?: boolean; hashConflict?: boolean; sizeMismatch?: boolean; unknownFailure?: boolean; commitFailure?: boolean; uploadId?: unknown; abortFailure?: boolean; outcome?: 'unknown' | 'failed'; outcomeAtBegin?: boolean; outcomeHttpError?: boolean } = {}) {
+    const uploadId = options.uploadId ?? coreUploadId
+    const calls = { begin: [] as string[], offsets: [] as number[], lengths: [] as number[], hashes: [] as string[], statuses: 0, commits: 0, aborts: 0, abortedIds: [] as string[] }
     let size = 0, committed = 0, state = 'active', dropped = false, attempts = 0
     const receipt = () => ({ server_id: 'srv-a', path: 'repo/payload.bin', bytes_written: size, sha256: '0'.repeat(64), committed_at: new Date().toISOString() })
-    const status = () => ({ upload_id: uploadId, size, committed_offset: committed, part_bytes_max: 8 * mib, state, reconciled: !options.unreconciled, cleanup_pending: options.abortPending ?? false, result: state === 'committed' ? receipt() : undefined })
+    const status = () => ({ upload_id: uploadId, size, committed_offset: committed, part_bytes_max: 8 * mib, state: options.outcome && (options.outcomeAtBegin || calls.commits) ? options.outcome : state, failure_code: options.outcome && (options.outcomeAtBegin || calls.commits) ? 'outcome_unknown' : undefined, reconciled: !options.unreconciled, cleanup_pending: options.abortPending ?? false, result: state === 'committed' ? receipt() : undefined })
     const ready = page.route('**/api/workspaces/ws-1/machines/srv-a/uploads**', async (route) => {
       const request = route.request(), method = request.method(), url = new URL(request.url())
       if (method === 'POST' && url.pathname.endsWith('/uploads')) {
@@ -3144,7 +3146,8 @@ test.describe('resumable machine upload', () => {
         return ok(route, url.pathname.endsWith('/uploads') ? { uploads: [value] } : value)
       }
       if (method === 'DELETE') {
-        calls.aborts++
+        calls.aborts++; calls.abortedIds.push(decodeURIComponent(url.pathname.split('/').at(-1)!))
+        if (options.abortFailure) return route.fulfill({ status: 503, json: { error: { code: 'controller_unavailable' } } })
         if (options.abortBusy && calls.aborts === 1) return route.fulfill({ status: 409, headers: { 'Retry-After': '1' }, json: { error: { code: 'upload_busy' } } })
         if (options.abortCommitted) { state = 'committed'; return route.fulfill({ status: 409, headers: { 'Retry-After': '1' }, json: { error: { code: 'upload_committed' } } }) }
         state = 'aborted'; return ok(route, status())
@@ -3167,6 +3170,8 @@ test.describe('resumable machine upload', () => {
       if (method === 'POST' && url.pathname.endsWith('/commit')) {
         calls.commits++
         await options.commitHold
+        if (options.outcomeHttpError) return route.fulfill({ status: 409, json: { error: { code: 'outcome_unknown' } } })
+        if (options.outcome) return ok(route, status())
         if (options.commitFailure) return route.fulfill({ status: 409, json: { error: { code: 'machine_file_exists' } } })
         state = 'committed'
         if (options.commitDrop && calls.commits === 1) return route.abort('connectionreset')
@@ -3189,6 +3194,76 @@ test.describe('resumable machine upload', () => {
     expect(calls.begin).toHaveLength(1)
     expect(calls.commits).toBe(1)
     await expect(dialog.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '100')
+  })
+  test('the earlier 32-hex handle remains compatible', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { uploadId: 'upl_' + 'a'.repeat(32) }); await ready
+    const dialog = await open(page, 0)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByText('Uploaded repo/payload.bin (0 B).')).toBeVisible()
+    expect(calls.commits).toBe(1)
+  })
+  for (const [name, id, cleanup] of [
+    ['short hex', 'upl_' + 'a'.repeat(31), true],
+    ['long hex', 'upl_' + 'a'.repeat(65), true],
+    ['uppercase hex', 'upl_' + 'A'.repeat(32), true],
+    ['path', '../other-upload', false],
+    ['URL', 'https://other.invalid/upload', false],
+    ['oversized handle', 'a'.repeat(81), false],
+    ['non-string', 12345, false],
+  ] as const) test(`rejected begin handle cleans up only a safe Controller identifier (${name})`, async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { uploadId: id }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Upload paused or failed')
+    expect(calls.aborts).toBe(cleanup ? 1 : 0)
+    expect(calls.abortedIds).toEqual(cleanup ? [id] : [])
+    expect(calls.offsets).toHaveLength(0)
+    expect(calls.commits).toBe(0)
+    await expect(dialog.getByText('Upload cancelled.', { exact: false })).toHaveCount(0)
+  })
+  test('rejected begin handle with failed cleanup never claims removal or sends bytes', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { uploadId: 'upl_' + 'A'.repeat(32), abortFailure: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Upload paused or failed')
+    expect(calls.aborts).toBe(1)
+    expect(calls.offsets).toHaveLength(0)
+    expect(calls.commits).toBe(0)
+    await expect(dialog.getByText('The temporary file was removed.', { exact: false })).toHaveCount(0)
+  })
+  for (const state of ['unknown', 'failed'] as const) for (const atBegin of [true, false]) test(`terminal ${state}/outcome_unknown stays uncertain (${atBegin ? 'begin replay' : 'commit'})`, async ({ page }, info) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { outcome: state, outcomeAtBegin: atBegin }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toHaveText('The upload result could not be confirmed. Check the file on the machine before uploading again.')
+    await expect(dialog.getByRole('button', { name: 'Cancel upload' })).toHaveCount(0)
+    await dialog.getByRole('button', { name: 'Check result' }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Check the file on the machine')
+    expect(calls.commits).toBe(atBegin ? 0 : 1)
+    expect(calls.aborts).toBe(0)
+    if (atBegin) expect(calls.offsets).toHaveLength(0)
+    await expect(dialog.getByText('Uploaded repo/payload.bin', { exact: false })).toHaveCount(0)
+    if (state === 'unknown' && !atBegin) {
+      await page.setViewportSize({ width: 390, height: 900 })
+      await page.evaluate(async () => { const { setLocale } = await import('/src/i18n/index.ts'); setLocale('zh') })
+      await expect(dialog.getByRole('alert')).toHaveText('无法确认上传结果。再次上传前，请先检查机器上的文件。')
+      await page.screenshot({ path: info.outputPath('upload-terminal-unknown-390-zh.png') })
+    }
+  })
+  test('an outcome_unknown HTTP refusal also preserves commit uncertainty', async ({ page }) => {
+    await support(page)
+    const { calls, ready } = fixture(page, { outcome: 'unknown', outcomeHttpError: true }); await ready
+    const dialog = await open(page)
+    await dialog.getByRole('button', { name: 'Upload', exact: true }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Check the file on the machine')
+    await dialog.getByRole('button', { name: 'Check result' }).click()
+    await expect(dialog.getByRole('alert')).toContainText('Check the file on the machine')
+    expect(calls.commits).toBe(1)
+    expect(calls.aborts).toBe(0)
   })
   test('128 MiB + 1 is rejected before begin', async ({ page }) => {
     await support(page)

@@ -77,7 +77,7 @@ export function MachineUploadDialog({ workspaceId, machine, onClose }: { workspa
     : view.phase === 'preparing' ? t('upload.preparing')
     : view.phase === 'uploading' ? t('upload.progress', { sent: uploadBytes(view.loaded), total: uploadBytes(view.total) }) : ''
   const tooLarge = Boolean(file && file.size > max)
-  const problem = error || (tooLarge ? t(mode === 'legacy' ? 'upload.upgrade_limit' : 'upload.too_large') : '') || (view.phase === 'paused' ? view.uncertain ? t('upload.outcome_unknown') : uploadErrorMessage(view.error) : '')
+  const problem = error || (tooLarge ? t(mode === 'legacy' ? 'upload.upgrade_limit' : 'upload.too_large') : '') || (view.phase === 'paused' ? view.uncertain ? t(view.error === 'outcome_unknown' ? 'upload.outcome_unknown_terminal' : 'upload.outcome_unknown') : uploadErrorMessage(view.error) : '')
   const percentage = view.phase === 'succeeded' ? 100 : view.total ? Math.min(100, Math.floor(view.loaded / view.total * 100)) : 0
   return <Dialog open onOpenChange={(open) => { if (!open && !busy && !retained) onClose() }}>
     <DialogContent onOpenAutoFocus={(event) => { event.preventDefault(); const input = directoryInput.current; input?.focus(); input?.setSelectionRange(input.value.length, input.value.length) }} className={`max-h-[calc(100dvh-2rem)] overflow-y-auto ${busy || retained ? '[&>button]:hidden' : ''}`}>
