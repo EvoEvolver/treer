@@ -66,6 +66,7 @@ test('tabs persist only bounded IDs, restore cold and prune deleted IDs', async 
   await open(page, 'Alpha'); await open(page, 'Terminal')
   // The URL names the selected workload and restores it on reload; leaving to Overview first keeps this a cold restore.
   await switchTab(page, 'Overview')
+  await expect(page).toHaveURL(new RegExp(`${workspaceUrl}$`))
   await page.reload()
   await expect(page.getByRole('tab', { name: 'Tab /Alpha', exact: true })).toBeVisible()
   await expect(page.getByRole('tab', { name: 'Tab /Terminal', exact: true })).toHaveAttribute('title', /Unloaded/)
@@ -80,6 +81,26 @@ test('tabs persist only bounded IDs, restore cold and prune deleted IDs', async 
   backend.remove('tab-0')
   await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
   await expect(page.locator('.xterm')).toHaveCount(0)
+})
+for (const mobile of [false, true]) test(`Overview clears the workload URL in the click turn before reload ${mobile ? '390' : 'desktop'}`, async ({ page }) => {
+  await page.setViewportSize({ width: mobile ? 390 : 1360, height: 900 })
+  const backend = await fixture(page)
+  await gotoWorkspace(page)
+  await open(page, 'Terminal', mobile)
+  await expect(page).toHaveURL(new RegExp(`${workspaceUrl}/workloads/tab-0$`))
+  await expect.poll(() => backend.connections.length).toBe(1)
+  if (mobile) await page.getByRole('button', { name: /^Show all tabs/ }).click()
+  const overview = mobile
+    ? page.getByRole('button', { name: 'Open tab Overview', exact: true })
+    : page.getByRole('tab', { name: 'Tab Overview', exact: true })
+  // Read the address before yielding to React effects. A later reload/copy must
+  // not observe the previous workload after the Overview click handler returns.
+  const path = await overview.evaluate((element: HTMLElement) => { element.click(); return location.pathname })
+  expect(path).toBe(workspaceUrl)
+  await page.reload()
+  await expect(page.getByRole('heading', { name: 'Workspace overview' })).toBeVisible()
+  await expect(page.locator('iframe,.xterm')).toHaveCount(0)
+  expect(backend.connections).toHaveLength(1)
 })
 test('tabs have roving keyboard navigation, shortcuts and close fallback', async ({ page }) => {
   const backend = await fixture(page)
