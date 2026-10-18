@@ -208,6 +208,24 @@ Offline focused checks: `python3 apps/message-endpoint/tests/run.py` (stripped
 Treer/harness environment, private HOME/temp, private worktree target). Independent
 Cargo.lock pinned; review/audit dependencies and build scripts. No root Core gate.
 
+### Optimized relay memory observation (not full-system acceptance)
+
+`env -i PATH=/usr/bin:/bin /usr/bin/python3 -I
+apps/message-endpoint/tests/measure_relay_rss.py target/release/treer-endpoint`
+measures only a newly spawned, optimized relay with its real private SQLite store
+and an empty synthetic mailbox. It does not call the installed Treer CLI or touch
+an enrolled machine. The synthetic Python CLI waits for one second per receive;
+its RSS is reported separately, never hidden in a claimed native total.
+
+On local Darwin/arm64, release relay SHA-256
+`61bbeba5b466843721af3a2ef1f09a61cdd82470b5826a4e412978eb219a2855`
+(source `7835d89e`), 25 samples reported relay RSS min/median/max
+3424/3808/5184 KiB. The synthetic Python child was 8080/10736/10912 KiB.
+This observation is not a memory ceiling or evidence for populated queues,
+multiple endpoints, a different OS/build, or native Treer CLI + Host/Controller
+total RSS. Release still owns that native acceptance. Measurements and process
+cleanup address only PIDs spawned by the helper; argv/environment are not read.
+
 The Unix CLI adapter invokes only fixed send/receive/ack operations using this
 process's own injected identity. Sends use stdin envelopes for bodies and external
 metadata; contexts are separately validated CLI options. It caps combined child
