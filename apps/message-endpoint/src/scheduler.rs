@@ -53,6 +53,7 @@ pub struct WorkerStatus {
     pub notice_core_handoffs: u64,
     pub handoff_failures: u64,
     pub handoffs_stopped: bool,
+    pub cli_integrity_failed: bool,
     pub last_handoff_failure: Option<&'static str>,
     pub receive_pages: u64,
     pub core_acked: u64,
@@ -134,6 +135,7 @@ impl CoreWorkers {
             notice_core_handoffs: 0,
             handoff_failures: 0,
             handoffs_stopped: false,
+            cli_integrity_failed: false,
             last_handoff_failure: None,
             receive_pages: c.pages.load(Ordering::Relaxed),
             core_acked: c.acked.load(Ordering::Relaxed),
@@ -178,11 +180,13 @@ fn failure_code(code: u64) -> Option<&'static str> {
         7 => Some("invalid_batch"),
         8 => Some("revision"),
         9 => Some("refetch_rate_limited"),
+        10 => Some("cli_integrity_failed"),
         _ => None,
     }
 }
 fn hub_failure(error: crate::hub::Error) -> u64 {
     match error {
+        crate::hub::Error::Integrity | crate::hub::Error::Core(crate::core::Error::Integrity) => 10,
         crate::hub::Error::Storage(_) => 3,
         crate::hub::Error::Core(_) => 1,
         crate::hub::Error::Binding => 4,

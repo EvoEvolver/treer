@@ -75,7 +75,17 @@ pub const STARTUP_ERROR_BACKOFF_SECONDS: u64 = 30;
 pub(crate) fn hash_executable(path: &Path) -> Result<String, Error> {
     use sha2::{Digest, Sha256};
     use std::{fs::File, io::Read};
-    let mut file = File::open(path).map_err(|_| Error::Configuration)?;
+    let fd = rustix::fs::open(
+        path,
+        rustix::fs::OFlags::RDONLY | rustix::fs::OFlags::CLOEXEC | rustix::fs::OFlags::NONBLOCK,
+        rustix::fs::Mode::empty(),
+    )
+    .map_err(|_| Error::Configuration)?;
+    let mut file = File::from(fd);
+    let metadata = file.metadata().map_err(|_| Error::Configuration)?;
+    if !metadata.is_file() || metadata.len() > 64 * 1024 * 1024 {
+        return Err(Error::Configuration);
+    }
     let mut hash = Sha256::new();
     let mut size = 0usize;
     let mut bytes = [0u8; 65536];
@@ -154,7 +164,7 @@ impl Relay<Core> {
         config.validate(own_id)?;
         let actual =
             config.verify_binaries(&std::env::current_exe().map_err(|_| Error::Configuration)?)?;
-        let mailbox = Core::new(&config.cli, own_id)?;
+        let mailbox = Core::new_pinned(&config.cli, own_id, &config.cli_sha256)?;
         let store = Store::open(&config.state_directory, Limits::default())?;
         Ok((Self::provision(config, store, mailbox)?, actual))
     }

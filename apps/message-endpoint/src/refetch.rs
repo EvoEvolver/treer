@@ -34,6 +34,7 @@ pub struct Refetched {
 }
 enum FetchFailure {
     IdentityMismatch,
+    Integrity,
     Unavailable,
     Timeout,
     OutputLimit,
@@ -43,6 +44,7 @@ enum FetchFailure {
 impl From<crate::core::Error> for FetchFailure {
     fn from(error: crate::core::Error) -> Self {
         match error {
+            crate::core::Error::Integrity => Self::Integrity,
             crate::core::Error::Unavailable => Self::Unavailable,
             crate::core::Error::Timeout => Self::Timeout,
             crate::core::Error::OutputLimit => Self::OutputLimit,
@@ -55,6 +57,7 @@ impl FetchFailure {
     fn audit_action(&self) -> &'static str {
         match self {
             Self::IdentityMismatch => "refetch_hub_identity_mismatch",
+            Self::Integrity => "refetch_cli_integrity_failed",
             Self::Unavailable => "refetch_core_unavailable",
             Self::Timeout => "refetch_core_timeout",
             Self::OutputLimit => "refetch_core_output_limit",

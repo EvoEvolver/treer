@@ -92,7 +92,8 @@ pub fn run(config: Config) -> Result<(), Error> {
     }
     let accounts = crate::telegram_workers::load(&config.telegram_accounts)
         .map_err(|_| Error::Configuration)?;
-    let core = Core::new(&config.cli, &config.hub_id).map_err(|_| Error::Configuration)?;
+    let core = Core::new_pinned(&config.cli, &config.hub_id, &config.cli_sha256)
+        .map_err(|_| Error::Configuration)?;
     let auth = OwnerAuth::new(
         &config.proxy_url,
         &config.service_id,
@@ -136,6 +137,7 @@ pub fn run(config: Config) -> Result<(), Error> {
         status.notice_core_handoffs = hs.notice_core_handoffs;
         status.handoff_failures = hs.handoff_failures;
         status.handoffs_stopped = hs.handoffs_stopped;
+        status.cli_integrity_failed = hub.backend().integrity_failed();
         status.last_handoff_failure = hub.last_core_handoff_failure().map_err(|_| ())?;
         let (audit_full, emergency_pause_bindings) = hub.owner_audit_capacity().map_err(|_| ())?;
         Ok(SettingsSnapshot {

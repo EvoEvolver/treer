@@ -24,6 +24,8 @@ pub enum Error {
     Core(#[from] crate::core::Error),
     #[error("hub_binding_unavailable")]
     Binding,
+    #[error("hub_cli_integrity_failed")]
+    Integrity,
     #[error("hub_revision_conflict")]
     Revision,
     #[error("hub_rejection_budget_exhausted")]
@@ -38,9 +40,15 @@ impl From<rusqlite::Error> for Error {
 }
 
 pub trait Directory {
+    fn integrity_ok(&self) -> bool {
+        true
+    }
     fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error>;
 }
 impl Directory for Core {
+    fn integrity_ok(&self) -> bool {
+        !self.integrity_failed()
+    }
     fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error> {
         self.agent_metadata(id)
     }
@@ -448,6 +456,9 @@ impl<M: Mailbox + Directory> Hub<M> {
         Ok(())
     }
     pub(crate) fn blocked(&self) -> Result<bool, Error> {
+        if !self.mailbox.integrity_ok() {
+            return Err(Error::Integrity);
+        }
         // Maintenance reports problems, but each admission/handoff also needs
         // its own fail-closed gate before using private persistent state.
         self.store.recheck_private_storage()?;

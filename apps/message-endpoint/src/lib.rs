@@ -1,6 +1,8 @@
 //! App-owned Core Message envelope/queue helpers. No runtime activation yet.
 #![forbid(unsafe_code)]
 #[cfg(unix)]
+mod cli_integrity;
+#[cfg(unix)]
 pub mod core;
 pub mod failures;
 #[cfg(unix)]

@@ -924,8 +924,8 @@ expected/current Tree display paths, pause/revision/reason, relay version/state
 assertions and worker counters. It excludes cwd, full Core metadata, message
 bodies, transport configuration/secrets and full relay diagnostic hashes. Tree
 paths remain presentation/drift information, never routing authorization. The
-CLI hash check is currently startup-only; periodic integrity monitoring, a
-listener header-read timeout and the dated Rust/npm dependency audit remain
+CLI checks now detect runtime drift as described below; a listener header-read
+timeout and the dated Rust/npm dependency audit remain
 pre-activation work. Versioned release files must be immutable to untrusted OS
 users; neither a hash nor 0600 protects against another process under the same UID.
 
@@ -1120,8 +1120,7 @@ restarts another App/Agent or changes a remote machine.
 
 The page now separates the pause control and its own confirmation from Telegram
 target fields, and embedded cards deep-link to that endpoint's dedicated pause
-control. Browser token/account editing, owner resume, recovery/archive controls,
-permanent inbound Core-handoff failure parking, CLI periodic integrity checks,
+control. Browser token/account editing, owner resume, archive/receipt clearing,
 header-read timeout, dated dependency audit, Policy evidence and live acceptance
 remain unfinished. These limitations must be closed before migration/activation.
 
@@ -1194,3 +1193,24 @@ Retry and irreversible discard have independent per-transfer confirmations in th
 UI; confirming retry never enables discard. Confirmations clear on inspection or
 a successful mutation. The discard checkbox explicitly states that deletion cannot
 be undone, separate from the warning about potentially duplicate retries.
+
+### Running CLI pin checks
+
+Both programs construct Core clients using the operator-configured CLI SHA-256;
+there is no unpinned production constructor. Before each CLI operation they check
+regular-file metadata (including inode/device, length, mode, mtime and ctime).
+A changed stamp triggers a full bounded hash. With unchanged metadata, the next
+Core operation once the previous hash is at least 30 seconds old rehashes it. Clones share a sticky failure latch.
+Missing, unreadable, nonregular, oversized or mismatched files prevent further CLI
+execution; restoring bytes does not clear the latch. Hub admission and external
+handoff gates also check it, and owner status displays a fixed integrity failure.
+The settings HTTP server and safety pause remain available. Already in-flight
+network operations can finish; an authorized artifact/config recovery and process
+restart must be arranged by the operator, not an App button.
+
+Hashing opens nonblocking and rejects nonregular files before reading, so replacing
+a CLI with a FIFO cannot wait forever for a writer. This is installation drift
+detection, **not OS isolation or race-free execution attestation**: a hostile same-OS
+principal can race path checks against spawn, and a cached stamp is not a new hash
+on every invocation. Use an independent OS user/container and owner-enforced Policy;
+this does not prove any endpoint's current Core command declaration or argv.

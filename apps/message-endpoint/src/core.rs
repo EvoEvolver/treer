@@ -15,6 +15,8 @@ const OUTPUT_LIMIT: usize = 1024 * 1024;
 pub enum Error {
     #[error("core_cli_unavailable")]
     Unavailable,
+    #[error("core_cli_integrity_failed")]
+    Integrity,
     #[error("core_cli_timeout")]
     Timeout,
     #[error("core_cli_output_limit")]
@@ -68,20 +70,42 @@ pub struct ReceiveBatch {
 pub struct Core {
     executable: PathBuf,
     own_id: String,
+    integrity: std::sync::Arc<crate::cli_integrity::Guard>,
 }
 
 impl Core {
     pub(crate) fn is_identity(&self, id: &str) -> bool {
         self.own_id == id
     }
+    #[cfg(test)]
     pub fn new(executable: &Path, own_id: &str) -> Result<Self, Error> {
+        let hash = crate::relay::hash_executable(executable).map_err(|_| Error::Integrity)?;
+        Self::new_pinned(executable, own_id, &hash)
+    }
+    pub fn new_pinned(
+        executable: &Path,
+        own_id: &str,
+        expected_sha256: &str,
+    ) -> Result<Self, Error> {
         if !executable.is_absolute() || !valid_id(own_id) {
             return Err(Error::Invalid);
         }
         Ok(Self {
             executable: executable.into(),
             own_id: own_id.into(),
+            integrity: std::sync::Arc::new(
+                crate::cli_integrity::Guard::new(executable, expected_sha256)
+                    .map_err(|_| Error::Integrity)?,
+            ),
         })
+    }
+
+    pub fn integrity_failed(&self) -> bool {
+        self.integrity.failed()
+    }
+    fn call(&self, arguments: &[String], input: Option<&[u8]>) -> Result<Value, Error> {
+        self.integrity.check().map_err(|_| Error::Integrity)?;
+        run(&self.executable, arguments, input, Duration::from_secs(15))
     }
 
     /// Stable IDs bypass CLI Tree enumeration. Never resolve a user-supplied path.
@@ -89,11 +113,9 @@ impl Core {
         if !(id.starts_with("ag_") || id.starts_with("app_")) || !valid_id(id) {
             return Err(Error::Invalid);
         }
-        let result: AgentMetadata = serde_json::from_value(run(
-            &self.executable,
+        let result: AgentMetadata = serde_json::from_value(self.call(
             &["agent".into(), "show".into(), "--".into(), id.into()],
             None,
-            Duration::from_secs(15),
         )?)
         .map_err(|_| Error::Invalid)?;
         if result.agent_id != id
@@ -123,8 +145,7 @@ impl Core {
         if wait_ms > 1000 {
             return Err(Error::Invalid);
         }
-        let result: ReceiveBatch = serde_json::from_value(run(
-            &self.executable,
+        let result: ReceiveBatch = serde_json::from_value(self.call(
             &[
                 "message".into(),
                 "receive".into(),
@@ -132,7 +153,6 @@ impl Core {
                 "--limit=10".into(),
             ],
             None,
-            Duration::from_secs(15),
         )?)
         .map_err(|_| Error::Invalid)?;
         if result.deliveries.len() > 10
@@ -182,8 +202,7 @@ impl Core {
         struct Response {
             message: BoundMessage,
         }
-        let result: Response = serde_json::from_value(run(
-            &self.executable,
+        let result: Response = serde_json::from_value(self.call(
             &[
                 "message".into(),
                 "get".into(),
@@ -191,7 +210,6 @@ impl Core {
                 message_id.into(),
             ],
             None,
-            Duration::from_secs(15),
         )?)
         .map_err(|_| Error::Invalid)?;
         let m = result.message;
@@ -254,13 +272,8 @@ impl Core {
         struct Response {
             message: Message,
         }
-        let result: Response = serde_json::from_value(run(
-            &self.executable,
-            &arguments,
-            Some(&envelope),
-            Duration::from_secs(15),
-        )?)
-        .map_err(|_| Error::Invalid)?;
+        let result: Response = serde_json::from_value(self.call(&arguments, Some(&envelope))?)
+            .map_err(|_| Error::Invalid)?;
         if result.message.sender.kind != SenderKind::Agent
             || result.message.sender.id != self.own_id
             || !valid_id(&result.message.message_id)
@@ -276,8 +289,7 @@ impl Core {
             return Err(Error::Invalid);
         }
         let key = crate::protocol::digest_id("ack", &self.own_id, 1, delivery);
-        let value = run(
-            &self.executable,
+        let value = self.call(
             &[
                 "message".into(),
                 "ack".into(),
@@ -286,7 +298,6 @@ impl Core {
                 delivery.into(),
             ],
             None,
-            Duration::from_secs(15),
         )?;
         #[derive(Deserialize)]
         struct Response {
@@ -433,6 +444,38 @@ mod tests {
         fs::write(&executable, format!("#!/usr/bin/python3\n{code}\n")).unwrap();
         fs::set_permissions(&executable, fs::Permissions::from_mode(0o700)).unwrap();
         (temporary, executable)
+    }
+    #[test]
+    fn pinned_cli_replacement_is_never_executed_and_poison_is_shared_with_hub_gate() {
+        let (_temporary, executable) =
+            fake("import json; print(json.dumps({'deliveries':[], 'remaining_unacknowledged':0}))");
+        let approved = std::fs::read(&executable).unwrap();
+        let pin = crate::relay::hash_executable(&executable).unwrap();
+        let core = Core::new_pinned(&executable, "app_own", &pin).unwrap();
+        assert!(core.receive(0).unwrap().is_empty());
+        let clone = core.clone();
+        let marker = executable.with_extension("executed");
+        std::fs::write(
+            &executable,
+            format!("#!/bin/sh\ntouch '{}'\n", marker.display()),
+        )
+        .unwrap();
+        assert!(matches!(core.receive(0), Err(Error::Integrity)));
+        assert!(!marker.exists());
+        assert!(clone.integrity_failed());
+        std::fs::write(&executable, approved).unwrap();
+        assert!(matches!(
+            clone.ack("delivery_fixture"),
+            Err(Error::Integrity)
+        ));
+        let hub = crate::hub::Hub::new(
+            crate::store::Store::memory(crate::store::Limits::default()).unwrap(),
+            clone,
+            "app_own",
+            "ws_test",
+        )
+        .unwrap();
+        assert!(matches!(hub.blocked(), Err(crate::hub::Error::Integrity)));
     }
     #[test]
     fn fixed_operations_match_real_cli_contract_and_keep_body_off_argv() {

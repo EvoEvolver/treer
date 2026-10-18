@@ -4,6 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 import sys
+import time
 import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from http_fixture import TOKEN, fixture
@@ -147,4 +148,27 @@ class Runtime(unittest.TestCase):
             self.assertEqual([a['action'] for a in older['audit']],['retry_parked','discard_parked'])
             self.assertIsNone(older['next_audit_before'])
             db.close()
+    def test_running_cli_replacement_latches_without_execution_and_owner_can_still_pause(self):
+        with fixture(BINARY) as f:
+            cli=f['state'].parent/'fixture-cli'
+            original=cli.read_bytes()
+            marker=f['state'].parent/'unapproved-was-executed'
+            cli.write_text('#!/usr/bin/python3\nfrom pathlib import Path\nPath('+repr(str(marker))+').write_text("bad")\n')
+            until=time.monotonic()+5
+            while True:
+                status,_,body=f['request']('/api/settings',{'X-Treer-Identity-Token':TOKEN})
+                snapshot=json.loads(body)
+                if status==200 and snapshot['settings']['workers']['cli_integrity_failed']:
+                    break
+                self.assertLess(time.monotonic(),until,'running CLI replacement not detected')
+                time.sleep(.2)
+            self.assertFalse(marker.exists(),'unapproved CLI was executed')
+            cli.write_bytes(original)
+            snapshot=json.loads(f['request']('/api/settings',{'X-Treer-Identity-Token':TOKEN})[2])
+            self.assertTrue(snapshot['settings']['workers']['cli_integrity_failed'])
+            endpoint=snapshot['settings']['endpoints'][0]
+            trusted={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+            status,_,_=f['request']('/api/configuration',trusted,method='POST',body=json.dumps({'action':'pause','endpoint_id':'ag_demo','revision':endpoint['revision'],'confirm':True}).encode())
+            self.assertEqual(status,200)
+            self.assertFalse(marker.exists())
 if __name__=='__main__':unittest.main()
