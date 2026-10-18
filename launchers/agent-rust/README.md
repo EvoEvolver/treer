@@ -14,6 +14,17 @@ The completed experiment is assessed in [P3](P3-REPORT.md): continue a staged
 port, but do not switch team launchers. The real-browser send failure, missing
 durable user items and detached-child reaping are explicit port blockers.
 
+M2 preview/download reads pin a canonical workspace directory descriptor at
+startup, then open every resolved relative component with `openat` and
+`O_NOFOLLOW` (`O_DIRECTORY` for intermediate components). An intermediate or
+final symlink swapped after path admission is refused. A replaced workspace
+pathname never redefines the pinned root; already opened directories remain
+capabilities to those original objects even if renamed. In-workspace symlinks
+are still supported by canonicalizing their target before the descriptor walk.
+This is read confinement, not isolation from same-account writers, hard links
+or mounts. Directory tree listing still uses pathname metadata/enumeration and
+its replacement race remains an open M2 item; this change covers file bytes only.
+
 M2 transcript admission retains at most 10,000 provider turns and 16 MiB of
 serialized turn content (excluding the outer array separators). Each turn
 replacement is counted without allocating a second serialized history and is

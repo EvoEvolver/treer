@@ -13,7 +13,6 @@ use futures_util::Stream;
 use serde_json::{json, Value};
 use std::{
     io,
-    os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     pin::Pin,
     sync::{
@@ -29,6 +28,7 @@ pub const PREVIEW_LIMIT: usize = 64 * 1024;
 pub const DOWNLOAD_LIMIT_BYTES: u64 = 1 << 30;
 const MAX_CONCURRENT: usize = 2;
 
+#[derive(Debug)]
 pub struct FileError {
     status: StatusCode,
     message: String,
@@ -58,7 +58,9 @@ async fn workspace_path(root: &Path, rel: &str) -> Result<Resolved, FileError> {
     if rel.contains('\0') || rel.split(['/', '\\']).any(|segment| segment == "..") {
         return Err(FileError::new(403, "Parent traversal is not allowed"));
     }
-    let canonical_root = tokio::fs::canonicalize(root).await.map_err(|e| io_error(&e))?;
+    // `root` was canonicalized and anchored once at startup. Never reinterpret
+    // a replacement root symlink as a new workspace on a later request.
+    let canonical_root = root.to_path_buf();
     let requested = Path::new(if rel.is_empty() { "." } else { rel });
     let mut candidate = if requested.is_absolute() { PathBuf::new() } else { canonical_root.clone() };
     for component in requested.components() {
@@ -121,13 +123,30 @@ async fn list_files(root: &Path, rel: &str) -> Result<Value, FileError> {
     Ok(json!({"path":directory.path,"entries":nodes.into_iter().map(|n| n.2).collect::<Vec<_>>()}))
 }
 
-/// Open a canonical regular file; never follows a swapped final symlink.
-async fn open_regular(canonical: &Path) -> Result<(tokio::fs::File, std::fs::Metadata), FileError> {
-    let file = std::fs::OpenOptions::new()
-        .read(true)
-        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-        .open(canonical)
-        .map_err(|e| io_error(&e))?;
+/// Walk from an already-owned directory capability. Every component is opened
+/// without following symlinks, so an intermediate pathname swap cannot redirect
+/// an admitted read outside that capability. Open directories stay pinned even
+/// if subsequently renamed; this is not a same-account isolation boundary.
+fn open_beneath(root: &std::fs::File, relative: &Path) -> io::Result<std::fs::File> {
+    use rustix::fs::{openat, Mode, OFlags};
+    let mut directory = root.try_clone()?;
+    let mut components = relative.components().peekable();
+    while let Some(component) = components.next() {
+        let std::path::Component::Normal(name) = component else {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "invalid workspace path"));
+        };
+        let mut flags = OFlags::RDONLY | OFlags::CLOEXEC | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+        if components.peek().is_some() {
+            flags |= OFlags::DIRECTORY;
+        }
+        directory = openat(&directory, name, flags, Mode::empty())?.into();
+    }
+    Ok(directory)
+}
+
+async fn open_regular(root: &std::fs::File, root_path: &Path, canonical: &Path) -> Result<(tokio::fs::File, std::fs::Metadata), FileError> {
+    let relative = canonical.strip_prefix(root_path).map_err(|_| FileError::new(403, "Path is outside the working directory"))?;
+    let file = open_beneath(root, relative).map_err(|e| io_error(&e))?;
     let metadata = file.metadata().map_err(|e| io_error(&e))?;
     if !metadata.is_file() {
         return Err(FileError::new(400, "Not a regular file"));
@@ -135,9 +154,9 @@ async fn open_regular(canonical: &Path) -> Result<(tokio::fs::File, std::fs::Met
     Ok((tokio::fs::File::from_std(file), metadata))
 }
 
-async fn preview_file(root: &Path, rel: &str) -> Result<Value, FileError> {
+async fn preview_file(root: &Path, anchor: &std::fs::File, rel: &str) -> Result<Value, FileError> {
     let file = workspace_path(root, rel).await?;
-    let (mut handle, metadata) = open_regular(&file.canonical).await?;
+    let (mut handle, metadata) = open_regular(anchor, root, &file.canonical).await?;
     let mut bytes = Vec::with_capacity(PREVIEW_LIMIT + 1);
     (&mut handle).take(PREVIEW_LIMIT as u64 + 1).read_to_end(&mut bytes).await.map_err(|e| io_error(&e))?;
     let truncated = bytes.len() > PREVIEW_LIMIT;
@@ -203,6 +222,7 @@ impl<R: AsyncRead + Unpin> Stream for DownloadBody<R> {
 #[derive(Clone)]
 pub struct Files {
     root: PathBuf,
+    anchor: Arc<std::fs::File>,
     active: Arc<AtomicUsize>,
     max: Duration,
     pub idle: Duration,
@@ -211,13 +231,22 @@ fn millis(name: &str, default: u64) -> Duration {
     Duration::from_millis(std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v > 0).unwrap_or(default).max(100))
 }
 impl Files {
-    pub fn new(root: PathBuf) -> Self {
-        Self {
+    pub fn new(root: PathBuf) -> io::Result<Self> {
+        // main passes the configured canonical cwd. Do not canonicalize again:
+        // a swapped root symlink must fail, not retarget the configuration.
+        // Canonical paths have no symlinks at resolution time. Walking from /
+        // also refuses a newly swapped symlink in a root ancestor at open time.
+        let anchor = open_beneath(&std::fs::File::open("/")?, root.strip_prefix("/").map_err(|_| io::Error::other("invalid workspace root"))?)?;
+        if !anchor.metadata()?.is_dir() {
+            return Err(io::Error::other("workspace root is not a directory"));
+        }
+        Ok(Self {
             root,
+            anchor: Arc::new(anchor),
             active: Arc::new(AtomicUsize::new(0)),
             max: millis("AGENT_UI_DOWNLOAD_MAX_MS", 60 * 60_000),
             idle: millis("AGENT_UI_DOWNLOAD_IDLE_MS", 60_000),
-        }
+        })
     }
 
     pub async fn handle(&self, method: &str, query: &str, headers: &HeaderMap, path: &str) -> Response {
@@ -233,7 +262,7 @@ impl Files {
             )
                 .into_response();
         }
-        let result = if path == "/v1/files/tree" { list_files(&self.root, &file_path).await } else { preview_file(&self.root, &file_path).await };
+        let result = if path == "/v1/files/tree" { list_files(&self.root, &file_path).await } else { preview_file(&self.root, &self.anchor, &file_path).await };
         match result {
             Ok(value) => json_response(StatusCode::OK, value),
             Err(error) => error_response(error, "File or directory not found", "Unable to read file or directory"),
@@ -266,7 +295,7 @@ impl Files {
             Ok(_) => return error_response(FileError::new(400, "A file path is required"), "", ""),
             Err(error) => return error_response(error, "File not found", "Unable to read file"),
         };
-        let (file, metadata) = match open_regular(&resolved.canonical).await {
+        let (file, metadata) = match open_regular(&self.anchor, &self.root, &resolved.canonical).await {
             Ok(opened) => opened,
             Err(error) => return error_response(error, "File not found", "Unable to read file"),
         };
@@ -373,5 +402,75 @@ impl axum::serve::Listener for IdleListener {
     }
     fn local_addr(&self) -> io::Result<Self::Addr> {
         self.listener.local_addr()
+    }
+}
+
+#[cfg(test)]
+mod confinement_tests {
+    use super::*;
+    use std::os::unix::fs::{symlink, DirBuilderExt};
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new() -> Self {
+            let path = std::env::temp_dir().join(format!("rust-files-{}", uuid::Uuid::new_v4()));
+            std::fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+            Self(std::fs::canonicalize(path).unwrap())
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            // Only this test's exact exclusively-created fixture root.
+            std::fs::remove_dir_all(&self.0).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn intermediate_and_final_symlink_swaps_cannot_redirect_admitted_reads() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("workspace");
+        let outside = fixture.0.join("outside");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("nested/data"), "accepted").unwrap();
+        std::fs::write(outside.join("data"), "outside-sentinel").unwrap();
+        let files = Files::new(root.clone()).unwrap();
+        // Pause deterministically after canonical admission, before opening.
+        let admitted = workspace_path(&files.root, "nested/data").await.unwrap();
+        std::fs::rename(root.join("nested"), root.join("original")).unwrap();
+        symlink(&outside, root.join("nested")).unwrap();
+        assert!(open_regular(&files.anchor, &files.root, &admitted.canonical).await.is_err());
+        std::fs::remove_file(root.join("nested")).unwrap();
+        std::fs::rename(root.join("original"), root.join("nested")).unwrap();
+        std::fs::remove_file(root.join("nested/data")).unwrap();
+        symlink(outside.join("data"), root.join("nested/data")).unwrap();
+        assert!(open_regular(&files.anchor, &files.root, &admitted.canonical).await.is_err());
+        assert_eq!(std::fs::read_to_string(outside.join("data")).unwrap(), "outside-sentinel");
+    }
+
+    #[tokio::test]
+    async fn root_replacement_does_not_retarget_the_pinned_workspace() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("workspace");
+        let outside = fixture.0.join("outside");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("data"), "accepted").unwrap();
+        std::fs::write(outside.join("data"), "outside-sentinel").unwrap();
+        let files = Files::new(root.clone()).unwrap();
+        let admitted = workspace_path(&files.root, "data").await.unwrap();
+        std::fs::rename(&root, fixture.0.join("original")).unwrap();
+        symlink(&outside, &root).unwrap();
+        // A previously admitted pathname still uses the original capability.
+        let (mut file, _) = open_regular(&files.anchor, &files.root, &admitted.canonical).await.unwrap();
+        let mut content = String::new();
+        file.read_to_string(&mut content).await.unwrap();
+        assert_eq!(content, "accepted");
+        // New resolutions may not redefine the workspace through the symlink.
+        assert!(workspace_path(&files.root, "data").await.is_err());
+        assert!(Files::new(root.clone()).is_err(), "startup must not recanonicalize a replaced canonical root");
+        assert!(open_beneath(&files.anchor, Path::new("../outside/data")).is_err());
+        assert!(open_beneath(&files.anchor, &outside.join("data")).is_err());
+        assert_eq!(std::fs::read_to_string(outside.join("data")).unwrap(), "outside-sentinel");
     }
 }

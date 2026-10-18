@@ -66,7 +66,7 @@ async fn main() -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or(std::env::current_dir()?),
     )?;
-    let files_root = cwd.clone();
+    let files = files::Files::new(cwd.clone())?;
     let agent = env("TREER_AGENT_ID").unwrap_or_default();
     if agent.len() > 128
         || !agent
@@ -152,7 +152,7 @@ async fn main() -> Result<()> {
         agent: agent.clone(),
         instance: instance.clone(),
         public,
-        files: files::Files::new(files_root),
+        files,
         attachments,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
     };
