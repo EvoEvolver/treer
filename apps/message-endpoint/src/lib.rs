@@ -60,3 +60,6 @@ pub mod telegram_tokens;
 
 #[cfg(all(unix, feature = "hub"))]
 pub mod email;
+
+#[cfg(all(unix, feature = "hub"))]
+pub use settings_http::email_threads;

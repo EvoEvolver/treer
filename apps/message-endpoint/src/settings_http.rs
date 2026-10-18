@@ -1,6 +1,8 @@
 //! Private settings HTTP boundary. No transport credentials or access tokens
 //! ever enter a response. Blocking Proxy calls hold a bounded admission permit,
 //! including after a disconnected caller cancels its async request.
+#[path = "email_threads.rs"]
+pub mod email_threads;
 use crate::{
     oauth::OAuthVault,
     owner_auth::{Error, Owner, OwnerAuth},
@@ -138,6 +140,7 @@ pub struct Settings {
     snapshot: Arc<Snapshot>,
     mutation: Option<Arc<Mutation>>,
     token_mutation: Option<Arc<crate::telegram_tokens::Mutation>>,
+    email: Option<Arc<crate::email_threads::Service>>,
     slots: Arc<Semaphore>,
     writes: WriteGate,
     exports: WriteGate,
@@ -177,6 +180,7 @@ impl Settings {
             snapshot,
             mutation: None,
             token_mutation: None,
+            email: None,
             slots: Arc::new(Semaphore::new(16)),
             writes: WriteGate::default(),
             exports: WriteGate::default(),
@@ -223,6 +227,10 @@ impl Settings {
     pub fn with_assets(mut self, javascript: &'static str, stylesheet: &'static str) -> Self {
         self.javascript = javascript;
         self.stylesheet = stylesheet;
+        self
+    }
+    pub fn with_email(mut self, service: Arc<crate::email_threads::Service>) -> Self {
+        self.email = Some(service);
         self
     }
     pub fn router(self) -> Router {
@@ -379,6 +387,17 @@ async fn handle(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "headers_too_large",
         ));
+    }
+    if parts.uri.path().starts_with("/api/email/") {
+        return match &app.email {
+            Some(service) => {
+                service
+                    .clone()
+                    .handle(peer, parts, body, &app.allowed_hosts)
+                    .await
+            }
+            None => secure(fixed(StatusCode::NOT_FOUND, "route_not_found")),
+        };
     }
     if parts.method == Method::POST
         && matches!(

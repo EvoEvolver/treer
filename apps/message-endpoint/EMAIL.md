@@ -88,7 +88,7 @@ URL transfer, inbound email or nonmember participation is implemented yet.
 The current additive storage module implements fixed-target thread admission,
 notification intents, private outbox records, byte/count/attempt limits, lease
 reclaim, retry/backoff and pause/revocation fencing. It is **not connected to the
-runtime, browser routes, OAuth member sessions or a Proxy email worker yet**.
+runtime or a Proxy email worker yet**.
 The storage methods accept already-verified inputs; they do not authenticate a
 member or authorize activation by themselves. No existing endpoint is changed.
 
@@ -104,8 +104,8 @@ and OS isolation as hub state.
 The next storage increment also has a distinct `MemberAuth` capability (current
 `verify_app` plus directory role on every call), and atomic member reply
 admission with fixed-recipient attribution and idempotency. Existing owner-only
-management remains owner-only. These capabilities are not yet connected to an
-HTTP handler or a member OAuth flow. A bare member ID from JSON cannot construct
+management remains owner-only. These capabilities now have an opt-in HTTP handler and separate member OAuth
+flow; the production runtime has not assembled that handler yet. A bare member ID from JSON cannot construct
 the verified capability.
 
 Historical messages and replies count against the email quota even after
@@ -126,3 +126,14 @@ include upstream errors or credentials. These helpers remain **unwired**: their
 routes, cookie handling, current-member dispatch check and worker assembly are
 not exposed by the running hub. Tests exercise only synthetic loopback servers.
 Reply framing escapes Unicode line/paragraph separators U+2028 and U+2029 too.
+
+The opt-in member HTTP service has separate `__Host-` session/login cookies,
+PKCE state and a generated-thread-only return destination. Its routes are
+`GET /api/email/auth/start?thread=<id>`, `GET /api/email/auth/callback`,
+`POST /api/email/auth/logout`, and `GET|POST /api/email/thread/<id>`.
+Thread POST accepts only `{key,body}` and returns queued, not delivered.
+It authenticates before reading a bounded body, holds a bounded admission slot
+through blocking work, and checks current membership on each request. Owner
+sessions are not member sessions. Invalid injected identity never falls back to
+a valid member cookie. This service is absent unless explicitly assembled with
+`Settings::with_email`; no existing runtime or endpoint is activated by it.
