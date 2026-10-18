@@ -30,6 +30,9 @@ synthetic identity. During notifications this preserves accepted history and
 receipts, persists the dispatch fence, stops the provider and reports a fixed
 owner-visible error without echoing provider content. Startup rejects such
 history without rewriting the journal or falling back to a fresh thread.
+Recovery requires operator inspection and repair of the provider thread; this
+launcher does not repair the malformed history or clear the dispatch fence
+automatically. A malformed resumed thread will be refused on each restart.
 
 Native macOS **does not guarantee detached-descendant cleanup**. A provider or
 tool can immediately call `setsid` or reparent outside the verified process
