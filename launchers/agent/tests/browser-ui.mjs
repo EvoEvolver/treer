@@ -11,6 +11,7 @@ import { testImagesUi } from "./browser-images-ui.mjs";
 import { testFilesDownloadUi } from "./browser-files-download-ui.mjs";
 import { testMobileComposer } from "./browser-mobile-composer.mjs";
 import { fakePrivateState } from "./fake-private-state.mjs";
+import { backend, createSteps, spawnLauncher, supports } from "./launcher-backend.mjs";
 
 // The React UI (public/ui.html) against the real launcher server and a fake Codex: no inference, no Treer mutations.
 // Usage: node tests/browser-ui.mjs [--page index.html]
@@ -20,7 +21,9 @@ const page_ = pageArgIndex > 0 ? process.argv[pageArgIndex + 1] : "index.html";
 const screenshots = process.env.UI_SCREENSHOTS || process.env.CODEX_UI_SCREENSHOTS || await mkdtemp(join(tmpdir(), "ui-shots-"));
 await mkdir(screenshots, { recursive: true });
 const servers = [];
+const unsupported = (what) => Object.assign(new Error(`${what} is not implemented by the ${backend} launcher`), { unsupported: true });
 async function startServer(name, extra, harness = "codex") {
+  if (!supports(harness)) throw unsupported(`The ${harness} harness`);
   const cwd = await mkdtemp(join(tmpdir(), `ui-browser-${name}-`));
   const privateRoot = await realpath(await mkdtemp(join(tmpdir(), `ui-images-${name}-`)));
   const controller = await fakePrivateState("ag_browser_ui");
@@ -36,7 +39,7 @@ async function startServer(name, extra, harness = "codex") {
   const env = hermeticEnv(harness === "claude"
     ? { ...common, AGENT_UI_HARNESS: "claude", AGENT_UI_CWD: cwd, AGENT_UI_PORT: "0", AGENT_UI_PORT_FILE: join(cwd, "port"), AGENT_UI_PUBLIC_DIR: join(app, "public"), CLAUDE_BIN: join(app, "tests/fake-claude.mjs"), ...extra }
     : { ...common, CODEX_UI_CWD: cwd, CODEX_UI_PORT_FILE: join(cwd, "port"), CODEX_BIN: join(app, "tests/fake-codex.mjs"), FAKE_CODEX_UX: "1", ...extra });
-  const server = spawn(join(app, "node_modules/.bin/tsx"), [join(app, "src/index.ts")], { env, stdio: "pipe" });
+  const server = spawnLauncher(app, env);
   let logs = "";
   server.stderr.on("data", (chunk) => { logs += chunk; });
   server.stdout.on("data", (chunk) => { logs += chunk; });
@@ -68,10 +71,15 @@ async function assertTouchTargets(page, selector, label) {
   }
 }
 let browser;
+let base, url, context, page, errors, live, claude, done, imageBase; // shared by the steps below
+const steps = createSteps();
+const { step } = steps;
+const recover = async () => { await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(url("?look=b")); };
 try {
-  const base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1", FAKE_CODEX_FILE_LINKS: "1" });
-  const url = (query = "") => `${base}/${page_}${query}`;
+  base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1", FAKE_CODEX_FILE_LINKS: "1" });
+  url = (query = "") => `${base}/${page_}${query}`;
 
+  await step('page headers and CSP', async () => {
   // Headers: the React page gets the strict policy, the legacy page is unchanged.
   const csp = (await fetch(url())).headers.get("content-security-policy") ?? "";
   const asset = await fetch(url().replace(/index\.html$/, "ui.js"));
@@ -85,11 +93,12 @@ try {
   for (const directive of ["object-src 'none'", "base-uri 'self'", "form-action 'none'"]) assert.ok(csp.includes(directive), `CSP lacks ${directive}`);
   assert.match((await fetch(base + "/")).headers.get("content-security-policy") ?? "", /style-src 'self'(?:;|$)/, "the root serves the same page under the same policy");
 
+  }, recover);
   browser = await chromium.launch({ headless: true });
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "light", extraHTTPHeaders: { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_browser_ui", "x-treer-interface-instance": "browser-ui" } });
+  context = await browser.newContext({ viewport: { width: 1440, height: 900 }, colorScheme: "light", extraHTTPHeaders: { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_browser_ui", "x-treer-interface-instance": "browser-ui" } });
   await context.addInitScript(() => { window.__violations = []; document.addEventListener("securitypolicyviolation", (event) => window.__violations.push(`${event.violatedDirective} ${event.blockedURI} ${event.sample} ${event.sourceFile}:${event.lineNumber}`)); });
-  const page = await context.newPage();
-  const errors = [];
+  page = await context.newPage();
+  errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
     if (message.type() !== "error") return;
@@ -99,6 +108,7 @@ try {
     errors.push(message.text());
   });
 
+  await step('first paint', async () => {
   // First paint: boot.js has set look and theme, React renders the real conversation from the real API.
   await page.goto(url());
   await expect(page.locator("html")).toHaveAttribute("data-look", "b");
@@ -110,6 +120,8 @@ try {
   const inlineStyles = await page.evaluate(() => [...document.querySelectorAll("[style]")].map((e) => `${e.tagName.toLowerCase()}: ${e.getAttribute("style")}`).filter((style) => !/^textarea: height:\s*[\d.]+px;?$|^html: --dock-h:\s*[\d.]+px;?$/.test(style)));
   assert.deepEqual(inlineStyles, [], "only CSSOM-set composer height and --dock-h exist; no markup styles");
 
+  }, recover);
+  await step('conversation body', async () => {
   // Conversation body: markdown through the one sanitized sink, collapsed activity, diffs, plans, failures.
   const chat = page.locator(".chat");
   await expect(chat.locator(".msg.asst strong", { hasText: "src/" })).toHaveCount(1);
@@ -142,6 +154,8 @@ try {
   assert.ok(await page.evaluate(() => document.documentElement.scrollHeight <= innerHeight && document.documentElement.scrollTop === 0), "the page itself never scrolls; only the thread does");
   await page.screenshot({ path: join(screenshots, "conversation-b-light.png") });
 
+  }, recover);
+  await step('touch hit areas', async () => {
   // Actual touch hit areas in all looks/themes, before paging consumes the earlier-messages button.
   for (const look of ["a", "b", "c"]) {
     for (const theme of ["light", "dark"]) {
@@ -161,6 +175,8 @@ try {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto(url());
 
+  }, recover);
+  await step('paging older messages', async () => {
   // Paging: 80 older turns exist; "Load earlier messages" keeps the reader's place and the window grows.
   await expect(page.locator(".older .btn")).toBeVisible();
   const before = await page.locator(".chat .msg.user").count();
@@ -180,6 +196,8 @@ try {
   await expect.poll(() => thread.evaluate((element) => element.scrollHeight - element.scrollTop - element.clientHeight)).toBeLessThan(40);
   await expect(page.locator("#jump")).toHaveCount(0);
 
+  }, recover);
+  await step('looks and themes', async () => {
   // 3 looks x light/dark, persisted look, whitelisted ?look, theme sources.
   const menuButton = { click: () => page.locator('button[aria-controls="appearance"]:visible').first().click() };
   for (const look of ["a", "b", "c"]) {
@@ -221,6 +239,8 @@ try {
   await expect(frame.locator("html")).toHaveAttribute("data-look", "c", "an unknown look in the message is ignored");
   assert.equal(await frame.locator("html").evaluate(() => localStorage.getItem("treer-launcher-look")), null, "a console-sent look is not persisted");
 
+  }, recover);
+  await step('send a message', async () => {
   // Send a message through the real API; a fake Codex answers and the WebSocket pushes the state.
   await page.goto(url("?look=b"));
   const box = page.getByRole("textbox", { name: /Message/ });
@@ -232,6 +252,8 @@ try {
   assert.equal(JSON.parse(response.request().postData()).prompt, "hello from the react ui");
   await expect(box).toHaveValue("");
 
+  }, recover);
+  await step('composer, goal and slash commands', async () => {
   // Composer and status strip on the real API: goal lifecycle, plan, one popover at a time, model settings.
   await page.goto(url("?look=b"));
   const strip = page.getByRole("toolbar", { name: "Run status" });
@@ -291,6 +313,8 @@ try {
   await composerBox.press("Enter");
   await expect(strip.getByRole("button", { name: /^Goal/ })).toContainText("Second objective");
   await expect(composerBox).toHaveValue("");
+  }, recover);
+  await step('model and effort settings', async () => {
   // Model and effort through the settings API.
   await page.getByRole("button", { name: /^Model/ }).click();
   const modelPop = page.getByRole("region", { name: "Model and effort" });
@@ -302,8 +326,10 @@ try {
   await page.keyboard.press("Escape");
   await page.screenshot({ path: join(screenshots, "composer-b-light.png") });
 
+  }, recover);
+  await step('running agent: steer, queue, interrupt', async () => {
   // A running agent: separate Steer and Queue buttons, queued messages, interrupt.
-  const live = await startServer("live", { FAKE_CODEX_LIVE: "1", FAKE_CODEX_MODELS: "1" });
+  live = await startServer("live", { FAKE_CODEX_LIVE: "1", FAKE_CODEX_MODELS: "1" });
   await page.goto(`${live}/${page_}?look=a`);
   const liveBox = page.getByRole("textbox", { name: /Message/ });
   await expect(page.getByRole("button", { name: "Stop current run" })).toBeEnabled();
@@ -340,6 +366,8 @@ try {
   await stopped;
   await page.screenshot({ path: join(screenshots, "composer-a-running.png") });
 
+  }, recover);
+  await step('files panel (tree, filter, preview, phone, links)', async () => {
   // Files: lazy folders, keyboard tree, filter, immediate read-only preview, errors that stay local, mobile tabs.
   const fileRequests = [];
   page.on("request", (request) => { if (request.url().includes("/v1/files")) fileRequests.push(new URL(request.url()).pathname + new URL(request.url()).search); });
@@ -464,6 +492,8 @@ try {
   await filesPanel.getByRole("button", { name: "Close file browser" }).click();
   await page.setViewportSize({ width: 1440, height: 900 });
 
+  }, recover);
+  await step('dialogs and conversation export', async () => {
   // Long text and images open in dialogs; the conversation can be exported as Markdown.
   await page.goto(url("?look=a"));
   const failedGroup = page.locator(".grp").last();
@@ -492,8 +522,10 @@ try {
   assert.match(exported, /^# /);
   for (const expected of ["## You", "remember 1", "```diff", "- [x] Inspect the workspace", "$ npm test", "![pixel]"]) assert.ok(exported.includes(expected), `export lacks ${expected}`);
 
+  }, recover);
+  await step('background tasks (Claude harness)', async () => {
   // Background tasks (Claude harness): status, output tail, polling, panel focus.
-  const claude = await startServer("claude", {}, "claude");
+  claude = await startServer("claude", {}, "claude");
   await page.goto(`${claude}/${page_}?look=c`);
   await page.getByRole("textbox", { name: /Message/ }).fill("report the tasks");
   await expect(page.getByRole("button", { name: "Send message", exact: true })).toBeEnabled();
@@ -514,6 +546,9 @@ try {
   await expect(tasksPanel).toBeHidden();
   await expect(tasksButton).toBeFocused();
 
+  }, recover);
+  await step('header entry points and menus', async () => {
+    if (!claude) throw unsupported("The claude harness");
   // Every look puts the same entry points in the same places: header actions top right on desktop, bottom bar on phones.
   const orders = {};
   for (const look of ["a", "b", "c"]) {
@@ -571,6 +606,9 @@ try {
   }
   assert.equal(new Set(Object.values(orders)).size, 1, "all looks order the header actions identically");
 
+  }, recover);
+  await step('idle is still', async () => {
+    if (!claude) throw unsupported("The claude harness");
   // Idle is still: the status block never animates unless the agent is working; reduced motion removes the working animation too.
   const dotAnimation = () => page.evaluate(() => getComputedStyle(document.querySelector(".status .dot")).animationName);
   for (const look of ["a", "b", "c"]) {
@@ -588,8 +626,10 @@ try {
   }
   await page.setViewportSize({ width: 1440, height: 900 });
 
+  }, recover);
+  await step('finished goal notice', async () => {
   // A finished goal leaves a notice in the conversation (the fake completes a goal when its first turn starts).
-  const done = await startServer("done", {});
+  done = await startServer("done", {});
   await page.goto(`${done}/${page_}?look=c`);
   const doneStrip = page.getByRole("toolbar", { name: "Run status" });
   await doneStrip.getByRole("button", { name: "Set goal" }).click();
@@ -597,6 +637,8 @@ try {
   await page.getByRole("dialog", { name: "Set goal" }).getByRole("button", { name: "Save goal" }).click();
   await expect(page.locator(".goal-done")).toContainText("Goal complete: Finish the migration");
 
+  }, recover);
+  await step('Chinese interface', async () => {
   // Chinese interface: dictionary strings, interpolation, English fallback for a missing key, and no raw keys on screen.
   await page.goto(url("?look=b&lang=zh"));
   await expect(page.locator("html")).toHaveAttribute("lang", "zh-Hans");
@@ -619,6 +661,8 @@ try {
   await chineseGoal.getByRole("button", { name: "取消", exact: true }).click();
   assert.equal(await page.evaluate(() => /\b(?:composer|status|activity|goal|plan|queue|tool|thread|appearance)\.[a-zA-Z.]+\b/.test(document.body.innerText)), false, "no raw message keys on screen");
 
+  }, recover);
+  await step('narrow screen', async () => {
   // Narrow screen: bottom bar, no horizontal overflow, in every look.
   for (const look of ["a", "b", "c"]) {
     await page.setViewportSize({ width: 390, height: 844 });
@@ -633,17 +677,20 @@ try {
 
     await page.screenshot({ path: join(screenshots, `mobile-${look}.png`) });
   }
+  }, recover);
+  await step('CSP violations and page errors', async () => {
   // The only expected violations are the hostile fixture's two inline handlers (img onerror, svg onload): DOMPurify's inert
   // parse trips script-src-attr and then strips them. Anything else, or a different count, is a real policy failure.
   const violations = await page.evaluate(() => window.__violations);
   assert.deepEqual(violations.map((line) => line.split(" ").slice(0, 2).join(" ")), ["script-src-attr inline", "script-src-attr inline"], violations.join("\n"));
   assert.deepEqual(errors.filter((message) => !/inline event handler|status of 500/.test(message)), []); // the 500 is the injected preview failure
-  await testRuntimeControlsUi(browser, screenshots, page_);
-  const imageBase = await startServer("images", { FAKE_CODEX_IMAGES: "1" });
-  await testImagesUi(browser, imageBase, screenshots, page_);
-  await testFilesDownloadUi(browser, imageBase, screenshots, page_);
-  await testMobileComposer(browser, imageBase, screenshots, page_);
-  console.log(`React UI browser checks passed. Screenshots: ${screenshots}`);
+  }, recover);
+  await step("runtime controls (mocked API)", () => testRuntimeControlsUi(browser, screenshots, page_), recover);
+  await step("image attachments", async () => { imageBase ??= await startServer("images", { FAKE_CODEX_IMAGES: "1" }); await testImagesUi(browser, imageBase, screenshots, page_); }, recover);
+  await step("file download", async () => { imageBase ??= await startServer("images", { FAKE_CODEX_IMAGES: "1" }); await testFilesDownloadUi(browser, imageBase, screenshots, page_); }, recover);
+  await step("mobile composer", async () => { imageBase ??= await startServer("images", { FAKE_CODEX_IMAGES: "1" }); await testMobileComposer(browser, imageBase, screenshots, page_); }, recover);
+  if (steps.results.length) { const failed = steps.summary(); if (failed) process.exitCode = 1; }
+  else console.log(`React UI browser checks passed. Screenshots: ${screenshots}`);
 } finally {
   await browser?.close();
   for (const { server, cwd, privateRoot, controller } of servers) {

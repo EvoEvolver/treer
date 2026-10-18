@@ -394,6 +394,26 @@ Agent. `--source CHECKOUT` archives committed files, ignoring dirty changes;
 `--repository URL` supports self-hosted/local Git mirrors. Run the script from
 its checkout, rather than piping it into a shell.
 
+### Browser suite against both launchers (#158 M1)
+
+`tests/browser-ui.mjs` (and the helpers it calls) runs against either launcher implementation:
+
+```bash
+# Node launcher (default, unchanged; fails at the first failing step)
+node tests/browser-ui.mjs
+# Rust launcher: a fixture-harness build, so CODEX_BIN can point at the fake Codex
+cargo build --locked --features fixture-harness --manifest-path launchers/agent-rust/Cargo.toml   # private CARGO_TARGET_DIR
+LAUNCHER_BACKEND=rust RUST_LAUNCHER_BIN=/abs/private-target/debug/treer-agent-rust-spike node tests/browser-ui.mjs
+# Run every step instead of stopping at the first failure, and print/write the failure list
+SUITE_REPORT=1 SUITE_REPORT_FILE=/abs/report.json LAUNCHER_BACKEND=rust RUST_LAUNCHER_BIN=... node tests/browser-ui.mjs
+```
+
+`tests/launcher-backend.mjs` owns the switch: it spawns the selected launcher with the same hermetic environment (the Rust
+launcher gets the `AGENT_UI_*` names for the `CODEX_UI_*` ones), and a harness the backend lacks (Claude on Rust) is reported
+as `unsupported` rather than failing. The suite is split into named steps; in report mode a failed step is recorded with its
+first assertion and the next step starts from a reset page. The exit criterion for the Rust launcher is the default (fail-fast)
+run being green on both backends.
+
 For local development outside a managed Agent:
 
 ```bash
