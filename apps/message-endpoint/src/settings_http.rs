@@ -241,7 +241,9 @@ fn response(status: StatusCode, value: Value) -> Response {
 fn error(e: Error) -> Response {
     let status = match e {
         Error::Required | Error::InvalidIdentity => StatusCode::UNAUTHORIZED,
-        Error::OwnerRequired | Error::Csrf | Error::OAuthState => StatusCode::FORBIDDEN,
+        Error::OwnerRequired | Error::MemberRequired | Error::Csrf | Error::OAuthState => {
+            StatusCode::FORBIDDEN
+        }
         Error::RateLimited | Error::LoginCapacity => StatusCode::TOO_MANY_REQUESTS,
         Error::Proxy => StatusCode::SERVICE_UNAVAILABLE,
         Error::Configuration => StatusCode::INTERNAL_SERVER_ERROR,

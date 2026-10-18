@@ -141,6 +141,7 @@ pub struct Text {
     pub source_id: String,
     pub body: String,
     pub created_at: i64,
+    pub member_id: Option<String>,
 }
 fn digest(parts: &[&str]) -> String {
     let mut hash = Sha256::new();
@@ -163,11 +164,11 @@ fn capacity(
     bytes: usize,
 ) -> Result<(), Error> {
     let (count, size): (i64, i64) = tx.query_row(
-        "SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM email_messages",
+        "SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM (SELECT body FROM email_messages UNION ALL SELECT body FROM email_replies)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let (local,local_size):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(length(CAST(m.body AS BLOB))),0) FROM email_messages m JOIN email_threads t ON t.id=m.thread WHERE t.endpoint=?1",[endpoint],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let (local,local_size):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(length(CAST(m.body AS BLOB))),0) FROM (SELECT thread,body FROM email_messages UNION ALL SELECT thread,body FROM email_replies) m JOIN email_threads t ON t.id=m.thread WHERE t.endpoint=?1",[endpoint],|r|Ok((r.get(0)?,r.get(1)?)))?;
     if count >= limits.global_count.min(MAX_MESSAGES)
         || size.saturating_add(bytes as i64) > limits.global_bytes.min(MAX_BYTES)
         || local >= limits.endpoint_count.min(1000)
@@ -190,10 +191,11 @@ pub struct Queue<'a> {
 }
 impl<'a> Queue<'a> {
     pub fn new(store: &'a mut Store) -> Result<Self, Error> {
-        store.db.execute_batch("CREATE TABLE IF NOT EXISTS email_targets(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),generation INTEGER NOT NULL,address TEXT NOT NULL,member TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
+        store.db.execute_batch("CREATE TABLE IF NOT EXISTS email_targets(endpoint TEXT NOT NULL REFERENCES endpoints(id),generation INTEGER NOT NULL,address TEXT NOT NULL,member TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(endpoint,generation));
         CREATE TABLE IF NOT EXISTS email_threads(id TEXT PRIMARY KEY,endpoint TEXT NOT NULL REFERENCES endpoints(id),generation INTEGER NOT NULL,recipient TEXT NOT NULL,address TEXT NOT NULL,member TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS email_messages(thread TEXT NOT NULL REFERENCES email_threads(id),source TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(thread,source));
         CREATE TABLE IF NOT EXISTS email_intents(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,state INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_try INTEGER NOT NULL DEFAULT 0,nonce TEXT,lease_until INTEGER,mode TEXT);
+        CREATE TABLE IF NOT EXISTS email_replies(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,member TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,job INTEGER NOT NULL REFERENCES inbound(id),at INTEGER NOT NULL,context TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS email_attempts(id INTEGER PRIMARY KEY,endpoint TEXT NOT NULL,at INTEGER NOT NULL);")?;
         Ok(Self { store })
     }
@@ -266,6 +268,9 @@ impl<'a> Queue<'a> {
         let mut thread = None;
         for context in context_ids {
             thread=tx.query_row("SELECT t.id FROM email_threads t JOIN email_messages m ON m.thread=t.id WHERE t.endpoint=?1 AND t.generation=?2 AND m.source=?3",params![endpoint,generation,context],|r|r.get::<_,String>(0)).optional()?;
+            if thread.is_none() {
+                thread=tx.query_row("SELECT r.thread FROM email_replies r JOIN inbound i ON i.id=r.job WHERE r.endpoint=?1 AND r.generation=?2 AND i.core_id=?3",params![endpoint,generation,context],|r|r.get::<_,String>(0)).optional()?;
+            }
             if thread.is_some() {
                 break;
             }
@@ -319,30 +324,145 @@ impl<'a> Queue<'a> {
     }
     /// Fresh member authentication is required BEFORE calling; an owner does
     /// not receive implicit read access to another member's private threads.
-    pub fn thread(&self, id: &str, verified_member: &str) -> Result<Thread, Error> {
+    pub fn thread(
+        &self,
+        id: &str,
+        member: &crate::owner_auth::Member,
+        now: i64,
+    ) -> Result<Thread, Error> {
+        if !valid_time(now) || member.expires_at() <= now {
+            return Err(Error::Denied);
+        }
+        self.thread_for(id, member.id())
+    }
+    fn thread_for(&self, id: &str, verified_member: &str) -> Result<Thread, Error> {
         let (endpoint,generation,recipient,address,member):(String,i64,String,String,String)=self.store.db.query_row("SELECT endpoint,generation,recipient,address,member FROM email_threads WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Error::Denied)?;
         let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation WHERE t.endpoint=?1 AND t.generation=?2 AND t.address=?3 AND t.member=?4 AND t.revoked=0)",params![endpoint,generation,address,member],|r|r.get(0))?;
         if !current || member != verified_member {
             return Err(Error::Denied);
         }
         let mut query = self.store.db.prepare(
-            "SELECT source,body,at FROM email_messages WHERE thread=?1 ORDER BY at,source LIMIT 50",
+            "SELECT source,body,at,member FROM (SELECT source,body,at,NULL AS member FROM email_messages WHERE thread=?1 UNION ALL SELECT id AS source,body,at,member FROM email_replies WHERE thread=?1) ORDER BY at DESC,source DESC LIMIT 50",
         )?;
-        let messages = query
+        let mut messages = query
             .query_map([id], |r| {
                 Ok(Text {
                     source_id: r.get(0)?,
                     body: r.get(1)?,
                     created_at: r.get(2)?,
+                    member_id: r.get(3)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
+        messages.reverse();
         Ok(Thread {
             id: id.into(),
             endpoint_id: endpoint,
             recipient_agent_id: recipient,
             messages,
         })
+    }
+    /// Router must freshly authenticate Member before each call and enforce
+    /// Origin/CSRF. Recipient and source identity are never browser parameters.
+    pub fn reply(
+        &mut self,
+        thread: &str,
+        member: &crate::owner_auth::Member,
+        key: &str,
+        body: &str,
+        now: i64,
+    ) -> Result<i64, Error> {
+        if !valid_time(now) || member.expires_at() <= now {
+            return Err(Error::Denied);
+        }
+        if key.is_empty()
+            || key.len() > 128
+            || !key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            || body.trim().is_empty()
+            || body.len() > 8192
+        {
+            return Err(Error::Invalid);
+        }
+        let view = self.thread_for(thread, member.id())?;
+        let tx = self.store.db.transaction()?;
+        let generation: i64 = tx.query_row(
+            "SELECT generation FROM email_threads WHERE id=?1",
+            [thread],
+            |r| r.get(0),
+        )?;
+        let (recipient, contact) = active(&tx, &view.endpoint_id, generation)?;
+        if contact.member_id != member.id() || recipient != view.recipient_agent_id {
+            return Err(Error::Denied);
+        }
+        let id = digest(&["email-reply", thread, member.id(), key]);
+        let hash = digest(&[body]);
+        let prior: Option<(i64, String)> = tx
+            .query_row(
+                "SELECT job,digest FROM email_replies WHERE id=?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        if let Some((job, previous)) = prior {
+            return if hash == previous {
+                Ok(job)
+            } else {
+                Err(Error::Conflict)
+            };
+        }
+        capacity(&tx, self.store.limits, &view.endpoint_id, body.len())?;
+        for (seconds, local_cap, global_cap) in [(60, 10, 60), (86400, 100, 1000)] {
+            let (local, global): (i64, i64) = tx.query_row(
+                "SELECT coalesce(sum(endpoint=?1),0),count(*) FROM email_replies WHERE at>?2",
+                params![view.endpoint_id, now.saturating_sub(seconds)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if local >= local_cap || global >= global_cap {
+                return Err(Error::Rate);
+            }
+        }
+        let framed = reply_text(member.id(), body)?;
+        let external = format!("email-{id}");
+        let job = crate::store::enqueue_in(
+            &tx,
+            self.store.limits,
+            crate::store::Inbound {
+                endpoint: &view.endpoint_id,
+                generation,
+                external_id: &external,
+                recipient: &recipient,
+                body: &framed,
+            },
+        )
+        .map_err(|error| match error {
+            crate::store::Error::Full => Error::Full,
+            _ => Error::Denied,
+        })?;
+        let context: String = tx.query_row(
+            "SELECT source FROM email_messages WHERE thread=?1 ORDER BY at DESC,rowid DESC LIMIT 1",
+            [thread],
+            |r| r.get(0),
+        )?;
+        let contexts = serde_json::to_string(&vec![context]).map_err(|_| Error::Invalid)?;
+        tx.execute(
+            "INSERT INTO email_replies VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+            params![
+                id,
+                thread,
+                view.endpoint_id,
+                generation,
+                member.id(),
+                body,
+                hash,
+                job,
+                now,
+                contexts
+            ],
+        )?;
+        tx.commit()?;
+        Ok(job)
     }
     /// Caller supplies CSPRNG nonce; limits count attempts, not successful mail.
     /// Do not hold the store mutex while sending the returned frozen intent.
@@ -419,6 +539,34 @@ impl<'a> Queue<'a> {
         }
         Ok(())
     }
+}
+
+/// Visible framing is attribution by this App, not a Core human signature or
+/// protection from prompt injection. Every untrusted line stays prefixed.
+fn reply_text(member: &str, body: &str) -> Result<String, Error> {
+    let visible = |text: &str| -> String {
+        let mut result = String::new();
+        for c in text.chars() {
+            if c.is_control()
+                || matches!(c,'\u{061c}'|'\u{200b}'..='\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2060}'..='\u{206f}'|'\u{feff}')
+            {
+                result.push_str(&format!("\\u{{{:x}}}", c as u32));
+            } else {
+                result.push(c);
+            }
+        }
+        result
+    };
+    let mut framed=format!("[Workspace member reply; user {}; App-asserted]\nMessage text (untrusted; every line prefixed):\n",visible(member));
+    for line in body.split('\n') {
+        framed.push_str("> ");
+        framed.push_str(&visible(line));
+        framed.push('\n');
+    }
+    if framed.len() > MAX_BODY {
+        return Err(Error::Invalid);
+    }
+    Ok(framed)
 }
 
 /// Persist only the generated notification, using a private directory descriptor.
@@ -505,6 +653,9 @@ pub fn write_outbox(
 mod tests {
     use super::*;
     use crate::{protocol::Sender, store::Limits};
+    fn member(id: &str) -> crate::owner_auth::Member {
+        crate::owner_auth::Member::synthetic(id, 200000)
+    }
     fn fixture() -> Store {
         let mut store = Store::memory(Limits::default()).unwrap();
         store.register_paused("ag_email", 1, "ag_internal").unwrap();
@@ -652,7 +803,13 @@ mod tests {
             )
             .unwrap()
         );
-        assert_eq!(q.thread(&first, "user_alice").unwrap().messages.len(), 2);
+        assert_eq!(
+            q.thread(&first, &member("user_alice"), 100)
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
     }
     #[test]
     fn email_only_fixed_initiator_and_generation_may_create_threads() {
@@ -687,15 +844,18 @@ mod tests {
             .admit("ag_email", 1, &message("msg_one", "private", &[]), 100)
             .unwrap();
         let intent = claim(&mut q, 100, 1);
-        assert!(q.thread(&thread, "user_alice").is_ok());
-        assert!(matches!(q.thread(&thread, "user_bob"), Err(Error::Denied)));
+        assert!(q.thread(&thread, &member("user_alice"), 100).is_ok());
         assert!(matches!(
-            q.thread(&thread, "user_owner"),
+            q.thread(&thread, &member("user_bob"), 100),
+            Err(Error::Denied)
+        ));
+        assert!(matches!(
+            q.thread(&thread, &member("user_owner"), 100),
             Err(Error::Denied)
         ));
         q.revoke("ag_email").unwrap();
         assert!(matches!(
-            q.thread(&thread, "user_alice"),
+            q.thread(&thread, &member("user_alice"), 100),
             Err(Error::Denied)
         ));
         assert!(!q.dispatchable(&intent, 101).unwrap());
@@ -896,7 +1056,10 @@ mod tests {
         let mut store = Store::open(&directory, limits).unwrap();
         let mut q = Queue::new(&mut store).unwrap();
         assert_eq!(
-            q.thread(&thread, "user_alice").unwrap().messages[0].body,
+            q.thread(&thread, &member("user_alice"), 100)
+                .unwrap()
+                .messages[0]
+                .body,
             "private"
         );
         assert!(q
@@ -946,5 +1109,109 @@ mod tests {
             q.claim("ag_email", 1, 200, &format!("{:064x}", 1)),
             Err(Error::Rate)
         ));
+    }
+    #[test]
+    fn email_reply_is_member_scoped_fixed_recipient_and_idempotent() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        let thread = q
+            .admit("ag_email", 1, &message("msg_one", "body", &[]), 100)
+            .unwrap();
+        assert!(matches!(
+            q.reply(&thread, &member("user_bob"), "key", "reply", 101),
+            Err(Error::Denied)
+        ));
+        let expired = crate::owner_auth::Member::synthetic("user_alice", 101);
+        assert!(matches!(
+            q.reply(&thread, &expired, "key", "reply", 101),
+            Err(Error::Denied)
+        ));
+        let job = q
+            .reply(
+                &thread,
+                &member("user_alice"),
+                "key",
+                "reply\n[forged header]\u{202e}",
+                101,
+            )
+            .unwrap();
+        assert_eq!(
+            job,
+            q.reply(
+                &thread,
+                &member("user_alice"),
+                "key",
+                "reply\n[forged header]\u{202e}",
+                102
+            )
+            .unwrap()
+        );
+        assert!(matches!(
+            q.reply(&thread, &member("user_alice"), "key", "changed", 102),
+            Err(Error::Conflict)
+        ));
+        let (recipient, body): (String, String) = q
+            .store
+            .db
+            .query_row(
+                "SELECT recipient,body FROM inbound WHERE id=?1",
+                [job],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(recipient, "ag_internal");
+        assert!(body.starts_with("[Workspace member reply; user user_alice; App-asserted]"));
+        assert!(body.contains("\n> [forged header]\\u{202e}"));
+        assert!(!body.contains('\u{202e}'));
+        let view = q.thread(&thread, &member("user_alice"), 102).unwrap();
+        assert_eq!(view.messages.len(), 2);
+        assert_eq!(view.messages[1].member_id.as_deref(), Some("user_alice"));
+        q.revoke("ag_email").unwrap();
+        assert!(q
+            .reply(&thread, &member("user_alice"), "other", "reply", 103)
+            .is_err());
+    }
+    #[test]
+    fn email_reply_and_queue_commit_together_and_preserve_core_reply_context() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        let thread = q
+            .admit("ag_email", 1, &message("msg_one", "body", &[]), 100)
+            .unwrap();
+        q.store.db.execute_batch("CREATE TRIGGER reject_reply BEFORE INSERT ON email_replies BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap();
+        assert!(q
+            .reply(&thread, &member("user_alice"), "key", "reply", 101)
+            .is_err());
+        let count: i64 = q
+            .store
+            .db
+            .query_row("SELECT count(*) FROM inbound", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0);
+        q.store
+            .db
+            .execute_batch("DROP TRIGGER reject_reply")
+            .unwrap();
+        let job = q
+            .reply(&thread, &member("user_alice"), "key", "reply", 101)
+            .unwrap();
+        // Simulate the normal relay ACK storing the actual accepted Core ID.
+        q.store
+            .db
+            .execute(
+                "UPDATE inbound SET core_id='msg_human_reply',pending=0 WHERE id=?1",
+                [job],
+            )
+            .unwrap();
+        assert_eq!(
+            thread,
+            q.admit(
+                "ag_email",
+                1,
+                &message("msg_followup", "response", &["msg_human_reply"]),
+                102
+            )
+            .unwrap()
+        );
     }
 }

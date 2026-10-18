@@ -100,3 +100,19 @@ closed on retry; an operator must inspect and reconcile that private record.
 Do not remove or overwrite it automatically or interpret an outbox record as
 actual mail delivery. Plaintext outbox records need the same backup/retention
 and OS isolation as hub state.
+
+The next storage increment also has a distinct `MemberAuth` capability (current
+`verify_app` plus directory role on every call), and atomic member reply
+admission with fixed-recipient attribution and idempotency. Existing owner-only
+management remains owner-only. These capabilities are not yet connected to an
+HTTP handler or a member OAuth flow. A bare member ID from JSON cannot construct
+the verified capability.
+
+Historical messages and replies count against the email quota even after
+revocation; there is currently no automatic expiry or owner purge UI. Cap-full
+state rejects new admissions. Do not delete database rows or outbox files to
+clear capacity while work is pending. A reviewed retention/purge mechanism with
+private outbox reconciliation is required before sustained production use.
+The eventual Proxy send deadline must be below the 60-second lease (20 seconds
+maximum); rate-limit/lease-unavailable results mean retry later, never permanent
+failure and never an extra consumed email attempt.
