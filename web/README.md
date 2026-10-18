@@ -355,6 +355,46 @@ or `rel="noopener noreferrer"` on links; the Console cannot strip an opener
 from arbitrary cross-origin frame scripts. Console-owned new-tab actions
 continue to use `noopener,noreferrer`.
 
+### Console opener isolation
+
+The Worker and standalone nginx host set
+`Cross-Origin-Opener-Policy: same-origin` on Console HTML, including SPA
+fallbacks and HTML errors. JSON configuration, health and non-HTML assets do
+not receive it. The matching Proxy `app_dist` header change must be released
+with these hosts; never install this as blanket middleware on API, OAuth
+callback, App ingress or Agent interface responses. A custom static host must
+add the same response header to every Console document; an HTML meta tag is
+not a substitute. Use HTTPS outside loopback development.
+
+COOP separates cross-origin top-level opener relationships; it does not
+restrict iframe access, replace the sandbox or Origin/CSRF checks, prevent
+network requests, or grant `crossOriginIsolated`. No COEP header is added.
+The same-origin credential-bearing iframe trust described above still applies.
+Console GitHub/Google sign-in uses a same-window redirect and cookie-bound
+callback, not popup messages; appearance messages target iframe windows.
+Third-party interfaces that rely on an opener to communicate with the Console
+must use independent navigation instead. Keep `noopener,noreferrer` on all
+Console and interface-owned external opens even with COOP.
+
+`node e2e/run.mjs coop.spec.ts --browser=all --workers=1` exercises Chromium,
+Firefox and WebKit against real loopback TLS responses and the built Console:
+enforced vs absent/report-only COOP, embedded Agent/App popups, origin-pinned
+theme messages, new Console tabs, incoming popup isolation, and synthetic
+GitHub/Google return/login/logout. These mocks do not verify a live provider's
+code exchange or deployed headers. Build first; install all three Playwright
+browsers for this focused matrix. `node scripts/check-nginx-headers.mjs` is an
+opt-in Docker smoke of the actual nginx template, including a generated HTML
+405 and non-HTML exclusions. The normal security suite verifies local Wrangler.
+
+Report-only COOP does not enforce isolation. No reporting endpoint or URL
+telemetry is configured. If an operator stages reporting, use a self-hosted
+endpoint with URL/credential minimization, not a third-party collector.
+Release to canary first and verify the document header, login return and popup
+flows there. Roll back by restoring the previous immutable Console deployment
+(and matching Proxy release for `app_dist`); do not relax CSP, CSRF or iframe
+sandbox settings to repair an opener-dependent integration. See the
+[COOP specification](https://html.spec.whatwg.org/multipage/browsers.html#cross-origin-opener-policies).
+
 The security suite
 starts its own local-only Wrangler and uses synthetic identities; build the
 bundle before running `pnpm test:e2e security.spec.ts --workers=1`.

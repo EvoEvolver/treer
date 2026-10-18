@@ -4,6 +4,13 @@ map $uri $treer_cache_control {
     /config.json "no-store";
 }
 
+# Includes SPA fallbacks and nginx-generated HTML error pages. An empty map
+# value omits the header on JSON/config/health and non-HTML static assets.
+map $sent_http_content_type $treer_coop {
+    default "";
+    ~*^text/html "same-origin";
+}
+
 server {
     listen ${PORT};
     listen [::]:${PORT};
@@ -15,6 +22,7 @@ server {
     add_header Content-Security-Policy "frame-ancestors 'none'; object-src 'none'; base-uri 'none'" always;
     add_header X-Content-Type-Options "nosniff" always;
     add_header Referrer-Policy "no-referrer" always;
+    add_header Cross-Origin-Opener-Policy $treer_coop always;
     add_header Cache-Control $treer_cache_control always;
 
     location = /health {
