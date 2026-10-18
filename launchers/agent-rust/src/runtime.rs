@@ -79,6 +79,11 @@ pub struct Config {
 pub fn spawn(config: Config) -> Result<Handle> {
     let store = Store::open(&config.private_root, &config.cwd)?;
     let saved = store.load()?;
+    // Refuse malformed durable dispatch state before starting a provider. Never
+    // discard an invalid record: it may contain an uncertain dispatch intent.
+    if let Some(saved) = &saved {
+        decode_records(saved)?;
+    }
     let (rpc, mut child, mut events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd)?;
     let (commands, mut requests) = mpsc::channel::<Request>(64);
     let (changed, state) = watch::channel(Arc::new(
@@ -220,8 +225,8 @@ impl Runtime {
     }
     async fn start(&mut self, config: &Config, saved: Option<Value>) -> Result<()> {
         if let Some(saved) = &saved {
-            self.records = serde_json::from_value(saved["records"].clone())?;
-            self.dispatch_blocked = saved["dispatchBlocked"].as_bool().unwrap_or(false);
+            self.records = decode_records(saved)?;
+            self.dispatch_blocked = saved["dispatchBlocked"].as_bool().unwrap_or(true);
         }
         self.rpc.request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Rust experiment","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
@@ -297,9 +302,16 @@ impl Runtime {
             if !turns.iter().any(|t| t["id"] == id) {
                 turns.push(json!({"id":id,"status":if record.submission["state"] == "running" {"inProgress"} else {"completed"},"startedAt":record.submission["created_at"],"error":null,"items":[]}));
             }
-            let turn = turns.iter_mut().find(|t| t["id"] == id).unwrap();
-            let items = turn["items"].as_array_mut().unwrap();
-            let item_id = format!("submission-{}", record.submission["id"].as_str().unwrap());
+            let Some(submission_id) = record.submission["id"].as_str() else {
+                continue;
+            };
+            let Some(turn) = turns.iter_mut().find(|t| t["id"] == id) else {
+                continue;
+            };
+            let Some(items) = turn["items"].as_array_mut() else {
+                continue;
+            };
+            let item_id = format!("submission-{submission_id}");
             let existing = items.iter().position(|item| {
                 item["kind"] == "userMessage"
                     && item["text"] == record.text
@@ -717,6 +729,91 @@ impl Runtime {
 }
 fn receipt(record: &Record) -> Value {
     record.receipt.clone()
+}
+fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
+    fn decode(saved: &Value) -> Result<VecDeque<Record>> {
+        if saved["schema"] != 1
+            || !saved["dispatchBlocked"].is_boolean()
+            || !saved["threadId"]
+                .as_str()
+                .is_some_and(|s| !s.is_empty() && s.len() <= 1024)
+        {
+            bail!("invalid journal");
+        }
+        let records: VecDeque<Record> = serde_json::from_value(saved["records"].clone())?;
+        if records.len() > 4096 {
+            bail!("invalid journal");
+        }
+        let mut ids = std::collections::HashSet::new();
+        let mut operations = std::collections::HashSet::new();
+        for r in &records {
+            let s = &r.submission;
+            let id = s["id"].as_str().ok_or_else(|| anyhow!("invalid journal"))?;
+            if uuid::Uuid::parse_str(id).is_err()
+                || !ids.insert(id.to_owned())
+                || r.operation.is_empty()
+                || r.operation.len() > 1024
+                || !operations.insert(r.operation.clone())
+                || r.text.is_empty()
+                || r.text.len() > 100_000
+                || !["queue", "steer"].contains(&r.delivery.as_str())
+                || !s["state"].as_str().is_some_and(|s| {
+                    ["queued", "running", "done", "failed", "interrupted"].contains(&s)
+                })
+                || !s["created_at"].is_string()
+                || !(s["turn_id"].is_null()
+                    || s["turn_id"]
+                        .as_str()
+                        .is_some_and(|s| !s.is_empty() && s.len() <= 1024))
+                || r.receipt["id"] != s["id"]
+                || r.fingerprint != json!([r.text, r.delivery, s["sender"], r.notify]).to_string()
+            {
+                bail!("invalid journal");
+            }
+            validate_metadata(&json!({"sender":s["sender"],"notify":r.notify}))?;
+        }
+        Ok(records)
+    }
+    // Do not expose parser fragments, prompt text, sender values or file paths.
+    decode(saved).map_err(|_| anyhow!("private_state_invalid"))
+}
+#[cfg(test)]
+mod journal_tests {
+    use super::*;
+
+    #[test]
+    fn recovery_rejects_semantic_corruption_without_disclosing_values() {
+        let id = uuid::Uuid::new_v4().to_string();
+        let record = json!({"operation":"op", "fingerprint":json!(["secret", "queue", null, null]).to_string(),
+            "text":"secret", "delivery":"queue", "submission":{"id":id,"state":"running","created_at":now(),"turn_id":null,"sender":null},
+            "receipt":{"id":id},"notify":null});
+        let valid =
+            json!({"schema":1,"threadId":"thread","dispatchBlocked":true,"records":[record]});
+        assert_eq!(decode_records(&valid).unwrap().len(), 1);
+        for pointer in [
+            "/schema",
+            "/threadId",
+            "/dispatchBlocked",
+            "/records/0/submission/id",
+            "/records/0/submission/state",
+            "/records/0/submission/created_at",
+            "/records/0/submission/turn_id",
+            "/records/0/fingerprint",
+            "/records/0/receipt/id",
+            "/records/0/submission/sender",
+        ] {
+            let mut corrupt = valid.clone();
+            *corrupt.pointer_mut(pointer).unwrap() = json!({"secret":"never print this"});
+            assert_eq!(
+                decode_records(&corrupt).err().unwrap().to_string(),
+                "private_state_invalid",
+                "{pointer}"
+            );
+        }
+        let mut duplicate = valid.clone();
+        duplicate["records"].as_array_mut().unwrap().push(record);
+        assert!(decode_records(&duplicate).is_err());
+    }
 }
 fn validate_metadata(body: &Value) -> Result<()> {
     if !body["sender"].is_null() {

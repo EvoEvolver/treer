@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, realpath, rm, chmod } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -168,6 +168,26 @@ test('Rust keeps journaled user text and attested sender after completion and re
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const restarted=await s.launch({});
   assert.equal(await check(restarted.base),id);
+});
+test('Rust corrupt journal refuses startup before provider dispatch and preserves evidence',{skip:useNode},async t=>{
+  const s=await fixture(t);
+  const accepted=await s.post({text:'private text must not enter error logs',operation_id:'corruption-check'}).then(r=>r.json());
+  await until(()=>fetch(s.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json()),x=>['done','failed'].includes(x.submission?.state));
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const path=join(s.state,'rust-spike.json');
+  const journal=JSON.parse(await readFile(path,'utf8'));
+  delete journal.records[0].submission.id;
+  const bytes=JSON.stringify(journal);
+  await writeFile(path,bytes,{mode:0o600});
+  const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null);
+  const child=spawn(binary,[],{cwd:join(s.root,'cwd'),env:hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')}),stdio:['ignore','pipe','pipe']});
+  let logs='';child.stdout.on('data',b=>logs+=b);child.stderr.on('data',b=>logs+=b);
+  const [code]=await once(child,'exit');
+  assert.notEqual(code,0);
+  assert.match(logs,/private_state_invalid/);
+  assert.doesNotMatch(logs,/private text|corruption-check/);
+  assert.equal(await readFile(path,'utf8'),bytes);
+  assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
 });
 test('concurrent queued submissions are FIFO, queue cancellation differs from abort',async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_LIVE:'1',FAKE_CODEX_STATUS:'active'});
