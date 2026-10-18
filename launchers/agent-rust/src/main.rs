@@ -6,6 +6,7 @@ mod model;
 mod rpc;
 mod runtime;
 mod store;
+mod transcript;
 
 use anyhow::{bail, Result};
 use axum::{

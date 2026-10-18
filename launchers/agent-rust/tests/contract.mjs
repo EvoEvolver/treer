@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { spawn } from 'node:child_process';
+import { spawn, execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { once } from 'node:events';
 import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unlink, symlink } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -13,6 +14,11 @@ const nodeRoot = resolve(process.env.NODE_LAUNCHER_ROOT || '../agent');
 const { WebSocket } = createRequire(join(nodeRoot, 'package.json'))('ws');
 const binary = process.env.RUST_SPIKE_BIN;
 const useNode = process.env.COMPARE_NODE === '1';
+const execFileAsync = promisify(execFile);
+async function rssKiB(pid) {
+  const {stdout}=await execFileAsync('/bin/ps',['-o','rss=','-p',String(pid)]);
+  const rss=Number(stdout.trim());assert.ok(Number.isFinite(rss)&&rss>0);return rss;
+}
 // Match Controller's NON_ALPHANUMERIC encoding, which also escapes '-' / '_'.
 const controllerSegment = id => id.replace(/[^a-z0-9]/gi, c => '%'+c.charCodeAt(0).toString(16).toUpperCase());
 assert.ok(binary || useNode, 'RUST_SPIKE_BIN or COMPARE_NODE required');
@@ -52,6 +58,68 @@ test('Rust serves its manifest while Controller registration probes it',{skip:us
   const s=await fixture(t,{RUST_SPIKE_REGISTER:'1',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH});
   const manifest=await until(()=>readFile(join(s.root,'registration.json'),'utf8').then(JSON.parse),x=>x.instance_id==='contract-instance');
   assert.equal(manifest.protocol,'treer.agent-interface/v1');
+});
+
+test('many-turn history limit stops provider, preserves receipts and remains readable',{skip:useNode,timeout:60000},async t=>{
+  const s=await fixture(t,{
+    CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),
+    // The fixture root is unknown until launch; the private root is explicit.
+    HISTORY_PID_FILE:'provider.pid',
+  });
+  const providerPid=Number(await readFile(join(s.root,'cwd/provider.pid'),'utf8'));
+  const baseline=await rssKiB(s.child.pid);let peak=baseline;
+  let rejected;
+  const admitted=[];
+  for(let n=0;n<40;n++) {
+    const response=await s.post({text:`bounded history ${n}`,operation_id:`history-${n}`});
+    assert.equal(response.status,202);
+    const receipt=await response.json();admitted.push(receipt.submission.id);
+    const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>!state.ready||state.thread.status==='idle');
+    peak=Math.max(peak,await rssKiB(s.child.pid));
+    if(!state.ready){rejected=receipt.submission.id;break;}
+  }
+  assert.ok(rejected,'default history budget was reached');
+  const state=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.equal(state.runtime.state,'blocked');
+  assert.match(state.runtime.error,/history limit/);
+  assert.ok(Buffer.byteLength(JSON.stringify(state.thread.turns))<17*1024*1024);
+  await until(async()=>{try{process.kill(providerPid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
+  const receipt=await fetch(s.base+'/v1/submissions/'+rejected,{headers:s.headers}).then(r=>r.json());
+  assert.equal(receipt.submission.state,'running','oversized completion must not invent success');
+  const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(journal.dispatchBlocked,true);
+  assert.equal(journal.records.length,admitted.length);
+  assert.ok((await s.post({text:'no automatic replay',operation_id:'after-limit'})).status>=400);
+  const before=JSON.stringify(state.thread.turns);
+  await new Promise(r=>setTimeout(r,250));
+  assert.equal(JSON.stringify((await fetch(s.base+'/api/state').then(r=>r.json())).thread.turns),before);
+  const stopped=await rssKiB(s.child.pid);
+  // RSS is allocator/platform dependent; this is a regression ceiling for the
+  // synthetic 16 MiB history, not a general process quota or a heap measurement.
+  assert.ok(peak<384*1024,`synthetic history RSS ${peak} KiB exceeds ceiling`);
+  assert.ok(stopped<384*1024);
+  t.diagnostic(JSON.stringify({turns:admitted.length,baselineRssKiB:baseline,peakSampledRssKiB:peak,stoppedRssKiB:stopped}));
+  const exited=once(s.child,'exit');s.child.kill('SIGTERM');await exited;
+  const restarted=await s.launch({});
+  const recovered=await fetch(restarted.base+'/api/state').then(r=>r.json());
+  assert.equal(recovered.runtime.state,'blocked');
+  const saved=await fetch(restarted.base+'/v1/submissions/'+rejected,{headers:s.headers}).then(r=>r.json());
+  assert.equal(saved.submission.state,'failed');
+  assert.match(saved.submission.error,/uncertain/);
+});
+
+test('streaming deltas stop at admission limit without replacing accepted text',{skip:useNode,timeout:30000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_DELTA:'1'});
+  const receipt=await s.post({text:'bounded stream',operation_id:'stream'}).then(r=>r.json());
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>!state.ready);
+  assert.match(state.runtime.error,/history limit/);
+  const answer=state.thread.turns.flatMap(t=>t.items).find(i=>i.id==='stream');
+  assert.equal(answer.text.length,14*1024*1024,'oversized delta is refused atomically');
+  const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(saved.dispatchBlocked,true);
+  assert.equal(saved.records.find(r=>r.submission.id===receipt.submission.id).submission.state,'running');
+  const pid=Number(await readFile(join(s.root,'cwd/provider.pid'),'utf8'));
+  await until(async()=>{try{process.kill(pid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
 });
 
 test('same manifest and initial transcript contract',async t=>{

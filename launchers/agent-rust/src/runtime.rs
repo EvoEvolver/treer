@@ -4,6 +4,7 @@ use crate::{
     model::{self, now, preview},
     rpc::Rpc,
     store::Store,
+    transcript::{HistoryLimit, Transcript},
 };
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
@@ -62,7 +63,8 @@ struct Runtime {
     thread: Value,
     models: Value,
     ready: bool,
-    turns: Vec<Value>,
+    turns: Transcript,
+    history_failed: bool,
     records: VecDeque<Record>,
     dispatch_blocked: bool,
     goals: Goals,
@@ -104,7 +106,8 @@ pub fn spawn(config: Config) -> Result<Handle> {
         thread: Value::Null,
         models: json!([]),
         ready: false,
-        turns: vec![],
+        turns: Transcript::default(),
+        history_failed: false,
         records: VecDeque::new(),
         dispatch_blocked: false,
         goals: Goals::default(),
@@ -153,6 +156,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
             }
         });
         let mut observation_pending = false;
+        let mut provider_stopped = false;
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         loop {
             tokio::select! {
@@ -160,7 +164,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     Some(request) => { let result = rt.command(&request.method, request.body).await; let _ = request.reply.send(result); }
                     None => break,
                 },
-                event = events.recv() => match event {
+                event = events.recv(), if !rt.history_failed => match event {
                     Some(event) => {
                         if event["method"] == "spike/provider-exit" { rt.ready = false; rt.thread["status"] = json!("error"); rt.thread["lastError"] = json!("Codex disconnected"); rt.publish(); break; }
                         if rt.event(event).await.is_err() { eprintln!("Rust spike: provider event failed"); }
@@ -168,7 +172,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     None => break,
                 },
                 _ = tick.tick() => {
-                    if rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
+                    if !rt.history_failed && rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
                         eprintln!("Rust spike: goal edit retained for reconciliation");
                     }
                     if rt.drain().await.is_err() { eprintln!("Rust spike: queue dispatch failed; retained"); }
@@ -200,6 +204,12 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     }
                 }
             }
+            if rt.history_failed && !provider_stopped {
+                let _ = child.kill().await;
+                events.close();
+                while events.try_recv().is_ok() {}
+                provider_stopped = true;
+            }
         }
         notification_worker.abort();
         let _ = notification_worker.await;
@@ -212,7 +222,10 @@ pub fn spawn(config: Config) -> Result<Handle> {
 
 impl Runtime {
     async fn observe(&mut self, observed: Value) -> Result<()> {
-        if self.dispatch_blocked || observed["thread"]["id"] != self.thread["id"] {
+        if self.history_failed
+            || self.dispatch_blocked
+            || observed["thread"]["id"] != self.thread["id"]
+        {
             return Ok(());
         }
         // Absence and idle flags are not completion. Only an explicit terminal
@@ -264,12 +277,9 @@ impl Runtime {
             bail!("session identity mismatch");
         }
         self.thread = json!({"id":id,"title":result["thread"]["name"].as_str().unwrap_or("Codex (Rust experiment)"),"cwd":config.cwd,"model":result["model"],"reasoningEffort":result["reasoningEffort"],"status":"idle","activeTurnId":null,"lastError":null,"createdAt":now(),"updatedAt":now(),"turns":[],"hasOlderItems":false});
-        self.turns = result["thread"]["turns"]
-            .as_array()
-            .unwrap_or(&vec![])
-            .iter()
-            .map(model::turn)
-            .collect();
+        for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
+            self.turns.insert(model::turn(turn))?;
+        }
         if let Some(active) = self
             .turns
             .iter()
@@ -314,15 +324,17 @@ impl Runtime {
     }
     fn publish(&self) {
         let mut thread = self.thread.clone();
-        thread["turns"] = json!(self.history());
+        thread["turns"] = Value::Array(self.history());
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
-        self.changed.send_replace(Arc::new(json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"]},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":thread,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}})));
+        let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"]},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
+        snapshot["thread"] = thread;
+        self.changed.send_replace(Arc::new(snapshot));
     }
     fn history(&self) -> Vec<Value> {
         // Provider snapshots may omit locally submitted user items. The journal
         // already owns their durable text and attested metadata; project it
         // without changing dispatch state or trusting provider-supplied senders.
-        let mut turns = self.turns.clone();
+        let mut turns = self.turns.to_vec();
         let mut matched = std::collections::HashSet::new();
         for record in &self.records {
             let Some(id) = record.submission["turn_id"].as_str() else {
@@ -366,6 +378,9 @@ impl Runtime {
         turns
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
+        if self.history_failed && !matches!(method, "queue" | "submission") {
+            return Err(HistoryLimit.into());
+        }
         match method {
             "goal" => self.goal_edit(body).await,
             "goal_reconcile" | "goal_retry" => {
@@ -821,7 +836,10 @@ impl Runtime {
                 self.thread["activeTurnId"] = turn.clone();
                 self.thread["status"] = json!("running");
                 if !busy {
-                    self.upsert_turn(json!({"id":turn,"status":"inProgress","startedAt":now(),"error":null,"items":[]}));
+                    if let Err(error) = self.upsert_turn(json!({"id":turn,"status":"inProgress","startedAt":now(),"error":null,"items":[]})) {
+                        self.stop_for_history_limit()?;
+                        return Err(error);
+                    }
                 }
             }
             Err(_) => {
@@ -845,14 +863,35 @@ impl Runtime {
         );
         self.thread["lastError"] = self.records[index].submission["error"].clone();
     }
-    fn upsert_turn(&mut self, turn: Value) {
-        if let Some(old) = self.turns.iter_mut().find(|t| t["id"] == turn["id"]) {
-            *old = turn;
-        } else {
-            self.turns.push(turn);
-        }
+    fn upsert_turn(&mut self, turn: Value) -> Result<()> {
+        self.turns.insert(turn)
+    }
+    fn stop_for_history_limit(&mut self) -> Result<()> {
+        self.history_failed = true;
+        self.ready = false;
+        self.dispatch_blocked = true;
+        self.thread["status"] = json!("error");
+        self.thread["lastError"] = json!(HistoryLimit.to_string());
+        // Keep all receipts, including running intents. No terminal outcome is
+        // invented and no pending turn is automatically replayed on restart.
+        let saved = self.persist();
+        self.publish();
+        saved
     }
     async fn event(&mut self, event: Value) -> Result<()> {
+        if self.history_failed {
+            return Ok(());
+        }
+        let result = self.apply_event(event).await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error.is::<HistoryLimit>())
+        {
+            self.stop_for_history_limit()?;
+        }
+        result
+    }
+    async fn apply_event(&mut self, event: Value) -> Result<()> {
         let method = event["method"].as_str().unwrap_or("");
         let p = &event["params"];
         if event.get("id").is_some() {
@@ -892,9 +931,9 @@ impl Runtime {
                 self.persist()?;
             }
             "turn/started" => {
+                self.upsert_turn(model::turn(&p["turn"]))?;
                 self.thread["status"] = json!("running");
                 self.thread["activeTurnId"] = p["turn"]["id"].clone();
-                self.upsert_turn(model::turn(&p["turn"]));
             }
             "turn/completed" => {
                 let turn_id = p["turn"]["id"].clone();
@@ -919,16 +958,17 @@ impl Runtime {
                     .find(|i| i["kind"] == "agentMessage")
                     .and_then(|i| i["text"].as_str())
                     .map(|s| preview(s, 2048));
+                let error = turn["error"].clone();
+                self.upsert_turn(turn)?;
                 for record in &mut self.records {
                     if record.submission["turn_id"] == turn_id
                         && record.submission["state"] == "running"
                     {
                         record.submission["state"] = json!(status);
                         record.submission["assistant_preview"] = json!(assistant);
-                        record.submission["error"] = turn["error"].clone();
+                        record.submission["error"] = error.clone();
                     }
                 }
-                self.upsert_turn(turn);
                 if self.thread["activeTurnId"] == turn_id {
                     self.thread["activeTurnId"] = Value::Null;
                     self.thread["status"] = json!("idle");
@@ -937,7 +977,7 @@ impl Runtime {
             }
             "item/started" | "item/completed" => {
                 let turn_id = p["turnId"].as_str().unwrap_or("");
-                if let Some(turn) = self.turns.iter_mut().find(|t| t["id"] == turn_id) {
+                if let Some(mut turn) = self.turns.iter().find(|t| t["id"] == turn_id).cloned() {
                     let items = turn["items"]
                         .as_array_mut()
                         .ok_or_else(|| anyhow!("invalid turn items"))?;
@@ -947,11 +987,12 @@ impl Runtime {
                     } else {
                         items.push(mapped);
                     }
+                    self.upsert_turn(turn)?;
                 }
             }
             "turn/plan/updated" => {
                 let turn_id = p["turnId"].as_str().unwrap_or("");
-                if let Some(turn) = self.turns.iter_mut().find(|t| t["id"] == turn_id) {
+                if let Some(mut turn) = self.turns.iter().find(|t| t["id"] == turn_id).cloned() {
                     let items = turn["items"]
                         .as_array_mut()
                         .ok_or_else(|| anyhow!("invalid turn items"))?;
@@ -966,13 +1007,15 @@ impl Runtime {
                     } else {
                         items.push(mapped);
                     }
+                    self.upsert_turn(turn)?;
                 }
             }
             "item/agentMessage/delta"
             | "item/reasoning/textDelta"
             | "item/reasoning/summaryTextDelta"
             | "item/commandExecution/outputDelta" => {
-                if let Some(turn) = self.turns.iter_mut().find(|t| t["id"] == p["turnId"]) {
+                if let Some(mut turn) = self.turns.iter().find(|t| t["id"] == p["turnId"]).cloned()
+                {
                     if let Some(item) = turn["items"]
                         .as_array_mut()
                         .and_then(|items| items.iter_mut().find(|i| i["id"] == p["itemId"]))
@@ -986,26 +1029,12 @@ impl Runtime {
                             + p["delta"].as_str().unwrap_or("");
                         item[field] = json!(text);
                     }
+                    self.upsert_turn(turn)?;
                 }
             }
             _ => return Ok(()),
         }
         self.thread["updatedAt"] = json!(now());
-        if self.turns.len() > 10000 || serde_json::to_vec(&self.turns)?.len() > 16 * 1024 * 1024 {
-            // Hard stop instead of silently dropping transcript or growing forever.
-            self.ready = false;
-            self.thread["status"] = json!("error");
-            self.thread["lastError"] = json!("Rust experiment history limit reached");
-            if let Some(turn) = self.thread["activeTurnId"].as_str() {
-                let _ = self
-                    .rpc
-                    .request(
-                        "turn/interrupt",
-                        json!({"threadId":self.thread["id"],"turnId":turn}),
-                    )
-                    .await;
-            }
-        }
         self.publish();
         Ok(())
     }

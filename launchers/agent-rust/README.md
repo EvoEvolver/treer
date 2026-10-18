@@ -14,6 +14,25 @@ The completed experiment is assessed in [P3](P3-REPORT.md): continue a staged
 port, but do not switch team launchers. The real-browser send failure, missing
 durable user items and detached-child reaping are explicit port blockers.
 
+M2 transcript admission retains at most 10,000 provider turns and 16 MiB of
+serialized turn content (excluding the outer array separators). Each turn
+replacement is counted without allocating a second serialized history and is
+admitted atomically. Exceeding either limit preserves the previous transcript,
+persists the dispatch fence, stops the directly owned provider/process group,
+rejects further mutations, and leaves state and receipt reads available.
+It never settles an oversized completion as success or replays a running intent
+on restart. The synthetic many-turn regression samples only its own launcher's
+RSS with a 384 MiB regression ceiling; this is not an OS memory quota or a heap
+profile. Provider frames/channels, the durable journal and HTTP snapshots have
+separate bounds, so the 16 MiB content budget is not a total RSS promise.
+
+Native macOS **does not guarantee detached-descendant cleanup**. A provider or
+tool can immediately call `setsid` or reparent outside the verified process
+group. Periodic scans, process names, cwd, UID and inherited environment markers
+are not ownership proofs and are not used to broaden cleanup. The general M2
+descendant-reaping criterion remains unmet; a future supervised OS containment
+boundary and its native tests are required before claiming that guarantee.
+
 M1 compatibility increments preserve the separate browser and AIS contracts:
 `/api/prompt`, `/api/settings` and `/api/interrupt` return the full browser state
 with the requested `history_limit`; prompt responses also include the submission.
