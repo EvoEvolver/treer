@@ -5722,7 +5722,7 @@ const STREAMED_AGENT_KEYS: [&str; 17] = [
     "interface",
     "interface_port",
 ];
-const STREAMED_SERVER_KEYS: [&str; 13] = [
+const STREAMED_SERVER_KEYS: [&str; 14] = [
     "server_id",
     "workspace_id",
     "name",
@@ -5736,6 +5736,9 @@ const STREAMED_SERVER_KEYS: [&str; 13] = [
     "status",
     "connected_at",
     "last_seen_at",
+    // Allow-listed live Controller capabilities (machine.upload,
+    // machine.upload.v3) so the Console can pick the upload route (#173).
+    "capabilities",
 ];
 const STREAM_DENIED_KEYS: [&str; 7] = [
     "folder",
