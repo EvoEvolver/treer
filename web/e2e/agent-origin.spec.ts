@@ -165,7 +165,9 @@ test('an interface registered after initial load gets its authorized origin with
 
 
 test('origin reconciliation backs off sustained registration churn and resets after quiet', async ({ page }) => {
-  await page.clock.install({ time: new Date('2026-10-17T12:00:00Z') })
+  // install starts a running clock; pause at a later instant so command
+  // latency cannot put the pause target behind the clock. No app runs yet.
+  await page.clock.install({ time: new Date('2026-10-17T11:00:00Z') })
   await page.clock.pauseAt(new Date('2026-10-17T12:00:00Z'))
   const live = await originFixture(page)
   let current = live.snapshot(), reads = 0, revision = 0
