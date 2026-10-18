@@ -203,7 +203,10 @@ def main(argv=None):
             ticket.unlink()  # the slot is ours: the next waiter becomes head
         except OSError:
             pass
-        (directory / "gate.holder.json").write_text(json.dumps({"pid": me, "name": args.name, "role": args.role, "since": since}))
+        # "since" is when the slot was acquired; "queued_since" is when this process began waiting.
+        acquired = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        (directory / "gate.holder.json").write_text(json.dumps({"pid": me, "name": args.name, "role": args.role,
+                                                                "since": acquired, "queued_since": since}))
         print(f"gate-lock: slot acquired by {args.name} ({args.role})", file=sys.stderr, flush=True)
         env = dict(os.environ, TREER_GATE_HELD="1")
         return subprocess.call(command, env=env)
