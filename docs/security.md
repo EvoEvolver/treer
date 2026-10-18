@@ -1038,7 +1038,10 @@ The flat workspace inventory is membership-based (#141): `GET
 (`/api/workspaces/{ws}/events`) give every current member the same facts about
 every workload and machine: IDs, names, kinds, status, machine IDs, the
 workload's working directory (`cwd`, a path on the user's machine), `pid`,
-build versions and the machine root. Policy `agent.discover` filters this list
+build versions, the machine root and the machine's allow-listed upload
+capabilities (`machine.upload`, `machine.upload.v3`; the Controller's full
+capability set stays in the Proxy connection table, #173). Policy
+`agent.discover` filters this list
 for machine and Agent principals only; applying it to browser sessions is a
 separate decision (#152), as is minimising `cwd`/`pid` (#153). The stream
 never carries folders, placements, paths or pin names: `workspace.snapshot`,

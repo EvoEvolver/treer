@@ -333,6 +333,28 @@ impl AppState {
         .await
     }
 
+    /// Capabilities the browser read models expose per machine. The Web only
+    /// decides between the legacy and the chunked upload route; every other
+    /// Controller capability stays in the connection table (#153 data
+    /// minimization, #173).
+    pub(crate) const READ_MODEL_CAPABILITIES: &'static [&'static str] = &[
+        treer_protocol::CAPABILITY_MACHINE_UPLOAD,
+        treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3,
+    ];
+
+    fn read_model_capabilities<'a>(
+        capabilities: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        let mut exposed: Vec<String> = capabilities
+            .into_iter()
+            .filter(|capability| Self::READ_MODEL_CAPABILITIES.contains(&capability.as_str()))
+            .cloned()
+            .collect();
+        exposed.sort();
+        exposed.dedup();
+        exposed
+    }
+
     pub async fn register_server_instance_with_capabilities(
         &self,
         mut server: ServerInfo,
@@ -361,8 +383,9 @@ impl AppState {
         server.connected_at = now;
         server.last_seen_at = now;
         let capabilities: Vec<String> = capabilities.into_iter().collect();
-        // The read models carry the live Controller's capabilities (#166).
-        server.capabilities = capabilities.clone();
+        // The read models carry the allow-listed live Controller capabilities
+        // (#166, #173); the full set stays on the connection for dispatch.
+        server.capabilities = Self::read_model_capabilities(&capabilities);
 
         let key = ServerKey {
             workspace_id: server.workspace_id.clone(),
@@ -445,6 +468,18 @@ impl AppState {
         let snapshot_workspace_id = workspace_id.clone();
         let server_id = server.server_id.clone();
         let agents = snapshot.agents;
+        // The Controller's snapshot never carries capabilities; the Proxy is
+        // authoritative for them from the registration handshake (#166).
+        let live_capabilities = self
+            .inner
+            .connections
+            .read()
+            .await
+            .get(&ServerKey {
+                workspace_id: workspace_id.clone(),
+                server_id: server_id.clone(),
+            })
+            .map(|connection| Self::read_model_capabilities(&connection.capabilities));
         let event = {
             let mut workspaces = self.inner.workspaces.write().await;
             let workspace = workspaces
@@ -455,6 +490,12 @@ impl AppState {
             }
             if let Some(current) = workspace.servers.get(&server_id) {
                 server.name.clone_from(&current.name);
+                if live_capabilities.is_none() {
+                    server.capabilities.clone_from(&current.capabilities);
+                }
+            }
+            if let Some(capabilities) = live_capabilities {
+                server.capabilities = capabilities;
             }
             workspace.servers.insert(server_id.clone(), server.clone());
             let names: HashMap<_, _> = workspace

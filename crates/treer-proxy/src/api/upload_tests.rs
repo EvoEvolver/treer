@@ -59,6 +59,31 @@ struct Fixture {
     store: crate::upload_store::UploadStore,
     fake: Fake,
     app: Router,
+    connection_a: Uuid,
+}
+
+/// A Controller-shaped ServerInfo: the Controller never fills `capabilities`.
+fn server_info(id: &str, now: chrono::DateTime<chrono::Utc>) -> ServerInfo {
+    let build = treer_protocol::BuildInfo {
+        version: "test".into(),
+        git_commit: "test".into(),
+    };
+    ServerInfo {
+        server_id: id.into(),
+        workspace_id: "default".into(),
+        name: id.into(),
+        hostname: id.into(),
+        root: "/tmp".into(),
+        controller_build: build.clone(),
+        host_build: build,
+        supervision: None,
+        labels: Default::default(),
+        available_agents: None,
+        status: ServerStatus::Online,
+        connected_at: now,
+        last_seen_at: now,
+        capabilities: vec![],
+    }
 }
 
 fn answer_v3(
@@ -203,45 +228,29 @@ async fn fixture() -> Fixture {
     let auth = AuthStore::for_test("test").await;
     auth.seed_test_workspace("default").await;
     let now = Utc::now();
-    sqlx::query("INSERT INTO users(id,email,email_verified,preferred_name,password_hash,created_at) VALUES('member','member@example.test',TRUE,'Member','unused',$1),('other','other@example.test',TRUE,'Other','unused',$1)")
+    sqlx::query("INSERT INTO users(id,email,email_verified,preferred_name,password_hash,created_at) VALUES('member','member@example.test',TRUE,'Member','unused',$1),('other','other@example.test',TRUE,'Other','unused',$1),('outsider','outsider@example.test',TRUE,'Outsider','unused',$1)")
         .bind(now.to_rfc3339()).execute(&auth.pool()).await.unwrap();
     sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_default','member','member',$1),('org_default','other','member',$1)")
         .bind(now.to_rfc3339()).execute(&auth.pool()).await.unwrap();
-    for user in ["member", "other"] {
+    for user in ["member", "other", "outsider"] {
         sqlx::query("INSERT INTO sessions(token,user_id,created_at,expires_at) VALUES($1,$2,$3,'2999-01-01T00:00:00Z')")
             .bind(format!("tok-{user}")).bind(user).bind(now.to_rfc3339())
             .execute(&auth.pool()).await.unwrap();
     }
     let state = AppState::new();
-    let build = treer_protocol::BuildInfo {
-        version: "test".into(),
-        git_commit: "test".into(),
-    };
-    let server = |id: &str| ServerInfo {
-        server_id: id.into(),
-        workspace_id: "default".into(),
-        name: id.into(),
-        hostname: id.into(),
-        root: "/tmp".into(),
-        controller_build: build.clone(),
-        host_build: build.clone(),
-        supervision: None,
-        labels: Default::default(),
-        available_agents: None,
-        status: ServerStatus::Online,
-        connected_at: now,
-        last_seen_at: now,
-        capabilities: vec![],
-    };
+    let server = |id: &str| server_info(id, now);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let connection_a = Uuid::new_v4();
     state
         .register_server_instance_with_capabilities(
             server("machine-a"),
-            Uuid::new_v4(),
+            connection_a,
             "controller-a".into(),
             [
                 CAPABILITY_MACHINE_UPLOAD.to_string(),
                 CAPABILITY_MACHINE_UPLOAD_V3.to_string(),
+                // Not read by the Web: must stay out of the read models (#173).
+                treer_protocol::CAPABILITY_MACHINE_EXEC.to_string(),
             ],
             tx,
         )
@@ -323,6 +332,7 @@ async fn fixture() -> Fixture {
         state,
         fake,
         app,
+        connection_a,
     }
 }
 
@@ -1131,4 +1141,77 @@ async fn chunked_upload_part_timing_releases_the_lease_and_legacy_route_is_uncha
         .as_array()
         .unwrap()
         .contains(&json!(CAPABILITY_MACHINE_UPLOAD_V3)));
+}
+
+#[tokio::test]
+async fn read_models_keep_live_capabilities_after_a_controller_snapshot() {
+    let fixture = fixture().await;
+    // A Controller snapshot carries a ServerInfo without capabilities; the
+    // Proxy must keep the capabilities it learned at registration (#166).
+    fixture
+        .state
+        .apply_snapshot(
+            fixture.connection_a,
+            treer_protocol::AgentServerSnapshot {
+                server: server_info("machine-a", Utc::now()),
+                agents: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    for uri in [
+        "/api/workspaces/default/snapshot",
+        "/api/workspaces/default/servers",
+    ] {
+        let request = base("GET", uri.to_string(), "tok-member")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body, _) = json_of(fixture.app.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        let servers = body
+            .as_array()
+            .cloned()
+            .or_else(|| body["servers"].as_array().cloned())
+            .unwrap_or_else(|| panic!("{uri}: no servers array in {body}"));
+        let capabilities = |id: &str| -> Vec<String> {
+            servers
+                .iter()
+                .find(|server| server["server_id"] == id)
+                .unwrap_or_else(|| panic!("{uri}: {id} missing in {body}"))["capabilities"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{uri}: {id} has no capabilities array"))
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            capabilities("machine-a"),
+            vec![
+                CAPABILITY_MACHINE_UPLOAD.to_string(),
+                CAPABILITY_MACHINE_UPLOAD_V3.to_string()
+            ],
+            "{uri}"
+        );
+        // machine-old models a Controller whose advertised set lacks v3 (the
+        // Windows gate-off): legacy only, field present.
+        assert_eq!(
+            capabilities("machine-old"),
+            vec![CAPABILITY_MACHINE_UPLOAD.to_string()],
+            "{uri}"
+        );
+        // A user outside the organization sees neither machine nor field.
+        let request = base("GET", uri.to_string(), "tok-outsider")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body, _) = json_of(fixture.app.clone().oneshot(request).await.unwrap()).await;
+        assert_ne!(
+            status,
+            StatusCode::OK,
+            "{uri}: outsider must not read the workspace"
+        );
+        assert!(
+            !body.to_string().contains("machine.upload"),
+            "{uri}: outsider response leaked capabilities: {body}"
+        );
+    }
 }

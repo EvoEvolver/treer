@@ -138,6 +138,13 @@ impl AppState {
             } else if let Some(current) = workspace.servers.get(&server_id) {
                 server.name.clone_from(&current.name);
             }
+            // A replica keeps the capabilities it already knows when the
+            // owning instance's snapshot carries none (#166).
+            if server.capabilities.is_empty() {
+                if let Some(current) = workspace.servers.get(&server_id) {
+                    server.capabilities.clone_from(&current.capabilities);
+                }
+            }
             workspace.servers.insert(server_id.clone(), server);
             let names = workspace
                 .agents
