@@ -13,6 +13,52 @@ pub struct Store {
     pub root: PathBuf,
     cwd: PathBuf,
 }
+
+/// A process-lifetime, nonblocking single-writer lease. Keep the inode in place:
+/// unlinking a lock file could let another process lock a different inode.
+pub struct Lease { _file: File }
+impl Lease {
+    pub fn acquire(root: &Path, cwd: &Path, agent: &str) -> Result<Self> {
+        let store = Store::open(root, cwd)
+            .map_err(|_| anyhow::anyhow!("private_state_unavailable"))?;
+        // This port cannot preserve all Node outbox/ack/goal/image semantics.
+        // Refuse the entire legacy Agent directory, even for an explicit resume;
+        // never parse, rewrite, rename, clean or silently ignore its contents.
+        let mut legacy = cwd.to_path_buf();
+        for (index, segment) in [".treer", "agents", if agent.is_empty() { "standalone" } else { agent }].into_iter().enumerate() {
+            legacy.push(segment);
+            match fs::symlink_metadata(&legacy) {
+                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
+                Ok(_) => bail!("legacy_state_migration_required"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(_) => bail!("legacy_state_migration_required"),
+            }
+            if index == 2 {
+                bail!("legacy_state_migration_required");
+            }
+        }
+        for name in ["queue.json", "agent-ui.json", "codex-ui.json", "images"] {
+            match fs::symlink_metadata(store.root.join(name)) {
+                Ok(_) => bail!("legacy_state_migration_required"),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
+                Err(_) => bail!("legacy_state_migration_required"),
+            }
+        }
+        let file = OpenOptions::new().read(true).write(true).create(true).truncate(false)
+            .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+            .open(store.root.join(".rust-launcher.lock"))
+            .map_err(|_| anyhow::anyhow!("private_state_lease_unavailable"))?;
+        let metadata = file.metadata()
+            .map_err(|_| anyhow::anyhow!("private_state_lease_unavailable"))?;
+        if !metadata.is_file() || metadata.uid() != rustix::process::geteuid().as_raw()
+            || metadata.mode() & 0o077 != 0 || metadata.nlink() != 1 {
+            bail!("private_state_lease_unavailable");
+        }
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+            .map_err(|_| anyhow::anyhow!("private_state_in_use"))?;
+        Ok(Self { _file: file })
+    }
+}
 impl Store {
     pub fn open(root: &Path, cwd: &Path) -> Result<Self> {
         if !root.is_absolute() || !root.exists() {

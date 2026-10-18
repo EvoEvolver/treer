@@ -30,6 +30,11 @@ final symlinks or opening FIFO/device entries. Canonical path resolution still
 selects permitted in-workspace symlink targets, but enumeration, metadata and
 file bytes never reopen an admitted absolute path. A concurrent rename can
 produce a partial/stale listing; it cannot retarget the descriptor to a new tree.
+Directory enumeration and path resolution share two blocking-worker slots
+(429 when occupied), retained by the worker even after request cancellation.
+Enumeration scans at most 4096 non-dot entries, including
+hidden/unsupported entries; larger directories return an explicit 413 rather
+than silently truncating. Cancellation retains the worker's slot until it exits.
 The entry point canonicalizes the configured cwd once, so stable aliases such
 as macOS `/tmp` are accepted. Only the resulting canonical path is passed to
 the descriptor opener; a component swapped to a symlink after canonicalization
@@ -44,8 +49,15 @@ persists the dispatch fence, stops the directly owned provider/process group,
 rejects further mutations, and leaves state and receipt reads available.
 It never settles an oversized completion as success or replays a running intent
 on restart. The synthetic many-turn regression samples only its own launcher's
-RSS with a 384 MiB regression ceiling; this is not an OS memory quota or a heap
-profile. Provider frames/channels, the durable journal and HTTP snapshots have
+RSS with a 384 MiB regression ceiling. On macOS, setting
+`RUST_SPIKE_HEAP_PROFILE=1` also samples aggregate live allocations with
+`heap -s --noContent` at baseline, after 16 turns, at the admission limit and
+after repeated snapshot reads. The sampled fixture has a 128 MiB live-heap
+ceiling and permits less than 16 MiB of retained growth across those reads.
+The profiling variant has a separate 150-second deadline for four heap probes;
+the normal regression retains its 60-second deadline. These are finite-workload
+regressions, not an OS quota or proof against leaks over an unbounded lifetime.
+Provider frames/channels, the durable journal and HTTP snapshots have
 separate bounds, so the 16 MiB content budget is not a total RSS promise.
 Missing or non-string provider turn IDs are rejected rather than assigned a
 synthetic identity. During notifications this preserves accepted history and
@@ -163,8 +175,27 @@ Managed execution requires the Controller's explicit
 from the bound loopback Controller, and private physical ancestors outside the
 working directory and VCS. The status is rechecked before HTTP prompt admission;
 local placement is rechecked before each journal write. Standalone hermetic
-tests may use `TREER_RUST_SPIKE_STATE_DIR`. No cwd fallback or import/migration
-of Node's journal or session files is implemented. The main state file is
+tests may use `TREER_RUST_SPIKE_STATE_DIR`. No cwd fallback is permitted.
+Journal publication or placement failure makes the runtime read-only, blocks
+dispatch and stops the directly owned provider. It does not automatically resume
+after storage repair. An unavailable store cannot durably record this new stop:
+the prior journal, including any already-persisted running intent, remains the
+restart authority. Error responses and cleanup status do not expose OS paths.
+A process-lifetime nonblocking file lock rejects a second Rust writer with
+`private_state_in_use`; its private 0600 inode is retained after exit rather
+than unlinked. A saved Rust thread cannot be overridden with a different resume
+ID (`private_state_session_mismatch`), and refusal precedes provider startup.
+Node-to-Rust migration remains unsupported: finding the selected Agent's legacy
+`.treer/agents/ID` directory (including `standalone`), a linked/non-directory
+ancestor, or known Node state in the private root refuses startup with
+`legacy_state_migration_required`, without opening, parsing, modifying or
+discarding that state. No resume override bypasses this check. This is a
+fail-closed refusal, not a completed migration or a tested bidirectional rollback.
+Do not delete or relocate legacy state to bypass it: queued/uncertain receipts,
+acknowledgments, notification batches, goals and attachment bindings need a
+reviewed converter. Keeping Node's files untouched alone does not make a
+rollback after new Rust work lossless. Such a switch remains blocked.
+The main state file is
 `rust-spike.json`, atomically replaced with mode 0600 in a pre-existing 0700
 directory. Journal reads recheck placement, open without following the final
 symlink and use nonblocking mode before rejecting non-regular files, so a FIFO
@@ -177,6 +208,17 @@ Managed image storage uses a separate journal and Controller quota
 client as described above; standalone images are disabled. Queue metadata
 has a 32 MiB hard journal bound; quota integration for other private bytes is a
 port prerequisite.
+
+The loopback HTTP/1 transport admits at most 128 live connections, including
+upgraded WebSockets; excess accepted sockets close immediately. Every request
+header has a ten-second absolute read deadline, at most 64 headers and a 32 KiB
+buffer. Body-consuming routes keep their existing ten-second/size limits.
+File and image responses hold their respective two-slot budgets through
+backpressure. Both use the operator-configurable download total duration cap
+(default one hour) and connection write-idle timeout (default 60 seconds).
+These limits bound admission; they do not authenticate local callers or isolate
+a same-account filesystem writer. A blocked OS filesystem operation can still
+outlast the HTTP request; the two directory worker permits remain held.
 
 The inherited Agent identity is deliberately delegated to Codex and its Treer
 tools as in Node. It is never returned to the browser or written to the journal.

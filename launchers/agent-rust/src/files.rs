@@ -1,6 +1,6 @@
 //! Read-only workspace file routes (#158 M1/M2): GET /v1/files/tree, /v1/files (64 KiB preview) and /v1/files/download.
 //! A port of launchers/agent/src/files.ts and download.ts with the same confinement and the #165 limits: a 1 GiB per-file limit
-//! decided from the open descriptor, two concurrent downloads, a write-idle timeout (see `IdleListener`), a 60 minute cap per
+//! decided from the open descriptor, two concurrent downloads, a write-idle timeout (see `WriteTimeout`), a 60 minute cap per
 //! download and a refusal of cross-site navigations. Slots are RAII guards, so every exit path (including a client that goes away
 //! while the file is still being opened) releases exactly once.
 
@@ -27,6 +27,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 pub const PREVIEW_LIMIT: usize = 64 * 1024;
 pub const DOWNLOAD_LIMIT_BYTES: u64 = 1 << 30;
 const MAX_CONCURRENT: usize = 2;
+const TREE_ENTRY_LIMIT: usize = 4096;
 
 #[derive(Debug)]
 pub struct FileError {
@@ -54,7 +55,16 @@ struct Resolved {
 }
 
 /// Resolve `rel` inside `root`: no `..`, no NUL, no absolute path or symlink leaving the canonical root.
-async fn workspace_path(root: &Path, rel: &str) -> Result<Resolved, FileError> {
+async fn workspace_path(root: &Path, rel: &str, slots: Arc<tokio::sync::Semaphore>) -> Result<Resolved, FileError> {
+    let slot = slots.try_acquire_owned().map_err(|_| FileError::new(429, "Workspace filesystem workers are busy; try again"))?;
+    let (root, rel) = (root.to_path_buf(), rel.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        workspace_path_blocking(&root, &rel)
+    }).await
+        .map_err(|_| FileError::new(500, "Unable to resolve workspace path"))?
+}
+fn workspace_path_blocking(root: &Path, rel: &str) -> Result<Resolved, FileError> {
     if rel.contains('\0') || rel.split(['/', '\\']).any(|segment| segment == "..") {
         return Err(FileError::new(403, "Parent traversal is not allowed"));
     }
@@ -72,7 +82,7 @@ async fn workspace_path(root: &Path, rel: &str) -> Result<Resolved, FileError> {
     if !candidate.starts_with(&canonical_root) {
         return Err(FileError::new(403, "Path is outside the working directory"));
     }
-    let canonical = tokio::fs::canonicalize(&candidate).await.map_err(|e| io_error(&e))?;
+    let canonical = std::fs::canonicalize(&candidate).map_err(|e| io_error(&e))?;
     if !canonical.starts_with(&canonical_root) {
         return Err(FileError::new(403, "Symlink points outside the working directory"));
     }
@@ -86,18 +96,30 @@ async fn workspace_path(root: &Path, rel: &str) -> Result<Resolved, FileError> {
     Ok(Resolved { canonical, path })
 }
 
-async fn list_files(root: &Path, anchor: &std::fs::File, rel: &str) -> Result<Value, FileError> {
-    let directory = workspace_path(root, rel).await?;
+async fn list_files(root: &Path, anchor: &std::fs::File, rel: &str, slot: Option<tokio::sync::OwnedSemaphorePermit>) -> Result<Value, FileError> {
+    let (root, anchor, rel) = (root.to_path_buf(), anchor.try_clone().map_err(|e| io_error(&e))?, rel.to_owned());
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot; // Cancellation must not release the slot while the worker still runs.
+        list_files_blocking(&root, &anchor, &rel)
+    }).await.map_err(|_| FileError::new(500, "Unable to list workspace directory"))?
+}
+fn list_files_blocking(root: &Path, anchor: &std::fs::File, rel: &str) -> Result<Value, FileError> {
+    let directory = workspace_path_blocking(root, rel)?;
     let relative = directory.canonical.strip_prefix(root).map_err(|_| FileError::new(403, "Path is outside the working directory"))?;
     let reader = directory_stream(anchor, relative)?;
     let mut nodes: Vec<(bool, String, Value)> = Vec::new();
+    let mut scanned = 0;
     for entry in reader {
         let entry = entry.map_err(|e| io_error(&e.into()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
         if matches!(name.as_str(), "." | "..") { continue; }
+        scanned += 1;
+        if scanned > TREE_ENTRY_LIMIT {
+            return Err(FileError::new(413, "Directory exceeds the 4096 entry listing limit"));
+        }
         let child_path = if directory.path.is_empty() { name.clone() } else { format!("{}/{}", directory.path, name) };
         // Outside/broken symlinks are not navigable; other errors stay visible.
-        let child = match workspace_path(root, &child_path).await {
+        let child = match workspace_path_blocking(root, &child_path) {
             Ok(child) => child,
             Err(error) if error.status == StatusCode::FORBIDDEN || error.status == StatusCode::NOT_FOUND => continue,
             Err(error) => return Err(error),
@@ -177,8 +199,8 @@ async fn open_regular(root: &std::fs::File, root_path: &Path, canonical: &Path) 
     Ok((tokio::fs::File::from_std(file), metadata))
 }
 
-async fn preview_file(root: &Path, anchor: &std::fs::File, rel: &str) -> Result<Value, FileError> {
-    let file = workspace_path(root, rel).await?;
+async fn preview_file(root: &Path, anchor: &std::fs::File, rel: &str, slots: Arc<tokio::sync::Semaphore>) -> Result<Value, FileError> {
+    let file = workspace_path(root, rel, slots).await?;
     let (mut handle, metadata) = open_regular(anchor, root, &file.canonical).await?;
     let mut bytes = Vec::with_capacity(PREVIEW_LIMIT + 1);
     (&mut handle).take(PREVIEW_LIMIT as u64 + 1).read_to_end(&mut bytes).await.map_err(|e| io_error(&e))?;
@@ -247,6 +269,7 @@ pub struct Files {
     root: PathBuf,
     anchor: Arc<std::fs::File>,
     active: Arc<AtomicUsize>,
+    browsing: Arc<tokio::sync::Semaphore>,
     max: Duration,
     pub idle: Duration,
 }
@@ -254,6 +277,7 @@ fn millis(name: &str, default: u64) -> Duration {
     Duration::from_millis(std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v > 0).unwrap_or(default).max(100))
 }
 impl Files {
+    pub fn max_duration(&self) -> Duration { self.max }
     pub fn new(root: PathBuf) -> io::Result<Self> {
         // main passes the configured canonical cwd. Do not canonicalize again:
         // a swapped root symlink must fail, not retarget the configuration.
@@ -267,6 +291,7 @@ impl Files {
             root,
             anchor: Arc::new(anchor),
             active: Arc::new(AtomicUsize::new(0)),
+            browsing: Arc::new(tokio::sync::Semaphore::new(2)),
             max: millis("AGENT_UI_DOWNLOAD_MAX_MS", 60 * 60_000),
             idle: millis("AGENT_UI_DOWNLOAD_IDLE_MS", 60_000),
         })
@@ -285,7 +310,12 @@ impl Files {
             )
                 .into_response();
         }
-        let result = if path == "/v1/files/tree" { list_files(&self.root, &self.anchor, &file_path).await } else { preview_file(&self.root, &self.anchor, &file_path).await };
+        let result = if path == "/v1/files/tree" {
+            let Ok(slot) = self.browsing.clone().try_acquire_owned() else {
+                return json_response(StatusCode::TOO_MANY_REQUESTS, json!({"error":{"code":"directory_busy","message":"Two directory listings are already running; try again"}}));
+            };
+            list_files(&self.root, &self.anchor, &file_path, Some(slot)).await
+        } else { preview_file(&self.root, &self.anchor, &file_path, self.browsing.clone()).await };
         match result {
             Ok(value) => json_response(StatusCode::OK, value),
             Err(error) => error_response(error, "File or directory not found", "Unable to read file or directory"),
@@ -313,7 +343,7 @@ impl Files {
         }
         // From here the slot is held by this guard: if the request future is dropped while the open is pending, it is released.
         let slot = Slot(self.active.clone());
-        let resolved = match workspace_path(&self.root, rel).await {
+        let resolved = match workspace_path(&self.root, rel, self.browsing.clone()).await {
             Ok(resolved) if !rel.is_empty() => resolved,
             Ok(_) => return error_response(FileError::new(400, "A file path is required"), "", ""),
             Err(error) => return error_response(error, "File not found", "Unable to read file"),
@@ -361,10 +391,16 @@ pub struct WriteTimeout<T> {
     idle: Duration,
     sleep: Pin<Box<tokio::time::Sleep>>,
     armed: bool,
+    _permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 impl<T> WriteTimeout<T> {
     pub fn new(inner: T, idle: Duration) -> Self {
-        Self { inner, idle, sleep: Box::pin(tokio::time::sleep(idle)), armed: false }
+        Self { inner, idle, sleep: Box::pin(tokio::time::sleep(idle)), armed: false, _permit: None }
+    }
+    pub fn with_permit(inner: T, idle: Duration, permit: tokio::sync::OwnedSemaphorePermit) -> Self {
+        let mut io = Self::new(inner, idle);
+        io._permit = Some(permit);
+        io
     }
     fn stalled(&mut self, cx: &mut Context<'_>) -> bool {
         if !self.armed {
@@ -407,27 +443,6 @@ impl<T: AsyncWrite + Unpin> AsyncWrite for WriteTimeout<T> {
     }
 }
 
-/// The TCP listener axum serves from: every accepted connection gets the write-idle timeout.
-pub struct IdleListener {
-    pub listener: tokio::net::TcpListener,
-    pub idle: Duration,
-}
-impl axum::serve::Listener for IdleListener {
-    type Io = WriteTimeout<tokio::net::TcpStream>;
-    type Addr = std::net::SocketAddr;
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            match self.listener.accept().await {
-                Ok((stream, address)) => return (WriteTimeout::new(stream, self.idle), address),
-                Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
-            }
-        }
-    }
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.listener.local_addr()
-    }
-}
-
 #[cfg(test)]
 mod confinement_tests {
     use super::*;
@@ -459,7 +474,7 @@ mod confinement_tests {
         std::fs::write(outside.join("data"), "outside-sentinel").unwrap();
         let files = Files::new(root.clone()).unwrap();
         // Pause deterministically after canonical admission, before opening.
-        let admitted = workspace_path(&files.root, "nested/data").await.unwrap();
+        let admitted = workspace_path(&files.root, "nested/data", files.browsing.clone()).await.unwrap();
         std::fs::rename(root.join("nested"), root.join("original")).unwrap();
         symlink(&outside, root.join("nested")).unwrap();
         assert!(open_regular(&files.anchor, &files.root, &admitted.canonical).await.is_err());
@@ -507,16 +522,16 @@ mod confinement_tests {
         symlink(&outside, root.join("outside-link")).unwrap();
         let files = Files::new(root).unwrap();
         for (parent, name, link) in [("", "root-link", "root-link"), ("nested", "back-to-root", "nested/back-to-root")] {
-            let listing = list_files(&files.root, &files.anchor, parent).await.unwrap();
+            let listing = list_files(&files.root, &files.anchor, parent, None).await.unwrap();
             let entry = listing["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == name).expect("root-target link must be visible");
             assert_eq!(entry["kind"], "directory");
             assert_eq!(entry["path"], link);
-            let linked = list_files(&files.root, &files.anchor, link).await.unwrap();
+            let linked = list_files(&files.root, &files.anchor, link, None).await.unwrap();
             assert_eq!(linked["path"], link);
             assert!(linked["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "proof"));
             assert!(!linked["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "outside-link"));
         }
-        assert!(list_files(&files.root, &files.anchor, "outside-link").await.is_err());
+        assert!(list_files(&files.root, &files.anchor, "outside-link", None).await.is_err());
         assert!(metadata_beneath(&files.anchor, Path::new("../outside")).is_err());
         assert!(metadata_beneath(&files.anchor, &outside).is_err());
     }
@@ -526,7 +541,7 @@ mod confinement_tests {
         let fixture = Fixture::new();
         for n in 0..16 { std::fs::write(fixture.0.join(format!("entry-{n}")), "accepted").unwrap(); }
         let files = Files::new(fixture.0.clone()).unwrap();
-        let (first, second) = tokio::join!(list_files(&files.root, &files.anchor, ""), list_files(&files.root, &files.anchor, ""));
+        let (first, second) = tokio::join!(list_files(&files.root, &files.anchor, "", None), list_files(&files.root, &files.anchor, "", None));
         let first = first.unwrap();
         let second = second.unwrap();
         assert_eq!(first["entries"].as_array().unwrap().len(), 16);
@@ -543,7 +558,7 @@ mod confinement_tests {
         std::fs::write(root.join("data"), "accepted").unwrap();
         std::fs::write(outside.join("data"), "outside-sentinel").unwrap();
         let files = Files::new(root.clone()).unwrap();
-        let admitted = workspace_path(&files.root, "data").await.unwrap();
+        let admitted = workspace_path(&files.root, "data", files.browsing.clone()).await.unwrap();
         std::fs::rename(&root, fixture.0.join("original")).unwrap();
         symlink(&outside, &root).unwrap();
         // A previously admitted pathname still uses the original capability.
@@ -552,7 +567,7 @@ mod confinement_tests {
         file.read_to_string(&mut content).await.unwrap();
         assert_eq!(content, "accepted");
         // New resolutions may not redefine the workspace through the symlink.
-        assert!(workspace_path(&files.root, "data").await.is_err());
+        assert!(workspace_path(&files.root, "data", files.browsing.clone()).await.is_err());
         assert!(Files::new(root.clone()).is_err(), "startup must not recanonicalize a replaced canonical root");
         assert!(open_beneath(&files.anchor, Path::new("../outside/data")).is_err());
         assert!(open_beneath(&files.anchor, &outside.join("data")).is_err());

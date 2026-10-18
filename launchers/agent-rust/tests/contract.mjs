@@ -3,10 +3,12 @@ import test from 'node:test';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unlink, symlink, lstat } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unlink, symlink, lstat, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
+import { connect } from 'node:net';
+import { get as httpGet } from 'node:http';
 import { hermeticEnv, localFetch as fetch } from '../../agent/tests/hermetic.mjs';
 import { fakePrivateState } from '../../agent/tests/fake-private-state.mjs';
 
@@ -18,6 +20,15 @@ const execFileAsync = promisify(execFile);
 async function rssKiB(pid) {
   const {stdout}=await execFileAsync('/bin/ps',['-o','rss=','-p',String(pid)]);
   const rss=Number(stdout.trim());assert.ok(Number.isFinite(rss)&&rss>0);return rss;
+}
+async function heapSample(pid) {
+  assert.equal(process.platform,'darwin','native heap profile requires macOS');
+  // Only our fixture's exact launcher PID. No addresses/content, files, user
+  // processes, provider config or MallocStackLogging changes are involved.
+  const {stdout}=await execFileAsync('/usr/bin/heap',['-s','--noContent',String(pid)],{timeout:15000,maxBuffer:2*1024*1024});
+  const totals=stdout.match(/All zones:\s+(\d+) nodes \((\d+) bytes\)/);
+  assert.ok(totals,'native heap output must include aggregate allocation totals');
+  return {nodes:Number(totals[1]),bytes:Number(totals[2])};
 }
 // Match Controller's NON_ALPHANUMERIC encoding, which also escapes '-' / '_'.
 const controllerSegment = id => id.replace(/[^a-z0-9]/gi, c => '%'+c.charCodeAt(0).toString(16).toUpperCase());
@@ -59,6 +70,38 @@ test('Rust serves its manifest while Controller registration probes it',{skip:us
   const manifest=await until(()=>readFile(join(s.root,'registration.json'),'utf8').then(JSON.parse),x=>x.instance_id==='contract-instance');
   assert.equal(manifest.protocol,'treer.agent-interface/v1');
 });
+test('Rust bounds slow headers, header count and upgraded connection occupancy',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{RUST_SPIKE_HTTP_HEADER_MS:'300',RUST_SPIKE_HTTP_CONNECTION_LIMIT:'8'});
+  const socket=connect({host:'127.0.0.1',port:Number(new URL(s.base).port)});socket.on('error',()=>{});
+  t.after(()=>socket.destroy());await once(socket,'connect');socket.resume();
+  const started=Date.now();socket.write('GET /api/state HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Trickle: ');
+  const trickle=setInterval(()=>{if(!socket.destroyed)socket.write('a')},25);
+  try {await until(async()=>socket.destroyed,Boolean);}finally{clearInterval(trickle);}
+  assert.ok(Date.now()-started<3000,'header deadline is absolute, not renewed per byte');
+  const tooMany=Object.fromEntries(Array.from({length:70},(_,n)=>['x-extra-'+n,'x']));
+  assert.equal((await fetch(s.base+'/api/state',{headers:tooMany})).status,431);
+  const sockets=[];t.after(()=>sockets.forEach(ws=>ws.terminate()));
+  let refused=false;
+  for(let n=0;n<10;n++) {
+    const ws=new WebSocket(s.base.replace('http','ws')+'/ws');ws.on('error',()=>{});
+    try {await once(ws,'open');sockets.push(ws);}catch{ws.terminate();refused=true;break;}
+  }
+  assert.equal(refused,true);assert.ok(sockets.length>=5&&sockets.length<=8);
+  const closed=once(sockets[0],'close');sockets[0].close();await closed;
+  const recovered=new WebSocket(s.base.replace('http','ws')+'/ws');recovered.on('error',()=>{});t.after(()=>recovered.terminate());await once(recovered,'open');
+  const exit=once(s.child,'exit');const stop=Date.now();s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
+  assert.ok(Date.now()-stop<8000,'open upgraded sockets cannot pin shutdown');
+});
+test('Rust bounds directory enumeration without blocking concurrent state reads',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t);
+  const directory=join(s.root,'cwd/many');await mkdir(directory);
+  for(let first=0;first<4097;first+=64)await Promise.all(Array.from({length:Math.min(64,4097-first)},(_,n)=>writeFile(join(directory,'entry-'+(first+n)),'')));
+  const listing=fetch(s.base+'/v1/files/tree?path=many');
+  const state=await fetch(s.base+'/api/state').then(r=>r.json());assert.equal(state.ready,true);
+  const response=await listing;assert.equal(response.status,413);
+  assert.match((await response.json()).error.message,/4096 entry/);
+  assert.equal((await fetch(s.base+'/v1/files/tree?path=')).status,200);
+});
 
 test('Rust canonicalizes a configured cwd alias and reports root failures without paths',{skip:useNode,timeout:15000},async t=>{
   const s=await fixture(t);
@@ -84,7 +127,7 @@ test('Rust canonicalizes a configured cwd alias and reports root failures withou
   }
 });
 
-test('many-turn history limit stops provider, preserves receipts and remains readable',{skip:useNode,timeout:60000},async t=>{
+test('many-turn history limit stops provider, preserves receipts and remains readable',{skip:useNode,timeout:process.env.RUST_SPIKE_HEAP_PROFILE==='1'?150000:60000},async t=>{
   const s=await fixture(t,{
     CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),
     // The fixture root is unknown until launch; the private root is explicit.
@@ -92,6 +135,7 @@ test('many-turn history limit stops provider, preserves receipts and remains rea
   });
   const providerPid=Number(await readFile(join(s.root,'cwd/provider.pid'),'utf8'));
   const baseline=await rssKiB(s.child.pid);let peak=baseline;
+  const heaps=process.env.RUST_SPIKE_HEAP_PROFILE==='1'?[{phase:'baseline',...await heapSample(s.child.pid)}]:[];
   let rejected;
   const admitted=[];
   for(let n=0;n<40;n++) {
@@ -100,6 +144,7 @@ test('many-turn history limit stops provider, preserves receipts and remains rea
     const receipt=await response.json();admitted.push(receipt.submission.id);
     const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>!state.ready||state.thread.status==='idle');
     peak=Math.max(peak,await rssKiB(s.child.pid));
+    if(heaps.length&&n===15)heaps.push({phase:'16-turns',...await heapSample(s.child.pid)});
     if(!state.ready){rejected=receipt.submission.id;break;}
   }
   assert.ok(rejected,'default history budget was reached');
@@ -126,6 +171,14 @@ test('many-turn history limit stops provider, preserves receipts and remains rea
   // synthetic 16 MiB history, not a general process quota or a heap measurement.
   assert.ok(peak<384*1024,`synthetic history RSS ${peak} KiB exceeds ceiling`);
   assert.ok(stopped<384*1024);
+  if(heaps.length) {
+    heaps.push({phase:'blocked',...await heapSample(s.child.pid)});
+    for(let n=0;n<3;n++)await fetch(s.base+'/api/state').then(r=>r.arrayBuffer());
+    heaps.push({phase:'after-reads',...await heapSample(s.child.pid)});
+    assert.ok(heaps.every(sample=>sample.bytes<128*1024*1024),'live native heap regression ceiling for synthetic 16 MiB history');
+    assert.ok(heaps.at(-1).bytes-heaps.at(-2).bytes<16*1024*1024,'read-only snapshots must not accumulate retained histories');
+    t.diagnostic(JSON.stringify({nativeHeap:heaps}));
+  }
   t.diagnostic(JSON.stringify({turns:admitted.length,baselineRssKiB:baseline,peakSampledRssKiB:peak,stoppedRssKiB:stopped}));
   const exited=once(s.child,'exit');s.child.kill('SIGTERM');await exited;
   const restarted=await s.launch({});
@@ -339,6 +392,31 @@ test('Rust corrupt journal refuses startup before provider dispatch and preserve
   assert.equal(await readFile(path,'utf8'),bytes);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
 });
+test('Rust refuses concurrent state writers, legacy migration and mismatched resume before provider startup',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t);
+  const path=join(s.state,'rust-spike.json');
+  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:s.controller.url,TREER_AGENT_PRIVATE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')});
+  const refuses=async (code,extra={})=>{
+    const bytes=await readFile(path);
+    const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null);
+    await assert.rejects(execFileAsync(binary,[],{cwd:join(s.root,'cwd'),env:{...env,...extra},timeout:3000,killSignal:'SIGKILL'}),error=>{
+      assert.equal(error.killed,false);assert.equal(error.code,1);assert.ok(error.stderr.includes(code));
+      assert.ok(!error.stderr.includes(s.root));return true;
+    });
+    assert.deepEqual(await readFile(path),bytes);
+    assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
+  };
+  await refuses('private_state_in_use');
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  await refuses('private_state_session_mismatch',{AGENT_UI_SESSION_ID:'different-synthetic-session'});
+  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
+  const evidence='private legacy evidence; do not parse or discard';await writeFile(join(legacy,'queue.json'),evidence,{mode:0o600});
+  await refuses('legacy_state_migration_required');
+  assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),evidence);
+  await rm(legacy,{recursive:true}); // Exact test-created Agent directory only.
+  const restarted=await s.launch({});
+  assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).ready,true,'lease must be released on exit');
+});
 test('Rust refuses a FIFO journal promptly before provider startup',{skip:useNode,timeout:10000},async t=>{
   const s=await fixture(t);
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
@@ -414,6 +492,24 @@ test('Rust mismatching goal reconciliation refuses a stale native mutation',{ski
   assert.equal(state.goalDelivery.status,'failed');
 });
 const imageGif=Buffer.from('R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==','base64');
+test('Rust image transfers retain two slots under backpressure and expire at the total duration cap',{skip:useNode,timeout:30000},async t=>{
+  const s=await fixture(t,{AGENT_UI_DOWNLOAD_MAX_MS:'5000',AGENT_UI_DOWNLOAD_IDLE_MS:'15000'});
+  const block=Buffer.alloc(256,120);block[0]=255;
+  const image=Buffer.concat([imageGif.subarray(0,-1),Buffer.from([0x21,0xfe]),...Array(32768).fill(block),Buffer.from([0,0x3b])]);
+  const upload=await fetch(s.base+'/api/attachments',{method:'POST',body:image});assert.equal(upload.status,201,await upload.clone().text());
+  const {attachment}=await upload.json();const url=s.base+'/api/attachments/'+attachment.id;
+  const transfers=[];t.after(()=>transfers.forEach(({request,response})=>{response.destroy();request.destroy()}));
+  const stalled=()=>new Promise((resolve,reject)=>{
+    const request=httpGet(url,response=>{response.pause();response.on('error',()=>{});resolve({request,response});});request.on('error',reject);
+  });
+  transfers.push(await stalled(),await stalled());
+  assert.ok(transfers.every(({response})=>response.statusCode===200));
+  assert.equal((await fetch(url)).status,429,'two backpressured image buffers must retain their slots');
+  await new Promise(r=>setTimeout(r,5300));
+  for(const {response} of transfers)response.resume();
+  await until(()=>fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}),response=>response.status===201);
+  assert.ok(transfers.some(({response})=>!response.complete),'expired transfer must not claim complete bytes');
+});
 test('Rust images are validated, quota admitted, retained in history and durable across restart',{skip:useNode},async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_IMAGES:'1'});
   for(const bad of [Buffer.from('MZfake'),imageGif.subarray(0,-1),Buffer.concat([imageGif,Buffer.from('MZ')])]) {
@@ -549,7 +645,7 @@ test('Rust shutdown kills the provider-owned process group including a descendan
   const alive=()=>{try{process.kill(pid,0);return true}catch{return false}};
   assert.equal(alive(),true);
   t.after(()=>{if(alive())try{process.kill(pid,'SIGKILL')}catch{}});
-  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);
   await until(async()=>alive(),x=>x===false);
   assert.match(s.logs(),/shutdown provider_exit=confirmed; process_group=termination_requested_unverified; detached_descendants=not_guaranteed/);
 });
@@ -559,7 +655,7 @@ test('Rust shutdown cancels startup and an in-flight turn without waiting for th
   const pending=s.post({text:'uncertain accepted input',operation_id:'shutdown-inflight'}).catch(()=>null);
   await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
   const started=Date.now();
-  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;await pending;
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');assert.equal((await exit)[0],0);await pending;
   assert.ok(Date.now()-started<8000,'shutdown must cancel the pending 60 s RPC');
   assert.throws(()=>process.kill(provider,0),{code:'ESRCH'});
   const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
@@ -567,7 +663,7 @@ test('Rust shutdown cancels startup and an in-flight turn without waiting for th
   assert.equal(journal.records[0].submission.state,'running','stop must not invent completion');
   const restarted=await s.launch(faultEnv('shutdown-startup'),false);
   const nextProvider=await until(()=>readFile(join(s.root,'provider.jsonl.pid'),'utf8').then(Number),pid=>pid!==provider);
-  const stop=Date.now();const stopped=once(restarted.child,'exit');restarted.child.kill('SIGTERM');await stopped;
+  const stop=Date.now();const stopped=once(restarted.child,'exit');restarted.child.kill('SIGTERM');assert.equal((await stopped)[0],0);
   assert.ok(Date.now()-stop<8000);
   assert.throws(()=>process.kill(nextProvider,0),{code:'ESRCH'});
   assert.match(s.logs(),/shutdown provider_exit=confirmed/);
@@ -643,11 +739,42 @@ test('Rust stalled notification worker permits continuous provider deltas and pr
 });
 
 test('Rust runtime VCS placement invalidation refuses a new prompt without journaling',{skip:useNode},async t=>{
-  const s=await fixture(t);
+  const s=await fixture(t,faultEnv('stream'));
+  const providerPid=Number(await readFile(join(s.root,'provider.jsonl.pid'),'utf8'));
   const before=await readFile(join(s.state,'rust-spike.json'),'utf8');
   await mkdir(join(s.root,'.git'));
   assert.ok((await s.post({text:'must not dispatch',operation_id:'invalidated'})).status>=400);
   assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),before);
   const queue=await fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json());
   assert.equal(queue.submissions.length,0);
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
+  assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');
+  assert.match(state.runtime.error,/private_state_write_failed/);
+  await until(async()=>{try{process.kill(providerPid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
+  await rm(join(s.root,'.git'),{recursive:true});
+  assert.ok((await s.post({text:'must stay stopped after placement repair',operation_id:'still-blocked'})).status>=400);
+  assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),before);
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
+});
+
+test('Rust journal publication failure stops provider and remains blocked after repair',{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv('receipt'));
+  const journal=join(s.state,'rust-spike.json'), backup=join(s.state,'fixture-journal-backup');
+  const before=await readFile(journal,'utf8');
+  // Exact fixture-owned paths only; force atomic rename failure without losing
+  // the previous durable bytes or changing the private root's permissions.
+  await rename(journal,backup);await mkdir(journal);
+  const response=await s.post({text:'publication must fail',operation_id:'write-failure'});
+  assert.ok(response.status>=400);
+  assert.equal((await response.json()).error.code,'operation_refused');
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
+  assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');
+  assert.match(state.runtime.error,/private_state_write_failed/);
+  assert.equal(await readFile(backup,'utf8'),before);
+  assert.equal((await lstat(journal)).isDirectory(),true);
+  assert.deepEqual((await readdir(s.state)).filter(name=>name.startsWith('.rust-spike-')),[]);
+  await rm(journal,{recursive:true});await rename(backup,journal);
+  assert.ok((await s.post({text:'still stopped',operation_id:'repaired'})).status>=400);
+  assert.equal(await readFile(journal,'utf8'),before);
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
 });

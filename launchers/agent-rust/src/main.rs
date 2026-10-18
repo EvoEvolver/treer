@@ -1,6 +1,7 @@
 mod attachments;
 mod files;
 mod goals;
+mod http;
 mod image_format;
 mod model;
 mod rpc;
@@ -94,6 +95,7 @@ async fn main() -> Result<()> {
     if !agent.is_empty() {
         private_status(&agent).await?;
     }
+    let _state_lease = store::Lease::acquire(&private_root, &cwd, &agent)?;
     let attachments = if !agent.is_empty() {
         Some(Arc::new(tokio::sync::Mutex::new(
             attachments::Attachments::open(
@@ -206,10 +208,8 @@ async fn main() -> Result<()> {
     }
     let draining = Arc::new(tokio::sync::Notify::new());
     let drain_started = draining.clone();
-    let serve =
-        async {
-            axum::serve(files::IdleListener { listener, idle: files_idle }, router)
-        .with_graceful_shutdown(async move {
+    let serve = async {
+        http::serve(listener, router, files_idle, async move {
             #[cfg(unix)]
             {
                 let mut term =
@@ -229,8 +229,8 @@ async fn main() -> Result<()> {
             drain_started.notify_one();
         })
         .await?;
-            Ok::<_, anyhow::Error>(())
-        };
+        Ok::<_, anyhow::Error>(())
+    };
     // A WebSocket or a client that keeps a response open cannot prevent exit.
     // Provider cleanup happens before the bounded HTTP drain begins.
     let result = tokio::select! {
@@ -602,6 +602,7 @@ async fn attachment_route(app: &App, request: Request<Body>, path: &str, method:
                         Some((Ok::<_, std::io::Error>(chunk), (bytes, end, permit)))
                     },
                 );
+                let chunks = futures_util::StreamExt::take_until(chunks, tokio::time::sleep(app.files.max_duration()));
                 Response::builder()
                     .status(200)
                     .header(

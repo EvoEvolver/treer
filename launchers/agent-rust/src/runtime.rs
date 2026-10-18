@@ -76,6 +76,7 @@ struct Runtime {
     models: Value,
     ready: bool,
     turns: Transcript,
+    // Sticky stop for history admission OR private journal failure.
     history_failed: bool,
     provider_exit: &'static str,
     records: VecDeque<Record>,
@@ -114,6 +115,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
     if let Some(saved) = &saved {
         decode_records(saved)?;
         Goals::load(&saved["goals"])?;
+        if config.session.as_ref().is_some_and(|session| saved["threadId"].as_str() != Some(session.as_str())) {
+            bail!("private_state_session_mismatch");
+        }
     }
     let (rpc, mut child, mut events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd)?;
     let (commands, mut requests) = mpsc::channel::<Request>(64);
@@ -140,6 +144,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
         changed,
     };
     tokio::spawn(async move {
+        // Cancellation is safe only at await boundaries: journal publication
+        // stays synchronous/atomic. Future async writes must finish outside
+        // this cancellable region before an intent can reach the provider.
         tokio::select! {
         biased;
         _ = shutdown_requested.notified() => {},
@@ -217,7 +224,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     if !observation_pending && !rt.dispatch_blocked && rt.thread["activeTurnId"].is_string() {
                         observation_pending = observe_tx.try_send(rt.thread["id"].clone()).is_ok();
                     }
-                    if !notification_pending {
+                    if !rt.history_failed && !notification_pending {
                         if let Some(job) = rt.next_notification() {
                             notification_pending = notify_tx.try_send(job).is_ok();
                         }
@@ -225,7 +232,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                 },
                 Some((id, success)) = result_rx.recv() => {
                     notification_pending = false;
-                    if success {
+                    if success && !rt.history_failed {
                         if let Some(record) = rt.records.iter_mut().find(|r| r.submission["id"] == id) {
                             record.notified = true;
                             if rt.persist().is_err() {
@@ -243,6 +250,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
                 }
             }
             if rt.history_failed && !provider_stopped {
+                notification_worker.0.abort();
+                observer.0.abort();
+                rt.publish();
                 rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
                 events.close();
                 while events.try_recv().is_ok() {}
@@ -253,8 +263,15 @@ pub fn spawn(config: Config) -> Result<Handle> {
         drop(observer);
         } => {},
         }
+        requests.close();
+        while let Ok(request) = requests.try_recv() {
+            let _ = request.reply.send(Err(anyhow!("runtime_stopping")));
+        }
         rt.ready = false;
         rt.dispatch_blocked = true;
+        rt.thread["status"] = json!("error");
+        rt.thread["lastError"] = json!("Launcher stopping; queued and uncertain work preserved");
+        rt.publish();
         // Preserve uncertain receipts and queued work; do not invent completion.
         rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
         eprintln!("Rust spike: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed", rt.provider_exit);
@@ -361,9 +378,22 @@ impl Runtime {
         self.publish();
         Ok(())
     }
-    fn persist(&self) -> Result<()> {
-        self.store
-            .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals}))
+    fn persist(&mut self) -> Result<()> {
+        if self.store
+            .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals})).is_err() {
+            self.stop_for_state_error();
+            bail!("private_state_write_failed");
+        }
+        Ok(())
+    }
+    fn stop_for_state_error(&mut self) {
+        // Storage is unavailable: do not claim that this fence was persisted.
+        // Existing durable intent remains authoritative on restart.
+        self.history_failed = true;
+        self.ready = false;
+        self.dispatch_blocked = true;
+        self.thread["status"] = json!("error");
+        self.thread["lastError"] = json!("private_state_write_failed; queue paused");
     }
     fn publish(&self) {
         let mut thread = self.thread.clone();
@@ -422,7 +452,11 @@ impl Runtime {
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
         if self.history_failed && !matches!(method, "queue" | "submission") {
-            anyhow::bail!("Provider history unavailable; queue paused");
+            anyhow::bail!("runtime_blocked; queue paused");
+        }
+        if !matches!(method, "queue" | "submission") && self.store.recheck().is_err() {
+            self.stop_for_state_error();
+            bail!("private_state_write_failed");
         }
         match method {
             "goal" => self.goal_edit(body).await,
@@ -842,7 +876,6 @@ impl Runtime {
         self.dispatch_blocked = true;
         if let Err(error) = self.persist() {
             self.records[index].submission["state"] = json!("queued");
-            self.dispatch_blocked = false;
             return Err(error);
         }
         let mut params = json!({"threadId":self.thread["id"],"input":input});
@@ -920,7 +953,8 @@ impl Runtime {
         };
         let reason = self.thread["lastError"]
             .as_str()
-            .unwrap_or("Provider stopped");
+            .unwrap_or("Provider stopped")
+            .split("; provider exit ").next().unwrap_or("Provider stopped");
         self.thread["lastError"] = json!(format!("{reason}; provider exit {}; process-group termination requested but unverified; detached-descendant cleanup not guaranteed", self.provider_exit));
         self.publish();
     }

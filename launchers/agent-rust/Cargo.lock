@@ -1141,6 +1141,8 @@ dependencies = [
  "axum",
  "chrono",
  "futures-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "percent-encoding",
  "reqwest",
