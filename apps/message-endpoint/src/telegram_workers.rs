@@ -20,7 +20,7 @@ use std::{
 };
 
 const VERIFY_INTERVAL: Duration = Duration::from_secs(300);
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountConfig {
     pub account_id: String,
@@ -180,8 +180,11 @@ pub fn load(configs: &[AccountConfig]) -> Result<Vec<Account>, ConfigurationErro
         {
             return Err(ConfigurationError);
         }
-        let bytes =
-            crate::private_store::read_config(&c.token_file).map_err(|_| ConfigurationError)?;
+        let Some(bytes) = crate::private_store::read_config_optional(&c.token_file)
+            .map_err(|_| ConfigurationError)?
+        else {
+            continue;
+        };
         let secret: SecretFile = serde_json::from_slice(&bytes).map_err(|_| ConfigurationError)?;
         let client = BotClient::new(c.account_id.clone(), secret.token, c.bot_id)
             .map_err(|_| ConfigurationError)?;
@@ -317,6 +320,34 @@ impl TelegramWorkers {
                 }
             })
             .collect()
+    }
+    /// Never join while holding the workers mutex: a snapshot holds hub first,
+    /// while a draining worker may still need hub.
+    pub(crate) fn stop_shared(shared: &Arc<Mutex<Self>>) -> Result<(), ()> {
+        Self::stop_shared_with_timeout(shared, Duration::from_secs(12))
+    }
+    fn stop_shared_with_timeout(shared: &Arc<Mutex<Self>>, timeout: Duration) -> Result<(), ()> {
+        let mut joins = {
+            let mut workers = shared.lock().map_err(|_| ())?;
+            workers.request_stop();
+            std::mem::take(&mut workers.joins)
+        };
+        let began = Instant::now();
+        while let Some(join) = joins.pop() {
+            while !join.is_finished() && began.elapsed() < timeout {
+                thread::sleep(Duration::from_millis(10));
+            }
+            if !join.is_finished() {
+                joins.push(join);
+                shared.lock().map_err(|_| ())?.joins.extend(joins);
+                return Err(());
+            }
+            if join.join().is_err() {
+                shared.lock().map_err(|_| ())?.joins.extend(joins);
+                return Err(());
+            }
+        }
+        Ok(())
     }
     pub fn request_stop(&self) {
         self.stop.store(true, Ordering::Release);
@@ -1147,6 +1178,32 @@ mod tests {
                 .unwrap(),
             12345
         );
+    }
+    #[test]
+    fn token_change_drain_times_out_safely_and_mid_poll_does_not_admit() {
+        let state = fixture();
+        let slow = Arc::new(BlockedBot::default());
+        let workers = Arc::new(Mutex::new(
+            TelegramWorkers::start(
+                state.clone(),
+                vec![Account::new("bot_fixture".into(), 12345, slow.clone())],
+            )
+            .unwrap(),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !slow.entered.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        assert!(
+            TelegramWorkers::stop_shared_with_timeout(&workers, Duration::from_millis(10)).is_err()
+        );
+        assert!(!workers.lock().unwrap().readiness()("bot_fixture"));
+        assert_eq!(workers.lock().unwrap().status()[0].state, "stopped");
+        slow.released.store(true, Ordering::Release);
+        TelegramWorkers::stop_shared(&workers).unwrap();
+        assert_eq!(workers.lock().unwrap().status()[0].admitted_batches, 0);
+        assert_eq!(workers.lock().unwrap().status()[0].sent_chunks, 0);
     }
     #[test]
     fn secret_startup_files_are_private_strict_and_never_have_an_origin_override() {

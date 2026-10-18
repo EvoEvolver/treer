@@ -161,6 +161,11 @@ fn run_assembled(
         }
         .map_err(|_| Error::Runtime)?,
     ));
+    let token_service = Arc::new(
+        crate::telegram_tokens::Service::new(config.telegram_accounts.clone())
+            .map_err(|_| Error::Configuration)?,
+    );
+    let snapshot_tokens = token_service.clone();
     let activation_enabled = config.activation_enabled;
     let account_ready = telegram.lock().map_err(|_| Error::Runtime)?.readiness();
     let snapshot_telegram = telegram.clone();
@@ -191,6 +196,7 @@ fn run_assembled(
             emergency_pause_bindings,
             telegram_accounts: snapshot_telegram.lock().map_err(|_| ())?.status(),
             activation_enabled,
+            telegram_tokens: snapshot_tokens.snapshot().map_err(|_| ())?,
         })
     });
     let mutation = Arc::new(crate::configuration::core_executor(
@@ -202,10 +208,16 @@ fn run_assembled(
             account_ready,
         },
     ));
+    let token_hub = hub.clone();
+    let token_workers = telegram.clone();
+    let token_mutation = Arc::new(move |owner: &crate::owner_auth::Owner, command| {
+        token_service.execute(&token_hub, &token_workers, owner, command)
+    });
     let serve = || -> Result<(), Error> {
         let settings = Settings::new(auth, snapshot, include_str!("../dist/index.html"))
             .map_err(|_| Error::Configuration)?
             .with_configuration(mutation)
+            .with_tokens(token_mutation)
             .with_loopback_listener(config.listen)
             .map_err(|_| Error::Configuration)?
             .with_assets(

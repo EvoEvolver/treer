@@ -1023,7 +1023,7 @@ or optimistic activation is used. Target IDs are exact safe integers, and sender
 IDs must be positive and distinct. Inputs/errors are rendered as text, labels
 remain visible, and forms wrap at 390px. A stale save shows the fixed conflict
 error and requires refresh/reconfirmation rather than silently retrying. The UI
-never accepts a bot token. Account setup remains operator-file based. Live bot
+does not accept a bot token in this older snapshot; the separate write-only token settings increment below supersedes that restriction. Live bot
 readiness and gated owner resume are described below; no release acceptance is
 implied by these controls.
 
@@ -1100,8 +1100,9 @@ container, encrypted disks/backups where appropriate; same-UID Agents can read
 Configuring an account is an explicit operator action that can start real
 getMe/getUpdates requests; **do not configure a live account before release
 review and legacy-poller drain approval**. There is no real-account test or
-migration permission in this change. A file is read at startup only; file changes
-or deletion do not revoke the in-memory token. Revoke compromised credentials at
+migration permission in this change. A file is loaded at startup; direct operator file changes
+or deletion do not revoke the in-memory token. The later write-only settings
+increment stops and drains workers before its own file changes. Revoke compromised credentials at
 Telegram, then have the authorized releaser update the private file and restart
 the versioned App. No live file reload or hidden token-recovery path exists.
 Changing tokens for the same bot is supported; after successful getMe, the App
@@ -1479,3 +1480,72 @@ does not inherit this label automatically.
 Use fresh state for the disposable slice. Earlier local-development queued rows
 are not silently rewritten to add a label: their bytes and retry keys remain
 unchanged, and they must be drained/discarded before enabling this candidate.
+
+### Write-only Telegram token settings (separate increment after 4caaf273)
+
+The owner can verify/store, replace or remove a token in the dedicated hub
+settings page. The operator first configures the account ID, **public numeric
+bot ID**, and absolute `token_file` under an existing 0700 directory. The file
+may initially be absent: that slot reports `token_missing`, creates no worker
+and makes no Telegram requests. Paths are never accepted from the browser.
+The configured bot ID remains the identity anchor for first store and replace;
+the durable account pin also prevents rebinding existing queues to another bot.
+
+The password field is write-only and clears on each submission. Only account ID,
+bot ID, presence, last four characters and restart status are returned. Use a
+disposable bot for sandbox acceptance and revoke its token in BotFather when
+finished. A pasted token travels over HTTPS through Treer ingress to the App;
+the hub does not log request bodies, URLs containing tokens, or provider errors.
+This does not make the credential safe from compromised App code or another
+process under the same OS user. Use a separate OS user/container and private
+backups for real deployment.
+
+`POST /api/telegram/token` accepts exactly one of:
+
+```json
+{"action":"set","account_id":"sandbox_telegram","token":"<write-only>","confirm":true}
+```
+
+```json
+{"action":"remove","account_id":"sandbox_telegram","confirm":true}
+```
+
+Both require current verified human owner identity, the dedicated App Origin,
+CSRF header and a bounded JSON body, just like configuration changes. Invalid
+identity never falls back to OAuth. Set attempts (including malformed/failed
+submissions) are limited to five per owner and twenty globally per minute, and
+share the ordinary owner write budget. Removal bypasses these mutation budgets;
+identity verification and HTTP resource limits still apply. A token must have a
+3–20 digit positive bot ID and a 35-character ASCII secret; whitespace is rejected
+before network access. `getMe` uses only the fixed Telegram API host, with a
+10-second timeout, redirects disabled and a bounded response. It must confirm
+the configured bot ID. Every error is a fixed code; provider descriptions and
+request URLs are never returned.
+
+**Conservative first-version lifecycle:** pause all endpoints before set/replace.
+Remove pauses all bindings itself as containment. Either operation stops and
+joins *all* Telegram workers before changing a file, and keeps them stopped until
+an authorized operator restarts the hub. The join wait is bounded to 12 seconds;
+failure leaves the old file untouched, workers stopped, bindings paused and
+`restart_required` visible. A file failure also leaves workers stopped and reports
+`storage_unavailable`; inspect/recover through an authorized operator action.
+An already accepted Telegram send cannot be recalled. Restart never bypasses the
+startup activation gate or the separate exact owner resume. Hot credential reload
+is intentionally not implemented in this increment.
+
+Files are written using an exclusive no-follow 0600 temporary file in the same
+0700 directory, synced, renamed atomically and followed by a directory sync.
+Existing symlinks, hard links, unsafe permissions and unsafe ancestors are
+refused. Replace keeps the old file until the new token passes verification.
+Remove unlinks the private file; this is not secure erasure of backups or memory,
+and revoking at BotFather is still necessary. SQLite stores only metadata. The
+ordinary owner audit records a confirmed **attempt** before filesystem I/O
+(owner/action/account, bot ID and last four); it is not proof of a successful
+filesystem commit. Removal additionally keeps one bounded latest containment
+record and count per configured account, so full ordinary audit capacity cannot
+block removal. Filesystem and SQLite commits are not one distributed transaction.
+
+Focused token UI checks: `node tests/token-browser.mjs <debug-hub> <playwright-module>
+<browser-cache> <screenshot-directory>`. These use local synthetic identities and
+an explicitly mocked successful UI submission; actual getMe rejection, atomic
+storage and secret-persistence checks are separate Rust/real-handler tests.

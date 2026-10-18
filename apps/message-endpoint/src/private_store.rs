@@ -55,7 +55,7 @@ fn check_directory(directory: &OwnedFd, leaf: bool) -> Result<(), Error> {
     vcs_free(directory)
 }
 
-fn open_directory(path: &Path, create_leaf: bool) -> Result<OwnedFd, Error> {
+pub(crate) fn open_directory(path: &Path, create_leaf: bool) -> Result<OwnedFd, Error> {
     if !path.is_absolute() {
         return Err(Error::PrivateStorage);
     }
@@ -110,7 +110,7 @@ fn private_file(directory: &OwnedFd, name: &str) -> Result<OwnedFd, Error> {
     Ok(file)
 }
 
-fn check_file(file: &OwnedFd) -> Result<(), Error> {
+pub(crate) fn check_file(file: &OwnedFd) -> Result<(), Error> {
     let metadata = denied(fs::fstat(file))?;
     if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
         || metadata.st_uid != rustix::process::geteuid().as_raw()
@@ -204,16 +204,24 @@ pub(crate) fn recheck(files: &PrivateFiles) -> Result<(), Error> {
 
 /// Strict local provisioning input, never an HTTP upload or a hub-supplied file.
 pub(crate) fn read_config(path: &Path) -> Result<Vec<u8>, Error> {
+    read_config_optional(path)?.ok_or(Error::PrivateStorage)
+}
+
+pub(crate) fn read_config_optional(path: &Path) -> Result<Option<Vec<u8>>, Error> {
     use std::io::Read;
     let parent = path.parent().ok_or(Error::PrivateStorage)?;
     let name = path.file_name().ok_or(Error::PrivateStorage)?;
     let directory = open_directory(parent, false)?;
-    let file = denied(fs::openat(
+    let file = match fs::openat(
         &directory,
         name,
         OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
         Mode::empty(),
-    ))?;
+    ) {
+        Ok(file) => file,
+        Err(Errno::NOENT) => return Ok(None),
+        Err(_) => return Err(Error::PrivateStorage),
+    };
     check_file(&file)?;
     let mut bytes = Vec::new();
     denied(
@@ -224,7 +232,7 @@ pub(crate) fn read_config(path: &Path) -> Result<Vec<u8>, Error> {
     if bytes.len() > 16 * 1024 {
         return Err(Error::PrivateStorage);
     }
-    Ok(bytes)
+    Ok(Some(bytes))
 }
 
 #[cfg(test)]

@@ -13,6 +13,44 @@ from http_fixture import TOKEN, fixture
 BINARY = (Path(sys.argv.pop(1)).resolve() if __name__ == '__main__'
           else Path(__file__).resolve().parents[3] / 'target/debug/treer-message-hub')
 class Runtime(unittest.TestCase):
+    def test_token_handler_auth_csrf_strict_body_quota_remove_and_no_persistence(self):
+        secret='12345:ABCDEFGHIJKLMNOPQRSTUVWXYZ_23456789'
+        with fixture(BINARY,tokens=True) as f:
+            trusted={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+            def call(value,headers=None,path='/api/telegram/token'):
+                status,_,body=f['request'](path, trusted if headers is None else headers,method='POST',body=json.dumps(value).encode())
+                self.assertNotIn(secret.encode(),body)
+                return status
+            remove={'action':'remove','account_id':'bot_fixture','confirm':True}
+            self.assertEqual(call(remove,{'Content-Type':'application/json'}),403)
+            self.assertEqual(call(remove,{**trusted,'X-Treer-Identity-Token':'forged'}),401)
+            for suffix,status in [('_member',403),('_agent',401),('_expired',401),('_workspace',401),('_audience',401)]:
+                self.assertEqual(call(remove,{**trusted,'X-Treer-Identity-Token':TOKEN+suffix}),status)
+            self.assertEqual(call(remove,{**trusted,'Origin':'https://evil.example'}),403)
+            self.assertEqual(call(remove,{**trusted,'Host':'evil.example'}),403)
+            self.assertEqual(call(remove,{**trusted,'Sec-Fetch-Site':'cross-site'}),403)
+            self.assertEqual(call(remove,path='/api/telegram/token?actor=owner'),404)
+            for invalid in [{**remove,'confirm':False},{**remove,'actor':'user_other'},{**remove,'token_file':'/untrusted/path'}]:
+                self.assertEqual(call(invalid),400)
+            # Wrong bot rejected before any network; no real Bot API calls.
+            self.assertEqual(call({'action':'set','account_id':'bot_fixture','token':secret.replace('12345:','54321:'),'confirm':True}),409)
+            self.assertEqual(call({'action':'set','account_id':'bot_fixture','token':secret+'\n','confirm':True}),400)
+            for _ in range(4):
+                status=call({'action':'set','account_id':'bot_fixture','token':secret+'bad','confirm':True})
+            self.assertEqual(status,429)
+            # Containment is allowed even after attempts/writes are exhausted.
+            self.assertEqual(call(remove),200)
+            result=f['request']('/api/settings',{'X-Treer-Identity-Token':TOKEN})
+            self.assertEqual(result[0],200)
+            self.assertNotIn(secret.encode(),result[2])
+            slot=json.loads(result[2])['settings']['telegram_tokens'][0]
+            self.assertFalse(slot['configured']);self.assertTrue(slot['restart_required'])
+            self.assertFalse((f['root']/'bot-token.json').exists())
+            for path in f['state'].iterdir():
+                self.assertNotIn(secret.encode(),path.read_bytes())
+            captured=f['stderr']
+        self.assertNotIn(secret.encode(),b''.join(captured))
+
     def test_real_hub_private_storage_identity_and_static_routes(self):
         with fixture(BINARY) as f:
             request=f['request']

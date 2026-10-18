@@ -33,6 +33,7 @@ pub struct SettingsSnapshot {
     pub audit_full: bool,
     pub emergency_pause_bindings: i64,
     pub telegram_accounts: Vec<crate::telegram_workers::Status>,
+    pub telegram_tokens: Vec<crate::telegram_tokens::Slot>,
 }
 #[derive(Serialize)]
 pub struct EndpointSnapshot {
@@ -84,7 +85,10 @@ impl From<crate::hub::View> for EndpointSnapshot {
     }
 }
 fn snapshot_value(owner: &str, snapshot: SettingsSnapshot) -> Result<Value, ()> {
-    if snapshot.endpoints.len() > 20 || snapshot.telegram_accounts.len() > 20 {
+    if snapshot.endpoints.len() > 20
+        || snapshot.telegram_accounts.len() > 20
+        || snapshot.telegram_tokens.len() > 20
+    {
         return Err(());
     }
     let value = json!({"owner_id":owner,"settings":snapshot});
@@ -131,9 +135,11 @@ pub struct Settings {
     vault: OAuthVault,
     snapshot: Arc<Snapshot>,
     mutation: Option<Arc<Mutation>>,
+    token_mutation: Option<Arc<crate::telegram_tokens::Mutation>>,
     slots: Arc<Semaphore>,
     writes: WriteGate,
     exports: WriteGate,
+    token_attempts: WriteGate,
     html: &'static str,
     javascript: &'static str,
     stylesheet: &'static str,
@@ -168,9 +174,11 @@ impl Settings {
             vault: OAuthVault::default(),
             snapshot,
             mutation: None,
+            token_mutation: None,
             slots: Arc::new(Semaphore::new(16)),
             writes: WriteGate::default(),
             exports: WriteGate::default(),
+            token_attempts: WriteGate::default(),
             html,
             javascript: "",
             stylesheet: "",
@@ -204,6 +212,10 @@ impl Settings {
     }
     pub fn with_configuration(mut self, mutation: Arc<Mutation>) -> Self {
         self.mutation = Some(mutation);
+        self
+    }
+    pub fn with_tokens(mut self, mutation: Arc<crate::telegram_tokens::Mutation>) -> Self {
+        self.token_mutation = Some(mutation);
         self
     }
     pub fn with_assets(mut self, javascript: &'static str, stylesheet: &'static str) -> Self {
@@ -364,7 +376,12 @@ async fn handle(
             "headers_too_large",
         ));
     }
-    if parts.method == Method::POST && parts.uri.path() == "/api/configuration" {
+    if parts.method == Method::POST
+        && matches!(
+            parts.uri.path(),
+            "/api/configuration" | "/api/telegram/token"
+        )
+    {
         return configuration_request(app, peer, parts, body).await;
     }
     // Refuse framed bodies before waiting for bytes or consuming verification
@@ -463,7 +480,14 @@ async fn configuration_request(
     parts: axum::http::request::Parts,
     body: Body,
 ) -> Response {
-    if parts.uri.query().is_some() || app.mutation.is_none() {
+    let token_request = parts.uri.path() == "/api/telegram/token";
+    if parts.uri.query().is_some()
+        || if token_request {
+            app.token_mutation.is_none()
+        } else {
+            app.mutation.is_none()
+        }
+    {
         return secure(fixed(StatusCode::NOT_FOUND, "route_not_found"));
     }
     let lengths: Vec<_> = parts.headers.get_all("content-length").iter().collect();
@@ -511,6 +535,50 @@ async fn configuration_request(
         Ok(Ok(b)) if Some(b.len()) == size => b,
         _ => return secure(fixed(StatusCode::BAD_REQUEST, "invalid_configuration_body")),
     };
+    if token_request {
+        return match tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let command = serde_json::from_slice::<crate::telegram_tokens::Command>(&bytes);
+            // Failed submissions count, including malformed JSON/shape. Removal
+            // is containment and is never blocked by ordinary submission quotas.
+            let removes = command.as_ref().is_ok_and(|c| c.removes());
+            if !removes {
+                let now = Instant::now();
+                let owner_allowed = app.token_attempts.admit_limit(owner.id(), now, 5);
+                let global_allowed = app.token_attempts.admit_limit("token:global", now, 20);
+                let write_allowed = app.writes.admit(owner.id(), now);
+                if !owner_allowed || !global_allowed || !write_allowed {
+                    return fixed(StatusCode::TOO_MANY_REQUESTS, "telegram_token_rate_limited");
+                }
+            }
+            let command = match command {
+                Ok(c) => c,
+                Err(_) => return fixed(StatusCode::BAD_REQUEST, "telegram_token_invalid"),
+            };
+            match app.token_mutation.as_ref().expect("checked token service")(&owner, command) {
+                Ok(slot) => response(
+                    StatusCode::OK,
+                    json!({"status":"telegram_token_saved","account":slot}),
+                ),
+                Err(e) => {
+                    use crate::telegram_tokens::Failure;
+                    let status = match e {
+                        Failure::Invalid | Failure::Rejected => StatusCode::BAD_REQUEST,
+                        Failure::DifferentBot | Failure::Active => StatusCode::CONFLICT,
+                        Failure::Verification => StatusCode::BAD_GATEWAY,
+                        Failure::Storage => StatusCode::SERVICE_UNAVAILABLE,
+                        Failure::Expired => StatusCode::UNAUTHORIZED,
+                    };
+                    fixed(status, &e.to_string())
+                }
+            }
+        })
+        .await
+        {
+            Ok(r) => secure(r),
+            Err(_) => secure(error(Error::Proxy)),
+        };
+    }
     let command: crate::configuration::Command = match serde_json::from_slice(&bytes) {
         Ok(c) => c,
         Err(_) => return secure(fixed(StatusCode::BAD_REQUEST, "invalid_configuration_body")),
@@ -896,6 +964,7 @@ mod tests {
                 audit_full: false,
                 emergency_pause_bindings: 0,
                 telegram_accounts: vec![],
+                telegram_tokens: vec![],
                 activation_enabled: false,
             },
         )
@@ -911,6 +980,7 @@ mod tests {
                 audit_full: false,
                 emergency_pause_bindings: 0,
                 telegram_accounts: vec![],
+                telegram_tokens: vec![],
                 activation_enabled: false,
             }
         )
@@ -923,6 +993,7 @@ mod tests {
                 audit_full: false,
                 emergency_pause_bindings: 0,
                 telegram_accounts: vec![],
+                telegram_tokens: vec![],
                 activation_enabled: false,
             }
         )

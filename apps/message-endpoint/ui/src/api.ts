@@ -27,3 +27,10 @@ export async function saveConfiguration(command:unknown) {
  if(!response.ok)throw new Error(typeof value?.error?.code==='string'?value.error.code:'configuration_unavailable');
  return value;
 }
+
+export async function saveTelegramToken(command:unknown) {
+ const response=await fetch('api/telegram/token',{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Endpoint-Request':'1'},body:JSON.stringify(command)});
+ const value=await response.json();
+ if(!response.ok)throw new Error(typeof value?.error?.code==='string'?value.error.code:'telegram_token_unavailable');
+ return value;
+}

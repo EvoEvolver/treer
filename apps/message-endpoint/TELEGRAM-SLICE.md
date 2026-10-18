@@ -106,3 +106,12 @@ changes telegram.rs, leaving 45 after the handoffs.rs fixture budget update. The
 line reread. The author re-examined the forwarding, admission, activation and
 test boundaries during extraction. No later P3 edits to those 47 files were
 carried into this slice; later P3 history may have modified the separate branch.
+
+## Subsequent token-entry increment
+
+The `message-endpoint-159-token-entry` branch starts at frozen 4caaf273 and adds
+only private owner token provisioning and its tests/UI. It does not reintroduce
+parked HTTP code, modify the endpoint relay protocol, or approve migration.
+Missing configured token files produce idle `token_missing` slots. Every UI token
+change stops/drains Telegram until an authorized restart and separate owner
+resume. This increment requires its own review, gate and artifact evidence.
