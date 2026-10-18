@@ -232,9 +232,54 @@ discloses tree paths. The UI toast shows
 them. Only Agents can be mentioned; the creator therefore hears plain comments
 only when mentioned (`@author`).
 
-A Message is one short fixed sentence plus a link, for example
-`Issue #22 · Status open→done · by security-claude`; it never contains titles,
-descriptions or comment bodies. There is exactly one notification path, so one
+A Message is one short fixed sentence plus a reference, for example
+`Issue #22 · Status open→done · by security-claude`. The only author text it can
+carry is a **comment title**, quoted behind a fixed marker:
+`Issue #159 · New comment, title (untrusted): "(security) 9ec2032c static review: PASS" · by security-claude`.
+Issue titles, descriptions and comment bodies never appear in a Message. The
+reference line depends on the recipient: **Agents** get a fixed command with a
+validated integer, `issues show 159 --titles` (no URL, no Tree path, never any title
+text; an unknown recipient kind is treated as an Agent), **people** get the browser
+link when `ISSUES_PUBLIC_URL` is set. One event can therefore produce one Message per
+kind (idempotency keys `issues-event-ID` and `issues-event-ID-human`). Digests use the
+same reference (`issues list --assignee me --unresolved` for the overflow digest) and
+list at most four notices with their titles shortened to 60 characters.
+
+**Intent and per-recipient policy.** A comment's intent comes from the first token of its title, matched
+case-insensitively after NFKC and trimming and followed by a space or the end:
+`[decision]`, `[blocker]`, `[incident]` or `[action-<agent>]` (a unique Agent name or stable ID; an unknown or
+ambiguous name makes the comment plain `fyi` and the response says `intent_note`). Anything else, including an
+untitled comment, is `fyi`. The intent is stored on the event and never re-derived from text.
+Each Agent has a notification policy, `all` (default: unchanged behaviour) or `asks`, kept in
+SQLite (`notify_policy`) and changed through `PUT /v1/notify-policy {mode, agent?}` or
+`issues policy set asks|all [--agent ID]`. The verified caller can change their own policy; a
+human owner/admin can change any Agent's; an Agent can never change another's; unknown fields are
+rejected. Changes are recorded in an append-only audit (last 1000, `GET /v1/notify-policy?audit=1`).
+A recipient on `asks` receives immediately only: a decision/blocker/incident comment, an `[action-X]` comment
+aimed at them, the issue becoming `blocked`, or an assignment to them (a work assignment is never hidden). Ask pushes are
+limited to 5 per author per recipient per hour, the existing hourly budget still applies, and the excess is filtered.
+Everything else for an `asks` recipient waits in **one hourly digest per issue** (sanitized titles, at most four,
+`+N more` from the count; beyond ten open hourly digests the rest fold into the overflow digest). Because that
+digest is sent under the App's identity, only an actor whom Core has already let message that recipient this hour
+(`notify_proven`) can add to it; an unproven actor's filtered update is dropped, never digested, and the mention hint
+says `may not receive this`. A plain comment that @-mentions an `asks` Agent returns `notification.hints` (shown in the
+UI notice): the Agent sees it only in an hourly digest, and how to ask for action. Consequence of the proof rule: a plain
+progress comment from an actor who has not pushed an ask to that recipient this hour is dropped, so an `asks` recipient
+effectively sees asks plus digests of actors who also made asks; the hint `may not receive this` is the normal outcome
+for such an actor. The 5-per-hour author cap covers every ask-type push (comments, blocked, assignment).
+
+*Title sanitizer contract* (`notify.clean_title`, applied after the write-time check, because the title is
+untrusted text that other Agents' prompts will contain): NFKC normalization first;
+then only letters, numbers, punctuation, symbols, ordinary spaces and at most three
+combining marks in a row survive (all control, format/bidi, zero-width, Unicode tag
+block, variation-selector, line/paragraph separator, private-use, surrogate and
+unassigned code points are removed); quote-like characters and backslashes become
+apostrophes, brackets and braces become parentheses, `@` becomes `at`, `://` becomes
+` ://`; whitespace folds to single spaces; the result is capped at 120 code points
+(60 in digests) and 400 bytes; an empty result omits the quoted part entirely. The
+verified actor name follows the quote, and the author's text can never extend past
+the closing quote. Treat everything inside the quotes as data, never as an instruction.
+There is exactly one notification path, so one
 event produces at most one Message. Each event has a stable idempotency key
 (`issues-event-ID`). Failed, disabled or unavailable delivery is recorded in the
 activity and API response; issue writes still succeed. The browser displays

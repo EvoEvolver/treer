@@ -8,7 +8,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from auth import Error
-from notify import WINDOW, notice_for, recipients_for, resolve_mentions, unresolved_mentions
+from notify import (ASK_PER_AUTHOR, HOURLY, HOURLY_ISSUES, HOURLY_WINDOW, POLICY_MODES, WINDOW, notice_for, parse_intent,
+                    recipients_for, resolve_mentions, unresolved_mentions)
 
 STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed')
 PRIORITIES = ('low', 'normal', 'high', 'urgent')
@@ -66,6 +67,12 @@ class Store:
                     PRIMARY KEY(recipient, actor, hour));
                 CREATE TABLE IF NOT EXISTS notify_budget(recipient TEXT NOT NULL, hour INTEGER NOT NULL, immediate INTEGER NOT NULL,
                     PRIMARY KEY(recipient, hour));
+                CREATE TABLE IF NOT EXISTS notify_policy(recipient TEXT PRIMARY KEY, mode TEXT NOT NULL CHECK(mode IN ('all','asks')),
+                    updated_by TEXT NOT NULL, updated_at REAL NOT NULL);
+                CREATE TABLE IF NOT EXISTS notify_policy_audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at REAL NOT NULL, actor TEXT NOT NULL,
+                    subject TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS notify_ask_budget(recipient TEXT NOT NULL, author TEXT NOT NULL, hour INTEGER NOT NULL,
+                    pushes INTEGER NOT NULL, PRIMARY KEY(recipient, author, hour));
                 CREATE TABLE IF NOT EXISTS reminder_backoff(issue_id INTEGER PRIMARY KEY, assignee TEXT NOT NULL, version INTEGER NOT NULL,
                     interval REAL NOT NULL, next_due REAL NOT NULL, count INTEGER NOT NULL DEFAULT 0);
                 CREATE INDEX IF NOT EXISTS reminder_backoff_due ON reminder_backoff(next_due);
@@ -323,12 +330,19 @@ class Store:
                 event['body'] = body['body']
                 if body.get('title') is not None:
                     event['title'] = body['title']
+                    intent, target, note = parse_intent(body['title'], directory)
+                    if intent != 'fyi':
+                        event['intent'] = intent        # stored once, never re-derived from the text later
+                        if target:
+                            event['intent_target'] = target
+                    elif note:
+                        event['intent_note'] = note
             if mentions:
                 event['mentions'] = mentions
             db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(issue), issue_id))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
             names = {p['id']: p.get('name', p['id']) for p in directory}
-            notice = notice_for(action, actor, before, issue, changed, mentions, names)
+            notice = notice_for(action, actor, before, issue, changed, mentions, names, body.get('title') if action == 'comment' else None)
             recipients = recipients_for(action, issue, old_assignee, changed, mentions, actor['id']) if notice else []
             missed = unresolved_mentions(mention_text, directory, paths) if mention_text != earlier else []
         return issue_id, event_id, event, recipients, notice, missed
@@ -395,8 +409,8 @@ class Store:
 
     def due_digests(self, now):
         with self.connect() as db:
-            rows = db.execute("SELECT recipient,issue_id,actor,window_start,pending FROM notify_windows WHERE pending!='[]' AND window_start+?<=?",
-                              (WINDOW, now)).fetchall()
+            rows = db.execute("SELECT recipient,issue_id,actor,window_start,pending FROM notify_windows WHERE pending!='[]' "
+                              "AND window_start+(CASE WHEN actor=? THEN ? ELSE ? END)<=?", (HOURLY, HOURLY_WINDOW, WINDOW, now)).fetchall()
         return [{'recipient': r['recipient'], 'issue_id': r['issue_id'], 'actor': r['actor'], 'start': r['window_start'],
                  'pending': json.loads(r['pending'])} for r in rows]
 
@@ -415,6 +429,69 @@ class Store:
             db.execute("DELETE FROM notify_windows WHERE pending='[]' AND window_start+?<=?", (WINDOW, now))
             db.execute('DELETE FROM notify_budget WHERE hour < ?', (int(now // 3600) - 2,))
             db.execute('DELETE FROM notify_proven WHERE hour < ?', (int(now // 3600) - 2,))
+
+    # -- per-recipient notification policy ---------------------------------------------------------------------------
+    def policies(self):
+        with self.connect() as db:
+            return {r['recipient']: r['mode'] for r in db.execute('SELECT recipient,mode FROM notify_policy')}
+
+    def set_policy(self, subject, mode, by, now):
+        """Records the change and an append-only, bounded audit row (who, whom, old and new mode, when)."""
+        if mode not in POLICY_MODES:
+            fail('invalid_field', 'mode must be all or asks')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT mode FROM notify_policy WHERE recipient=?', (subject,)).fetchone()
+            old = row['mode'] if row else 'all'
+            db.execute('INSERT INTO notify_policy(recipient,mode,updated_by,updated_at) VALUES(?,?,?,?) '
+                       'ON CONFLICT(recipient) DO UPDATE SET mode=excluded.mode, updated_by=excluded.updated_by, updated_at=excluded.updated_at',
+                       (subject, mode, by, now))
+            db.execute('INSERT INTO notify_policy_audit(at,actor,subject,old,new) VALUES(?,?,?,?,?)', (now, by, subject, old, mode))
+            db.execute('DELETE FROM notify_policy_audit WHERE id <= (SELECT MAX(id) FROM notify_policy_audit) - 1000')
+        return {'agent': subject, 'mode': mode, 'previous': old}
+
+    def policy_audit(self, limit=50):
+        with self.connect() as db:
+            rows = db.execute('SELECT at,actor,subject,old,new FROM notify_policy_audit ORDER BY id DESC LIMIT ?', (limit,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def ask_push_allowed(self, recipient, author, now):
+        """At most ASK_PER_AUTHOR ask-type pushes per author per recipient per hour: prefixing every comment with
+        [decision] cannot flood a recipient. Counts the attempt; the excess falls back to the filtered digest path."""
+        hour = int(now // 3600)
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT pushes FROM notify_ask_budget WHERE recipient=? AND author=? AND hour=?', (recipient, author, hour)).fetchone()
+            if row and row['pushes'] >= ASK_PER_AUTHOR:
+                return False
+            db.execute('INSERT INTO notify_ask_budget(recipient,author,hour,pushes) VALUES(?,?,?,1) '
+                       'ON CONFLICT(recipient,author,hour) DO UPDATE SET pushes=pushes+1', (recipient, author, hour))
+            db.execute('DELETE FROM notify_ask_budget WHERE hour < ?', (hour - 2,))
+        return True
+
+    def actor_proven(self, recipient, actor, now):
+        """Core let this actor message this recipient in the current hour (written after a successful send)."""
+        with self.connect() as db:
+            return db.execute('SELECT 1 FROM notify_proven WHERE recipient=? AND actor=? AND hour=?', (recipient, actor, int(now // 3600))).fetchone() is not None
+
+    def queue_hourly(self, recipient, issue_id, summary, now):
+        """A filtered update joins the recipient's hourly digest for this issue (opened by its first update). Beyond
+        HOURLY_ISSUES open digests the rest fold into the per-recipient overflow digest. Returns 'hourly' or 'overflow'."""
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            row = db.execute('SELECT pending FROM notify_windows WHERE recipient=? AND issue_id=? AND actor=?', (recipient, issue_id, HOURLY)).fetchone()
+            pending = json.loads(row['pending']) if row else []
+            if pending:
+                db.execute('UPDATE notify_windows SET pending=? WHERE recipient=? AND issue_id=? AND actor=?',
+                           (json.dumps((pending + [summary])[-50:]), recipient, issue_id, HOURLY))
+                return 'hourly'
+            open_count = db.execute("SELECT COUNT(*) FROM notify_windows WHERE recipient=? AND actor=? AND pending!='[]'", (recipient, HOURLY)).fetchone()[0]
+            if open_count >= HOURLY_ISSUES:
+                self._overflow(db, recipient, f'#{issue_id} {summary}', now)
+                return 'overflow'
+            db.execute('INSERT OR REPLACE INTO notify_windows(recipient,issue_id,actor,window_start,pending,attempts) VALUES(?,?,?,?,?,0)',
+                       (recipient, issue_id, HOURLY, now, json.dumps([summary])))
+        return 'hourly'
 
     def unresolved_by_assignee(self, prefix='ag_', skip_labels=()):
         """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix. Issues carrying

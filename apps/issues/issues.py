@@ -13,7 +13,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
-from notify import Digest, candidates, enabled as notify_enabled, hourly_limit, path_tokens
+from notify import ASK_INTENTS, Digest, POLICY_MODES, candidates, digest_form, issue_ref, label, enabled as notify_enabled, hourly_limit, path_tokens
 from reminders import Reminders, backoff as reminder_backoff, enabled as reminders_enabled
 from store import Store, fields, fail
 
@@ -100,6 +100,108 @@ class Application:
                     resolved[path.lower()] = entry['id']
         return resolved
 
+    def set_policy(self, body, actor, directory):
+        """PUT /v1/notify-policy {mode, agent?}. The verified caller may change their own policy; a human owner/admin may
+        change any Agent's. An Agent can never change another principal's. Unknown fields are rejected."""
+        fields(body, ('mode', 'agent'))
+        mode, subject = body.get('mode'), body.get('agent') or actor['id']
+        if mode not in POLICY_MODES:
+            fail('invalid_field', 'mode must be all or asks')
+        if subject != actor['id'] and not (actor.get('kind') == 'human' and actor.get('role') in ('owner', 'admin')):
+            fail('forbidden', 'Only the principal itself or a human owner/admin can change a notification policy', 403)
+        if not any(p['id'] == subject and p.get('kind') == 'agent' for p in directory):
+            fail('invalid_field', 'Notification policies are kept for Agents in the directory')
+        return self.store.set_policy(subject, mode, actor['id'], self.store.clock())
+
+    @staticmethod
+    def is_ask_for(event, recipient):
+        """Whether this event must reach a recipient who chose `asks` at once: a decision/blocker/incident comment, an
+        [action-X] comment aimed at them, the issue becoming blocked, or an assignment to them (a work assignment is
+        never hidden by a policy meant to quiet progress chatter)."""
+        changes = event.get('changes') or {}
+        if event.get('kind') == 'comment':
+            return event.get('intent') in ASK_INTENTS or (event.get('intent') == 'action' and event.get('intent_target') == recipient)
+        return changes.get('status') == 'blocked' or changes.get('assignee') == recipient
+
+    def route(self, event, recipients, actor, now):
+        """Split recipients into (immediate, filtered) by each one's own policy. `all` (the default) is unchanged.
+        An `asks` recipient gets ask-type events at once (comments, blocked, assignments), all bounded to ASK_PER_AUTHOR pushes per author per hour."""
+        policies = self.store.policies()
+        immediate, filtered = [], []
+        for recipient in recipients:
+            if policies.get(recipient, 'all') != 'asks':
+                immediate.append(recipient)
+            elif self.is_ask_for(event, recipient) and self.store.ask_push_allowed(recipient, actor['id'], now):
+                immediate.append(recipient)
+            else:
+                filtered.append(recipient)
+        return immediate, filtered
+
+    def park(self, issue_id, notice, filtered, actor, now):
+        """Filtered updates go to the recipient's hourly digest, but only for an actor whom Core has already let message
+        that recipient this hour (notify_proven): the digest is sent under the App identity and must not become a way
+        around Message Policy. Unproven updates are dropped, and the hint says so. Returns {recipient: outcome}."""
+        outcome = {}
+        for recipient in filtered:
+            if not self.store.actor_proven(recipient, actor['id'], now):
+                outcome[recipient] = 'not_delivered'
+            else:
+                self.store.queue_hourly(recipient, issue_id, digest_form(notice), now)   # 'overflow' is still a digest
+                outcome[recipient] = 'digest'
+        return outcome
+
+    @staticmethod
+    def hints(event, filtered, parked, directory):
+        """For people who wrote a plain comment mentioning an Agent that only wants asks."""
+        names = {p['id']: label(p.get('name', p['id']), p['id']) for p in directory}
+        out = []
+        for agent in event.get('mentions') or []:
+            if agent in filtered:
+                reached = parked.get(agent) == 'digest'
+                out.append({'agent': names.get(agent, agent), 'delivery': 'digest' if reached else 'not_delivered',
+                            'tip': (f'{names.get(agent, agent)} sees this only in an hourly digest; ' if reached else f'{names.get(agent, agent)} may not receive this; ')
+                            + 'to ask for action start the title with [decision], [blocker], [incident] or '
+                            + f'[action-{names.get(agent, agent)}]'})
+        return out
+
+    def deliver(self, token, issue_id, event_id, notice, send, directory, actor, now):
+        """One Message per recipient kind: Agents get a fixed CLI reference (no URL), people the browser link when the
+        App has a public URL. An unknown kind is treated as an Agent. Each group has its own idempotency key and a
+        failed group releases only its own recipients."""
+        humans = {p['id'] for p in directory if p.get('kind') == 'human'}
+        groups = [(key, members, text) for key, members, text in (
+            ('', [r for r in send if r not in humans], issue_ref(issue_id, True)),
+            ('-human', [r for r in send if r in humans], None)) if members]
+        failure = None
+        try:
+            auth = self.identity_provider()
+        except Error as exc:
+            auth, failure = None, exc
+        delivered = []
+        for suffix, members, tail in groups:
+            if auth is None:
+                self.store.release_notifications(issue_id, members, actor['id'], now)
+                continue
+            if tail is None:
+                url = getattr(auth, 'public_url', '') or ''
+                tail = f'{url}#issue={issue_id}' if url else ''
+            try:
+                auth.request('POST', f'/api/apps/{auth.service_id}/messages', token, body={
+                    'recipients': members, 'context_ids': [],
+                    'body': f"Issue #{issue_id} \u00b7 {notice}" + (f'\n{tail}' if tail else ''),
+                    'idempotency_key': f'issues-event-{event_id}{suffix}'})
+                delivered.extend(members)
+            except Error as exc:
+                failure = failure or exc
+                self.store.release_notifications(issue_id, members, actor['id'], now)
+        if delivered:
+            self.store.prove_notifications(delivered, actor['id'], now)
+        if failure is None:
+            return {'status': 'sent'}
+        return {'status': 'disabled' if failure.code == 'core_messages_disabled' else 'unavailable',
+                'code': failure.code, 'message': 'Change saved; Core Message notification was not delivered'
+                + (' to everyone' if delivered else '')}
+
     HEALTH_TTL = 2.0
 
     def deployment_health(self, clock=time.monotonic):
@@ -134,26 +236,25 @@ class Application:
             else:
                 # One Message per event: this is the only notification path, so nothing is sent twice.
                 now = self.store.clock()
-                send, merged, throttled = self.store.claim_notifications(issue_id, recipients, notice, now, actor['id'], hourly_limit())
-                if not send:
-                    notification = {'status': 'coalesced' if merged else 'throttled'}
+                immediate, filtered = self.route(event, recipients, actor, now)
+                parked = self.park(issue_id, notice, filtered, actor, now)
+                if not immediate:
+                    notification = {'status': 'filtered'}
                 else:
-                    try:
-                        auth = self.identity_provider()
-                        auth.request('POST', f'/api/apps/{auth.service_id}/messages', token, body={
-                            'recipients': send, 'context_ids': [],
-                            'body': f"Issue #{issue_id} · {notice}\n{auth.public_url}#issue={issue_id}",
-                            'idempotency_key': f'issues-event-{event_id}'})
-                        self.store.prove_notifications(send, actor['id'], now)
-                        notification = {'status': 'sent'}
-                    except Error as exc:
-                        self.store.release_notifications(issue_id, send, actor['id'], now)
-                        notification = {'status': 'disabled' if exc.code == 'core_messages_disabled' else 'unavailable',
-                                        'code': exc.code, 'message': 'Change saved; Core Message notification was not delivered'}
-                if send and merged:
-                    notification['coalesced'] = len(merged)
-                if throttled:
-                    notification['throttled'] = len(throttled)
+                    send, merged, throttled = self.store.claim_notifications(issue_id, immediate, digest_form(notice), now, actor['id'], hourly_limit())
+                    if not send:
+                        notification = {'status': 'coalesced' if merged else 'throttled'}
+                    else:
+                        notification = self.deliver(token, issue_id, event_id, notice, send, directory, actor, now)
+                    if send and merged:
+                        notification['coalesced'] = len(merged)
+                    if throttled:
+                        notification['throttled'] = len(throttled)
+                hints = self.hints(event, filtered, parked, directory)
+                if hints:
+                    notification['hints'] = hints
+        if event.get('intent_note'):
+            notification = dict(notification, intent_note=event['intent_note'])
         if missed:
             notification = dict(notification, unresolved_mentions=missed)
             options = {t: c for t in missed if (c := candidates(t, directory))}
@@ -185,6 +286,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_PATCH(self):
         self.dispatch('PATCH')
+
+    def do_PUT(self):
+        self.dispatch('PUT')
 
     def raw_cookie(self, name=COOKIE):
         cookies = http.cookies.SimpleCookie()
@@ -266,6 +370,14 @@ class Handler(BaseHTTPRequestHandler):
                 capabilities = sorted(getattr(directory, 'capabilities', ()))
                 self.json(200, {'principals': directory, 'capabilities': capabilities,
                                 'paths': 'supported' if 'app.directory-paths.v1' in capabilities else 'unsupported'})
+            elif path == '/v1/notify-policy' and method == 'GET':
+                fields(query, ('audit',))
+                result = {'default': 'all', 'modes': list(POLICY_MODES), 'policies': app.store.policies()}
+                if query.get('audit') == '1':
+                    result['audit'] = app.store.policy_audit()
+                self.json(200, result)
+            elif path == '/v1/notify-policy' and method == 'PUT':
+                self.json(200, app.set_policy(self.body(), actor, directory))
             elif path == '/v1/issues' and method == 'GET':
                 if query.get('assignee') == 'me':
                     query['assignee'] = actor['id']

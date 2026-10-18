@@ -28,7 +28,8 @@ const resultNotice = (result: MutationResult) => {
     const options = n?.mention_candidates?.[m];
     return options?.length ? `@${m} (ambiguous: ${options.map((o) => "@" + o).join(" or ")})` : `@${m}`;
   });
-  return missed.length ? `${base} · not notified: ${missed.join(", ")}` : base;
+  const tips = (n?.hints ?? []).map((h) => h.tip);
+  return [missed.length ? `${base} · not notified: ${missed.join(", ")}` : base, ...tips].join(" · ");
 };
 
 export function App() {
