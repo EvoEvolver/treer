@@ -77,6 +77,7 @@ export interface Machine {
   host_build: BuildInfo
   supervision?: MachineSupervision
   status: string
+  capabilities?: string[]
   available_agents?: string[]
   labels?: Record<string, string>
 }

@@ -1,3 +1,4 @@
+import { MachineUploadDialog } from "@/components/machine-upload-dialog"
 import { ProviderCliInstaller } from "@/components/provider-cli-installer"
 import { AgentReservationRecovery } from "@/components/agent-reservation-recovery"
 import type { AgentCreationFailure } from "@/lib/agent-creation-failure"
@@ -9,11 +10,11 @@ import { Input } from "@/components/ui/input"
 import { Select,SelectContent,SelectItem,SelectTrigger,SelectValue } from "@/components/ui/select"
 import { Textarea } from "@/components/ui/textarea"
 import type { useWorkspaceDialogState } from "@/components/workspace-dialog-state"
-import type { Agent,AgentLaunchProfile,Machine,Organization,Snapshot,User,WorkloadTreeState,Workspace } from "@/lib/api"
+import type { AgentLaunchProfile,Machine,Organization,Snapshot,User,WorkloadTreeState,Workspace } from "@/lib/api"
 import { machineName } from "@/lib/api"
 import { formatCommandLine } from "@/lib/command-line"
 import { agentPath } from "@/lib/workload-path"
-import { Copy,Play,Rocket,Upload } from "lucide-react"
+import { Copy,Play,Rocket } from "lucide-react"
 import type { Dispatch,FormEvent,SetStateAction } from "react"
 import { t } from "@/i18n"
 
@@ -43,26 +44,22 @@ interface WorkspaceDialogsProps {
   submitRename: (event: FormEvent) => Promise<void>
   snapshot: Snapshot | null
   workloadTree: WorkloadTreeState
-  uploadToAgentMachine: (event: FormEvent) => Promise<void>
+  uploadScopeActive: boolean
   selectedAgentMachine: Machine | undefined
-  selectedAgent: Agent | undefined
-  selectedAgentMachineOnline: boolean
   confirmDelete: () => Promise<void>
   workspaceMachineCount: number | undefined
   workspace: Workspace | undefined
   confirmDeleteWorkspace: () => Promise<void>
 }
 
-export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadToAgentMachine, selectedAgentMachine, selectedAgent, selectedAgentMachineOnline, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
+export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, creationFailure, onReservationCleaned, state, user, setUser, showError, createOrganization, organization, createWorkspace, saveLaunchProfile, launchFromProfile, onlineMachines, deleteLaunchProfile, createAgent, selectAgentProfile, launchProfiles, selectedCreateProfile, changeAgentCommandLine, deleteAppDeployment, copy, submitRename, snapshot, workloadTree, uploadScopeActive, selectedAgentMachine, confirmDelete, workspaceMachineCount, workspace, confirmDeleteWorkspace }: WorkspaceDialogsProps) {
   const {
     settingsOpen, setSettingsOpen, createOrganizationOpen, setCreateOrganizationOpen,
     createWorkspaceOpen, setCreateWorkspaceOpen, deleteWorkspaceOpen, setDeleteWorkspaceOpen,
     createAgentOpen, setCreateAgentOpen, agentFolder, renameError, createAgentError, creatingAgent,
     deletingApp, setDeletingApp, profileEditorOpen, setProfileEditorOpen, editingLaunchProfile,
     setEditingLaunchProfile, launchingProfile, setLaunchingProfile, deletingProfile, setDeletingProfile,
-    installOpen, setInstallOpen, inviteOpen, setInviteOpen, uploadOpen, setUploadOpen, uploadDirectory,
-    setUploadDirectory, uploadFile, setUploadFile, overwriteUpload, setOverwriteUpload, uploading,
-    uploadInputKey, uploadMessage, uploadError, renameTarget, setRenameTarget, deleteTarget,
+    installOpen, setInstallOpen, inviteOpen, setInviteOpen, uploadOpen, setUploadOpen, renameTarget, setRenameTarget, deleteTarget,
     setDeleteTarget, createOrganizationName, setCreateOrganizationName, createWorkspaceName,
     setCreateWorkspaceName, agentName, setAgentName, setAgentNameCustomized, agentProfileId,
     agentServerId, setAgentServerId, agentCwd, setAgentCwd, agentCommandLine, launchProfileName,
@@ -144,7 +141,7 @@ export function WorkspaceDialogs({ creationCommandMissing, reservationCleaned, c
 
     <Dialog open={Boolean(renameTarget)} onOpenChange={(open) => !open && setRenameTarget(null)}><DialogContent><form onSubmit={submitRename}><DialogHeader><DialogTitle>{t("dialogs.rename_title", { kind: renameTarget ? t(`kind.${renameTarget.kind}`) : "" })}</DialogTitle><DialogDescription>{t("dialogs.rename_body", { target: renameTarget?.kind === "agent" ? agentPath(snapshot?.agents.find((agent) => agent.agent_id === renameTarget.id) ?? { agent_id: renameTarget.id, name: renameTarget.name, server_id: "", kind: "", status: "" }, workloadTree) : renameTarget?.name })}</DialogDescription></DialogHeader><div className="my-5"><Field label={t("dialogs.name")}><Input value={renameName} onChange={(event) => setRenameName(event.target.value)} required autoFocus /></Field></div>{renameError && <p role="alert" className="mb-4 break-words text-sm text-destructive">{renameError}</p>}<DialogFooter><Button type="button" variant="outline" onClick={() => setRenameTarget(null)}>{t("common.cancel")}</Button><Button type="submit">{t("machine.rename")}</Button></DialogFooter></form></DialogContent></Dialog>
 
-    <Dialog open={uploadOpen} onOpenChange={(open) => !uploading && setUploadOpen(open)}><DialogContent><form onSubmit={uploadToAgentMachine} className="space-y-4"><DialogHeader><DialogTitle>{t("surface.upload_file")}</DialogTitle><DialogDescription>{t("dialogs.upload_to", { machine: machineName(selectedAgentMachine, selectedAgent?.server_id) })}</DialogDescription></DialogHeader><Field label={t("dialogs.destination_directory")}><Input aria-label={t("dialogs.destination_directory")} className="font-mono" value={uploadDirectory} onChange={(event) => setUploadDirectory(event.target.value)} placeholder="." required disabled={uploading} /></Field><Field label={t("dialogs.file")}><Input key={uploadInputKey} aria-label={t("dialogs.file")} type="file" onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)} disabled={uploading} /></Field><label className="flex items-center gap-2 text-xs text-muted-foreground"><input type="checkbox" className="size-4 accent-foreground" checked={overwriteUpload} onChange={(event) => setOverwriteUpload(event.target.checked)} disabled={uploading} />{t("dialogs.replace_an_existing_file_with")}</label><p className="text-[10px] text-muted-foreground">{t("dialogs.maximum_16_mib")}</p>{uploadMessage && <p className="text-xs text-emerald-700">{uploadMessage}</p>}{uploadError && <p className="text-xs text-red-600">{uploadError}</p>}<DialogFooter><Button type="button" variant="outline" onClick={() => setUploadOpen(false)} disabled={uploading}>{t("org.close")}</Button><Button type="submit" disabled={!uploadFile || uploading || !selectedAgentMachineOnline}><Upload />{uploading ? t("dialogs.uploading") : t("dialogs.upload")}</Button></DialogFooter></form></DialogContent></Dialog>
+    {uploadScopeActive && uploadOpen && workspace && selectedAgentMachine && <MachineUploadDialog key={`${user.user_id}/${workspace.workspace_id}/${selectedAgentMachine.server_id}`} workspaceId={workspace.workspace_id} machine={selectedAgentMachine} onClose={() => setUploadOpen(false)} />}
 
     <Dialog open={Boolean(deleteTarget)} onOpenChange={(open) => !open && setDeleteTarget(null)}><DialogContent><DialogHeader><DialogTitle>{t("dialogs.delete_title", { kind: deleteTarget ? t(`kind.${deleteTarget.kind}`) : "" })}</DialogTitle><DialogDescription>{deleteTarget?.kind === "machine" ? t("dialogs.remove_machine_confirm", { name: deleteTarget.name }) : t("dialogs.delete_agent_confirm", { path: deleteTarget ? agentPath(snapshot?.agents.find((agent) => agent.agent_id === deleteTarget.id) ?? { agent_id: deleteTarget.id, name: deleteTarget.name, server_id: "", kind: "", status: "" }, workloadTree) : t("dialogs.agent_fallback") })}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteTarget(null)}>{t("common.cancel")}</Button><Button variant="destructive" onClick={confirmDelete}>{t("machine.delete")}</Button></DialogFooter></DialogContent></Dialog>
     <Dialog open={deleteWorkspaceOpen} onOpenChange={(open) => !open && setDeleteWorkspaceOpen(false)}><DialogContent><DialogHeader><DialogTitle>{t("wsettings.delete_workspace")}</DialogTitle><DialogDescription>{workspaceMachineCount === undefined ? t("dialogs.checking_inventory") : workspaceMachineCount > 0 ? t(workspaceMachineCount === 1 ? "dialogs.delete_machines_first_one" : "dialogs.delete_machines_first_many", { count: workspaceMachineCount, name: workspace?.name ?? t("dialogs.this_workspace") }) : t("dialogs.delete_workspace_confirm", { name: workspace?.name ?? "" })}</DialogDescription></DialogHeader><DialogFooter><Button variant="outline" onClick={() => setDeleteWorkspaceOpen(false)}>{t("common.cancel")}</Button><Button variant="destructive" disabled={workspaceMachineCount !== 0} onClick={() => void confirmDeleteWorkspace()}>{t("wsettings.delete_workspace")}</Button></DialogFooter></DialogContent></Dialog>

@@ -714,3 +714,36 @@ disposable test browser, and a browser-only DNS mapping for the synthetic Agent 
 actual native middle/modifier-click navigation without relying on interception of a popup's first
 request. That spec uses bundled full Chromium because the macOS headless shell crashes on this
 cross-site navigation in a minimal reproduction. No system trust or production settings change.
+
+Machine **Upload file** supports files up to 128 MiB when the Proxy and machine
+both advertise `machine.upload.v3`. The Console sends raw sequential parts,
+starting at 1 MiB and adapting to measured throughput (up to the server's 8 MiB
+maximum). SHA-256 is computed per part using Web Crypto; the whole file is never
+read into a single buffer on this path. HTTPS (or a browser-trusted localhost)
+is required for Web Crypto. Older versions retain the base64 upload capped at
+16 MiB; failed capability discovery does not enable that fallback.
+
+The dialog reports overall bytes sent, then **Finishing upload** until the
+machine confirms publication. Temporary transport failures have three bounded
+retries; service rate limiting honors Retry-After with a separate finite budget.
+A lost begin response reuses its idempotency key; after a lost part response the
+Console asks for the machine-confirmed offset before continuing. **Resume
+upload** keeps the same file and upload handle in memory. No file, key, handle or
+credential is saved to browser storage, and resume does not survive a reload.
+Keep the dialog open to resume. Leaving the account/workspace or unmounting the
+dialog aborts local requests and fences old results; server expiry handles
+abandoned temporary files rather than sending a cleanup request with a new
+account's cookies.
+
+**Cancel upload** stops the request and asks the server to remove the temporary
+file. It reports cancellation only after cleanup is acknowledged; unreachable
+machines or a busy cleanup report **cleanup pending**. Cancellation is disabled
+once commit starts. A dropped commit response is resolved using the same upload's
+status/receipt, never by interpreting an existing destination file as success.
+An expired or forgotten receipt reported as `unknown` / `outcome_unknown` keeps
+the result uncertain: check the file on the machine before uploading again; it
+is not proof that publication failed. Upload handles accept `upl_` plus 32–64
+lowercase hex characters (Core currently generates 64). A rejected begin handle
+that still matches the Controller's bounded identifier syntax gets a scoped
+best-effort abort; unsafe strings are never used as request paths.
+See the operator guide for temporary-file visibility, expiry and server quotas.

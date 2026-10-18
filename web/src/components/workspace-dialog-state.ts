@@ -23,13 +23,6 @@ export function useWorkspaceDialogState() {
   const [installOpen, setInstallOpen] = useState(false)
   const [inviteOpen, setInviteOpen] = useState(false)
   const [uploadOpen, setUploadOpen] = useState(false)
-  const [uploadDirectory, setUploadDirectory] = useState(".")
-  const [uploadFile, setUploadFile] = useState<File | null>(null)
-  const [overwriteUpload, setOverwriteUpload] = useState(false)
-  const [uploading, setUploading] = useState(false)
-  const [uploadInputKey, setUploadInputKey] = useState(0)
-  const [uploadMessage, setUploadMessage] = useState("")
-  const [uploadError, setUploadError] = useState("")
   const [renameTarget, setRenameTarget] = useState<RenameTarget>(null)
   const [deleteTarget, setDeleteTarget] = useState<DeleteTarget>(null)
   const [createOrganizationName, setCreateOrganizationName] = useState("")
@@ -90,20 +83,6 @@ export function useWorkspaceDialogState() {
     setInviteOpen,
     uploadOpen,
     setUploadOpen,
-    uploadDirectory,
-    setUploadDirectory,
-    uploadFile,
-    setUploadFile,
-    overwriteUpload,
-    setOverwriteUpload,
-    uploading,
-    setUploading,
-    uploadInputKey,
-    setUploadInputKey,
-    uploadMessage,
-    setUploadMessage,
-    uploadError,
-    setUploadError,
     renameTarget,
     setRenameTarget,
     deleteTarget,
