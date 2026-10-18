@@ -76,7 +76,7 @@ const steps = createSteps();
 const { step } = steps;
 const recover = async () => { await page.setViewportSize({ width: 1440, height: 900 }); await page.goto(url("?look=b")); };
 try {
-  base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1", FAKE_CODEX_FILE_LINKS: "1" });
+  base = await startServer("rich", { FAKE_CODEX_RICH: "1", FAKE_CODEX_MANY: "80", FAKE_CODEX_MODELS: "1", FAKE_CODEX_GOAL_ACTIVE: "1", FAKE_CODEX_COMPLETE_TURNS: "1", FAKE_CODEX_FILE_LINKS: "1" });
   url = (query = "") => `${base}/${page_}${query}`;
 
   await step('page headers and CSP', async () => {
@@ -105,7 +105,7 @@ try {
     const expectedFileFailures = new Map([[base + "/v1/files?path=missing.txt", 404], [base + "/v1/files?path=..%2Fescape.txt", 403]]);
     const expectedStatus = expectedFileFailures.get(message.location().url);
     if (expectedStatus && message.text().includes(`status of ${expectedStatus}`)) return;
-    errors.push(message.text());
+    errors.push(message.text() + (message.location().url ? ` (${message.location().url})` : ""));
   });
 
   await step('first paint', async () => {

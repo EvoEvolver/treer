@@ -19,6 +19,7 @@ if (process.env.FAKE_CODEX_IMAGES) {
 }
 let threadId = `new-${process.pid}`;
 let relayTurn = 0;
+let completedTurns = 0, pendingCompletion;
 let recoveryRead = false;
 if (process.env.FAKE_CODEX_OLD_ERROR) {
   turns[0].status = "failed";
@@ -94,6 +95,12 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         else turn.items.push({ id: `answer-${turn.id}`, type: "agentMessage", text: "Relay recovered" });
         console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn } }));
       }, 40);
+    } else if (process.env.FAKE_CODEX_COMPLETE_TURNS) {
+      // Records the started turn and completes it for real (thread/read shows it, turn/completed is emitted), so no
+      // launcher has to settle an accepted turn by guessing.
+      const turn = { id: completedTurns ? `turn-new-${completedTurns}` : "turn-new", status: "completed", items: [{ id: `u-new-${completedTurns}`, type: "userMessage", content: request.params.input }, { id: `a-new-${completedTurns}`, type: "agentMessage", text: "Done." }] };
+      completedTurns++; turns.push(turn); pendingCompletion = turn;
+      result = { turn: { id: turn.id } };
     } else result = { turn: { id: "turn-new" } };
   }
   if (request.method === "thread/resume") {
@@ -135,6 +142,7 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn } }));
   }
   if (request.method === "thread/goal/set" || request.method === "thread/goal/clear") console.log(JSON.stringify({ method: goal ? "thread/goal/updated" : "thread/goal/cleared", params: { threadId, goal } }));
+  if (pendingCompletion) { console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn: pendingCompletion } })); pendingCompletion = undefined; }
   if (request.method === "turn/start" && goal && !process.env.FAKE_CODEX_GOAL_ACTIVE) {
     goal = { ...goal, status: "complete", tokensUsed: 42, timeUsedSeconds: 2 };
     writeFileSync(goalFile, JSON.stringify(goal));

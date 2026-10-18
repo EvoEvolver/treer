@@ -389,7 +389,15 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
                 };
                 return call(&app, "submission", json!({"id":id}), StatusCode::OK).await;
             }
-            _ => return static_file(&app, &path).await,
+            _ => {
+                // Like the Node launcher, an unknown GET path serves the UI shell so deep links and stray URLs load it.
+                let response = static_file(&app, &path).await;
+                return if response.status() == StatusCode::NOT_FOUND {
+                    static_file(&app, "/").await
+                } else {
+                    response
+                };
+            }
         };
         return json_response(StatusCode::OK, data);
     }
