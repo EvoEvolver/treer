@@ -1260,3 +1260,14 @@ hash-chain anchors and minimum evidence-tail retention are not yet implemented.
 A full 10,000-row owner audit therefore still blocks configuration/recovery writes;
 safety pause remains available. Export is not yet a complete full-audit recovery
 workflow. Resume and capacity receipt recovery remain separate unfinished work.
+
+### Core failure streak expiry
+
+The durable Core handoff circuit stores first and last failure timestamps. A new
+actual failed attempt after more than 30 minutes without one starts at one failure
+and a new ten-minute window. A clock rollback also starts a new window. Delayed
+duplicate callbacks do not extend the streak. Migration adds `last_failure_at` in
+the existing transaction; historical rows without that timestamp start a fresh
+window on their next distinct failure. The eight-attempt/ten-minute threshold,
+private lease fencing, sticky paused state and successful-completion reset remain.
+No expiry automatically resumes a paused binding.

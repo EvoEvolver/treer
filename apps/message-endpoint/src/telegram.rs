@@ -341,7 +341,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         if !valid {
             return Err(Error::Conflict);
         }
-        let changed=tx.execute("INSERT INTO hub_core_handoff_health(endpoint,generation,failures,last_job,last_token,first_failure_at) VALUES(?1,?2,1,?3,?4,?5) ON CONFLICT(endpoint) DO UPDATE SET first_failure_at=CASE WHEN generation!=excluded.generation OR failures=0 OR first_failure_at=0 THEN excluded.first_failure_at ELSE first_failure_at END,failures=CASE WHEN generation=excluded.generation THEN MIN(failures+1,8) ELSE 1 END,generation=excluded.generation,last_job=excluded.last_job,last_token=excluded.last_token WHERE generation!=excluded.generation OR last_job!=excluded.last_job OR last_token!=excluded.last_token",
+        let changed=tx.execute("INSERT INTO hub_core_handoff_health(endpoint,generation,failures,last_job,last_token,first_failure_at,last_failure_at) VALUES(?1,?2,1,?3,?4,?5,?5) ON CONFLICT(endpoint) DO UPDATE SET first_failure_at=CASE WHEN generation!=excluded.generation OR failures=0 OR first_failure_at=0 OR last_failure_at=0 OR last_failure_at NOT BETWEEN excluded.last_failure_at-1800 AND excluded.last_failure_at THEN excluded.first_failure_at ELSE first_failure_at END,failures=CASE WHEN generation=excluded.generation AND last_failure_at!=0 AND last_failure_at BETWEEN excluded.last_failure_at-1800 AND excluded.last_failure_at THEN MIN(failures+1,8) ELSE 1 END,generation=excluded.generation,last_job=excluded.last_job,last_token=excluded.last_token,last_failure_at=excluded.last_failure_at WHERE generation!=excluded.generation OR last_job!=excluded.last_job OR last_token!=excluded.last_token",
             params![intent.endpoint,intent.generation,intent.job,intent.token,now])?;
         if changed == 0 {
             tx.commit()?;
@@ -391,7 +391,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         // the old failure streak rather than permitting more attempts.
         if pending {
             self.store.db.execute(
-                "UPDATE hub_core_handoff_health SET failures=0,first_failure_at=0 WHERE endpoint=?1 AND generation=?2",
+                "UPDATE hub_core_handoff_health SET failures=0,first_failure_at=0,last_failure_at=0 WHERE endpoint=?1 AND generation=?2",
                 params![intent.endpoint, intent.generation],
             )?;
         }
@@ -1126,19 +1126,19 @@ mod tests {
         assert!(!hub.view("ag_endpoint").unwrap().paused);
         hub.store
             .db
-            .execute(
-                "ALTER TABLE hub_core_handoff_health DROP COLUMN first_failure_at",
-                [],
+            .execute_batch(
+                "ALTER TABLE hub_core_handoff_health DROP COLUMN first_failure_at; ALTER TABLE hub_core_handoff_health DROP COLUMN last_failure_at",
             )
             .unwrap();
         let mut hub = Hub::new(hub.store, fake, "app_hub", "ws").unwrap();
-        for (token, at, paused) in [("e", NOW + 10000, false), ("f", NOW + 10600, true)] {
+        for n in 0..8 {
+            let (token, at, paused) = (format!("{:064x}", n + 10), NOW + 10000 + n * 100, n == 7);
             hub.store
                 .db
                 .execute("UPDATE inbound SET lease_until=0", [])
                 .unwrap();
             let intent = hub
-                .prepare_telegram_forward("ag_endpoint", NOW, &token.repeat(64))
+                .prepare_telegram_forward("ag_endpoint", NOW, &token)
                 .unwrap()
                 .unwrap();
             hub.fail_telegram_forward(&intent, at).unwrap();
@@ -1154,6 +1154,62 @@ mod tests {
             )
             .unwrap();
         assert_eq!(health, (8, NOW + 10000));
+    }
+    #[test]
+    fn stale_failure_streak_resets_before_eighth_failure_and_persists_new_window() {
+        let (mut hub, fake) = fixture(Limits::default());
+        hub.admit_telegram("bot_test", vec![update(1)], NOW)
+            .unwrap();
+        hub.store.db.execute("INSERT INTO hub_core_handoff_health(endpoint,generation,failures,last_job,last_token,first_failure_at,last_failure_at) VALUES('ag_endpoint',1,7,-1,'old',?1,?2)",params![NOW-3600,NOW-1801]).unwrap();
+        let first = hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        hub.fail_telegram_forward(&first, NOW).unwrap();
+        assert!(!hub.view("ag_endpoint").unwrap().paused);
+        assert_eq!(
+            hub.store
+                .db
+                .query_row(
+                    "SELECT failures,first_failure_at,last_failure_at FROM hub_core_handoff_health",
+                    [],
+                    |r| Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?
+                    ))
+                )
+                .unwrap(),
+            (1, NOW, NOW)
+        );
+        let mut hub = Hub::new(hub.store, fake, "app_hub", "ws").unwrap();
+        hub.store
+            .db
+            .execute("UPDATE inbound SET lease_until=0", [])
+            .unwrap();
+        let second = hub
+            .prepare_telegram_forward("ag_endpoint", NOW, &"b".repeat(64))
+            .unwrap()
+            .unwrap();
+        hub.fail_telegram_forward(&second, NOW + 600).unwrap();
+        assert!(!hub.view("ag_endpoint").unwrap().paused);
+        // Duplicate delayed completion cannot move the last-failure timestamp.
+        hub.fail_telegram_forward(&second, NOW + 10000).unwrap();
+        assert_eq!(
+            hub.store
+                .db
+                .query_row(
+                    "SELECT failures,first_failure_at,last_failure_at FROM hub_core_handoff_health",
+                    [],
+                    |r| Ok((
+                        r.get::<_, i64>(0)?,
+                        r.get::<_, i64>(1)?,
+                        r.get::<_, i64>(2)?
+                    ))
+                )
+                .unwrap(),
+            (2, NOW, NOW + 600)
+        );
     }
     #[test]
     fn failed_core_results_are_lease_fenced_and_success_resets_only_once() {
