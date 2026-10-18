@@ -2483,8 +2483,8 @@ async fn chunked_upload_bounds_active_uploads_reaps_idle_ones_and_sweeps_after_r
     // alive and holds its staging files open: on Windows the sweep cannot
     // delete them (sharing mode), so begin must still succeed, the held names
     // stay recorded for the next sweep, and nothing else is touched.
-    std::fs::write(root.join(".treer-transfer-upl_unrecorded"), b"not ours").unwrap();
     let recorded_before = staging_files(&root).len();
+    std::fs::write(root.join(".treer-transfer-upl_unrecorded"), b"not ours").unwrap();
     let replacement = crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
     replacement
         .begin("upl_fresh00001", ".", "fresh.bin", false, Some(8))
