@@ -21,6 +21,11 @@ explicit; Codex/macOS M4 does not expand the adapter/platform matrix implicitly.
 
 ## Migration: preserve accepted work in both directions
 
+The concrete [envelope-v1 schema proposal](M4-ENVELOPE.md) supplies the separate
+Security/Core schema gate. Its limits and Controller transaction fields remain
+proposals until that gate accepts them; the existing design review alone does
+not enable a migration consumer or switch.
+
 The existing [provider bundle](../agent/src/session-transfer.ts) omits launcher
 receipts, dispatch fences, notifications, goals and attachment accounting.
 Define a separate bounded, versioned launcher envelope. Its manifest records
