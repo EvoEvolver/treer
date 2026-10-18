@@ -2,9 +2,11 @@ import {useEffect,useState} from 'react';
 import {readEditUrl,readEmailThread,submitEmailReply,endMemberSession} from './api';
 type Message={source_id:string;body:string;created_at:number;member_id:string|null};
 type Thread={id:string;endpoint_id:string;recipient_agent_id:string;messages:Message[]};
+// getRandomValues also works on HTTP virtual-network origins; randomUUID does not.
+function replyKey(){return Array.from(crypto.getRandomValues(new Uint8Array(16)),v=>v.toString(16).padStart(2,'0')).join('');}
 export function EmailThread({id}:{id:string}) {
  const [zh,setZh]=useState(navigator.language.startsWith('zh')),[dark,setDark]=useState(matchMedia('(prefers-color-scheme: dark)').matches);
- const [thread,setThread]=useState<Thread|null>(null),[busy,setBusy]=useState(false),[failure,setFailure]=useState(''),[login,setLogin]=useState(false),[root,setRoot]=useState<string|null>(null),[text,setText]=useState(''),[queued,setQueued]=useState(false),[key,setKey]=useState(()=>crypto.randomUUID());
+ const [thread,setThread]=useState<Thread|null>(null),[busy,setBusy]=useState(false),[failure,setFailure]=useState(''),[login,setLogin]=useState(false),[root,setRoot]=useState<string|null>(null),[text,setText]=useState(''),[queued,setQueued]=useState(false),[key,setKey]=useState(()=>replyKey());
  const editable=root===location.origin+'/'&&location.pathname==='/';
  useEffect(()=>{document.documentElement.lang=zh?'zh':'en';document.documentElement.classList.toggle('dark',dark);},[zh,dark]);
  async function load() {
@@ -21,7 +23,7 @@ export function EmailThread({id}:{id:string}) {
   if(!editable||!text.trim()||busy)return;
   setBusy(true);setFailure('');setQueued(false);
   try {await submitEmailReply(id,key,text);
-   setText('');setKey(crypto.randomUUID());setQueued(true);await load();
+   setText('');setKey(replyKey());setQueued(true);await load();
   }catch(e){setFailure(e instanceof Error?e.message:'email_reply_unavailable');}finally{setBusy(false);}
  }
  async function logout() {
