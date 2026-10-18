@@ -447,7 +447,9 @@ committing rows. The Controller side (`machine_upload.rs`) stages through the
 platform `Root`/`StagedFile` boundary, journals intents and receipts next to
 the transfer journal, reaps after one hour idle or six hours, and advertises
 `machine.upload.v3`; the Proxy copies live Controller capabilities onto each
-machine entry of the read models. Directories are validated beneath the
+machine entry of the read models at registration and keeps them across the
+Controller's periodic snapshots, which never carry the field (the Proxy is
+authoritative for them). Directories are validated beneath the
 enrolled Host root and file names cannot contain path separators. These
 operations run in the Controller, so a Controller hot update enables them
 without replacing the stable Host.

@@ -59,6 +59,31 @@ struct Fixture {
     store: crate::upload_store::UploadStore,
     fake: Fake,
     app: Router,
+    connection_a: Uuid,
+}
+
+/// A Controller-shaped ServerInfo: the Controller never fills `capabilities`.
+fn server_info(id: &str, now: chrono::DateTime<chrono::Utc>) -> ServerInfo {
+    let build = treer_protocol::BuildInfo {
+        version: "test".into(),
+        git_commit: "test".into(),
+    };
+    ServerInfo {
+        server_id: id.into(),
+        workspace_id: "default".into(),
+        name: id.into(),
+        hostname: id.into(),
+        root: "/tmp".into(),
+        controller_build: build.clone(),
+        host_build: build,
+        supervision: None,
+        labels: Default::default(),
+        available_agents: None,
+        status: ServerStatus::Online,
+        connected_at: now,
+        last_seen_at: now,
+        capabilities: vec![],
+    }
 }
 
 fn answer_v3(
@@ -213,31 +238,13 @@ async fn fixture() -> Fixture {
             .execute(&auth.pool()).await.unwrap();
     }
     let state = AppState::new();
-    let build = treer_protocol::BuildInfo {
-        version: "test".into(),
-        git_commit: "test".into(),
-    };
-    let server = |id: &str| ServerInfo {
-        server_id: id.into(),
-        workspace_id: "default".into(),
-        name: id.into(),
-        hostname: id.into(),
-        root: "/tmp".into(),
-        controller_build: build.clone(),
-        host_build: build.clone(),
-        supervision: None,
-        labels: Default::default(),
-        available_agents: None,
-        status: ServerStatus::Online,
-        connected_at: now,
-        last_seen_at: now,
-        capabilities: vec![],
-    };
+    let server = |id: &str| server_info(id, now);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let connection_a = Uuid::new_v4();
     state
         .register_server_instance_with_capabilities(
             server("machine-a"),
-            Uuid::new_v4(),
+            connection_a,
             "controller-a".into(),
             [
                 CAPABILITY_MACHINE_UPLOAD.to_string(),
@@ -323,6 +330,7 @@ async fn fixture() -> Fixture {
         state,
         fake,
         app,
+        connection_a,
     }
 }
 
@@ -1131,4 +1139,61 @@ async fn chunked_upload_part_timing_releases_the_lease_and_legacy_route_is_uncha
         .as_array()
         .unwrap()
         .contains(&json!(CAPABILITY_MACHINE_UPLOAD_V3)));
+}
+
+#[tokio::test]
+async fn read_models_keep_live_capabilities_after_a_controller_snapshot() {
+    let fixture = fixture().await;
+    // A Controller snapshot carries a ServerInfo without capabilities; the
+    // Proxy must keep the capabilities it learned at registration (#166).
+    fixture
+        .state
+        .apply_snapshot(
+            fixture.connection_a,
+            treer_protocol::AgentServerSnapshot {
+                server: server_info("machine-a", Utc::now()),
+                agents: vec![],
+            },
+        )
+        .await
+        .unwrap();
+    for uri in [
+        "/api/workspaces/default/snapshot",
+        "/api/workspaces/default/servers",
+    ] {
+        let request = base("GET", uri.to_string(), "tok-member")
+            .body(Body::empty())
+            .unwrap();
+        let (status, body, _) = json_of(fixture.app.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+        let servers = body
+            .as_array()
+            .cloned()
+            .or_else(|| body["servers"].as_array().cloned())
+            .unwrap_or_else(|| panic!("{uri}: no servers array in {body}"));
+        let capabilities = |id: &str| -> Vec<String> {
+            servers
+                .iter()
+                .find(|server| server["server_id"] == id)
+                .unwrap_or_else(|| panic!("{uri}: {id} missing in {body}"))["capabilities"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{uri}: {id} has no capabilities array"))
+                .iter()
+                .map(|value| value.as_str().unwrap().to_owned())
+                .collect()
+        };
+        assert_eq!(
+            capabilities("machine-a"),
+            vec![
+                CAPABILITY_MACHINE_UPLOAD.to_string(),
+                CAPABILITY_MACHINE_UPLOAD_V3.to_string()
+            ],
+            "{uri}"
+        );
+        assert_eq!(
+            capabilities("machine-old"),
+            vec![CAPABILITY_MACHINE_UPLOAD.to_string()],
+            "{uri}"
+        );
+    }
 }

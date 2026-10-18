@@ -445,6 +445,23 @@ impl AppState {
         let snapshot_workspace_id = workspace_id.clone();
         let server_id = server.server_id.clone();
         let agents = snapshot.agents;
+        // The Controller's snapshot never carries capabilities; the Proxy is
+        // authoritative for them from the registration handshake (#166).
+        let live_capabilities = self
+            .inner
+            .connections
+            .read()
+            .await
+            .get(&ServerKey {
+                workspace_id: workspace_id.clone(),
+                server_id: server_id.clone(),
+            })
+            .map(|connection| {
+                let mut capabilities: Vec<String> =
+                    connection.capabilities.iter().cloned().collect();
+                capabilities.sort();
+                capabilities
+            });
         let event = {
             let mut workspaces = self.inner.workspaces.write().await;
             let workspace = workspaces
@@ -455,6 +472,12 @@ impl AppState {
             }
             if let Some(current) = workspace.servers.get(&server_id) {
                 server.name.clone_from(&current.name);
+                if live_capabilities.is_none() {
+                    server.capabilities.clone_from(&current.capabilities);
+                }
+            }
+            if let Some(capabilities) = live_capabilities {
+                server.capabilities = capabilities;
             }
             workspace.servers.insert(server_id.clone(), server.clone());
             let names: HashMap<_, _> = workspace
