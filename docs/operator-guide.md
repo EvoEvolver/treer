@@ -278,9 +278,11 @@ domain under a registrable domain separate from the Console and Proxy hosts
 (for example `treer-apps.example` next to `console.example.com`); when the
 Proxy sees them sharing one it logs `agent_origins_share_site` at startup. That
 check compares the last two labels only, so a public-suffix host such as
-`example.co.uk` can be reported either way; the recommendation stands
+`example.co.uk` may be reported or missed either way; the recommendation stands
 regardless. Deleting the Agent deletes its origin and sessions; Console logout
-ends the user's ingress sessions.
+ends the user's ingress sessions. With authentication disabled (development
+only) the Agent origin path skips the interface gate like every other route, so
+never combine that mode with an apps domain that others can reach.
 
 Apps receive `TREER_PROXY_URL` from the Controller's configured Proxy base URL
 (HTTP(S) origin with URL credentials, query and fragment removed), overriding
@@ -1739,7 +1741,13 @@ explicit UI choice. Each machine stages at most eight uploads at a time, so
 plan for up to 1 GiB of staging space in the destination directories; the
 destination volume must keep the file size plus the larger of 5 percent and
 128 MiB free, and staging files (`.treer-transfer-upl_...`, owner-only) are
-visible in the destination directory while an upload is active. Two uploads
+visible in the destination directory while an upload is active. A restarted
+Controller sweeps the staging names its predecessor recorded; a name it cannot
+remove (for example one still held open by the predecessor on Windows) is kept
+for the next start and logged as a warning naming the path, so a partial file
+of user content may stay on disk until a later start succeeds. Once no
+Controller holds it, an operator may delete such a `.treer-transfer-upl_...`
+file by hand. Two uploads
 per user and eight per workspace may be active at once; an upload with no part
 for an hour, or older than six hours, is cancelled and its staging file
 removed. The Controller remembers committed receipts for 24 hours; if a

@@ -54,8 +54,11 @@ pub(in crate::api) async fn authorize_service_ingress(
             .agent_interface_target(&agent_id)
             .await?
             .ok_or_else(|| ApiFailure::not_found("agent_not_found", "agent does not exist"))?;
+        // A signed-in non-member gets the same answer as an unknown id, so a
+        // guessed id cannot confirm that an Agent exists elsewhere (#164 a).
         auth.require_workspace_member(&workspace_id, &session.user_id)
-            .await?;
+            .await
+            .map_err(|_| ApiFailure::not_found("agent_not_found", "agent does not exist"))?;
         let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
         require_agent_interface_access(
             &policy,
@@ -610,7 +613,9 @@ fn enforce_ingress_fetch_metadata(
             return Err(rejected());
         }
     }
-    if upgraded {
+    // Upgrades always prove their Origin; an unsafe request from a browser
+    // too old to send Fetch Metadata proves it through Origin instead (#164 b).
+    if upgraded || sites.is_empty() {
         let origins: Vec<&str> = request
             .headers()
             .get_all(header::ORIGIN)
