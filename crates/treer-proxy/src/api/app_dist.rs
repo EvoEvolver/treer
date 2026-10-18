@@ -428,9 +428,30 @@ fn json_response(value: serde_json::Value) -> Response<Body> {
     response
 }
 
-/// The nginx template's header set, item for item.
+/// `Cross-Origin-Opener-Policy` for the Console document only (#182): a
+/// popup the Console opens, or that a Console frame opens, lands in its own
+/// browsing context group and cannot reach the Console through `opener`. It is
+/// set on HTML responses alone; JSON, assets, APIs and tunnels never carry it.
+const CROSS_ORIGIN_OPENER_POLICY: header::HeaderName =
+    header::HeaderName::from_static("cross-origin-opener-policy");
+
+/// The nginx template's header set, item for item; HTML documents also get
+/// `Cross-Origin-Opener-Policy: same-origin`.
 fn with_headers(mut response: Response<Body>, cache_control: &'static str) -> Response<Body> {
+    let html = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/html"));
     let headers = response.headers_mut();
+    if html {
+        headers.insert(
+            CROSS_ORIGIN_OPENER_POLICY,
+            HeaderValue::from_static("same-origin"),
+        );
+    } else {
+        headers.remove(CROSS_ORIGIN_OPENER_POLICY);
+    }
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
     headers.insert(
         header::CONTENT_SECURITY_POLICY,

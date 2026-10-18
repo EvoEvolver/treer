@@ -91,6 +91,23 @@ async fn get(app: &Router, host: &str, path: &str) -> (StatusCode, HeaderMap, St
     (status, headers, String::from_utf8_lossy(&body).into_owned())
 }
 
+const COOP: &str = "cross-origin-opener-policy";
+
+/// The Console document carries `Cross-Origin-Opener-Policy: same-origin`
+/// (#182); nothing that is not HTML does, so a later edit cannot widen it to
+/// APIs, tunnels or assets without failing here.
+fn assert_opener_policy(headers: &HeaderMap, html: bool, what: &str) {
+    if html {
+        assert_eq!(
+            headers.get(COOP).map(|v| v.to_str().unwrap()),
+            Some("same-origin"),
+            "{what}"
+        );
+    } else {
+        assert!(headers.get(COOP).is_none(), "{what} must not carry COOP");
+    }
+}
+
 fn assert_app_headers(headers: &HeaderMap, cache: &str) {
     assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
     assert_eq!(
@@ -117,17 +134,20 @@ async fn app_build_is_served_only_for_the_app_host_with_the_nginx_contract() {
     assert!(body.contains("<title>treer</title>"));
     assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
     assert_app_headers(&headers, "no-cache");
+    assert_opener_policy(&headers, true, "/");
     let (status, headers, body) = get(&app, "APP.treer.example.", "/assets/app.js").await;
     assert_eq!((status, body.as_str()), (StatusCode::OK, "console.log(1)"));
     assert_eq!(
         headers[header::CONTENT_TYPE],
         "text/javascript; charset=utf-8"
     );
+    assert_opener_policy(&headers, false, "/assets/app.js");
     let (status, headers, _) = get(&app, "app.treer.example", "/favicon.svg").await;
     assert_eq!(
         (status, headers[header::CONTENT_TYPE].to_str().unwrap()),
         (StatusCode::OK, "image/svg+xml")
     );
+    assert_opener_policy(&headers, false, "/favicon.svg");
     // SPA fallback for client routes, including unknown nested paths.
     for path in [
         "/workspaces/ws_x/machines",
@@ -139,6 +159,7 @@ async fn app_build_is_served_only_for_the_app_host_with_the_nginx_contract() {
         assert_eq!(status, StatusCode::OK, "{path}");
         assert!(body.contains("<title>treer</title>"), "{path}");
         assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
+        assert_opener_policy(&headers, true, path);
     }
     // Runtime config and App health, never cached.
     let (status, headers, body) = get(&app, "app.treer.example", "/config.json").await;
@@ -148,8 +169,10 @@ async fn app_build_is_served_only_for_the_app_host_with_the_nginx_contract() {
         json!({"proxy_url": "https://proxy.treer.example/"})
     );
     assert_app_headers(&headers, "no-store");
-    let (status, _, body) = get(&app, "app.treer.example", "/health").await;
+    assert_opener_policy(&headers, false, "/config.json");
+    let (status, headers, body) = get(&app, "app.treer.example", "/health").await;
     assert_eq!(status, StatusCode::OK);
+    assert_opener_policy(&headers, false, "/health");
     assert_eq!(
         serde_json::from_str::<Value>(&body).unwrap(),
         json!({"service": "treer-app", "status": "ok"})
@@ -173,7 +196,12 @@ async fn app_build_is_served_only_for_the_app_host_with_the_nginx_contract() {
             "{path}"
         );
         assert!(!body.contains("<title>"), "{path}");
+        assert_opener_policy(&headers, false, path);
     }
+    // Core API responses on the Proxy host never carry the Console's COOP.
+    let (status, headers, _) = get(&app, "proxy.treer.example", "/api/health").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_opener_policy(&headers, false, "/api/health");
     // Traversal and symlink escape never read outside dist (they fall back to the page).
     for path in [
         "/../etc/passwd",
@@ -329,6 +357,7 @@ async fn same_origin_app_disables_embedded_interfaces_and_virtual_hosts() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<title>treer</title>"));
     assert_app_headers(&headers, "no-cache");
+    assert_opener_policy(&headers, true, "one-origin /");
     // One origin: Core routes and the Console both answer on it.
     let (status, _, _) = get(&app, "treer.example", "/api/health").await;
     assert_eq!(status, StatusCode::OK);

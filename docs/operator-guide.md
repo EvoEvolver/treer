@@ -991,7 +991,10 @@ fallback, `GET /config.json` with the Proxy URL and `GET /health`, all with the
 same headers as the standalone nginx image (`X-Frame-Options: DENY`,
 `Content-Security-Policy: frame-ancestors 'none'; object-src 'none'; base-uri
 'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
-`Cache-Control: no-cache`, `no-store` for `/config.json` and `/health`). Files
+`Cache-Control: no-cache`, `no-store` for `/config.json` and `/health`), and
+HTML documents (the page and every SPA fallback) additionally carry
+`Cross-Origin-Opener-Policy: same-origin`; JSON, assets, Core APIs, tunnels
+and OAuth callbacks never do (#182). Files
 are resolved only inside the canonical directory (no traversal, no symlink
 escape); `/api/`, `/agent/`, `/artifacts/`, `/.treer/`, `/.well-known/` and
 `/install.*` are never served as App content. In this mode the Proxy applies a strict Host allowlist: exactly one Host header,
