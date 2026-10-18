@@ -602,10 +602,13 @@ pub fn write_outbox(
         ))?;
         private(crate::private_store::check_file(&file))?;
         let mut prior = Vec::new();
-        private(std::fs::File::from(file).take(8193).read_to_end(&mut prior))?;
+        let mut file = std::fs::File::from(file);
+        private((&mut file).take(8193).read_to_end(&mut prior))?;
         if prior != bytes {
             return Err(Error::Conflict);
         }
+        private(file.sync_all())?;
+        private(fs::fsync(&directory))?;
         Ok(())
     };
     match fs::statat(&directory, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
