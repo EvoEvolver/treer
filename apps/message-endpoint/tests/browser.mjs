@@ -77,12 +77,15 @@ try {
  await card.getByText('2',{exact:true}).waitFor();
  // Safety pause is its own form: invalid unrelated target fields cannot block it.
  await card.getByLabel('Chat ID',{exact:true}).fill('');
- await card.getByLabel('Confirm pausing this endpoint at the displayed revision.',{exact:true}).check();await card.getByRole('button',{name:'Pause endpoint',exact:true}).click();
+ await card.getByLabel('Confirm pausing this endpoint at the displayed revision.',{exact:true}).check();const pausedSettings=edit.waitForResponse(r=>r.url().endsWith('/api/settings')&&r.request().method()==='GET');await card.getByRole('button',{name:'Pause endpoint',exact:true}).click();
+ const conflictSettings=await (await pausedSettings).json();
  await card.getByText('3',{exact:true}).waitFor();
  // Keep production verification limits while exercising one more owner flow.
  await new Promise(resolve=>setTimeout(resolve,10500));
  await card.getByText('Resume endpoint',{exact:true}).click();
+ const previewResponse=edit.waitForResponse(r=>r.url().endsWith('/api/configuration')&&r.request().method()==='POST');
  await card.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
+ const conflictPreview=await (await previewResponse).json();
  const resumeButton=card.getByRole('button',{name:'Resume and send pending messages',exact:true});
  await resumeButton.waitFor();
  await card.getByText(/Approximate oldest held age/).waitFor();
@@ -101,6 +104,47 @@ try {
  await edit.screenshot({path:join(screenshotPath,'owner-resume-390-light.png'),fullPage:true});
  await edit.getByRole('button',{name:'Dark',exact:true}).click();
  await edit.screenshot({path:join(screenshotPath,'owner-resume-390-dark.png'),fullPage:true});
+ // UI-only negative flow: keep the real default-off assertions above. These
+ // intercepted responses enable only this page's controls and reject its POST;
+ // they are NOT actual owner activation, Core readback or Policy evidence.
+ const conflict=await browser.newPage({viewport:{width:390,height:900},locale:'en-US'});
+ const enabledSettings=structuredClone(conflictSettings);enabledSettings.settings.activation_enabled=true;
+ await conflict.route('**/api/settings',r=>r.fulfill({json:enabledSettings}));
+ await conflict.route('**/api/auth/config',r=>r.fulfill({json:{settings_url:config.url,login_url:config.url+'api/auth/start'}}));
+ let conflictPosts=0;
+ await conflict.route('**/api/configuration',r=>{
+  const command=r.request().postDataJSON();
+  if(command.action==='preview_resume')return r.fulfill({json:{...conflictPreview,activation_enabled:true,account_ready:true}});
+  if(command.action==='resume'){conflictPosts++;return r.fulfill({status:409,json:{error:{code:'configuration_conflict',message:'configuration_conflict'}}});}
+  throw new Error('unexpected conflict-fixture action');
+ });
+ await conflict.goto(config.url);
+ const cc=conflict.locator('section').filter({has:conflict.locator('code').filter({hasText:/^ag_new$/})});
+ await cc.getByText('Resume endpoint',{exact:true}).click();
+ await cc.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
+ await cc.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
+ await cc.getByLabel('I checked OS user/container separation and enforced Policy isolation.',{exact:true}).check();
+ await cc.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('synthetic conflict fixture');
+ await cc.getByLabel('Confirm resuming these exact objects and sending pending messages.',{exact:true}).check();
+ await cc.getByRole('button',{name:'Resume and send pending messages',exact:true}).click();
+ await cc.getByRole('alert').filter({hasText:'Conditions or metadata checks changed.'}).waitFor();
+ if(await cc.getByRole('button',{name:'Resume and send pending messages',exact:true}).count())throw new Error('stale resume confirmation survived 409');
+ if(conflictPosts!==1)throw new Error('resume was automatically retried');
+ for(const width of [390,1280])for(const theme of ['Light','Dark']){
+  await conflict.setViewportSize({width,height:900});if(await conflict.getByRole('button',{name:theme,exact:true}).count())await conflict.getByRole('button',{name:theme,exact:true}).click();
+  if(!await conflict.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('conflict hint overflow');
+  await conflict.screenshot({path:join(screenshotPath,`owner-resume-conflict-${width}-${theme.toLowerCase()}.png`),fullPage:true});
+ }
+ await conflict.getByLabel('Language').selectOption('zh');
+ await cc.getByRole('alert').filter({hasText:'请重新预览当前恢复条件'}).waitFor();
+ await conflict.setViewportSize({width:390,height:900});await conflict.screenshot({path:join(screenshotPath,'owner-resume-conflict-390-zh.png'),fullPage:true});
+ await conflict.getByLabel('语言').selectOption('en');
+ await cc.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
+ if(await cc.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).isChecked())throw new Error('fresh preview reused stale declaration');
+ if(!await cc.getByRole('button',{name:'Resume and send pending messages',exact:true}).isDisabled())throw new Error('fresh preview skipped reconfirmation');
+ if(conflictPosts!==1)throw new Error('fresh preview retried resume');
+ await conflict.close();
+
  await edit.getByRole('button',{name:'Light',exact:true}).click();
  await card.getByText('Recovery and audit',{exact:true}).click();
  await card.getByRole('button',{name:'Load recovery records',exact:true}).click();
@@ -155,7 +199,7 @@ try {
  if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('editing form overflow at 390px');
  await edit.screenshot({path:join(screenshotPath,'owner-edit-390-light.png'),fullPage:true});
  await edit.close();
- console.log('PASS: real hub, injected identity on wildcard + actual iframe prefix; 8 layout/theme screenshots + 390px confirmed owner create/bind/pause/default-off-resume/recovery/archive; fallback + forged rejection');
+ console.log('PASS: real hub, injected identity on wildcard + actual iframe prefix; 8 layout/theme screenshots + 390px confirmed owner create/bind/pause/default-off-resume/recovery/archive; fallback + forged rejection; UI-only 409 clears stale confirmation and requires re-preview (no auto retry)');
 } finally {
  clearTimeout(timer);if(browser)await browser.close();fixture.kill('SIGTERM');
  if(fixture.exitCode===null)await once(fixture,'exit');lines.close();rmSync(home,{recursive:true,force:true});

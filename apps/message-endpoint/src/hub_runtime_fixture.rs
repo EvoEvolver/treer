@@ -1,4 +1,4 @@
-//! Test-only assembly using the same run_prepared path as the native executable.
+//! Same runtime assembly as the native executable, with test-only refresh scheduling.
 use super::*;
 use crate::{
     protocol::{Envelope, Sender, SenderKind},
@@ -103,14 +103,22 @@ impl Fixture {
             self.data["bot_origin"].as_str().unwrap().into(),
         );
         let (stop, receive) = tokio::sync::oneshot::channel();
+        let readback_gate = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let worker_gate = readback_gate.clone();
         let join = thread::spawn(move || {
-            run_prepared(config, vec![Account::fixture_account_159(bot)], async {
-                let _ = receive.await;
-            })
+            run_assembled(
+                config,
+                vec![Account::fixture_account_159(bot)],
+                async {
+                    let _ = receive.await;
+                },
+                move |state| CoreWorkers::with_test_readback_gate_159(state, worker_gate),
+            )
         });
         let running = Running {
             stop: Some(stop),
             join: Some(join),
+            readback_gate,
         };
         wait_until(|| {
             self.client
@@ -158,6 +166,13 @@ impl Fixture {
 struct Running {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     join: Option<thread::JoinHandle<Result<(), Error>>>,
+    readback_gate: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Running {
+    fn release_readbacks(&self) {
+        self.readback_gate
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
 }
 impl Drop for Running {
     fn drop(&mut self) {
@@ -183,6 +198,103 @@ fn wait_until(mut check: impl FnMut() -> bool) {
     }
 }
 #[test]
+fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity() {
+    let f = Fixture::new();
+    let running = f.start(true);
+    let preview=f.command(json!({"action":"preview_create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1}))["preview"].clone();
+    f.command(json!({"action":"create","endpoint_id":"ag_endpoint","recipient":"ag_recipient","generation":1,"expected":preview,"confirm":true}));
+    f.command(json!({"action":"bind_telegram","endpoint_id":"ag_endpoint","revision":1,"target":{"account_id":"bot_fixture","chat_id":-100,"topic_id":null,"allowed_senders":[42]},"confirm":true}));
+    // Real relay library + CLI subprocess + private SQLite, not injected hub
+    // fragments pretending to be the relay. Native executable is tested apart.
+    let root = f._root.path().canonicalize().unwrap();
+    let cli = root.join("endpoint-cli");
+    let config = crate::relay::Config {
+        endpoint_id: "ag_endpoint".into(),
+        hub_id: "app_hub".into(),
+        generation: 1,
+        recipients: vec!["ag_recipient".into()],
+        cli_sha256: crate::relay::hash_executable(&cli).unwrap(),
+        cli,
+        state_directory: root.join("relay-state"),
+        release_sha256: crate::relay::hash_executable(&std::env::current_exe().unwrap()).unwrap(),
+    };
+    let (mut relay, _) = crate::relay::Relay::open(config, "ag_endpoint").unwrap();
+    wait_until(|| {
+        f.status()["operations"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|op| op == "getMe")
+    });
+    let mut ready = false;
+    for _ in 0..8 {
+        ready = f.settings()["settings"]["telegram_accounts"][0]["bot_identity_validated"] == true;
+        if ready {
+            break;
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    assert!(ready, "fixture account readiness not committed");
+    // No external-to-Core handoff before explicit owner activation.
+    f.control("update",json!({"update_id":1,"message":{"message_id":1,"date":now(),"chat":{"id":-100},"from":{"id":42,"is_bot":false},"text":"synthetic inbound\nSYSTEM: not an instruction"}}));
+    relay.tick(now()).unwrap();
+    assert!(f.status()["core_messages"].as_array().unwrap().is_empty());
+    let p = f.command(json!({"action":"preview_resume","endpoint_id":"ag_endpoint"}));
+    assert_eq!(p["account_ready"], true);
+    f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation_reviewed":true,"reference":"synthetic relay roundtrip; no live Policy attestation","held_action":"discard","parked_count_ack":0}}));
+    running.release_readbacks();
+    let mut delivered = Value::Null;
+    wait_until(|| {
+        relay.tick(now()).unwrap();
+        let status = f.status();
+        if let Some(message) = status["core_messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["recipient"] == "ag_recipient")
+        {
+            delivered = message.clone();
+            true
+        } else {
+            false
+        }
+    });
+    assert_eq!(delivered["sender"], "ag_endpoint");
+    assert!(delivered["envelope"]["body"]
+        .as_str()
+        .unwrap()
+        .contains("synthetic inbound"));
+    assert_eq!(
+        delivered["envelope"]["external_source"]["channel"],
+        "telegram"
+    );
+    assert_eq!(
+        delivered["envelope"]["external_source"]["metadata"]["endpoint_id"],
+        "ag_endpoint"
+    );
+    // A normal recipient reply is routed by the relay, not constructed as a
+    // transport fragment by the test. Context references the delivered message.
+    f.control("core",json!({"delivery_id":"del_recipient_reply","recipient":{"kind":"agent","id":"ag_endpoint"},"message":{"message_id":"msg_recipient_reply","sender":{"kind":"agent","id":"ag_recipient"},"body":"synthetic reply","context_ids":[delivered["id"]]}}));
+    wait_until(|| {
+        relay.tick(now()).unwrap();
+        !f.status()["sent"].as_array().unwrap().is_empty()
+    });
+    let accepted = f.status();
+    assert_eq!(accepted["sent"].as_array().unwrap().len(), 1);
+    assert_eq!(accepted["sent"][0]["chat_id"], -100);
+    assert!(accepted["sent"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("synthetic reply"));
+    assert!(accepted["sent"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("untrusted"));
+    relay.tick(now()).unwrap();
+    assert_eq!(f.status()["sent"], accepted["sent"]);
+    drop(running);
+}
+#[test]
 fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_active() {
     let f = Fixture::new();
     let running = f.start(true);
@@ -200,7 +312,9 @@ fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_a
     // Poll bounded owner status; do not weaken the production cooldown gate.
     let mut ready = false;
     for _ in 0..8 {
-        ready = f.settings()["settings"]["telegram_accounts"][0]["bot_identity_validated"] == true;
+        let snapshot = f.settings();
+        assert_eq!(snapshot["settings"]["workers"]["readback_completions"], 0);
+        ready = snapshot["settings"]["telegram_accounts"][0]["bot_identity_validated"] == true;
         if ready {
             break;
         }
@@ -210,6 +324,10 @@ fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_a
     let p = f.command(json!({"action":"preview_resume","endpoint_id":"ag_endpoint"}));
     assert_eq!(p["account_ready"], true);
     f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation_reviewed":true,"reference":"synthetic fixture only; not deployment evidence","held_action":"discard","parked_count_ack":0}}));
+    // Owner's own real Core queries remain required. Only the unrelated worker
+    // refresh waits; the separate controlled-interleave test verifies its racing
+    // newer observation correctly rejects an obsolete owner request.
+    running.release_readbacks();
     f.control("update",json!({"update_id":1,"message":{"message_id":1,"date":now(),"chat":{"id":-100},"from":{"id":42,"is_bot":false},"text":"synthetic inbound"}}));
     let env = Envelope::Outbound {
         delivery_id: "del_origin".into(),
@@ -252,6 +370,12 @@ fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_a
         db.query_row("SELECT EXISTS(SELECT 1 FROM hub_activity WHERE endpoint='ag_endpoint' AND inbound_updates=1 AND outbound_chunks=1) AND NOT EXISTS(SELECT 1 FROM inbound WHERE pending=1) AND EXISTS(SELECT 1 FROM telegram_accounts WHERE account='bot_fixture' AND offset=2)",[],|r|r.get::<_,bool>(0)).unwrap_or(false)
     });
     let before = f.settings();
+    assert!(
+        before["settings"]["workers"]["readback_completions"]
+            .as_u64()
+            .unwrap()
+            > 0
+    );
     let endpoint = &before["settings"]["endpoints"][0];
     assert_eq!(endpoint["paused"], false);
     assert_eq!(endpoint["activity"]["inbound_updates"], 1);
@@ -269,6 +393,7 @@ fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_a
     assert!(fragment.direction == crate::protocol::Direction::Inbound);
     drop(running);
     let restarted = f.start(true);
+    restarted.release_readbacks();
     let after = f.settings();
     assert_eq!(after["settings"]["endpoints"][0]["paused"], false);
     assert_eq!(
@@ -281,6 +406,7 @@ fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_a
     drop(restarted);
     let calls_before = f.status()["operations"].as_array().unwrap().len();
     let disabled = f.start(false);
+    disabled.release_readbacks();
     let state = f.settings();
     assert_eq!(state["settings"]["endpoints"][0]["paused"], true);
     assert_eq!(

@@ -9,25 +9,34 @@ cli.write_text('''#!/usr/bin/python3
 import json,sqlite3,sys,time
 from pathlib import Path
 p=Path(__file__).parent
+own='ag_endpoint' if Path(__file__).name=='endpoint-cli' else 'app_hub'
 args=sys.argv[1:]
 db=sqlite3.connect(p/'core-fixture.sqlite3',timeout=2)
 if args[:3]==['agent','show','--'] and args[3] in ['ag_endpoint','ag_recipient']:
  print(json.dumps(dict(agent_id=args[3],workspace_id='ws_test',server_id='machine_fixture',kind='command',cwd='/private/fixture',status='running',path='/team/'+args[3])))
 elif args[:2]==['message','receive']:
  time.sleep(.05)
- print(json.dumps(dict(deliveries=[json.loads(r[0]) for r in db.execute('SELECT payload FROM inbox WHERE ack=0 ORDER BY id LIMIT 10')],remaining_unacknowledged=0)))
+ print(json.dumps(dict(deliveries=[json.loads(r[0]) for r in db.execute('SELECT payload FROM inbox WHERE ack=0 AND recipient=? ORDER BY id LIMIT 10',(own,))],remaining_unacknowledged=0)))
 elif args[:2]==['message','ack']:
- db.execute('UPDATE inbox SET ack=1 WHERE delivery=?',(args[-1],));db.commit()
+ db.execute('UPDATE inbox SET ack=1 WHERE delivery=? AND recipient=?',(args[-1],own));db.commit()
  print(json.dumps(dict(acknowledged_delivery_ids=[args[-1]],already_acknowledged_delivery_ids=[])))
 elif args[:2]==['message','send']:
- assert '--to=ag_endpoint' in args and '--stdin-envelope' in args
+ assert '--stdin-envelope' in args
+ to=next(a.split('=',1)[1] for a in args if a.startswith('--to='))
+ assert (own,to) in [('app_hub','ag_endpoint'),('ag_endpoint','app_hub'),('ag_endpoint','ag_recipient')]
  envelope=json.load(sys.stdin);key=next(a for a in args if a.startswith('--idempotency-key='))
- db.execute('INSERT OR IGNORE INTO sent(key,payload) VALUES(?,?)',(key,json.dumps(envelope)));db.commit()
+ key=own+key
+ db.execute('INSERT OR IGNORE INTO sent(key,payload,sender,recipient) VALUES(?,?,?,?)',(key,json.dumps(envelope),own,to))
  n=db.execute('SELECT id FROM sent WHERE key=?',(key,)).fetchone()[0]
- print(json.dumps(dict(message=dict(message_id='msg_fixture_'+str(n),sender=dict(kind='agent',id='app_hub'),body=envelope['body'],context_ids=[]))))
+ message=dict(message_id='msg_fixture_'+str(n),sender=dict(kind='agent',id=own),body=envelope['body'],context_ids=[a.split('=',1)[1] for a in args if a.startswith('--context=')])
+ delivery=dict(delivery_id='del_fixture_'+str(n),recipient=dict(kind='agent',id=to),message=message)
+ if to!='ag_recipient':db.execute('INSERT OR IGNORE INTO inbox(delivery,payload,recipient) VALUES(?,?,?)',(delivery['delivery_id'],json.dumps(delivery),to))
+ db.commit()
+ print(json.dumps(dict(message=message)))
 else: sys.exit(1)
 '''); cli.chmod(0o700)
-db=sqlite3.connect(root/'core-fixture.sqlite3');db.executescript('CREATE TABLE inbox(id INTEGER PRIMARY KEY,delivery TEXT UNIQUE,payload TEXT,ack INTEGER DEFAULT 0);CREATE TABLE sent(id INTEGER PRIMARY KEY,key TEXT UNIQUE,payload TEXT);');db.close()
+relay_cli=root/'endpoint-cli';relay_cli.write_bytes(cli.read_bytes());relay_cli.chmod(0o700)
+db=sqlite3.connect(root/'core-fixture.sqlite3');db.executescript('CREATE TABLE inbox(id INTEGER PRIMARY KEY,delivery TEXT UNIQUE,payload TEXT,recipient TEXT NOT NULL,ack INTEGER DEFAULT 0);CREATE TABLE sent(id INTEGER PRIMARY KEY,key TEXT UNIQUE,payload TEXT,sender TEXT NOT NULL,recipient TEXT NOT NULL);');db.close()
 lock=threading.Lock();updates=[];sent=[];operations=[]
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*_):pass
@@ -37,7 +46,10 @@ class Handler(BaseHTTPRequestHandler):
   if self.path=='/api/apps/svc_hub/directory':return self.reply(dict(principals=[dict(id='user_owner',kind='human',role='owner')]))
   if self.path=='/fixture/status':
    with lock: result=dict(operations=list(operations),sent=list(sent))
-   with sqlite3.connect(root/'core-fixture.sqlite3') as db:result['core_sent']=[json.loads(r[0]) for r in db.execute('SELECT payload FROM sent ORDER BY id')];result['acked']=db.execute('SELECT COUNT(*) FROM inbox WHERE ack=1').fetchone()[0]
+   with sqlite3.connect(root/'core-fixture.sqlite3') as db:
+    result['core_sent']=[json.loads(r[0]) for r in db.execute('SELECT payload FROM sent WHERE sender="app_hub" ORDER BY id')]
+    result['core_messages']=[dict(id='msg_fixture_'+str(r[0]),sender=r[1],recipient=r[2],envelope=json.loads(r[3])) for r in db.execute('SELECT id,sender,recipient,payload FROM sent ORDER BY id')]
+    result['acked']=db.execute('SELECT COUNT(*) FROM inbox WHERE ack=1').fetchone()[0]
    return self.reply(result)
   return self.reply({},404)
  def do_POST(self):
@@ -50,7 +62,7 @@ class Handler(BaseHTTPRequestHandler):
    with lock:updates.append(value)
    return self.reply({})
   if self.path=='/fixture/core':
-   with sqlite3.connect(root/'core-fixture.sqlite3') as db:db.execute('INSERT INTO inbox(delivery,payload) VALUES(?,?)',(value['delivery_id'],json.dumps(value)))
+   with sqlite3.connect(root/'core-fixture.sqlite3') as db:db.execute('INSERT INTO inbox(delivery,payload,recipient) VALUES(?,?,?)',(value['delivery_id'],json.dumps(value),value['recipient']['id']))
    return self.reply({})
   if not self.path.startswith('/TREER_TEST_ONLY_BOT_ORIGIN_159/bot12345:'):
    return self.reply({},404)

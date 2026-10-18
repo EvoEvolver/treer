@@ -108,6 +108,16 @@ fn run_prepared(
     accounts: Vec<crate::telegram_workers::Account>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> Result<(), Error> {
+    run_assembled(config, accounts, shutdown, CoreWorkers::start)
+}
+// Production always selects CoreWorkers::start. Only cfg(test) assembly supplies
+// a scheduling gate; it is absent from the executable's input/configuration.
+fn run_assembled(
+    config: Config,
+    accounts: Vec<crate::telegram_workers::Account>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    start_workers: impl FnOnce(crate::scheduler::SharedHub<Core>) -> std::io::Result<CoreWorkers>,
+) -> Result<(), Error> {
     if crate::relay::hash_executable(&config.cli).map_err(|_| Error::Configuration)?
         != config.cli_sha256
     {
@@ -138,7 +148,7 @@ fn run_prepared(
     let listener = std::net::TcpListener::bind(config.listen).map_err(|_| Error::Runtime)?;
     listener.set_nonblocking(true).map_err(|_| Error::Runtime)?;
     let workers = Arc::new(Mutex::new(
-        CoreWorkers::start(hub.clone()).map_err(|_| Error::Runtime)?,
+        start_workers(hub.clone()).map_err(|_| Error::Runtime)?,
     ));
     let handoffs = Arc::new(Mutex::new(
         crate::handoffs::CoreHandoffs::start(hub.clone()).map_err(|_| Error::Runtime)?,

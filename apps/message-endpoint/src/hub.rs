@@ -312,6 +312,11 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(Error::Revision);
         }
         if view.checked_at.is_some_and(|at| at > readback.requested_at) {
+            #[cfg(test)]
+            eprintln!(
+                "test-only readback superseded: requested={} checked={:?}",
+                readback.requested_at, view.checked_at
+            );
             return Err(Error::Binding);
         }
         let observed = readback.observed;

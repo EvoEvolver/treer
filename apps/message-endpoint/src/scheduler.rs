@@ -32,6 +32,8 @@ const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Default)]
 struct Counters {
+    #[cfg(test)]
+    refresh_gate: Option<Arc<AtomicBool>>,
     pages: AtomicU64,
     acked: AtomicU64,
     failures: AtomicU64,
@@ -74,13 +76,32 @@ pub struct CoreWorkers {
 }
 impl CoreWorkers {
     pub fn start<M: CoreInbox>(state: SharedHub<M>) -> std::io::Result<Self> {
+        Self::start_with_counters(state, Arc::new(Counters::default()))
+    }
+    #[cfg(all(test, feature = "hub"))]
+    pub(crate) fn with_test_readback_gate_159<M: CoreInbox>(
+        state: SharedHub<M>,
+        gate: Arc<AtomicBool>,
+    ) -> std::io::Result<Self> {
+        Self::start_with_counters(
+            state,
+            Arc::new(Counters {
+                refresh_gate: Some(gate),
+                ..Counters::default()
+            }),
+        )
+    }
+    fn start_with_counters<M: CoreInbox>(
+        state: SharedHub<M>,
+        shared: Arc<Counters>,
+    ) -> std::io::Result<Self> {
         let backend = state
             .lock()
             .map_err(|_| std::io::Error::other("hub_state_unavailable"))?
             .backend()
             .clone();
         let mut workers = Self {
-            shared: Arc::new(Counters::default()),
+            shared,
             joins: vec![],
         };
         let result: std::io::Result<()> =
@@ -388,6 +409,17 @@ fn supervise<M: CoreInbox>(state: SharedHub<M>, c: Arc<Counters>) {
                     .name("hub-endpoint-readback".into())
                     .spawn(move || {
                         while !shared.stopping.load(Ordering::Acquire) {
+                            // Test-only deterministic scheduling; production
+                            // has neither this field nor a configuration switch.
+                            #[cfg(test)]
+                            if shared
+                                .refresh_gate
+                                .as_ref()
+                                .is_some_and(|g| !g.load(Ordering::Acquire))
+                            {
+                                wait(&shared, Duration::from_millis(25));
+                                continue;
+                            }
                             let began = Instant::now();
                             if refresh(&s, &core, &endpoint) {
                                 increment(&shared.readbacks);

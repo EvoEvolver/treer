@@ -7,6 +7,11 @@ use crate::{
 use rusqlite::OptionalExtension;
 use std::sync::Arc;
 
+fn conflict(_guard: &str) -> Failure {
+    #[cfg(test)]
+    eprintln!("test-only resume conflict: {_guard}");
+    Failure::Conflict
+}
 pub(crate) struct Activation {
     pub(crate) enabled: bool,
     pub(crate) account_ready: Arc<dyn Fn(&str) -> bool + Send + Sync>,
@@ -69,7 +74,7 @@ fn target<M: Mailbox + Directory>(hub: &Hub<M>, id: &str) -> Result<Target, Fail
         )
         .map_err(|_| Failure::Unavailable)?;
     if !exists {
-        return Err(Failure::Conflict);
+        return Err(conflict("target_table_absent"));
     }
     let definition: Option<String> = hub
         .store
@@ -81,7 +86,8 @@ fn target<M: Mailbox + Directory>(hub: &Hub<M>, id: &str) -> Result<Target, Fail
         )
         .optional()
         .map_err(|_| Failure::Unavailable)?;
-    serde_json::from_str(&definition.ok_or(Failure::Conflict)?).map_err(|_| Failure::Unavailable)
+    serde_json::from_str(&definition.ok_or_else(|| conflict("target_absent"))?)
+        .map_err(|_| Failure::Unavailable)
 }
 fn backlog<M: Mailbox + Directory>(
     hub: &Hub<M>,
@@ -145,7 +151,7 @@ fn observe<M: Mailbox + Directory, D: Directory>(
             .map_err(|_| Failure::Unavailable)?;
         let v = hub.view(id).map_err(map_hub)?;
         if !v.paused {
-            return Err(Failure::Conflict);
+            return Err(conflict("not_paused"));
         }
         let pending = backlog(&hub, id, v.binding.generation)?;
         (v.binding, v.revision, target(&hub, id)?, pending)
@@ -159,7 +165,7 @@ fn observe<M: Mailbox + Directory, D: Directory>(
         &binding.recipient,
     )?;
     if binding != current_binding {
-        return Err(Failure::Conflict);
+        return Err(conflict("binding_snapshot_changed"));
     }
     // Retain the actual Core observation, not a browser-shaped reconstruction.
     let observed = directory.metadata(id).map_err(|_| Failure::Unavailable)?;
@@ -172,7 +178,7 @@ fn observe<M: Mailbox + Directory, D: Directory>(
             || target(&hub, id)? != expected_target
             || backlog(&hub, id, binding.generation)? != expected_backlog
         {
-            return Err(Failure::Conflict);
+            return Err(conflict("state_changed_during_observe"));
         }
     }
     Ok((
@@ -225,11 +231,11 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
         return Err(Failure::Invalid);
     }
     if !activation.enabled {
-        return Err(Failure::Conflict);
+        return Err(conflict("activation_disabled"));
     }
     let (current, readback) = observe(shared, directory, workspace, owner, &endpoint_id)?;
     if current != expected || evidence.parked_count_ack != current.parked_transfers {
-        return Err(Failure::Conflict);
+        return Err(conflict("preview_changed"));
     }
     let discard_held = evidence.held_action == HeldAction::Discard;
     let evidence=serde_json::to_string(&serde_json::json!({
@@ -252,7 +258,7 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
             )
         || !(activation.account_ready)(&current.target.account_id)
     {
-        return Err(Failure::Conflict);
+        return Err(conflict("state_or_readiness_changed_before_commit"));
     }
     let context = AuditContext::with_detail(owner.id(), now, &evidence).map_err(map_hub)?;
     hub.resume_with_context(
@@ -354,6 +360,69 @@ mod tests {
                 parked_count_ack,
             },
         }
+    }
+    #[test]
+    fn newer_worker_readback_during_owner_query_conflicts_without_weakening_freshness() {
+        struct Supersede<'a> {
+            inner: &'a DirectoryFixture,
+            once: AtomicBool,
+        }
+        impl Directory for Supersede<'_> {
+            fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error> {
+                let original = self.inner.metadata(id)?;
+                if id == "ag_endpoint" && !self.once.swap(true, Ordering::SeqCst) {
+                    // Deterministic interleaving, not CPU load: an owner query
+                    // started in this second returns after a worker query in
+                    // the next second has committed. No fake future timestamp.
+                    let started = current_time().unwrap();
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+                    while current_time().unwrap() == started {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "test clock did not advance"
+                        );
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    let at = current_time().unwrap();
+                    let observed = self.inner.metadata(id)?;
+                    let mut h = self.inner.state.lock().unwrap();
+                    let revision = h.view(id).unwrap().revision;
+                    h.record_readback(
+                        id,
+                        revision,
+                        Readback {
+                            observed: Some(observed),
+                            requested_at: at,
+                        },
+                        at,
+                    )
+                    .unwrap();
+                }
+                Ok(original)
+            }
+        }
+        let (s, d, o, a) = setup();
+        let r = request(&s, &d, &o, &a);
+        let revision = s.lock().unwrap().view("ag_endpoint").unwrap().revision;
+        let supersede = Supersede {
+            inner: &d,
+            once: AtomicBool::new(false),
+        };
+        assert!(matches!(
+            resume(&s, &supersede, "ws_test", &o, r, &a),
+            Err(Failure::Conflict)
+        ));
+        let h = s.lock().unwrap();
+        let view = h.view("ag_endpoint").unwrap();
+        assert!(view.paused);
+        assert_eq!(view.revision, revision);
+        assert!(h.owner_audit(None, 25).unwrap().is_empty());
+        drop(h);
+        // An explicit fresh owner preview succeeds; there is no internal
+        // automatic retry, overwritten observation or relaxed commit fence.
+        let fresh = request(&s, &d, &o, &a);
+        resume(&s, &d, "ws_test", &o, fresh, &a).unwrap();
+        assert!(!s.lock().unwrap().view("ag_endpoint").unwrap().paused);
     }
     #[test]
     fn default_off_and_unready_account_cannot_activate_even_with_owner_confirmation() {

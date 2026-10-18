@@ -1,6 +1,9 @@
 # Message endpoint (#159)
 
-**Development implementation; relay is locally runnable, hub is unfinished. Not deployed.**
+**Telegram-only release candidate; not deployed or live-bot verified by the author.**
+This release candidate is the Telegram-only slice requested in #159/4286.
+Public HTTP lifecycle/RPC and email are not included; that unfinished work stays
+on the separate development branch. Default activation remains off.
 User direction3479 supersedes the socket design and research's routing details.
 Core3485 confirms Managed App runtime Agents can send/receive/ack; security3483
 accepts the new boundary with the controls below. No Core change is requested.
@@ -9,8 +12,7 @@ accepts the new boundary with the controls below. No Core change is requested.
 
 Independent Rust package under `apps/message-endpoint`, not the Core workspace:
 
-- `treer-message-hub`: private Managed App, Telegram polling/email/HTTP channel
-  workers, SQLite state and its own integrated React settings UI with committed
+- `treer-message-hub`: private Managed App, Telegram polling workers, SQLite state and its own integrated React settings UI with committed
   dist. Its own runtime identity runs Core receive/send/ack and App APIs (email
   route as the actual App). Never stores or uses endpoint workload credentials.
 - `treer-endpoint`: ordinary `kind=command` Agent, one per external target.
@@ -18,9 +20,8 @@ Independent Rust package under `apps/message-endpoint`, not the Core workspace:
   then binds its stable ID to one hub and one external target. No App-side Agent
   creation, Policy writes, owner credential borrowing, or Start-as-wake.
 
-Public HTTP is a separate `treer-message-hub public-http` process exposing only
-#142's four routes, never opening hub state or invoking Treer. Its narrow queue
-boundary remains P3 review work. There is no separate settings App. Telegram
+Public HTTP and email channels are deferred P3 work and have no runtime or
+subcommand in this candidate. There is no separate settings App. Telegram
 webhooks are deferred. Linux/macOS first; other-platform support needs validation.
 
 ## Authentication and forwarding
@@ -1409,6 +1410,16 @@ It waits for durable commits, not just observation of requests at fake services.
 The Core fixture stands in for the endpoint's Core messages; this test does not
 claim final recipient Agent delivery or actual bot acceptance.
 
+A second runtime test now runs the real Rust `Relay` logic with its own private
+SQLite store and pinned CLI subprocess against the same isolated Core message
+bus. A fake Telegram update traverses hub → relay → recipient under the endpoint
+identity with external-source metadata. A normal recipient reply traverses
+relay → hub → the bound fake chat, retaining context and without a second send
+on the next relay turn. It does not inject prebuilt outbound transport fragments.
+The native relay executable has a separate process test; neither test substitutes
+for the [disposable release-owned Telegram smoke](tests/TELEGRAM-SMOKE.md).
+
+
 Only `cfg(test)` can construct the fake Bot origin/account factory; no Cargo
 feature, config field or environment variable can enable it. The App gate scans
 both debug and optimized release hub executables for the test origin/factory markers and verifies the
@@ -1424,3 +1435,31 @@ are nonzero. The resume preview includes the oldest held creation timestamp and
 shows its approximate age using the browser clock. Explicit release can send
 content up to the one-hour hold TTL; the default remains irreversible discard.
 Age/status/evidence are display/declarations, never authorization decisions.
+
+### Telegram candidate checks and recovery
+
+The [disposable Telegram acceptance checklist](tests/TELEGRAM-SMOKE.md) defines
+release-owned provisioning, owner bind/resume, identity/context checks, negative
+controls, drain, rollback and token revocation. No live test or deployment is
+implied by local checks. The [dependency audit](DEPENDENCY_AUDIT.md) records the
+Rust TLS patch carried into this slice; its dated result is not a perpetual
+security guarantee.
+
+The App author runner accepts explicit non-secret tooling paths:
+`python3 tests/run.py --cargo /absolute/cargo --cargo-home /private/tool-cache --rustup-home /absolute/rustup-home`.
+It clears runtime identities and credentials from child environments, keeps the
+build target in this worktree, and limits Rust test concurrency to two threads.
+Build the debug hub before the graded `unittest discover` check; discovery tests
+must not treat their runner arguments as binary paths. UI checks remain
+`npm run check` and the focused browser driver documented above.
+
+A stale resume preview is a conflict: the page discards the old preview and
+confirmation, asks for a fresh preview and never silently retries the POST.
+The deterministic positive fixture gates only its unrelated test readback
+scheduler; production still requires every fresh Core observation. No fake Bot
+origin or test scheduling control exists in production configuration.
+
+## Telegram candidate provenance
+
+See [the file provenance table](TELEGRAM-SLICE.md) for inherited review scope and
+newly changed files; prior verdicts do not approve this extracted candidate.

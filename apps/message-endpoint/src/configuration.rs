@@ -223,6 +223,8 @@ fn current_time() -> Result<i64, Failure> {
         .ok_or(Failure::Unavailable)
 }
 fn map_hub(error: crate::hub::Error) -> Failure {
+    #[cfg(test)]
+    eprintln!("test-only configuration hub rejection: {error}");
     match error {
         crate::hub::Error::Revision | crate::hub::Error::Binding => Failure::Conflict,
         _ => Failure::Unavailable,

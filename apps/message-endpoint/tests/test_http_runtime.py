@@ -10,7 +10,8 @@ import unittest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from http_fixture import TOKEN, fixture
 
-BINARY = Path(sys.argv.pop(1)).resolve()
+BINARY = (Path(sys.argv.pop(1)).resolve() if __name__ == '__main__'
+          else Path(__file__).resolve().parents[3] / 'target/debug/treer-message-hub')
 class Runtime(unittest.TestCase):
     def test_real_hub_private_storage_identity_and_static_routes(self):
         with fixture(BINARY) as f:
