@@ -39,6 +39,8 @@ struct FakeUpload {
 struct FakeState {
     uploads: HashMap<String, FakeUpload>,
     results: HashMap<String, Value>,
+    /// Definitive failure receipts the fake Controller remembers (#169).
+    failed: HashMap<String, String>,
     begun: usize,
     chunks: usize,
     part_commits: usize,
@@ -201,6 +203,9 @@ fn answer_v3(
         AgentCommand::UploadResult { upload_id } => {
             if let Some(result) = fake.results.get(&upload_id) {
                 return CommandResult::success(id, json!({"state": "committed", "result": result}));
+            }
+            if let Some(code) = fake.failed.get(&upload_id) {
+                return CommandResult::success(id, json!({"state": "failed", "code": code}));
             }
             match fake.uploads.get(&upload_id) {
                 Some(upload) => CommandResult::success(
@@ -1214,4 +1219,52 @@ async fn read_models_keep_live_capabilities_after_a_controller_snapshot() {
             "{uri}: outsider response leaked capabilities: {body}"
         );
     }
+}
+
+#[tokio::test]
+async fn controller_failure_receipt_ends_the_row_immediately_with_the_fixed_code() {
+    // #169: a Controller that recorded a definitive failure receipt answers
+    // UploadResult with state failed; the Proxy ends the row at once instead
+    // of waiting six hours for outcome_unknown.
+    let fixture = fixture().await;
+    let (status, body, _) =
+        begin(&fixture, "tok-member", "machine-a", KEY_A, 2 * MIB, "f.bin").await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    let (status, body, _) = put_part(&fixture, &upload_id, 0, &vec![1u8; MIB as usize]).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    {
+        let mut fake = fixture.fake.state.lock().unwrap();
+        fake.uploads.remove(&upload_id);
+        fake.failed
+            .insert(upload_id.clone(), "machine_file_denied".to_string());
+    }
+    let request = base(
+        "GET",
+        format!("{}/{upload_id}", uploads_uri("machine-a")),
+        "tok-member",
+    )
+    .body(Body::empty())
+    .unwrap();
+    let (status, seen, _) = json_of(fixture.app.clone().oneshot(request).await.unwrap()).await;
+    assert_eq!(status, StatusCode::OK, "{seen}");
+    assert_eq!(seen["state"], "failed", "{seen}");
+    assert_eq!(seen["reconciled"], true);
+    assert!(
+        seen.to_string().contains("machine_file_denied"),
+        "the fixed code reaches the client: {seen}"
+    );
+    // The receipt is terminal: a commit now answers the terminal state, and
+    // the same begin key does not revive the row.
+    let request = base(
+        "POST",
+        format!("{}/{upload_id}/commit", uploads_uri("machine-a")),
+        "tok-member",
+    )
+    .body(Body::empty())
+    .unwrap();
+    let (status, body, _) = json_of(fixture.app.clone().oneshot(request).await.unwrap()).await;
+    assert_ne!(status, StatusCode::OK, "{body}");
+    let row = fixture.store.get(&upload_id).await.unwrap().unwrap();
+    assert_eq!(row.state, crate::upload_store::UploadState::Failed);
 }

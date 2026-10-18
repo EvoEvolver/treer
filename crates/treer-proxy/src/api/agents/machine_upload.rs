@@ -564,6 +564,32 @@ async fn reconcile(
                     .map_err(store_error)?;
             }
         }
+        "failed" => {
+            // The Controller recorded a definitive failure receipt (#169):
+            // the commit provably did not publish, so the row ends now with
+            // the fixed code instead of waiting for outcome_unknown.
+            let code = answer["code"]
+                .as_str()
+                .filter(|code| {
+                    !code.is_empty()
+                        && code.len() <= 64
+                        && code
+                            .bytes()
+                            .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+                })
+                .unwrap_or("machine_upload_failed");
+            store
+                .set_terminal(&row.upload_id, UploadState::Failed, code)
+                .await
+                .map_err(store_error)?;
+            audit(
+                auth,
+                caller,
+                "machine.file.upload_aborted",
+                json!({"upload_id": row.upload_id, "reason": code}),
+            )
+            .await;
+        }
         _ => {
             if row.state == UploadState::Active {
                 // The Controller has neither staging nor receipt (it restarted

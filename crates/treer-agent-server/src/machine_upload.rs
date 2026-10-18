@@ -90,7 +90,27 @@ struct StoredResult {
     committed_at: u64,
     #[serde(default)]
     cleanup_pending: bool,
+    /// `Failed` only when the commit provably did not publish (#169): the
+    /// receipt then carries the fixed error code and an empty path, so a
+    /// retry or `UploadResult` answers the same definitive failure instead of
+    /// waiting for the lifetime to end as `outcome_unknown`.
+    #[serde(default)]
+    outcome: StoredOutcome,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    code: Option<String>,
 }
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredOutcome {
+    #[default]
+    Committed,
+    Failed,
+}
+
+/// Receipts kept beyond the 24-hour retention are also capped by count so
+/// `upload-results.json` cannot grow without bound; the oldest go first.
+pub(crate) const MAX_STORED_RESULTS: usize = 256;
 
 struct Upload {
     path: String,
@@ -141,9 +161,50 @@ pub struct Uploads {
     results: Mutex<Vec<StoredResult>>,
     recovered: std::sync::atomic::AtomicBool,
     /// Recorded staging names the startup sweep could not remove; they stay
-    /// journaled so a later start retries them.
-    unswept: Mutex<Vec<(String, String)>>,
+    /// journaled so a later start retries them, with the count of
+    /// consecutive failed sweeps of that name (#169).
+    unswept: Mutex<Vec<IntentRecord>>,
 }
+
+/// A journaled staging intent: the published path, the upload id and how
+/// many consecutive starts failed to remove the staging name. Older journals
+/// stored `[path, id]` pairs, which still deserialize.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+enum JournaledIntent {
+    Record(IntentRecord),
+    Legacy(String, String),
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+struct IntentRecord {
+    path: String,
+    id: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    failed_sweeps: u32,
+}
+
+fn is_zero(value: &u32) -> bool {
+    *value == 0
+}
+
+impl From<JournaledIntent> for IntentRecord {
+    fn from(value: JournaledIntent) -> Self {
+        match value {
+            JournaledIntent::Record(record) => record,
+            JournaledIntent::Legacy(path, id) => IntentRecord {
+                path,
+                id,
+                failed_sweeps: 0,
+            },
+        }
+    }
+}
+
+/// After this many consecutive starts that could not remove one recorded
+/// staging name, the record is dropped with a warning and the file is left
+/// for the operator (#169, security 3980/4504).
+const MAX_FAILED_SWEEPS: u32 = 5;
 
 /// Whether this Controller offers the chunked, resumable upload contract
 /// (`machine.upload.v3`). The Windows code path compiles and is exercised by
@@ -242,7 +303,48 @@ impl Uploads {
     /// diagnostics).
     #[cfg(test)]
     pub fn unswept_for_test(&self) -> Vec<(String, String)> {
-        self.unswept.lock().map(|u| u.clone()).unwrap_or_default()
+        self.unswept
+            .lock()
+            .map(|u| u.iter().map(|r| (r.path.clone(), r.id.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Journals a synthetic receipt as if an earlier upload had ended that
+    /// way, for the receipt-cap tests; goes through `store_result` so the cap
+    /// and eviction order apply exactly as in production.
+    #[cfg(test)]
+    pub fn seed_receipt_for_test(&self, upload_id: &str, failed: bool) {
+        self.store_result(StoredResult {
+            upload_id: upload_id.to_string(),
+            path: if failed {
+                String::new()
+            } else {
+                format!("{upload_id}.bin")
+            },
+            bytes_written: 1,
+            sha256: String::new(),
+            committed_at: now_epoch(),
+            cleanup_pending: false,
+            outcome: if failed {
+                StoredOutcome::Failed
+            } else {
+                StoredOutcome::Committed
+            },
+            code: failed.then(|| "machine_upload_failed".to_string()),
+        });
+    }
+
+    /// Every journaled receipt as `(upload_id, failed)` in storage order.
+    #[cfg(test)]
+    pub fn receipts_for_test(&self) -> Vec<(String, bool)> {
+        self.results
+            .lock()
+            .map(|r| {
+                r.iter()
+                    .map(|r| (r.upload_id.clone(), r.outcome == StoredOutcome::Failed))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn open_root(&self) -> Result<Root, ProtocolError> {
@@ -290,29 +392,45 @@ impl Uploads {
                 .cleanup_staging(file, temporary)
                 .map_err(io_failure)?;
         }
-        let intents: Vec<(String, String)> = read_journal(&journal, JOURNAL_INTENTS)?;
+        let intents: Vec<JournaledIntent> = read_journal(&journal, JOURNAL_INTENTS)?;
         if intents.len() > MACHINE_UPLOAD_MAX_ACTIVE + 1 {
             return Err(failure("state_error", "too many upload recovery records"));
         }
         // A recorded name that cannot be removed now (held open by another
         // process, an antivirus scan, a stale handle on Windows) must not
         // block every later upload: it stays journaled for the next sweep and
-        // is reported, and recovery continues with the others.
-        let mut kept: Vec<(String, String)> = Vec::new();
-        for (path, id) in intents {
-            if validate_upload_id(&id).is_err() || !id.starts_with("upl_") {
+        // is reported, and recovery continues with the others. Only
+        // consecutive failures of that specific name count; after
+        // MAX_FAILED_SWEEPS the record is dropped and the file is left for
+        // the operator. A missing parent directory means nothing is left to
+        // sweep; every other error on the parent is a failure.
+        let mut kept: Vec<IntentRecord> = Vec::new();
+        for intent in intents {
+            let mut record = IntentRecord::from(intent);
+            if validate_upload_id(&record.id).is_err() || !record.id.starts_with("upl_") {
                 return Err(failure("state_error", "invalid upload recovery identifier"));
             }
-            if treer_platform::machine_file::is_reserved_namespace(&path).map_err(io_failure)? {
+            if treer_platform::machine_file::is_reserved_namespace(&record.path)
+                .map_err(io_failure)?
+            {
                 continue;
             }
-            match root.cleanup_staging(&path, &format!(".treer-transfer-{id}")) {
+            let id = record.id.clone();
+            match root.cleanup_staging(&record.path, &format!(".treer-transfer-{id}")) {
                 Ok(()) => {
                     tracing::warn!(upload_id = %id, "removed the staging file of an upload interrupted by a Controller restart");
                 }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    tracing::warn!(upload_id = %id, "the directory of an interrupted upload is gone; nothing left to sweep");
+                }
                 Err(error) => {
-                    tracing::warn!(upload_id = %id, ?error, "could not remove the staging file of an interrupted upload; kept for the next sweep");
-                    kept.push((path, id));
+                    record.failed_sweeps = record.failed_sweeps.saturating_add(1);
+                    if record.failed_sweeps >= MAX_FAILED_SWEEPS {
+                        tracing::warn!(upload_id = %id, attempts = record.failed_sweeps, ?error, "giving up on the staging file of an interrupted upload after repeated failed sweeps; the operator may remove it by hand");
+                    } else {
+                        tracing::warn!(upload_id = %id, attempts = record.failed_sweeps, ?error, "could not remove the staging file of an interrupted upload; kept for the next sweep");
+                        kept.push(record);
+                    }
                 }
             }
         }
@@ -350,13 +468,13 @@ impl Uploads {
     }
 
     fn persist_intents(&self, entries: &HashMap<String, Upload>) -> Result<(), ProtocolError> {
-        let mut records: Vec<(String, String)> =
+        let mut records: Vec<IntentRecord> =
             self.unswept.lock().map(|u| u.clone()).unwrap_or_default();
-        records.extend(
-            entries
-                .iter()
-                .map(|(id, upload)| (upload.path.clone(), id.clone())),
-        );
+        records.extend(entries.iter().map(|(id, upload)| IntentRecord {
+            path: upload.path.clone(),
+            id: id.clone(),
+            failed_sweeps: 0,
+        }));
         let journal = self.open_root()?.transfer_journal().map_err(io_failure)?;
         write_journal(
             &journal,
@@ -428,14 +546,18 @@ impl Uploads {
         }
         // Intent first, then the staging file, so a crash in between leaves a
         // recorded name for the startup sweep.
-        let mut planned: Vec<(String, String)> =
+        let mut planned: Vec<IntentRecord> =
             self.unswept.lock().map(|u| u.clone()).unwrap_or_default();
-        planned.extend(
-            entries
-                .iter()
-                .map(|(id, upload)| (upload.path.clone(), id.clone())),
-        );
-        planned.push((path.clone(), upload_id.to_owned()));
+        planned.extend(entries.iter().map(|(id, upload)| IntentRecord {
+            path: upload.path.clone(),
+            id: id.clone(),
+            failed_sweeps: 0,
+        }));
+        planned.push(IntentRecord {
+            path: path.clone(),
+            id: upload_id.to_owned(),
+            failed_sweeps: 0,
+        });
         let journal = root.transfer_journal().map_err(io_failure)?;
         write_journal(
             &journal,
@@ -649,8 +771,10 @@ impl Uploads {
     /// receipt is remembered for the retention window and repeated commits
     /// return it.
     pub fn commit(&self, upload_id: &str) -> Result<UploadMachineFileResponse, ProtocolError> {
-        if let Some(result) = self.stored_result(upload_id)? {
-            return Ok(result);
+        // First terminal result wins: a replayed commit answers the stored
+        // receipt, success or definitive failure, and never flips it.
+        if let Some(stored) = self.stored_result(upload_id)? {
+            return stored;
         }
         let mut entries = self.lock()?;
         let mut upload = entries
@@ -708,7 +832,26 @@ impl Uploads {
                 );
                 true
             }
-            Err(error) => return Err(error),
+            Err(error) => {
+                // Nothing was published (validation or the atomic link or
+                // rename itself failed, never an unlink after a link, which
+                // is the uncertain case above): record a definitive failure
+                // so the Proxy can end the row now (#169). Fixed code only.
+                if upload.chunked() {
+                    let receipt = StoredResult {
+                        upload_id: upload_id.to_owned(),
+                        path: String::new(),
+                        bytes_written: upload.written,
+                        sha256: format!("{:x}", hash.finalize()),
+                        committed_at: now_epoch(),
+                        cleanup_pending: false,
+                        outcome: StoredOutcome::Failed,
+                        code: Some(error.code.clone()),
+                    };
+                    self.store_result(receipt);
+                }
+                return Err(error);
+            }
         };
         let result = StoredResult {
             upload_id: upload_id.to_owned(),
@@ -717,22 +860,11 @@ impl Uploads {
             sha256: format!("{:x}", hash.finalize()),
             committed_at: now_epoch(),
             cleanup_pending,
+            outcome: StoredOutcome::Committed,
+            code: None,
         };
         if upload.chunked() {
-            let mut results = self
-                .results
-                .lock()
-                .map_err(|_| failure("state_error", "upload results lock poisoned"))?;
-            let now = now_epoch();
-            results.retain(|r| {
-                now.saturating_sub(r.committed_at) < MACHINE_UPLOAD_RESULT_RETENTION_SECONDS
-            });
-            results.push(result.clone());
-            let snapshot = results.clone();
-            drop(results);
-            if let Err(error) = self.persist_results(&snapshot) {
-                tracing::warn!(?error, upload_id, "failed to persist the upload receipt");
-            }
+            self.store_result(result.clone());
         }
         Ok(UploadMachineFileResponse {
             server_id: self.server_id.clone(),
@@ -743,32 +875,76 @@ impl Uploads {
         })
     }
 
-    fn stored_result(
-        &self,
-        upload_id: &str,
-    ) -> Result<Option<UploadMachineFileResponse>, ProtocolError> {
+    /// Appends a terminal receipt unless one already exists for the id (first
+    /// terminal wins), trims by retention and count, and persists; a failed
+    /// persist keeps the in-memory receipt and is logged.
+    fn store_result(&self, receipt: StoredResult) {
+        let Ok(mut results) = self.results.lock() else {
+            return;
+        };
+        if results.iter().any(|r| r.upload_id == receipt.upload_id) {
+            return;
+        }
+        let now = now_epoch();
+        results.retain(|r| {
+            now.saturating_sub(r.committed_at) < MACHINE_UPLOAD_RESULT_RETENTION_SECONDS
+        });
+        let upload_id = receipt.upload_id.clone();
+        results.push(receipt);
+        // Over the cap, failed receipts go first (oldest first), then the
+        // oldest committed ones: a committed receipt the Proxy has not
+        // reconciled yet is the one worth keeping (#169, security 4567).
+        while results.len() > MAX_STORED_RESULTS {
+            let victim = results
+                .iter()
+                .position(|r| r.outcome == StoredOutcome::Failed)
+                .unwrap_or(0);
+            results.remove(victim);
+        }
+        let snapshot = results.clone();
+        drop(results);
+        if let Err(error) = self.persist_results(&snapshot) {
+            tracing::warn!(?error, upload_id, "failed to persist the upload receipt");
+        }
+    }
+
+    fn stored(&self, upload_id: &str) -> Result<Option<StoredResult>, ProtocolError> {
         self.recover()?;
         let results = self
             .results
             .lock()
             .map_err(|_| failure("state_error", "upload results lock poisoned"))?;
-        Ok(results
-            .iter()
-            .find(|r| r.upload_id == upload_id)
-            .map(|r| UploadMachineFileResponse {
+        Ok(results.iter().find(|r| r.upload_id == upload_id).cloned())
+    }
+
+    /// The stored terminal answer for a replayed commit: the receipt for a
+    /// published upload, or the same definitive failure as the first commit.
+    fn stored_result(
+        &self,
+        upload_id: &str,
+    ) -> Result<Option<Result<UploadMachineFileResponse, ProtocolError>>, ProtocolError> {
+        Ok(self.stored(upload_id)?.map(|r| match r.outcome {
+            StoredOutcome::Committed => Ok(UploadMachineFileResponse {
                 server_id: self.server_id.clone(),
                 path: r.path.clone(),
                 bytes_written: r.bytes_written,
                 sha256: Some(r.sha256.clone()),
                 cleanup_pending: r.cleanup_pending,
-            }))
+            }),
+            StoredOutcome::Failed => Err(failure(
+                r.code.as_deref().unwrap_or("machine_upload_failed"),
+                "the upload failed to publish",
+            )),
+        }))
     }
 
     /// The Controller's view for recovery: a committed receipt, the progress
     /// of an active upload, or unknown.
     pub fn result(&self, upload_id: &str) -> Result<Value, ProtocolError> {
-        if let Some(result) = self.stored_result(upload_id)? {
-            return Ok(json!({"state": "committed", "result": result}));
+        match self.stored_result(upload_id)? {
+            Some(Ok(result)) => return Ok(json!({"state": "committed", "result": result})),
+            Some(Err(error)) => return Ok(json!({"state": "failed", "code": error.code})),
+            None => {}
         }
         let entries = self.lock()?;
         match entries.get(upload_id) {
