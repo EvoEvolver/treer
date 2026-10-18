@@ -82,6 +82,7 @@ pub struct View {
     /// Endpoint-asserted diagnostic, NOT verification of command or Policy.
     pub diagnostic: Option<Status>,
     pub activity: crate::activation_state::Activity,
+    pub isolation: Option<crate::recovery::IsolationChoice>,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -252,6 +253,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             "SELECT b.definition,b.revision,e.paused,b.reason,b.observed,b.checked_at,b.diagnostic FROM hub_bindings b JOIN endpoints e ON e.id=b.endpoint WHERE e.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
         Ok(View {
             activity: self.activation_activity(id)?,
+            isolation: self.isolation_choice(id)?,
             binding: serde_json::from_str(&definition).map_err(|_| Error::Binding)?,
             revision,
             paused,

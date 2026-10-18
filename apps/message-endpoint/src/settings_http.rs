@@ -44,6 +44,7 @@ pub struct EndpointSnapshot {
     observed: Option<ObservedSnapshot>,
     diagnostic: Option<DiagnosticSnapshot>,
     activity: crate::activation_state::Activity,
+    isolation: Option<crate::recovery::IsolationChoice>,
 }
 #[derive(Serialize)]
 struct BindingSnapshot {
@@ -66,6 +67,7 @@ impl From<crate::hub::View> for EndpointSnapshot {
     fn from(view: crate::hub::View) -> Self {
         Self {
             activity: view.activity,
+            isolation: view.isolation,
             binding: BindingSnapshot {
                 endpoint_id: view.binding.endpoint_id,
                 generation: view.binding.generation,
@@ -940,6 +942,7 @@ mod tests {
         let endpoint = |size| {
             EndpointSnapshot::from(crate::hub::View {
                 activity: Default::default(),
+                isolation: None,
                 binding: crate::hub::Binding {
                     endpoint_id: "ag_demo".into(),
                     generation: 1,

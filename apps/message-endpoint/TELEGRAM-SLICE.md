@@ -115,3 +115,10 @@ parked HTTP code, modify the endpoint relay protocol, or approve migration.
 Missing configured token files produce idle `token_missing` slots. Every UI token
 change stops/drains Telegram until an authorized restart and separate owner
 resume. This increment requires its own review, gate and artifact evidence.
+
+
+The isolation-choice increment (#159 decision 4441) adds an explicit owner choice
+(reviewed or unverified risk accepted), durable audit evidence and persistent
+binding badge. It does not attest OS/Policy isolation, change relay protocol,
+relax identity/CSRF checks or automatically resume existing bindings. It requires
+a separate freeze and security review before any sandbox update.

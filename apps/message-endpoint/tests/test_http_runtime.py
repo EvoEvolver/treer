@@ -238,7 +238,7 @@ class Runtime(unittest.TestCase):
                 self.assertEqual(call({'action':'bind_telegram','endpoint_id':'ag_new','revision':1,'target':{'account_id':'bot_fixture','chat_id':123,'topic_id':None,'allowed_senders':[456]},'confirm':True})[0],200)
                 status,result=call({'action':'preview_resume','endpoint_id':'ag_new'});self.assertEqual(status,200)
                 self.assertEqual(result['activation_enabled'],activation);self.assertFalse(result['account_ready'])
-                resume={'action':'resume','endpoint_id':'ag_new','expected':result['preview'],'evidence':{'profile_reviewed':True,'isolation_reviewed':True,'reference':'#159 synthetic fixture'},'confirm':True}
+                resume={'action':'resume','endpoint_id':'ag_new','expected':result['preview'],'evidence':{'profile_reviewed':True,'isolation':'reviewed','reference':'#159 synthetic fixture'},'confirm':True}
                 self.assertEqual(call({**resume,'confirm':False})[0],400)
                 self.assertEqual(call({**resume,'activation_enabled':True})[0],400)
                 self.assertEqual(call({**resume,'observed':{'path':'/forged'}})[0],400)

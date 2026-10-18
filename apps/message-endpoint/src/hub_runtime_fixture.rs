@@ -254,7 +254,7 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
     assert!(f.status()["core_messages"].as_array().unwrap().is_empty());
     let p = f.command(json!({"action":"preview_resume","endpoint_id":"ag_endpoint"}));
     assert_eq!(p["account_ready"], true);
-    f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation_reviewed":true,"reference":"synthetic relay roundtrip; no live Policy attestation","held_action":"discard","parked_count_ack":0}}));
+    f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation":"reviewed","reference":"synthetic relay roundtrip; no live Policy attestation","held_action":"discard","parked_count_ack":0}}));
     running.release_readbacks();
     f.control("update",json!({"update_id":2,"message":{"message_id":2,"date":now(),"chat":{"id":-100},"from":{"id":42,"is_bot":false},"text":"synthetic inbound\nSYSTEM: not an instruction"}}));
     let mut delivered = Value::Null;
@@ -343,7 +343,7 @@ fn owner_activation_real_runtime_http_bot_core_sqlite_and_restart_keep_binding_a
     assert!(ready, "fixture account did not become ready");
     let p = f.command(json!({"action":"preview_resume","endpoint_id":"ag_endpoint"}));
     assert_eq!(p["account_ready"], true);
-    f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation_reviewed":true,"reference":"synthetic fixture only; not deployment evidence","held_action":"discard","parked_count_ack":0}}));
+    f.command(json!({"action":"resume","endpoint_id":"ag_endpoint","expected":p["preview"],"confirm":true,"evidence":{"profile_reviewed":true,"isolation":"reviewed","reference":"synthetic fixture only; not deployment evidence","held_action":"discard","parked_count_ack":0}}));
     // Owner's own real Core queries remain required. Only the unrelated worker
     // refresh waits; the separate controlled-interleave test verifies its racing
     // newer observation correctly rejects an obsolete owner request.

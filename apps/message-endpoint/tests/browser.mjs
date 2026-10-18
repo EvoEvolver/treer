@@ -96,7 +96,7 @@ try {
  await card.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
  const resumeConfirm=card.getByLabel('Confirm resuming these exact objects and sending pending messages.',{exact:true});
  if(!await resumeConfirm.isDisabled())throw new Error('one owner declaration armed resume confirmation');
- await card.getByLabel('I checked OS user/container separation and enforced Policy isolation.',{exact:true}).check();
+ await card.getByLabel('Isolation state (explicit choice required)',{exact:true}).selectOption('reviewed');
  await card.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('#159 synthetic release reference');
  await resumeConfirm.check();
  if(!await resumeButton.isDisabled())throw new Error('browser declarations bypassed default operator gate/unready account');
@@ -123,7 +123,7 @@ try {
  await cc.getByText('Resume endpoint',{exact:true}).click();
  await cc.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
  await cc.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
- await cc.getByLabel('I checked OS user/container separation and enforced Policy isolation.',{exact:true}).check();
+ await cc.getByLabel('Isolation state (explicit choice required)',{exact:true}).selectOption('reviewed');
  await cc.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('synthetic conflict fixture');
  await cc.getByLabel('Confirm resuming these exact objects and sending pending messages.',{exact:true}).check();
  await cc.getByRole('button',{name:'Resume and send pending messages',exact:true}).click();
@@ -144,6 +144,57 @@ try {
  if(!await cc.getByRole('button',{name:'Resume and send pending messages',exact:true}).isDisabled())throw new Error('fresh preview skipped reconfirmation');
  if(conflictPosts!==1)throw new Error('fresh preview retried resume');
  await conflict.close();
+ // UI-only success fixture: actual commit/rollback and SQLite restart durability
+ // are covered in Rust. These requests retain the real signed owner gateway.
+ for(const choice of ['reviewed','unverified_accepted']) {
+  const page=await browser.newPage({viewport:{width:390,height:900}});
+  let stored=null,posted=0;
+  const settings=structuredClone(conflictSettings);
+  const endpoint=settings.settings.endpoints.find(v=>v.binding.endpoint_id==='ag_new');
+  endpoint.paused=true;endpoint.isolation=null;
+  await page.route('**/api/settings',r=>r.fulfill({json:settings}));
+  await page.route('**/api/configuration',r=>{
+   const command=r.request().postDataJSON();
+   if(command.action==='preview_resume')return r.fulfill({json:{...conflictPreview,activation_enabled:true,account_ready:true}});
+   if(command.action==='resume'){
+    if(command.evidence.isolation!==choice||'isolation_reviewed' in command.evidence)throw new Error('wrong isolation wire choice');
+    if(command.evidence.reference!=='isolation untested <script>window.injected=true</script>')throw new Error('reference changed');
+    stored=choice;posted++;endpoint.isolation=choice;endpoint.paused=false;
+    return r.fulfill({json:{status:'saved',paused:false,revision:4}});
+   }
+   throw new Error('unexpected choice command');
+  });
+  await page.goto(config.url);
+  const section=page.locator('section').filter({has:page.locator('code').filter({hasText:/^ag_new$/})});
+  await section.getByText('Resume endpoint',{exact:true}).click();
+  await section.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
+  const isolation=section.getByLabel('Isolation state (explicit choice required)',{exact:true});
+  if(await isolation.inputValue()!=='')throw new Error('isolation choice defaulted');
+  await section.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
+  await section.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('isolation untested <script>window.injected=true</script>');
+  const confirm=section.getByLabel('Confirm resuming these exact objects and sending pending messages.',{exact:true});
+  if(!await confirm.isDisabled())throw new Error('missing isolation choice armed resume');
+  await isolation.selectOption(choice);
+  for(const width of [390,1280])for(const theme of ['Light','Dark']) {
+   await page.setViewportSize({width,height:900});
+   if(await page.getByRole('button',{name:theme,exact:true}).count())await page.getByRole('button',{name:theme,exact:true}).click();
+   if(!await page.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('isolation choice overflow');
+   await page.screenshot({path:join(screenshotPath,`isolation-${choice}-${width}-${theme.toLowerCase()}.png`),fullPage:true});
+  }
+  await confirm.check();await section.getByRole('button',{name:'Resume and send pending messages',exact:true}).click();
+  await section.getByText('Endpoint resumed. Downstream delivery is not verified.',{exact:true}).waitFor();
+  if(posted!==1||stored!==choice)throw new Error('choice not submitted exactly once');
+  await page.reload();
+  if(choice==='unverified_accepted')await section.getByTestId('isolation-unverified').filter({hasText:'risk accepted by owner'}).waitFor();
+  else if(await section.getByTestId('isolation-unverified').count())throw new Error('reviewed badge mislabeled');
+  if(await page.evaluate(()=>window.injected))throw new Error('reference executed');
+  endpoint.paused=true;await page.reload();
+  if(choice==='unverified_accepted')await section.getByTestId('isolation-unverified').waitFor();
+  await page.getByLabel('Language').selectOption('zh');
+  if(choice==='unverified_accepted')await section.getByText('隔离未核验 · owner 已接受风险',{exact:true}).waitFor();
+  await page.close();
+ }
+
 
  await edit.getByRole('button',{name:'Light',exact:true}).click();
  await card.getByText('Recovery and audit',{exact:true}).click();

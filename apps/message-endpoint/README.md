@@ -1315,7 +1315,7 @@ fresh endpoint observation is kept internally; it cannot be supplied in JSON.
 A preview is not authority and can be inspected while the operator gate is off.
 
 `resume` accepts endpoint ID, the exact preview under `expected`, `confirm:true`
-and `evidence:{profile_reviewed:true,isolation_reviewed:true,reference:"..."}`.
+and `evidence:{profile_reviewed:true,isolation:"reviewed",reference:"..."}`.
 The reference is a bounded 1–256-byte ticket/manifest reference, never a credential.
 The server repeats Core queries, compares the current preview, rechecks current
 owner proof, paused state, exact revision and immutable target under the state
@@ -1326,7 +1326,7 @@ held across the activation transaction. Workers independently recheck their live
 health/readback gates before each handoff.
 
 The owner must separately confirm the fixed relay launch profile/release and
-independent OS user/container plus actual enforced Policy isolation, provide the
+either reviewed OS/container separation and enforced Policy isolation, or explicitly accepted unverified isolation; provide the
 evidence reference, and then confirm sending the pending queue. These are **owner
 declarations, not App/Core attestation**: Core metadata does not prove startup argv,
 OS isolation or Policy enforcement; getMe does not prove target reachability.
@@ -1555,3 +1555,33 @@ restarted. The durable binding pause and bot identity pin survive restart; a
 cleared restart hint never means that an endpoint resumed automatically. Set
 also checks pause state before getMe and again before stopping workers/committing,
 so an already-active binding causes refusal without a Telegram request.
+
+
+### Truthful isolation choice at resume (#159, decision 4441)
+
+Resume requires a current verified workspace owner, a fresh exact preview, the
+operator activation gate, ready bot identity, the fixed-profile declaration,
+and an explicit isolation choice. Nothing is preselected. The owner chooses
+`evidence.isolation: "reviewed"` (OS/container separation and enforced Policy
+isolation were reviewed) or `"unverified_accepted"` (running without verified
+isolation; risk accepted). Both are owner statements, never App attestation.
+The second option is available for general deployments, not only sandboxes.
+Same-UID processes can read credentials/state even with 0600 files.
+
+The choice and the bounded free-text `reference` commit atomically with resume
+in the existing owner audit (and its JSONL exports). A reference is plain text,
+not HTML; it must contain no secrets. For this functional smoke the truthful
+reference is `functional smoke, sandbox folder, same user, isolation untested`.
+The profile declaration remains required and must also be truthful.
+
+Bindings expose the latest committed `isolation` in owner settings and retain
+an **Isolation unverified · risk accepted by owner** badge after pause/reload/
+restart. No declaration gives an unverified/no-declaration badge; it never
+implies risk acceptance. No destructive schema migration is required: legacy
+audit entries with `isolation_reviewed:true` display as the historical reviewed
+owner declaration, while absent/unrecognized legacy evidence stays unknown.
+New resume JSON requires the enum field; old boolean/missing/null/unknown
+choices are rejected, so an old client cannot silently accept risk. Existing
+bindings are not automatically resumed or modified. Auth, CSRF, rate limits,
+Core metadata, preview revision, bot readiness, held-content choice and audit
+capacity checks remain enforced for both isolation choices.

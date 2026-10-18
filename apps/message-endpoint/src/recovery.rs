@@ -10,6 +10,14 @@ use serde::Serialize;
 
 pub(crate) const AUDIT_LIMIT: i64 = 10_000;
 
+/// Owner's recorded choice, not an App attestation. No implicit acceptance.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum IsolationChoice {
+    Reviewed,
+    UnverifiedAccepted,
+}
+
 #[derive(Clone, Copy, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Recovery {
@@ -47,6 +55,39 @@ pub struct Audit {
 }
 
 impl<M: Mailbox + Directory> Hub<M> {
+    /// Latest committed resume declaration survives pauses/restarts. Audit export
+    /// never deletes these rows. Legacy true means reviewed, missing evidence is
+    /// unknown, never silently converted into accepted risk.
+    pub fn isolation_choice(&self, endpoint: &str) -> Result<Option<IsolationChoice>, Error> {
+        use rusqlite::OptionalExtension;
+        let exists: bool = self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='hub_owner_audit')",
+            [],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Ok(None);
+        }
+        let detail: Option<String> = self.store.db.query_row(
+            "SELECT transfer FROM hub_owner_audit WHERE endpoint=?1 AND action='resume_binding' ORDER BY id DESC LIMIT 1",
+            [endpoint], |r| r.get(0)).optional()?;
+        let Some(detail) = detail else {
+            return Ok(None);
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&detail) else {
+            return Ok(None);
+        };
+        if let Some(choice) = value.get("isolation") {
+            return serde_json::from_value(choice.clone())
+                .map(Some)
+                .map_err(|_| Error::Binding);
+        }
+        Ok(
+            (value.get("isolation_reviewed").and_then(|v| v.as_bool()) == Some(true))
+                .then_some(IsolationChoice::Reviewed),
+        )
+    }
+
     pub fn owner_audit_capacity(&self) -> Result<(bool, i64), Error> {
         self.recovery_schema()?;
         let count: i64 =

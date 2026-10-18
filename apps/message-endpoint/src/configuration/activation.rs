@@ -46,7 +46,7 @@ enum HeldAction {
 #[serde(deny_unknown_fields)]
 pub struct ResumeEvidence {
     profile_reviewed: bool,
-    isolation_reviewed: bool,
+    isolation: crate::recovery::IsolationChoice,
     reference: String,
     #[serde(default)]
     held_action: HeldAction,
@@ -57,7 +57,6 @@ impl ResumeEvidence {
     fn valid(&self) -> bool {
         self.parked_count_ack >= 0
             && self.profile_reviewed
-            && self.isolation_reviewed
             && !self.reference.trim().is_empty()
             && self.reference.len() <= 256
             && !self.reference.chars().any(char::is_control)
@@ -239,7 +238,7 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
     }
     let discard_held = evidence.held_action == HeldAction::Discard;
     let evidence=serde_json::to_string(&serde_json::json!({
-        "kind":"owner_declaration_not_attestation", "profile_reviewed":true,"isolation_reviewed":true,
+        "kind":"owner_declaration_not_attestation", "profile_reviewed":true,"isolation":evidence.isolation,
         "reference":evidence.reference,"pins_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&current.pins).map_err(|_|Failure::Invalid)?)),
         "target":current.target,"held_action":evidence.held_action,"held_fragments":current.held_fragments,"oldest_held_at":current.oldest_held_at,"held_snapshot":current.held_snapshot,"parked_count_ack":evidence.parked_count_ack
     })).map_err(|_|Failure::Invalid)?;
@@ -313,7 +312,10 @@ mod tests {
         }
     }
     fn setup() -> (SharedHub<NoIo>, DirectoryFixture, Owner, Activation) {
-        let (hub, _) = fixture(Store::memory(Limits::default()).unwrap());
+        setup_store(Store::memory(Limits::default()).unwrap())
+    }
+    fn setup_store(store: Store) -> (SharedHub<NoIo>, DirectoryFixture, Owner, Activation) {
+        let (hub, _) = fixture(store);
         hub.store
             .db
             .execute("UPDATE hub_bindings SET checked_at=NULL", [])
@@ -354,12 +356,130 @@ mod tests {
             confirm: true,
             evidence: ResumeEvidence {
                 profile_reviewed: true,
-                isolation_reviewed: true,
+                isolation: crate::recovery::IsolationChoice::Reviewed,
                 reference: "#159 reviewed manifest fixture".into(),
                 held_action: HeldAction::Discard,
                 parked_count_ack,
             },
         }
+    }
+    #[test]
+    fn explicit_isolation_choices_are_required_and_unknown_values_fail_closed() {
+        for bad in [
+            serde_json::json!(null),
+            serde_json::json!(false),
+            serde_json::json!(""),
+            serde_json::json!("accepted"),
+            serde_json::json!({}),
+        ] {
+            let value =
+                serde_json::json!({"profile_reviewed":true,"isolation":bad,"reference":"fixture"});
+            assert!(serde_json::from_value::<ResumeEvidence>(value).is_err());
+        }
+        for legacy in [
+            serde_json::json!({"profile_reviewed":true,"reference":"fixture"}),
+            serde_json::json!({"profile_reviewed":true,"isolation_reviewed":true,"reference":"fixture"}),
+        ] {
+            assert!(serde_json::from_value::<ResumeEvidence>(legacy).is_err());
+        }
+    }
+    #[test]
+    fn unverified_acceptance_is_audited_and_badge_survives_pause_restart_and_legacy() {
+        let home = tempfile::tempdir().unwrap();
+        let path = home.path().canonicalize().unwrap().join("state");
+        std::fs::create_dir(&path).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (s, d, o, a) = setup_store(Store::open(&path, Limits::default()).unwrap());
+        assert_eq!(
+            s.lock().unwrap().view("ag_endpoint").unwrap().isolation,
+            None
+        );
+        let mut r = request(&s, &d, &o, &a);
+        r.evidence.isolation = crate::recovery::IsolationChoice::UnverifiedAccepted;
+        r.evidence.reference = "functional smoke, same user, isolation untested <script>".into();
+        resume(&s, &d, "ws_test", &o, r, &a).unwrap();
+        {
+            let mut h = s.lock().unwrap();
+            assert_eq!(
+                h.view("ag_endpoint").unwrap().isolation,
+                Some(crate::recovery::IsolationChoice::UnverifiedAccepted)
+            );
+            let e: serde_json::Value =
+                serde_json::from_str(&h.owner_audit(None, 25).unwrap()[0].transfer_id).unwrap();
+            assert_eq!(e["isolation"], "unverified_accepted");
+            assert_eq!(
+                e["reference"],
+                "functional smoke, same user, isolation untested <script>"
+            );
+            h.pause_audited("ag_endpoint", 5, o.id(), current_time().unwrap())
+                .unwrap();
+            assert_eq!(
+                h.view("ag_endpoint").unwrap().isolation,
+                Some(crate::recovery::IsolationChoice::UnverifiedAccepted)
+            );
+        }
+        drop(d);
+        drop(s);
+        let h = Hub::new(
+            Store::open(&path, Limits::default()).unwrap(),
+            NoIo,
+            "app_hub",
+            "ws_test",
+        )
+        .unwrap();
+        assert!(h.view("ag_endpoint").unwrap().paused);
+        assert_eq!(
+            h.view("ag_endpoint").unwrap().isolation,
+            Some(crate::recovery::IsolationChoice::UnverifiedAccepted)
+        );
+        // Additive read compatibility only: old audit declarations remain owner
+        // statements, not inferred risk acceptance or live isolation checks.
+        h.store
+            .db
+            .execute(
+                "UPDATE hub_owner_audit SET transfer=?1 WHERE action='resume_binding'",
+                [r#"{"isolation_reviewed":true}"#],
+            )
+            .unwrap();
+        assert_eq!(
+            h.view("ag_endpoint").unwrap().isolation,
+            Some(crate::recovery::IsolationChoice::Reviewed)
+        );
+        h.store
+            .db
+            .execute(
+                "UPDATE hub_owner_audit SET transfer='{}' WHERE action='resume_binding'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(h.view("ag_endpoint").unwrap().isolation, None);
+    }
+    #[test]
+    fn unverified_choice_cannot_bypass_gate_profile_or_audit_commit() {
+        let (s, d, o, mut a) = setup();
+        let mut r = request(&s, &d, &o, &a);
+        r.evidence.isolation = crate::recovery::IsolationChoice::UnverifiedAccepted;
+        r.evidence.profile_reviewed = false;
+        assert!(matches!(
+            resume(&s, &d, "ws_test", &o, r, &a),
+            Err(Failure::Invalid)
+        ));
+        let mut r = request(&s, &d, &o, &a);
+        r.evidence.isolation = crate::recovery::IsolationChoice::UnverifiedAccepted;
+        a.enabled = false;
+        assert!(matches!(
+            resume(&s, &d, "ws_test", &o, r, &a),
+            Err(Failure::Conflict)
+        ));
+        a.enabled = true;
+        let mut r = request(&s, &d, &o, &a);
+        r.evidence.isolation = crate::recovery::IsolationChoice::UnverifiedAccepted;
+        s.lock().unwrap().store.db.execute_batch("CREATE TRIGGER fail_resume BEFORE INSERT ON hub_owner_audit BEGIN SELECT RAISE(ABORT,'synthetic'); END;").unwrap();
+        assert!(resume(&s, &d, "ws_test", &o, r, &a).is_err());
+        let h = s.lock().unwrap();
+        assert!(h.view("ag_endpoint").unwrap().paused);
+        assert_eq!(h.view("ag_endpoint").unwrap().isolation, None);
     }
     #[test]
     fn newer_worker_readback_during_owner_query_conflicts_without_weakening_freshness() {
@@ -490,12 +610,6 @@ mod tests {
             Err(Failure::Invalid)
         ));
         let mut r = request(&s, &d, &o, &a);
-        r.evidence.isolation_reviewed = false;
-        assert!(matches!(
-            resume(&s, &d, "ws_test", &o, r, &a),
-            Err(Failure::Invalid)
-        ));
-        let mut r = request(&s, &d, &o, &a);
         r.confirm = false;
         assert!(matches!(
             resume(&s, &d, "ws_test", &o, r, &a),
@@ -580,7 +694,10 @@ mod tests {
             assert_eq!(e["held_fragments"], 1);
             assert_eq!(e["parked_count_ack"], 1);
         }
-        let e:ResumeEvidence=serde_json::from_value(serde_json::json!({"profile_reviewed":true,"isolation_reviewed":true,"reference":"test"})).unwrap();
+        let e: ResumeEvidence = serde_json::from_value(
+            serde_json::json!({"profile_reviewed":true,"isolation":"reviewed","reference":"test"}),
+        )
+        .unwrap();
         assert!(e.held_action == HeldAction::Discard);
     }
     #[test]
