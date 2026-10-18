@@ -59,7 +59,12 @@ try {
  if(await forged.getByRole('link',{name:'Continue with Treer'}).count())throw new Error('forged identity fell back to login');
  await forged.close();
  const edit=await browser.newPage({viewport:{width:390,height:900},locale:'en-US',extraHTTPHeaders:{'X-Treer-Identity-Token':'fixture.owner.token'}});
+ // Reproduce the real wildcard Proxy reserving its own auth routes. The App
+ // must discover its settings via its distinct namespace, never this payload.
+ let reservedAuthReads=0;
+ await edit.route('**/api/auth/config',route=>{reservedAuthReads++;return route.fulfill({json:{github:true,google:false,capabilities:[]}});});
  await edit.goto(config.url);await edit.getByRole('heading',{name:'Add a paused endpoint',exact:true}).waitFor();
+ if(reservedAuthReads!==0)throw new Error('App discovery called the Proxy-reserved auth route');
  const create=edit.locator('form').first();
  await create.getByLabel('Endpoint Agent ID',{exact:true}).fill('ag_new');
  await create.getByLabel('Recipient Agent ID',{exact:true}).fill('ag_recipient');
@@ -110,7 +115,7 @@ try {
  const conflict=await browser.newPage({viewport:{width:390,height:900},locale:'en-US'});
  const enabledSettings=structuredClone(conflictSettings);enabledSettings.settings.activation_enabled=true;
  await conflict.route('**/api/settings',r=>r.fulfill({json:enabledSettings}));
- await conflict.route('**/api/auth/config',r=>r.fulfill({json:{settings_url:config.url,login_url:config.url+'api/auth/start'}}));
+ await conflict.route('**/api/endpoint/auth/config',r=>r.fulfill({json:{settings_url:config.url,login_url:config.url+'api/auth/start'}}));
  let conflictPosts=0;
  await conflict.route('**/api/configuration',r=>{
   const command=r.request().postDataJSON();

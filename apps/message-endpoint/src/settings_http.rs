@@ -687,7 +687,7 @@ fn dispatch(
     if query.is_some() {
         return fixed(StatusCode::BAD_REQUEST, "query_not_allowed");
     }
-    if method == Method::GET && path == "/api/auth/config" {
+    if method == Method::GET && path == "/api/endpoint/auth/config" {
         return response(
             StatusCode::OK,
             json!({"login_url":app.auth.settings_url().join("api/auth/start").map(|v|v.to_string()).ok(), "settings_url":app.auth.settings_url().as_str()}),
@@ -722,7 +722,7 @@ fn dispatch(
     // Logout revokes only the opaque cookie that this browser already holds.
     // It needs CSRF, but no Proxy authority: expired/revoked owners must still
     // be able to discard their local session and clear their browser cookie.
-    if method == Method::POST && path == "/api/auth/logout" {
+    if method == Method::POST && path == "/api/endpoint/auth/logout" {
         if let Err(e) = app.auth.check_mutation(&values) {
             return error(e);
         }
@@ -1154,7 +1154,7 @@ mod tests {
         let logout = invoke(
             &app,
             Method::POST,
-            "/api/auth/logout",
+            "/api/endpoint/auth/logout",
             None,
             &headers(&[
                 ("cookie", &session),
@@ -1267,7 +1267,7 @@ mod tests {
         let bad = invoke(
             &app,
             Method::POST,
-            "/api/auth/logout",
+            "/api/endpoint/auth/logout",
             None,
             &headers(&[
                 ("x-treer-identity-token", TOKEN),
@@ -1280,7 +1280,7 @@ mod tests {
         let good = invoke(
             &app,
             Method::POST,
-            "/api/auth/logout",
+            "/api/endpoint/auth/logout",
             None,
             &headers(&[
                 ("x-treer-identity-token", TOKEN),
@@ -1301,7 +1301,7 @@ mod tests {
         for (m, p, q) in [
             (Method::POST, "/", None),
             (Method::GET, "/api/missing", None),
-            (Method::GET, "/api/auth/logout", None),
+            (Method::GET, "/api/endpoint/auth/logout", None),
             (Method::GET, "/api/settings", Some("token=untrusted")),
         ] {
             let r = invoke(&app, m, p, q, &HeaderMap::new());
@@ -1358,7 +1358,7 @@ mod tests {
         let result = client.get(format!("{base}/health")).send().unwrap();
         assert_eq!(result.status(), StatusCode::OK);
         let result = client
-            .post(format!("{base}/api/auth/logout"))
+            .post(format!("{base}/api/endpoint/auth/logout"))
             .body(vec![b'x'; 2048])
             .send()
             .unwrap();
@@ -1373,7 +1373,7 @@ mod tests {
         let mut drip = std::net::TcpStream::connect(address).unwrap();
         drip.set_read_timeout(Some(std::time::Duration::from_millis(500)))
             .unwrap();
-        write!(drip,"POST /api/auth/logout HTTP/1.1\r\nHost: hub.example\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
+        write!(drip,"POST /api/endpoint/auth/logout HTTP/1.1\r\nHost: hub.example\r\nTransfer-Encoding: chunked\r\n\r\n").unwrap();
         let mut reply = [0; 256];
         let read = drip.read(&mut reply).unwrap();
         assert!(std::str::from_utf8(&reply[..read])

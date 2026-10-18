@@ -4,19 +4,19 @@ export async function readSettings() {
  return {ok:response.ok,status:response.status,value:await response.json()};
 }
 export async function readLoginUrl():Promise<string|null> {
- const response=await fetch('api/auth/config',{credentials:'same-origin'});
+ const response=await fetch('api/endpoint/auth/config',{credentials:'same-origin'});
  if(!response.ok)return null;const v=await response.json();
  if(typeof v.login_url!=='string')return null;const u=new URL(v.login_url);
  // The destination is configured server state, never external message content.
  return u.protocol==='https:'||(u.protocol==='http:'&&['127.0.0.1','[::1]'].includes(u.hostname))?u.href:null;
 }
 export async function endSession() {
- const response=await fetch('api/auth/logout',{method:'POST',credentials:'same-origin',headers:{'X-Endpoint-Request':'1'}});
+ const response=await fetch('api/endpoint/auth/logout',{method:'POST',credentials:'same-origin',headers:{'X-Endpoint-Request':'1'}});
  if(!response.ok)throw new Error('logout_rejected');
 }
 
 export async function readEditUrl():Promise<string|null> {
- const response=await fetch('api/auth/config',{credentials:'same-origin'});
+ const response=await fetch('api/endpoint/auth/config',{credentials:'same-origin'});
  if(!response.ok)return null;const value=await response.json();
  if(typeof value.settings_url!=='string')return null;const u=new URL(value.settings_url);
  return u.pathname==='/'&&(u.protocol==='https:'||(u.protocol==='http:'&&['127.0.0.1','[::1]'].includes(u.hostname)))?u.href:null;
