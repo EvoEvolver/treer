@@ -86,16 +86,15 @@ async fn workspace_path(root: &Path, rel: &str) -> Result<Resolved, FileError> {
     Ok(Resolved { canonical, path })
 }
 
-async fn list_files(root: &Path, rel: &str) -> Result<Value, FileError> {
+async fn list_files(root: &Path, anchor: &std::fs::File, rel: &str) -> Result<Value, FileError> {
     let directory = workspace_path(root, rel).await?;
-    let metadata = tokio::fs::metadata(&directory.canonical).await.map_err(|e| io_error(&e))?;
-    if !metadata.is_dir() {
-        return Err(FileError::new(400, "Not a directory"));
-    }
-    let mut reader = tokio::fs::read_dir(&directory.canonical).await.map_err(|e| io_error(&e))?;
+    let relative = directory.canonical.strip_prefix(root).map_err(|_| FileError::new(403, "Path is outside the working directory"))?;
+    let reader = directory_stream(anchor, relative)?;
     let mut nodes: Vec<(bool, String, Value)> = Vec::new();
-    while let Some(entry) = reader.next_entry().await.map_err(|e| io_error(&e))? {
+    for entry in reader {
+        let entry = entry.map_err(|e| io_error(&e.into()))?;
         let name = entry.file_name().to_string_lossy().into_owned();
+        if matches!(name.as_str(), "." | "..") { continue; }
         let child_path = if directory.path.is_empty() { name.clone() } else { format!("{}/{}", directory.path, name) };
         // Outside/broken symlinks are not navigable; other errors stay visible.
         let child = match workspace_path(root, &child_path).await {
@@ -103,19 +102,21 @@ async fn list_files(root: &Path, rel: &str) -> Result<Value, FileError> {
             Err(error) if error.status == StatusCode::FORBIDDEN || error.status == StatusCode::NOT_FOUND => continue,
             Err(error) => return Err(error),
         };
-        let metadata = match tokio::fs::metadata(&child.canonical).await {
+        let relative = child.canonical.strip_prefix(root).map_err(|_| FileError::new(403, "Path is outside the working directory"))?;
+        let metadata = match metadata_beneath(anchor, relative) {
             Ok(metadata) => metadata,
             Err(error) if matches!(io_error(&error).status.as_u16(), 403 | 404) => continue,
             Err(error) => return Err(io_error(&error)),
         };
-        if !metadata.is_dir() && !metadata.is_file() {
+        let kind = rustix::fs::FileType::from_raw_mode(metadata.st_mode);
+        if !matches!(kind, rustix::fs::FileType::Directory | rustix::fs::FileType::RegularFile) {
             continue;
         }
-        let is_dir = metadata.is_dir();
+        let is_dir = kind == rustix::fs::FileType::Directory;
         nodes.push((
             is_dir,
             name.clone(),
-            json!({"name":name,"path":child_path,"kind":if is_dir {"directory"} else {"file"},"size":if is_dir {Value::Null} else {json!(metadata.len())},"has_children":is_dir}),
+            json!({"name":name,"path":child_path,"kind":if is_dir {"directory"} else {"file"},"size":if is_dir {Value::Null} else {json!(metadata.st_size)},"has_children":is_dir}),
         ));
     }
     // kind first ("directory" < "file"), then the name case-insensitively like the Node localeCompare.
@@ -142,6 +143,23 @@ fn open_beneath(root: &std::fs::File, relative: &Path) -> io::Result<std::fs::Fi
         directory = openat(&directory, name, flags, Mode::empty())?.into();
     }
     Ok(directory)
+}
+
+/// Metadata never opens the final object (in particular FIFO/device entries).
+/// A final symlink replaced after admission is reported as a symlink and skipped.
+fn metadata_beneath(root: &std::fs::File, relative: &Path) -> io::Result<rustix::fs::Stat> {
+    let name = relative.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "invalid workspace path"))?;
+    let parent = open_beneath(root, relative.parent().unwrap_or(Path::new("")))?;
+    Ok(rustix::fs::statat(&parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?)
+}
+
+fn directory_stream(root: &std::fs::File, relative: &Path) -> Result<rustix::fs::Dir, FileError> {
+    let handle = open_beneath(root, relative).map_err(|e| io_error(&e))?;
+    if !handle.metadata().map_err(|e| io_error(&e))?.is_dir() {
+        return Err(FileError::new(400, "Not a directory"));
+    }
+    // Independent streams prevent concurrent listings sharing iteration offsets.
+    rustix::fs::Dir::read_from(&handle).map_err(|e| io_error(&e.into()))
 }
 
 async fn open_regular(root: &std::fs::File, root_path: &Path, canonical: &Path) -> Result<(tokio::fs::File, std::fs::Metadata), FileError> {
@@ -262,7 +280,7 @@ impl Files {
             )
                 .into_response();
         }
-        let result = if path == "/v1/files/tree" { list_files(&self.root, &file_path).await } else { preview_file(&self.root, &self.anchor, &file_path).await };
+        let result = if path == "/v1/files/tree" { list_files(&self.root, &self.anchor, &file_path).await } else { preview_file(&self.root, &self.anchor, &file_path).await };
         match result {
             Ok(value) => json_response(StatusCode::OK, value),
             Err(error) => error_response(error, "File or directory not found", "Unable to read file or directory"),
@@ -440,12 +458,47 @@ mod confinement_tests {
         std::fs::rename(root.join("nested"), root.join("original")).unwrap();
         symlink(&outside, root.join("nested")).unwrap();
         assert!(open_regular(&files.anchor, &files.root, &admitted.canonical).await.is_err());
+        assert!(metadata_beneath(&files.anchor, Path::new("nested/data")).is_err());
+        assert!(directory_stream(&files.anchor, Path::new("nested")).is_err());
         std::fs::remove_file(root.join("nested")).unwrap();
         std::fs::rename(root.join("original"), root.join("nested")).unwrap();
         std::fs::remove_file(root.join("nested/data")).unwrap();
         symlink(outside.join("data"), root.join("nested/data")).unwrap();
         assert!(open_regular(&files.anchor, &files.root, &admitted.canonical).await.is_err());
+        let metadata = metadata_beneath(&files.anchor, Path::new("nested/data")).unwrap();
+        assert_eq!(rustix::fs::FileType::from_raw_mode(metadata.st_mode), rustix::fs::FileType::Symlink);
         assert_eq!(std::fs::read_to_string(outside.join("data")).unwrap(), "outside-sentinel");
+    }
+
+    #[tokio::test]
+    async fn directory_stream_stays_pinned_when_its_path_is_replaced() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("workspace");
+        let outside = fixture.0.join("outside");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("nested/inside-name"), "accepted").unwrap();
+        std::fs::write(outside.join("outside-name"), "outside-sentinel").unwrap();
+        let files = Files::new(root.clone()).unwrap();
+        let reader = directory_stream(&files.anchor, Path::new("nested")).unwrap();
+        std::fs::rename(root.join("nested"), root.join("original")).unwrap();
+        symlink(&outside, root.join("nested")).unwrap();
+        let names: Vec<_> = reader.map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().any(|name| name == "inside-name"));
+        assert!(!names.iter().any(|name| name == "outside-name"));
+        assert_eq!(std::fs::read_to_string(outside.join("outside-name")).unwrap(), "outside-sentinel");
+    }
+
+    #[tokio::test]
+    async fn concurrent_tree_reads_have_independent_directory_offsets() {
+        let fixture = Fixture::new();
+        for n in 0..16 { std::fs::write(fixture.0.join(format!("entry-{n}")), "accepted").unwrap(); }
+        let files = Files::new(fixture.0.clone()).unwrap();
+        let (first, second) = tokio::join!(list_files(&files.root, &files.anchor, ""), list_files(&files.root, &files.anchor, ""));
+        let first = first.unwrap();
+        let second = second.unwrap();
+        assert_eq!(first["entries"].as_array().unwrap().len(), 16);
+        assert_eq!(first, second);
     }
 
     #[tokio::test]
