@@ -54,12 +54,34 @@ struct Resolved {
     path: String,
 }
 
+async fn filesystem_slot(slots: Arc<tokio::sync::Semaphore>) -> Result<tokio::sync::OwnedSemaphorePermit, FileError> {
+    tokio::time::timeout(Duration::from_secs(1), slots.acquire_owned()).await
+        .ok().and_then(Result::ok)
+        .ok_or_else(|| FileError::new(429, "Workspace filesystem workers are busy; try again"))
+}
+
+#[cfg(feature = "fixture-harness")]
+fn fixture_worker_gate() {
+    use std::os::unix::fs::OpenOptionsExt;
+    let Ok(path) = std::env::var("RUST_SPIKE_FILES_WORKER_GATE") else { return; };
+    let directory = PathBuf::from(path);
+    if !directory.is_dir() { return; }
+    let _entry = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600)
+        .open(directory.join(format!("started-{}", uuid::Uuid::new_v4())));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while directory.is_dir() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// Resolve `rel` inside `root`: no `..`, no NUL, no absolute path or symlink leaving the canonical root.
 async fn workspace_path(root: &Path, rel: &str, slots: Arc<tokio::sync::Semaphore>) -> Result<Resolved, FileError> {
-    let slot = slots.try_acquire_owned().map_err(|_| FileError::new(429, "Workspace filesystem workers are busy; try again"))?;
+    let slot = filesystem_slot(slots).await?;
     let (root, rel) = (root.to_path_buf(), rel.to_owned());
     tokio::task::spawn_blocking(move || {
         let _slot = slot;
+        #[cfg(feature = "fixture-harness")]
+        fixture_worker_gate();
         workspace_path_blocking(&root, &rel)
     }).await
         .map_err(|_| FileError::new(500, "Unable to resolve workspace path"))?
@@ -100,6 +122,8 @@ async fn list_files(root: &Path, anchor: &std::fs::File, rel: &str, slot: Option
     let (root, anchor, rel) = (root.to_path_buf(), anchor.try_clone().map_err(|e| io_error(&e))?, rel.to_owned());
     tokio::task::spawn_blocking(move || {
         let _slot = slot; // Cancellation must not release the slot while the worker still runs.
+        #[cfg(feature = "fixture-harness")]
+        fixture_worker_gate();
         list_files_blocking(&root, &anchor, &rel)
     }).await.map_err(|_| FileError::new(500, "Unable to list workspace directory"))?
 }
@@ -311,10 +335,10 @@ impl Files {
                 .into_response();
         }
         let result = if path == "/v1/files/tree" {
-            let Ok(slot) = self.browsing.clone().try_acquire_owned() else {
-                return json_response(StatusCode::TOO_MANY_REQUESTS, json!({"error":{"code":"directory_busy","message":"Two directory listings are already running; try again"}}));
-            };
-            list_files(&self.root, &self.anchor, &file_path, Some(slot)).await
+            match filesystem_slot(self.browsing.clone()).await {
+                Ok(slot) => list_files(&self.root, &self.anchor, &file_path, Some(slot)).await,
+                Err(error) => Err(error),
+            }
         } else { preview_file(&self.root, &self.anchor, &file_path, self.browsing.clone()).await };
         match result {
             Ok(value) => json_response(StatusCode::OK, value),

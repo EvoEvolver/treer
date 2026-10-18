@@ -8,11 +8,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { hermeticEnv } from '../../agent/tests/hermetic.mjs';
 
-test('default release artifact excludes HTTP fixture hooks and refuses provider overrides', async t => {
+test('default release artifact excludes fixture hooks and refuses provider overrides', async t => {
   const binary = process.env.RUST_SPIKE_RELEASE_BIN;
   assert.ok(binary, 'RUST_SPIKE_RELEASE_BIN must name a default-feature release build');
   const bytes = await readFile(binary);
-  for (const hook of ['RUST_SPIKE_HTTP_', 'RUST_SPIKE_PROVIDER_LOG']) {
+  for (const hook of ['RUST_SPIKE_HTTP_', 'RUST_SPIKE_FILES_', 'RUST_SPIKE_CHECKPOINT_', 'RUST_SPIKE_PROVIDER_LOG']) {
     assert.equal(bytes.includes(Buffer.from(hook)), false, `test-only hook remains in release: ${hook}`);
   }
   const root = await realpath(await mkdtemp(join(tmpdir(), 'rust158-release-')));

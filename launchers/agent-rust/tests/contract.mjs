@@ -48,6 +48,7 @@ async function fixture(t, extra={}, controllerOptions={}) {
   const env=hermeticEnv({ HOME:root, CODEX_HOME:join(root,'codex'), AGENT_UI_CWD:cwd, AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'), AGENT_UI_PORT_FILE:portFile, AGENT_UI_PORT:'0', TREER_AGENT_ID:'ag_contract', TREER_WORKLOAD_CREDENTIAL:'fixture-only', TREER_AGENT_SERVER_URL:controller.url, TREER_AGENT_PRIVATE_STATE_DIR:state, AGENT_UI_INSTANCE_ID:'contract-instance', AGENT_UI_MESSAGE_WATCH:'0', CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'), FAKE_CODEX_RELAY_RECOVERY:'1', ...extra });
   env.RUST_SPIKE_CLI_LOG=join(root,'registration.json');
   env.RUST_SPIKE_PROVIDER_LOG=join(root,'provider.jsonl');
+  env.FAKE_CODEX_CALLS=env.RUST_SPIKE_PROVIDER_LOG;
   if(useNode&&process.env.NODE_LAUNCHER_RUNTIME){env.AGENT_UI_APP_ROOT=dirname(process.env.NODE_LAUNCHER_RUNTIME);env.AGENT_UI_PUBLIC_DIR=join(env.AGENT_UI_APP_ROOT,'public');}
   const children=[];let logs='';
   const launch=async (overrides,waitReady=true)=>{
@@ -108,6 +109,22 @@ test('Rust bounds directory enumeration without blocking concurrent state reads'
   const response=await listing;assert.equal(response.status,413);
   assert.match((await response.json()).error.message,/4096 entry/);
   assert.equal((await fetch(s.base+'/v1/files/tree?path=')).status,200);
+});
+
+test('Rust cancelled directory requests retain worker slots until the workers exit',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{RUST_SPIKE_FILES_WORKER_GATE:'filesystem-worker-gate'});
+  const gate=join(s.root,'cwd/filesystem-worker-gate');await mkdir(gate);
+  const controllers=[new AbortController(),new AbortController()];
+  const requests=controllers.map(controller=>fetch(s.base+'/v1/files/tree?path=',{signal:controller.signal}).catch(()=>null));
+  try {
+    await until(()=>readdir(gate),names=>names.length===2);
+    controllers.forEach(controller=>controller.abort());await Promise.all(requests);
+    assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).ready,true);
+    const started=Date.now();
+    assert.equal((await fetch(s.base+'/v1/files/tree?path=')).status,429);
+    assert.ok(Date.now()-started>=800,'busy workers allow a bounded wait for normal navigation bursts');
+  } finally {await rm(gate,{recursive:true,force:true});}
+  await until(()=>fetch(s.base+'/v1/files/tree?path='),response=>response.status===200);
 });
 
 test('Rust canonicalizes a configured cwd alias and reports root failures without paths',{skip:useNode,timeout:15000},async t=>{
@@ -784,4 +801,52 @@ test('Rust journal publication failure stops provider and remains blocked after 
   assert.ok((await s.post({text:'still stopped',operation_id:'repaired'})).status>=400);
   assert.equal(await readFile(journal,'utf8'),before);
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
+});
+
+for(const command of ['submit','steer','cancel','goal','goal-clear','goal-reconcile','goal-retry'])test('Rust failed '+command+' checkpoint restores durable receipts and goals',{skip:useNode},async t=>{
+  const goalCommand=command.startsWith('goal');
+  const s=await fixture(t,faultEnv(goalCommand?'goal-ack-lost':'receipt'));
+  let queued;
+  if(command==='cancel')queued=await s.post({text:'keep queued after failed cancel',operation_id:'cancel-before-failure'}).then(r=>r.json());
+  if(['goal-clear','goal-reconcile','goal-retry'].includes(command)) {
+    assert.equal((await fetch(s.base+'/api/goal',{method:'PUT',body:JSON.stringify({objective:'Durable objective',operationId:'durable-goal'})})).status,400);
+  }
+  const journal=join(s.state,'rust-spike.json'),backup=join(s.state,'fixture-journal-backup');
+  const before=await readFile(journal,'utf8'),saved=JSON.parse(before);
+  await rename(journal,backup);await mkdir(journal);
+  let response;
+  if(command==='cancel')response=await fetch(s.base+'/v1/queue/'+controllerSegment(queued.submission.id),{method:'DELETE',headers:s.headers});
+  else if(goalCommand)response=await fetch(s.base+(['goal-reconcile','goal-retry'].includes(command)?'/api/goal/'+command.slice(5):'/api/goal'),{method:command==='goal-clear'?'DELETE':command==='goal'?'PUT':'POST',body:JSON.stringify({id:'durable-goal',objective:'Unpublished objective',operationId:'unpublished-goal'})});
+  else response=await s.post({text:'must not publish',operation_id:'unpublished',delivery:command==='steer'?'steer':'queue'});
+  assert.ok(response.status>=400);
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
+  assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');
+  assert.match(state.runtime.error,/private_state_write_failed/);
+  const receipts=await fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json());
+  const expected=saved.records.map(record=>record.submission);
+  assert.deepEqual(receipts.submissions.map(({position,...record})=>record),expected.map(({position,...record})=>record));
+  assert.deepEqual(state.goal,saved.goals.goal);
+  assert.equal(await readFile(backup,'utf8'),before);
+  assert.deepEqual((await readdir(s.state)).filter(name=>name.startsWith('.rust-spike-')),[]);
+  await rm(journal,{recursive:true});await rename(backup,journal);
+  assert.ok((await s.post({text:'must remain read-only',operation_id:'after-repair'})).status>=400);
+  assert.equal(await readFile(journal,'utf8'),before);
+});
+
+for(const phase of ['dispatch-intent','dispatch-result','completion','notification-ack','goal-applying','goal-applied','goal-mode','goal-sent','directory-sync'])test('Rust failed '+phase+' checkpoint exposes only published receipts and goals',{skip:useNode},async t=>{
+  const s=await fixture(t,{RUST_SPIKE_CHECKPOINT_FAIL:phase,FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_COMPLETE_TURNS:'1',PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH});
+  if(phase.startsWith('goal-'))await fetch(s.base+'/api/goal',{method:'PUT',body:JSON.stringify({objective:'Checkpoint objective',operationId:'checkpoint-goal'})});
+  else await s.post({text:'checkpoint prompt',operation_id:'checkpoint-prompt',notify:{to:'ag_target',on:['done']}});
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
+  assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');
+  assert.match(state.runtime.error,/private_state_write_failed|Dispatch checkpoint failed/);
+  const path=join(s.state,'rust-spike.json'),before=await readFile(path,'utf8'),saved=JSON.parse(before);
+  const receipts=await fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json());
+  assert.deepEqual(receipts.submissions.map(({position,...record})=>record),saved.records.map(({submission:{position,...record}})=>record));
+  assert.deepEqual(state.goal,saved.goals.goal);
+  const edit=saved.goals.edits.at(-1);
+  assert.deepEqual(state.goalDelivery,edit?{id:edit.id,status:edit.sent?'sent':typeof edit.error==='string'?'failed':'pending',error:edit.error,promptId:edit.prompt_id}:null);
+  assert.ok((await s.post({text:'stay blocked',operation_id:'no-more-mutations'})).status>=400);
+  assert.equal(await readFile(path,'utf8'),before);
+  if(['dispatch-intent','directory-sync'].includes(phase))assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,0);
 });

@@ -78,10 +78,14 @@ struct Runtime {
     turns: Transcript,
     // Sticky stop for history admission OR private journal failure.
     history_failed: bool,
+    state_failed: bool,
     provider_exit: &'static str,
     records: VecDeque<Record>,
     dispatch_blocked: bool,
     goals: Goals,
+    // Last successfully published state; rollback is centralized for every
+    // checkpoint caller, including provider events and notification acks.
+    checkpoint: (VecDeque<Record>, Goals),
     goals_supported: bool,
     attachments: Option<Arc<tokio::sync::Mutex<Attachments>>>,
     changed: watch::Sender<Arc<Value>>,
@@ -135,10 +139,12 @@ pub fn spawn(config: Config) -> Result<Handle> {
         ready: false,
         turns: Transcript::default(),
         history_failed: false,
+        state_failed: false,
         provider_exit: "not_requested",
         records: VecDeque::new(),
         dispatch_blocked: false,
         goals: Goals::default(),
+        checkpoint: (VecDeque::new(), Goals::default()),
         goals_supported: false,
         attachments: config.attachments.clone(),
         changed,
@@ -154,7 +160,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
         let startup = rt.start(&config, saved).await;
         if let Err(error) = startup {
             eprintln!("Rust spike: Codex startup failed (no fresh-thread fallback)");
-            let reason = if error.is::<HistoryLimit>() {
+            let reason = if rt.state_failed {
+                "private_state_write_failed; queue paused"
+            } else if error.is::<HistoryLimit>() {
                 rt.dispatch_blocked = true;
                 "Codex thread exceeds launcher history limit; use a launcher supporting larger history; no fresh-thread fallback"
             } else if error.is::<InvalidTurnIdentity>() {
@@ -236,7 +244,6 @@ pub fn spawn(config: Config) -> Result<Handle> {
                         if let Some(record) = rt.records.iter_mut().find(|r| r.submission["id"] == id) {
                             record.notified = true;
                             if rt.persist().is_err() {
-                                if let Some(record) = rt.records.iter_mut().find(|r| r.submission["id"] == id) { record.notified = false; }
                                 eprintln!("Rust spike: notification checkpoint failed");
                             }
                         }
@@ -270,7 +277,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
         rt.ready = false;
         rt.dispatch_blocked = true;
         rt.thread["status"] = json!("error");
-        rt.thread["lastError"] = json!("Launcher stopping; queued and uncertain work preserved");
+        if rt.thread["lastError"].as_str().is_none_or(str::is_empty) {
+            rt.thread["lastError"] = json!("Launcher stopping; queued and uncertain work preserved");
+        }
         rt.publish();
         // Preserve uncertain receipts and queued work; do not invent completion.
         rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
@@ -316,6 +325,7 @@ impl Runtime {
             self.records = decode_records(saved)?;
             self.dispatch_blocked = saved["dispatchBlocked"].as_bool().unwrap_or(true);
             self.goals = Goals::load(&saved["goals"])?;
+            self.checkpoint = (self.records.clone(), self.goals.clone());
         }
         self.rpc.request("initialize", json!({"clientInfo":{"name":"treer-rust-spike","title":"Treer Rust experiment","version":"0.0.1"},"capabilities":{"experimentalApi":true}})).await?;
         self.rpc.write(json!({"method":"initialized"})).await?;
@@ -379,17 +389,27 @@ impl Runtime {
         Ok(())
     }
     fn persist(&mut self) -> Result<()> {
-        if self.store
-            .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals})).is_err() {
+        if self.state_failed {
+            (self.records, self.goals) = self.checkpoint.clone();
+            bail!("private_state_write_failed");
+        }
+        if let Err(error) = self.store
+            .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals})) {
+            if error.is::<crate::store::PublicationUncertain>() {
+                self.checkpoint = (self.records.clone(), self.goals.clone());
+            }
+            (self.records, self.goals) = self.checkpoint.clone();
             self.stop_for_state_error();
             bail!("private_state_write_failed");
         }
+        self.checkpoint = (self.records.clone(), self.goals.clone());
         Ok(())
     }
     fn stop_for_state_error(&mut self) {
         // Storage is unavailable: do not claim that this fence was persisted.
         // Existing durable intent remains authoritative on restart.
         self.history_failed = true;
+        self.state_failed = true;
         self.ready = false;
         self.dispatch_blocked = true;
         self.thread["status"] = json!("error");
@@ -563,12 +583,8 @@ impl Runtime {
             .as_str()
             .map(str::to_owned)
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let previous = self.goals.clone();
         self.goals.add(&id, input)?;
-        if let Err(e) = self.persist() {
-            self.goals = previous;
-            return Err(e);
-        }
+        self.persist()?;
         self.flush_goals().await?;
         self.publish();
         Ok(json!({"accepted":true}))
@@ -830,10 +846,7 @@ impl Runtime {
                 .retain(&ids, self.thread["id"].as_str().unwrap_or(""))?;
         }
         self.records.push_back(record);
-        if let Err(error) = self.persist() {
-            self.records.pop_back();
-            return Err(error);
-        }
+        self.persist()?;
         self.drain().await?;
         self.publish();
         let record = self.records.back().unwrap();
@@ -874,10 +887,7 @@ impl Runtime {
         // Persist intent BEFORE contacting the provider. No ambiguous replay.
         self.records[index].submission["state"] = json!("running");
         self.dispatch_blocked = true;
-        if let Err(error) = self.persist() {
-            self.records[index].submission["state"] = json!("queued");
-            return Err(error);
-        }
+        self.persist()?;
         let mut params = json!({"threadId":self.thread["id"],"input":input});
         if busy {
             params["expectedTurnId"] = self.thread["activeTurnId"].clone();
@@ -923,8 +933,6 @@ impl Runtime {
             }
         }
         if let Err(error) = self.persist() {
-            self.dispatch_blocked = true;
-            self.thread["lastError"] = json!("Dispatch checkpoint failed; queue paused");
             self.publish();
             return Err(error);
         }

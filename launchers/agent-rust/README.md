@@ -31,7 +31,9 @@ selects permitted in-workspace symlink targets, but enumeration, metadata and
 file bytes never reopen an admitted absolute path. A concurrent rename can
 produce a partial/stale listing; it cannot retarget the descriptor to a new tree.
 Directory enumeration and path resolution share two blocking-worker slots
-(429 when occupied), retained by the worker even after request cancellation.
+(at most one second waiting before 429), retained by the worker even after
+request cancellation. Pending handlers are bounded by the HTTP connection cap;
+normal navigation bursts can wait briefly without increasing the worker count.
 Enumeration scans at most 4096 non-dot entries, including
 hidden/unsupported entries; larger directories return an explicit 413 rather
 than silently truncating. Cancellation retains the worker's slot until it exits.
@@ -181,6 +183,29 @@ dispatch and stops the directly owned provider. It does not automatically resume
 after storage repair. An unavailable store cannot durably record this new stop:
 the prior journal, including any already-persisted running intent, remains the
 restart authority. Error responses and cleanup status do not expose OS paths.
+Every journal checkpoint shares one rollback path for receipts, immutable
+acceptance receipts, notification acknowledgements and goal state. A failed
+pre-publication write restores the last published snapshot before exposing the
+read-only stop. If rename succeeded but directory sync failed, the newly
+published snapshot remains visible and the runtime still stops; durability is
+unverified. The extra snapshot has the same entry and 32 MiB serialized journal
+bounds; Rust allocation overhead is measured separately, not equated to that cap.
+Fault regressions cover submit/steer, cancel, goal edit/clear/reconcile/retry,
+dispatch intent/result, completion, notification acknowledgement and internal
+goal checkpoints. Image discard has its own attachment journal and quota
+rollback tests; it does not call this journal's checkpoint function.
+
+Checkpoint caller audit:
+
+| Caller | Publication boundary |
+| --- | --- |
+| Startup/reconciliation | Recovered receipts and native goal observations publish together. |
+| Submit/steer/cancel | New or cancelled receipts roll back together; dispatch follows durable intent. |
+| Goal edit/clear/reconcile/retry | Edit, applying/applied, delivery mode, retry and sent checkpoints use the same rollback. |
+| Provider completion/goal events | Receipt and goal mutations publish before subsequent work is dispatched. |
+| Notification acknowledgement | Failed acknowledgement publication restores the previous flag; sending remains an uncertain external side effect. |
+| History admission stop | Receipt state is preserved; a failed stop publication cannot claim a new durable fence. |
+
 A process-lifetime nonblocking file lock rejects a second Rust writer with
 `private_state_in_use`; its private 0600 inode is retained after exit rather
 than unlinked. This is an advisory Rust-only lock: Node does not participate;
@@ -229,9 +254,11 @@ backpressure. Both use the operator-configurable download total duration cap
 The total-duration timer is polled with the response body: a transfer already
 blocked on a socket write may retain its slot past that timer until reads resume
 or the write-idle timeout fires. The image regression proves truncation on
-resumed reads, not independent wall-clock eviction. Directory cancellation
-slot retention is established by worker ownership in source; the HTTP regression
-currently covers entry rejection and concurrent state reads, not cancellation.
+resumed reads, not independent wall-clock eviction. A fixture-only bounded
+worker barrier exercises directory cancellation: two cancelled HTTP requests
+retain both worker slots, a third request gets 429 after the bounded wait, and
+new requests succeed after those exact workers exit. The barrier is absent
+from default release builds.
 These limits bound admission; they do not authenticate local callers or isolate
 a same-account filesystem writer. A blocked OS filesystem operation can still
 outlast the HTTP request; the two directory worker permits remain held. A

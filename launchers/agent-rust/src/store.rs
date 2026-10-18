@@ -14,6 +14,15 @@ pub struct Store {
     cwd: PathBuf,
 }
 
+#[derive(Debug)]
+pub struct PublicationUncertain;
+impl std::fmt::Display for PublicationUncertain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("private_state_publication_uncertain")
+    }
+}
+impl std::error::Error for PublicationUncertain {}
+
 /// A process-lifetime, nonblocking single-writer lease. Keep the inode in place:
 /// unlinking a lock file could let another process lock a different inode.
 pub struct Lease { _file: File }
@@ -142,6 +151,8 @@ impl Store {
     pub fn save(&self, state: &Value) -> Result<()> {
         // Re-evaluate placement on each journal update; git init disables writes.
         Self::open(&self.root, &self.cwd)?;
+        #[cfg(feature = "fixture-harness")]
+        if fixture_checkpoint_failure(state) { bail!("fixture_checkpoint_failure"); }
         let data = serde_json::to_vec(state)?;
         if data.len() > 32 * 1024 * 1024 {
             bail!("state too large");
@@ -158,7 +169,15 @@ impl Store {
             f.write_all(&data)?;
             f.sync_all()?;
             fs::rename(&temp, self.root.join("rust-spike.json"))?;
-            File::open(&self.root)?.sync_all()?;
+            #[cfg(feature = "fixture-harness")]
+            if std::env::var("RUST_SPIKE_CHECKPOINT_FAIL").as_deref() == Ok("directory-sync")
+                && state["records"].as_array().is_some_and(|records| !records.is_empty()) {
+                return Err(PublicationUncertain.into());
+            }
+            // Rename already published the new bytes. A directory-sync error
+            // must stop dispatch, but must not restore stale in-memory receipts.
+            File::open(&self.root).and_then(|directory| directory.sync_all())
+                .map_err(|_| PublicationUncertain)?;
             Ok(())
         })();
         if result.is_err() {
@@ -172,6 +191,24 @@ impl Store {
             }
         }
         result
+    }
+}
+
+#[cfg(feature = "fixture-harness")]
+fn fixture_checkpoint_failure(state: &Value) -> bool {
+    let Ok(phase) = std::env::var("RUST_SPIKE_CHECKPOINT_FAIL") else { return false; };
+    let record = &state["records"][0];
+    let edit = &state["goals"]["edits"][0];
+    match phase.as_str() {
+        "dispatch-intent" => record["submission"]["state"] == "running" && record["submission"]["turn_id"].is_null(),
+        "dispatch-result" => record["submission"]["turn_id"].is_string(),
+        "completion" => record["submission"]["state"] == "done",
+        "notification-ack" => record["notified"] == true,
+        "goal-applying" => edit["applying"] == true,
+        "goal-applied" => edit["applied"] == true,
+        "goal-mode" => edit["mode"].is_string(),
+        "goal-sent" => edit["sent"] == true,
+        _ => false,
     }
 }
 
