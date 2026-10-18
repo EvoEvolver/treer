@@ -15,16 +15,26 @@ The runtime continues processing events while awaiting RPC responses, prioritize
 ready responses, and preserves early turn items/completion before the response
 identifies the accepted submission. Queue saturation does not close the stream.
 No automatic provider retry is performed. Fixed transport reasons (`open`,
-`stdout_eof`, `line_error`, `invalid_json`, `consumer_closed`) and independently
+`stdout_eof`, `line_error`, `invalid_json`, `consumer_closed`, `stdin_write_error`,
+`stdin_write_timeout`, `rpc_timeout`) and independently
 observed child status/signal before cleanup appear in AIS diagnostics and the
 shutdown line. Stream closure alone is never called spontaneous provider exit.
-The last 8 KiB of raw stderr is retained in a bounded memory tail and saved at
+Outbound operations include mutex acquisition, writing and flushing within a
+five-second deadline; the event-pumping RPC wait has an absolute 60-second
+deadline. A write timeout can mean partial delivery. It poisons the transport,
+preserves accepted-operation uncertainty and stops further dispatch without retry.
+Raw stderr capture is disabled by default. Only the explicit launch setting
+`RUST_SPIKE_CAPTURE_STDERR=1` retains the last 8 KiB in memory and saves it at
 shutdown as 0600 `rust-provider-stderr.log` under the validated private root,
 atomically replacing the previous tail. This file may contain sensitive provider
 text: it is never served by AIS, printed to the terminal or copied into a ticket.
 Only the owner may inspect it locally and supply a reviewed excerpt. An abrupt
 launcher kill can lose this tail; capture failure is reported without its text.
 It is diagnostic retention, not Controller quota or detached-process containment.
+This separate 8 KiB file is outside the local journal cap and Controller quota.
+It lives until replaced by another opted-in run or until normal Controller
+deletion purges that Agent's private root; disabling capture never deletes an
+earlier evidence file. No team-wide opt-in is implied by a pilot wrapper.
 The completed experiment is assessed in [P3](P3-REPORT.md): continue a staged
 port, but do not switch team launchers. The real-browser send failure, missing
 durable user items and detached-child reaping are explicit port blockers.

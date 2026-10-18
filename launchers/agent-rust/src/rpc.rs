@@ -73,6 +73,7 @@ impl Rpc {
         command: &str,
         args: &[String],
         cwd: &std::path::Path,
+        capture_stderr: bool,
     ) -> Result<(Self, ProviderChild, mpsc::Receiver<Value>)> {
         let mut child = Command::new(command)
             .args(args)
@@ -87,7 +88,7 @@ impl Rpc {
             input: Arc::new(Mutex::new(child.stdin.take().unwrap())),
             pending: Arc::default(),
             next: Arc::new(AtomicU64::new(1)),
-            diagnostics: Arc::new(std::sync::Mutex::new(json!({"transport":"open","beforeCleanup":null,"stderrCapture":"pending"}))),
+            diagnostics: Arc::new(std::sync::Mutex::new(json!({"transport":"open","beforeCleanup":null,"stderrCapture":if capture_stderr {"pending"} else {"disabled"}}))),
         };
         let (events, receiver) = mpsc::channel(8);
         let stdout = child.stdout.take().unwrap();
@@ -101,6 +102,7 @@ impl Rpc {
             let mut bytes = [0; 4096];
             while let Ok(n) = stderr.read(&mut bytes).await {
                 if n == 0 { break; }
+                if !capture_stderr { continue; }
                 let mut tail = tail_writer.lock().unwrap();
                 tail.extend(&bytes[..n]);
                 while tail.len() > 8192 { tail.pop_front(); }
@@ -136,7 +138,7 @@ impl Rpc {
                     }
                 }
             };
-            reader_rpc.diagnostics.lock().unwrap()["transport"] = json!(reason);
+            reader_rpc.fail(reason);
             reader_rpc.pending.lock().await.clear();
             let _ = events.send(json!({"method":"spike/provider-exit","params":{"reason":reason}})).await;
         });
@@ -148,6 +150,11 @@ impl Rpc {
     }
 
     pub fn diagnostics(&self) -> Value { self.diagnostics.lock().unwrap().clone() }
+    pub fn fail(&self, reason: &'static str) {
+        let mut diagnostic = self.diagnostics.lock().unwrap();
+        if diagnostic["transport"] == "open" { diagnostic["transport"] = json!(reason); }
+    }
+    pub fn failed(&self) -> bool { self.diagnostics.lock().unwrap()["transport"] != "open" }
     pub fn stderr_saved(&self, saved: bool) {
         self.diagnostics.lock().unwrap()["stderrCapture"] = json!(if saved { "saved" } else { "failed" });
     }
@@ -158,10 +165,18 @@ impl Rpc {
             bail!("RPC input too large");
         }
         bytes.push(b'\n');
-        let mut input = self.input.lock().await;
-        input.write_all(&bytes).await?;
-        input.flush().await?;
-        Ok(())
+        let operation = async {
+            let mut input = self.input.lock().await;
+            if self.failed() { bail!("provider_transport_closed"); }
+            input.write_all(&bytes).await?;
+            input.flush().await?;
+            Ok::<_, anyhow::Error>(())
+        };
+        match timeout(Duration::from_secs(5), operation).await {
+            Ok(Ok(())) => Ok(()),
+            Ok(Err(_)) => { self.fail("stdin_write_error"); bail!("provider_write_failed"); },
+            Err(_) => { self.fail("stdin_write_timeout"); bail!("provider_write_timeout"); },
+        }
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
@@ -169,13 +184,14 @@ impl Rpc {
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         let result = async {
-            self.write(json!({"id":id,"method":method,"params":params}))
-                .await?;
-            timeout(Duration::from_secs(60), rx)
-                .await?
-                .map_err(|_| anyhow!("Codex disconnected"))?
-        }
-        .await;
+            self.write(json!({"id":id,"method":method,"params":params})).await?;
+            rx.await.map_err(|_| anyhow!("Codex disconnected"))?
+        };
+        // The whole request includes mutex acquisition and write/flush.
+        let result = match timeout(Duration::from_secs(60), result).await {
+            Ok(result) => result,
+            Err(_) => { self.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
+        };
         self.pending.lock().await.remove(&id);
         result
     }

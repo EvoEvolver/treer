@@ -9,7 +9,7 @@ if(mode==='descendant') {
   appendFileSync(process.env.RUST_SPIKE_PROVIDER_LOG+'.child',String(child.pid),{mode:0o600});
 }
 const threadId='fault-thread';let started=0, timer;
-let turns=mode==='receipt'?[{id:'initial',status:'inProgress',items:[]}]:[];
+let turns=['receipt','burst-previous'].includes(mode)?[{id:'initial',status:'inProgress',items:[]}]:[];
 const emit=(method,params)=>console.log(JSON.stringify({method,params:{threadId,...params}}));
 for await(const line of readline.createInterface({input:process.stdin})) {
   const request=JSON.parse(line);
@@ -42,6 +42,20 @@ for await(const line of readline.createInterface({input:process.stdin})) {
   },150);
   if(request.method==='turn/start') {
     const turn={id:'fault-'+(++started),status:'inProgress',items:[]};turns.push(turn);
+    if(mode==='stdin-stall') {
+      process.stdin.pause();
+      // Replies mirror these bounded permissions, filling the unread stdin
+      // pipe while a foreground turn/start response is outstanding.
+      for(let n=0;n<32;n++)console.log(JSON.stringify({id:'approval-'+n,method:'item/permissions/requestApproval',params:{permissions:{synthetic:'x'.repeat(64000)}}}));
+      setTimeout(()=>console.log(JSON.stringify({id:request.id,result:{turn:{id:turn.id}}})),30);
+      timer=setInterval(()=>{},1000);
+      await new Promise(()=>{});
+    }
+    if(mode==='burst-previous') {
+      emit('turn/completed',{turn:{id:'initial',status:'completed',items:[]}});
+      for(let n=0;n<200;n++)emit('synthetic/notice',{n});
+      console.log(JSON.stringify({id:request.id,result:{turn:{}}}));continue;
+    }
     if(mode==='burst-turn') {
       emit('turn/started',{turn});
       emit('item/started',{turnId:turn.id,item:{id:'burst-item',type:'agentMessage',text:''}});

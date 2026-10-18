@@ -139,6 +139,7 @@ async fn main() -> Result<()> {
         codex_args,
         session: env("AGENT_UI_SESSION_ID"),
         attachments: attachments.clone(),
+        capture_stderr: env("RUST_SPIKE_CAPTURE_STDERR").as_deref() == Some("1"),
     })?;
     if let Some(file) = env("AGENT_UI_PORT_FILE") {
         use std::io::Write;

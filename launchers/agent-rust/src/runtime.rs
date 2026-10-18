@@ -112,6 +112,7 @@ pub struct Config {
     pub codex_args: Vec<String>,
     pub session: Option<String>,
     pub attachments: Option<Arc<tokio::sync::Mutex<Attachments>>>,
+    pub capture_stderr: bool,
 }
 pub fn spawn(config: Config) -> Result<Handle> {
     let store = Store::open(&config.private_root, &config.cwd)?;
@@ -125,7 +126,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
             bail!("private_state_session_mismatch");
         }
     }
-    let (rpc, mut child, events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd)?;
+    let (rpc, mut child, events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd, config.capture_stderr)?;
     let (commands, mut requests) = mpsc::channel::<Request>(64);
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_requested = shutdown.clone();
@@ -260,6 +261,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     }
                 }
             }
+            if rt.rpc.failed() && !rt.history_failed {
+                let _ = rt.stop_for_transport_error();
+            }
             if rt.history_failed && !provider_stopped {
                 notification_worker.0.abort();
                 observer.0.abort();
@@ -287,7 +291,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
         rt.publish();
         // Preserve uncertain receipts and queued work; do not invent completion.
         rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
-        rt.rpc.stderr_saved(rt.store.save_stderr(&child.stderr_tail()).is_ok());
+        if config.capture_stderr {
+            rt.rpc.stderr_saved(rt.store.save_stderr(&child.stderr_tail()).is_ok());
+        }
         rt.publish();
         let diagnostic = rt.rpc.diagnostics();
         eprintln!("Rust spike: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed; transport={}; before_cleanup={}", rt.provider_exit, diagnostic["transport"].as_str().unwrap_or("unverified"), diagnostic["beforeCleanup"]);
@@ -298,6 +304,18 @@ pub fn spawn(config: Config) -> Result<Handle> {
 
 impl Runtime {
     async fn provider_request(&mut self, method: &str, params: Value) -> Result<Value> {
+        // This outer deadline is polled even during an event's reply write.
+        let result = match timeout(Duration::from_secs(60), self.wait_provider_response(method, params)).await {
+            Ok(result) => result,
+            Err(_) => { self.rpc.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
+        };
+        if self.rpc.failed() {
+            self.stop_for_transport_error()?;
+            bail!("provider_transport_closed");
+        }
+        result
+    }
+    async fn wait_provider_response(&mut self, method: &str, params: Value) -> Result<Value> {
         self.rpc_completed_turns.clear();
         let rpc = self.rpc.clone();
         let response = rpc.request(method, params);
@@ -1008,6 +1026,21 @@ impl Runtime {
     fn stop_for_history_limit(&mut self) -> Result<()> {
         self.stop_for_history_error(HistoryLimit.to_string())
     }
+    fn stop_for_transport_error(&mut self) -> Result<()> {
+        let reason = "Provider transport failed; dispatch outcome uncertain; queue paused";
+        if self.thread["id"].is_string() {
+            return self.stop_for_history_error(reason.into());
+        }
+        // Initialization may fail before a thread exists. Preserve the previous
+        // durable journal instead of replacing it with an invalid thread ID.
+        self.history_failed = true;
+        self.ready = false;
+        self.dispatch_blocked = true;
+        self.thread["status"] = json!("error");
+        self.thread["lastError"] = json!(reason);
+        self.publish();
+        Ok(())
+    }
     fn stop_for_history_error(&mut self, reason: String) -> Result<()> {
         self.history_failed = true;
         self.ready = false;
@@ -1025,6 +1058,9 @@ impl Runtime {
             return Ok(());
         }
         let result = self.apply_event(event).await;
+        if self.rpc.failed() {
+            self.stop_for_transport_error()?;
+        }
         if result
             .as_ref()
             .is_err_and(|error| error.is::<HistoryLimit>())

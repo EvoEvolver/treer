@@ -764,7 +764,7 @@ test('Rust backpressure preserves 200 mid-turn deltas and early completion befor
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
 for(const mode of ['diagnostic-eof','diagnostic-invalid'])test('Rust private provider diagnostics '+mode,{skip:useNode},async t=>{
-  const s=await fixture(t,faultEnv(mode));
+  const s=await fixture(t,{...faultEnv(mode),RUST_SPIKE_CAPTURE_STDERR:'1'});
   const snapshot=await until(()=>fetch(s.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.provider?.stderrCapture==='saved');
   assert.equal(snapshot.runtime.provider.transport,mode==='diagnostic-eof'?'stdout_eof':'invalid_json');
   assert.equal(snapshot.runtime.provider.beforeCleanup.state,mode==='diagnostic-eof'?'exited':'running');
@@ -775,6 +775,58 @@ for(const mode of ['diagnostic-eof','diagnostic-invalid'])test('Rust private pro
   if(mode==='diagnostic-invalid'){assert.ok(captured.endsWith('synthetic-private-tail'));assert.ok(!captured.includes('sensitive-fixture-prefix'));}
   assert.ok(!JSON.stringify(snapshot.runtime).includes('synthetic-secret'));
   assert.ok(!s.logs().includes('synthetic-private-tail'));assert.ok(!s.logs().includes('sensitive-fixture-prefix'));
+});
+test('Rust previous completion during a queued dispatch never clears its uncertainty fence',{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv('burst-previous'));
+  const first=await s.post({text:'first queued',operation_id:'first'}).then(r=>r.json());
+  const second=await s.post({text:'second queued',operation_id:'second'}).then(r=>r.json());
+  await fetch(s.base+'/v1/abort',{method:'POST',headers:s.headers,body:'{}'});
+  const queue=await until(()=>fetch(s.base+'/v1/queue',{headers:s.headers}).then(r=>r.json()),q=>q.submissions?.find(r=>r.id===first.submission.id)?.state==='failed');
+  assert.equal(queue.submissions.find(r=>r.id===second.submission.id).state,'queued');
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+  assert.equal(JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8')).dispatchBlocked,true);
+});
+test('Rust stderr retention is opt-in and private write failure leaves stop unchanged',{skip:useNode},async t=>{
+  const off=await fixture(t,faultEnv('diagnostic-invalid'));
+  const stopped=await until(()=>fetch(off.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.cleanup?.providerExit==='confirmed');
+  assert.equal(stopped.runtime.provider.stderrCapture,'disabled');
+  await assert.rejects(lstat(join(off.state,'rust-provider-stderr.log')),{code:'ENOENT'});
+  const on=await fixture(t,{...faultEnv('diagnostic-invalid'),RUST_SPIKE_CAPTURE_STDERR:'1'});
+  await chmod(on.state,0o500);
+  try {
+    const failed=await until(()=>fetch(on.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.provider?.stderrCapture==='failed');
+    assert.equal(failed.runtime.cleanup.providerExit,'confirmed');
+    assert.equal(failed.runtime.provider.transport,'invalid_json');
+    assert.ok(!JSON.stringify(failed.runtime).includes('synthetic-private-tail'));
+    const exit=once(on.child,'exit');on.child.kill('SIGTERM');assert.deepEqual(await exit,[0,null]);
+  } finally { await chmod(on.state,0o700); }
+});
+test('Rust stalled provider stdin fails closed while state reads remain responsive',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t,faultEnv('stdin-stall'));
+  const pending=s.post({text:'accepted but write stalls',operation_id:'stalled'}).then(async r=>({status:r.status,body:await r.json()}));
+  await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
+  const readStarted=Date.now();
+  assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).ready,true);
+  assert.ok(Date.now()-readStarted<2000,'reads do not await stdin writes');
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime?.cleanup?.providerExit==='confirmed');
+  await pending;
+  assert.equal(state.ready,false);
+  assert.equal(state.runtime.provider.transport,'stdin_write_timeout');
+  const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(journal.dispatchBlocked,true);
+  assert.ok((await s.post({text:'must not retry',operation_id:'blocked'})).status>=400);
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+});
+test('Rust shutdown cancels a stalled provider reply write without duplicate dispatch',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,faultEnv('stdin-stall'));
+  const pending=s.post({text:'stop while replying',operation_id:'stopped'}).then(()=>null,()=>null);
+  await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
+  await new Promise(r=>setTimeout(r,200));
+  const started=Date.now(),exit=once(s.child,'exit');s.child.kill('SIGTERM');
+  assert.deepEqual(await exit,[0,null]);assert.ok(Date.now()-started<7000);
+  await pending;
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+  assert.equal(JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8')).dispatchBlocked,true);
 });
 test('Rust stalled notification worker permits continuous provider deltas and prompt abort',{skip:useNode},async t=>{
   const s=await fixture(t,{...faultEnv('stream'),PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,RUST_SPIKE_NOTIFY_BLOCK:'1'});
