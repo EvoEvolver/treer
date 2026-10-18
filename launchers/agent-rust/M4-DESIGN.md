@@ -1,11 +1,11 @@
 # M4 prerequisites for switching team launchers
 
-**Superseded by #158 decision 4767 (2026-10-18).** The current target is Node
-parity plus bounded memory: one-way Node import after byte backup, rollback by
-restoring that backup and Node startup, and Node-equivalent group cleanup with
-its detached-descendant gap. New Core quota/Host APIs and bidirectional migration
-are cancelled prerequisites. This document remains design history only; use
-[the launcher README](README.md) for current implementation and limits.
+**Scope update: #158/4773 retracts 4767; 4790 decides migration only.** Migration
+uses one-way Node import after byte backup, manual restore and Node startup,
+switching only while idle with an empty queue. The bidirectional migration and
+migration-specific private-state v2 proposal below is parked, not approved.
+Quota and detached-reaping prerequisites remain open pending the user; no team
+switch is approved here. Use [the launcher README](README.md) for implementation.
 
 Proposal for #158, following leader decision 4578 and Security verdict 4580.
 The reviewed implementation remains frozen at

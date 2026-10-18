@@ -8,6 +8,7 @@ import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unli
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
+import { pathToFileURL } from 'node:url';
 import { connect } from 'node:net';
 import { get as httpGet } from 'node:http';
 import { hermeticEnv, localFetch as fetch } from '../../agent/tests/hermetic.mjs';
@@ -454,6 +455,8 @@ test('Rust imports a Node queue once, resumes its thread, preserves retries and 
   const queue=JSON.stringify({version:1,records:[{operationId:'node-op',fingerprint,text:'',delivery,notify,receipt,notification:null,submission:{id,state:'done',sender,created_at:'2026-10-18T00:00:00.000Z',position:null,text_preview:text,turn_id:'old-turn',assistant_preview:null,error:null}}]})+'\n';
   const threadBytes=JSON.stringify({threadId:thread})+'\n';
   await writeFile(join(legacy,'agent-ui.json'),threadBytes,{mode:0o600});await writeFile(join(legacy,'queue.json'),queue,{mode:0o600});
+  await execFileAsync(process.execPath,['--import',join(nodeRoot,'node_modules/tsx/dist/loader.mjs'),'--input-type=module','-e',`import {AttachmentStore} from ${JSON.stringify(pathToFileURL(join(nodeRoot,'src/attachments.ts')).href)}; new AttachmentStore(${JSON.stringify(join(s.state,'images'))});`],{env:s.env,timeout:5000});
+  assert.deepEqual(await readdir(join(s.state,'images')),[],'real Node AttachmentStore creates an empty images root');
   const imported=await s.launch({},true,['--import-node-state']);
   const snapshot=await fetch(imported.base+'/api/state').then(r=>r.json());assert.equal(snapshot.thread.id,thread);
   assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),queue);
@@ -475,12 +478,25 @@ test('Rust imports a Node queue once, resumes its thread, preserves retries and 
   assert.equal(await readFile(join(legacy,'agent-ui.json'),'utf8'),threadBytes);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore,'restore must not start the provider');
 });
-test('Rust malformed Node state keeps exact backup and refuses before spawning provider',{skip:useNode,timeout:10000},async t=>{
+test('Rust malformed Node state keeps exact backup and refuses before spawning provider',{skip:useNode,timeout:60000},async t=>{
+  const id='sub_11111111-1111-4111-8111-111111111111';
+  const record={operationId:'op',fingerprint:'a'.repeat(64),text:'',delivery:'queue',notify:null,receipt:{id,disposition:'sent',position:null},notification:null,submission:{id,state:'done',sender:null,created_at:'2026-10-18T00:00:00Z',position:null,text_preview:'seeded-private-text',turn_id:null,assistant_preview:null,error:null}};
+  const cases=[['duplicate keys','{"version":1,"records":[],"records":["seeded-private-text"]}\n']];
+  const add=(name,change)=>{const q={version:1,records:[structuredClone(record)]};change(q,q.records[0]);cases.push([name,JSON.stringify(q)]);};
+  add('unknown queue field',q=>q.futureFence=true);
+  add('unknown record field',(q,r)=>r.futureFence=true);
+  add('invalid date',(q,r)=>r.submission.created_at='not-a-date');
+  add('missing preview',(q,r)=>delete r.submission.text_preview);
+  add('missing assistant preview',(q,r)=>delete r.submission.assistant_preview);
+  add('missing error',(q,r)=>delete r.submission.error);
+  add('incomplete notification',(q,r)=>r.notification={delivered:true});
+  add('busy queue',(q,r)=>{r.text='pending';r.submission.state='queued';});
+  cases.push(['unknown thread field',JSON.stringify({version:1,records:[]}),'{"threadId":"thread","futureFence":true}']);
+  for(const [name,malformed,thread='{"threadId":"thread"}'] of cases) await t.test(name,async t=>{
   const s=await fixture(t);const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
   await unlink(join(s.state,'rust-spike.json'));
   const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
-  const malformed='{"version":1,"records":[],"records":["seeded-private-text"]}\n';
-  await writeFile(join(legacy,'agent-ui.json'),'{"threadId":"thread"}',{mode:0o600});
+  await writeFile(join(legacy,'agent-ui.json'),thread,{mode:0o600});
   await writeFile(join(legacy,'queue.json'),malformed,{mode:0o600});
   const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8');
   await assert.rejects(execFileAsync(binary,['--import-node-state'],{cwd:join(s.root,'cwd'),env:s.env,timeout:5000}),error=>{
@@ -490,6 +506,7 @@ test('Rust malformed Node state keeps exact backup and refuses before spawning p
   assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),malformed);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore);
   await assert.rejects(readFile(join(s.state,'rust-spike.json')),{code:'ENOENT'});
+  });
 });
 test('Rust refuses a FIFO journal promptly before provider startup',{skip:useNode,timeout:10000},async t=>{
   const s=await fixture(t);

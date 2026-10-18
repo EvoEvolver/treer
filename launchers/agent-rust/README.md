@@ -2,13 +2,12 @@
 
 This is a separate, unpublished Cargo workspace. It does not replace
 `launchers/agent`, enter the production bundle, change a saved profile, or change
-Core behavior. #158 decision 4767 resets the target to Node parity plus bounded
-memory. After a full-day pilot, the leader may authorize switching Codex Agents
-one at a time. New Controller quota/Host ownership APIs and bidirectional state
-conversion were cancelled as M4 prerequisites by 4767. Decision 4790 confirms
-simple migration only, with quota and detached-reaping choices held pending the
-user; this increment makes no decision on those items. The [earlier design](M4-DESIGN.md)
-is parked, not approved, and preserved as history.
+Core behavior. The scope reset 4767 was retracted by #158/4773. Current decision
+4790 simplifies migration only: one-way import after byte backup, manual restore
+rollback, and switching only while idle with an empty queue. Quota and detached
+reaping remain on hold pending the user. This increment does not authorize a
+team switch or decide those items. See [M4 design](M4-DESIGN.md); its migration
+proposal is parked, not approved, while the other prerequisites remain open.
 The offline library's `envelope::validate_manifest` currently validates only
 manifest grammar, declared byte/entry limits and typed metadata references.
 It reads no object files and grants no handoff authority. Object digests,
@@ -290,10 +289,14 @@ and at most 4,096 settled text receipts, immutable submission IDs/receipts/Node
 retry hashes and sender/notify metadata. Empty terminal text is normal Node eviction and
 does not fabricate a userMessage. The provider resumes the same thread, never
 silently starts a new one. Native goals are read from that thread. Attachment
-references, pending completion outboxes and all additional sidecars still refuse
+references, pending completion outboxes, settled notification batches and all additional sidecars still refuse
 this first import increment; support is needed before switching such an Agent.
 No state is discarded to make it fit the limits. These compatibility gaps are
-local adapters, not dependencies on the cancelled Core contracts.
+local adapters; migration does not depend on a new Core contract per 4790.
+An empty Node-created private `images` directory is eligible only after no-follow
+open, owner/mode validation and descriptor enumeration finds no entries. Its
+identity and emptiness are rechecked immediately before publication; any entry
+(including dotfiles or a journal) refuses. Never delete state to force eligibility.
 
 Rollback: stop Rust (and keep Node stopped), invoke the same Rust binary with
 `--restore-node-backup` under the same Agent/cwd/private-root settings, then
@@ -308,9 +311,32 @@ during the Rust period may be repeated once after a rollback, or has to be resen
 Backups alone are not a lossless bidirectional merge. The leader controls rollout
 and any recovery. The same same-account/concurrent-writer limitations as Node
 apply; the Rust lease does not stop a separately running Node process.
-The backup contains conversation text: retain it privately through the agreed
-acceptance period, then have the owner remove that exact backup directory.
+The backup contains conversation text: the retention window is until the leader
+explicitly accepts that Agent's switch and closes its rollback window. Then the
+owner removes that exact backup directory after confirming rollback is no longer
+needed. It is never deleted automatically or on a failed switch.
 Never paste its content into logs or tickets.
+
+Per-Agent switch checklist (leader/owner only; gated on the outstanding M4 decisions):
+
+1. Verify the running Node provider is idle, the queue is empty and there are no
+   pending acknowledgements, notifications, goal edits or image drafts. Stop Node
+   through the Controller; verify its provider has exited. Keep the old startup.
+2. Start the pinned Rust binary once with `--import-node-state`, the same Agent,
+   cwd and private root. Inspect only the backup manifest hash, not conversation
+   contents, and record it with the Agent, binary hash and generation.
+3. On success remove `--import-node-state` from subsequent startup arguments;
+   inspect thread identity/history, short soak and post-switch state before
+   considering another Agent. Any failure stops the sequence; do not delete files
+   or clear a fence to make the import pass.
+4. A person rolls back only with both launchers stopped: restore the byte backup,
+   set the old Node startup and start Node. Restore overwrites the backed-up Node
+   files, losing any Node changes since backup. The owner leaves the Rust restore
+   marker intact; removing it is a separate explicitly authorized fresh migration
+   after reconciling the two histories, never an ordinary restart step.
+
+On subsequent Rust starts, a prior import's Node source inventory must still
+match the verified backup; divergent Node history refuses startup.
 The main state file is
 `rust-spike.json`, atomically replaced with mode 0600 in a pre-existing 0700
 directory. Journal reads recheck placement, open without following the final

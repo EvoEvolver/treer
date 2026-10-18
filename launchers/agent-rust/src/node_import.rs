@@ -173,6 +173,28 @@ fn load_backup(root: &Path, cwd: &Path, agent: &str) -> Result<Backup> {
     }
     Ok(backup)
 }
+fn empty_node_images(root: &Path) -> Result<Option<(u64, u64)>> {
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_DIRECTORY)
+        .open(root.join("images"))
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.into()),
+    };
+    let m = file.metadata()?;
+    if !m.is_dir() || m.uid() != rustix::process::geteuid().as_raw() || m.mode() & 0o077 != 0 {
+        bail!("node_import_unsafe_images");
+    }
+    for entry in rustix::fs::Dir::read_from(&file)? {
+        let entry = entry?;
+        if ![b".".as_slice(), b"..".as_slice()].contains(&entry.file_name().to_bytes()) {
+            bail!("node_import_images_not_empty");
+        }
+    }
+    Ok(Some((m.dev(), m.ino())))
+}
 pub fn prepare(
     root: &Path,
     cwd: &Path,
@@ -198,7 +220,19 @@ fn prepare_inner(
         bail!("node_import_backup_already_restored");
     }
     match fs::symlink_metadata(root.join("rust-spike.json")) {
-        Ok(_) => return Ok(()), // Runtime validates it; never re-import or repair.
+        Ok(_) => {
+            // Runtime validates Rust state; a prior import must still match its
+            // source backup, otherwise Node ran again and histories diverged.
+            if fs::symlink_metadata(root.join(BACKUP)).is_ok() {
+                let backup = load_backup(root, cwd, agent)?;
+                let dir = source(cwd, agent)?;
+                if serde_json::to_value(inventory(&dir)?)? != serde_json::to_value(&backup.files)? {
+                    bail!("node_import_source_changed");
+                }
+                empty_node_images(root)?;
+            }
+            return Ok(());
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(e) => return Err(e.into()),
     }
@@ -209,7 +243,7 @@ fn prepare_inner(
         }
         return Ok(());
     }
-    for name in ["queue.json", "agent-ui.json", "codex-ui.json", "images"] {
+    for name in ["queue.json", "agent-ui.json", "codex-ui.json"] {
         if fs::symlink_metadata(root.join(name)).is_ok() {
             bail!("node_import_unsupported_source_placement");
         }
@@ -225,6 +259,7 @@ fn prepare_inner(
     if !allow_import {
         bail!("node_import_explicit_action_required");
     }
+    let images = empty_node_images(root)?;
     if files.iter().any(|e| e.name == "manifest.json") {
         bail!("node_import_unsupported_file");
     }
@@ -286,6 +321,9 @@ fn prepare_inner(
     // Recheck source after conversion, before the only publication. Same-account
     // concurrent mutation remains an operator precondition, as with Node.
     if serde_json::to_value(inventory(&dir)?)? != serde_json::to_value(&backup.files)? {
+        bail!("node_import_source_changed");
+    }
+    if empty_node_images(root)? != images {
         bail!("node_import_source_changed");
     }
     store.save(&state)?;
@@ -369,6 +407,20 @@ mod tests {
         }
     }
     #[test]
+    fn empty_images_only_and_no_follow() {
+        let f = Fixture::new();
+        let images = f.private.join("images");
+        fs::DirBuilder::new().mode(0o700).create(&images).unwrap();
+        assert!(empty_node_images(&f.private).unwrap().is_some());
+        write_new(&images.join(".draft"), b"retained").unwrap();
+        assert!(prepare(&f.private, &f.cwd, "ag_test", None, true).is_err());
+        assert!(!f.private.join("rust-spike.json").exists());
+        assert_eq!(fs::read(images.join(".draft")).unwrap(), b"retained");
+        let linked = Fixture::new();
+        std::os::unix::fs::symlink(&images, linked.private.join("images")).unwrap();
+        assert!(empty_node_images(&linked.private).is_err());
+    }
+    #[test]
     fn import_backs_up_exact_bytes_restarts_and_restores_without_provider() {
         let f = Fixture::new();
         let original = fs::read(f.source.join("queue.json")).unwrap();
@@ -390,7 +442,10 @@ mod tests {
         );
         let journal = fs::read(f.private.join("rust-spike.json")).unwrap();
         fs::write(f.source.join("queue.json"), b"changed after import").unwrap();
-        prepare(&f.private, &f.cwd, "ag_test", None, false).unwrap();
+        assert!(
+            prepare(&f.private, &f.cwd, "ag_test", None, false).is_err(),
+            "divergent Node history must refuse restart"
+        );
         assert_eq!(
             fs::read(f.private.join("rust-spike.json")).unwrap(),
             journal

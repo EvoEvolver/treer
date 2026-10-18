@@ -1360,7 +1360,55 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
 
 /// Convert the text queue used by Node v1. Unsupported in-flight sidecars or
 /// attachments are refused as a whole; source bytes and their backup survive.
+pub(crate) fn node_fields(value: &Value, allowed: &[&str]) -> Result<()> {
+    if value.as_object().is_none_or(|o| o.keys().any(|key| !allowed.contains(&key.as_str()))) {
+        bail!("node_import_unknown_field");
+    }
+    Ok(())
+}
+fn node_nullable_string(value: Option<&Value>, limit: usize) -> bool {
+    value.is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.len() <= limit))
+}
+fn validate_node_record(r: &Value) -> Result<()> {
+    node_fields(r, &["operationId", "fingerprint", "text", "delivery", "notify", "receipt", "submission", "notification", "turnScope", "priorTurnId", "sourceMessage", "sourceMessages", "attachmentIds", "attachmentSession"])?;
+    let s = &r["submission"];
+    node_fields(s, &["id", "sender", "created_at", "position", "text_preview", "state", "turn_id", "assistant_preview", "error"])?;
+    node_fields(&r["receipt"], &["id", "disposition", "position"])?;
+    if !s["sender"].is_null() { node_fields(&s["sender"], &["agent_id", "path", "name"])?; }
+    if !r["notify"].is_null() { node_fields(&r["notify"], &["on", "to"])?; }
+    if !s["created_at"].as_str().is_some_and(|s| s.len() <= 128 && chrono::DateTime::parse_from_rfc3339(s).is_ok())
+        || s["text_preview"].as_str().is_none_or(|s| s.len() > 1024)
+        || !node_nullable_string(s.get("assistant_preview"), 4096)
+        || !node_nullable_string(s.get("error"), 100_000)
+        || !node_nullable_string(s.get("turn_id"), 1024)
+        || !s.get("position").is_some_and(Value::is_null)
+        || !r["receipt"].get("position").is_some_and(|v| v.is_null() || v.as_u64().is_some_and(|n| n > 0))
+        || s.get("sender").is_none() || r.get("notify").is_none()
+        || r.get("priorTurnId").is_some_and(|v| !node_nullable_string(Some(v), 1024))
+        || r.get("turnScope").is_some_and(|v| !v.as_str().is_some_and(|s| s.len() == 36 && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b) || b == b'-')))
+        || r.get("attachmentSession").is_some()
+    { bail!("node_import_invalid_queue"); }
+    if let Some(to) = r["notify"].get("to") {
+        if !to.as_str().is_some_and(|s| !s.is_empty() && s.len() <= 1024 && !s.contains(['\r', '\n', '\0'])) { bail!("node_import_invalid_queue"); }
+    }
+    let notification = r.get("notification").ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+    if !notification.is_null() {
+        node_fields(notification, &["attempts", "nextAttempt", "error", "delivered", "batch"])?;
+        // Settled notification batches may be omitted from the destination;
+        // refuse them here until their full semantic validator is implemented.
+        if notification.get("batch").is_some() || notification["delivered"] != true
+            || notification["attempts"].as_u64().is_none()
+            || notification["nextAttempt"].as_f64().is_none()
+            || !node_nullable_string(notification.get("error"), 100_000)
+        { bail!("node_import_invalid_queue"); }
+    } else if r["notify"]["on"].as_array().is_some_and(|on| on.contains(&s["state"])) {
+        bail!("node_import_missing_notification");
+    }
+    Ok(())
+}
 pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> {
+    node_fields(thread, &["threadId"])?;
+    node_fields(queue, &["version", "records"])?;
     let thread_id = thread["threadId"].as_str().filter(|s| !s.trim().is_empty() && s.len() <= 1024)
         .ok_or_else(|| anyhow!("node_import_invalid_thread"))?;
     if queue["version"] != 1 { bail!("node_import_invalid_queue"); }
@@ -1368,6 +1416,7 @@ pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> 
         .ok_or_else(|| anyhow!("node_import_queue_limit"))?;
     let mut records = Vec::new();
     for value in source {
+        validate_node_record(value)?;
         let text = value["text"].as_str().filter(|s| s.len() <= 65_536)
             .ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
         let operation = value["operationId"].as_str().ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
@@ -1379,11 +1428,13 @@ pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> 
         let mut messages = Vec::new();
         if !value["sourceMessage"].is_null() { messages.push(value["sourceMessage"].clone()); }
         if let Some(batch) = value.get("sourceMessages") {
-            messages.extend(batch.as_array().ok_or_else(|| anyhow!("node_import_invalid_queue"))?.iter().cloned());
+            let batch = batch.as_array().filter(|batch| batch.len() <= 255).ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+            messages.extend(batch.iter().cloned());
         }
         if messages.len() > 256 || messages.iter().any(|m| !m["ackPending"].is_boolean() || ["messageId", "deliveryId"].into_iter().any(|k| !m[k].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')))) {
             bail!("node_import_invalid_queue");
         }
+        for message in &messages { node_fields(message, &["messageId", "deliveryId", "ackPending"])?; }
         let submission = value["submission"].clone();
         if matches!(submission["state"].as_str(), Some("queued" | "running")) || messages.iter().any(|m| m["ackPending"] == true) {
             bail!("node_import_requires_idle_empty_queue");
