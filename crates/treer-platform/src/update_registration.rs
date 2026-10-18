@@ -6,8 +6,8 @@ use super::update_deadline::{Deadline, Window};
 // Distinct from both TRUB pipe frames and the earlier 56-byte observation.
 // This fixture format is not a production on-disk compatibility contract.
 const MAGIC: &[u8; 4] = b"TURF";
-const VERSION: u16 = 1;
-const SIZE: usize = 184;
+const VERSION: u16 = 2;
+const SIZE: usize = 200;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct ProcessIdentity {
@@ -24,6 +24,35 @@ struct Observation {
     intent: [u8; 32],
     owner: ProcessIdentity,
     child: ProcessIdentity,
+    boot: [u8; 16],
+}
+
+// Both fields must eventually come from the verifier's own trusted OS sources.
+// These synthetic samples deliberately provide no boot-identity acquisition API.
+#[derive(Clone, Copy)]
+struct ClockSample {
+    boot: [u8; 16],
+    ticks: u64,
+}
+
+struct RegisteredDeadline {
+    boot: [u8; 16],
+    deadline: Deadline,
+}
+
+impl RegisteredDeadline {
+    fn check(&mut self, sample: ClockSample) -> Result<(), ()> {
+        if sample.boot != self.boot {
+            self.deadline.refuse();
+            return Err(());
+        }
+        self.deadline.check(sample.ticks)
+    }
+
+    fn remaining_ms(&mut self, sample: ClockSample) -> Result<u64, ()> {
+        self.check(sample)?;
+        self.deadline.remaining_ms(sample.ticks)
+    }
 }
 
 struct Registration {
@@ -67,6 +96,7 @@ impl Registration {
             intent: reader.take()?,
             owner: reader.process()?,
             child: reader.process()?,
+            boot: reader.take()?,
         };
         let window = Window {
             start: u64::from_le_bytes(reader.take()?),
@@ -75,6 +105,7 @@ impl Registration {
         if !reader.0.is_empty()
             || observation.attempt == [0; 16]
             || observation.intent == [0; 32]
+            || observation.boot == [0; 16]
             || observation.owner.pid == observation.child.pid
             || [observation.owner, observation.child]
                 .iter()
@@ -94,19 +125,29 @@ impl Registration {
     fn validate(
         &self,
         expected: &Observation,
-        now: u64,
+        now: ClockSample,
         original_expiry: Option<u64>,
-    ) -> Result<Deadline, ()> {
-        if self.observation != *expected {
+    ) -> Result<RegisteredDeadline, ()> {
+        if self.observation != *expected || now.boot != expected.boot {
             return Err(());
         }
-        self.window.accept(now, original_expiry)
+        Ok(RegisteredDeadline {
+            boot: expected.boot,
+            deadline: self.window.accept(now.ticks, original_expiry)?,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample(ticks: u64) -> ClockSample {
+        ClockSample {
+            boot: [6; 16],
+            ticks,
+        }
+    }
 
     fn fixture() -> (Observation, Vec<u8>) {
         let owner = ProcessIdentity {
@@ -125,6 +166,7 @@ mod tests {
                 created: 201,
                 ..owner
             },
+            boot: sample(0).boot,
         };
         let mut bytes = Vec::new();
         bytes.extend_from_slice(MAGIC);
@@ -139,6 +181,7 @@ mod tests {
             bytes.extend_from_slice(&process.file.to_le_bytes());
             bytes.extend_from_slice(&process.image);
         }
+        bytes.extend_from_slice(&expected.boot);
         bytes.extend_from_slice(&100u64.to_le_bytes());
         bytes.extend_from_slice(&5_100u64.to_le_bytes());
         assert_eq!(bytes.len(), SIZE);
@@ -150,13 +193,13 @@ mod tests {
         let (expected, bytes) = fixture();
         let owner = Registration::parse(&bytes).unwrap();
         let child = Registration::parse(&bytes.clone()).unwrap();
-        let mut owner = owner.validate(&expected, 150, Some(5_000)).unwrap();
-        let mut child = child.validate(&expected, 4_900, None).unwrap();
-        assert_eq!(owner.remaining_ms(4_999), Ok(1));
-        assert!(owner.check(5_000).is_err());
-        assert_eq!(child.remaining_ms(5_000), Ok(100));
-        assert!(child.check(5_100).is_err());
-        assert!(owner.check(151).is_err());
+        let mut owner = owner.validate(&expected, sample(150), Some(5_000)).unwrap();
+        let mut child = child.validate(&expected, sample(4_900), None).unwrap();
+        assert_eq!(owner.remaining_ms(sample(4_999)), Ok(1));
+        assert!(owner.check(sample(5_000)).is_err());
+        assert_eq!(child.remaining_ms(sample(5_000)), Ok(100));
+        assert!(child.check(sample(5_100)).is_err());
+        assert!(owner.check(sample(151)).is_err());
     }
 
     #[test]
@@ -173,6 +216,13 @@ mod tests {
             changed[offset] ^= 1;
             assert!(Registration::parse(&changed).is_err());
         }
+        let mut old_version = bytes.clone();
+        old_version[4..6].copy_from_slice(&1u16.to_le_bytes());
+        assert!(Registration::parse(&old_version).is_err());
+        // Reconstruct the previously valid v1 layout without its boot field.
+        old_version.drain(168..184);
+        old_version[6..8].copy_from_slice(&184u16.to_le_bytes());
+        assert!(Registration::parse(&old_version).is_err());
         assert!(Registration::parse(&[0; super::super::update_binding::FRAME_SIZE]).is_err());
         let mut disguised = bytes;
         disguised[..5].copy_from_slice(b"TRUB\x01");
@@ -182,22 +232,24 @@ mod tests {
     #[test]
     fn every_binding_byte_requires_an_exact_independent_observation() {
         let (expected, bytes) = fixture();
-        // Attempt, intent and both process identities: no self-reported field
+        // Attempt, intent, process identities and boot: no self-reported field
         // may substitute for the locally observed value, even if well formed.
-        for offset in 8..168 {
+        for offset in 8..184 {
             let mut changed = bytes.clone();
             changed[offset] ^= 0x80;
             if let Ok(record) = Registration::parse(&changed) {
-                assert!(record.validate(&expected, 200, Some(5_100)).is_err());
+                assert!(record
+                    .validate(&expected, sample(200), Some(5_100))
+                    .is_err());
             }
         }
         let record = Registration::parse(&bytes).unwrap();
         let mut other_attempt = expected;
         other_attempt.attempt = [3; 16];
-        assert!(record.validate(&other_attempt, 200, None).is_err());
+        assert!(record.validate(&other_attempt, sample(200), None).is_err());
         let mut swapped = expected;
         std::mem::swap(&mut swapped.owner, &mut swapped.child);
-        assert!(record.validate(&swapped, 200, None).is_err());
+        assert!(record.validate(&swapped, sample(200), None).is_err());
     }
 
     #[test]
@@ -212,6 +264,7 @@ mod tests {
             112..116,
             116..124,
             136..168,
+            168..184,
         ] {
             let mut changed = bytes.clone();
             changed[range].fill(0);
@@ -235,20 +288,83 @@ mod tests {
             (u64::MAX - 2, u64::MAX, u64::MAX - 1),
         ] {
             let mut changed = bytes.clone();
-            changed[168..176].copy_from_slice(&start.to_le_bytes());
-            changed[176..184].copy_from_slice(&expiry.to_le_bytes());
+            changed[184..192].copy_from_slice(&start.to_le_bytes());
+            changed[192..200].copy_from_slice(&expiry.to_le_bytes());
             assert!(Registration::parse(&changed)
                 .unwrap()
-                .validate(&expected, now, None)
+                .validate(&expected, sample(now), None)
                 .is_err());
         }
         let mut changed = bytes;
-        changed[168..176].copy_from_slice(&200u64.to_le_bytes());
-        changed[176..184].copy_from_slice(&5_200u64.to_le_bytes());
+        changed[184..192].copy_from_slice(&200u64.to_le_bytes());
+        changed[192..200].copy_from_slice(&5_200u64.to_le_bytes());
         let record = Registration::parse(&changed).unwrap();
-        let mut owner = record.validate(&expected, 200, Some(5_100)).unwrap();
-        assert_eq!(owner.remaining_ms(5_099), Ok(1));
-        assert!(owner.check(5_100).is_err());
-        assert!(record.validate(&expected, 5_100, Some(5_100)).is_err());
+        let mut owner = record
+            .validate(&expected, sample(200), Some(5_100))
+            .unwrap();
+        assert_eq!(owner.remaining_ms(sample(5_099)), Ok(1));
+        assert!(owner.check(sample(5_100)).is_err());
+        assert!(record
+            .validate(&expected, sample(5_100), Some(5_100))
+            .is_err());
+    }
+
+    #[test]
+    fn prior_boot_record_is_refused_even_when_ticks_and_process_fields_match() {
+        let (expected, bytes) = fixture();
+        let record = Registration::parse(&bytes).unwrap();
+        let next_boot = ClockSample {
+            boot: [7; 16],
+            ticks: 200,
+        };
+        // A matching record/observation pair cannot override the local clock's
+        // boot. Conversely a fresh observation rejects a prior-boot record.
+        assert!(record.validate(&expected, next_boot, None).is_err());
+        let fresh = Observation {
+            boot: next_boot.boot,
+            ..expected
+        };
+        assert!(record.validate(&fresh, next_boot, None).is_err());
+        assert!(record.validate(&fresh, sample(200), None).is_err());
+        assert!(record
+            .validate(
+                &expected,
+                ClockSample {
+                    boot: [0; 16],
+                    ticks: 200
+                },
+                None
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn changed_boot_permanently_refuses_both_readers_without_tick_regression() {
+        let (expected, bytes) = fixture();
+        for remaining_check in [false, true] {
+            for owner_expiry in [Some(5_000), None] {
+                let mut deadline = Registration::parse(&bytes)
+                    .unwrap()
+                    .validate(&expected, sample(200), owner_expiry)
+                    .unwrap();
+                assert_eq!(
+                    deadline.remaining_ms(sample(201)),
+                    Ok(owner_expiry.unwrap_or(5_100) - 201)
+                );
+                let changed = ClockSample {
+                    boot: [7; 16],
+                    ticks: 202,
+                };
+                if remaining_check {
+                    assert!(deadline.remaining_ms(changed).is_err());
+                } else {
+                    assert!(deadline.check(changed).is_err());
+                }
+                // Returning to the old boot value or earlier time cannot undo
+                // the refusal. A reboot must never renew an existing budget.
+                assert!(deadline.check(sample(203)).is_err());
+                assert!(deadline.remaining_ms(sample(200)).is_err());
+            }
+        }
     }
 }

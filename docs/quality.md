@@ -5,12 +5,15 @@
 The private `cfg(test)` platform module `update_registration` exercises a
 synthetic, fixed-size registration format before native record publication is
 implemented. Focused tests reject malformed headers, truncation/trailing bytes,
-pipe-frame confusion, altered attempt/intent/process identities and invalid
+pipe-frame confusion, altered attempt/intent/process/boot identities and invalid
 deadline windows. Independent readers compare the decoded fields with separate
 synthetic observations; the owner retains its original expiry ceiling. The
-synthetic tick values assume the same boot; this model has no boot/session
-identity field and cannot reject a prior-boot record that otherwise matches.
-Native registration must bind a verified boot/session identity before use.
+version-2 fixture carries a nonzero 16-byte boot identity. A reader must compare
+it with both its independent observation and every local clock sample; a changed
+boot permanently refuses that reader even when ticks still fall in the window.
+This tests rejection of prior-boot records with otherwise matching fields, not
+the authenticity or availability of a Windows boot identity. Native registration
+still requires verified boot identity acquisition and trusted clock samples.
 These tests do not read or write files, acquire OS identity or time, enforce replay
 uniqueness, construct frame bindings, or grant update authority. Native record
 publication, suspended-child registration and real-machine acceptance remain

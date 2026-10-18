@@ -425,10 +425,11 @@ exchange; the prior `9f683383` results do not cover this new protocol model.
 ## Proposed next slice: independent durable binding in disposable fixtures
 
 The next inert substep, `update_registration`, models registration bytes only
-under `cfg(test)`. Its 184-byte fixture layout is little-endian: distinct `TURF`
-magic, version `u16`, total size `u16`, attempt (16 bytes), intent digest (32),
+under `cfg(test)`. Its version-2, 200-byte fixture layout is little-endian: distinct
+`TURF` magic, version `u16`, total size `u16`, attempt (16 bytes), intent digest (32),
 owner and child identity (56 bytes each: PID `u32`, creation `u64`, volume `u32`,
-file identity `u64`, image digest (32)), then start/expiry ticks (`u64` each).
+file identity `u64`, image digest (32)), boot identity (16), then start/expiry
+ticks (`u64` each). The earlier version-1 fixture is rejected, not migrated.
 Parsing rejects noncanonical headers/lengths, empty bindings and invalid process
 pairs. A separate comparison requires all fields to match independently supplied
 synthetic observations before the existing deadline model admits the window.
@@ -436,10 +437,15 @@ The owner still supplies its original expiry ceiling. No bytes enter the pipe
 exchange, and no file, clock, process observation, real record, lock, permit or
 production caller is added. Exact field equality is not proof of provenance,
 process liveness or once-only use; copied bytes with identical observations are
-not a replay fence. The tick model assumes a single boot; its fixture format has
-no boot/session identity field and cannot detect an otherwise matching record
-from before a reboot. Native registration must carry or be bound to a verified
-boot/session identity before any use. Native publication and authenticated
+not a replay fence. The nonzero boot identity must match the independent
+observation and local clock sample at validation. The returned private deadline
+wrapper checks the boot on every subsequent clock sample and permanently refuses
+after a mismatch, even if ticks remain in range or a later sample returns to the
+original identity. These synthetic tests reject otherwise matching prior-boot
+records; they do not acquire or authenticate an OS boot identity. Native
+registration must establish a trusted, cross-process Windows boot identity and
+pair it with locally acquired clock samples before any use; a peer-supplied boot
+value is insufficient. Native publication and authenticated
 process binding remain subsequent authority-reviewed work. This is not a stable
 on-disk format.
 
