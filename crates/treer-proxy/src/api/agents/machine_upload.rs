@@ -1081,6 +1081,23 @@ pub(crate) async fn commit_machine_upload(
                         "machine_upload_not_found" => "upload_lost".to_owned(),
                         _ => return,
                     };
+                    // A content or length mismatch leaves the staging file
+                    // registered on the Controller; free it now rather than
+                    // waiting for the idle reaper.
+                    if matches!(
+                        code.as_str(),
+                        "machine_upload_content_mismatch" | "machine_upload_file_mismatch"
+                    ) {
+                        let _ = state
+                            .send_command(
+                                &row.workspace_id,
+                                &row.server_id,
+                                AgentCommand::UploadAbort {
+                                    upload_id: row.upload_id.clone(),
+                                },
+                            )
+                            .await;
+                    }
                     let _ = store
                         .set_terminal(&row.upload_id, UploadState::Failed, &code)
                         .await;

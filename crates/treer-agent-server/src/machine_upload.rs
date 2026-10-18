@@ -587,6 +587,11 @@ impl Uploads {
                 ));
             }
         }
+        // The upload is out of the registry while it is verified and
+        // published, so the (up to 128 MiB) read-back never holds the lock
+        // other uploads' chunks need; a concurrent chunk or abort for this id
+        // sees "not active" meanwhile.
+        drop(entries);
         let hash = if upload.chunked() {
             upload.committed_hash.clone()
         } else {
@@ -596,7 +601,7 @@ impl Uploads {
         // the written bytes and hash to what was acknowledged. On a mismatch
         // the upload stays registered (staging kept) for abort or the reaper.
         if let Err(error) = verify_staged(&mut upload, &hash) {
-            entries.insert(upload_id.to_owned(), upload);
+            self.lock()?.insert(upload_id.to_owned(), upload);
             return Err(error);
         }
         let staged = upload
@@ -610,7 +615,10 @@ impl Uploads {
             .open_root()
             .and_then(|root| root.validate_target(&upload.path).map_err(io_failure))
             .and_then(|()| staged.commit(upload.overwrite).map_err(io_failure));
-        let _ = self.persist_intents(&entries);
+        {
+            let entries = self.lock()?;
+            let _ = self.persist_intents(&entries);
+        }
         // A failed unlink after a successful link means the file is published
         // and only the staging name lingers: committed, cleanup pending.
         let cleanup_pending = match outcome {
