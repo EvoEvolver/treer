@@ -37,6 +37,9 @@ fs.mkdirSync('node_modules/.bin',{recursive:true}); fs.mkdirSync('node_modules/w
 fs.writeFileSync('node_modules/.bin/tsx','#!/bin/sh\\nexit 0\\n',{mode:0o755}); fs.writeFileSync('node_modules/ws/package.json','{}');
 `;
 
+// Belt and braces for the cleanup race: a late writer under the temp tree makes one rmdir fail with ENOTEMPTY, so retry.
+const cleanup = (root: string) => rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 });
+
 function fixture() {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "agent-install-")));
   const source = join(root, "source"), bin = join(root, "bin"), machine = join(root, "machine root");
@@ -44,7 +47,9 @@ function fixture() {
   cpSync(launcher, join(source, "launchers/agent"), { recursive: true, filter: (path) => !path.split(/[\\/]/).includes("node_modules") });
   writeFileSync(join(bin, "treer"), mockTreer, { mode: 0o755 });
   writeFileSync(join(bin, "npm"), mockNpm, { mode: 0o755 });
-  const env = hermeticEnv({ HOME: root, LOCALAPPDATA: root, FIXTURE_ROOT: root, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null" });
+  const env = hermeticEnv({ HOME: root, LOCALAPPDATA: root, FIXTURE_ROOT: root, PATH: `${bin}:${process.env.PATH}`, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_SYSTEM: "/dev/null",
+    // `git commit` may start a detached `gc --auto` that keeps writing under .git/objects while the cleanup hook removes the tree (#181).
+    GIT_CONFIG_COUNT: "2", GIT_CONFIG_KEY_0: "gc.auto", GIT_CONFIG_VALUE_0: "0", GIT_CONFIG_KEY_1: "maintenance.auto", GIT_CONFIG_VALUE_1: "false" });
   const git = (...args: string[]) => execFileSync("git", ["-C", source, ...args], { env, encoding: "utf8" }).trim();
   git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "test@example.invalid");
   const commit = () => { git("add", "."); git("commit", "-qm", "fixture"); return git("rev-parse", "HEAD"); };
@@ -55,7 +60,7 @@ function fixture() {
 }
 
 test("installer uses immutable committed source, verifies profiles, and updates current without touching previous versions", (t) => {
-  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const f = fixture(); t.after(() => cleanup(f.root));
   f.install();
   const firstRoot = realpathSync(join(f.base, "current"));
   assert.equal(firstRoot, join(f.base, f.first));
@@ -74,14 +79,14 @@ test("installer uses immutable committed source, verifies profiles, and updates 
 });
 
 test("installer sparse-fetches a full commit from a local git repository", (t) => {
-  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const f = fixture(); t.after(() => cleanup(f.root));
   f.install(["--repository", f.source, "--ref", f.first]);
   assert.equal(realpathSync(join(f.base, "current")), join(f.base, f.first));
   assert.equal(existsSync(join(f.base, f.first, ".git")), false);
 });
 
 test("npm failure and profile verification failure leave current on the previous working version", (t) => {
-  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const f = fixture(); t.after(() => cleanup(f.root));
   f.install();
   writeFileSync(join(f.source, "launchers/agent/revision"), "next"); f.commit();
   assert.throws(() => f.install(undefined, { NPM_FAIL: "1" }));
@@ -93,14 +98,14 @@ test("npm failure and profile verification failure leave current on the previous
 });
 
 test("first-install verification failure removes the newly created profile before removing current", (t) => {
-  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const f = fixture(); t.after(() => cleanup(f.root));
   assert.throws(() => f.install(undefined, { BAD_SHOW: "1" }), /Profile verification failed/);
   assert.equal(existsSync(join(f.base, "current")), false);
   assert.equal(existsSync(join(f.root, "Codex + UI.json")), false);
 });
 
 test("failure verifying a second profile restores earlier edits and removes new profiles", (t) => {
-  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const f = fixture(); t.after(() => cleanup(f.root));
   f.install();
   const previous = readFileSync(join(f.root, "Codex + UI.json"), "utf8");
   const manifestPath = join(f.source, "launchers/agent/profiles.json");
@@ -114,7 +119,7 @@ test("failure verifying a second profile restores earlier edits and removes new 
 });
 
 test("invalid provider and cwd outside machine root fail before installing", (t) => {
-  const f = fixture(); t.after(() => rmSync(f.root, { recursive: true, force: true }));
+  const f = fixture(); t.after(() => cleanup(f.root));
   assert.throws(() => f.install(["--source", f.source, "--agent", "pi"]), /Unknown provider/);
   assert.throws(() => f.install(["--source", f.source, "--cwd", ".."]), /inside machine.root/);
   symlinkSync(f.root, join(f.machine, "outside-cwd"), "dir");
