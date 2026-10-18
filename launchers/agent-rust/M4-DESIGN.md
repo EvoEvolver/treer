@@ -29,11 +29,25 @@ object digests/sizes, operation IDs/fingerprints, immutable acceptance receipts,
 lifecycle/uncertainty, notification acknowledgements, goal intent/reconciliation
 and image references. Never export credentials or arbitrary home/project trees.
 
+Treat this envelope as untrusted input. Bind its manifest/digests to stable Agent
+identity, the current source generation and a Controller-issued single-use handoff
+token. Controller verifies authenticity, rejects stale generations and atomically
+consumes the token when activating the destination; copied or replayed exports
+cannot activate newer state. Destination generation is part of that binding.
+The schema must specify hard entry/depth/total-byte limits before implementation;
+initially accept only uncompressed objects, so decompression expansion is absent.
+Object references are envelope-local digests, never source filesystem paths.
+Reject duplicate operation IDs, conflicting receipts and dangling references.
+
 Both backends must support an exclusive Controller-owned handoff. Rust's current
 flock alone cannot exclude an older Node launcher. Quiesce new admission, stop
 the supervised provider, settle only confirmed terminal facts and export a
 consistent snapshot. Unknown outcomes retain uncertainty; do not unblock dispatch
 by inference. Missing handshake support means refuse the switch.
+Controller startup ownership enforces exclusion even if old Node ignores a file
+lock: it never launches another backend for the same active generation. Both
+supported launchers require the current Controller generation token before start.
+An older launcher lacking this check is not eligible for a migration handoff.
 
 Validate versions, identities, limits, references and digests before publishing
 into a fresh private destination generation. Use exclusive descriptor-based files,
@@ -65,6 +79,15 @@ Reuse Controller private-state authority, never cwd fallback. Existing
 journal replacement or peak staging bytes are covered. Core must specify charges
 for logical retained bytes, physical staging, and atomic replacement of old data.
 
+The accounting contract must include finite per-Agent AND machine-global caps.
+Reserve the peak simultaneous charge: old published bytes + new published bytes
++ additional staging bytes/metadata, without double-counting a new file that is
+itself staging. Do not credit the old charge before replacement reconciliation.
+Exact cap values and overhead accounting are Core-reviewed schema requirements,
+not silently chosen implementation defaults. Quota denial uses the centralized
+4df6db94 rollback: previous checkpoint authoritative, fail-closed read-only state,
+no provider dispatch and no automatic retry that clears the fence.
+
 Proposed transaction: reserve new object and bounded staging overhead under
 Agent/generation/object identity; write/fsync temporary bytes; publish by atomic
 rename; commit accounting for published digest/size. Retain the old charge until
@@ -80,6 +103,10 @@ synchronous journal persist cannot just await quota inside mutation handling:
 introduce serialized asynchronous store transactions with bounded requests and
 cancellation-safe ownership, preserving actor ordering and abort responsiveness.
 Shutdown cannot abandon published bytes or release their charge. Keep local caps.
+Publication must execute outside the cancellable runtime select region. Shutdown
+waits for its transaction owner with a finite deadline; timeout marks outcome
+uncertain and retains reservation/fence, never claims rollback or successful stop
+of an in-progress blocking OS call. Only the transaction owner can settle it.
 
 Use a real isolated Controller to test exhaustion, reserve/commit timeout,
 Controller restart, duplicate commits, concurrent generations, replacement peak
@@ -105,6 +132,13 @@ is insufficient. If native macOS cannot prove them, mark that mode unsupported
 for the team-switch guarantee and propose reviewed containment. No system setup
 is authorized by this design.
 
+The capability must be created by Host/Controller, a parent that outlives the
+launcher, not by the launcher itself. Evaluate the already-reviewed
+[Apple container machine path](../../skills/treer-macos-container/SKILL.md)
+alongside any native supervisor proposal; using a container does not automatically
+prove the required membership, owner-death and teardown semantics. If neither
+candidate proves them, macOS team switching remains explicitly unsupported.
+
 Start Codex only after verified ownership exists. Controller/Host owns lifecycle;
 launcher requests cleanup through that capability and reports confirmed, timed
 out or unverified accurately. Crash recovery uses supervisor records and generation
@@ -120,8 +154,9 @@ separate operator approval.
 
 ## Delivery and switch gate
 
-1. Core/Security review contracts and supported containment mode; resolve quota
-   semantics and ownership feasibility before implementing platform behavior.
+1. Security reviews the envelope schema as a separate gate BEFORE migration code
+   starts. Core/Security review freshness/authenticity, token lifecycle, parser
+   limits, quota semantics and supported containment mode before implementation.
 2. Implement migration/quota increments with fault fixtures and isolated
    Controller tests; implement the reviewed supervisor boundary separately.
 3. Run exact-SHA graded/native gates and shared browser parity, recording explicit
@@ -130,3 +165,11 @@ separate operator approval.
 4. Security/Core approve integration and rollback rehearsal. Leader authorizes
    a disposable migration rehearsal, then staged team switching. Limited M3
    success alone never authorizes a team-agent switch.
+
+All migration/fault fixtures use synthetic data only: no real conversations,
+tokens or Codex home. Scan fixture envelopes and diagnostic logs for seeded
+credential canaries/credential patterns and unexpected content. The schema
+allowlist permits only the synthetic content explicitly carried by receipts;
+logs must not echo that content. A pattern scan is a regression aid, not proof
+that arbitrary secrets are absent. Real-session migration needs separate review
+and explicit operator authorization, not reuse of M3 default-home permission.
