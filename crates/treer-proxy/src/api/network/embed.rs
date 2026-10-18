@@ -189,7 +189,8 @@ fn no_store(response: &mut Response) {
 /// nonce, announces its hash to the Console (exact origin), receives the code
 /// from the Console (exact origin), redeems both on its own origin, verifies
 /// that the partitioned cookie came back, then navigates to the Agent UI.
-/// Anything else reports `cookies_blocked` to the Console and stops.
+/// Anything else reports `cookies_blocked` to the Console (with the nonce hash
+/// once it exists, so the Agent document cannot forge it later) and stops.
 fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Response, ApiFailure> {
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
@@ -208,15 +209,21 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
   var CONSOLE = {console_js};
   var parentWindow = window.parent;
   var done = false;
+  var hash = null;
+  // A failure report carries the nonce hash once it exists: the Agent
+  // document that later replaces this page shares window and origin but never
+  // learned the hash, so the Console accepts a post-ready failure only with it.
   function report(kind) {{
     if (done) return; done = true;
-    try {{ parentWindow.postMessage({{ treer_embed: kind }}, CONSOLE); }} catch (e) {{}}
+    var message = {{ treer_embed: kind }};
+    if (hash) message.nonce_hash = hash;
+    try {{ parentWindow.postMessage(message, CONSOLE); }} catch (e) {{}}
   }}
   if (window.top === window || !window.crypto || !window.crypto.subtle) {{ report("cookies_blocked"); return; }}
   var bytes = new Uint8Array(32); window.crypto.getRandomValues(bytes);
   var nonce = Array.prototype.map.call(bytes, function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
   window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(nonce)).then(function (digest) {{
-    var hash = Array.prototype.map.call(new Uint8Array(digest), function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
+    hash = Array.prototype.map.call(new Uint8Array(digest), function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
     var timer = setTimeout(function () {{ report("cookies_blocked"); }}, 15000);
     window.addEventListener("message", function (event) {{
       if (done || event.origin !== CONSOLE || event.source !== parentWindow) return;
