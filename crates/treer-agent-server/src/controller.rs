@@ -3245,6 +3245,9 @@ impl ControllerRuntime {
                 })?;
             // Serialize the final fence check and proxy/registry publication
             // with deletion cleanup; a delayed Host event cannot reinsert it.
+            // Lock order is registry -> workload proxies. ensure synchronously
+            // binds loopback and builds a client; it neither awaits nor calls
+            // back into the Controller or takes the registry lock itself.
             self.require_not_denied(&metadata.agent_id)?;
             if process.running {
                 if let Some(port) = metadata.http_proxy_port {

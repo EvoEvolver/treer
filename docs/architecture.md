@@ -551,10 +551,15 @@ and retained exited Host inventory cannot re-register the deleted identity,
 including after Controller replacement. Existing denial fences remain intact;
 if the bounded fence store (4096 IDs, no automatic eviction) is full or cannot
 persist, cleanup reports failure and retries without removing state. Private
-directory deletion follows persistence and registry cleanup. The directory or remaining
-startup declaration is the pending record; an older
-Proxy omits the field and nothing is purged. Directories under other server IDs
-are never touched.
+directory deletion follows persistence and registry cleanup. The directory or
+remaining startup declaration is the pending record; an older Proxy omits the
+field and nothing is purged. Directories under other server IDs are never touched.
+This clears Controller records, not every copy of the revoked credential: Host
+process metadata and cached operation responses can still contain it. Host
+history retains up to 256 completed processes and 1024 operation results until
+capacity eviction or Host exit, with no wall-clock expiry. Proxy revocation
+continues to enforce deletion during that retention; cleanup never restarts the
+Host to erase its caches.
 
 The local API exposes the caller's own private state to the workload identity
 only: `GET /api/private-state` (status, usage, feature
