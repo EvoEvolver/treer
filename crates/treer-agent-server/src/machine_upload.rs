@@ -106,9 +106,28 @@ struct Upload {
     committed_hash: Sha256,
     created: Instant,
     touched: Instant,
+    /// Test-only ageing added to the elapsed times the reaper compares, so a
+    /// test can expire an upload without an `Instant` before the platform's
+    /// epoch (Windows cannot represent one before boot).
+    #[cfg(test)]
+    aged_idle: Duration,
+    #[cfg(test)]
+    aged_lifetime: Duration,
 }
 
 impl Upload {
+    fn idle_for(&self) -> Duration {
+        #[cfg(test)]
+        return self.touched.elapsed() + self.aged_idle;
+        #[cfg(not(test))]
+        self.touched.elapsed()
+    }
+    fn lived_for(&self) -> Duration {
+        #[cfg(test)]
+        return self.created.elapsed() + self.aged_lifetime;
+        #[cfg(not(test))]
+        self.created.elapsed()
+    }
     fn chunked(&self) -> bool {
         self.declared.is_some()
     }
@@ -121,13 +140,39 @@ pub struct Uploads {
     entries: Mutex<HashMap<String, Upload>>,
     results: Mutex<Vec<StoredResult>>,
     recovered: std::sync::atomic::AtomicBool,
+    /// Recorded staging names the startup sweep could not remove; they stay
+    /// journaled so a later start retries them.
+    unswept: Mutex<Vec<(String, String)>>,
 }
 
-/// Test hook: the next chunk write stores only half its bytes and fails, as
-/// a full disk would.
+/// Whether this Controller offers the chunked, resumable upload contract
+/// (`machine.upload.v3`). The Windows code path compiles and is exercised by
+/// the tests, but has not been validated on a real machine (#171), so the
+/// capability is not advertised there and the command dispatch refuses the
+/// v3 commands; the legacy append route stays available everywhere.
+pub const fn chunked_upload_supported() -> bool {
+    !cfg!(windows)
+}
+
+/// Test hook: the next chunk write for the named upload stores only half its
+/// bytes and fails, as a full disk would. Keyed by upload id so parallel tests
+/// in the same process cannot consume each other's injected failure.
 #[cfg(test)]
-pub(crate) static FAIL_NEXT_WRITE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+pub(crate) static FAIL_NEXT_WRITE_FOR: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn take_injected_write_failure(upload_id: &str) -> bool {
+    let mut armed = FAIL_NEXT_WRITE_FOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if armed.as_deref() == Some(upload_id) {
+        *armed = None;
+        true
+    } else {
+        false
+    }
+}
 
 fn validate_upload_id(upload_id: &str) -> Result<(), ProtocolError> {
     if upload_id.len() < 8
@@ -189,7 +234,15 @@ impl Uploads {
             entries: Mutex::new(HashMap::new()),
             results: Mutex::new(Vec::new()),
             recovered: std::sync::atomic::AtomicBool::new(false),
+            unswept: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Recorded staging names the last sweep could not remove (for tests and
+    /// diagnostics).
+    #[cfg(test)]
+    pub fn unswept_for_test(&self) -> Vec<(String, String)> {
+        self.unswept.lock().map(|u| u.clone()).unwrap_or_default()
     }
 
     fn open_root(&self) -> Result<Root, ProtocolError> {
@@ -241,6 +294,11 @@ impl Uploads {
         if intents.len() > MACHINE_UPLOAD_MAX_ACTIVE + 1 {
             return Err(failure("state_error", "too many upload recovery records"));
         }
+        // A recorded name that cannot be removed now (held open by another
+        // process, an antivirus scan, a stale handle on Windows) must not
+        // block every later upload: it stays journaled for the next sweep and
+        // is reported, and recovery continues with the others.
+        let mut kept: Vec<(String, String)> = Vec::new();
         for (path, id) in intents {
             if validate_upload_id(&id).is_err() || !id.starts_with("upl_") {
                 return Err(failure("state_error", "invalid upload recovery identifier"));
@@ -248,16 +306,26 @@ impl Uploads {
             if treer_platform::machine_file::is_reserved_namespace(&path).map_err(io_failure)? {
                 continue;
             }
-            root.cleanup_staging(&path, &format!(".treer-transfer-{id}"))
-                .map_err(io_failure)?;
-            tracing::warn!(upload_id = %id, "removed the staging file of an upload interrupted by a Controller restart");
+            match root.cleanup_staging(&path, &format!(".treer-transfer-{id}")) {
+                Ok(()) => {
+                    tracing::warn!(upload_id = %id, "removed the staging file of an upload interrupted by a Controller restart");
+                }
+                Err(error) => {
+                    tracing::warn!(upload_id = %id, ?error, "could not remove the staging file of an interrupted upload; kept for the next sweep");
+                    kept.push((path, id));
+                }
+            }
         }
         write_journal(
             &journal,
             JOURNAL_INTENTS,
             ".treer-transfer-upl_journal",
-            &Vec::<(String, String)>::new(),
+            &kept,
         )?;
+        *self
+            .unswept
+            .lock()
+            .map_err(|_| failure("state_error", "upload sweep lock poisoned"))? = kept;
         let mut results: Vec<StoredResult> = read_journal(&journal, JOURNAL_RESULTS)?;
         let now = now_epoch();
         results.retain(|r| {
@@ -282,10 +350,13 @@ impl Uploads {
     }
 
     fn persist_intents(&self, entries: &HashMap<String, Upload>) -> Result<(), ProtocolError> {
-        let records: Vec<(String, String)> = entries
-            .iter()
-            .map(|(id, upload)| (upload.path.clone(), id.clone()))
-            .collect();
+        let mut records: Vec<(String, String)> =
+            self.unswept.lock().map(|u| u.clone()).unwrap_or_default();
+        records.extend(
+            entries
+                .iter()
+                .map(|(id, upload)| (upload.path.clone(), id.clone())),
+        );
         let journal = self.open_root()?.transfer_journal().map_err(io_failure)?;
         write_journal(
             &journal,
@@ -357,10 +428,13 @@ impl Uploads {
         }
         // Intent first, then the staging file, so a crash in between leaves a
         // recorded name for the startup sweep.
-        let mut planned: Vec<(String, String)> = entries
-            .iter()
-            .map(|(id, upload)| (upload.path.clone(), id.clone()))
-            .collect();
+        let mut planned: Vec<(String, String)> =
+            self.unswept.lock().map(|u| u.clone()).unwrap_or_default();
+        planned.extend(
+            entries
+                .iter()
+                .map(|(id, upload)| (upload.path.clone(), id.clone())),
+        );
         planned.push((path.clone(), upload_id.to_owned()));
         let journal = root.transfer_journal().map_err(io_failure)?;
         write_journal(
@@ -393,6 +467,10 @@ impl Uploads {
                 committed_hash: Sha256::new(),
                 created: now,
                 touched: now,
+                #[cfg(test)]
+                aged_idle: Duration::ZERO,
+                #[cfg(test)]
+                aged_lifetime: Duration::ZERO,
             },
         );
         Ok(())
@@ -460,7 +538,7 @@ impl Uploads {
                 .expect("active upload keeps its staging file")
                 .file_mut();
             #[cfg(test)]
-            if FAIL_NEXT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            if take_injected_write_failure(upload_id) {
                 let _ = file.write_all(&content[..content.len() / 2]);
                 Err(std::io::Error::other("injected short write"))
             } else {
@@ -725,7 +803,7 @@ impl Uploads {
         let lifetime = Duration::from_secs(MACHINE_UPLOAD_MAX_LIFETIME_SECONDS);
         let before = entries.len();
         entries.retain(|id, upload| {
-            let keep = upload.touched.elapsed() < idle && upload.created.elapsed() < lifetime;
+            let keep = upload.idle_for() < idle && upload.lived_for() < lifetime;
             if !keep {
                 tracing::warn!(upload_id = %id, "reaped an abandoned machine upload");
             }
@@ -738,13 +816,30 @@ impl Uploads {
         reaped
     }
 
+    /// Ages one upload for the reaper without moving any `Instant` backwards.
     #[cfg(test)]
     pub fn age_for_test(&self, upload_id: &str, idle: Duration, lifetime: Duration) {
         let mut entries = self.entries.lock().unwrap();
         if let Some(upload) = entries.get_mut(upload_id) {
-            upload.touched = Instant::now() - idle;
-            upload.created = Instant::now() - lifetime;
+            upload.aged_idle = idle;
+            upload.aged_lifetime = lifetime;
         }
+    }
+
+    /// Writes bytes into the staging file through the Controller's own handle
+    /// (the only handle that may write it; Windows opens it with read-only
+    /// sharing), then restores the write position. Models a corrupted or
+    /// mislengthed staging file for the pre-publish verification tests.
+    #[cfg(test)]
+    pub fn write_staging_for_test(&self, upload_id: &str, offset: u64, bytes: &[u8]) {
+        let mut entries = self.entries.lock().unwrap();
+        let upload = entries.get_mut(upload_id).expect("active upload");
+        let written = upload.written;
+        let file = upload.staged.as_mut().expect("staging").file_mut();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(bytes).unwrap();
+        file.flush().unwrap();
+        file.seek(SeekFrom::Start(written)).unwrap();
     }
 }
 

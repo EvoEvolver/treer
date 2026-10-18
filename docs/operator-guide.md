@@ -1726,7 +1726,9 @@ environment hygiene rather than credential or filesystem isolation.
 
 The machine details page also uploads one file of up to 128 MiB into an
 existing directory beneath the Host root (16 MiB for Controllers that predate
-`machine.upload.v3`; the Console then falls back to the legacy route for small
+`machine.upload.v3` and, for now, for Windows Controllers, which do not
+advertise the chunked contract and refuse its commands until the validation
+tracked in #171; the Console then falls back to the legacy route for small
 files and reports `controller_update_required` for larger ones). The browser
 sends the file in parts of at most 8 MiB, each a short request that survives a
 slow link and the five-minute request limit of hosted edges; a dropped

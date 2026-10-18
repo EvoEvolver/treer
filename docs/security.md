@@ -133,7 +133,11 @@ or configuration contents. Failed launch retains the newly saved specification.
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
   output, and file content.
-- Chunked, resumable browser upload (#166; capability `machine.upload.v3`;
+- Chunked, resumable browser upload (#166; capability `machine.upload.v3`,
+  advertised only where the Controller supports it, not on Windows until #171;
+  the Controller's command dispatch refuses any command whose required
+  capability it does not advertise, so the unvalidated Windows path is
+  unreachable while the legacy route stays;
   routes `POST .../machines/{id}/uploads`, `GET .../uploads`,
   `GET|DELETE .../uploads/{upload_id}`, `PUT .../uploads/{upload_id}/parts`,
   `POST .../uploads/{upload_id}/commit`). The Railway edge ends any request

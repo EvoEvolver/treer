@@ -2479,24 +2479,53 @@ async fn chunked_upload_bounds_active_uploads_reaps_idle_ones_and_sweeps_after_r
         treer_protocol::MACHINE_UPLOAD_MAX_ACTIVE - 1
     );
     // A replacement Controller sweeps exactly the staging names its
-    // predecessor recorded, and nothing else.
+    // predecessor recorded, and nothing else. Here the predecessor is still
+    // alive and holds its staging files open: on Windows the sweep cannot
+    // delete them (sharing mode), so begin must still succeed, the held names
+    // stay recorded for the next sweep, and nothing else is touched.
+    let recorded_before = staging_files(&root).len();
     std::fs::write(root.join(".treer-transfer-upl_unrecorded"), b"not ours").unwrap();
     let replacement = crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
     replacement
         .begin("upl_fresh00001", ".", "fresh.bin", false, Some(8))
         .unwrap();
     let after = staging_files(&root);
-    assert_eq!(
-        after,
-        vec![
-            ".treer-transfer-upl_fresh00001".to_string(),
-            ".treer-transfer-upl_unrecorded".to_string()
-        ],
-        "recorded intents swept, unrecorded names untouched"
-    );
+    assert!(after.contains(&".treer-transfer-upl_fresh00001".to_string()));
+    assert!(after.contains(&".treer-transfer-upl_unrecorded".to_string()));
+    if cfg!(windows) {
+        assert_eq!(
+            replacement.unswept_for_test().len(),
+            recorded_before,
+            "held-open names are kept for the next sweep"
+        );
+        assert_eq!(after.len(), recorded_before + 2);
+    } else {
+        assert!(replacement.unswept_for_test().is_empty());
+        assert_eq!(
+            after,
+            vec![
+                ".treer-transfer-upl_fresh00001".to_string(),
+                ".treer-transfer-upl_unrecorded".to_string()
+            ],
+            "recorded intents swept, unrecorded names untouched"
+        );
+    }
     assert!(replacement.abort("upl_fresh00001").unwrap());
     std::fs::remove_file(root.join(".treer-transfer-upl_unrecorded")).unwrap();
     host_task.abort();
+    // The test leaves seven uploads active on purpose, so their staging
+    // handles stay open inside the predecessor's registry; on Windows the
+    // directory cannot be removed while they are. Abort them through the
+    // Controller API, which closes and removes each staging file
+    // deterministically, before dropping both registries.
+    drop(replacement);
+    for index in 2..treer_protocol::MACHINE_UPLOAD_MAX_ACTIVE {
+        assert!(runtime
+            .abort_upload(&format!("upl_active{index:03}"))
+            .unwrap());
+    }
+    assert!(runtime.abort_upload("upl_extra0001").unwrap());
+    drop(runtime);
     std::fs::remove_dir_all(root).unwrap();
 }
 
@@ -2508,7 +2537,7 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
     runtime
         .begin_upload("upl_short0002", ".", "short.bin", false, Some(6))
         .unwrap();
-    crate::machine_upload::FAIL_NEXT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+    *crate::machine_upload::FAIL_NEXT_WRITE_FOR.lock().unwrap() = Some("upl_short0002".into());
     let error = runtime
         .append_upload_chunk("upl_short0002", Some(0), &b64(b"abc"))
         .unwrap_err();
@@ -2548,7 +2577,12 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
     runtime
         .commit_upload_part("upl_tamper001", 0, 3, &sha(b"abc"))
         .unwrap();
-    std::fs::write(root.join(".treer-transfer-upl_tamper001"), b"abX").unwrap();
+    // Through the Controller's own handle: production never writes the file
+    // from outside, and Windows refuses an external writer by sharing mode.
+    runtime
+        .inner
+        .uploads
+        .write_staging_for_test("upl_tamper001", 0, b"abX");
     let error = runtime.commit_upload("upl_tamper001").unwrap_err();
     assert_eq!(error.code, "machine_upload_content_mismatch");
     assert!(!root.join("tamper.bin").exists());
@@ -2567,7 +2601,10 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
     runtime
         .append_upload_chunk("upl_length001", Some(0), &b64(b"ab"))
         .unwrap();
-    std::fs::write(root.join(".treer-transfer-upl_length001"), b"abcd").unwrap();
+    runtime
+        .inner
+        .uploads
+        .write_staging_for_test("upl_length001", 2, b"cd");
     let error = runtime
         .commit_upload_part("upl_length001", 0, 2, &sha(b"ab"))
         .unwrap_err();
@@ -2577,6 +2614,92 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
         0
     );
     assert!(runtime.abort_upload("upl_length001").unwrap());
+    host_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
+async fn chunked_upload_capability_matches_the_dispatch_gate_and_legacy_stays() {
+    let (runtime, root, host_task) = upload_fixture().await;
+    let advertised = runtime.advertised_capabilities();
+    let v3 = advertised.contains(&treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3.to_string());
+    assert_eq!(
+        v3,
+        crate::machine_upload::chunked_upload_supported(),
+        "the capability is advertised exactly where chunked uploads are supported"
+    );
+    assert_eq!(v3, !cfg!(windows), "Windows waits for the #171 validation");
+    let begin = |size: Option<u64>| treer_protocol::AgentCommand::UploadBegin {
+        upload_id: "upl_gate000001".into(),
+        directory: ".".into(),
+        file_name: "gate.bin".into(),
+        overwrite: false,
+        size,
+    };
+    // The dispatch refuses every v3 command where the capability is not
+    // advertised and keeps the legacy commands.
+    assert_eq!(
+        crate::proxy::command_permitted(&advertised, &begin(Some(8))),
+        v3
+    );
+    assert_eq!(
+        crate::proxy::command_permitted(
+            &advertised,
+            &treer_protocol::AgentCommand::UploadChunk {
+                upload_id: "upl_gate000001".into(),
+                content_base64: String::new(),
+                offset: Some(0),
+            }
+        ),
+        v3
+    );
+    assert_eq!(
+        crate::proxy::command_permitted(
+            &advertised,
+            &treer_protocol::AgentCommand::UploadPartCommit {
+                upload_id: "upl_gate000001".into(),
+                offset: 0,
+                length: 1,
+                sha256: "00".into(),
+            }
+        ),
+        v3
+    );
+    assert_eq!(
+        crate::proxy::command_permitted(
+            &advertised,
+            &treer_protocol::AgentCommand::UploadResult {
+                upload_id: "upl_gate000001".into(),
+            }
+        ),
+        v3
+    );
+    assert!(crate::proxy::command_permitted(&advertised, &begin(None)));
+    assert!(crate::proxy::command_permitted(
+        &advertised,
+        &treer_protocol::AgentCommand::UploadChunk {
+            upload_id: "upl_gate000001".into(),
+            content_base64: String::new(),
+            offset: None,
+        }
+    ));
+    assert!(crate::proxy::command_permitted(
+        &advertised,
+        &treer_protocol::AgentCommand::UploadCommit {
+            upload_id: "upl_gate000001".into(),
+        }
+    ));
+    // Legacy begin, append and commit work on every platform.
+    runtime
+        .begin_upload("upl_legacy0002", ".", "legacy2.bin", false, None)
+        .unwrap();
+    runtime
+        .append_upload_chunk("upl_legacy0002", None, &b64(b"xy"))
+        .unwrap();
+    let legacy = runtime.commit_upload("upl_legacy0002").unwrap();
+    assert_eq!(legacy.bytes_written, 2);
+    assert_eq!(std::fs::read(root.join("legacy2.bin")).unwrap(), b"xy");
+    assert!(staging_files(&root).is_empty());
     host_task.abort();
     std::fs::remove_dir_all(root).unwrap();
 }
