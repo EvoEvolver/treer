@@ -356,8 +356,8 @@ later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) 
   have something due are probed; an Agent found busy or unreachable is not probed again
   within the same minute, however many other wake-ups there are.
 - **One Message per Agent per moment.** Everything due for the same Agent at the same poll
-  is one Message listing up to ten issue IDs (`+N more` beyond that) plus the App link
-  (only a plain `http(s)` URL is ever included) sent with `treer message send` under the
+  is one Message listing up to ten issue IDs (`+N more` beyond that) plus the fixed command
+  `issues list --assignee me --unresolved` (reminders only go to Agents; no URL, no Tree path) sent with `treer message send` under the
   App's own runtime identity; each issue keeps its own backoff. Bodies never contain titles,
   descriptions or comments. No token is read, logged or put on a command line.
 - **Idempotent and honest about failure.** The Message idempotency key covers the Agent,

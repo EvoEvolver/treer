@@ -80,8 +80,8 @@ class ReminderBase(unittest.TestCase):
     def act(self, issue_id, action, body, actor=ACTOR):
         return self.store.mutate(issue_id, action, body, actor, PEOPLE)
 
-    def reminders(self, treer, schedule=DEFAULT, link=lambda: 'https://issues.example/', store=None, skip=None):
-        return Reminders(store or self.store, link, clock=lambda: self.now, runner=treer, log=self.logs.append, schedule=schedule, skip=skip)
+    def reminders(self, treer, schedule=DEFAULT, store=None, skip=None):
+        return Reminders(store or self.store, clock=lambda: self.now, runner=treer, log=self.logs.append, schedule=schedule, skip=skip)
 
     def advance(self, seconds):
         self.now += seconds
@@ -245,7 +245,7 @@ class AggregationAndDeliveryTest(ReminderBase):
         self.assertIn(f'#{a1}, #{a2}', body)
         self.assertIn('2 unresolved issues', body)
         self.assertNotIn('Secret', body, 'titles and descriptions never leave the App')
-        self.assertIn('https://issues.example/', body)
+        self.assertIn('issues list --assignee me --unresolved', body)
         self.act(a2, 'comment', {'body': 'ping'}, OTHER)                       # only a2 resets, counted from this moment
         self.advance(10 * MIN)
         r.tick()                                                               # a2 is due again (10m after its activity), a1 is not (20m)
@@ -321,15 +321,16 @@ class AggregationAndDeliveryTest(ReminderBase):
         r.tick()
         self.assertEqual(sorted(treer.probes()), ['ag_a', 'ag_b'])
 
-    def test_link_is_resolved_once_and_only_when_sending(self):
-        self.issue(assignee='ag_a'); self.issue(assignee='ag_b')
-        calls = []
-        r = self.reminders(FakeTreer({'ag_a': 'idle', 'ag_b': 'idle'}), link=lambda: calls.append(1) or 'http://x/')
-        r.tick()
-        self.assertEqual(calls, [])
-        self.advance(FIRST)
-        r.tick()
-        self.assertEqual(len(calls), 1)
+    def test_body_has_a_fixed_cli_reference_and_no_url_title_or_path(self):
+        self.issue(assignee='ag_a')
+        treer = FakeTreer({'ag_a': 'idle'})
+        r = self.reminders(treer)
+        r.tick(); self.advance(FIRST); r.tick()
+        body = treer.body()
+        self.assertTrue(body.endswith('\nissues list --assignee me --unresolved'))
+        self.assertEqual(len(body.splitlines()), 2)
+        for forbidden in ('http', 'Secret', '/'):
+            self.assertNotIn(forbidden, body)
 
     def test_skip_labels_default_and_configuration(self):
         self.assertEqual(skip_labels({}), ('epic',))
@@ -495,7 +496,7 @@ else:
 ''')
         script.chmod(script.stat().st_mode | stat.S_IXUSR)
         self.issue(assignee='ag_a')
-        r = Reminders(self.store, lambda: 'http://issues.treer/', str(script), clock=lambda: self.now, log=self.logs.append, schedule=DEFAULT)
+        r = Reminders(self.store, str(script), clock=lambda: self.now, log=self.logs.append, schedule=DEFAULT)
         r.tick()
         self.advance(FIRST)
         self.assertEqual(r.tick()['sent'], 1)
@@ -503,7 +504,7 @@ else:
         self.assertEqual(calls[0], ['agent', 'show', 'ag_a'])
         self.assertEqual(calls[1][:4], ['message', 'send', '--to', 'ag_a'])
         self.assertEqual(self.logs, [])
-        missing = Reminders(self.store, lambda: '', str(script) + '-missing', clock=lambda: self.now + 2 * HOUR, log=self.logs.append, schedule=DEFAULT)
+        missing = Reminders(self.store, str(script) + '-missing', clock=lambda: self.now + 2 * HOUR, log=self.logs.append, schedule=DEFAULT)
         self.assertEqual(missing.tick()['sent'], 0)
 
 

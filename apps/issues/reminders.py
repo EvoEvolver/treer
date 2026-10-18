@@ -12,7 +12,7 @@ schedule, and issues unresolved at deployment time simply start their first inte
 Sending: `treer agent show` to check idleness, `treer message send` under the App's own runtime identity. No credential is
 read, logged or put on a command line. A failed send is not recorded (the same idempotency key is used on the retry). The
 key covers the Agent, the issue set and each issue's backoff step, so a crash between send and record cannot duplicate a
-reminder and different steps never collide. Message bodies carry only issue IDs and a link, never titles or descriptions.
+reminder and different steps never collide. Message bodies carry only issue IDs and a fixed CLI reference, never titles or descriptions.
 """
 import collections
 import hashlib
@@ -98,8 +98,8 @@ def safe_link(base_url):
 
 
 class Reminders:
-    def __init__(self, store, base_url, treer_bin='treer', clock=time.time, runner=None, log=None, skip=None, schedule=None):
-        self.store, self.base_url, self.treer_bin, self.clock = store, base_url, treer_bin, clock
+    def __init__(self, store, treer_bin='treer', clock=time.time, runner=None, log=None, skip=None, schedule=None):
+        self.store, self.treer_bin, self.clock = store, treer_bin, clock
         self.skip = skip
         self.schedule = schedule or backoff()
         self.runner = runner or self.run_treer
@@ -121,12 +121,13 @@ class Reminders:
             return False
         return isinstance(info, dict) and info.get('agent_id') == agent and info.get('status') == 'idle' and info.get('busy') is not True
 
-    def body(self, issue_ids, link):
+    REF = 'issues list --assignee me --unresolved'   # reminders only go to Agents: a fixed command, no URL, no tree path
+
+    def body(self, issue_ids):
         shown = ', '.join(f'#{i}' for i in issue_ids[:MAX_LISTED])
         more = f' (+{len(issue_ids) - MAX_LISTED} more)' if len(issue_ids) > MAX_LISTED else ''
         noun = 'issue' if len(issue_ids) == 1 else 'issues'
-        return (f'Issues reminder: you are idle and have {len(issue_ids)} unresolved {noun} assigned to you: {shown}{more}.\n'
-                f'{link}'.rstrip('\n'))
+        return f'Issues reminder: you are idle and have {len(issue_ids)} unresolved {noun} assigned to you: {shown}{more}.\n{self.REF}'
 
     @staticmethod
     def key(agent, rows):
@@ -144,7 +145,6 @@ class Reminders:
         for row in due:
             by_agent.setdefault(row['assignee'], []).append(row)
         sent = skipped = 0
-        link = None
         for agent, rows in by_agent.items():
             if self.retry_after.get(agent, 0) > now:
                 skipped += 1            # looked at a moment ago and it was busy: do not probe again before the next poll
@@ -153,8 +153,7 @@ class Reminders:
                 self.retry_after[agent] = now + POLL
                 skipped += 1            # busy, unknown or unreachable: no message and no growth; look again next poll
                 continue
-            link = link if link is not None else safe_link(self.base_url)   # resolved once per poll, only when sending
-            status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body([r['issue_id'] for r in rows], link),
+            status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body([r['issue_id'] for r in rows]),
                                      '--idempotency-key', self.key(agent, rows)])
             if status != 0:
                 self.retry_after[agent] = now + POLL
