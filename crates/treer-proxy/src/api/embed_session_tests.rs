@@ -313,6 +313,12 @@ async fn embed_bootstrap_page_is_fixed_and_frameable_by_the_console_only() {
             body.contains(&format!("var CONSOLE = \"{CONSOLE}\"")),
             "{body}"
         );
+        // A failure report after the handshake began carries the nonce hash,
+        // which only the bootstrap document knows (web-dev 4782).
+        assert!(
+            body.contains("if (hash) message.nonce_hash = hash;"),
+            "{body}"
+        );
         assert!(
             !body.contains(AGENT_ID),
             "the page reveals nothing about the Agent"

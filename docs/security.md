@@ -1280,7 +1280,13 @@ Partitioned; Max-Age=43200`. The page then calls `GET /.treer/embed/check`
 with credentials: `204` proves the partitioned cookie is sent back and the
 frame navigates to the Agent UI; anything else (older Safari and other browsers
 that block third-party cookies, a timeout, a failed redeem) posts
-`{treer_embed: "cookies_blocked"}` and the Console falls back to the
+`{treer_embed: "cookies_blocked", nonce_hash}`; the hash is present once the
+page computed it, and the Console accepts a failure report after `ready` only
+when the hash matches the one it accepted: the Agent document that later
+replaces the bootstrap shares the frame's window and origin but never learned
+the hash, so it cannot imitate a bootstrap failure to pull the Console back to
+the shared origin (a hash-less failure is accepted only before any `ready`).
+On such a failure the Console falls back to the
 Proxy-origin tunnel, visibly, or offers a new tab only when the operator set
 `--agent-embed-fallback refuse` (the tunnel then answers
 `503 embedded_ui_requires_isolated_origin`). Codes are never logged. Embed
