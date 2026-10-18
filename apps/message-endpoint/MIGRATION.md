@@ -21,9 +21,10 @@ python3 apps/message-endpoint/tools/telegram-migration-plan.py \
 
 This standard-library offline aid is not a third runtime program or Managed
 App. It never invokes Treer, opens a network connection, reads a token/config or
-changes SQL state. It uses a read transaction and `mode=ro`, including committed
-WAL. SQLite can still acquire reader locks/shared-memory reader marks; use a
-backup when physical immutability of the original files is required. The output
+changes SQL state. It requires a closed online-backup snapshot with no WAL/SHM/rollback-journal files and opens it
+with `mode=ro&immutable=1`, so it cannot create or modify SQLite reader marks or
+sidecars. A live WAL source is rejected: its owner/release must make the
+consistent online backup first. Apps-dev must not run this against production. The output
 is exclusive-created 0600 and includes only bounded public bot/target IDs,
 allowlists, status counts, offset conversion and blockers. It omits bodies,
 labels, errors, credentials and message mappings themselves. Unknown schema,
@@ -60,10 +61,18 @@ request cannot be reconstructed from local status alone.
    integrity checks and the final bot/offset/registry snapshot. Token material
    stays out of reports, argv and logs. Old threads/URLs and author identities
    remain valid; retain the old read-only service if historical URLs require it.
-4. **Owner/release stops the old poller and verifies it has stopped.** A database
+4. Owner decides whether to rotate the production bot token (recommended), and
+   installs it through the new hub's write-only token page without putting it in
+   argv, links or reports. **Owner/release stops the old poller and verifies its
+   exact process identity has stopped.** A database
    row, a stale PID or a config flag does not prove absence of another poller.
-   Check that Telegram has no competing webhook or other consumer, without
-   logging tokens. Never run the old bridge and new hub against the same bot.
+   The owner checks webhook configuration with getWebhookInfo only, keeping
+   the token out of argv and logs. Do not call getUpdates as an inventory probe:
+   that could consume or confirm updates. Process identity must establish that
+   other consumers stopped. Only after owner approval of the new poller, check
+   that its normal getUpdates is conflict-free; a conflict/second consumer is an immediate stop,
+   not a reason to retry against production. Never run the old bridge and new
+   hub against the same bot.
 5. With BOTH consumers stopped, a separately reviewed offline importer must
    verify snapshot identity/checksums, import the monotonic next offset and
    historical reply/context/dedup mappings into a fresh private hub state, and
@@ -98,3 +107,8 @@ into the old state. Preserve new Core authors and IDs; do not rewrite them as
 old POCs. A reviewed reverse importer is not implemented; post-traffic automatic
 rollback is therefore unavailable. The safe fallback is containment (paused,
 no poller) and a manual reviewed reconciliation, with the outage disclosed.
+
+Recovery backups are held only by the owner/release operator in private storage.
+After retirement acceptance, rotate the bot token again to retire the old
+bridge credential, and remove retired config/token backups under the operator
+retention policy. Retain the credential-free cutover journal as needed.

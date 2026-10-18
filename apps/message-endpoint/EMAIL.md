@@ -37,8 +37,12 @@ App's opaque session and never the Treer login.
 
 New private SQLite tables hold generation-pinned targets, thread/message IDs,
 durable email intents/attempts/receipts and member reply idempotency. Thread IDs
-are stable opaque digests, not addresses. Pending work uses existing caps and
-pause/readback/generation fencing. Network work never holds the SQLite mutex.
+are stable opaque digests, not addresses. Pending work is limited to 1,000 messages / 16 MiB per binding and 10,000 /
+128 MiB globally. Send attempts are capped at 10 per minute and 100 per day per
+binding, and 60 per minute / 1,000 per day globally. Each intent gets at most
+eight attempts with a 60-second lease and bounded backoff. Owner pause blocks
+new dispatch immediately (an in-flight network request cannot be recalled);
+readback/generation fencing applies immediately before dispatch. Network work never holds the SQLite mutex.
 Persist the frozen notification intent and idempotency before dispatch; preserve
 retry/lease/backoff through restart. Check current binding, membership and
 allowlist again before a queued send. Conflict on changed idempotent payloads.
@@ -60,13 +64,16 @@ off unless separately authorized, and the only permitted real recipient is
 This cap cannot be broadened by Agent text or an email binding. Missing provider
 configuration produces an explicit unavailable/outbox result, never a fake sent
 receipt. No full Core body, user-controlled email HTML or external URL goes into
-mail: fixed subject, fixed one-line summary, configured private thread link.
+mail: fixed subject, a template with no text derived from Core/external
+messages, and the configured dedicated hub App origin plus generated thread ID.
+No caller-selected URL, redirect or link credential is permitted.
 
 ## Review and limitations
 
 Email extends the hub's browser trust boundary from owner settings to a scoped
 member thread view. That change needs Core/security cross-review before release.
-Tests must cover cross-member reads/replies, revoked contacts/membership, forged
+Tests must cover two-member IDOR reads/replies, former members, revoked
+contacts/membership, forged
 or expired tokens/audience mismatch, CSRF, text XSS, idempotency/concurrency,
 pause/generation races, quotas, crash replay and summary-only outbox content.
 Desktop/390 light/dark browser checks remain hermetic.

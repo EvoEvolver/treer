@@ -61,13 +61,24 @@ class MigrationPlan(unittest.TestCase):
         for value in ['-2','9'*25,'SYNTHETIC_TOKEN','4.2']:
             self.db.execute("INSERT OR REPLACE INTO metadata VALUES('last_update_id',?)",(value,));self.db.commit()
             with self.assertRaises(plan.Invalid):plan.inventory(self.path)
-    def test_wal_commits_are_in_snapshot_uncommitted_values_are_not(self):
+    def test_live_wal_rejected_and_closed_online_backup_includes_commits(self):
         self.db.execute('PRAGMA journal_mode=WAL')
         self.db.execute("UPDATE metadata SET value='50' WHERE key='last_update_id'");self.db.commit()
         for suffix in ['-wal','-shm']:Path(str(self.path)+suffix).chmod(0o600)
         self.db.execute("UPDATE metadata SET value='99' WHERE key='last_update_id'")
-        self.assertEqual(plan.inventory(self.path)['proposed_next_offset'],51)
+        with self.assertRaises(plan.Invalid):plan.inventory(self.path)
         self.db.rollback()
+        snapshot=self.root/'snapshot.sqlite3'
+        destination=sqlite3.connect(snapshot);snapshot.chmod(0o600)
+        self.db.backup(destination);destination.close()
+        self.assertEqual(plan.inventory(snapshot)['proposed_next_offset'],51)
+    def test_closed_snapshot_rejects_any_sidecar_without_touching_it(self):
+        for suffix in ['-wal','-shm','-journal']:
+            side=Path(str(self.path)+suffix)
+            side.write_bytes(b'SYNTHETIC_SIDE');side.chmod(0o600)
+            with self.assertRaises(plan.Invalid):plan.inventory(self.path)
+            self.assertEqual(side.read_bytes(),b'SYNTHETIC_SIDE')
+            side.unlink()
     def test_sources_symlinks_hardlinks_and_broad_permissions_rejected(self):
         link=self.root/'link';link.symlink_to(self.path)
         with self.assertRaises(plan.Invalid):plan.inventory(link)

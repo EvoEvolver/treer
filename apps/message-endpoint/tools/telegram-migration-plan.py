@@ -36,20 +36,20 @@ def private_source(path):
     parent = path.parent.stat()
     if parent.st_uid != os.getuid() or parent.st_mode & 0o077:
         raise Invalid('source_directory_not_private')
-    for suffix in ['-wal', '-shm']:
+    for suffix in ['-wal', '-shm', '-journal']:
         side = Path(str(path)+suffix)
         if side.exists() or side.is_symlink():
-            s = side.lstat()
-            if not stat.S_ISREG(s.st_mode) or s.st_nlink != 1 or s.st_uid != os.getuid() or s.st_mode & 0o077:
-                raise Invalid('source_sidecar_not_private')
-    return path, (info.st_dev, info.st_ino)
+            # Never touch a production WAL/SHM, even SQLite reader marks. The
+            # owner must first make a closed, consistent online-backup file.
+            raise Invalid('closed_online_backup_required')
+    return path, (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 def inventory(path):
     path, identity = private_source(path)
-    db = sqlite3.connect(path.as_uri()+'?mode=ro', uri=True, timeout=2)
+    db = sqlite3.connect(path.as_uri()+'?mode=ro&immutable=1', uri=True, timeout=2)
     try:
         db.execute('PRAGMA query_only=ON')
-        db.execute('BEGIN')  # consistent snapshot, including committed WAL
+        db.execute('BEGIN')  # closed immutable snapshot; no WAL/SHM access
         ticks = 0
         def budget():
             nonlocal ticks
@@ -103,7 +103,7 @@ def inventory(path):
             report['blockers'].append('historical_context_mapping_requires_review')
         report['inventory_sha256'] = hashlib.sha256(json.dumps(report, sort_keys=True, separators=(',',':')).encode()).hexdigest()
         current = path.stat()
-        if (current.st_dev,current.st_ino) != identity:
+        if (current.st_dev,current.st_ino,current.st_size,current.st_mtime_ns) != identity:
             raise Invalid('source_changed')
         return report
     finally:
@@ -112,6 +112,9 @@ def inventory(path):
 def write_private(path, report):
     path = Path(os.path.abspath(path))
     parent = path.parent
+    for ancestor in Path(__file__).resolve().parents:
+        if (ancestor/'.git').exists() and path.is_relative_to(ancestor):
+            raise Invalid('report_must_be_outside_repository')
     for part in [parent, *parent.parents]:
         if part.is_symlink():
             raise Invalid('symlink_output_parent')
