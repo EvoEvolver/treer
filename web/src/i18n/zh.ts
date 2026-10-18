@@ -444,6 +444,8 @@ export const zh: Messages = {
   "surface.show_logs": "显示日志",
   "surface.embed_load_compatibility": "加载兼容视图（共享来源）",
   "surface.app_shared_origin": "此 App 界面与控制面共享来源。",
+  "surface.embed_unknown": "无法检查界面隔离。请重新加载 Console 页面以重试。",
+  "surface.embed_timeout": "隔离界面未能及时加载。请重新加载此标签页重试，或在新的浏览器标签页中打开。",
   "surface.embed_checking": "正在检查界面隔离…",
   "surface.embed_fallback_checking": "隔离不可用，正在检查是否允许兼容视图…",
   "surface.embed_compatibility": "兼容视图：此界面与控制面共享来源。请在独立浏览器标签页中打开以使用隔离。",

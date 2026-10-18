@@ -5,14 +5,15 @@ import { fixture, gotoWorkspace, open, switchTab } from './fixtures/workspace-ta
 const id = 'ag_0123456789abcdef0123456789abcdef'
 const origin = 'https://ag-0123456789abcdef0123456789abcdef.agents.example.test'
 const hash = 'a'.repeat(64), code = 'iec_v1_' + 'b'.repeat(64)
-async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'success', strict = false, realBootstrap = false) {
+async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'success', strict = false, realBootstrap = false, mintWait?: Promise<void>) {
   const live = await fixture(page, { 'tab-1': origin+'/' }, { 'tab-1': id })
   await page.route('**/api/auth/config', r => r.fulfill({ json: { capabilities: ['agent.interface-origin.v1', 'agent.interface-embed.v1'] } }))
   let mints = 0, probes = 0, delivered = 0, mintedHash = ''
-  await page.route('**/interface/embed-authorization', r => {
+  await page.route('**/interface/embed-authorization', async r => {
     mints++; mintedHash = r.request().postDataJSON().browser_nonce_hash
     if (!realBootstrap) expect(mintedHash).toBe(hash)
-    return r.fulfill({ json: { code, origin, expires_in: 30 } })
+    if (mintWait) await mintWait
+    return r.fulfill({ json: { code, origin, expires_in: 30 } }).catch(() => {})
   })
   await page.route('**/api/workspaces/**/interface/ui/**', r => {
     probes++
@@ -71,7 +72,7 @@ test('isolated Agent retains draft and cannot force a shared-origin downgrade', 
   await expect(page.getByText('Checking interface isolation…', { exact: true })).toHaveCount(0)
   await send(page, { treer_embed: 'ready', nonce_hash: hash })
   await send(page, { treer_embed: 'cookies_blocked', nonce_hash: hash })
-  await page.clock.fastForward(16_000)
+  await page.clock.fastForward(21_000)
   await send(page, { treer_embed: 'cookies_blocked' })
   await switchTab(page, 'Overview'); await switchTab(page, 'Alpha')
   await expect(ui.getByRole('textbox')).toHaveValue('retained draft')
@@ -89,6 +90,7 @@ for (const strict of [false, true]) test(`cookie failure requires explicit choic
     await expect(page.locator('iframe')).toHaveCount(0); expect(s.probes()).toBe(1)
     await choice.focus(); await page.keyboard.press('Enter')
     await expect(page.frameLocator('iframe').getByRole('heading')).toHaveText('Compatibility interface'); expect(s.probes()).toBe(2)
+    await expect(page.getByRole('alert')).toBeFocused()
   }
   await expect(page.getByRole('link', { name: 'Open in new browser tab' })).toHaveAttribute('href', origin+'/')
   await expect(page.getByRole('link', { name: 'Open in new browser tab' })).toHaveAttribute('rel', 'noopener noreferrer')
@@ -118,7 +120,7 @@ test('late mint after timeout is dropped without credentials or fallback', async
   const held = new Promise<void>(resolve => { release = resolve })
   await page.route('**/interface/embed-authorization', async r => { started = true; await held; await r.fulfill({ json: { code, origin, expires_in: 30 } }).catch(() => {}) })
   await send(page, { treer_embed: 'ready', nonce_hash: hash }); await expect.poll(() => started).toBe(true)
-  await page.clock.fastForward(16_000); await expect(page.getByRole('alert')).toContainText('Cannot open an isolated')
+  await page.clock.fastForward(21_000); await expect(page.getByRole('alert')).toContainText('did not load in time')
   release(); await expect(page.locator('iframe')).toHaveCount(0); expect(s.delivered()).toBe(0); expect(s.probes()).toBe(0)
 })
 
@@ -162,7 +164,7 @@ for (const discovery of ['legacy', 'unavailable'] as const) test(`capability dis
   await page.route('**/api/auth/config', r => discovery === 'legacy' ? r.fulfill({ status: 404, json: {} }) : r.fulfill({ status: 500, json: {} }))
   await page.reload(); await gotoWorkspace(page); await open(page, 'Alpha')
   if (discovery === 'legacy') await expect(page.frameLocator('iframe').getByRole('heading')).toHaveText('Compatibility interface')
-  else { await expect(page.getByRole('alert')).toContainText('Cannot open an isolated'); await expect(page.locator('iframe')).toHaveCount(0) }
+  else { await expect(page.getByRole('alert')).toContainText('Cannot check interface isolation'); await expect(page.locator('iframe')).toHaveCount(0) }
   expect(s.mints()).toBe(0)
 })
 
@@ -199,4 +201,16 @@ test('the assigned WindowProxy at a different origin cannot mint or request fall
   }, { target: new URL(page.url()).origin, hash })
   await page.waitForTimeout(100)
   expect(s.mints()).toBe(0); expect(s.probes()).toBe(0)
+})
+
+test('the actual bootstrap 15 s timeout can offer compatibility before the Console deadline', async ({ page }) => {
+  await page.clock.install()
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  const s = await setup(page, 'success', false, true, held)
+  await expect.poll(s.mints).toBe(1)
+  await page.clock.fastForward(16_000)
+  await expect(page.getByRole('button', { name: 'Load compatibility view (shared origin)' })).toBeVisible()
+  release()
+  expect(s.probes()).toBe(1)
 })

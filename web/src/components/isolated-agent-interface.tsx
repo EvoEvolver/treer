@@ -4,7 +4,7 @@ import { postEmbedTheme, readEmbedAppearance, withEmbedTheme } from '@/lib/embed
 import type { Theme } from '@/lib/theme'
 import { t } from '@/i18n'
 
-type Phase = 'bootstrap' | 'framed' | 'checking-fallback' | 'offer-compatibility' | 'compatibility' | 'refused' | 'unavailable'
+type Phase = 'bootstrap' | 'framed' | 'checking-fallback' | 'offer-compatibility' | 'compatibility' | 'refused' | 'unavailable' | 'timed-out'
 
 // Probe only the fixed Proxy tunnel. Never execute its bytes while deciding
 // whether the deployment permits the weaker compatibility view.
@@ -40,21 +40,24 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
   title: string; theme: Theme; pending?: boolean
 }) {
   const frame = useRef<HTMLIFrameElement>(null)
+  const noticeRegion = useRef<HTMLDivElement>(null)
   const loaded = useRef<() => void>(() => {})
   const [phase, setPhase] = useState<Phase>(origin ? 'bootstrap' : 'unavailable')
   // Appearance is an initial public hint; later changes use exact-origin messages.
   const bootstrap = useMemo(() => origin ? withEmbedTheme(new URL('/.treer/embed', origin).href, theme, readEmbedAppearance()) : null, [origin]) // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { postEmbedTheme(frame.current, theme, readEmbedAppearance()) }, [theme])
+  useLayoutEffect(() => { if (phase === 'compatibility') noticeRegion.current?.focus() }, [phase])
   useLayoutEffect(() => {
     if (!origin || pending) return
     const expectedOrigin = new URL(origin).origin
     let active = true, ended = false, acceptedHash: string | undefined, sent = false, loads = 0
-    const deadline = Date.now() + 15_000
+    const deadline = Date.now() + 20_000
     const mint = new AbortController(), fallback = new AbortController()
     let fallbackTimer: ReturnType<typeof setTimeout> | undefined
     const stop = () => { ended = true; clearTimeout(timer); mint.abort() }
     const unavailable = () => { if (active) { stop(); setPhase('unavailable') } }
-    const timer = setTimeout(unavailable, 15_000)
+    // Give the bootstrap's own 15 s failure report time to reach the Console.
+    const timer = setTimeout(() => { if (active) { stop(); setPhase('timed-out') } }, 20_000)
     const compatibility = async () => {
       stop()
       setPhase('checking-fallback')
@@ -98,11 +101,11 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
   }, [workspaceId, agentId, origin, fallbackUrl, pending])
 
   const waiting = pending || phase === 'bootstrap' || phase === 'checking-fallback'
-  const error = !pending && (phase === 'unavailable' || phase === 'refused')
-  const notice = pending || phase === 'bootstrap' ? 'surface.embed_checking' : phase === 'checking-fallback' ? 'surface.embed_fallback_checking' : phase === 'compatibility' || phase === 'offer-compatibility' ? 'surface.embed_compatibility' : phase === 'refused' ? 'surface.embed_refused' : 'surface.embed_unavailable'
+  const error = !pending && (phase === 'unavailable' || phase === 'refused' || phase === 'timed-out')
+  const notice = pending || phase === 'bootstrap' ? 'surface.embed_checking' : phase === 'checking-fallback' ? 'surface.embed_fallback_checking' : phase === 'compatibility' || phase === 'offer-compatibility' ? 'surface.embed_compatibility' : phase === 'refused' ? 'surface.embed_refused' : phase === 'timed-out' ? 'surface.embed_timeout' : !origin ? 'surface.embed_unknown' : 'surface.embed_unavailable'
   const src = phase === 'compatibility' ? fallbackUrl : bootstrap
   return <div className="flex size-full min-h-0 min-w-0 flex-col overflow-hidden">
-    {(waiting || error || phase === 'compatibility' || phase === 'offer-compatibility') && <div role={error || phase === 'compatibility' || phase === 'offer-compatibility' ? 'alert' : 'status'} className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b bg-sidebar px-3 py-2 text-xs leading-5 text-foreground">
+    {(waiting || error || phase === 'compatibility' || phase === 'offer-compatibility') && <div ref={noticeRegion} tabIndex={-1} role={error || phase === 'compatibility' || phase === 'offer-compatibility' ? 'alert' : 'status'} className="flex shrink-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-b bg-sidebar px-3 py-2 text-xs leading-5 text-foreground">
       <p className="w-full min-w-0 sm:w-auto sm:flex-1">{t(notice)}</p>
       {phase === 'offer-compatibility' && <button type="button" onClick={() => setPhase('compatibility')} className="inline-flex min-h-11 items-center rounded-sm px-2 underline outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('surface.embed_load_compatibility')}</button>}
       {!pending && origin && <a href={origin} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center rounded-sm underline outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('app.open_in_new_tab')}</a>}
