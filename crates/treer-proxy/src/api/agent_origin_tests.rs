@@ -18,16 +18,16 @@ use treer_protocol::{
 };
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
-const AGENT_ID: &str = "ag_0123456789abcdef0123456789abcdef";
-const AGENT_HOST: &str = "ag-0123456789abcdef0123456789abcdef.apps.treer.example";
-const UNKNOWN_HOST: &str = "ag-ffffffffffffffffffffffffffffffff.apps.treer.example";
+pub(super) const AGENT_ID: &str = "ag_0123456789abcdef0123456789abcdef";
+pub(super) const AGENT_HOST: &str = "ag-0123456789abcdef0123456789abcdef.apps.treer.example";
+pub(super) const UNKNOWN_HOST: &str = "ag-ffffffffffffffffffffffffffffffff.apps.treer.example";
 const BASE: &str = "apps.treer.example";
 
-fn allow() -> PolicyEngine {
+pub(super) fn allow() -> PolicyEngine {
     PolicyEngine::allow_all()
 }
 
-fn deny() -> PolicyEngine {
+pub(super) fn deny() -> PolicyEngine {
     PolicyEngine::new(
         crate::policy::PolicyDecision::Deny(crate::policy::PolicyDenial::new(
             "policy_denied",
@@ -40,7 +40,7 @@ fn deny() -> PolicyEngine {
 /// The shared ingress fixture plus one managed Agent with a registered
 /// interface UI, its unrevoked credential row and Console sessions for the
 /// owner, a member and a non-member.
-async fn agent_fixture() -> Fixture {
+pub(super) async fn agent_fixture() -> Fixture {
     let fixture = fixture().await;
     let now = Utc::now();
     sqlx::query("INSERT INTO agent_credentials(agent_id,workspace_id,server_id,secret_hash,created_at) VALUES($1,'default','machine-a','unused',$2)")
@@ -84,7 +84,7 @@ async fn agent_fixture() -> Fixture {
     fixture
 }
 
-async fn send(
+pub(super) async fn send(
     fixture: &Fixture,
     policy: PolicyEngine,
     config: &IngressConfig,
@@ -101,7 +101,7 @@ async fn send(
     .await
 }
 
-fn navigation(host: &str, uri: &str) -> axum::http::request::Builder {
+pub(super) fn navigation(host: &str, uri: &str) -> axum::http::request::Builder {
     Request::builder()
         .uri(uri)
         .header(header::HOST, host)
@@ -109,7 +109,7 @@ fn navigation(host: &str, uri: &str) -> axum::http::request::Builder {
         .header("sec-fetch-dest", "document")
 }
 
-async fn error_of(result: Result<Response, ApiFailure>) -> (StatusCode, String) {
+pub(super) async fn error_of(result: Result<Response, ApiFailure>) -> (StatusCode, String) {
     match result {
         Ok(response) => {
             let status = response.status();
@@ -133,7 +133,7 @@ async fn agent_rows(fixture: &Fixture) -> i64 {
         .unwrap()
 }
 
-async fn ingress_sessions(fixture: &Fixture) -> i64 {
+pub(super) async fn ingress_sessions(fixture: &Fixture) -> i64 {
     sqlx::query_scalar("SELECT count(*) FROM ingress_sessions")
         .fetch_one(&fixture.auth.pool())
         .await
@@ -183,7 +183,7 @@ async fn authorize(
 
 /// The full browser flow on `host`: redirect to authorize, authorize as the
 /// session, callback; returns the ingress session cookie pair.
-async fn establish_session(
+pub(super) async fn establish_session(
     fixture: &Fixture,
     policy: PolicyEngine,
     config: &IngressConfig,

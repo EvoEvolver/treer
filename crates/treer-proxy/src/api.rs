@@ -144,8 +144,31 @@ struct ServiceIngressApi {
 }
 
 const INGRESS_SESSION_COOKIE: &str = "__Host-treer_ingress";
+const INGRESS_EMBED_SESSION_COOKIE: &str = "__Host-treer_ingress_embed";
 const TREER_AUTHORIZATION_HEADER: &str = "treer-authorization";
 const TREER_IDENTITY_TOKEN_HEADER: &str = "x-treer-identity-token";
+
+/// What the Console may do when an embed session cannot be established in
+/// the browser (third-party cookies blocked): fall back to the Proxy-origin
+/// tunnel, which shares the Proxy origin with the Agent page, or refuse so
+/// the Console offers "open in new tab" only (#156, security 4701 (8)).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EmbedFallback {
+    #[default]
+    Tunnel,
+    Refuse,
+}
+
+impl std::str::FromStr for EmbedFallback {
+    type Err = anyhow::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value.trim().to_ascii_lowercase().as_str() {
+            "tunnel" => Ok(Self::Tunnel),
+            "refuse" => Ok(Self::Refuse),
+            other => anyhow::bail!("embed fallback must be 'tunnel' or 'refuse', not {other:?}"),
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct IngressConfig {
@@ -156,6 +179,7 @@ pub struct IngressConfig {
     /// Admission control for public ingress (#146); defaults to no trusted
     /// front, so the TCP peer is the client.
     guard: crate::ingress_guard::IngressGuard,
+    embed_fallback: EmbedFallback,
 }
 
 impl IngressConfig {
@@ -205,6 +229,7 @@ impl IngressConfig {
             guard: crate::ingress_guard::IngressGuard::new(
                 crate::ingress_guard::TrustedProxies::none(),
             ),
+            embed_fallback: EmbedFallback::default(),
         })
     }
 
@@ -212,6 +237,31 @@ impl IngressConfig {
     pub fn with_guard(mut self, guard: crate::ingress_guard::IngressGuard) -> Self {
         self.guard = guard;
         self
+    }
+
+    pub fn with_embed_fallback(mut self, fallback: EmbedFallback) -> Self {
+        self.embed_fallback = fallback;
+        self
+    }
+
+    pub fn embed_fallback(&self) -> EmbedFallback {
+        self.embed_fallback
+    }
+
+    /// Embed sessions need a wildcard base domain for the `ag-` origins and
+    /// HTTPS, because their cookie is `Partitioned` + `SameSite=None`, which
+    /// browsers accept only with `Secure`.
+    pub(in crate::api) fn embed_available(&self) -> bool {
+        self.base_domain.is_some()
+            && self
+                .public_url
+                .as_ref()
+                .is_some_and(|url| url.scheme() == "https")
+    }
+
+    /// The Console origin (scheme, host, port) that may frame embed sessions.
+    pub(in crate::api) fn console_origin(&self) -> String {
+        self.app_public_url.origin().ascii_serialization()
     }
 
     pub fn guard(&self) -> &crate::ingress_guard::IngressGuard {
@@ -267,6 +317,13 @@ impl IngressConfig {
         self.url_for_hostname(&hostname)
             .ok()
             .map(|url| url.to_string())
+    }
+
+    /// The partitioned cookie of an embed session (#156); host-only like the
+    /// standalone cookie, under a different name so a token can never be
+    /// presented through the other cookie.
+    pub(in crate::api) fn embed_cookie_name(&self) -> &'static str {
+        INGRESS_EMBED_SESSION_COOKIE
     }
 
     fn ingress_cookie_name(&self) -> &'static str {
@@ -501,6 +558,8 @@ mod agent_origin_tests;
 #[cfg(test)]
 #[path = "api/app_dist_tests.rs"]
 mod app_dist_tests;
+#[cfg(test)]
+mod embed_session_tests;
 #[cfg(test)]
 #[path = "api/ingress_protection_tests.rs"]
 mod ingress_protection_tests;

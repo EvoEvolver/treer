@@ -81,6 +81,13 @@ struct Args {
     ingress_allow_wide_trust: bool,
     #[arg(
         long,
+        env = "TREER_AGENT_EMBED_FALLBACK",
+        default_value = "tunnel",
+        help = "When a browser blocks the partitioned embed session cookie: 'tunnel' lets the Console fall back to the Proxy-origin interface tunnel, 'refuse' answers that tunnel with 503 so the Console offers a new tab only"
+    )]
+    agent_embed_fallback: api::EmbedFallback,
+    #[arg(
+        long,
         env = "TREER_ARTIFACTS_DIR",
         default_value = "dist",
         help = "Directory containing <platform>/treer[-agent-server] binaries"
@@ -247,7 +254,8 @@ async fn main() -> anyhow::Result<()> {
     let server_limits = server::ServerLimits::default().with_trusted(trusted_proxies.clone());
     let ingress =
         api::IngressConfig::new(args.ingress_public_url, &proxy_public_url, &app_public_url)?
-            .with_guard(ingress_guard::IngressGuard::new(trusted_proxies));
+            .with_guard(ingress_guard::IngressGuard::new(trusted_proxies))
+            .with_embed_fallback(args.agent_embed_fallback);
     if !args.disable_auth && proxy_public_url.scheme() != "https" {
         warn!(%proxy_public_url, "authenticated proxy is using an insecure HTTP public URL");
     }

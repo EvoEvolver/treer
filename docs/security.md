@@ -863,9 +863,14 @@ the machine account. Anyone with that account's authority can modify the same
 state or execute an equivalent command.
 
 Browser sandbox flags do not isolate trusted App or Agent Interface JavaScript
-from the user's Proxy authority. Embedded pages share the Proxy origin and can
+from the user's Proxy authority. Embedded pages served through the Proxy-origin
+tunnel share the Proxy origin and can
 make authenticated requests to that origin; if the control plane is also hosted
 there, `allow-scripts` plus `allow-same-origin` permits access to the parent page.
+Agent interfaces can instead be embedded on their own `ag-<id>` origin through
+an embed session (#156, below), which removes the shared origin; the tunnel
+remains the fallback for browsers that block the partitioned cookie unless
+the operator sets `--agent-embed-fallback refuse`.
 Embedded interfaces may also open a new browser tab (`allow-popups` and
 `allow-popups-to-escape-sandbox`), for example to show the same interface full
 page. These popups are unsandboxed top-level pages; same-origin destinations
@@ -1245,6 +1250,59 @@ registered `ui_path`. Responses keep the Agent's CSP untouched (no
 `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` when the
 Agent did not set them.
 
+#### Embed sessions
+
+The standalone authorize flow cannot run inside the Console iframe: the
+authorize step requires a top-level navigation carrying the Console cookie,
+and the Agent origin's cookies are third-party in a frame. Embed sessions
+(#156, capability `agent.interface-embed.v1`) therefore split the flow. The
+Console, with its own session and the ordinary Console-origin CSRF rule,
+`POST`s `/api/workspaces/{ws}/agents/{id}/interface/embed-authorization` with
+the hash of a nonce the frame generated; the Proxy applies the same gate as the
+standalone authorize (membership, with a non-member answered as an unknown
+Agent; `agent.output.read` and `agent.prompt` for the human; interface
+registered) and answers a single-use code that lives 30 seconds and is bound
+to the user, the Agent, its `ag-` ingress row and that nonce hash; the response
+is `no-store` and carries no CORS allowance. The iframe loads the Proxy-owned
+bootstrap page `https://ag-<id>.<apps domain>/.treer/embed` (strict CSP with a
+per-response script nonce, `connect-src 'self'`, `frame-ancestors` equal to the
+Console origin, `Referrer-Policy: no-referrer`, `no-store`; it reveals nothing
+about the Agent). The page announces `{treer_embed: "ready", nonce_hash}` to the
+Console origin only; the Console must accept it only when `event.source` is the
+iframe's window and `event.origin` is the expected `ag-` origin, and answers
+`{treer_embed: "code", code}` with that exact `targetOrigin`; the page accepts
+the code only from the configured Console origin and never uses `*`. The page
+redeems code and nonce on its own origin (`POST /.treer/embed/session`, subject
+to the Fetch Metadata rule below); the Proxy consumes the code before checking
+the nonce, re-checks membership, and sets
+`__Host-treer_ingress_embed=…; Path=/; Secure; HttpOnly; SameSite=None;
+Partitioned; Max-Age=43200`. The page then calls `GET /.treer/embed/check`
+with credentials: `204` proves the partitioned cookie is sent back and the
+frame navigates to the Agent UI; anything else (older Safari and other browsers
+that block third-party cookies, a timeout, a failed redeem) posts
+`{treer_embed: "cookies_blocked"}` and the Console falls back to the
+Proxy-origin tunnel, visibly, or offers a new tab only when the operator set
+`--agent-embed-fallback refuse` (the tunnel then answers
+`503 embedded_ui_requires_isolated_origin`). Codes are never logged. Embed
+sessions are separate rows from standalone sessions: the token of one never
+authenticates through the other cookie. Responses to requests carrying the
+embed cookie get `frame-ancestors` replaced with the Console origin and
+`X-Frame-Options` removed; standalone sessions keep the Agent's CSP untouched.
+Membership is re-checked on every request and Console logout and membership
+removal end embed sessions like standalone ones.
+
+A `Partitioned` cookie is keyed by the top-level **site** (scheme plus
+registrable domain), not the origin. When the Console and the apps domain
+share a registrable domain, a top-level visit to an `ag-` host and the Console
+embed share one partition, so partitioning alone separates nothing; the
+barriers are the host-only `__Host-` cookie, `frame-ancestors` limited to the
+exact Console origin on embed responses, and the Fetch Metadata rule below,
+which refuses same-site and cross-site browser requests to the Agent origin.
+Operators should give the Console and the apps domain separate registrable
+domains where possible. Browser support for `Partitioned` (Chrome/Edge 114+,
+Firefox 141+, Safari 26.2) is verified in the canary window; the check step
+fails closed everywhere else.
+
 Agent origins are siblings of every other ingress host under the apps domain,
 so the ingress gateway refuses browser requests that could ride the ingress
 cookie from a sibling: on every ingress host an unsafe method or WebSocket
@@ -1317,6 +1375,9 @@ requests and WebSocket upgrades require exactly one `Origin` equal to the
 configured Console origin. Only the registered App UI, Agent interface UI and
 virtual-host HTTP proxy tunnel routes additionally accept the configured Proxy
 origin, because their embedded pages issue relative requests from that origin.
+The embed-authorization mint route is an ordinary Console-origin route; the
+embed session and check routes live on the Agent origin and are governed by
+the ingress Fetch Metadata rule, not by this classification.
 Classification uses Axum's matched route template, never a user-supplied prefix;
 Proxy origin alone cannot authorize ordinary Core management API writes.
 Missing, `null`, duplicate and foreign origins are

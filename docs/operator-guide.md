@@ -982,6 +982,24 @@ the administrator refused, a single reset only restores the budget for an instan
 3. Sign in, then lift the temporary restriction. Existing sessions were never
    affected. Do not use `--disable-auth` as a recovery method.
 
+## Embedded Agent interfaces on their own origin
+
+With a wildcard ingress domain (`TREER_INGRESS_PUBLIC_URL`, HTTPS) the Proxy
+advertises `agent.interface-embed.v1` and the Console embeds a registered
+Agent interface on `https://ag-<id>.<apps domain>/` instead of the Proxy-origin
+tunnel: the Console mints a 30-second one-time code for its iframe, a
+Proxy-owned bootstrap page on the Agent origin redeems it for a partitioned
+(`Partitioned; SameSite=None; Secure`) session cookie and verifies the browser
+sends it back before loading the Agent UI. Browsers without partitioned-cookie
+support (older Safari, strict third-party-cookie settings) fail that check and
+the Console falls back to the Proxy-origin tunnel, which the user sees.
+`TREER_AGENT_EMBED_FALLBACK=refuse` (`--agent-embed-fallback refuse`) closes
+that fallback: the tunnel answers `503 embedded_ui_requires_isolated_origin`
+and the Console offers "open in new tab" only. Give the Console and the apps
+domain separate registrable domains where possible; see
+[the security model](security.md#embed-sessions) for why. Supported browsers
+for the embedded path: Chrome and Edge 114+, Firefox 141+, Safari 26.2.
+
 ## Serving the browser App from the Proxy
 
 `TREER_APP_DIST_DIR` (or `--app-dist-dir`) makes the Proxy serve the web App

@@ -647,6 +647,10 @@ pub fn router(
             any(proxy_agent_interface_ui_path),
         )
         .registered_route(
+            "/api/workspaces/{workspace_id}/agents/{agent_id}/interface/embed-authorization",
+            post(mint_agent_interface_embed),
+        )
+        .registered_route(
             "/api/workspaces/{workspace_id}/agents/{agent_id}/prompt",
             post(prompt_agent),
         )

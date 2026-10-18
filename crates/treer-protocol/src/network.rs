@@ -339,6 +339,10 @@ pub const CAPABILITY_INGRESS_PROTECTION: &str = "ingress.protection.v1";
 /// (`ag-<id>.<apps domain>`, #143 Phase 2) and the Agent read models carry
 /// `interface.origin_url` for members who pass the interface gate.
 pub const CAPABILITY_AGENT_INTERFACE_ORIGIN: &str = "agent.interface-origin.v1";
+/// The Proxy can mint embed authorizations so the Console iframe loads an
+/// Agent interface on its own `ag-<id>` origin with a partitioned session
+/// (#156); the Console falls back to the Proxy-origin tunnel without it.
+pub const CAPABILITY_AGENT_INTERFACE_EMBED: &str = "agent.interface-embed.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

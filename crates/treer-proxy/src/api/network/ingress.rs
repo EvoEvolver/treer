@@ -473,9 +473,6 @@ async fn proxy_agent_interface_origin(
         )
         .await;
     }
-    if request.uri().path().starts_with("/.treer/") {
-        return Err(ApiFailure::not_found("route_not_found", "route not found"));
-    }
     if request.headers().contains_key(header::CONTENT_LENGTH)
         && request.headers().contains_key(header::TRANSFER_ENCODING)
     {
@@ -484,6 +481,14 @@ async fn proxy_agent_interface_origin(
             "request carries both Content-Length and Transfer-Encoding",
         ));
     }
+    if let Some(served) =
+        serve_agent_embed_route(&auth, &config, &hostname, &agent_id, &mut request).await
+    {
+        return served;
+    }
+    if request.uri().path().starts_with("/.treer/") {
+        return Err(ApiFailure::not_found("route_not_found", "route not found"));
+    }
     if ingress_bearer_token(request.headers())?.is_some() {
         return Err(ApiFailure::unauthorized(
             "ingress_authentication_required",
@@ -491,14 +496,22 @@ async fn proxy_agent_interface_origin(
         ));
     }
     enforce_ingress_fetch_metadata(&request, &hostname, false)?;
+    // An embed session (#156) is recognised by its own cookie; its token
+    // never authenticates through the standalone cookie or the reverse.
+    let mut embedded = false;
     let user_id = if auth.authentication_disabled() {
         None
     } else {
-        let session = cookie_value(request.headers(), config.ingress_cookie_name());
-        let user_id = match session {
-            Some(token) => auth.authenticate_ingress_session(&hostname, &token).await?,
-            None => None,
-        };
+        let mut user_id = None;
+        if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
+            user_id = auth.authenticate_embed_session(&hostname, &token).await?;
+            embedded = user_id.is_some();
+        }
+        if user_id.is_none() {
+            if let Some(token) = cookie_value(request.headers(), config.ingress_cookie_name()) {
+                user_id = auth.authenticate_ingress_session(&hostname, &token).await?;
+            }
+        }
         let Some(user_id) = user_id else {
             require_ingress_navigation(request.headers())?;
             return redirect_to_ingress_authorization(
@@ -574,6 +587,9 @@ async fn proxy_agent_interface_origin(
         headers
             .entry(header::REFERRER_POLICY)
             .or_insert(HeaderValue::from_static("no-referrer"));
+        if embedded {
+            allow_console_frame_only(headers, &config.console_origin())?;
+        }
     }
     Ok(response)
 }
@@ -584,7 +600,7 @@ async fn proxy_agent_interface_origin(
 /// upgrade's `Origin` must be this host. Workspace hosts, whose cookie carries
 /// authority, also refuse cross-site; public hosts are internet APIs and keep
 /// accepting cross-site under their own CORS, refusing only same-site.
-fn enforce_ingress_fetch_metadata(
+pub(super) fn enforce_ingress_fetch_metadata(
     request: &Request<Body>,
     hostname: &str,
     public: bool,

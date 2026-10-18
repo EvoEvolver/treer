@@ -1412,20 +1412,151 @@ impl AuthStore {
         })
     }
 
+    /// Mints the one-time code the Console hands to its iframe (#156). Bound
+    /// to the Agent origin's ingress row, the user, the Agent and the
+    /// bootstrap nonce hash; 30 seconds; redeemable once through
+    /// `consume_embed_auth_code` only.
+    pub async fn create_embed_auth_code(
+        &self,
+        ingress: &ServiceIngress,
+        user_id: &str,
+        agent_id: &str,
+        browser_nonce_hash: &str,
+    ) -> Result<String, AuthFailure> {
+        if !valid_ingress_nonce(browser_nonce_hash) {
+            return Err(invalid_ingress_authorization());
+        }
+        self.require_workspace_member(&ingress.workspace_id, user_id)
+            .await?;
+        let code = format!(
+            "iec_v1_{}{}",
+            Uuid::new_v4().simple(),
+            Uuid::new_v4().simple()
+        );
+        let now = Utc::now();
+        sqlx::query(
+            "DELETE FROM ingress_browser_auth_codes WHERE expires_at <= $1 OR used_at IS NOT NULL",
+        )
+        .bind(now.to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO ingress_browser_auth_codes(code, ingress_id, user_id, return_path, expires_at, browser_nonce_hash, embed, agent_id) \
+             VALUES($1, $2, $3, '/', $4, $5, TRUE, $6)",
+        )
+        .bind(&code)
+        .bind(&ingress.ingress_id)
+        .bind(user_id)
+        .bind((now + Duration::seconds(INGRESS_EMBED_CODE_TTL_SECONDS)).to_rfc3339())
+        .bind(browser_nonce_hash)
+        .bind(agent_id)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(code)
+    }
+
+    /// Redeems an embed code on the Agent origin it was minted for and opens
+    /// an embed session; the plain authorize code path cannot redeem it and
+    /// it cannot redeem plain codes. Consumed before the nonce is checked so
+    /// a wrong redeem attempt burns the code.
+    pub async fn consume_embed_auth_code(
+        &self,
+        hostname: &str,
+        agent_id: &str,
+        code: &str,
+        browser_nonce: &str,
+    ) -> Result<String, AuthFailure> {
+        let now = Utc::now();
+        let row = sqlx::query(
+            "UPDATE ingress_browser_auth_codes c SET used_at = $3 \
+             FROM service_ingresses i \
+             WHERE c.code = $1 AND lower(i.hostname) = lower($2) AND i.enabled = TRUE \
+             AND i.ingress_id = c.ingress_id AND c.used_at IS NULL AND c.expires_at > $3 \
+             AND c.embed = TRUE AND c.agent_id = $4 \
+             RETURNING c.ingress_id, c.user_id, c.browser_nonce_hash, i.workspace_id",
+        )
+        .bind(code)
+        .bind(hostname)
+        .bind(now.to_rfc3339())
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?
+        .ok_or_else(invalid_ingress_authorization)?;
+        let expected: String = row.get("browser_nonce_hash");
+        if !valid_ingress_nonce(browser_nonce)
+            || !bool::from(
+                ingress_nonce_hash(browser_nonce)
+                    .as_bytes()
+                    .ct_eq(expected.as_bytes()),
+            )
+        {
+            return Err(invalid_ingress_authorization());
+        }
+        let workspace_id: String = row.get("workspace_id");
+        let user_id: String = row.get("user_id");
+        self.require_workspace_member(&workspace_id, &user_id)
+            .await?;
+        let session_token = format!("ies_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        sqlx::query("DELETE FROM ingress_sessions WHERE expires_at <= $1")
+            .bind(now.to_rfc3339())
+            .execute(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+        sqlx::query(
+            "INSERT INTO ingress_sessions(token, ingress_id, user_id, created_at, expires_at, embed) \
+             VALUES($1, $2, $3, $4, $5, TRUE)",
+        )
+        .bind(&session_token)
+        .bind(row.get::<String, _>("ingress_id"))
+        .bind(&user_id)
+        .bind(now.to_rfc3339())
+        .bind((now + Duration::hours(INGRESS_SESSION_TTL_HOURS)).to_rfc3339())
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(session_token)
+    }
+
     pub async fn authenticate_ingress_session(
         &self,
         hostname: &str,
         token: &str,
     ) -> Result<Option<String>, AuthFailure> {
+        self.authenticate_ingress_session_kind(hostname, token, false)
+            .await
+    }
+
+    /// An embed session (#156) is a separate kind of row: a token minted for
+    /// the partitioned iframe cookie never authenticates through the
+    /// standalone cookie, and the other way round.
+    pub async fn authenticate_embed_session(
+        &self,
+        hostname: &str,
+        token: &str,
+    ) -> Result<Option<String>, AuthFailure> {
+        self.authenticate_ingress_session_kind(hostname, token, true)
+            .await
+    }
+
+    async fn authenticate_ingress_session_kind(
+        &self,
+        hostname: &str,
+        token: &str,
+        embed: bool,
+    ) -> Result<Option<String>, AuthFailure> {
         let row = sqlx::query(
             "SELECT s.user_id, i.workspace_id FROM ingress_sessions s \
              JOIN service_ingresses i ON i.ingress_id = s.ingress_id \
              WHERE s.token = $1 AND lower(i.hostname) = lower($2) AND i.enabled = TRUE \
-             AND s.expires_at > $3",
+             AND s.expires_at > $3 AND s.embed = $4",
         )
         .bind(token)
         .bind(hostname)
         .bind(Utc::now().to_rfc3339())
+        .bind(embed)
         .fetch_optional(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
