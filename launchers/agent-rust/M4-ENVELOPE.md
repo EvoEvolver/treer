@@ -6,6 +6,10 @@ All numeric limits below are proposed for review, not Controller defaults.
 No exporter, importer, provider-file reader or real-session migration is enabled
 by this document. Supported direction is Node/Codex -> Rust/Codex -> Node/Codex;
 an older destination without envelope-v1 support is refused before cutover.
+Security schema verdict 4682 permits synthetic validators/converters only;
+Core authority/cap values remain open. This protects against stale, replayed,
+misordered and accidental handoffs. A malicious process under the same OS account
+can still read these private directories; same-account isolation is out of scope.
 
 ## Representation and bounded parsing
 
@@ -42,6 +46,18 @@ nodes during parsing. Never parse image bytes as JSON. Sum checked object sizes
 before reading objects; stream hashes/image copies with a <=64 KiB buffer. No
 archive extraction, compression, remote URL, symlink, hardlink, FIFO or device.
 No arbitrary backend extension map: a new field needs a schema version/review.
+Use a custom serde visitor (bounded_json.rs), which detects decoded duplicate
+keys and consumes a shared value/key counter before descending. Add an
+envelope-specific string admission bound; do not assume serde_json::Value alone
+enforces these requirements. Tests exercise each boundary and one over.
+
+Parse, validate and drop ONE metadata object at a time. Retain only bounded
+cross-object ID/digest summaries, never all five decoded trees at once. Stream
+the 384 MiB payload through the <=64 KiB hash/copy buffer. A 256 MiB live-heap
+regression ceiling is proposed for the offline validator, excluding provider and
+destination runtime; it must be measured with maximum-shape fixtures before a
+full validator freeze. This is a test budget, not an OS-enforced memory quota.
+The manifest-only increment reads at most 1 MiB and does not read any object.
 
 ## Manifest fields (all required, no additional properties)
 
@@ -72,6 +88,17 @@ The manifest does NOT contain a token, credential, filesystem path, launch argv,
 environment, provider-home location, stderr, transcript cache or raw provider
 session files. Provider thread identity is a reference, not permission to inspect
 its home; actual provider-file transfer is a separate authorized protocol.
+
+Envelope plaintext contains receipt text, previews and goals. Its directory is
+0700, files 0600, and all copies count against private-byte quota. Proposed
+retention is at most 24 hours after verified activation, with an operator-approved
+cleanup operation scheduled at issuance; deletion must verify exact handoff and
+generation ownership. Until deletion is verified, the bytes stay charged. A
+failed or uncertain activation retains evidence pending explicit recovery,
+fences new handoffs after 24 hours, and alerts the operator to select bounded
+retention/cleanup; it never silently deletes the source or releases accounting.
+No envelope content is copied to diagnostics. Core must review retention/expiry
+with quota accounting before activation can be implemented.
 
 ## Accepted work and cross-backend representation
 
@@ -138,6 +165,9 @@ Message/delivery IDs use `[A-Za-z0-9_-]{1,256}`. Reject duplicate checkpoint IDs
 with different submission or acknowledgement state. Ack only after that accepted
 submission is durable in the ACTIVE destination generation. No acknowledgement
 is emitted while importing or while a generation is quiesced/fenced.
+Reauthorize stored notification recipients, sender-dependent routing and goal
+actions under CURRENT Policy at send time in the active generation. Stored
+attestation and an old allow decision never grant authority after handoff.
 
 Goals preserve typed `current` plus every edit. A goal includes exactly `id`,
 `objective`, `status`, `token_budget`, `round_budget`, `tokens_used`, `rounds_used`,
@@ -179,6 +209,12 @@ deliver only to the one intended handoff worker over authenticated local control
 never via envelope/argv/environment/profile/log. Hash token at rest; compare in
 constant time. Proposed lifetime is 15 minutes from issue to activation. Core
 must select the actual credential transport and approve this lifetime.
+Worker identity must be bound to an authenticated process generation via an
+inherited descriptor or peer-credential-checked socket chosen by Core, never a
+bearer token in environment, argv or a file. At operator issuance, manifest hash
+and size are unbound. Bind them once at `exported`, reported by the authenticated
+source worker after durable export; then freeze that binding for destination
+validation/activation. A changed digest needs a new operator-authorized handoff.
 
 The worker presents token+handoff id+manifest hash through the versioned control
 channel. Controller validates the persisted tuple/current generation, verifies
@@ -226,6 +262,11 @@ substitute for Core enforcement. Controller restart must recover the same stages
    Logs contain only fixed error enums, never data values or hashes of secrets.
    Scan synthetic envelopes and logs for seeded credential canaries; intentional
    receipt text is the only synthetic content allowed. No real Codex home.
+   Include source values beyond destination limits (for example Rust text above
+   65,536 bytes): refuse the WHOLE handoff with `handoff_unrepresentable`, never
+   truncate to make it fit. Node's envelope-v1 importer/exporter and generation
+   fencing require a separate reviewed production Node increment with its own
+   gates; Rust-only work never satisfies bidirectional migration acceptance.
 
 Migration/rollback is not complete until the real Controller crash matrix and
 both runtime consumers pass; converter round trips alone do not establish it.

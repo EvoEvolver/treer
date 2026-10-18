@@ -6,6 +6,12 @@ Core behavior. No production Agent is eligible for this experiment.
 The proposed [M4 prerequisites](M4-DESIGN.md) cover bidirectional migration,
 Controller quotas and proven process ownership before any team-agent switch;
 the limited fresh-session M3 pilot does not establish those guarantees.
+The offline library's `envelope::validate_manifest` currently validates only
+manifest grammar, declared byte/entry limits and typed metadata references.
+It reads no object files and grants no handoff authority. Object digests,
+cross-object semantics, Node/Rust conversion, Controller quotas and proven
+process ownership remain separate increments. There is no migration command,
+HTTP route or activation entry point in this increment.
 
 The first implementation covers one Codex app-server session: loopback AIS,
 HTTP/WebSocket state, prompt/queue/abort, transcript paging, operation-id receipts,
@@ -149,6 +155,12 @@ refuse. Limit failure follows the existing checkpoint rollback and dispatch stop
 Diagnostics never include the offending key/value.
 This hardens existing state reads; it does not enable M4 envelope import or
 replace the separate envelope schema review and Controller handoff capability.
+An earlier Rust journal beyond these shape limits now intentionally refuses
+startup; it is preserved for operator recovery, never truncated or repaired.
+This increment does not replace the other JSON readers: the image metadata
+index in attachments.rs, provider RPC replies in runtime.rs, and HTTP request
+bodies in main.rs retain their existing readers and bounds. Those sites are not
+covered by this private-journal decoder claim.
 Read-only reconciliation uses one bounded background `thread/read` operation.
 Only an explicit terminal turn matching a known accepted running submission can
 settle its receipt. Missing turns, an idle flag and read failures never complete

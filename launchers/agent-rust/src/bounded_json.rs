@@ -6,13 +6,22 @@ use std::fmt;
 const MAX_DEPTH: usize = 32;
 const MAX_NODES: usize = 500_000;
 
-pub fn decode(bytes: &[u8]) -> Result<Value, ()> {
-    decode_with_limits(bytes, MAX_DEPTH, MAX_NODES)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Error;
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("private_state_invalid")
+    }
+}
+impl std::error::Error for Error {}
+
+pub fn decode(bytes: &[u8]) -> Result<Value, Error> {
+    decode_with_limits(bytes, MAX_DEPTH, MAX_NODES).map_err(|_| Error)
 }
 
 /// Apply the same shape budget before publication, without a second JSON tree.
 /// The writer must never publish a checkpoint its own reader would refuse.
-pub fn admit(value: &Value) -> Result<(), ()> {
+pub fn admit(value: &Value) -> Result<(), Error> {
     fn walk(value: &Value, depth: usize, remaining: &mut usize) -> Result<(), ()> {
         if depth == 0 || *remaining == 0 {
             return Err(());
@@ -35,7 +44,7 @@ pub fn admit(value: &Value) -> Result<(), ()> {
         Ok(())
     }
     let mut remaining = MAX_NODES;
-    walk(value, MAX_DEPTH, &mut remaining)
+    walk(value, MAX_DEPTH, &mut remaining).map_err(|_| Error)
 }
 
 fn decode_with_limits(bytes: &[u8], depth: usize, nodes: usize) -> Result<Value, ()> {
@@ -134,7 +143,7 @@ mod tests {
             br#"{"records":[{"receipt":{"id":"first","\u0069d":"second"}}]}"#,
             br#"{"goals":{"applying":true,"applying":false}}"#,
         ] {
-            assert_eq!(decode(bytes), Err(()));
+            assert_eq!(decode(bytes), Err(Error));
         }
         assert!(decode(br#"{"a":{"id":1},"b":{"id":2}}"#).is_ok());
     }
@@ -144,10 +153,13 @@ mod tests {
         assert_eq!(decode_with_limits(b"{\"a\":[null]}", 2, 4), Err(()));
         assert_eq!(decode_with_limits(b"{\"a\":[null]}", 3, 3), Err(()));
         let nested = format!("{}null{}", "[".repeat(32), "]".repeat(32));
-        assert_eq!(decode(nested.as_bytes()), Err(()));
+        assert_eq!(decode(nested.as_bytes()), Err(Error));
         let wide = format!("[{}]", "null,".repeat(MAX_NODES) + "null");
-        assert_eq!(decode(wide.as_bytes()), Err(()));
-        assert_eq!(admit(&Value::Array(vec![Value::Null; MAX_NODES])), Err(()));
+        assert_eq!(decode(wide.as_bytes()), Err(Error));
+        assert_eq!(
+            admit(&Value::Array(vec![Value::Null; MAX_NODES])),
+            Err(Error)
+        );
     }
     #[test]
     fn malformed_input_has_no_content_bearing_error() {
@@ -157,7 +169,7 @@ mod tests {
             b"{}[]",
             b"[1e999]",
         ] {
-            assert_eq!(decode(bytes), Err(()));
+            assert_eq!(decode(bytes), Err(Error));
         }
     }
     #[test]

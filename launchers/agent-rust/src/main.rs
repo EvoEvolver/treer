@@ -1,5 +1,5 @@
 mod attachments;
-mod bounded_json;
+use treer_agent_rust_spike::bounded_json;
 mod files;
 mod goals;
 mod http;
