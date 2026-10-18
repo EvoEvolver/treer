@@ -62,7 +62,7 @@ pub(super) async fn get_policy_provider(
         None => None,
     };
     if let Some(app) = app.as_mut() {
-        hydrate_app_deployment(&state, app).await;
+        hydrate_app_deployment(&state, app, super::inventory_view::InventoryView::Browser).await;
         hydrate_app_public_url(&auth, &config, app).await?;
     }
     let cache = policy.provider_cache_status(&workspace_id).await;
@@ -115,7 +115,12 @@ pub(super) async fn set_policy_provider(
     let mut app = auth
         .resolve_app_deployment(&workspace_id, request.app_id.trim())
         .await?;
-    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_deployment(
+        &state,
+        &mut app,
+        super::inventory_view::InventoryView::Browser,
+    )
+    .await;
     hydrate_app_public_url(&auth, &config, &mut app).await?;
     let has_public_ingress = auth
         .list_service_ingresses(&workspace_id)

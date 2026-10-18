@@ -5,7 +5,7 @@
 //! workspace membership upstream. Every path that returns inventory to a
 //! client goes through this module so an unknown credential kind cannot leak
 //! the full shape.
-use axum::http::{header, HeaderMap};
+use axum::http::HeaderMap;
 use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::Value;
@@ -22,15 +22,15 @@ pub(crate) enum InventoryView {
     Trusted,
 }
 
-/// Decides the view from the credential that authenticated the request: a
-/// `Bearer` token is a tooling credential, anything else (the session cookie,
-/// an unknown mechanism) is the browser class.
-pub(crate) fn inventory_view(headers: &HeaderMap) -> InventoryView {
-    let bearer = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.len() > 7 && value[..7].eq_ignore_ascii_case("bearer "));
-    if bearer {
+/// Decides the view from the credential that authenticated the request. It
+/// uses the same `bearer_token` parser as `authenticate_request`, so the
+/// selection cannot drift from authentication: when that parser finds a
+/// `Bearer` token the request was authenticated by it (or refused), and only
+/// then the caller is a tooling credential; a machine or Agent principal is
+/// trusted as well; everything else (the session cookie, an unknown
+/// mechanism) is the browser class.
+pub(crate) fn inventory_view(headers: &HeaderMap, trusted_principal: bool) -> InventoryView {
+    if trusted_principal || crate::auth::bearer_token(headers).is_some() {
         InventoryView::Trusted
     } else {
         InventoryView::Browser

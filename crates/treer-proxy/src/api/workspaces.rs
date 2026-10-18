@@ -140,7 +140,7 @@ pub(super) async fn workspace_snapshot(
             .await?;
         }
     }
-    let view = super::inventory_view::inventory_view(&headers);
+    let view = super::inventory_view::inventory_view(&headers, machine.is_some());
     Ok(Json(super::inventory_view::snapshot_value(
         view, &snapshot,
     )?))

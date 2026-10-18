@@ -1062,7 +1062,11 @@ credential (a human's CLI or API token, an Agent token, a machine token) keeps
 the full `AgentInfo`, still subject to membership and Policy `agent.discover`.
 The split is by credential kind, not by client name, so a member who holds a
 CLI token can still read `pid`; the change removes it from browser-delivered
-data only. `cwd` remains visible to members and is the next candidate for
+data only. The view is chosen with the same `Bearer` parser that
+authentication uses, so a cookie session cannot obtain the trusted shape by
+adding a malformed `Authorization` header. App deployments follow the same
+rule: their runtime `pid` is omitted from browser responses of the `/apps`
+routes and kept for bearer, Agent and machine callers. `cwd` remains visible to members and is the next candidate for
 minimization once the Console has an explicit affordance for it. Policy
 `agent.discover` filters this list
 for machine and Agent principals only; applying it to browser sessions is a

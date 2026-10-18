@@ -57,7 +57,11 @@ pub(super) async fn list_agent_traffic(
     Ok(Json(json!({"hours": query.hours, "traffic": traffic})))
 }
 
-pub(super) async fn hydrate_app_deployment(state: &AppState, app: &mut AppDeployment) {
+pub(super) async fn hydrate_app_deployment(
+    state: &AppState,
+    app: &mut AppDeployment,
+    view: super::inventory_view::InventoryView,
+) {
     if app.desired_state == AppDesiredState::Stopped {
         app.status = AppDeploymentStatus::Stopped;
         return;
@@ -67,7 +71,12 @@ pub(super) async fn hydrate_app_deployment(state: &AppState, app: &mut AppDeploy
             .resolve_agent(&app.workspace_id, runtime_agent_id)
             .await
         {
-            app.pid = agent.pid;
+            // The runtime pid follows the Agent inventory rule (#153): the
+            // browser view never carries it.
+            app.pid = match view {
+                super::inventory_view::InventoryView::Browser => None,
+                super::inventory_view::InventoryView::Trusted => agent.pid,
+            };
             app.exit_code = agent.exit_code;
             app.restart_count = agent.run_generation.saturating_sub(1);
             app.status = if agent.status.is_terminal() {
@@ -124,12 +133,15 @@ pub(super) async fn list_app_deployments(
     State(state): State<AppState>,
     Extension(auth): Extension<AuthStore>,
     Extension(config): Extension<IngressConfig>,
+    machine: Option<Extension<MachineSession>>,
+    headers: HeaderMap,
     Path(workspace_id): Path<String>,
 ) -> Result<Json<Value>, ApiFailure> {
+    let view = super::inventory_view::inventory_view(&headers, machine.is_some());
     let mut apps = auth.list_app_deployments(&workspace_id).await?;
     let ingresses = auth.list_service_ingresses(&workspace_id).await?;
     for app in &mut apps {
-        hydrate_app_deployment(&state, app).await;
+        hydrate_app_deployment(&state, app, view).await;
         attach_app_public_url(&config, &ingresses, app);
     }
     Ok(Json(json!({ "apps": apps })))
@@ -157,7 +169,12 @@ pub(super) async fn get_app_deployment(
     Path((workspace_id, target)): Path<(String, String)>,
 ) -> Result<Json<Value>, ApiFailure> {
     let mut app = resolve_app_target(&state, &auth, &workspace_id, &headers, &target).await?;
-    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_deployment(
+        &state,
+        &mut app,
+        super::inventory_view::inventory_view(&headers, false),
+    )
+    .await;
     hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({ "app": app })))
 }
@@ -241,7 +258,12 @@ pub(super) async fn update_app_access(
             request.access,
         )
         .await?;
-    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_deployment(
+        &state,
+        &mut app,
+        super::inventory_view::inventory_view(&headers, false),
+    )
+    .await;
     attach_app_public_url(&config, &[ingress], &mut app);
     record_app_audit(&auth, Some(&session), None, "app.access.updated", &app).await;
     Ok(Json(json!({ "app": app })))
@@ -431,7 +453,12 @@ pub(super) async fn create_app_deployment(
                 .await?;
         }
     }
-    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_deployment(
+        &state,
+        &mut app,
+        super::inventory_view::inventory_view(&headers, machine.is_some()),
+    )
+    .await;
     hydrate_app_public_url(&auth, &config, &mut app).await?;
     record_app_audit(
         &auth,
@@ -485,7 +512,12 @@ pub(super) async fn start_app_deployment(
     let mut app = auth
         .resolve_app_deployment(&workspace_id, &current.app_id)
         .await?;
-    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_deployment(
+        &state,
+        &mut app,
+        super::inventory_view::inventory_view(&headers, machine.is_some()),
+    )
+    .await;
     record_app_audit(
         &auth,
         session.as_deref(),
@@ -539,7 +571,12 @@ pub(super) async fn stop_app_deployment(
     let mut app = auth
         .resolve_app_deployment(&workspace_id, &current.app_id)
         .await?;
-    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_deployment(
+        &state,
+        &mut app,
+        super::inventory_view::inventory_view(&headers, machine.is_some()),
+    )
+    .await;
     record_app_audit(
         &auth,
         session.as_deref(),
@@ -601,7 +638,12 @@ pub(super) async fn restart_app_deployment(
     let mut app = auth
         .resolve_app_deployment(&workspace_id, &current.app_id)
         .await?;
-    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_deployment(
+        &state,
+        &mut app,
+        super::inventory_view::inventory_view(&headers, machine.is_some()),
+    )
+    .await;
     record_app_audit(
         &auth,
         session.as_deref(),
@@ -722,7 +764,12 @@ pub(super) async fn update_app_deployment(
     result.map_err(|error| ProtocolError::new(error.code,
         format!("App startup revision {} was saved, but replacement failed; repair then start/restart, or explicitly update back to the previous specification", app.startup_revision)))?;
     app.last_error = None;
-    hydrate_app_deployment(&state, &mut app).await;
+    hydrate_app_deployment(
+        &state,
+        &mut app,
+        super::inventory_view::inventory_view(&headers, machine.is_some()),
+    )
+    .await;
     hydrate_app_public_url(&auth, &config, &mut app).await?;
     Ok(Json(json!({"app": app})))
 }

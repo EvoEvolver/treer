@@ -37,7 +37,7 @@ pub(crate) async fn list_agents(
             Err(error) => return Err(error),
         }
     }
-    let view = super::super::inventory_view::inventory_view(&headers);
+    let view = super::super::inventory_view::inventory_view(&headers, machine.is_some());
     Ok(Json(json!({
         "agents": super::super::inventory_view::agents_value(view, &agents)?
     })))
@@ -91,7 +91,7 @@ pub(crate) async fn get_agent(
         &mut agent,
     )
     .await?;
-    let view = super::super::inventory_view::inventory_view(&headers);
+    let view = super::super::inventory_view::inventory_view(&headers, machine.is_some());
     let mut value = super::super::inventory_view::agent_value(view, &agent)?;
     if agent
         .interface

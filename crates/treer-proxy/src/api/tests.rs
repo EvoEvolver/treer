@@ -6157,6 +6157,56 @@ async fn pid_is_absent_for_browser_sessions_and_kept_for_bearer_and_machine_call
             assert_eq!(agent["pid"], 4242, "{uri}: bearer keeps pid: {agent}");
         }
     }
+    // Selection follows authentication (security 4536): a cookie session
+    // with a malformed or non-Bearer Authorization header stays Browser; an
+    // invalid Bearer token is refused rather than falling back to the cookie.
+    for authorization in [
+        "bearer tok-member",
+        "BEARER tok-member",
+        "Basic abc",
+        "Bearer ",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/workspaces/default/agents")
+                    .header(header::COOKIE, "treer_session=tok-member")
+                    .header(header::AUTHORIZATION, authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{authorization:?}");
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        for agent in value["agents"].as_array().unwrap() {
+            assert!(
+                agent.get("pid").is_none(),
+                "{authorization:?}: cookie session leaked pid: {agent}"
+            );
+        }
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/workspaces/default/agents")
+                .header(header::COOKIE, "treer_session=tok-member")
+                .header(header::AUTHORIZATION, "Bearer bogus-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an invalid Bearer never falls back to the cookie"
+    );
     // Delivered events: the browser stream re-serializes stored payloads
     // through the view, so a buffered event with pid never reaches it.
     let event = WorkspaceEvent {
@@ -6187,6 +6237,50 @@ async fn pid_is_absent_for_browser_sessions_and_kept_for_bearer_and_machine_call
         &event,
     );
     assert_eq!(trusted_event.data, event.data);
+    // App deployments follow the same rule: the runtime pid copied from the
+    // Agent is omitted for the browser view and kept for bearer callers.
+    let deployment = auth
+        .create_app_deployment(
+            "default",
+            "member",
+            "machine-a".into(),
+            CreateAppDeploymentRequest {
+                folder_id: None,
+                server_id: Some("machine-a".into()),
+                name: "pid-view-app".into(),
+                command: "fixture".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8082,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE app_deployments SET runtime_agent_id='agent-a' WHERE app_id=$1")
+        .bind(&deployment.app_id)
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    let apps = fetch("/api/workspaces/default/apps", true).await;
+    let listed = apps["apps"].as_array().unwrap();
+    assert!(!listed.is_empty());
+    for app in listed {
+        assert!(
+            app.get("pid").is_none(),
+            "browser app view carries pid: {app}"
+        );
+    }
+    let apps = fetch("/api/workspaces/default/apps", false).await;
+    assert!(
+        apps["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|app| app["pid"] == 4242),
+        "bearer app view keeps the runtime pid: {apps}"
+    );
     // Live stream opened with the cookie: initial snapshot without pid.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

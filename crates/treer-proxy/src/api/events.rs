@@ -50,7 +50,9 @@ pub(super) async fn workspace_events(
 ) -> Result<Response, ApiFailure> {
     browser.validate_if_present(&headers)?;
     state.snapshot(&workspace_id).await?;
-    let view = super::inventory_view::inventory_view(&headers);
+    // This route authenticates human sessions only; a bearer here is a
+    // human CLI or API token.
+    let view = super::inventory_view::inventory_view(&headers, false);
     Ok(ws.on_upgrade(move |socket| {
         stream_workspace_events(socket, state, auth, session, workspace_id, view)
     }))
