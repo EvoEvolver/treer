@@ -1742,12 +1742,29 @@ destination volume must keep the file size plus the larger of 5 percent and
 visible in the destination directory while an upload is active. Two uploads
 per user and eight per workspace may be active at once; an upload with no part
 for an hour, or older than six hours, is cancelled and its staging file
-removed. The Controller remembers committed receipts for 24 hours; if a
-Controller is unreachable for longer than that right after publishing a file
-whose commit response the Proxy lost, the Console reports the outcome as
-unconfirmed (`outcome_unknown`) and the operator should check the destination
-directory. With authentication disabled (development only) the upload routes
-skip the Policy gate like every other machine route.
+removed. The Controller remembers committed receipts for 24 hours (at most
+256 receipts; the oldest go first); if a Controller is unreachable for longer
+than that right after publishing a file whose commit response the Proxy lost,
+the Console reports the outcome as unconfirmed (`outcome_unknown`) and the
+operator should check the destination directory. A commit whose publish
+provably did not happen (the target was refused, or the atomic rename or link
+itself failed) leaves a definitive failure receipt next to the success
+receipts, so the Console reports the fixed error at once instead of
+`outcome_unknown` after six hours. A restarted Controller sweeps the staging
+names its predecessor recorded; a name it cannot remove (for example one still
+held open by the predecessor on Windows) is kept for the next start and logged
+as a warning naming the path, so a partial file of user content may stay on
+disk until a later start succeeds. After five consecutive starts that failed
+to remove the same name the Controller drops the record with a final warning
+and leaves the file alone; a directory that no longer exists counts as swept.
+Once no Controller holds it, an operator may delete such a
+`.treer-transfer-upl_...` file by hand. The Proxy's per-upload part and status
+rate limits (160 parts and 60 status reads per minute, 32 part bodies in
+flight) are counted per Proxy instance; a multi-instance deployment multiplies
+them by the instance count, while the active-upload quotas (two per user,
+eight per workspace and per machine, 1 GiB declared per machine) are held in
+the database and are not. With authentication disabled (development only) the
+upload routes skip the Policy gate like every other machine route.
 
 Transfer single files from the CLI (directories and implicit parent creation are
 not supported):

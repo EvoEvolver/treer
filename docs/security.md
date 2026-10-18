@@ -1210,7 +1210,10 @@ and never creates the row; its result is remembered per (workspace, member,
 Agent, Policy revision) for five seconds on each Proxy instance (a bounded
 cache, cleared when it exceeds ten thousand entries), so an interface
 re-registering in a loop cannot turn every member's Console refetch into
-unbounded Policy evaluation. The revision is the one the Policy evaluators
+unbounded Policy evaluation; the Controller additionally refuses more than ten
+interface registrations per minute per authenticated Agent
+(`agent_interface_rate_limited`, counted after authentication, the existing
+registration left intact, a bounded map of tracked Agents). The revision is the one the Policy evaluators
 would apply now, so a published Policy is re-evaluated as soon as the engine
 sees it; one member's result is never served to another; allowed and denied
 results share the window, a failed evaluation is never remembered, and when

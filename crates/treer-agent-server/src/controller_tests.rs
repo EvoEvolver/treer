@@ -2530,6 +2530,153 @@ async fn chunked_upload_bounds_active_uploads_reaps_idle_ones_and_sweeps_after_r
 }
 
 #[tokio::test]
+async fn chunked_upload_commit_that_provably_did_not_publish_leaves_a_definitive_failure_receipt() {
+    let (runtime, root, host_task) = upload_fixture().await;
+    runtime
+        .begin_upload("upl_failrcpt01", ".", "failrcpt.bin", false, Some(3))
+        .unwrap();
+    runtime
+        .append_upload_chunk("upl_failrcpt01", Some(0), &b64(b"abc"))
+        .unwrap();
+    runtime
+        .commit_upload_part("upl_failrcpt01", 0, 3, &sha(b"abc"))
+        .unwrap();
+    let state = runtime.upload_result("upl_failrcpt01").unwrap();
+    assert_eq!(state["state"], "active");
+    // A directory now sits where the file would be published: the no-replace
+    // publish cannot succeed and nothing is linked or renamed.
+    std::fs::create_dir(root.join("failrcpt.bin")).unwrap();
+    let first = runtime.commit_upload("upl_failrcpt01").unwrap_err();
+    assert!(!first.code.is_empty() && first.code != "machine_upload_commit_uncertain");
+    // First terminal wins: the replayed commit answers the same failure, the
+    // registry no longer holds the upload, and UploadResult says failed.
+    let again = runtime.commit_upload("upl_failrcpt01").unwrap_err();
+    assert_eq!(again.code, first.code);
+    let result = runtime.upload_result("upl_failrcpt01").unwrap();
+    assert_eq!(result["state"], "failed", "{result}");
+    assert_eq!(result["code"], first.code);
+    assert!(
+        staging_files(&root).is_empty(),
+        "a failed publish drops its staging file"
+    );
+    // The receipt is journaled: a replacement Controller answers it too.
+    let replacement = crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
+    let replayed = replacement.result("upl_failrcpt01").unwrap();
+    assert_eq!(replayed["state"], "failed");
+    assert_eq!(replayed["code"], first.code);
+    // A later successful upload under another id is unaffected.
+    runtime
+        .begin_upload("upl_failrcpt02", ".", "ok.bin", false, Some(2))
+        .unwrap();
+    runtime
+        .append_upload_chunk("upl_failrcpt02", Some(0), &b64(b"ok"))
+        .unwrap();
+    runtime
+        .commit_upload_part("upl_failrcpt02", 0, 2, &sha(b"ok"))
+        .unwrap();
+    let ok = runtime.commit_upload("upl_failrcpt02").unwrap();
+    assert_eq!(ok.bytes_written, 2);
+    std::fs::remove_dir(root.join("failrcpt.bin")).unwrap();
+    host_task.abort();
+    drop(replacement);
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn interface_registration_limiter_refuses_the_eleventh_in_a_window_and_bounds_tracked_agents() {
+    let mut limiter = InterfaceRegistrationLimiter::default();
+    let start = Instant::now();
+    for _ in 0..INTERFACE_REGISTRATIONS_PER_WINDOW {
+        limiter.admit("ag_one", start).unwrap();
+    }
+    // The eleventh is refused; the first refusal in the window is reported
+    // once, later ones silently.
+    assert_eq!(limiter.admit("ag_one", start), Err(true));
+    assert_eq!(limiter.admit("ag_one", start), Err(false));
+    // Another Agent's budget is independent.
+    limiter.admit("ag_two", start).unwrap();
+    // After the window the Agent registers again.
+    let later = start + INTERFACE_REGISTRATION_WINDOW + Duration::from_secs(1);
+    limiter.admit("ag_one", later).unwrap();
+    // The tracking map is capped: the oldest window is evicted, never grown.
+    let mut limiter = InterfaceRegistrationLimiter::default();
+    for index in 0..INTERFACE_REGISTRATION_TRACKED_AGENTS {
+        limiter
+            .admit(
+                &format!("ag_{index}"),
+                start + Duration::from_millis(index as u64),
+            )
+            .unwrap();
+    }
+    assert_eq!(limiter.windows.len(), INTERFACE_REGISTRATION_TRACKED_AGENTS);
+    limiter
+        .admit("ag_overflow", start + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(limiter.windows.len(), INTERFACE_REGISTRATION_TRACKED_AGENTS);
+    assert!(
+        !limiter.windows.contains_key("ag_0"),
+        "the oldest window was evicted"
+    );
+    assert!(limiter.windows.contains_key("ag_overflow"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn startup_sweep_counts_consecutive_failures_per_name_and_gives_up_after_five() {
+    use std::os::unix::fs::PermissionsExt;
+    let (runtime, root, host_task) = upload_fixture().await;
+    std::fs::create_dir(root.join("locked")).unwrap();
+    std::fs::create_dir(root.join("gone")).unwrap();
+    runtime
+        .begin_upload("upl_sweepfail01", "locked", "a.bin", false, Some(8))
+        .unwrap();
+    runtime
+        .begin_upload("upl_sweepgone01", "gone", "b.bin", false, Some(8))
+        .unwrap();
+    // Both intents are journaled; the Controller "crashes" with the staging
+    // files in place.
+    host_task.abort();
+    std::mem::forget(runtime);
+    // One parent is now unwritable (the unlink fails with EACCES), the other
+    // is gone entirely (nothing left to sweep).
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o500)).unwrap();
+    std::fs::remove_dir_all(root.join("gone")).unwrap();
+    let mut remembered = Vec::new();
+    for attempt in 1..=5 {
+        let replacement =
+            crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
+        replacement.recover_at_startup();
+        let unswept = replacement.unswept_for_test();
+        remembered.push(unswept.len());
+        if attempt < 5 {
+            assert_eq!(
+                unswept,
+                vec![("locked/a.bin".to_string(), "upl_sweepfail01".to_string())],
+                "attempt {attempt}: the unwritable name is kept, the missing directory is not"
+            );
+        } else {
+            assert!(
+                unswept.is_empty(),
+                "the fifth failed sweep drops the record"
+            );
+        }
+        drop(replacement);
+    }
+    assert_eq!(remembered, vec![1, 1, 1, 1, 0]);
+    // The file itself is left for the operator.
+    std::fs::set_permissions(root.join("locked"), std::fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(root.join("locked/.treer-transfer-upl_sweepfail01").exists());
+    // A later start no longer touches it: the journal has no record.
+    let fresh = crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
+    fresh.recover_at_startup();
+    assert!(fresh.unswept_for_test().is_empty());
+    assert!(root.join("locked/.treer-transfer-upl_sweepfail01").exists());
+    drop(fresh);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[tokio::test]
 async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_staging() {
     let (runtime, root, host_task) = upload_fixture().await;
     // The first chunk of a part fails half-way: nothing of it stays, the

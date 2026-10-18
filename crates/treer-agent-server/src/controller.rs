@@ -180,6 +180,63 @@ pub struct PrivateStateReservation {
     pub expires_at: chrono::DateTime<Utc>,
 }
 
+/// Interface registrations an Agent may perform per window; a Controller
+/// restart re-registers each Agent once and a Proxy reconnect does not
+/// re-register at all, so normal operation stays far below the limit.
+pub const INTERFACE_REGISTRATIONS_PER_WINDOW: u32 = 10;
+pub const INTERFACE_REGISTRATION_WINDOW: Duration = Duration::from_secs(60);
+/// Distinct Agents tracked at once; the oldest window is evicted beyond it so
+/// an enumeration cannot grow memory.
+const INTERFACE_REGISTRATION_TRACKED_AGENTS: usize = 1024;
+
+#[derive(Default)]
+struct InterfaceRegistrationLimiter {
+    windows: HashMap<String, RegistrationWindow>,
+}
+
+struct RegistrationWindow {
+    started: Instant,
+    count: u32,
+    warned: bool,
+}
+
+impl InterfaceRegistrationLimiter {
+    /// Counts one registration for the authenticated Agent and says whether
+    /// it is within the window; `now` is a monotonic instant. The first
+    /// refusal in a window is reported once.
+    fn admit(&mut self, agent_id: &str, now: Instant) -> Result<(), bool> {
+        self.windows
+            .retain(|_, window| now.duration_since(window.started) < INTERFACE_REGISTRATION_WINDOW);
+        if !self.windows.contains_key(agent_id)
+            && self.windows.len() >= INTERFACE_REGISTRATION_TRACKED_AGENTS
+        {
+            if let Some(oldest) = self
+                .windows
+                .iter()
+                .min_by_key(|(_, window)| window.started)
+                .map(|(id, _)| id.clone())
+            {
+                self.windows.remove(&oldest);
+            }
+        }
+        let window = self
+            .windows
+            .entry(agent_id.to_string())
+            .or_insert(RegistrationWindow {
+                started: now,
+                count: 0,
+                warned: false,
+            });
+        if window.count >= INTERFACE_REGISTRATIONS_PER_WINDOW {
+            let first = !window.warned;
+            window.warned = true;
+            return Err(first);
+        }
+        window.count += 1;
+        Ok(())
+    }
+}
+
 #[derive(Clone)]
 pub struct ControllerRuntime {
     inner: Arc<ControllerInner>,
@@ -236,6 +293,10 @@ struct ControllerInner {
     provider_cli: crate::provider_cli::ProviderCliService,
     recovery_lock: tokio::sync::Mutex<()>,
     uploads: crate::machine_upload::Uploads,
+    /// Per-Agent interface (re)registration windows (#164 Controller item,
+    /// security 3555 P3-2): keyed by the authenticated Agent id, bounded in
+    /// size, one warning per window.
+    interface_registrations: Mutex<InterfaceRegistrationLimiter>,
     file_transfers: crate::machine_file_transfer::Transfers,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
@@ -364,6 +425,7 @@ impl ControllerRuntime {
                     config.server_id.clone(),
                     protected_paths.clone(),
                 ),
+                interface_registrations: Mutex::new(InterfaceRegistrationLimiter::default()),
                 file_transfers: crate::machine_file_transfer::Transfers::new(
                     config.root.clone(),
                     config.workspace_id.clone(),
@@ -2674,6 +2736,24 @@ impl ControllerRuntime {
         self.validate_interface_manifest(agent_id, &descriptor)
             .await?;
         let agent = self.get(agent_id)?;
+        // Rate limit after authentication and validation and before any
+        // mutation: an excess registration is refused and the existing
+        // registration stays exactly as it was.
+        {
+            let mut limiter =
+                self.inner.interface_registrations.lock().map_err(|_| {
+                    ProtocolError::new("state_error", "registration limiter poisoned")
+                })?;
+            if let Err(first_refusal) = limiter.admit(agent_id, Instant::now()) {
+                if first_refusal {
+                    tracing::warn!(%agent_id, "Agent interface registrations exceed the per-minute limit; refusing until the window passes");
+                }
+                return Err(ProtocolError::new(
+                    "agent_interface_rate_limited",
+                    "too many Agent Interface registrations; retry after a minute",
+                ));
+            }
+        }
         let info = {
             let mut agent = agent
                 .lock()
