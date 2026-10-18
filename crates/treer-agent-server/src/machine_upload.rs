@@ -106,9 +106,28 @@ struct Upload {
     committed_hash: Sha256,
     created: Instant,
     touched: Instant,
+    /// Test-only ageing added to the elapsed times the reaper compares, so a
+    /// test can expire an upload without an `Instant` before the platform's
+    /// epoch (Windows cannot represent one before boot).
+    #[cfg(test)]
+    aged_idle: Duration,
+    #[cfg(test)]
+    aged_lifetime: Duration,
 }
 
 impl Upload {
+    fn idle_for(&self) -> Duration {
+        #[cfg(test)]
+        return self.touched.elapsed() + self.aged_idle;
+        #[cfg(not(test))]
+        self.touched.elapsed()
+    }
+    fn lived_for(&self) -> Duration {
+        #[cfg(test)]
+        return self.created.elapsed() + self.aged_lifetime;
+        #[cfg(not(test))]
+        self.created.elapsed()
+    }
     fn chunked(&self) -> bool {
         self.declared.is_some()
     }
@@ -402,6 +421,10 @@ impl Uploads {
                 committed_hash: Sha256::new(),
                 created: now,
                 touched: now,
+                #[cfg(test)]
+                aged_idle: Duration::ZERO,
+                #[cfg(test)]
+                aged_lifetime: Duration::ZERO,
             },
         );
         Ok(())
@@ -734,7 +757,7 @@ impl Uploads {
         let lifetime = Duration::from_secs(MACHINE_UPLOAD_MAX_LIFETIME_SECONDS);
         let before = entries.len();
         entries.retain(|id, upload| {
-            let keep = upload.touched.elapsed() < idle && upload.created.elapsed() < lifetime;
+            let keep = upload.idle_for() < idle && upload.lived_for() < lifetime;
             if !keep {
                 tracing::warn!(upload_id = %id, "reaped an abandoned machine upload");
             }
@@ -747,13 +770,30 @@ impl Uploads {
         reaped
     }
 
+    /// Ages one upload for the reaper without moving any `Instant` backwards.
     #[cfg(test)]
     pub fn age_for_test(&self, upload_id: &str, idle: Duration, lifetime: Duration) {
         let mut entries = self.entries.lock().unwrap();
         if let Some(upload) = entries.get_mut(upload_id) {
-            upload.touched = Instant::now() - idle;
-            upload.created = Instant::now() - lifetime;
+            upload.aged_idle = idle;
+            upload.aged_lifetime = lifetime;
         }
+    }
+
+    /// Writes bytes into the staging file through the Controller's own handle
+    /// (the only handle that may write it; Windows opens it with read-only
+    /// sharing), then restores the write position. Models a corrupted or
+    /// mislengthed staging file for the pre-publish verification tests.
+    #[cfg(test)]
+    pub fn write_staging_for_test(&self, upload_id: &str, offset: u64, bytes: &[u8]) {
+        let mut entries = self.entries.lock().unwrap();
+        let upload = entries.get_mut(upload_id).expect("active upload");
+        let written = upload.written;
+        let file = upload.staged.as_mut().expect("staging").file_mut();
+        file.seek(SeekFrom::Start(offset)).unwrap();
+        file.write_all(bytes).unwrap();
+        file.flush().unwrap();
+        file.seek(SeekFrom::Start(written)).unwrap();
     }
 }
 

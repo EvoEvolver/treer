@@ -2548,7 +2548,12 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
     runtime
         .commit_upload_part("upl_tamper001", 0, 3, &sha(b"abc"))
         .unwrap();
-    std::fs::write(root.join(".treer-transfer-upl_tamper001"), b"abX").unwrap();
+    // Through the Controller's own handle: production never writes the file
+    // from outside, and Windows refuses an external writer by sharing mode.
+    runtime
+        .inner
+        .uploads
+        .write_staging_for_test("upl_tamper001", 0, b"abX");
     let error = runtime.commit_upload("upl_tamper001").unwrap_err();
     assert_eq!(error.code, "machine_upload_content_mismatch");
     assert!(!root.join("tamper.bin").exists());
@@ -2567,7 +2572,10 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
     runtime
         .append_upload_chunk("upl_length001", Some(0), &b64(b"ab"))
         .unwrap();
-    std::fs::write(root.join(".treer-transfer-upl_length001"), b"abcd").unwrap();
+    runtime
+        .inner
+        .uploads
+        .write_staging_for_test("upl_length001", 2, b"cd");
     let error = runtime
         .commit_upload_part("upl_length001", 0, 2, &sha(b"ab"))
         .unwrap_err();
