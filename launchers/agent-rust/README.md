@@ -20,7 +20,9 @@ startup, then open every resolved relative component with `openat` and
 final symlink swapped after path admission is refused. A replaced workspace
 pathname never redefines the pinned root; already opened directories remain
 capabilities to those original objects even if renamed. In-workspace symlinks
-are still supported by canonicalizing their target before the descriptor walk.
+are still supported by canonicalizing their target before the descriptor walk,
+including directory links back to the workspace root (metadata uses the pinned
+root descriptor itself).
 This is read confinement, not isolation from same-account writers, hard links
 or mounts. Directory tree listing uses an independent descriptor-based stream
 and obtains child metadata with descriptor-relative `statat` without following

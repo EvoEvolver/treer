@@ -148,6 +148,11 @@ fn open_beneath(root: &std::fs::File, relative: &Path) -> io::Result<std::fs::Fi
 /// Metadata never opens the final object (in particular FIFO/device entries).
 /// A final symlink replaced after admission is reported as a symlink and skipped.
 fn metadata_beneath(root: &std::fs::File, relative: &Path) -> io::Result<rustix::fs::Stat> {
+    // A permitted symlink to the workspace root resolves to an empty path.
+    // Inspect the pinned capability itself without reopening its pathname.
+    if relative.as_os_str().is_empty() {
+        return Ok(rustix::fs::fstat(root)?);
+    }
     let name = relative.file_name().ok_or_else(|| io::Error::new(io::ErrorKind::PermissionDenied, "invalid workspace path"))?;
     let parent = open_beneath(root, relative.parent().unwrap_or(Path::new("")))?;
     Ok(rustix::fs::statat(&parent, name, rustix::fs::AtFlags::SYMLINK_NOFOLLOW)?)
@@ -487,6 +492,33 @@ mod confinement_tests {
         assert!(names.iter().any(|name| name == "inside-name"));
         assert!(!names.iter().any(|name| name == "outside-name"));
         assert_eq!(std::fs::read_to_string(outside.join("outside-name")).unwrap(), "outside-sentinel");
+    }
+
+    #[tokio::test]
+    async fn root_target_symlinks_are_listed_and_navigable() {
+        let fixture = Fixture::new();
+        let root = fixture.0.join("workspace");
+        let outside = fixture.0.join("outside");
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(root.join("proof"), "accepted").unwrap();
+        symlink(".", root.join("root-link")).unwrap();
+        symlink("..", root.join("nested/back-to-root")).unwrap();
+        symlink(&outside, root.join("outside-link")).unwrap();
+        let files = Files::new(root).unwrap();
+        for (parent, name, link) in [("", "root-link", "root-link"), ("nested", "back-to-root", "nested/back-to-root")] {
+            let listing = list_files(&files.root, &files.anchor, parent).await.unwrap();
+            let entry = listing["entries"].as_array().unwrap().iter().find(|entry| entry["name"] == name).expect("root-target link must be visible");
+            assert_eq!(entry["kind"], "directory");
+            assert_eq!(entry["path"], link);
+            let linked = list_files(&files.root, &files.anchor, link).await.unwrap();
+            assert_eq!(linked["path"], link);
+            assert!(linked["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "proof"));
+            assert!(!linked["entries"].as_array().unwrap().iter().any(|entry| entry["name"] == "outside-link"));
+        }
+        assert!(list_files(&files.root, &files.anchor, "outside-link").await.is_err());
+        assert!(metadata_beneath(&files.anchor, Path::new("../outside")).is_err());
+        assert!(metadata_beneath(&files.anchor, &outside).is_err());
     }
 
     #[tokio::test]
