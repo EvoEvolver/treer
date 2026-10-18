@@ -50,6 +50,7 @@ pub struct Snapshot {
     pub mode: &'static str,
     pub worker: Option<Status>,
     pub targets: Vec<Target>,
+    pub targets_truncated: bool,
 }
 #[derive(Serialize)]
 pub struct Target {
@@ -62,7 +63,7 @@ pub struct Target {
 impl Snapshot {
     pub(crate) fn read(store: &crate::store::Store, worker: Option<&Workers>) -> Result<Self, ()> {
         let mut q=store.db.prepare("SELECT t.endpoint,t.generation,t.address,t.member,t.revoked FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation ORDER BY t.endpoint LIMIT 21").map_err(|_|())?;
-        let targets = q
+        let mut targets = q
             .query_map([], |r| {
                 Ok(Target {
                     endpoint_id: r.get(0)?,
@@ -75,13 +76,13 @@ impl Snapshot {
             .map_err(|_| ())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|_| ())?;
-        if targets.len() > 20 {
-            return Err(());
-        }
+        let targets_truncated = targets.len() > 20;
+        targets.truncate(20);
         Ok(Self {
             mode: "outbox",
             worker: worker.map(Workers::status),
             targets,
+            targets_truncated,
         })
     }
 }

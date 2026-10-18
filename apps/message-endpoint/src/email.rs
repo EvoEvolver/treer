@@ -829,6 +829,42 @@ mod tests {
             .unwrap();
         store
     }
+    #[test]
+    fn email_snapshot_truncates_targets_without_breaking_settings() {
+        let mut store = fixture();
+        for n in 0..20 {
+            let id = format!("ag_extra_{n}");
+            // Simulate oversized imported/history state beyond the current 20-endpoint admission cap.
+            store
+                .db
+                .execute(
+                    "INSERT INTO endpoints(id,generation,recipient) VALUES (?1,1,'ag_internal')",
+                    [&id],
+                )
+                .unwrap();
+            Queue::new(&mut store)
+                .unwrap()
+                .bind_paused(
+                    &id,
+                    1,
+                    Contact {
+                        address: "person@example.test".into(),
+                        member_id: "user_alice".into(),
+                    },
+                )
+                .unwrap();
+        }
+        let snapshot = crate::email_workers::Snapshot::read(&store, None).unwrap();
+        assert_eq!(snapshot.targets.len(), 20);
+        assert!(snapshot.targets_truncated);
+        store
+            .db
+            .execute("DELETE FROM email_targets WHERE endpoint='ag_email'", [])
+            .unwrap();
+        let snapshot = crate::email_workers::Snapshot::read(&store, None).unwrap();
+        assert_eq!(snapshot.targets.len(), 20);
+        assert!(!snapshot.targets_truncated);
+    }
     fn message(id: &str, body: &str, context: &[&str]) -> Envelope {
         Envelope::Outbound {
             delivery_id: format!("delivery_{id}"),

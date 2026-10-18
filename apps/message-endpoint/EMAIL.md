@@ -168,3 +168,8 @@ as are the wired author gate, security/Core approval and separate owner/release
 authorization. Runtime tests use fake loopback Proxy/CLI plus the actual Rust
 relay; browser tests use a native binary and synthetic identities, never a live
 bot or provider.
+
+The current directory client accepts at most 1,000 principals / 256 KiB per
+response. Larger workspaces fail closed for email binding, resume and dispatch rather than trusting partial membership. Directory
+pagination is not implemented. The owner settings overview shows at most 20
+email targets with an explicit truncation notice; other settings remain usable.
