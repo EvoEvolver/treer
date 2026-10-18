@@ -62,8 +62,10 @@ pub const MACHINE_UPLOAD_MAX_ACTIVE: usize = 8;
 pub const MACHINE_UPLOAD_IDLE_SECONDS: u64 = 60 * 60;
 /// Hard lifetime of one upload, however slowly it trickles.
 pub const MACHINE_UPLOAD_MAX_LIFETIME_SECONDS: u64 = 6 * 60 * 60;
-/// How long the Controller remembers a committed upload's receipt.
-pub const MACHINE_UPLOAD_RESULT_RETENTION_SECONDS: u64 = 30 * 60;
+/// How long the Controller remembers a committed upload's receipt, so a Proxy
+/// that lost the commit response can still learn the outcome after a long
+/// Controller outage.
+pub const MACHINE_UPLOAD_RESULT_RETENTION_SECONDS: u64 = 24 * 60 * 60;
 /// How long the Proxy serves a terminal upload row (idempotent commit, status).
 pub const MACHINE_UPLOAD_RECEIPT_RETENTION_SECONDS: u64 = 10 * 60;
 pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";

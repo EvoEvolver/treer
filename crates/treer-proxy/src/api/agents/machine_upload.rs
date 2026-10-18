@@ -565,17 +565,24 @@ async fn reconcile(
             }
         }
         _ => {
-            if row.state == UploadState::Committing {
-                // The Controller never published and forgot the upload.
+            if row.state == UploadState::Active {
+                // The Controller has neither staging nor receipt (it restarted
+                // and swept the upload): the client must start over.
                 store
-                    .set_terminal(
-                        &row.upload_id,
-                        UploadState::Failed,
-                        "controller_unavailable",
-                    )
+                    .set_terminal(&row.upload_id, UploadState::Failed, "upload_lost")
                     .await
                     .map_err(store_error)?;
+                audit(
+                    auth,
+                    caller,
+                    "machine.file.upload_aborted",
+                    json!({"upload_id": row.upload_id, "reason": "upload_lost"}),
+                )
+                .await;
             }
+            // A committing row with no Controller evidence stays committing:
+            // the outcome is unknown, never a definitive failure; the expiry
+            // job ends it as outcome_unknown at the hard lifetime.
         }
     }
     let row = store
@@ -1056,12 +1063,23 @@ pub(crate) async fn commit_machine_upload(
                     .await;
                 }
                 Err(error) => {
+                    // Only a definitive Controller refusal ends the row as
+                    // failed; anything else (offline, timeout, generic state
+                    // errors) is an unknown outcome and stays committing.
                     let code = match error.code.as_str() {
-                        "server_offline" | "command_timeout" | "command_cancelled" => {
-                            // Unknown outcome: leave committing for recovery.
-                            return;
-                        }
-                        other => other.to_owned(),
+                        definitive @ ("machine_file_exists"
+                        | "machine_upload_size_mismatch"
+                        | "machine_upload_publish_unsupported"
+                        | "machine_upload_space_insufficient"
+                        | "machine_upload_content_mismatch"
+                        | "machine_upload_file_mismatch"
+                        | "upload_part_hash_mismatch"
+                        | "invalid_machine_path"
+                        | "invalid_machine_file_name"
+                        | "machine_file_denied"
+                        | "machine_file_not_found") => definitive.to_owned(),
+                        "machine_upload_not_found" => "upload_lost".to_owned(),
+                        _ => return,
                     };
                     let _ = store
                         .set_terminal(&row.upload_id, UploadState::Failed, &code)
@@ -1135,7 +1153,21 @@ pub(crate) async fn abort_machine_upload(
                 "the upload is already published and cannot be aborted",
             )))
         }
-        UploadState::Active | UploadState::Pending => {}
+        UploadState::Active | UploadState::Pending => {
+            // Take the lease in the same conditional UPDATE a part would, so
+            // no part can start between the check and the abort.
+            if store
+                .acquire_lease(&upload_id)
+                .await
+                .map_err(store_error)?
+                .is_none()
+            {
+                return Ok(closing(conflict(
+                    "upload_busy",
+                    "a part of this upload is in flight",
+                )));
+            }
+        }
         _ => return Ok(Json(status_json(&row, true)).into_response()),
     }
     let cleanup = state
@@ -1201,7 +1233,29 @@ pub async fn expire_machine_uploads(state: &AppState, auth: &AuthStore, store: &
         };
         match row.state {
             UploadState::Committing => {
-                let _ = reconcile(state, auth, store, &caller, row).await;
+                let lifetime_over = chrono::DateTime::parse_from_rfc3339(&row.created_at)
+                    .ok()
+                    .is_some_and(|created| {
+                        Utc::now().signed_duration_since(created.with_timezone(&Utc))
+                            >= chrono::Duration::seconds(MACHINE_UPLOAD_MAX_LIFETIME_SECONDS as i64)
+                    });
+                let Ok((row, _)) = reconcile(state, auth, store, &caller, row).await else {
+                    continue;
+                };
+                if row.state == UploadState::Committing && lifetime_over {
+                    // No Controller evidence within the lifetime: a distinct
+                    // terminal outcome, never a definitive failure.
+                    let _ = store
+                        .set_terminal(&row.upload_id, UploadState::Failed, "outcome_unknown")
+                        .await;
+                    audit(
+                        auth,
+                        &caller,
+                        "machine.file.upload_aborted",
+                        json!({"upload_id": row.upload_id, "reason": "outcome_unknown"}),
+                    )
+                    .await;
+                }
             }
             UploadState::Pending => {
                 let _ = state

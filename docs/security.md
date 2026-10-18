@@ -177,14 +177,26 @@ or configuration contents. Failed launch retains the newly saved specification.
   an existing file is `machine_file_exists`). Status reconciles an active row
   against the Controller (`UploadResult`): a Controller ahead of the row after
   a lost response is adopted, a committing row whose receipt the Controller
-  holds is finalized, so a client resumes from the Controller's truth. Staging
-  files are owner-only (`0600`), live under a recorded random name in the
-  validated destination directory (visible there while the upload is active)
-  and are removed on abort, hash or size failure, and by the Controller reaper
-  (one hour idle, six hours lifetime); a restarted Controller sweeps only the
-  staging names it recorded. The Controller keeps committed receipts for 30
-  minutes so a Proxy that died between publish and the row update recovers
-  the result instead of reporting failure. Audit: `machine.file.upload_begun`,
+  holds is finalized, so a client resumes from the Controller's truth. Before
+  publishing, the Controller flushes the staging file, checks that its length
+  equals the acknowledged byte count and re-reads it through the held
+  directory descriptor to compare its SHA-256 with the acknowledged digest,
+  refusing (`machine_upload_content_mismatch`, staging kept for abort) rather
+  than publishing a file whose receipt would not describe it; a failed chunk
+  write rewinds the staging file to the committed offset, and every part
+  commit checks the on-disk length. Staging files are owner-only (`0600`),
+  live under a recorded random name in the validated destination directory
+  (visible there while the upload is active) and are removed on abort, hash or
+  size failure, and by the Controller reaper (one hour idle, six hours
+  lifetime); a restarted Controller sweeps the staging names it recorded at
+  startup. The Controller keeps committed receipts for 24 hours so a Proxy that
+  died between publish and the row update recovers the result instead of
+  reporting failure. A row becomes `failed` only on a definitive Controller
+  refusal or when the Controller has neither staging nor receipt for an active
+  upload (`upload_lost`, after a Controller restart); a committing row with no
+  Controller evidence stays committing and ends at the six-hour lifetime as
+  `failed` with `failure_code outcome_unknown`, which the Console shows as an
+  unconfirmed outcome, never as a definitive failure. Audit: `machine.file.upload_begun`,
   `machine.file.upload_aborted` (fixed reason) and `machine.file.uploaded`
   (path, bytes, actor, the Controller's SHA-256), metadata only; parts are not
   audited. The legacy base64 route keeps its 16 MiB cap; uploads begun without

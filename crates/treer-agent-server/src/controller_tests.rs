@@ -2499,3 +2499,84 @@ async fn chunked_upload_bounds_active_uploads_reaps_idle_ones_and_sweeps_after_r
     host_task.abort();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_staging() {
+    let (runtime, root, host_task) = upload_fixture().await;
+    // The first chunk of a part fails half-way: nothing of it stays, the
+    // retry lands cleanly and the published file matches the receipt hash.
+    runtime
+        .begin_upload("upl_short0002", ".", "short.bin", false, Some(6))
+        .unwrap();
+    crate::machine_upload::FAIL_NEXT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+    let error = runtime
+        .append_upload_chunk("upl_short0002", Some(0), &b64(b"abc"))
+        .unwrap_err();
+    assert_eq!(error.code, "machine_upload_failed");
+    let state = runtime.upload_result("upl_short0002").unwrap();
+    assert_eq!(state["written_offset"], 0);
+    assert_eq!(
+        std::fs::metadata(root.join(".treer-transfer-upl_short0002"))
+            .unwrap()
+            .len(),
+        0,
+        "partial bytes are discarded"
+    );
+    runtime
+        .append_upload_chunk("upl_short0002", Some(0), &b64(b"abc"))
+        .unwrap();
+    runtime
+        .commit_upload_part("upl_short0002", 0, 3, &sha(b"abc"))
+        .unwrap();
+    runtime
+        .append_upload_chunk("upl_short0002", Some(3), &b64(b"def"))
+        .unwrap();
+    runtime
+        .commit_upload_part("upl_short0002", 3, 3, &sha(b"def"))
+        .unwrap();
+    let receipt = runtime.commit_upload("upl_short0002").unwrap();
+    assert_eq!(std::fs::read(root.join("short.bin")).unwrap(), b"abcdef");
+    assert_eq!(receipt.sha256.as_deref(), Some(sha(b"abcdef").as_str()));
+    // Staging tampered between the last part and the commit: the commit
+    // fails closed, the staging stays for abort, nothing is published.
+    runtime
+        .begin_upload("upl_tamper001", ".", "tamper.bin", false, Some(3))
+        .unwrap();
+    runtime
+        .append_upload_chunk("upl_tamper001", Some(0), &b64(b"abc"))
+        .unwrap();
+    runtime
+        .commit_upload_part("upl_tamper001", 0, 3, &sha(b"abc"))
+        .unwrap();
+    std::fs::write(root.join(".treer-transfer-upl_tamper001"), b"abX").unwrap();
+    let error = runtime.commit_upload("upl_tamper001").unwrap_err();
+    assert_eq!(error.code, "machine_upload_content_mismatch");
+    assert!(!root.join("tamper.bin").exists());
+    assert!(root.join(".treer-transfer-upl_tamper001").exists());
+    assert_eq!(
+        runtime.upload_result("upl_tamper001").unwrap()["state"],
+        "active"
+    );
+    assert!(runtime.abort_upload("upl_tamper001").unwrap());
+    assert!(!root.join(".treer-transfer-upl_tamper001").exists());
+    // A part whose bytes on disk differ in length from the acknowledged
+    // count is discarded at part commit.
+    runtime
+        .begin_upload("upl_length001", ".", "length.bin", false, Some(4))
+        .unwrap();
+    runtime
+        .append_upload_chunk("upl_length001", Some(0), &b64(b"ab"))
+        .unwrap();
+    std::fs::write(root.join(".treer-transfer-upl_length001"), b"abcd").unwrap();
+    let error = runtime
+        .commit_upload_part("upl_length001", 0, 2, &sha(b"ab"))
+        .unwrap_err();
+    assert_eq!(error.code, "machine_upload_file_mismatch");
+    assert_eq!(
+        runtime.upload_result("upl_length001").unwrap()["written_offset"],
+        0
+    );
+    assert!(runtime.abort_upload("upl_length001").unwrap());
+    host_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}

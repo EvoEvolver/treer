@@ -451,6 +451,15 @@ async fn chunked_upload_streams_128_mib_in_parts_and_commits_once() {
     assert_eq!(body["state"], "active");
     assert_eq!(body["part_bytes_max"], MACHINE_UPLOAD_PART_MAX_BYTES);
     let upload_id = body["upload_id"].as_str().unwrap().to_owned();
+    assert!(
+        upload_id.len() >= 36
+            && upload_id.len() <= 68
+            && upload_id.starts_with("upl_")
+            && upload_id[4..]
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
+        "upload id is upl_ + 32 to 64 lowercase hex (Web contract): {upload_id}"
+    );
     let part = MACHINE_UPLOAD_PART_MAX_BYTES as usize;
     let mut whole = sha2::Sha256::new();
     let mut offset = 0_u64;
@@ -917,6 +926,81 @@ async fn chunked_upload_status_reconciles_and_expiry_recovers_or_expires() {
     assert_eq!(
         (status, code(&body)),
         (StatusCode::NOT_FOUND, "upload_not_found")
+    );
+    // A Controller that forgot an active upload (restart) ends it as
+    // upload_lost; a committing row with a generic Controller error or no
+    // evidence stays committing and only the lifetime ends it as
+    // outcome_unknown.
+    let (status, body, _) = begin(
+        &fixture,
+        "tok-member",
+        "machine-a",
+        "key-dddddddddddddddddddddddddddddddddddd",
+        MIB,
+        "lost.bin",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let lost_id = body["upload_id"].as_str().unwrap().to_owned();
+    fixture.fake.state.lock().unwrap().uploads.remove(&lost_id);
+    let (status, seen, _) = simple(&fixture, "GET", &format!("/{lost_id}"), "tok-member").await;
+    assert_eq!(
+        (
+            status,
+            seen["state"].as_str(),
+            seen["failure_code"].as_str()
+        ),
+        (StatusCode::OK, Some("failed"), Some("upload_lost"))
+    );
+    let (status, body, _) = begin(
+        &fixture,
+        "tok-member",
+        "machine-a",
+        "key-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        MIB,
+        "generic.bin",
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let generic_id = body["upload_id"].as_str().unwrap().to_owned();
+    put_part(&fixture, &generic_id, 0, &first).await;
+    *fixture.fake.fail_commit.lock().unwrap() = Some("state_error");
+    let (status, body, _) = simple(
+        &fixture,
+        "POST",
+        &format!("/{generic_id}/commit"),
+        "tok-member",
+    )
+    .await;
+    assert_eq!(
+        (status, code(&body)),
+        (StatusCode::SERVICE_UNAVAILABLE, "controller_unavailable")
+    );
+    assert_eq!(body["state"], "committing");
+    assert_eq!(body["reconciled"], false);
+    *fixture.fake.fail_commit.lock().unwrap() = None;
+    // The fake dropped the upload on that failure, so the Controller now
+    // answers unknown: still committing, until the lifetime ends it.
+    super::agents::expire_machine_uploads(&fixture.state, &fixture.auth, &fixture.store).await;
+    let (_, seen, _) = simple(&fixture, "GET", &format!("/{generic_id}"), "tok-member").await;
+    assert_eq!(
+        (seen["state"].as_str(), seen["reconciled"].as_bool()),
+        (Some("committing"), Some(true))
+    );
+    sqlx::query("UPDATE machine_uploads SET created_at = '2000-01-01T00:00:00.000000Z' WHERE upload_id = $1")
+        .bind(&generic_id)
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    super::agents::expire_machine_uploads(&fixture.state, &fixture.auth, &fixture.store).await;
+    let (_, seen, _) = simple(&fixture, "GET", &format!("/{generic_id}"), "tok-member").await;
+    assert_eq!(
+        (
+            seen["state"].as_str(),
+            seen["failure_code"].as_str(),
+            seen["terminal"].as_bool()
+        ),
+        (Some("failed"), Some("outcome_unknown"), Some(true))
     );
     // A failed publish is a terminal, fixed-code state.
     let (status, body, _) =

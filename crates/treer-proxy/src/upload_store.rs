@@ -347,7 +347,7 @@ impl UploadStore {
     ) -> Result<Option<UploadRow>, UploadStoreError> {
         let now = Utc::now();
         Ok(sqlx::query(&format!(
-            "UPDATE machine_uploads SET lease_until = $2 WHERE upload_id = $1 AND state = 'active' \
+            "UPDATE machine_uploads SET lease_until = $2 WHERE upload_id = $1 AND state IN ('pending','active') \
              AND (lease_until IS NULL OR lease_until < $3) RETURNING {COLUMNS}"
         ))
         .bind(upload_id)
@@ -454,7 +454,7 @@ impl UploadStore {
             "SELECT {COLUMNS} FROM machine_uploads WHERE \
              (state = 'active' AND (last_part_at < $1 OR created_at < $2)) \
              OR (state = 'pending' AND created_at < $3) \
-             OR (state = 'committing' AND lease_until < $4) \
+             OR (state = 'committing' AND (lease_until IS NULL OR lease_until < $4 OR created_at < $2)) \
              ORDER BY created_at LIMIT 64"
         ))
         .bind(stamp(now - Duration::seconds(idle_seconds)))

@@ -123,6 +123,12 @@ pub struct Uploads {
     recovered: std::sync::atomic::AtomicBool,
 }
 
+/// Test hook: the next chunk write stores only half its bytes and fails, as
+/// a full disk would.
+#[cfg(test)]
+pub(crate) static FAIL_NEXT_WRITE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 fn validate_upload_id(upload_id: &str) -> Result<(), ProtocolError> {
     if upload_id.len() < 8
         || upload_id.len() > 80
@@ -263,6 +269,16 @@ impl Uploads {
             .map_err(|_| failure("state_error", "upload results lock poisoned"))? = results;
         self.recovered.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Runs the startup sweep now instead of on the first upload command.
+    pub fn recover_at_startup(&self) {
+        if let Err(error) = self.recover() {
+            tracing::warn!(
+                ?error,
+                "machine upload recovery failed at startup; retried on the first upload"
+            );
+        }
     }
 
     fn persist_intents(&self, entries: &HashMap<String, Upload>) -> Result<(), ProtocolError> {
@@ -437,13 +453,34 @@ impl Uploads {
                 &format!("upload exceeds its declared size or the {cap} byte limit"),
             ));
         }
-        upload
-            .staged
-            .as_mut()
-            .expect("active upload keeps its staging file")
-            .file_mut()
-            .write_all(&content)
-            .map_err(io_failure)?;
+        let written = {
+            let file = upload
+                .staged
+                .as_mut()
+                .expect("active upload keeps its staging file")
+                .file_mut();
+            #[cfg(test)]
+            if FAIL_NEXT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+                let _ = file.write_all(&content[..content.len() / 2]);
+                Err(std::io::Error::other("injected short write"))
+            } else {
+                file.write_all(&content)
+            }
+            #[cfg(not(test))]
+            file.write_all(&content)
+        };
+        if let Err(error) = written {
+            // A partial write (disk full, I/O error) must never stay in the
+            // file: discard everything since the committed offset so the
+            // retry starts clean.
+            if upload.chunked() {
+                let _ = rewind(upload);
+            } else {
+                entries.remove(upload_id);
+                let _ = self.persist_intents(&entries);
+            }
+            return Err(io_failure(error));
+        }
         upload.part_hash.update(&content);
         upload.file_hash.update(&content);
         upload.written = total;
@@ -495,6 +532,21 @@ impl Uploads {
                 "part does not cover exactly the bytes written since the committed offset",
             ));
         }
+        let on_disk = upload
+            .staged
+            .as_mut()
+            .expect("active upload keeps its staging file")
+            .file_mut()
+            .metadata()
+            .map_err(io_failure)?
+            .len();
+        if on_disk != upload.written {
+            rewind(upload)?;
+            return Err(failure(
+                "machine_upload_file_mismatch",
+                "the staging file does not hold exactly the bytes written; the part was discarded",
+            ));
+        }
         let actual = format!("{:x}", upload.part_hash.clone().finalize());
         if actual != sha256 {
             rewind(upload)?;
@@ -535,6 +587,18 @@ impl Uploads {
                 ));
             }
         }
+        let hash = if upload.chunked() {
+            upload.committed_hash.clone()
+        } else {
+            upload.file_hash.clone()
+        };
+        // Fail closed before publishing: the staging file must hold exactly
+        // the written bytes and hash to what was acknowledged. On a mismatch
+        // the upload stays registered (staging kept) for abort or the reaper.
+        if let Err(error) = verify_staged(&mut upload, &hash) {
+            entries.insert(upload_id.to_owned(), upload);
+            return Err(error);
+        }
         let staged = upload
             .staged
             .take()
@@ -559,11 +623,6 @@ impl Uploads {
                 true
             }
             Err(error) => return Err(error),
-        };
-        let hash = if upload.chunked() {
-            upload.committed_hash.clone()
-        } else {
-            upload.file_hash.clone()
         };
         let result = StoredResult {
             upload_id: upload_id.to_owned(),
@@ -679,6 +738,42 @@ impl Uploads {
             upload.created = Instant::now() - lifetime;
         }
     }
+}
+
+/// The staging file must be exactly `written` bytes long and hash to the
+/// acknowledged digest; read back through the held parent descriptor.
+fn verify_staged(upload: &mut Upload, expected: &Sha256) -> Result<(), ProtocolError> {
+    let staged = upload
+        .staged
+        .as_mut()
+        .expect("active upload keeps its staging file");
+    staged.file_mut().flush().map_err(io_failure)?;
+    let length = staged.file_mut().metadata().map_err(io_failure)?.len();
+    if length != upload.written {
+        return Err(failure(
+            "machine_upload_content_mismatch",
+            "the staging file length differs from the bytes written; refusing to publish",
+        ));
+    }
+    let mut reader = staged.reopen_read().map_err(io_failure)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut total = 0_u64;
+    loop {
+        let read = reader.read(&mut buffer).map_err(io_failure)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        total += read as u64;
+    }
+    if total != upload.written || hasher.finalize() != expected.clone().finalize() {
+        return Err(failure(
+            "machine_upload_content_mismatch",
+            "the staging file does not hash to the acknowledged content; refusing to publish",
+        ));
+    }
+    Ok(())
 }
 
 /// Discards bytes written since the committed offset and restores the hash

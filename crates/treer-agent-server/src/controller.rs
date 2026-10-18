@@ -353,7 +353,7 @@ impl ControllerRuntime {
         .flatten()
         .chain(config.protected_paths.clone())
         .collect();
-        let runtime = Self {
+        let runtime_result = Self {
             inner: Arc::new(ControllerInner {
                 #[cfg(all(test, windows))]
                 hosted_test_module_cache: Mutex::new(None),
@@ -404,6 +404,10 @@ impl ControllerRuntime {
                 proxy_link: RwLock::new(ProxyLinkStatus::default()),
             }),
         };
+        let runtime = runtime_result;
+        // Sweep staging files recorded by a previous Controller instance now,
+        // not on the first upload command (#166).
+        runtime.inner.uploads.recover_at_startup();
         let replays: HashMap<_, _> = replay
             .into_iter()
             .map(|replay| (replay.process_id.clone(), replay))

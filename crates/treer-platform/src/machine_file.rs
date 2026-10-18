@@ -444,6 +444,28 @@ mod unix {
         pub fn file_mut(&mut self) -> &mut File {
             self.file.as_mut().expect("staged file is not committed")
         }
+        /// A read-only handle on the same staging inode, through the held
+        /// parent descriptor, so the caller can verify the bytes it wrote
+        /// before publishing (the write handle is write-only).
+        pub fn reopen_read(&self) -> io::Result<File> {
+            let written = self.file.as_ref().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "staged file is committed")
+            })?;
+            let file: File = sys::openat(
+                &self.parent,
+                self.temporary_name.as_str(),
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NOCTTY,
+                Mode::empty(),
+            )?
+            .into();
+            if identity(&file)? != identity(written)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "staging name no longer refers to the staged file",
+                ));
+            }
+            Ok(file)
+        }
         pub fn commit(mut self, overwrite: bool) -> io::Result<()> {
             // A same-UID actor can still race this check using direct OS
             // operations; this boundary is not a sandbox against that actor.

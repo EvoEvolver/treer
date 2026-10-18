@@ -1740,7 +1740,11 @@ destination volume must keep the file size plus the larger of 5 percent and
 visible in the destination directory while an upload is active. Two uploads
 per user and eight per workspace may be active at once; an upload with no part
 for an hour, or older than six hours, is cancelled and its staging file
-removed. With authentication disabled (development only) the upload routes
+removed. The Controller remembers committed receipts for 24 hours; if a
+Controller is unreachable for longer than that right after publishing a file
+whose commit response the Proxy lost, the Console reports the outcome as
+unconfirmed (`outcome_unknown`) and the operator should check the destination
+directory. With authentication disabled (development only) the upload routes
 skip the Policy gate like every other machine route.
 
 Transfer single files from the CLI (directories and implicit parent creation are

@@ -84,6 +84,8 @@ impl From<ProtocolError> for ApiFailure {
             "machine_upload_busy" | "machine_upload_rate_limited" => StatusCode::TOO_MANY_REQUESTS,
             "machine_upload_space_insufficient" => StatusCode::INSUFFICIENT_STORAGE,
             "machine_upload_size_mismatch"
+            | "machine_upload_content_mismatch"
+            | "machine_upload_file_mismatch"
             | "upload_part_length_mismatch"
             | "upload_part_hash_mismatch"
             | "upload_part_too_small"
@@ -102,6 +104,7 @@ impl From<ProtocolError> for ApiFailure {
             | "upload_incomplete"
             | "upload_not_active"
             | "upload_begin_conflict"
+            | "upload_lost"
             | "controller_update_required" => StatusCode::CONFLICT,
             "upload_not_found" => StatusCode::NOT_FOUND,
             "upload_overrun" | "upload_too_many_parts" | "upload_part_too_large" => {
