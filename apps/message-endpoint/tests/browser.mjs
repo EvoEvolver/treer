@@ -16,7 +16,7 @@ const {chromium}=createRequire(import.meta.url)(resolve(modulePath));
 const home=mkdtempSync(join(tmpdir(),'endpoint-browser-'));chmodSync(home,0o700);
 const env={HOME:home,TMPDIR:home,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',PLAYWRIGHT_BROWSERS_PATH:resolve(browserPath)};
 mkdirSync(screenshotPath,{recursive:true,mode:0o700});
-const fixture=spawn('/usr/bin/python3',[fileURLToPath(new URL('./http_fixture.py',import.meta.url)),resolve(binary),'--editable'],{env,stdio:['ignore','pipe','pipe']});
+const fixture=spawn('/usr/bin/python3',[fileURLToPath(new URL('./http_fixture.py',import.meta.url)),resolve(binary),'--editable','--seed-recovery'],{env,stdio:['ignore','pipe','pipe']});
 let stderr='';fixture.stderr.on('data',chunk=>{stderr+=chunk.toString().slice(0,1000)});
 const lines=createInterface({input:fixture.stdout});
 const timer=setTimeout(()=>{fixture.kill('SIGTERM')},10000);
@@ -77,10 +77,27 @@ try {
  await card.getByLabel('Chat ID',{exact:true}).fill('');
  await card.getByLabel('Confirm pausing this endpoint at the displayed revision.',{exact:true}).check();await card.getByRole('button',{name:'Pause endpoint',exact:true}).click();
  await card.getByText('3',{exact:true}).waitFor();
+ await card.getByText('Recovery and audit',{exact:true}).click();
+ await card.getByRole('button',{name:'Load recovery records',exact:true}).click();
+ await card.getByText('No parked transfers.',{exact:true}).waitFor();
+ await card.getByRole('heading',{name:'Hub owner audit',exact:true}).waitFor();
+ await card.getByText('create_binding',{exact:false}).waitFor();
+ if(await card.getByRole('button',{name:'Permanently discard',exact:true}).count())throw new Error('empty recovery offered destructive action');
+ const recoveryCard=edit.locator('section').filter({has:edit.locator('code').filter({hasText:/^ag_demo$/})});
+ await recoveryCard.getByText('Recovery and audit',{exact:true}).click();
+ await recoveryCard.getByRole('button',{name:'Load recovery records',exact:true}).click();
+ await recoveryCard.getByText('fixture_transfer',{exact:true}).waitFor();
+ const discard=recoveryCard.getByRole('button',{name:'Permanently discard',exact:true});
+ if(!await discard.isDisabled())throw new Error('discard did not require explicit confirmation');
+ await recoveryCard.getByLabel('Confirm the chosen operation on this transfer.',{exact:true}).check();
+ await discard.click();await recoveryCard.getByText('Updated. The endpoint remains paused.',{exact:true}).waitFor();
+ try {await recoveryCard.getByText('No parked transfers.',{exact:true}).waitFor({timeout:8000});} catch(error) {await edit.screenshot({path:join(screenshotPath,'recovery-failure.png'),fullPage:true});console.error('Synthetic recovery diagnostic:',await recoveryCard.innerText());throw error;}
+ await recoveryCard.getByText('discard_parked',{exact:false}).waitFor();
+ if((await edit.locator('body').innerText()).includes('PRIVATE RECOVERY BODY'))throw new Error('recovery exposed message body');
  if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('editing form overflow at 390px');
  await edit.screenshot({path:join(screenshotPath,'owner-edit-390-light.png'),fullPage:true});
  await edit.close();
- console.log('PASS: real hub, injected identity on wildcard + actual iframe prefix; 8 layout/theme screenshots + 390px confirmed owner create/bind/pause; fallback + forged rejection');
+ console.log('PASS: real hub, injected identity on wildcard + actual iframe prefix; 8 layout/theme screenshots + 390px confirmed owner create/bind/pause/recovery; fallback + forged rejection');
 } finally {
  clearTimeout(timer);if(browser)await browser.close();fixture.kill('SIGTERM');
  if(fixture.exitCode===null)await once(fixture,'exit');lines.close();rmSync(home,{recursive:true,force:true});

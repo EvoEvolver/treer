@@ -1150,3 +1150,32 @@ this records the current durable safety state, not an append-only owner audit.
 A `sendMessage` 400/403/404 is a permanent target rejection: park that transfer
 without invalidating the bot identity or delaying unrelated chats. A 401 from
 any operation, or 403 from getMe/getUpdates, invalidates account readiness.
+
+### Owner recovery interface (development)
+
+The dedicated owner settings page now offers **Recovery and audit** on each
+endpoint. `POST api/configuration` accepts `inspect_recovery` (`endpoint_id`,
+optional `before_audit`) and `recover_parked` (`endpoint_id`, exact `revision`,
+`transfer_id`, `operation: retry|discard`, `confirm: true`). Both require current
+owner verification and the same dedicated-origin CSRF checks as configuration.
+Read-only inspection uses the bounded HTTP verification budget, not the owner
+write quota. It returns at most 100 oldest parked transfers and 25 recent failure
+receipts for that endpoint, and a global hub owner audit page of 25 records with
+`next_audit_before`. No message body, transport error, digest or lease is returned.
+For more than 100 parked items, handle the oldest items and inspect again; arbitrary
+parked pagination is not implemented. Audit pages are not a stable export snapshot.
+
+Recovery requires a paused binding, matching revision, explicit confirmation and
+no live transport lease. Retry preserves already accepted chunks and can duplicate
+an ambiguous external send; discard irreversibly clears remaining plaintext and
+records a distinct discarded state, never delivered. Each operation and revision
+change commit atomically with a server-derived owner audit row. A full audit blocks
+recovery writes until an eventual archive workflow; safety pause remains available.
+These controls never resume the binding or clear failure receipts. Owner resume,
+receipt clearing/archive, account editing, isolation evidence and release acceptance
+remain unfinished activation requirements.
+
+A successful recovery returns the updated bounded recovery projection (including
+its audit row) in the same verified request. The UI does not issue a second
+verification just to discover the outcome. A failed inspection clears stale local
+results and offers a manual reload; verification limits are unchanged.

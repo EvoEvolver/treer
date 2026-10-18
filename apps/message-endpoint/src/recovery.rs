@@ -10,7 +10,8 @@ use serde::Serialize;
 
 pub(crate) const AUDIT_LIMIT: i64 = 10_000;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Recovery {
     Retry,
     Discard,
@@ -99,6 +100,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         actor: &str,
         now: i64,
     ) -> Result<(), Error> {
+        self.store.recheck_private_storage()?;
         if !valid_id(actor) || !valid_id(transfer) || now < 0 {
             return Err(Error::Binding);
         }

@@ -32,6 +32,17 @@ pub enum Command {
         revision: i64,
         confirm: bool,
     },
+    InspectRecovery {
+        endpoint_id: String,
+        before_audit: Option<i64>,
+    },
+    RecoverParked {
+        endpoint_id: String,
+        revision: i64,
+        transfer_id: String,
+        operation: crate::recovery::Recovery,
+        confirm: bool,
+    },
     BindTelegram {
         endpoint_id: String,
         revision: i64,
@@ -41,7 +52,10 @@ pub enum Command {
 }
 impl Command {
     pub(crate) fn consumes_write_quota(&self) -> bool {
-        !matches!(self, Self::PreviewCreate { .. } | Self::Pause { .. })
+        !matches!(
+            self,
+            Self::PreviewCreate { .. } | Self::Pause { .. } | Self::InspectRecovery { .. }
+        )
     }
 }
 #[derive(Deserialize, Serialize, PartialEq)]
@@ -58,8 +72,22 @@ pub struct Preview {
 #[derive(Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Outcome {
-    Preview { preview: Preview },
-    Saved { revision: i64, paused: bool },
+    Preview {
+        preview: Preview,
+    },
+    Saved {
+        revision: i64,
+        paused: bool,
+    },
+    RecoveryStatus {
+        endpoint_id: String,
+        revision: i64,
+        paused: bool,
+        parked: Vec<crate::recovery::Parked>,
+        receipts: Vec<crate::failures::Failure>,
+        audit: Vec<crate::recovery::Audit>,
+        next_audit_before: Option<i64>,
+    },
 }
 fn preview<D: Directory>(
     directory: &D,
@@ -117,6 +145,33 @@ fn saved<M: Mailbox + Directory>(hub: &crate::hub::Hub<M>, id: &str) -> Result<O
     Ok(Outcome::Saved {
         revision: view.revision,
         paused: view.paused,
+    })
+}
+fn recovery_status<M: Mailbox + Directory>(
+    hub: &crate::hub::Hub<M>,
+    endpoint_id: &str,
+    before_audit: Option<i64>,
+) -> Result<Outcome, Failure> {
+    if before_audit.is_some_and(|id| id <= 0) {
+        return Err(Failure::Invalid);
+    }
+    let view = hub.view(endpoint_id).map_err(map_hub)?;
+    let parked = hub.parked_transfers(endpoint_id, 100).map_err(map_hub)?;
+    let receipts = hub
+        .store
+        .recent_failures(endpoint_id, view.binding.generation, 25)
+        .map_err(|_| Failure::Unavailable)?;
+    let audit = hub.owner_audit(before_audit, 25).map_err(map_hub)?;
+    let next_audit_before =
+        (audit.len() == 25).then(|| audit.last().expect("nonempty bounded page").id);
+    Ok(Outcome::RecoveryStatus {
+        endpoint_id: endpoint_id.into(),
+        revision: view.revision,
+        paused: view.paused,
+        parked,
+        receipts,
+        audit,
+        next_audit_before,
     })
 }
 #[derive(Clone, Copy)]
@@ -201,6 +256,37 @@ pub fn execute<M: Mailbox + Directory, D: Directory>(
             hub.pause_audited(&endpoint_id, revision, owner.id(), now)
                 .map_err(map_hub)?;
             saved(&hub, &endpoint_id)
+        }
+        Command::InspectRecovery {
+            endpoint_id,
+            before_audit,
+        } => {
+            let hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            recovery_status(&hub, &endpoint_id, before_audit)
+        }
+        Command::RecoverParked {
+            endpoint_id,
+            revision,
+            transfer_id,
+            operation,
+            confirm,
+        } => {
+            if !confirm || revision < 1 || !crate::store::valid_id(&transfer_id) {
+                return Err(Failure::Invalid);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            let now = check_owner(owner)?;
+            hub.recover_parked(
+                &endpoint_id,
+                revision,
+                &transfer_id,
+                operation,
+                owner.id(),
+                now,
+            )
+            .map_err(map_hub)?;
+            recovery_status(&hub, &endpoint_id, None)
         }
         Command::BindTelegram {
             endpoint_id,

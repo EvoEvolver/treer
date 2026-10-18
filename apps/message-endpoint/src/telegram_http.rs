@@ -285,8 +285,12 @@ mod tests {
                             Err(_) => panic!("synthetic accept"),
                         }
                     };
+                    // Accepted sockets may inherit nonblocking mode on some
+                    // platforms. The synthetic server must wait for the client
+                    // body with a bounded scheduling allowance, not race it.
+                    stream.set_nonblocking(false).unwrap();
                     stream
-                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .set_read_timeout(Some(Duration::from_secs(5)))
                         .unwrap();
                     let request = read_request(&mut stream);
                     capture.lock().unwrap().push(request);
