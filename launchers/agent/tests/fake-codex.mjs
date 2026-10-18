@@ -95,6 +95,13 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
         else turn.items.push({ id: `answer-${turn.id}`, type: "agentMessage", text: "Relay recovered" });
         console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn } }));
       }, 40);
+    } else if (process.env.FAKE_CODEX_IMAGES) {
+      const count = turns.filter(turn => turn.id === "turn-new" || turn.id.startsWith("turn-new-")).length;
+      const id = count ? `turn-new-${count}` : "turn-new";
+      const turn = { id, status: "completed", items: [{ id: `image-user-${count}`, type: "userMessage", content: request.params.input }] };
+      turns.push(turn); pendingCompletion = turn;
+      writeFileSync(join(process.cwd(), ".fake-image-turns.json"), JSON.stringify(turns.filter(turn => turn.id === "turn-new" || turn.id.startsWith("turn-new-"))));
+      result = { turn: { id } };
     } else if (process.env.FAKE_CODEX_COMPLETE_TURNS) {
       // Records the started turn and completes it for real (thread/read shows it, turn/completed is emitted), so no
       // launcher has to settle an accepted turn by guessing.
@@ -136,11 +143,6 @@ for await (const line of readline.createInterface({ input: process.stdin })) {
     continue;
   }
   console.log(JSON.stringify({ id: request.id, result }));
-  if (request.method === "turn/start" && process.env.FAKE_CODEX_IMAGES) {
-    const turn = { id: "turn-new", status: "completed", items: [{ id: "image-user", type: "userMessage", content: request.params.input }] };
-    writeFileSync(join(process.cwd(), ".fake-image-turns.json"), JSON.stringify([turn]));
-    console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn } }));
-  }
   if (request.method === "thread/goal/set" || request.method === "thread/goal/clear") console.log(JSON.stringify({ method: goal ? "thread/goal/updated" : "thread/goal/cleared", params: { threadId, goal } }));
   if (pendingCompletion) { console.log(JSON.stringify({ method: "turn/completed", params: { threadId, turn: pendingCompletion } })); pendingCompletion = undefined; }
   if (request.method === "turn/start" && goal && !process.env.FAKE_CODEX_GOAL_ACTIVE) {
