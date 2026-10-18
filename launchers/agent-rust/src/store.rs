@@ -58,11 +58,12 @@ impl Store {
         Ok(Self { root, cwd })
     }
     pub fn load(&self) -> Result<Option<Value>> {
+        self.recheck()?;
         let path = self.root.join("rust-spike.json");
         let mut options = OpenOptions::new();
         options.read(true);
         #[cfg(unix)]
-        options.custom_flags(libc::O_NOFOLLOW);
+        options.custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
         let mut file = match options.open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -107,10 +108,57 @@ impl Store {
         #[cfg(unix)]
         options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
         let mut f = options.open(&temp)?;
-        f.write_all(&data)?;
-        f.sync_all()?;
-        fs::rename(&temp, self.root.join("rust-spike.json"))?;
-        File::open(&self.root)?.sync_all()?;
-        Ok(())
+        let result = (|| -> Result<()> {
+            f.write_all(&data)?;
+            f.sync_all()?;
+            fs::rename(&temp, self.root.join("rust-spike.json"))?;
+            File::open(&self.root)?.sync_all()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            // Only the exact name exclusively created above is ours. Never
+            // sweep another attempt's temporary files or replace the primary
+            // write/sync/rename error with a secondary cleanup error.
+            if let Err(error) = fs::remove_file(&temp) {
+                if error.kind() != std::io::ErrorKind::NotFound {
+                    eprintln!("Rust spike: private_state_temporary_cleanup_failed");
+                }
+            }
+        }
+        result
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn failed_publication_removes_only_its_own_temp_and_preserves_primary_error() {
+        let base = fs::canonicalize(std::env::temp_dir())
+            .unwrap()
+            .join(format!("rust-store-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let root = base.join("private");
+        let cwd = base.join("cwd");
+        fs::create_dir(&root).unwrap();
+        fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::create_dir(&cwd).unwrap();
+        let target = root.join("rust-spike.json");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("sentinel"), b"keep").unwrap();
+        let other_temp = root.join(".rust-spike-unrelated.tmp");
+        fs::write(&other_temp, b"keep").unwrap();
+        let store = Store::open(&root, &cwd).unwrap();
+        let error = store
+            .save(&serde_json::json!({"fixture":true}))
+            .unwrap_err();
+        assert!(error.downcast_ref::<std::io::Error>().is_some());
+        assert_eq!(fs::read_dir(&root).unwrap().count(), 2);
+        assert_eq!(fs::read(&other_temp).unwrap(), b"keep");
+        assert_eq!(fs::read(target.join("sentinel")).unwrap(), b"keep");
+        fs::remove_dir_all(base).unwrap();
     }
 }

@@ -3,7 +3,7 @@ import test from 'node:test';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
-import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unlink, symlink } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unlink, symlink, lstat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
@@ -268,6 +268,22 @@ test('Rust corrupt journal refuses startup before provider dispatch and preserve
   assert.match(logs,/private_state_invalid/);
   assert.doesNotMatch(logs,/private text|corruption-check/);
   assert.equal(await readFile(path,'utf8'),bytes);
+  assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
+});
+test('Rust refuses a FIFO journal promptly before provider startup',{skip:useNode,timeout:10000},async t=>{
+  const s=await fixture(t);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const path=join(s.state,'rust-spike.json');
+  await unlink(path);
+  await execFileAsync('/usr/bin/mkfifo',[path]);
+  const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null);
+  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')});
+  await assert.rejects(execFileAsync(binary,[],{cwd:join(s.root,'cwd'),env,timeout:2000,killSignal:'SIGKILL'}),error=>{
+    assert.equal(error.killed,false,'FIFO must be refused without the watchdog killing startup');
+    assert.match(error.stderr,/private_state_invalid/);
+    return true;
+  });
+  assert.equal((await lstat(path)).isFIFO(),true);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
 });
 test('Rust goal edits persist native state and deduplicate model-context delivery across restart',{skip:useNode},async t=>{

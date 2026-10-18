@@ -115,7 +115,12 @@ local placement is rechecked before each journal write. Standalone hermetic
 tests may use `TREER_RUST_SPIKE_STATE_DIR`. No cwd fallback or import/migration
 of Node's journal or session files is implemented. The main state file is
 `rust-spike.json`, atomically replaced with mode 0600 in a pre-existing 0700
-directory. Managed image storage uses a separate journal and Controller quota
+directory. Journal reads recheck placement, open without following the final
+symlink and use nonblocking mode before rejecting non-regular files, so a FIFO
+cannot stall startup. A failed write/sync/rename removes only that attempt's
+exclusively created temporary file; cleanup failures use a fixed diagnostic and
+never replace the primary failure. Other temporary files are never swept.
+Managed image storage uses a separate journal and Controller quota
 client as described above; standalone images are disabled. Queue metadata
 has a 32 MiB hard journal bound; quota integration for other private bytes is a
 port prerequisite.

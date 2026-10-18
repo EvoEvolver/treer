@@ -88,7 +88,7 @@ pub struct Config {
 }
 pub fn spawn(config: Config) -> Result<Handle> {
     let store = Store::open(&config.private_root, &config.cwd)?;
-    let saved = store.load()?;
+    let saved = store.load().map_err(|_| anyhow!("private_state_invalid"))?;
     // Refuse malformed durable dispatch state before starting a provider. Never
     // discard an invalid record: it may contain an uncertain dispatch intent.
     if let Some(saved) = &saved {
