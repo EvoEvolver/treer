@@ -1596,3 +1596,10 @@ App discovery and logout. The Proxy reserves `/api/auth/config` and
 `/api/auth/logout` even on wildcard App domains; those routes must not be used
 for hub operations. Dedicated-origin editing still requires a verified owner
 and the existing Origin/CSRF checks; embedded views remain read-only.
+
+## Next channel and migration work
+
+[Telegram migration](MIGRATION.md) describes the read-only inventory tool and
+cutover/rollback blockers. [Email channel contract](EMAIL.md) describes the
+planned scoped-member thread flow. Neither document enables a transport or
+authorizes a production migration.
