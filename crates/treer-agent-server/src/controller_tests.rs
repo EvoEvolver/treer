@@ -2479,21 +2479,37 @@ async fn chunked_upload_bounds_active_uploads_reaps_idle_ones_and_sweeps_after_r
         treer_protocol::MACHINE_UPLOAD_MAX_ACTIVE - 1
     );
     // A replacement Controller sweeps exactly the staging names its
-    // predecessor recorded, and nothing else.
+    // predecessor recorded, and nothing else. Here the predecessor is still
+    // alive and holds its staging files open: on Windows the sweep cannot
+    // delete them (sharing mode), so begin must still succeed, the held names
+    // stay recorded for the next sweep, and nothing else is touched.
     std::fs::write(root.join(".treer-transfer-upl_unrecorded"), b"not ours").unwrap();
+    let recorded_before = staging_files(&root).len();
     let replacement = crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
     replacement
         .begin("upl_fresh00001", ".", "fresh.bin", false, Some(8))
         .unwrap();
     let after = staging_files(&root);
-    assert_eq!(
-        after,
-        vec![
-            ".treer-transfer-upl_fresh00001".to_string(),
-            ".treer-transfer-upl_unrecorded".to_string()
-        ],
-        "recorded intents swept, unrecorded names untouched"
-    );
+    assert!(after.contains(&".treer-transfer-upl_fresh00001".to_string()));
+    assert!(after.contains(&".treer-transfer-upl_unrecorded".to_string()));
+    if cfg!(windows) {
+        assert_eq!(
+            replacement.unswept_for_test().len(),
+            recorded_before,
+            "held-open names are kept for the next sweep"
+        );
+        assert_eq!(after.len(), recorded_before + 2);
+    } else {
+        assert!(replacement.unswept_for_test().is_empty());
+        assert_eq!(
+            after,
+            vec![
+                ".treer-transfer-upl_fresh00001".to_string(),
+                ".treer-transfer-upl_unrecorded".to_string()
+            ],
+            "recorded intents swept, unrecorded names untouched"
+        );
+    }
     assert!(replacement.abort("upl_fresh00001").unwrap());
     std::fs::remove_file(root.join(".treer-transfer-upl_unrecorded")).unwrap();
     host_task.abort();

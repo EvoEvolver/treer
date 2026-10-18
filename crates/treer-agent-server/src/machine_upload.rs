@@ -140,6 +140,9 @@ pub struct Uploads {
     entries: Mutex<HashMap<String, Upload>>,
     results: Mutex<Vec<StoredResult>>,
     recovered: std::sync::atomic::AtomicBool,
+    /// Recorded staging names the startup sweep could not remove; they stay
+    /// journaled so a later start retries them.
+    unswept: Mutex<Vec<(String, String)>>,
 }
 
 /// Whether this Controller offers the chunked, resumable upload contract
@@ -217,7 +220,15 @@ impl Uploads {
             entries: Mutex::new(HashMap::new()),
             results: Mutex::new(Vec::new()),
             recovered: std::sync::atomic::AtomicBool::new(false),
+            unswept: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Recorded staging names the last sweep could not remove (for tests and
+    /// diagnostics).
+    #[cfg(test)]
+    pub fn unswept_for_test(&self) -> Vec<(String, String)> {
+        self.unswept.lock().map(|u| u.clone()).unwrap_or_default()
     }
 
     fn open_root(&self) -> Result<Root, ProtocolError> {
@@ -269,6 +280,11 @@ impl Uploads {
         if intents.len() > MACHINE_UPLOAD_MAX_ACTIVE + 1 {
             return Err(failure("state_error", "too many upload recovery records"));
         }
+        // A recorded name that cannot be removed now (held open by another
+        // process, an antivirus scan, a stale handle on Windows) must not
+        // block every later upload: it stays journaled for the next sweep and
+        // is reported, and recovery continues with the others.
+        let mut kept: Vec<(String, String)> = Vec::new();
         for (path, id) in intents {
             if validate_upload_id(&id).is_err() || !id.starts_with("upl_") {
                 return Err(failure("state_error", "invalid upload recovery identifier"));
@@ -276,16 +292,26 @@ impl Uploads {
             if treer_platform::machine_file::is_reserved_namespace(&path).map_err(io_failure)? {
                 continue;
             }
-            root.cleanup_staging(&path, &format!(".treer-transfer-{id}"))
-                .map_err(io_failure)?;
-            tracing::warn!(upload_id = %id, "removed the staging file of an upload interrupted by a Controller restart");
+            match root.cleanup_staging(&path, &format!(".treer-transfer-{id}")) {
+                Ok(()) => {
+                    tracing::warn!(upload_id = %id, "removed the staging file of an upload interrupted by a Controller restart");
+                }
+                Err(error) => {
+                    tracing::warn!(upload_id = %id, ?error, "could not remove the staging file of an interrupted upload; kept for the next sweep");
+                    kept.push((path, id));
+                }
+            }
         }
         write_journal(
             &journal,
             JOURNAL_INTENTS,
             ".treer-transfer-upl_journal",
-            &Vec::<(String, String)>::new(),
+            &kept,
         )?;
+        *self
+            .unswept
+            .lock()
+            .map_err(|_| failure("state_error", "upload sweep lock poisoned"))? = kept;
         let mut results: Vec<StoredResult> = read_journal(&journal, JOURNAL_RESULTS)?;
         let now = now_epoch();
         results.retain(|r| {
@@ -310,10 +336,13 @@ impl Uploads {
     }
 
     fn persist_intents(&self, entries: &HashMap<String, Upload>) -> Result<(), ProtocolError> {
-        let records: Vec<(String, String)> = entries
-            .iter()
-            .map(|(id, upload)| (upload.path.clone(), id.clone()))
-            .collect();
+        let mut records: Vec<(String, String)> =
+            self.unswept.lock().map(|u| u.clone()).unwrap_or_default();
+        records.extend(
+            entries
+                .iter()
+                .map(|(id, upload)| (upload.path.clone(), id.clone())),
+        );
         let journal = self.open_root()?.transfer_journal().map_err(io_failure)?;
         write_journal(
             &journal,
@@ -385,10 +414,13 @@ impl Uploads {
         }
         // Intent first, then the staging file, so a crash in between leaves a
         // recorded name for the startup sweep.
-        let mut planned: Vec<(String, String)> = entries
-            .iter()
-            .map(|(id, upload)| (upload.path.clone(), id.clone()))
-            .collect();
+        let mut planned: Vec<(String, String)> =
+            self.unswept.lock().map(|u| u.clone()).unwrap_or_default();
+        planned.extend(
+            entries
+                .iter()
+                .map(|(id, upload)| (upload.path.clone(), id.clone())),
+        );
         planned.push((path.clone(), upload_id.to_owned()));
         let journal = root.transfer_journal().map_err(io_failure)?;
         write_journal(
