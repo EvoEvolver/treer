@@ -480,6 +480,29 @@ async fn public_ingress_caps_bodies_refuses_ambiguous_framing_and_keeps_permits_
     assert_eq!(error.error.code, "ingress_request_rejected");
     assert_eq!(guard.counters(&ingress.ingress_id).request_rejected, 1);
 
+    // A public host is an internet API: a cross-origin caller that sends an
+    // Origin but no Fetch Metadata (old browser, non-browser client) is still
+    // served; only workspace hosts require the Origin to match (#164 b).
+    let cross_origin = with_peer(
+        Request::builder()
+            .method("POST")
+            .uri("/v1/inbox")
+            .header(header::HOST, &ingress.hostname)
+            .header(header::ORIGIN, "https://other.example")
+            .header(header::CONTENT_LENGTH, "2")
+            .body(Body::from("ok"))
+            .unwrap(),
+        "203.0.113.13",
+    );
+    let response = send(&fixture, &config, cross_origin)
+        .await
+        .expect("public host serves a cross-origin caller without Fetch Metadata");
+    assert_ne!(response.status(), StatusCode::FORBIDDEN);
+    axum::body::to_bytes(response.into_body(), 1024)
+        .await
+        .unwrap();
+    assert_eq!(guard.counters(&ingress.ingress_id).request_rejected, 1);
+
     // In-flight cap: two slow requests hold the permits, the third is 429
     // and nothing above the cap reaches the machine; permits return after
     // the responses complete.
