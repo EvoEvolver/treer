@@ -83,6 +83,11 @@ impl Health {
                 .is_some_and(|t| now.saturating_duration_since(t) < VERIFY_INTERVAL)
     }
     fn error(&mut self, error: &Error, verification: bool, now: Instant) {
+        // A permanent target refusal is parked by the queue, not an account
+        // outage. Do not clear a concurrent account cooldown or revalidate bot.
+        if matches!(error, Error::Rejected) && !verification {
+            return;
+        }
         self.errors = self.errors.saturating_add(1);
         let delay = Duration::from_secs((1u64 << self.errors.saturating_sub(1).min(5)).min(30));
         self.retry_at = now.checked_add(delay);
@@ -628,6 +633,7 @@ mod tests {
         verifies: AtomicU64,
         polls: Mutex<VecDeque<Result<Vec<Update>, Error>>>,
         sent: Mutex<Vec<(String, i64, String)>>,
+        rejected_chat: std::sync::atomic::AtomicI64,
     }
     impl AccountTransport for FakeBot {
         fn verify(&self) -> Result<(), Error> {
@@ -643,6 +649,9 @@ mod tests {
     impl Transport for FakeBot {
         fn send(&self, target: &Target, text: &str) -> Result<i64, Error> {
             assert!(self.verified.load(Ordering::Acquire));
+            if target.chat_id == self.rejected_chat.load(Ordering::Relaxed) {
+                return Err(Error::Rejected);
+            }
             self.sent.lock().unwrap().push((
                 target.account_id.clone(),
                 target.chat_id,
@@ -780,6 +789,106 @@ mod tests {
         assert_eq!(bot.verifies.load(Ordering::Relaxed), 2);
     }
     #[test]
+    fn permanently_blocked_chat_parks_without_preventing_other_endpoint_send() {
+        let state = fixture();
+        let time = now().unwrap();
+        {
+            let mut hub = state.lock().unwrap();
+            hub.add_binding_audited(
+                Binding {
+                    endpoint_id: "ag_second".into(),
+                    generation: 1,
+                    recipient: "ag_recipient".into(),
+                    expected_path: "/team/ag_second".into(),
+                    expected_cwd: "/fixture".into(),
+                    expected_server_id: "machine_fixture".into(),
+                },
+                "user_owner",
+                time,
+            )
+            .unwrap();
+            hub.bind_telegram_audited(
+                "ag_second",
+                1,
+                Target {
+                    account_id: "bot_fixture".into(),
+                    chat_id: 200,
+                    topic_id: None,
+                    allowed_senders: vec![9],
+                },
+                "user_owner",
+                time,
+            )
+            .unwrap();
+            hub.resume_after_readback_audited(
+                "ag_second",
+                2,
+                Readback {
+                    observed: Some(NoCore.metadata("ag_second").unwrap()),
+                    requested_at: time,
+                },
+                "user_owner",
+                time,
+            )
+            .unwrap();
+            let envelope = Envelope::Outbound {
+                delivery_id: "delivery_second".into(),
+                message_id: "msg_second".into(),
+                original_sender: Sender {
+                    kind: SenderKind::Agent,
+                    id: "ag_recipient".into(),
+                },
+                body: "second chat".into(),
+                context_ids: vec![],
+            };
+            for (i, body) in envelope
+                .fragments("ag_second", 1)
+                .unwrap()
+                .into_iter()
+                .enumerate()
+            {
+                hub.admit_core_delivery(
+                    &Delivery {
+                        delivery_id: format!("delivery_second_{i}"),
+                        recipient: Principal {
+                            kind: SenderKind::Agent,
+                            id: "app_hub".into(),
+                        },
+                        message: Message {
+                            message_id: format!("msg_second_frame{i}"),
+                            sender: Principal {
+                                kind: SenderKind::Agent,
+                                id: "ag_second".into(),
+                            },
+                            body,
+                            context_ids: vec![],
+                        },
+                    },
+                    time,
+                )
+                .unwrap();
+            }
+        }
+        let bot = Arc::new(FakeBot::default());
+        bot.rejected_chat.store(100, Ordering::Relaxed);
+        let account = Account::new("bot_fixture".into(), 12345, bot.clone());
+        let stop = AtomicBool::new(false);
+        poll_once(&state, &account, &stop);
+        send_round(&state, &account, &stop);
+        assert!(account.ready());
+        assert_eq!(bot.verifies.load(Ordering::Relaxed), 1);
+        assert_eq!(account.sent.load(Ordering::Relaxed), 1);
+        assert_eq!(bot.sent.lock().unwrap()[0].1, 200);
+        // The next queue selection durably parks the permanent first result.
+        send_round(&state, &account, &stop);
+        assert_eq!(bot.verifies.load(Ordering::Relaxed), 1);
+        assert_eq!(bot.sent.lock().unwrap().len(), 1);
+        let hub = state.lock().unwrap();
+        assert_eq!(hub.parked_transfers("ag_endpoint", 10).unwrap().len(), 1);
+        assert!(hub.parked_transfers("ag_second", 10).unwrap().is_empty());
+        assert!(!hub.view("ag_second").unwrap().paused);
+    }
+    #[test]
     fn duplicate_poller_is_sticky_and_rate_limit_or_credentials_block_new_sends() {
         let state = fixture();
         let bot = Arc::new(FakeBot::default());
@@ -802,6 +911,23 @@ mod tests {
         poll_once(&state, &account, &stop);
         assert!(!account.ready());
         assert_eq!(account.health.lock().unwrap().phase, "credentials_rejected");
+        send_round(&state, &account, &stop);
+        send_round(&state, &account, &stop);
+        let attempts: i64 = state
+            .lock()
+            .unwrap()
+            .store
+            .db
+            .query_row(
+                "SELECT COALESCE(SUM(attempts),0) FROM telegram_chunks",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            attempts, 0,
+            "unready account must not consume queue attempts"
+        );
         account.health.lock().unwrap().retry_at = None;
         bot.polls.lock().unwrap().push_back(Err(Error::Conflict));
         poll_once(&state, &account, &stop);

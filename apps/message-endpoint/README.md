@@ -776,7 +776,7 @@ messages too. No topic (`None` in configuration; main chat) maps to stored topic
 key zero; an actual Bot API `message_thread_id` must be positive. The worker uses
 only the persisted polling offset, not a caller-provided offset.
 
-Typed HTTP 400/401/403/404 rejection parks a chunk after its first failed request;
+Typed HTTP 400/401 (or 403 on getMe/getUpdates)/404 rejection parks a chunk after its first failed request;
 other errors remain transient up to the cap. HTTP429 returns a bounded typed
 retry delay (1–86400 seconds, malformed response defaults to60). Workers must call
 `fail_telegram_chunk` with that typed result after the request ends; it persists
@@ -1107,7 +1107,7 @@ Core workers, state and settings remain independent. Telegram sendMessage has no
 idempotency key: losing the accepted result before commit can duplicate an
 external message, as documented for the chunk state machine.
 
-429 retry_after (1..86400 seconds) gates both account loops. 401/403 clear the
+429 retry_after (1..86400 seconds) gates both account loops. 401 (or 403 on getMe/getUpdates) clear the
 client identity check and require a new getMe; credential failures show a fixed
 phase and back off. 409 is sticky `duplicate_poller`, with no automatic retries
 until an operator resolves the competing poller and an authorized restart.
@@ -1146,3 +1146,7 @@ increment the streak or clear a later failure. The bounded health table has at m
 one row per binding, and worker settings expose only `core_send_unavailable`, never
 CLI stderr or message bodies. Automatic pause history remains a known limitation:
 this records the current durable safety state, not an append-only owner audit.
+
+A `sendMessage` 400/403/404 is a permanent target rejection: park that transfer
+without invalidating the bot identity or delaying unrelated chats. A 401 from
+any operation, or 403 from getMe/getUpdates, invalidates account readiness.

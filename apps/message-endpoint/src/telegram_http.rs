@@ -57,7 +57,7 @@ impl BotClient {
             .send()
             .map_err(|_| Error::Transport)?;
         let status = response.status();
-        if matches!(status.as_u16(), 401 | 403) {
+        if status.as_u16() == 401 || (status.as_u16() == 403 && operation != "sendMessage") {
             self.verified
                 .store(false, std::sync::atomic::Ordering::Release);
             return Err(Error::Credentials);
@@ -67,7 +67,7 @@ impl BotClient {
                 .store(false, std::sync::atomic::Ordering::Release);
             return Err(Error::Conflict);
         }
-        if matches!(status.as_u16(), 400 | 404) {
+        if matches!(status.as_u16(), 400 | 403 | 404) {
             return Err(Error::Rejected);
         }
         if status.as_u16() == 429 {
@@ -463,6 +463,38 @@ mod tests {
             assert!(!client.verified.load(std::sync::atomic::Ordering::Acquire));
             assert!(matches!(client.poll(0), Err(Error::Invalid)));
             assert_eq!(server.finish().len(), 2);
+        }
+    }
+    #[test]
+    fn send_forbidden_is_per_target_and_does_not_invalidate_shared_bot_identity() {
+        for status in [400, 403, 404] {
+            let server = Server::start(vec![
+                (
+                    200,
+                    json!({"ok":true,"result":{"id":12345,"is_bot":true}}).to_string(),
+                ),
+                (status, TOKEN.into()),
+                (
+                    200,
+                    json!({"ok":true,"result":{"message_id":7,"chat":{"id":200}}}).to_string(),
+                ),
+            ]);
+            let client = server.client();
+            client.verify().unwrap();
+            let mut target = Target {
+                account_id: "test".into(),
+                chat_id: 100,
+                topic_id: None,
+                allowed_senders: vec![9],
+            };
+            assert!(matches!(
+                client.send(&target, "blocked"),
+                Err(Error::Rejected)
+            ));
+            assert!(client.verified.load(std::sync::atomic::Ordering::Acquire));
+            target.chat_id = 200;
+            assert_eq!(client.send(&target, "unrelated chat").unwrap(), 7);
+            assert_eq!(server.finish().len(), 3);
         }
     }
     #[test]

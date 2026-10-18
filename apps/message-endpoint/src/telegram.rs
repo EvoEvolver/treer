@@ -549,7 +549,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             .ok_or(Error::Conflict)?;
         let backoff = (5_i64 << (attempts - 1).min(6)).min(300);
         let (class, delay) = match error {
-            Error::Rejected | Error::Credentials => (1, 0),
+            Error::Rejected => (1, 0),
             Error::RateLimited(delay) => (0, backoff.max(i64::from((*delay).clamp(1, 86400)))),
             _ => (0, backoff),
         };
