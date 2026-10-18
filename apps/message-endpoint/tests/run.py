@@ -18,7 +18,7 @@ cargo = options.cargo.absolute()  # rustup is a multicall symlink; retain argv[0
 with tempfile.TemporaryDirectory(prefix='treer-endpoint-check-') as home:
     environment = {
         'HOME': home,
-        'PATH': '/usr/bin:/bin:/usr/sbin:/sbin',
+        'PATH': str(cargo.parent) + ':/usr/bin:/bin:/usr/sbin:/sbin',
         'TMPDIR': home,
         'CARGO_HOME': str(options.cargo_home.resolve()),
         'RUSTUP_HOME': str(options.rustup_home.resolve()),
