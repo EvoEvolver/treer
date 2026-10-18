@@ -19,14 +19,28 @@ pub async fn serve(
         128,
     )));
     let mut connections = JoinSet::new();
+    let mut inject_accept_error = fixture_accept_error();
     tokio::pin!(shutdown);
     loop {
         tokio::select! {
             biased;
             _ = &mut shutdown => break,
             Some(_) = connections.join_next(), if !connections.is_empty() => {},
-            accepted = listener.accept() => {
-                let (stream, _) = accepted?;
+            accepted = async {
+                if std::mem::take(&mut inject_accept_error) {
+                    Err(std::io::Error::from_raw_os_error(libc::EMFILE))
+                } else {
+                    listener.accept().await
+                }
+            } => {
+                let (stream, _) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(_) => {
+                        eprintln!("Rust spike: http_accept_retry");
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                        continue;
+                    }
+                };
                 let Ok(permit) = slots.clone().try_acquire_owned() else { drop(stream); continue; };
                 // The permit belongs to the I/O, not the HTTP future: an upgraded
                 // WebSocket keeps its connection slot until the socket closes.
@@ -51,6 +65,15 @@ pub async fn serve(
     connections.abort_all();
     while connections.join_next().await.is_some() {}
     Ok(())
+}
+
+fn fixture_accept_error() -> bool {
+    #[cfg(feature = "fixture-harness")]
+    {
+        std::env::var("RUST_SPIKE_HTTP_ACCEPT_ERROR_ONCE").as_deref() == Ok("1")
+    }
+    #[cfg(not(feature = "fixture-harness"))]
+    false
 }
 
 fn fixture_limit(_name: &str, default: usize) -> usize {

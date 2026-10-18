@@ -70,6 +70,13 @@ test('Rust serves its manifest while Controller registration probes it',{skip:us
   const manifest=await until(()=>readFile(join(s.root,'registration.json'),'utf8').then(JSON.parse),x=>x.instance_id==='contract-instance');
   assert.equal(manifest.protocol,'treer.agent-interface/v1');
 });
+test('Rust retries an accept error without ending the provider or HTTP server',{skip:useNode},async t=>{
+  const s=await fixture(t,{RUST_SPIKE_HTTP_ACCEPT_ERROR_ONCE:'1'});
+  assert.match(s.logs(),/http_accept_retry/);
+  assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).ready,true);
+  assert.equal((await s.post({text:'still serves after EMFILE',operation_id:'accept-retry'})).status,202);
+  assert.equal(s.child.exitCode,null);
+});
 test('Rust bounds slow headers, header count and upgraded connection occupancy',{skip:useNode,timeout:15000},async t=>{
   const s=await fixture(t,{RUST_SPIKE_HTTP_HEADER_MS:'300',RUST_SPIKE_HTTP_CONNECTION_LIMIT:'8'});
   const socket=connect({host:'127.0.0.1',port:Number(new URL(s.base).port)});socket.on('error',()=>{});

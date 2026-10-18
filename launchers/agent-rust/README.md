@@ -183,7 +183,8 @@ the prior journal, including any already-persisted running intent, remains the
 restart authority. Error responses and cleanup status do not expose OS paths.
 A process-lifetime nonblocking file lock rejects a second Rust writer with
 `private_state_in_use`; its private 0600 inode is retained after exit rather
-than unlinked. A saved Rust thread cannot be overridden with a different resume
+than unlinked. This is an advisory Rust-only lock: Node does not participate;
+never run Node and Rust concurrently on the same state. A saved Rust thread cannot be overridden with a different resume
 ID (`private_state_session_mismatch`), and refusal precedes provider startup.
 Node-to-Rust migration remains unsupported: finding the selected Agent's legacy
 `.treer/agents/ID` directory (including `standalone`), a linked/non-directory
@@ -213,9 +214,22 @@ The loopback HTTP/1 transport admits at most 128 live connections, including
 upgraded WebSockets; excess accepted sockets close immediately. Every request
 header has a ten-second absolute read deadline, at most 64 headers and a 32 KiB
 buffer. Body-consuming routes keep their existing ten-second/size limits.
+Accept errors retry after 50 ms rather than ending the provider/server.
+The write-idle wrapper does not time out reads: request-body routes enforce
+their own ten-second deadline. Silent upgraded WebSockets have no read-idle
+deadline and occupy a connection slot until disconnect or launcher shutdown;
+upgrade uses the same local Host/forwarding admission checks as other routes,
+not a new credential-based authentication boundary. Outgoing WS writes have
+their separate five-second deadline.
 File and image responses hold their respective two-slot budgets through
 backpressure. Both use the operator-configurable download total duration cap
 (default one hour) and connection write-idle timeout (default 60 seconds).
+The total-duration timer is polled with the response body: a transfer already
+blocked on a socket write may retain its slot past that timer until reads resume
+or the write-idle timeout fires. The image regression proves truncation on
+resumed reads, not independent wall-clock eviction. Directory cancellation
+slot retention is established by worker ownership in source; the HTTP regression
+currently covers entry rejection and concurrent state reads, not cancellation.
 These limits bound admission; they do not authenticate local callers or isolate
 a same-account filesystem writer. A blocked OS filesystem operation can still
 outlast the HTTP request; the two directory worker permits remain held.
@@ -251,6 +265,9 @@ build host's PATH in `build.rs` (or `TREER_SPIKE_BUILD_CODEX` for native Codex).
 Default builds reject script entry points to avoid PATH-dependent interpreters;
 runtime PATH cannot redirect either executable.
 `CODEX_BIN`/`RUST_SPIKE_CODEX_ARGS` overrides cause default-build startup to fail.
+`tests/default-build.mjs` scans the default release artifact for HTTP fixture
+hooks and verifies override refusal in a disposable directory, without starting
+the native provider. Its required input is `RUST_SPIKE_RELEASE_BIN`.
 Only the explicitly enabled `fixture-harness` test feature permits overrides and
 a fake Treer CLI from PATH. P2 must use a default release build, record resolved
 tool paths and all three binary SHA-256 hashes, and not set harness overrides.
