@@ -405,35 +405,40 @@ mod tests {
             )
             .unwrap();
         }
-        hub.admit_telegram(
-            "bot_fixture",
-            vec![
-                Update {
-                    update_id: 1,
-                    message: Some(Incoming {
-                        date: time,
-                        message_id: 1,
-                        chat_id: 10,
-                        topic_id: None,
-                        sender_id: 9,
-                        text: body.into(),
-                    }),
-                },
-                Update {
-                    update_id: 2,
-                    message: Some(Incoming {
-                        date: time,
-                        message_id: 2,
-                        chat_id: 20,
-                        topic_id: None,
-                        sender_id: 9,
-                        text: "fast message".into(),
-                    }),
-                },
-            ],
-            time,
-        )
-        .unwrap();
+        let admitted = hub
+            .admit_telegram(
+                "bot_fixture",
+                vec![
+                    Update {
+                        update_id: 1,
+                        message: Some(Incoming {
+                            date: time,
+                            message_id: 1,
+                            chat_id: 10,
+                            topic_id: None,
+                            sender_id: 9,
+                            text: body.into(),
+                        }),
+                    },
+                    Update {
+                        update_id: 2,
+                        message: Some(Incoming {
+                            date: time,
+                            message_id: 2,
+                            chat_id: 20,
+                            topic_id: None,
+                            sender_id: 9,
+                            text: "fast message".into(),
+                        }),
+                    },
+                ],
+                time,
+            )
+            .unwrap();
+        assert_eq!(
+            admitted, 2,
+            "fixture input must fit the labeled body budget"
+        );
         (Arc::new(Mutex::new(hub)), fake)
     }
     fn wait_for(fake: &Fake, predicate: impl Fn(&Calls) -> bool) {
@@ -615,7 +620,9 @@ mod tests {
     }
     #[test]
     fn owner_pause_between_parts_prevents_the_next_send_and_does_not_complete_partial_job() {
-        let (state, fake) = fixture(&"x".repeat(crate::protocol::MAX_BODY));
+        // Leave room for the durable source header while still requiring
+        // multiple transport fragments; raw MAX_BODY is correctly refused.
+        let (state, fake) = fixture(&"x".repeat(crate::protocol::MAX_BODY - 512));
         let counters = Arc::new(Counters::default());
         let s = state.clone();
         let backend = fake.clone();

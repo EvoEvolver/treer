@@ -38,7 +38,7 @@ cross-platform correctness. Author checks and the frozen SHA belong on #159.
 | `apps/message-endpoint/src/configuration/activation.rs` | Selected file patch from `a8d95a2d` on P2 | Review 3992; extraction needs fresh coverage |
 | `apps/message-endpoint/src/core.rs` | P2 `88779477`, last original change `94add5a5` | Review 3862; fresh slice review pending |
 | `apps/message-endpoint/src/failures.rs` | P2 `88779477`, last original change `d13b48ff` | Review 3898; fresh slice review pending |
-| `apps/message-endpoint/src/handoffs.rs` | P2 `88779477`, last original change `d63cc7fb` | Review 3893; fresh slice review pending |
+| `apps/message-endpoint/src/handoffs.rs` | P2 plus fixture-only labeled-budget reservation/admission assertion | New test change; fresh review pending |
 | `apps/message-endpoint/src/holds.rs` | P2 `88779477`, last original change `d63cc7fb` | Review 3893; fresh slice review pending |
 | `apps/message-endpoint/src/hub.rs` | Selected file patch from `a8d95a2d` on P2 | Review 3992; extraction needs fresh coverage |
 | `apps/message-endpoint/src/hub_runtime.rs` | Selected file patch from `c7e5ad17` on P2 | Review 3997; extraction needs fresh coverage |
@@ -102,7 +102,7 @@ See [the disposable acceptance checklist](tests/TELEGRAM-SMOKE.md) for release's
 real-bot, negative controls, drain, rollback and token-revocation obligations.
 
 At ed8fd960 there were 47 P2-identical files; the new admission-time label now
-changes telegram.rs, leaving 46. These files are inherited, not a claim of a fresh complete line-by-
+changes telegram.rs, leaving 45 after the handoffs.rs fixture budget update. These files are inherited, not a claim of a fresh complete line-by-
 line reread. The author re-examined the forwarding, admission, activation and
 test boundaries during extraction. No later P3 edits to those 47 files were
 carried into this slice; later P3 history may have modified the separate branch.
