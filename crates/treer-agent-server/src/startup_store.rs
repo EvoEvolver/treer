@@ -141,6 +141,30 @@ impl StartupStore {
         Ok(removed)
     }
 
+    /// A Proxy-confirmed deletion removes the declaration and fences delayed
+    /// creates and retained Host inventory in the same durable transaction.
+    pub fn remove_deleted(&self, agent_id: &str) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| io::Error::other("Agent startup store lock poisoned"))?;
+        if state.denied_agent_ids.contains(agent_id) && !state.entries.contains_key(agent_id) {
+            return Ok(());
+        }
+        if !state.denied_agent_ids.contains(agent_id)
+            && state.denied_agent_ids.len() >= MAX_DENIED_AGENT_IDS
+        {
+            return Err(io::Error::other("Agent denial fence limit reached"));
+        }
+        let mut updated = state.clone();
+        updated.entries.remove(agent_id);
+        updated.denied_agent_ids.insert(agent_id.to_owned());
+        persist(&self.inner.path, &updated)?;
+        *state = updated;
+        Ok(())
+    }
+
     pub fn update(
         &self,
         agent_id: &str,
@@ -510,6 +534,51 @@ mod tests {
             }
             fs::remove_dir_all(directory).unwrap();
         }
+    }
+
+    #[test]
+    fn deleted_declaration_is_atomically_fenced_and_failure_preserves_it() {
+        let directory =
+            std::env::temp_dir().join(format!("treer-startup-delete-{}", Uuid::new_v4()));
+        let path = directory.join("startup.json");
+        let store = StartupStore::load(path.clone()).unwrap();
+        store.upsert(entry("deleted")).unwrap();
+        store.deny_absent("existing-fence").unwrap();
+        // A full fence store must leave the declaration and credential intact
+        // for retry; it must never evict another denial to acknowledge cleanup.
+        store
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .denied_agent_ids
+            .extend((0..MAX_DENIED_AGENT_IDS - 1).map(|i| format!("ag_{i}")));
+        assert!(store.remove_deleted("deleted").is_err());
+        assert!(store.get("deleted").is_some());
+        assert!(!store.is_denied("deleted").unwrap());
+        store
+            .inner
+            .state
+            .lock()
+            .unwrap()
+            .denied_agent_ids
+            .retain(|id| id == "existing-fence");
+        // Deterministic replacement failure on all operating systems.
+        fs::remove_file(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        assert!(store.remove_deleted("deleted").is_err());
+        assert!(store.get("deleted").is_some());
+        assert!(!store.is_denied("deleted").unwrap());
+        fs::remove_dir(&path).unwrap();
+        store.remove_deleted("deleted").unwrap();
+        store.remove_deleted("deleted").unwrap();
+        let reload = StartupStore::load(path.clone()).unwrap();
+        assert!(reload.get("deleted").is_none());
+        assert!(reload.is_denied("deleted").unwrap());
+        assert!(reload.is_denied("existing-fence").unwrap());
+        assert!(reload.upsert(entry("deleted")).is_err());
+        assert!(!fs::read_to_string(path).unwrap().contains("wlc_secret"));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

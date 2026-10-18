@@ -1646,6 +1646,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn recovery_deleted_declaration_and_unavailable_proxy_never_spawn_or_reregister() {
+        use crate::controller::private_state_tests::{create, fixture};
+        use crate::startup_store::StartupStore;
+        use axum::{http::StatusCode, routing::post};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let fixture = fixture().await;
+        let config = || fixture.config("srv_a", fixture.state.join("agent-private"));
+        let runtime = fixture.runtime(config()).await.unwrap();
+        for id in ["ag_deleted", "ag_keep"] {
+            create(&runtime, &fixture, id, "repo").await;
+            runtime.stop(&format!("stop-{id}"), id).await.unwrap();
+        }
+        // Model a Controller that was offline when the Proxy deleted an
+        // enabled declaration. The replacement reads the original disk state.
+        let store = StartupStore::load(fixture.root.join("startup.json")).unwrap();
+        for id in ["ag_deleted", "ag_keep"] {
+            store
+                .update(id, |entry| {
+                    entry.spec.enabled = true;
+                    // Newer explicit intent than the old successful exit.
+                    entry.spec.generation += 1;
+                })
+                .unwrap();
+        }
+        let replacement = fixture.runtime(config()).await.unwrap();
+        let unavailable = Arc::new(AtomicBool::new(true));
+        let failing = unavailable.clone();
+        let app = Router::new().route(
+            "/agent/workspaces/workspace/machines/srv_a/startup/validate",
+            post(move |Json(request): Json<ValidateAgentStartupRequest>| {
+                let failing = failing.clone();
+                async move {
+                    assert!(request.agent_ids.contains(&"ag_deleted".into()));
+                    if failing.load(Ordering::SeqCst) {
+                        return Err(StatusCode::SERVICE_UNAVAILABLE);
+                    }
+                    Ok(Json(ValidateAgentStartupResponse {
+                        active_agent_ids: vec!["ag_keep".into()],
+                        stopped_agent_ids: vec![],
+                        deleted_agent_ids: vec!["ag_deleted".into()],
+                        app_startups: vec![],
+                    }))
+                }
+            }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let http = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let make_client = |runtime| {
+            ProxyClient::new(
+                Url::parse(&format!("ws://{address}/")).unwrap(),
+                None,
+                server_info(
+                    "srv_a".into(),
+                    "workspace".into(),
+                    "fixture".into(),
+                    fixture.root.to_string_lossy().into_owned(),
+                    treer_protocol::BuildInfo {
+                        version: "test".into(),
+                        git_commit: "test".into(),
+                    },
+                    vec![],
+                    None,
+                ),
+                runtime,
+                NetworkRuntime::new(),
+            )
+        };
+        let client = make_client(replacement.clone());
+        let restore = |id: &str| CommandEnvelope {
+            command_id: id.into(),
+            workspace_id: "workspace".into(),
+            command: AgentCommand::RestoreRuntime {},
+        };
+        let failed = client.execute(restore("unavailable")).await;
+        assert_eq!(failed.error.unwrap().code, "restore_waiting_for_proxy");
+        assert_eq!(fixture.spawns.lock().unwrap().len(), 2);
+        assert!(replacement.get_startup("ag_deleted").is_ok());
+
+        unavailable.store(false, Ordering::SeqCst);
+        let restored = client.execute(restore("confirmed-deleted")).await;
+        assert!(restored.error.is_none(), "{restored:?}");
+        assert_eq!(fixture.spawns.lock().unwrap().len(), 3);
+        assert!(!replacement
+            .list()
+            .iter()
+            .any(|agent| agent.agent_id == "ag_deleted"));
+        assert!(replacement.get_startup("ag_deleted").is_err());
+        // Another replacement cannot materialize or register the removed ID.
+        let next = fixture.runtime(config()).await.unwrap();
+        assert!(!next
+            .list()
+            .iter()
+            .any(|agent| agent.agent_id == "ag_deleted"));
+        assert!(next.get_startup("ag_deleted").is_err());
+        assert!(!next.startup_candidate_ids().contains(&"ag_deleted".into()));
+        http.abort();
+    }
+
+    #[tokio::test]
     async fn recovery_validation_batches_at_proxy_boundary_and_preserves_stopped_ids() {
         use axum::{routing::post, Json, Router};
         let sizes = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
