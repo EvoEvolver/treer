@@ -150,6 +150,7 @@ try {
   const page=await browser.newPage({viewport:{width:390,height:900}});
   let stored=null,posted=0;
   const settings=structuredClone(conflictSettings);
+  settings.settings.activation_enabled=true;
   const endpoint=settings.settings.endpoints.find(v=>v.binding.endpoint_id==='ag_new');
   endpoint.paused=true;endpoint.isolation=null;
   await page.route('**/api/settings',r=>r.fulfill({json:settings}));
@@ -169,6 +170,7 @@ try {
   await section.getByText('Resume endpoint',{exact:true}).click();
   await section.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
   const radios=section.getByRole('radio');
+  await radios.first().waitFor();
   if(await radios.count()!==2||await radios.nth(0).isChecked()||await radios.nth(1).isChecked())throw new Error('isolation choice missing or defaulted');
   await section.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
   await section.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('isolation untested <script>window.injected=true</script>');
@@ -181,14 +183,22 @@ try {
    if(!await page.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('isolation choice overflow');
    await page.screenshot({path:join(screenshotPath,`isolation-${choice}-${width}-${theme.toLowerCase()}.png`),fullPage:true});
   }
-  await confirm.check();await section.getByRole('button',{name:'Resume and send pending messages',exact:true}).click();
+  await confirm.check();
+  const submit=section.getByRole('button',{name:'Resume and send pending messages',exact:true});
+  if(!await submit.isEnabled())throw new Error('explicit choice fixture did not satisfy resume preconditions');
+  await submit.click();
   await section.getByText('Endpoint resumed. Downstream delivery is not verified.',{exact:true}).waitFor();
   if(posted!==1||stored!==choice)throw new Error('choice not submitted exactly once');
   await page.reload();
+  await section.locator('h2').waitFor();
   if(choice==='unverified_accepted')await section.getByTestId('isolation-unverified').filter({hasText:'risk accepted by owner'}).waitFor();
   else if(await section.getByTestId('isolation-unverified').count())throw new Error('reviewed badge mislabeled');
   if(await page.evaluate(()=>window.injected))throw new Error('reference executed');
+  await page.setViewportSize({width:390,height:900});
+  if(!await page.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('persisted isolation badge overflow');
+  await page.screenshot({path:join(screenshotPath,`isolation-badge-${choice}-390.png`),fullPage:true});
   endpoint.paused=true;await page.reload();
+  await section.locator('h2').waitFor();
   if(choice==='unverified_accepted')await section.getByTestId('isolation-unverified').waitFor();
   await page.getByLabel('Language').selectOption('zh');
   if(choice==='unverified_accepted')await section.getByText('隔离未核验 · owner 已接受风险',{exact:true}).waitFor();
