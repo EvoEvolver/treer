@@ -429,9 +429,10 @@ fn json_response(value: serde_json::Value) -> Response<Body> {
 }
 
 /// `Cross-Origin-Opener-Policy` for the Console document only (#182): a
-/// popup the Console opens, or that a Console frame opens, lands in its own
-/// browsing context group and cannot reach the Console through `opener`. It is
-/// set on HTML responses alone; JSON, assets, APIs and tunnels never carry it.
+/// cross-origin popup the Console opens, or that a Console frame opens, lands
+/// in its own browsing context group and cannot reach the Console through
+/// `opener` (same-origin popups may keep a compatible opener). It is set on
+/// HTML responses alone; JSON, assets, APIs and tunnels never carry it.
 const CROSS_ORIGIN_OPENER_POLICY: header::HeaderName =
     header::HeaderName::from_static("cross-origin-opener-policy");
 

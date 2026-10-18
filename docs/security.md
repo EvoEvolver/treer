@@ -875,11 +875,13 @@ top-navigation permission. Interface authors should use `noopener,noreferrer`
 for external opens. These flags do not make the embedded App a trust boundary.
 The Console HTML document is served with `Cross-Origin-Opener-Policy:
 same-origin` (Proxy `app_dist`, the Worker and the nginx image alike, #182):
-a popup opened from the Console or from one of its frames gets its own
-browsing context group, so `window.opener` cannot reach the Console. COOP
-protects only against opener-based access from popups; it does not isolate
-iframes, network requests or embedding by other sites, and it is set on HTML
-responses only, never on APIs, tunnels, callbacks or assets.
+a popup of a different origin opened from the Console or from one of its
+frames gets its own browsing context group, so its `window.opener` cannot
+reach the Console; same-origin popups can keep a compatible opener. COOP
+protects only against opener-based access from cross-origin popups; it does
+not isolate iframes, network requests or embedding by other sites, and it is
+set on HTML responses only, never on APIs, tunnels, callbacks or assets. The
+iframe sandbox and the Console's own `noopener` practice are unchanged.
 Native WebView bridges currently lack a complete frame-origin and navigation
 boundary. HttpOnly cookies prevent direct script reads, not authenticated API
 calls or bridge abuse. Do not open untrusted interfaces with a privileged user
