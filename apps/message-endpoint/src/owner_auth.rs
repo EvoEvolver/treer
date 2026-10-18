@@ -80,15 +80,23 @@ pub struct MemberAuth {
     auth: OwnerAuth,
 }
 impl MemberAuth {
+    #[cfg(test)]
+    pub(crate) fn synthetic_client(auth: OwnerAuth) -> Self {
+        Self { auth }
+    }
+
+    pub(crate) fn oauth_client(&self) -> &OwnerAuth {
+        &self.auth
+    }
     pub fn new(
         proxy: &str,
         service: &str,
         workspace: &str,
         public_url: &str,
     ) -> Result<Self, Error> {
-        Ok(Self {
-            auth: OwnerAuth::new(proxy, service, workspace, public_url)?,
-        })
+        let mut auth = OwnerAuth::new(proxy, service, workspace, public_url)?;
+        auth.callback_path = "api/email/auth/callback";
+        Ok(Self { auth })
     }
     pub fn authenticate_from(
         &self,
@@ -136,6 +144,7 @@ pub struct OwnerAuth {
     origins: BTreeSet<String>,
     public_url: Url,
     gate: crate::verification_gate::Gate,
+    callback_path: &'static str,
 }
 fn configured_url(value: &str) -> Result<Url, Error> {
     let url = Url::parse(value).map_err(|_| Error::Configuration)?;
@@ -257,6 +266,7 @@ impl OwnerAuth {
             origins,
             public_url: public,
             gate: crate::verification_gate::Gate::default(),
+            callback_path: "api/auth/callback",
         })
     }
     fn read(&self, response: Response) -> Result<Value, Error> {
@@ -393,7 +403,7 @@ impl OwnerAuth {
     pub(crate) fn callback_url(&self) -> Result<String, Error> {
         Ok(self
             .public_url
-            .join("api/auth/callback")
+            .join(self.callback_path)
             .map_err(|_| Error::Configuration)?
             .into())
     }

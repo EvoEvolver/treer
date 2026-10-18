@@ -116,3 +116,13 @@ private outbox reconciliation is required before sustained production use.
 The eventual Proxy send deadline must be below the 60-second lease (20 seconds
 maximum); rate-limit/lease-unavailable results mean retry later, never permanent
 failure and never an extra consumed email attempt.
+
+Library transport/session helpers now include a separate, bounded PKCE member
+OAuth vault with the fixed `/api/email/auth/callback` path, and a Proxy sender
+that mints the hub's own service token through its pinned CLI. The sender checks
+its dispatch fence after minting, refuses redirects, bounds response bytes and
+uses a 20-second HTTP deadline. Fixed unavailable/retry/rejected outcomes never
+include upstream errors or credentials. These helpers remain **unwired**: their
+routes, cookie handling, current-member dispatch check and worker assembly are
+not exposed by the running hub. Tests exercise only synthetic loopback servers.
+Reply framing escapes Unicode line/paragraph separators U+2028 and U+2029 too.

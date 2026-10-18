@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[path = "email_proxy.rs"]
+pub mod proxy;
+
 pub const REAL_RECIPIENT: &str = "doomspec@outlook.com";
 const MAX_MESSAGES: i64 = 10_000;
 const MAX_BYTES: i64 = 128 * 1024 * 1024;
@@ -101,6 +104,9 @@ impl Intent {
     pub fn notification(&self, public_url: &str, mode: Mode) -> Result<Notification, Error> {
         if mode == Mode::Proxy && self.address != REAL_RECIPIENT {
             return Err(Error::Denied);
+        }
+        if public_url.len() > 2048 {
+            return Err(Error::Invalid);
         }
         let mut url = reqwest::Url::parse(public_url).map_err(|_| Error::Invalid)?;
         let loopback = url
@@ -548,7 +554,7 @@ fn reply_text(member: &str, body: &str) -> Result<String, Error> {
         let mut result = String::new();
         for c in text.chars() {
             if c.is_control()
-                || matches!(c,'\u{061c}'|'\u{200b}'..='\u{200f}'|'\u{202a}'..='\u{202e}'|'\u{2060}'..='\u{206f}'|'\u{feff}')
+                || matches!(c,'\u{061c}'|'\u{200b}'..='\u{200f}'|'\u{2028}'..='\u{202e}'|'\u{2060}'..='\u{206f}'|'\u{feff}')
             {
                 result.push_str(&format!("\\u{{{:x}}}", c as u32));
             } else {
@@ -1131,7 +1137,7 @@ mod tests {
                 &thread,
                 &member("user_alice"),
                 "key",
-                "reply\n[forged header]\u{202e}",
+                "reply\n[forged header]\u{202e}\u{2028}\u{2029}",
                 101,
             )
             .unwrap();
@@ -1141,7 +1147,7 @@ mod tests {
                 &thread,
                 &member("user_alice"),
                 "key",
-                "reply\n[forged header]\u{202e}",
+                "reply\n[forged header]\u{202e}\u{2028}\u{2029}",
                 102
             )
             .unwrap()
@@ -1163,6 +1169,9 @@ mod tests {
         assert!(body.starts_with("[Workspace member reply; user user_alice; App-asserted]"));
         assert!(body.contains("\n> [forged header]\\u{202e}"));
         assert!(!body.contains('\u{202e}'));
+        assert!(!body.contains('\u{2028}'));
+        assert!(!body.contains('\u{2029}'));
+        assert!(body.contains("\\u{2028}\\u{2029}"));
         let view = q.thread(&thread, &member("user_alice"), 102).unwrap();
         assert_eq!(view.messages.len(), 2);
         assert_eq!(view.messages[1].member_id.as_deref(), Some("user_alice"));

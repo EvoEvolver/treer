@@ -108,6 +108,54 @@ impl Core {
         run(&self.executable, arguments, input, Duration::from_secs(15))
     }
 
+    /// Mint a service-audience token only with this process's own injected
+    /// workload authority. Never accept a browser token or another Agent ID.
+    #[cfg(feature = "hub")]
+    pub(crate) fn app_service_token(&self, service: &str) -> Result<String, Error> {
+        if !service.starts_with("svc_")
+            || service.len() > 128
+            || !service
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+        {
+            return Err(Error::Invalid);
+        }
+        let value = self.call(
+            &[
+                "token".into(),
+                "create".into(),
+                service.into(),
+                "--json".into(),
+            ],
+            None,
+        )?;
+        if value.get("audience").and_then(Value::as_str) != Some(service)
+            || value.get("token_type").and_then(Value::as_str) != Some("Bearer")
+            || value
+                .get("expires_in")
+                .and_then(Value::as_u64)
+                .is_none_or(|n| n == 0 || n > 3600)
+        {
+            return Err(Error::Invalid);
+        }
+        let token = value
+            .get("access_token")
+            .and_then(Value::as_str)
+            .ok_or(Error::Invalid)?;
+        if token.len() > 8192
+            || token.split('.').count() != 3
+            || token.split('.').any(|p| {
+                p.is_empty()
+                    || !p
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
+            })
+        {
+            return Err(Error::Invalid);
+        }
+        Ok(token.into())
+    }
+
     /// Stable IDs bypass CLI Tree enumeration. Never resolve a user-supplied path.
     pub fn agent_metadata(&self, id: &str) -> Result<AgentMetadata, Error> {
         if !(id.starts_with("ag_") || id.starts_with("app_")) || !valid_id(id) {
@@ -658,5 +706,23 @@ print(json.dumps(result))
         ] {
             assert!(error.to_string().starts_with("core_cli_"));
         }
+    }
+    #[cfg(feature = "hub")]
+    #[test]
+    fn service_token_uses_own_cli_fixed_argv_and_validates_audience() {
+        let code = r#"
+import json,sys
+assert sys.argv[1:]==['token','create','svc_hub','--json']
+print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer','audience':'svc_hub','expires_in':300}))
+"#;
+        let (_temp, exe) = fake(code);
+        let core = Core::new(&exe, "app_own").unwrap();
+        assert!(core.app_service_token("svc_hub").is_ok());
+        for invalid in ["owner", "svc_../other", "svc_target?next=evil"] {
+            assert!(core.app_service_token(invalid).is_err());
+        }
+        let (_temp, exe) = fake(&code.replace("'audience':'svc_hub'", "'audience':'svc_other'"));
+        let core = Core::new(&exe, "app_own").unwrap();
+        assert!(core.app_service_token("svc_hub").is_err());
     }
 }
