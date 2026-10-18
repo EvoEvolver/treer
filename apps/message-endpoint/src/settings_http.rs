@@ -97,6 +97,9 @@ fn snapshot_value(owner: &str, snapshot: SettingsSnapshot) -> Result<Value, ()> 
 struct WriteGate(Mutex<HashMap<String, (Instant, u32)>>);
 impl WriteGate {
     fn admit(&self, owner: &str, now: Instant) -> bool {
+        self.admit_limit(owner, now, 10)
+    }
+    fn admit_limit(&self, owner: &str, now: Instant, limit: u32) -> bool {
         let Ok(mut slots) = self.0.lock() else {
             return false;
         };
@@ -107,7 +110,7 @@ impl WriteGate {
             return false;
         }
         let (_, count) = slots.entry(owner.into()).or_insert((now, 0));
-        if *count >= 10 {
+        if *count >= limit {
             return false;
         }
         *count += 1;
@@ -130,6 +133,7 @@ pub struct Settings {
     mutation: Option<Arc<Mutation>>,
     slots: Arc<Semaphore>,
     writes: WriteGate,
+    exports: WriteGate,
     html: &'static str,
     javascript: &'static str,
     stylesheet: &'static str,
@@ -166,6 +170,7 @@ impl Settings {
             mutation: None,
             slots: Arc::new(Semaphore::new(16)),
             writes: WriteGate::default(),
+            exports: WriteGate::default(),
             html,
             javascript: "",
             stylesheet: "",
@@ -512,6 +517,13 @@ async fn configuration_request(
     };
     match tokio::task::spawn_blocking(move || {
         let _permit = permit;
+        if matches!(
+            &command,
+            crate::configuration::Command::ExportMetadata { .. }
+        ) && !app.exports.admit_limit(owner.id(), Instant::now(), 6)
+        {
+            return fixed(StatusCode::TOO_MANY_REQUESTS, "owner_export_rate_limited");
+        }
         if command.consumes_write_quota() && !app.writes.admit(owner.id(), Instant::now()) {
             return fixed(StatusCode::TOO_MANY_REQUESTS, "owner_write_rate_limited");
         }
@@ -800,6 +812,19 @@ mod tests {
             json!({"active":true,"claims":{"sub":"user_owner","principal_kind":"human","workspace_id":"ws_test","service_id":"svc_hub","exp":2000}}),
             json!({"principals":[{"id":"user_owner","kind":"human","role":"owner"}]}),
         ]
+    }
+    #[test]
+    fn export_read_quota_is_independent_per_owner_and_resets_after_one_minute() {
+        let exports = WriteGate::default();
+        let writes = WriteGate::default();
+        let now = Instant::now();
+        for _ in 0..6 {
+            assert!(exports.admit_limit("owner_a", now, 6));
+        }
+        assert!(!exports.admit_limit("owner_a", now, 6));
+        assert!(exports.admit_limit("owner_b", now, 6));
+        assert!(writes.admit("owner_a", now));
+        assert!(exports.admit_limit("owner_a", now + Duration::from_secs(60), 6));
     }
     #[test]
     fn owner_write_quota_is_bounded_and_resets_without_blocking_safety_pause() {

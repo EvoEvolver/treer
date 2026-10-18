@@ -1359,3 +1359,22 @@ observations since activation (not final delivery). Duplicate callbacks do not
 increment the accepted counters; repeating a discarded update after a crash can
 count another observation before the account offset commits. Held Core content
 is a different queue with the explicit release/discard choice above.
+
+
+### Referenced receipts and export read budget
+
+A receipt still referenced by a parked transfer or pending failure notice is not
+clearable, even after export. The whole requested clear is refused (no partial
+delete) until those references have been recovered/resolved. TTL pruning keeps
+the same references. Metadata export remains available and does not acknowledge
+or resolve the work. Preserved receipts continue consuming the bounded failure
+budget; the safety pause path remains available.
+
+`export_metadata` has a separate per-owner limit of six attempts per minute per
+hub process, after authentication and before taking the hub state mutex. It
+returns HTTP 429 `owner_export_rate_limited` and does not consume the write/pause
+budget. Restart resets this RAM read limiter. The 8 MiB export budget counts the
+complete serialized export object, including the compatibility `records` copy,
+JSON string escaping and emergency evidence; 1 KiB is reserved for the fixed HTTP
+outcome wrapper. Canonical download SHA-256 continues covering only the exact
+JSONL bytes. Audit deletion/hash-chain pruning is still not implemented.

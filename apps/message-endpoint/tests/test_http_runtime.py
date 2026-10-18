@@ -255,4 +255,18 @@ class Runtime(unittest.TestCase):
             self.assertEqual(status,409)
             self.assertEqual([a[0] for a in db.execute('SELECT action FROM hub_owner_audit ORDER BY id')],['archive_receipts','later'])
             db.close()
+    def test_metadata_export_read_limit_does_not_block_safety_pause(self):
+        with fixture(BINARY) as f:
+            trusted={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+            def call(value):
+                status,_,body=f['request']('/api/configuration',trusted,method='POST',body=json.dumps(value).encode())
+                return status,json.loads(body)
+            export={'action':'export_metadata','kind':'audit','endpoint_id':None}
+            snapshot=f['request']('/api/settings',{'X-Treer-Identity-Token':TOKEN})
+            self.assertEqual(snapshot[0],200)
+            revision=json.loads(snapshot[2])['settings']['endpoints'][0]['revision']
+            for _ in range(6):self.assertEqual(call(export)[0],200)
+            status,result=call(export)
+            self.assertEqual(status,429);self.assertEqual(result['error']['code'],'owner_export_rate_limited')
+            self.assertEqual(call({'action':'pause','endpoint_id':'ag_demo','revision':revision,'confirm':True})[0],200)
 if __name__=='__main__':unittest.main()

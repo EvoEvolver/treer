@@ -46,6 +46,19 @@ pub struct Failure {
     pub created_at: i64,
 }
 
+/// Fixed SQL only. Standalone relay stores do not have the optional hub tables.
+/// A parked transfer or pending notice still needs its original reason/dedup key.
+pub(crate) fn unreferenced(db: &rusqlite::Connection) -> Result<String, Error> {
+    let mut conditions = vec!["1"];
+    for (table,predicate) in [
+        ("hub_parked","NOT EXISTS(SELECT 1 FROM hub_parked p WHERE p.endpoint=failures.endpoint AND p.generation=failures.generation AND failures.delivery IN (p.transfer,'transport-'||p.transfer))"),
+        ("hub_failure_notices","NOT EXISTS(SELECT 1 FROM hub_failure_notices n WHERE n.endpoint=failures.endpoint AND n.generation=failures.generation AND n.state=0 AND failures.delivery IN (n.transfer,'transport-'||n.transfer))")
+    ] {
+        if db.query_row("SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name=?1)",[table],|r|r.get::<_,bool>(0))? {conditions.push(predicate);}
+    }
+    Ok(conditions.join(" AND "))
+}
+
 impl Store {
     /// Only receiver-derived trusted endpoint/generation/delivery may be used.
     /// Caller is responsible for identifying poison and verifying outer sender.
@@ -134,8 +147,13 @@ impl Store {
         }
         let before = now - TOMBSTONE_TTL;
         let transaction = self.db.transaction()?;
-        let mut removed =
-            transaction.execute("DELETE FROM failures WHERE created_at<=?1", [before])?;
+        let mut removed = transaction.execute(
+            &format!(
+                "DELETE FROM failures WHERE created_at<=?1 AND ({})",
+                unreferenced(&transaction)?
+            ),
+            [before],
+        )?;
         for table in ["inbound", "outbound"] {
             // Constant table names only, never caller-controlled SQL.
             removed += transaction.execute(

@@ -207,7 +207,7 @@ fn collect(
         return Err(StorageError::Full.into());
     }
     let checksum = format!("{:x}", Sha256::digest(canonical_jsonl.as_bytes()));
-    Ok(Export {
+    let export = Export {
         version: 1,
         kind,
         endpoint_id: endpoint.map(str::to_owned),
@@ -218,7 +218,21 @@ fn collect(
         checksum,
         records,
         emergency_pauses,
-    })
+    };
+    // Budget the actual JSON shape (duplicated records and JSON string escaping
+    // included), leaving fixed headroom for the configuration outcome wrapper.
+    validate_response_budget(&export)?;
+    Ok(export)
+}
+fn validate_response_budget(export: &Export) -> Result<(), Error> {
+    if serde_json::to_vec(export)
+        .map_err(|_| Error::Binding)?
+        .len()
+        > 8 * 1024 * 1024 - 1024
+    {
+        return Err(StorageError::Full.into());
+    }
+    Ok(())
 }
 impl<M: Mailbox + Directory> Hub<M> {
     pub fn metadata_archive(&self, kind: Kind, endpoint: Option<&str>) -> Result<Export, Error> {
@@ -324,6 +338,11 @@ impl<M: Mailbox + Directory> Hub<M> {
         if audits >= AUDIT_LIMIT {
             return Err(StorageError::Full.into());
         }
+        let unreferenced = crate::failures::unreferenced(&tx)?;
+        let protected: bool = tx.query_row(&format!("SELECT EXISTS(SELECT 1 FROM failures WHERE endpoint=?1 AND rowid<=?2 AND NOT ({unreferenced}))"),params![archive.endpoint_id,archive.through],|r|r.get(0))?;
+        if protected {
+            return Err(Error::Binding);
+        }
         // Only terminal failures: capacity receipts (including unrecovered Core
         // message handles), audit evidence and all queue/rate/circuit state stay.
         tx.execute(
@@ -411,6 +430,12 @@ mod tests {
     #[test]
     fn receipt_clear_is_scope_revision_and_snapshot_fenced_and_does_not_clear_queues() {
         let (mut hub, _) = fixture(Store::memory(Limits::default()).unwrap());
+        // This test exercises eligible terminal receipts; referenced ones have a
+        // dedicated retention regression below.
+        hub.store
+            .db
+            .execute_batch("DELETE FROM hub_parked; UPDATE hub_failure_notices SET state=1;")
+            .unwrap();
         let before: i64 = hub
             .store
             .db
@@ -524,6 +549,12 @@ mod tests {
     #[test]
     fn changed_receipts_or_emergency_snapshot_and_audit_failure_roll_back_clear() {
         let (mut hub, _) = fixture(Store::memory(Limits::default()).unwrap());
+        // This test exercises eligible terminal receipts; referenced ones have a
+        // dedicated retention regression below.
+        hub.store
+            .db
+            .execute_batch("DELETE FROM hub_parked; UPDATE hub_failure_notices SET state=1;")
+            .unwrap();
         let export = hub
             .metadata_archive(Kind::Receipts, Some("ag_endpoint"))
             .unwrap();
@@ -549,5 +580,75 @@ mod tests {
             export.checksum
         );
         assert_eq!(hub.view("ag_endpoint").unwrap().revision, 4);
+    }
+    #[test]
+    fn parked_and_pending_notice_receipts_survive_owner_clear_and_ttl_pruning() {
+        let (mut hub, _) = fixture(Store::memory(Limits::default()).unwrap());
+        let a = hub
+            .metadata_archive(Kind::Receipts, Some("ag_endpoint"))
+            .unwrap();
+        assert!(matches!(
+            hub.clear_metadata_archive(&clear(&a), "human_owner", NOW),
+            Err(Error::Binding)
+        ));
+        let receipts = hub
+            .store
+            .db
+            .query_row("SELECT COUNT(*) FROM failures", [], |r| r.get::<_, i64>(0))
+            .unwrap();
+        hub.store
+            .prune_completed(NOW + crate::transfers::TOMBSTONE_TTL + 1)
+            .unwrap();
+        assert_eq!(
+            hub.store
+                .db
+                .query_row("SELECT COUNT(*) FROM failures", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            receipts
+        );
+        hub.store.db.execute("DELETE FROM hub_parked", []).unwrap();
+        assert!(matches!(
+            hub.clear_metadata_archive(&clear(&a), "human_owner", NOW),
+            Err(Error::Binding)
+        ));
+        hub.store
+            .prune_completed(NOW + crate::transfers::TOMBSTONE_TTL + 1)
+            .unwrap();
+        assert_eq!(
+            hub.store
+                .db
+                .query_row("SELECT COUNT(*) FROM failures", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            receipts
+        );
+        hub.store
+            .db
+            .execute("UPDATE hub_failure_notices SET state=1", [])
+            .unwrap();
+        hub.clear_metadata_archive(&clear(&a), "human_owner", NOW)
+            .unwrap();
+        assert_eq!(
+            hub.store
+                .db
+                .query_row("SELECT COUNT(*) FROM failures", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn full_json_response_budget_counts_duplicate_records_and_string_escaping() {
+        let (hub, _) = fixture(Store::memory(Limits::default()).unwrap());
+        hub.recovery_schema().unwrap();
+        hub.store.db.execute_batch("WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<1000) INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) SELECT 'human_owner','resume_binding','ag_endpoint',replace(hex(zeroblob(2048)),'0','x'),1,1 FROM n;").unwrap();
+        assert!(hub.metadata_archive(Kind::Audit, None).is_err());
+        hub.store
+            .db
+            .execute(
+                "UPDATE hub_owner_audit SET transfer='bounded reference'",
+                [],
+            )
+            .unwrap();
+        let export = hub.metadata_archive(Kind::Audit, None).unwrap();
+        assert!(serde_json::to_vec(&export).unwrap().len() <= 8 * 1024 * 1024 - 1024);
     }
 }
