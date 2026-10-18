@@ -20,6 +20,7 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 pub struct ProviderChild {
     child: Child,
     group: Option<rustix::process::Pid>,
+    readers: Vec<tokio::task::AbortHandle>,
 }
 impl ProviderChild {
     fn kill_group(&mut self) {
@@ -32,12 +33,14 @@ impl ProviderChild {
     }
     pub async fn kill(&mut self) -> std::io::Result<()> {
         self.kill_group();
+        for task in &self.readers { task.abort(); }
         self.child.kill().await
     }
 }
 impl Drop for ProviderChild {
     fn drop(&mut self) {
         self.kill_group();
+        for task in &self.readers { task.abort(); }
     }
 }
 
@@ -73,11 +76,11 @@ impl Rpc {
         let stdout = child.stdout.take().unwrap();
         let stderr = child.stderr.take().unwrap();
         // Drain provider stderr without retaining/logging conversation or secrets.
-        tokio::spawn(async move {
+        let stderr_reader = tokio::spawn(async move {
             let _ = tokio::io::copy(&mut BufReader::new(stderr), &mut tokio::io::sink()).await;
         });
         let reader_rpc = rpc.clone();
-        tokio::spawn(async move {
+        let stdout_reader = tokio::spawn(async move {
             let mut lines =
                 FramedRead::new(stdout, LinesCodec::new_with_max_length(4 * 1024 * 1024));
             while let Some(Ok(line)) = lines.next().await {
@@ -108,7 +111,7 @@ impl Rpc {
         let group = child
             .id()
             .and_then(|id| rustix::process::Pid::from_raw(id as i32));
-        Ok((rpc, ProviderChild { child, group }, receiver))
+        Ok((rpc, ProviderChild { child, group, readers: vec![stderr_reader.abort_handle(), stdout_reader.abort_handle()] }, receiver))
     }
 
     pub async fn write(&self, message: Value) -> Result<()> {

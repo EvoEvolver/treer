@@ -39,12 +39,12 @@ async function fixture(t, extra={}, controllerOptions={}) {
   env.RUST_SPIKE_PROVIDER_LOG=join(root,'provider.jsonl');
   if(useNode&&process.env.NODE_LAUNCHER_RUNTIME){env.AGENT_UI_APP_ROOT=dirname(process.env.NODE_LAUNCHER_RUNTIME);env.AGENT_UI_PUBLIC_DIR=join(env.AGENT_UI_APP_ROOT,'public');}
   const children=[];let logs='';
-  const launch=async overrides=>{
+  const launch=async (overrides,waitReady=true)=>{
     await rm(portFile,{force:true});
     const child=spawn(useNode?process.execPath:binary,useNode?(process.env.NODE_LAUNCHER_RUNTIME?[process.env.NODE_LAUNCHER_RUNTIME]:['--import',join(nodeRoot,'node_modules/tsx/dist/loader.mjs'),join(nodeRoot,'src/index.ts')]):[],{cwd,env:{...env,...overrides},stdio:['ignore','pipe','pipe']});
     children.push(child);child.stdout.on('data',b=>logs+=b);child.stderr.on('data',b=>logs+=b);
     const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(portFile,'utf8'))}`,x=>!x.endsWith('NaN'));
-    try {await until(()=>fetch(base+'/api/state').then(r=>r.json()),x=>x.ready===true);}catch(e){throw Error(e.message+' '+logs);}
+    if(waitReady)try {await until(()=>fetch(base+'/api/state').then(r=>r.json()),x=>x.ready===true);}catch(e){throw Error(e.message+' '+logs);}
     return {child,base};
   };
   t.after(async()=>{for(const child of children){if(child.exitCode===null&&child.signalCode===null){child.kill('SIGTERM');await once(child,'exit');}}await controller.close();await rm(root,{recursive:true,force:true});});
@@ -551,6 +551,26 @@ test('Rust shutdown kills the provider-owned process group including a descendan
   t.after(()=>{if(alive())try{process.kill(pid,'SIGKILL')}catch{}});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   await until(async()=>alive(),x=>x===false);
+  assert.match(s.logs(),/shutdown provider_exit=confirmed; process_group=termination_requested_unverified; detached_descendants=not_guaranteed/);
+});
+test('Rust shutdown cancels startup and an in-flight turn without waiting for the RPC timeout',{skip:useNode,timeout:25000},async t=>{
+  const s=await fixture(t,faultEnv('timeout'));
+  const provider=Number(await readFile(join(s.root,'provider.jsonl.pid'),'utf8'));
+  const pending=s.post({text:'uncertain accepted input',operation_id:'shutdown-inflight'}).catch(()=>null);
+  await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
+  const started=Date.now();
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;await pending;
+  assert.ok(Date.now()-started<8000,'shutdown must cancel the pending 60 s RPC');
+  assert.throws(()=>process.kill(provider,0),{code:'ESRCH'});
+  const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(journal.dispatchBlocked,true);
+  assert.equal(journal.records[0].submission.state,'running','stop must not invent completion');
+  const restarted=await s.launch(faultEnv('shutdown-startup'),false);
+  const nextProvider=await until(()=>readFile(join(s.root,'provider.jsonl.pid'),'utf8').then(Number),pid=>pid!==provider);
+  const stop=Date.now();const stopped=once(restarted.child,'exit');restarted.child.kill('SIGTERM');await stopped;
+  assert.ok(Date.now()-stop<8000);
+  assert.throws(()=>process.kill(nextProvider,0),{code:'ESRCH'});
+  assert.match(s.logs(),/shutdown provider_exit=confirmed/);
 });
 test('Rust refuses unknown provider RPC requests with method-not-found',{skip:useNode},async t=>{
   const s=await fixture(t,faultEnv('unknown-request'));

@@ -3,6 +3,7 @@ import readline from 'node:readline';
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 const mode=process.env.RUST_SPIKE_FAULT;
+writeFileSync(process.env.RUST_SPIKE_PROVIDER_LOG+'.pid',String(process.pid),{mode:0o600});
 if(mode==='descendant') {
   const child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'});
   appendFileSync(process.env.RUST_SPIKE_PROVIDER_LOG+'.child',String(child.pid),{mode:0o600});
@@ -15,6 +16,7 @@ for await(const line of readline.createInterface({input:process.stdin})) {
   appendFileSync(process.env.RUST_SPIKE_PROVIDER_LOG,line+'\n',{mode:0o600});
   if(!request.id)continue;
   if(!request.method)continue; // Response to a provider-initiated request.
+  if(mode==='shutdown-startup'&&request.method==='initialize')continue;
   let result={};
   if(mode==='goal-ack-lost'&&request.method.startsWith('thread/goal/')) {
     const file='.fault-goal.json';

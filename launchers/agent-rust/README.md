@@ -67,7 +67,15 @@ versus unverified, group termination requested but unverified, and detached
 descendants not guaranteed. History-limit and startup-failure notices expose
 the same distinction through the existing browser error display. Direct exit
 confirmation is bounded to five seconds; timeout or kill/wait failure is never
-reported as confirmed. This does not yet cover the full stop/delete lifecycle.
+reported as confirmed. SIGTERM, SIGHUP and SIGINT cancel even an in-flight
+startup/turn RPC, stop the provider, bound direct-child wait to five seconds,
+and print a fixed cleanup outcome before at most two seconds of HTTP drain.
+Internal observer/notification and provider pipe-reader tasks are cancelled.
+Queued and uncertain running receipts remain durable; stopping does not invent
+a terminal result or replay them. This covers graceful launcher stop (including
+a Controller stop delivered as these signals), not SIGKILL, abrupt machine loss,
+or a guarantee about deliberately detached descendants. Agent deletion and
+private-state lifecycle remain Controller-owned; the launcher deletes no state.
 Resuming an already oversized thread fails with an owner-visible history-limit
 reason and no fresh-thread fallback. The durable journal remains byte-for-byte
 unchanged; this implementation does not silently select a partial history.

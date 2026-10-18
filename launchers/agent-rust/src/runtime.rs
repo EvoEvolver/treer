@@ -26,8 +26,20 @@ pub struct Request {
 pub struct Handle {
     pub commands: mpsc::Sender<Request>,
     pub state: watch::Receiver<Arc<Value>>,
+    shutdown: Arc<tokio::sync::Notify>,
+    stopped: watch::Receiver<bool>,
 }
 impl Handle {
+    pub async fn shutdown(&self) -> Result<()> {
+        self.shutdown.notify_one();
+        let mut stopped = self.stopped.clone();
+        timeout(Duration::from_secs(7), async {
+            while !*stopped.borrow_and_update() {
+                stopped.changed().await.map_err(|_| anyhow!("runtime_shutdown_unverified"))?;
+            }
+            Ok::<_, anyhow::Error>(())
+        }).await.map_err(|_| anyhow!("runtime_shutdown_unverified"))?
+    }
     pub async fn call(&self, method: &str, body: Value) -> Result<Value> {
         let (tx, rx) = oneshot::channel();
         self.commands
@@ -79,6 +91,13 @@ struct Notification {
     payload: String,
 }
 
+// Cancellation must not detach auxiliary workers when the actor is stopped
+// during an in-flight provider RPC or startup handshake.
+struct AbortTask(tokio::task::JoinHandle<()>);
+impl Drop for AbortTask {
+    fn drop(&mut self) { self.0.abort(); }
+}
+
 pub struct Config {
     pub cwd: PathBuf,
     pub private_root: PathBuf,
@@ -98,6 +117,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
     }
     let (rpc, mut child, mut events) = Rpc::spawn(&config.codex, &config.codex_args, &config.cwd)?;
     let (commands, mut requests) = mpsc::channel::<Request>(64);
+    let shutdown = Arc::new(tokio::sync::Notify::new());
+    let shutdown_requested = shutdown.clone();
+    let (stopped_tx, stopped) = watch::channel(false);
     let (changed, state) = watch::channel(Arc::new(
         json!({"ready":false,"runtime":{"state":"starting","error":null},"thread":null,"queue":[],"modelOptions":[],"backgroundTasks":[],"goal":null}),
     ));
@@ -118,6 +140,10 @@ pub fn spawn(config: Config) -> Result<Handle> {
         changed,
     };
     tokio::spawn(async move {
+        tokio::select! {
+        biased;
+        _ = shutdown_requested.notified() => {},
+        _ = async {
         let startup = rt.start(&config, saved).await;
         if let Err(error) = startup {
             eprintln!("Rust spike: Codex startup failed (no fresh-thread fallback)");
@@ -140,21 +166,21 @@ pub fn spawn(config: Config) -> Result<Handle> {
         // Network/CLI latency never occupies the runtime actor.
         let (notify_tx, mut notify_rx) = mpsc::channel::<Notification>(1);
         let (result_tx, mut result_rx) = mpsc::channel(1);
-        let notification_worker = tokio::spawn(async move {
+        let notification_worker = AbortTask(tokio::spawn(async move {
             while let Some(job) = notify_rx.recv().await {
                 let success = message_command(&job.args, Some(&job.payload)).await.is_ok();
                 if result_tx.send((job.id, success)).await.is_err() {
                     break;
                 }
             }
-        });
+        }));
         let mut notification_pending = false;
         // Read-only reconciliation stays outside the actor with one pending
         // read/result, so a slow read cannot block interrupts or grow a backlog.
         let (observe_tx, mut observe_rx) = mpsc::channel::<Value>(1);
         let (observed_tx, mut observed_rx) = mpsc::channel(1);
         let observer_rpc = rt.rpc.clone();
-        let observer = tokio::spawn(async move {
+        let observer = AbortTask(tokio::spawn(async move {
             while let Some(thread) = observe_rx.recv().await {
                 let result = observer_rpc
                     .request(
@@ -166,7 +192,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     break;
                 }
             }
-        });
+        }));
         let mut observation_pending = false;
         let mut provider_stopped = false;
         let mut tick = tokio::time::interval(Duration::from_secs(2));
@@ -223,13 +249,18 @@ pub fn spawn(config: Config) -> Result<Handle> {
                 provider_stopped = true;
             }
         }
-        notification_worker.abort();
-        let _ = notification_worker.await;
-        observer.abort();
-        let _ = observer.await;
-        let _ = child.kill().await;
+        drop(notification_worker);
+        drop(observer);
+        } => {},
+        }
+        rt.ready = false;
+        rt.dispatch_blocked = true;
+        // Preserve uncertain receipts and queued work; do not invent completion.
+        rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
+        eprintln!("Rust spike: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed", rt.provider_exit);
+        stopped_tx.send_replace(true);
     });
-    Ok(Handle { commands, state })
+    Ok(Handle { commands, state, shutdown, stopped })
 }
 
 impl Runtime {

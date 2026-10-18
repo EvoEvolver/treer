@@ -196,16 +196,20 @@ async fn main() -> Result<()> {
         }
         Ok::<_, anyhow::Error>(())
     };
+    let shutdown_handle = handle.clone();
+    let final_shutdown = handle.clone();
     if !agent.is_empty()
         && env("AGENT_UI_MESSAGE_WATCH").as_deref() != Some("0")
         && env("TREER_WORKLOAD_CREDENTIAL").is_some()
     {
         tokio::spawn(runtime::watch_messages(handle, agent));
     }
+    let draining = Arc::new(tokio::sync::Notify::new());
+    let drain_started = draining.clone();
     let serve =
         async {
             axum::serve(files::IdleListener { listener, idle: files_idle }, router)
-        .with_graceful_shutdown(async {
+        .with_graceful_shutdown(async move {
             #[cfg(unix)]
             {
                 let mut term =
@@ -219,11 +223,22 @@ async fn main() -> Result<()> {
             {
                 let _ = tokio::signal::ctrl_c().await;
             }
+            if shutdown_handle.shutdown().await.is_err() {
+                eprintln!("Rust spike: runtime_shutdown_unverified");
+            }
+            drain_started.notify_one();
         })
         .await?;
             Ok::<_, anyhow::Error>(())
         };
-    tokio::try_join!(register, serve)?;
+    // A WebSocket or a client that keeps a response open cannot prevent exit.
+    // Provider cleanup happens before the bounded HTTP drain begins.
+    let result = tokio::select! {
+        result = async { tokio::try_join!(register, serve).map(|_| ()) } => result,
+        _ = async { draining.notified().await; tokio::time::sleep(std::time::Duration::from_secs(2)).await; } => Ok(()),
+    };
+    final_shutdown.shutdown().await?;
+    result?;
     Ok(())
 }
 
