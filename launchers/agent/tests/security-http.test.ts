@@ -90,6 +90,20 @@ test("every browser HTTP surface rejects unmarked Origin/Fetch Metadata and fore
   }
 });
 
+test("file download refuses cross-site navigations but allows same-origin, same-site and user-typed ones", async (t) => {
+  const server = await fixture(t);
+  const ui = { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_security", "x-treer-interface-instance": "security-instance" };
+  const get = (site?: string) => fetch(server.base + "/v1/files/download?path=port", { headers: { ...ui, ...(site ? { "sec-fetch-site": site, "sec-fetch-mode": "navigate" } : {}) } });
+  const crossSite = await get("cross-site");
+  assert.equal(crossSite.status, 403);
+  assert.equal((await crossSite.json()).error.code, "cross_site_download");
+  for (const site of ["same-origin", "same-site", "none", undefined]) {
+    const allowed = await get(site);
+    assert.equal(allowed.status, 200, String(site));
+    await allowed.arrayBuffer();
+  }
+});
+
 test("UI/Controller provenance matches target/instance/Host but only Controller may attest queue sender", async (t) => {
   const server = await fixture(t);
   const ui = { "x-treer-interface-source": "proxy-ui", "x-treer-agent-id": "ag_security", "x-treer-interface-instance": "security-instance", origin: "https://proxy.fixture.invalid", "sec-fetch-mode": "cors" };

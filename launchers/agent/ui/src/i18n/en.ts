@@ -182,6 +182,7 @@ export const en = {
   "files.open": "Open full text",
   "files.download": "Download",
   "files.downloadFile": "Download {{name}}",
+  "files.downloadTooLarge": "Larger than the 1 GiB download limit",
   "tasks.title": "Background tasks",
   "tasks.close": "Close background tasks",
   "tasks.empty": "No background tasks.",

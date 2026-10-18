@@ -68,6 +68,23 @@ export async function testFilesDownloadUi(browser, upstream, screenshots, entry 
       assert.equal(fromHeader.suggestedFilename(), "large.txt");
       assert.equal((await readFile(await fromHeader.path(), "utf8")).length, 65537);
       await page.screenshot({ path: join(screenshots, `files-download-${width}.png`) });
+      // Over the 1 GiB limit the UI says so up front (the server answers 413 before any byte): the row and preview buttons are disabled.
+      await page.route("**/v1/files/tree?path=", async (route) => { const response = await route.fetch(); const body = await response.json(); for (const entry of body.entries) if (entry.name === "README.md") entry.size = 1024 ** 3 + 1; await route.fulfill({ response, json: body }); });
+      await page.route("**/v1/files?path=README.md", async (route) => { const response = await route.fetch(); const body = await response.json(); body.size = 1024 ** 3 + 1; await route.fulfill({ response, json: body }); });
+      await panel.getByRole("button", { name: "Refresh" }).click();
+      if (width < 700) await panel.getByRole("button", { name: "Browse", exact: true }).click(); // the tree is the Browse tab on phones
+      const tooLarge = panel.getByRole("button", { name: /^Download README\.md: Larger than the 1 GiB download limit$/ });
+      await expect(tooLarge).toBeDisabled();
+      await expect(panel.getByRole("link", { name: "Download README.md", exact: true })).toHaveCount(0);
+      await tree.getByRole("treeitem", { name: "README.md" }).click();
+      await expect(panel.locator(".pmeta .dl-note")).toHaveText("Larger than the 1 GiB download limit");
+      await expect(panel.locator(".pmeta").getByRole("button", { name: /Download/ })).toBeDisabled();
+      await expect(panel.locator(".pmeta").getByRole("link", { name: /^Download/ })).toHaveCount(0);
+      await page.screenshot({ path: join(screenshots, `files-download-too-large-${width}.png`) });
+      await page.unroute("**/v1/files/tree?path="); await page.unroute("**/v1/files?path=README.md");
+      await panel.getByRole("button", { name: "Refresh" }).click();
+      if (width < 700) await panel.getByRole("button", { name: "Browse", exact: true }).click();
+      await expect(panel.getByRole("link", { name: "Download README.md", exact: true })).toHaveCount(1);
       if (width >= 700) {
         // Keyboard: ArrowRight on a file row moves to its download link, Enter downloads, ArrowLeft returns to the row.
         await tree.getByRole("treeitem", { name: "README.md" }).focus();

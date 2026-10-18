@@ -10,7 +10,8 @@ import { CodexRuntime } from "./harness/codex.js";
 import { ClaudeRuntime } from "./harness/claude.js";
 import type { HarnessRuntime } from "./runtime.js";
 import { threadStatePath } from "./thread-state.js";
-import { listFiles, previewFile, openDownload, contentDisposition, fileErrorStatus } from "./files.js";
+import { listFiles, previewFile, fileErrorStatus } from "./files.js";
+import { createDownloads } from "./download.js";
 import { InvalidPromptMode, PromptQueue, promptMode } from "./prompt-queue.js";
 import { taskOutput } from "./task-output.js";
 import { GoalError, goalUpdate } from "./goals.js";
@@ -239,6 +240,9 @@ runtime.on("state", broadcast);
 runtime.on("log", (message) => console.log(`[${runtime.harness.id}] ${message}`));
 
 // Keep stalled uploads bounded (Node's defaults, explicit for this boundary).
+// File downloads (#165): limit, concurrency cap, idle and duration timeouts live in src/download.ts; the env vars only tune the timeouts.
+const downloads = createDownloads({ cwd, idleMs: Number(process.env.AGENT_UI_DOWNLOAD_IDLE_MS) || undefined, maxMs: Number(process.env.AGENT_UI_DOWNLOAD_MAX_MS) || undefined });
+
 const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 }, async (request, response) => {
   const method = request.method ?? "GET";
   try {
@@ -282,33 +286,7 @@ const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 },
       send(response, 200, await runtime.exportSession());
       return;
     }
-    if (path === "/v1/files/download") {
-      if (method !== "GET") {
-        response.setHeader("allow", "GET");
-        send(response, 405, { error: { code: "method_not_allowed", message: "File download is read-only; use GET" } });
-        return;
-      }
-      let download: Awaited<ReturnType<typeof openDownload>> | undefined;
-      try { download = await openDownload(cwd, url.searchParams.get("path") ?? ""); }
-      catch (error) {
-        const status = fileErrorStatus(error);
-        send(response, status, { error: { code: "file_access_failed", message: status === 404 ? "File not found" : status === 500 ? "Unable to read file" : error instanceof Error ? error.message : "File access denied" } });
-        return;
-      }
-      // Stream exactly the size seen on the open descriptor, so a file that grows meanwhile cannot break Content-Length.
-      const { handle, size, name } = download;
-      response.writeHead(200, {
-        "content-type": "application/octet-stream", "content-length": size, "content-disposition": contentDisposition(name),
-        "x-content-type-options": "nosniff", "cache-control": "no-store",
-      });
-      // No CSP sandbox header here: Chromium treats a sandboxed response as a sandboxed download source and cancels it.
-      if (size === 0) { await handle.close(); response.end(); return; }
-      const stream = handle.createReadStream({ start: 0, end: size - 1, autoClose: true });
-      response.once("close", () => stream.destroy());
-      stream.once("error", () => response.destroy());
-      stream.pipe(response);
-      return;
-    }
+    if (path === "/v1/files/download") { await downloads.handle(request, response, url); return; }
     if (path === "/v1/files/tree" || path === "/v1/files") {
       if (method !== "GET") {
         response.setHeader("allow", "GET");
