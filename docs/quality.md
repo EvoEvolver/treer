@@ -230,6 +230,12 @@ export TREER_TEST_DATABASE_URL=postgres://treer:treer@127.0.0.1:55432/treer_test
 just check
 ```
 
+`just test-db-up` starts the container with `--shm-size=1g`: Docker's default 64 MB
+`/dev/shm` is too small for the parallel Proxy tests (PostgreSQL then fails with
+"could not resize shared memory segment ... No space left on device" and the gate
+fails without a code defect). A container created by an older recipe keeps its old
+size; recreate it with `just test-db-down && just test-db-up`.
+
 The complete gate is not a prerequisite for every local change. When its
 database coverage is relevant and Docker is unavailable, record that the
 PostgreSQL-backed workspace gate was skipped. Do not point
