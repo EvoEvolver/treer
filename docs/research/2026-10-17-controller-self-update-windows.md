@@ -445,7 +445,17 @@ original identity. These synthetic tests reject otherwise matching prior-boot
 records; they do not acquire or authenticate an OS boot identity. Native
 registration must establish a trusted, cross-process Windows boot identity and
 pair it with locally acquired clock samples before any use; a peer-supplied boot
-value is insufficient. Native publication and authenticated
+value is insufficient. A private synthetic `ClockSource` now models acquisition
+order: read boot, read tick, read boot again, and accept only matching nonzero
+boot identities. Either boot read or the tick read failing refuses the sample,
+without retry, fallback, or a separately sampled tick for the remaining budget.
+Deadline checks through this source permanently refuse on acquisition failure,
+just as they do on a changed boot; a later successful read cannot renew them.
+Tests script the exact read order, every failure point, mixed/empty/different
+boots, both deadline reader paths, and the original owner ceiling. This does not
+select or call a Windows boot API: trusted OS acquisition, Fast Startup,
+sleep/hibernate and VM snapshot semantics still require native review and
+real-machine validation. Native publication and authenticated
 process binding remain subsequent authority-reviewed work. This is not a stable
 on-disk format.
 

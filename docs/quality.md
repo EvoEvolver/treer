@@ -14,6 +14,10 @@ boot permanently refuses that reader even when ticks still fall in the window.
 This tests rejection of prior-boot records with otherwise matching fields, not
 the authenticity or availability of a Windows boot identity. Native registration
 still requires verified boot identity acquisition and trusted clock samples.
+An injected synthetic source tests boot/tick/boot read ordering and refuses
+empty, mixed or failed samples without retry or fallback. Either deadline reader
+permanently refuses after any acquisition failure; subsequent coherent samples
+cannot renew its budget. These checks model acquisition ordering, not an OS API.
 These tests do not read or write files, acquire OS identity or time, enforce replay
 uniqueness, construct frame bindings, or grant update authority. Native record
 publication, suspended-child registration and real-machine acceptance remain

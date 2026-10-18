@@ -28,11 +28,34 @@ struct Observation {
 }
 
 // Both fields must eventually come from the verifier's own trusted OS sources.
-// These synthetic samples deliberately provide no boot-identity acquisition API.
+// This synthetic source deliberately provides no OS boot-identity API.
+trait ClockSource {
+    fn boot(&mut self) -> Result<[u8; 16], ()>;
+    fn ticks(&mut self) -> Result<u64, ()>;
+}
+
 #[derive(Clone, Copy)]
 struct ClockSample {
     boot: [u8; 16],
     ticks: u64,
+}
+
+impl ClockSample {
+    fn collect(source: &mut impl ClockSource) -> Result<Self, ()> {
+        let before = source.boot()?;
+        if before == [0; 16] {
+            return Err(());
+        }
+        let ticks = source.ticks()?;
+        let after = source.boot()?;
+        if before != after {
+            return Err(());
+        }
+        Ok(Self {
+            boot: before,
+            ticks,
+        })
+    }
 }
 
 struct RegisteredDeadline {
@@ -41,6 +64,22 @@ struct RegisteredDeadline {
 }
 
 impl RegisteredDeadline {
+    fn sample_from_source(&mut self, source: &mut impl ClockSource) -> Result<ClockSample, ()> {
+        ClockSample::collect(source).map_err(|()| {
+            self.deadline.refuse();
+        })
+    }
+
+    fn check_source(&mut self, source: &mut impl ClockSource) -> Result<(), ()> {
+        let sample = self.sample_from_source(source)?;
+        self.check(sample)
+    }
+
+    fn remaining_from_source(&mut self, source: &mut impl ClockSource) -> Result<u64, ()> {
+        let sample = self.sample_from_source(source)?;
+        self.remaining_ms(sample)
+    }
+
     fn check(&mut self, sample: ClockSample) -> Result<(), ()> {
         if sample.boot != self.boot {
             self.deadline.refuse();
@@ -141,6 +180,118 @@ impl Registration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    enum Read {
+        Boot(Result<[u8; 16], ()>),
+        Ticks(Result<u64, ()>),
+    }
+
+    struct Script(std::collections::VecDeque<Read>);
+
+    impl ClockSource for Script {
+        fn boot(&mut self) -> Result<[u8; 16], ()> {
+            match self.0.pop_front() {
+                Some(Read::Boot(value)) => value,
+                _ => panic!("unexpected boot read"),
+            }
+        }
+
+        fn ticks(&mut self) -> Result<u64, ()> {
+            match self.0.pop_front() {
+                Some(Read::Ticks(value)) => value,
+                _ => panic!("unexpected tick read"),
+            }
+        }
+    }
+
+    fn clock(boot: [u8; 16], ticks: u64) -> Script {
+        Script(std::collections::VecDeque::from([
+            Read::Boot(Ok(boot)),
+            Read::Ticks(Ok(ticks)),
+            Read::Boot(Ok(boot)),
+        ]))
+    }
+
+    #[test]
+    fn paired_clock_reads_preserve_order_and_original_expiry() {
+        let (expected, bytes) = fixture();
+        let mut initial = clock(expected.boot, 200);
+        let sampled = ClockSample::collect(&mut initial).unwrap();
+        assert!(initial.0.is_empty());
+        for ceiling in [Some(5_000), None] {
+            let mut deadline = Registration::parse(&bytes)
+                .unwrap()
+                .validate(&expected, sampled, ceiling)
+                .unwrap();
+            let expiry = ceiling.unwrap_or(5_100);
+            let mut source = clock(expected.boot, expiry - 1);
+            assert_eq!(deadline.remaining_from_source(&mut source), Ok(1));
+            assert!(
+                source.0.is_empty(),
+                "remaining budget must use the paired tick"
+            );
+            assert!(deadline
+                .check_source(&mut clock(expected.boot, expiry))
+                .is_err());
+            assert!(deadline
+                .check_source(&mut clock(expected.boot, 201))
+                .is_err());
+        }
+    }
+
+    #[test]
+    fn clock_acquisition_failures_permanently_refuse_without_retry_or_fallback() {
+        let (expected, bytes) = fixture();
+        for remaining in [false, true] {
+            // Every failure point, empty identities, mixed boots and a coherent
+            // but different boot. No second read may repair a failed sample.
+            let scripts = [
+                vec![Read::Boot(Err(()))],
+                vec![Read::Boot(Ok([0; 16]))],
+                vec![Read::Boot(Ok(expected.boot)), Read::Ticks(Err(()))],
+                vec![
+                    Read::Boot(Ok(expected.boot)),
+                    Read::Ticks(Ok(201)),
+                    Read::Boot(Err(())),
+                ],
+                vec![
+                    Read::Boot(Ok(expected.boot)),
+                    Read::Ticks(Ok(201)),
+                    Read::Boot(Ok([0; 16])),
+                ],
+                vec![
+                    Read::Boot(Ok(expected.boot)),
+                    Read::Ticks(Ok(201)),
+                    Read::Boot(Ok([7; 16])),
+                ],
+                vec![
+                    Read::Boot(Ok([7; 16])),
+                    Read::Ticks(Ok(201)),
+                    Read::Boot(Ok([7; 16])),
+                ],
+            ];
+            for script in scripts {
+                let mut deadline = Registration::parse(&bytes)
+                    .unwrap()
+                    .validate(&expected, sample(200), None)
+                    .unwrap();
+                let mut source = Script(script.into());
+                let result = if remaining {
+                    deadline.remaining_from_source(&mut source).map(|_| ())
+                } else {
+                    deadline.check_source(&mut source)
+                };
+                assert!(result.is_err());
+                assert!(source.0.is_empty());
+                assert!(deadline
+                    .check_source(&mut clock(expected.boot, 202))
+                    .is_err());
+                assert!(deadline
+                    .remaining_from_source(&mut clock(expected.boot, 202))
+                    .is_err());
+            }
+        }
+    }
 
     fn sample(ticks: u64) -> ClockSample {
         ClockSample {
