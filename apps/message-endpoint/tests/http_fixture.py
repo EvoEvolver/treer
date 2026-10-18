@@ -139,6 +139,7 @@ if __name__=='__main__':
             db.execute("INSERT INTO transfers(endpoint,generation,direction,transfer,digest,parts,state,expires) VALUES('ag_demo',1,0,'fixture_transfer','fixture_digest',1,1,9999999999)")
             db.execute("INSERT INTO fragments(endpoint,generation,direction,transfer,part,wire,digest) VALUES('ag_demo',1,0,'fixture_transfer',0,'PRIVATE RECOVERY BODY',x'00')")
             db.execute("INSERT INTO hub_parked(endpoint,generation,transfer,reason,created_at) VALUES('ag_demo',1,'fixture_transfer','transport_rejected',1)")
+            db.execute("INSERT INTO failures(endpoint,generation,delivery,payload_bytes,reason,created_at) VALUES('ag_demo',1,'fixture_receipt',17,0,?)",(int(time.time()),))
             db.commit();db.close()
         print(json.dumps({k:f[k] for k in ['url','wildcard','embedded','prefix']}),flush=True)
         while True:time.sleep(1)

@@ -25,7 +25,7 @@ impl FailureReason {
             Self::TransportRejected => 5,
         }
     }
-    fn from_code(code: i64) -> rusqlite::Result<Self> {
+    pub(crate) fn from_code(code: i64) -> rusqlite::Result<Self> {
         match code {
             0 => Ok(Self::InvalidEnvelope),
             1 => Ok(Self::RecipientDenied),

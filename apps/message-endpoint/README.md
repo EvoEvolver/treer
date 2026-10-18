@@ -1214,3 +1214,49 @@ detection, **not OS isolation or race-free execution attestation**: a hostile sa
 principal can race path checks against spawn, and a cached stamp is not a new hash
 on every invocation. Use an independent OS user/container and owner-enforced Policy;
 this does not prove any endpoint's current Core command declaration or argv.
+
+### Owner metadata export and terminal receipt clear (development)
+
+**Recovery and audit → Archive and clear metadata** exports the oldest 1,000
+owner audit rows (hub-wide, export-only) or terminal failure receipts (one endpoint,
+all generations). Audit includes the bounded emergency-pause summary. Private
+metadata includes actor/endpoint/delivery IDs, fixed reasons/actions, size, revision
+and timestamps. No message body, rejected-body hash, transport error, lease or
+credential is exported. Store downloads in private backups.
+
+The server supplies `canonical_jsonl`: UTF-8 without BOM, fixed struct field order,
+compact `serde_json` escaping, one JSON object per LF-terminated line (including
+last line). The first line is the version-1 header: `version`, `hub`, `workspace`,
+`kind`, `endpoint_id`, `revision`, `from`, `through`. Next come records ordered by
+ID; audit emergency summaries follow as `{"emergency_pause": ...}` lines ordered
+by endpoint. SHA-256 covers exactly these downloadable bytes; check offline with
+`shasum -a 256 FILE.jsonl`. The displayed file name contains the closed ID range and
+full hash. The HTTP envelope also contains records for UI counts; do not hash that
+envelope. Empty ranges use 0–0. Exports are capped; audit pagination beyond the
+first batch is not implemented.
+
+`POST api/configuration` accepts `export_metadata` (`kind: audit|receipts`,
+`endpoint_id: null|ID`) and `clear_metadata` (receipts only: `archive` containing
+kind/endpoint/revision/through/checksum, `archive_saved: true`, `confirm: true`).
+Current owner and Origin/CSRF checks apply to both; clear consumes the owner write
+quota. Clear recomputes the exact metadata prefix and checksum with the hub mutex
+held, in the deletion transaction. New rows beyond the prefix remain; changed or
+pruned snapshots require a new export. All bindings must be paused and there must
+be no live refetch, transport, inbound handoff or notice lease. Exact binding revision
+is mandatory. No arbitrary filesystem path is accepted.
+
+Two independent confirmations become available only after requesting a download:
+the owner declares it saved and accepts irreversible clearing. A browser download
+is not proof of persistence. The retained owner audit event records actor, time,
+previous revision and fixed JSON metadata in its legacy `transfer_id` field: range,
+row count, SHA-256, `archive_saved` declaration and whether the terminal receipt
+budget latch was released. Latch release requires every endpoint and the global
+terminal receipt count to be below their ceilings in that same transaction.
+
+Audit records, emergency pauses, capacity receipts (including unrecovered message
+handles), their capacity latch, pending messages, circuit-breaker and refetch rate
+history are never cleared. Bindings remain paused. There is no audit-clear API:
+hash-chain anchors and minimum evidence-tail retention are not yet implemented.
+A full 10,000-row owner audit therefore still blocks configuration/recovery writes;
+safety pause remains available. Export is not yet a complete full-audit recovery
+workflow. Resume and capacity receipt recovery remain separate unfinished work.

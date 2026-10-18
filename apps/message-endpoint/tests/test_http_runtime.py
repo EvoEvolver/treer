@@ -2,6 +2,7 @@
 """Real executable and loopback doubles; explicitly synthetic identities."""
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 import sys
 import time
@@ -148,12 +149,15 @@ class Runtime(unittest.TestCase):
             self.assertEqual([a['action'] for a in older['audit']],['retry_parked','discard_parked'])
             self.assertIsNone(older['next_audit_before'])
             db.close()
-    def test_running_cli_replacement_latches_without_execution_and_owner_can_still_pause(self):
+    def test_running_cli_removal_latches_then_replacement_is_not_executed_and_owner_can_still_pause(self):
         with fixture(BINARY) as f:
             cli=f['state'].parent/'fixture-cli'
             original=cli.read_bytes()
             marker=f['state'].parent/'unapproved-was-executed'
-            cli.write_text('#!/usr/bin/python3\nfrom pathlib import Path\nPath('+repr(str(marker))+').write_text("bad")\n')
+            # Remove first and observe the latch before installing unapproved
+            # bytes. Replacing while an interpreter is opening its script would
+            # exercise the documented unsupported path-check/exec TOCTOU race.
+            cli.rename(cli.with_suffix('.approved'))
             until=time.monotonic()+5
             while True:
                 status,_,body=f['request']('/api/settings',{'X-Treer-Identity-Token':TOKEN})
@@ -162,7 +166,16 @@ class Runtime(unittest.TestCase):
                     break
                 self.assertLess(time.monotonic(),until,'running CLI replacement not detected')
                 time.sleep(.2)
-            self.assertFalse(marker.exists(),'unapproved CLI was executed')
+            # Calls spawned before the latch can still be opening the old
+            # shebang path. Drain only this fixture's direct children first.
+            deadline=time.monotonic()+20
+            while subprocess.run(['/usr/bin/pgrep','-P',str(f['pid'])],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL).returncode==0:
+                self.assertLess(time.monotonic(),deadline,'pre-latch fixture calls did not finish')
+                time.sleep(.02)
+            cli.write_text('#!/usr/bin/python3\nfrom pathlib import Path\nPath('+repr(str(marker))+').write_text("bad")\n')
+            cli.chmod(0o700)
+            time.sleep(.3)
+            self.assertFalse(marker.exists(),'unapproved CLI was executed after latch')
             cli.write_bytes(original)
             snapshot=json.loads(f['request']('/api/settings',{'X-Treer-Identity-Token':TOKEN})[2])
             self.assertTrue(snapshot['settings']['workers']['cli_integrity_failed'])
@@ -171,4 +184,49 @@ class Runtime(unittest.TestCase):
             status,_,_=f['request']('/api/configuration',trusted,method='POST',body=json.dumps({'action':'pause','endpoint_id':'ag_demo','revision':endpoint['revision'],'confirm':True}).encode())
             self.assertEqual(status,200)
             self.assertFalse(marker.exists())
+    def test_owner_metadata_export_clear_checks_scope_snapshot_and_confirmation(self):
+        with fixture(BINARY) as f:
+            trusted={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+            def call(value,headers=None):
+                status,_,body=f['request']('/api/configuration',headers or trusted,method='POST',body=json.dumps(value).encode())
+                return status,json.loads(body)
+            db=sqlite3.connect(f['state']/'hub.sqlite3')
+            db.execute("INSERT INTO failures(endpoint,generation,delivery,payload_bytes,reason,created_at) VALUES('ag_demo',1,'delivery_fixture',17,0,1)")
+            db.commit()
+            export={'action':'export_metadata','kind':'receipts','endpoint_id':'ag_demo'}
+            self.assertEqual(call(export,{**trusted,'X-Treer-Identity-Token':'forged'})[0],401)
+            status,result=call(export)
+            self.assertEqual(status,200)
+            archive=result['archive']
+            self.assertEqual(archive['version'],1)
+            self.assertEqual(len(archive['records']),1)
+            self.assertEqual(archive['records'][0]['delivery_id'],'delivery_fixture')
+            self.assertNotIn('body',archive['records'][0])
+            import hashlib
+            self.assertEqual(hashlib.sha256(archive['canonical_jsonl'].encode()).hexdigest(),archive['checksum'])
+            self.assertEqual(json.loads(archive['canonical_jsonl'].splitlines()[0])['from'],archive['from'])
+            db.execute("INSERT INTO failures(endpoint,generation,delivery,payload_bytes,reason,created_at) VALUES('ag_demo',1,'new_after_export',7,0,2)")
+            db.commit()
+            clear={'action':'clear_metadata','archive':{k:archive[k] for k in ['kind','endpoint_id','revision','through','checksum']},'archive_saved':True,'confirm':True}
+            self.assertEqual(call(clear,{**trusted,'Origin':'https://evil.example'})[0],403)
+            self.assertEqual(call({**clear,'archive_saved':False})[0],400)
+            self.assertEqual(call({**clear,'confirm':False})[0],400)
+            self.assertEqual(call({**clear,'actor':'user_other'})[0],400)
+            self.assertEqual(call({**clear,'archive':{**clear['archive'],'checksum':'0'*64}})[0],409)
+            status,result=call(clear)
+            self.assertEqual((status,result['status']),(200,'metadata_cleared'))
+            self.assertEqual(db.execute('SELECT delivery FROM failures').fetchall(),[('new_after_export',)])
+            self.assertEqual(db.execute("SELECT paused FROM endpoints WHERE id='ag_demo'").fetchone()[0],1)
+            self.assertEqual(call(clear)[0],409)
+            status,result=call({'action':'export_metadata','kind':'audit','endpoint_id':None})
+            self.assertEqual(status,200)
+            archive=result['archive']
+            self.assertEqual(archive['records'][0]['action'],'archive_receipts')
+            self.assertEqual(archive['records'][0]['actor_id'],'user_owner')
+            db.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES('user_owner','later','ag_demo','',1,2)")
+            db.commit()
+            status,result=call({'action':'clear_metadata','archive':{k:archive[k] for k in ['kind','endpoint_id','revision','through','checksum']},'archive_saved':True,'confirm':True})
+            self.assertEqual(status,409)
+            self.assertEqual([a[0] for a in db.execute('SELECT action FROM hub_owner_audit ORDER BY id')],['archive_receipts','later'])
+            db.close()
 if __name__=='__main__':unittest.main()

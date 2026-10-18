@@ -32,6 +32,15 @@ pub enum Command {
         revision: i64,
         confirm: bool,
     },
+    ExportMetadata {
+        kind: crate::archive::Kind,
+        endpoint_id: Option<String>,
+    },
+    ClearMetadata {
+        archive: crate::archive::Clear,
+        archive_saved: bool,
+        confirm: bool,
+    },
     InspectRecovery {
         endpoint_id: String,
         before_audit: Option<i64>,
@@ -54,7 +63,10 @@ impl Command {
     pub(crate) fn consumes_write_quota(&self) -> bool {
         !matches!(
             self,
-            Self::PreviewCreate { .. } | Self::Pause { .. } | Self::InspectRecovery { .. }
+            Self::PreviewCreate { .. }
+                | Self::Pause { .. }
+                | Self::InspectRecovery { .. }
+                | Self::ExportMetadata { .. }
         )
     }
 }
@@ -79,6 +91,10 @@ pub enum Outcome {
         revision: i64,
         paused: bool,
     },
+    MetadataArchive {
+        archive: crate::archive::Export,
+    },
+    MetadataCleared,
     RecoveryStatus {
         endpoint_id: String,
         revision: i64,
@@ -256,6 +272,28 @@ pub fn execute<M: Mailbox + Directory, D: Directory>(
             hub.pause_audited(&endpoint_id, revision, owner.id(), now)
                 .map_err(map_hub)?;
             saved(&hub, &endpoint_id)
+        }
+        Command::ExportMetadata { kind, endpoint_id } => {
+            let hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            check_owner(owner)?;
+            let archive = hub
+                .metadata_archive(kind, endpoint_id.as_deref())
+                .map_err(map_hub)?;
+            Ok(Outcome::MetadataArchive { archive })
+        }
+        Command::ClearMetadata {
+            archive,
+            archive_saved,
+            confirm,
+        } => {
+            if !archive_saved || !confirm {
+                return Err(Failure::Invalid);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            let now = check_owner(owner)?;
+            hub.clear_metadata_archive(&archive, owner.id(), now)
+                .map_err(map_hub)?;
+            Ok(Outcome::MetadataCleared)
         }
         Command::InspectRecovery {
             endpoint_id,

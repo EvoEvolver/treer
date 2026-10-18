@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 // Focused browser check. Module and browser cache are explicit test tooling;
 // process/browser environments contain no inherited Treer/harness credentials.
+import {createHash} from 'node:crypto';
 import {createRequire} from 'node:module';
 import {spawn} from 'node:child_process';
 import {once} from 'node:events';
 import {createInterface} from 'node:readline';
-import {mkdtempSync,rmSync,mkdirSync,chmodSync} from 'node:fs';
+import {mkdtempSync,rmSync,mkdirSync,chmodSync,readFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join,resolve} from 'node:path';
 import {fileURLToPath} from 'node:url';
@@ -88,7 +89,7 @@ try {
  await recoveryCard.getByRole('button',{name:'Load recovery records',exact:true}).click();
  await recoveryCard.getByText('fixture_transfer',{exact:true}).waitFor();
  if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('parked recovery overflow at 390px');
- if(!await recoveryCard.locator('.recovery button,.recovery input[type=checkbox]').evaluateAll(elements=>elements.every(el=>el.matches('input')||el.getBoundingClientRect().height>=44)))throw new Error('recovery touch target below 44px');
+ if(!await recoveryCard.locator('.recovery button,.recovery input[type=checkbox]').evaluateAll(elements=>elements.filter(el=>el.getBoundingClientRect().height>0).every(el=>el.matches('input')||el.getBoundingClientRect().height>=44)))throw new Error('recovery touch target below 44px');
  await edit.screenshot({path:join(screenshotPath,'owner-recovery-parked-390-light.png'),fullPage:true});
  const discard=recoveryCard.getByRole('button',{name:'Permanently discard',exact:true});
  if(!await discard.isDisabled())throw new Error('discard did not require explicit confirmation');
@@ -99,10 +100,38 @@ try {
  try {await recoveryCard.getByText('No parked transfers.',{exact:true}).waitFor({timeout:8000});} catch(error) {await edit.screenshot({path:join(screenshotPath,'recovery-failure.png'),fullPage:true});console.error('Synthetic recovery diagnostic:',await recoveryCard.innerText());throw error;}
  await recoveryCard.getByText('discard_parked',{exact:false}).waitFor();
  if((await edit.locator('body').innerText()).includes('PRIVATE RECOVERY BODY'))throw new Error('recovery exposed message body');
+ // This driver compresses many distinct owner flows into one source address.
+ // Keep the real 20/10s verification budget; wait its window before archive flow.
+ await new Promise(resolve=>setTimeout(resolve,10500));
+ await recoveryCard.getByText('Archive and clear metadata',{exact:true}).click();
+ await recoveryCard.getByRole('button',{name:'Prepare metadata archive',exact:true}).click();
+ const clearArchive=recoveryCard.getByRole('button',{name:'Clear archived records',exact:true});
+ await recoveryCard.getByRole('button',{name:'Download metadata JSONL',exact:true}).waitFor();
+ if(!await clearArchive.isDisabled())throw new Error('archive clear did not require saved and irreversible confirmations');
+ const archived=recoveryCard.getByLabel('I have saved and checked this JSONL archive.',{exact:true});
+ if(!await archived.isDisabled())throw new Error('save declaration enabled before download request');
+ const downloadEvent=edit.waitForEvent('download');await recoveryCard.getByRole('button',{name:'Download metadata JSONL',exact:true}).click();
+ const downloaded=await downloadEvent,downloadPath=join(home,'metadata-export.json');await downloaded.saveAs(downloadPath);
+ const bytes=readFileSync(downloadPath),exported=bytes.toString('utf8').trimEnd().split('\n').map(line=>JSON.parse(line));
+ const digest=createHash('sha256').update(bytes).digest('hex');
+ if(exported[0].version!==1||exported[0].kind!=='receipts'||exported[1]?.delivery_id!=='fixture_receipt'||'body' in exported[1]||!downloaded.suggestedFilename().includes(digest))throw new Error('wrong metadata download or checksum');
+ await archived.check();if(!await clearArchive.isDisabled())throw new Error('saved confirmation alone armed permanent clear');
+ await recoveryCard.getByLabel('Permanently clear these archived records. This cannot be undone.',{exact:true}).check();
+ if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('archive overflow at 390px');
+ await edit.screenshot({path:join(screenshotPath,'owner-archive-390-light.png'),fullPage:true});
+ await edit.getByRole('button',{name:'Dark',exact:true}).click();
+ await edit.screenshot({path:join(screenshotPath,'owner-archive-390-dark.png'),fullPage:true});
+ await edit.getByRole('button',{name:'Light',exact:true}).click();
+ await clearArchive.click();await recoveryCard.getByText('Confirmed records cleared. Endpoints remain paused.',{exact:true}).waitFor();
+ await recoveryCard.getByLabel('Archive scope',{exact:false}).selectOption('audit');
+ await recoveryCard.getByRole('button',{name:'Prepare metadata archive',exact:true}).click();
+ await recoveryCard.getByRole('button',{name:'Download metadata JSONL',exact:true}).waitFor();
+ if(await recoveryCard.getByRole('button',{name:'Clear archived records',exact:true}).count())throw new Error('audit offered evidence deletion');
+
  if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('editing form overflow at 390px');
  await edit.screenshot({path:join(screenshotPath,'owner-edit-390-light.png'),fullPage:true});
  await edit.close();
- console.log('PASS: real hub, injected identity on wildcard + actual iframe prefix; 8 layout/theme screenshots + 390px confirmed owner create/bind/pause/recovery; fallback + forged rejection');
+ console.log('PASS: real hub, injected identity on wildcard + actual iframe prefix; 8 layout/theme screenshots + 390px confirmed owner create/bind/pause/recovery/archive; fallback + forged rejection');
 } finally {
  clearTimeout(timer);if(browser)await browser.close();fixture.kill('SIGTERM');
  if(fixture.exitCode===null)await once(fixture,'exit');lines.close();rmSync(home,{recursive:true,force:true});
