@@ -372,7 +372,7 @@ function WorkspaceAppContent() {
   function showOverview() {
     // Clear the reload target in the same turn as the navigation gesture; the
     // selection-following effect can run after an immediate reload or URL copy.
-    if (!preview) replaceWorkloadRoute(null)
+    if (!preview && isWorkloadDeepLink(window.location.pathname)) replaceWorkloadRoute(null)
     setMainView("overview")
     setSelectedAgentId(null)
     setMobileTerminalOpen(false)
