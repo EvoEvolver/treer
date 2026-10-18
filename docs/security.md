@@ -860,6 +860,13 @@ Browser sandbox flags do not isolate trusted App or Agent Interface JavaScript
 from the user's Proxy authority. Embedded pages share the Proxy origin and can
 make authenticated requests to that origin; if the control plane is also hosted
 there, `allow-scripts` plus `allow-same-origin` permits access to the parent page.
+Embedded interfaces may also open a new browser tab (`allow-popups` and
+`allow-popups-to-escape-sandbox`), for example to show the same interface full
+page. These popups are unsandboxed top-level pages; same-origin destinations
+retain that origin's session. Unless the interface uses `noopener`, the popup's
+opener is the embedded frame, not the Console. The iframe still has no
+top-navigation permission. Interface authors should use `noopener,noreferrer`
+for external opens. These flags do not make the embedded App a trust boundary.
 Native WebView bridges currently lack a complete frame-origin and navigation
 boundary. HttpOnly cookies prevent direct script reads, not authenticated API
 calls or bridge abuse. Do not open untrusted interfaces with a privileged user

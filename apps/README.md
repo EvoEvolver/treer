@@ -1,5 +1,12 @@
 # Workspace Apps
 
+Embedded App interfaces can open unsandboxed browser tabs from a user gesture.
+External links must use `rel="noopener noreferrer"`; external `window.open`
+calls must pass the `noopener,noreferrer` features. A full-page button should
+open only the App's own URL. Without `noopener`, a popup retains a reference
+to the embedded frame and may navigate that frame. The Console iframe does
+not grant top-navigation permission.
+
 Treer supports two deployment forms. A Managed App is a single HTTP process
 created with `treer app create`; Treer persists its command, machine, service,
 and generated public origin. Its process uses the same stable Agent identity
