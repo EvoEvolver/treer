@@ -1,4 +1,4 @@
-//! Experiment-owned state only: never open or migrate a Node launcher's files.
+//! Private Rust journal and single-writer lease. Node import is in node_import.
 use anyhow::{bail, Result};
 use serde_json::Value;
 #[cfg(unix)]
@@ -27,32 +27,9 @@ impl std::error::Error for PublicationUncertain {}
 /// unlinking a lock file could let another process lock a different inode.
 pub struct Lease { _file: File }
 impl Lease {
-    pub fn acquire(root: &Path, cwd: &Path, agent: &str) -> Result<Self> {
+    pub fn acquire(root: &Path, cwd: &Path, _agent: &str) -> Result<Self> {
         let store = Store::open(root, cwd)
             .map_err(|_| anyhow::anyhow!("private_state_unavailable"))?;
-        // This port cannot preserve all Node outbox/ack/goal/image semantics.
-        // Refuse the entire legacy Agent directory, even for an explicit resume;
-        // never parse, rewrite, rename, clean or silently ignore its contents.
-        let mut legacy = cwd.to_path_buf();
-        for (index, segment) in [".treer", "agents", if agent.is_empty() { "standalone" } else { agent }].into_iter().enumerate() {
-            legacy.push(segment);
-            match fs::symlink_metadata(&legacy) {
-                Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {},
-                Ok(_) => bail!("legacy_state_migration_required"),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
-                Err(_) => bail!("legacy_state_migration_required"),
-            }
-            if index == 2 {
-                bail!("legacy_state_migration_required");
-            }
-        }
-        for name in ["queue.json", "agent-ui.json", "codex-ui.json", "images"] {
-            match fs::symlink_metadata(store.root.join(name)) {
-                Ok(_) => bail!("legacy_state_migration_required"),
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {},
-                Err(_) => bail!("legacy_state_migration_required"),
-            }
-        }
         let file = OpenOptions::new().read(true).write(true).create(true).truncate(false)
             .mode(0o600).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(store.root.join(".rust-launcher.lock"))

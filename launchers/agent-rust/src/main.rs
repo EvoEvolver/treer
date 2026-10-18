@@ -5,6 +5,7 @@ mod goals;
 mod http;
 mod image_format;
 mod model;
+mod node_import;
 mod rpc;
 mod runtime;
 mod store;
@@ -97,6 +98,14 @@ async fn main() -> Result<()> {
         private_status(&agent).await?;
     }
     let _state_lease = store::Lease::acquire(&private_root, &cwd, &agent)?;
+    if std::env::args().nth(1).as_deref() == Some("--restore-node-backup") {
+        node_import::restore(&private_root, &cwd, &agent)?;
+        println!("node_state_backup_restored; set startup back to Node before starting it");
+        return Ok(());
+    }
+    node_import::prepare(&private_root, &cwd, &agent,
+        env("AGENT_UI_SESSION_ID").or_else(|| env("CODEX_UI_THREAD_ID")).as_deref(),
+        std::env::args().any(|arg| arg == "--import-node-state"))?;
     let attachments = if !agent.is_empty() {
         Some(Arc::new(tokio::sync::Mutex::new(
             attachments::Attachments::open(
@@ -665,6 +674,7 @@ async fn ui_call(app: &App, method: &str, body: Value, limit: usize) -> Response
             }
             json_response(StatusCode::OK, snapshot)
         }
+        Err(error) if error.to_string() == "operation_id conflict" => failure(StatusCode::CONFLICT, "operation_id_conflict"),
         Err(_) => failure(StatusCode::BAD_REQUEST, "operation_refused"),
     }
 }
@@ -675,6 +685,7 @@ async fn call(app: &App, method: &str, body: Value, status: StatusCode) -> Respo
         }
         Ok(value) if value.is_null() => failure(StatusCode::NOT_FOUND, "submission_not_found"),
         Ok(value) => json_response(status, value),
+        Err(error) if error.to_string() == "operation_id conflict" => failure(StatusCode::CONFLICT, "operation_id_conflict"),
         Err(_) => failure(StatusCode::BAD_REQUEST, "operation_refused"),
     }
 }

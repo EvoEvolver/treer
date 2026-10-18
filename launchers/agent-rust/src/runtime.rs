@@ -68,6 +68,10 @@ struct Record {
     notified: bool,
     #[serde(default)]
     images: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    node_fingerprint: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    source_messages: Vec<Value>,
 }
 struct Runtime {
     rpc: Rpc,
@@ -475,6 +479,7 @@ impl Runtime {
         let mut turns = self.turns.to_vec();
         let mut matched = std::collections::HashSet::new();
         for record in &self.records {
+            if record.node_fingerprint.is_some() && record.text.is_empty() { continue; }
             let Some(id) = record.submission["turn_id"].as_str() else {
                 continue;
             };
@@ -549,6 +554,17 @@ impl Runtime {
             }
             "submit" => self.submit(body).await,
             "queue" => Ok(json!({"submissions":self.submissions()})),
+            "message_seen" => Ok(json!(self.records.iter().any(|r| r.source_messages.iter().any(|m| m["messageId"] == body["id"])))),
+            "message_pending_acks" => Ok(json!(self.records.iter().flat_map(|r| &r.source_messages).filter(|m| m["ackPending"] == true).map(|m| m["deliveryId"].clone()).collect::<Vec<_>>())),
+            "message_ack" => {
+                for record in &mut self.records {
+                    for message in &mut record.source_messages {
+                        if message["deliveryId"] == body["id"] { message["ackPending"] = json!(false); }
+                    }
+                }
+                self.persist()?;
+                Ok(json!(true))
+            },
             "submission" => Ok(self
                 .submissions()
                 .iter()
@@ -828,7 +844,11 @@ impl Runtime {
         let fingerprint =
             fingerprint(text, delivery, &body["sender"], &body["notify"], &images).to_string();
         if let Some(prior) = self.records.iter().find(|r| r.operation == operation) {
-            if prior.fingerprint != fingerprint {
+            let matches = match &prior.node_fingerprint {
+                Some(hash) => images.is_empty() && *hash == node_fingerprint(text, delivery, &body["sender"], &body["notify"]),
+                None => prior.fingerprint == fingerprint,
+            };
+            if !matches {
                 bail!("operation_id conflict");
             }
             return Ok(
@@ -872,6 +892,8 @@ impl Runtime {
             notify: body["notify"].clone(),
             notified: false,
             images,
+            node_fingerprint: None,
+            source_messages: vec![],
         };
         if has_images {
             self.attachments
@@ -1283,12 +1305,12 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
         for r in &records {
             let s = &r.submission;
             let id = s["id"].as_str().ok_or_else(|| anyhow!("invalid journal"))?;
-            if uuid::Uuid::parse_str(id).is_err()
+            if uuid::Uuid::parse_str(if r.node_fingerprint.is_some() { id.strip_prefix("sub_").unwrap_or("") } else { id }).is_err()
                 || !ids.insert(id.to_owned())
                 || r.operation.is_empty()
                 || r.operation.len() > 1024
                 || !operations.insert(r.operation.clone())
-                || r.text.is_empty() && r.images.is_empty()
+                || r.text.is_empty() && r.images.is_empty() && (r.node_fingerprint.is_none() || matches!(s["state"].as_str(), Some("queued" | "running")))
                 || r.text.len() > 100_000
                 || !["queue", "steer"].contains(&r.delivery.as_str())
                 || !s["state"].as_str().is_some_and(|s| {
@@ -1300,7 +1322,8 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
                         .as_str()
                         .is_some_and(|s| !s.is_empty() && s.len() <= 1024))
                 || r.receipt["id"] != s["id"]
-                || serde_json::from_str::<Value>(&r.fingerprint).ok()
+                || r.node_fingerprint.as_ref().is_some_and(|f| f.len() != 64 || !f.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)))
+                || r.node_fingerprint.is_none() && serde_json::from_str::<Value>(&r.fingerprint).ok()
                     != Some(fingerprint(
                         &r.text,
                         &r.delivery,
@@ -1312,6 +1335,9 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
                 bail!("invalid journal");
             }
             validate_metadata(&json!({"sender":s["sender"],"notify":r.notify}))?;
+            if r.source_messages.len() > 256 || r.source_messages.iter().any(|m| !m["ackPending"].is_boolean() || ["messageId", "deliveryId"].into_iter().any(|key| !m[key].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')))) {
+                bail!("invalid journal");
+            }
             if r.images.len() > crate::image_format::COUNT_LIMIT
                 || r.images.iter().any(|m| {
                     !m["id"].as_str().is_some_and(crate::attachments::valid_id)
@@ -1330,6 +1356,65 @@ fn decode_records(saved: &Value) -> Result<VecDeque<Record>> {
     }
     // Do not expose parser fragments, prompt text, sender values or file paths.
     decode(saved).map_err(|_| anyhow!("private_state_invalid"))
+}
+
+/// Convert the text queue used by Node v1. Unsupported in-flight sidecars or
+/// attachments are refused as a whole; source bytes and their backup survive.
+pub(crate) fn import_node_queue(thread: &Value, queue: &Value) -> Result<Value> {
+    let thread_id = thread["threadId"].as_str().filter(|s| !s.trim().is_empty() && s.len() <= 1024)
+        .ok_or_else(|| anyhow!("node_import_invalid_thread"))?;
+    if queue["version"] != 1 { bail!("node_import_invalid_queue"); }
+    let source = queue["records"].as_array().filter(|r| r.len() <= 4096)
+        .ok_or_else(|| anyhow!("node_import_queue_limit"))?;
+    let mut records = Vec::new();
+    for value in source {
+        let text = value["text"].as_str().filter(|s| s.len() <= 65_536)
+            .ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+        let operation = value["operationId"].as_str().ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+        let hash = value["fingerprint"].as_str().ok_or_else(|| anyhow!("node_import_invalid_queue"))?;
+        if value.get("attachmentIds").is_some() || !value["notification"].is_null() && value["notification"]["delivered"] != true {
+            bail!("node_import_pending_outbox_or_images_unsupported");
+        }
+        if !["queued", "sent", "steered"].contains(&value["receipt"]["disposition"].as_str().unwrap_or("")) { bail!("node_import_invalid_queue"); }
+        let mut messages = Vec::new();
+        if !value["sourceMessage"].is_null() { messages.push(value["sourceMessage"].clone()); }
+        if let Some(batch) = value.get("sourceMessages") {
+            messages.extend(batch.as_array().ok_or_else(|| anyhow!("node_import_invalid_queue"))?.iter().cloned());
+        }
+        if messages.len() > 256 || messages.iter().any(|m| !m["ackPending"].is_boolean() || ["messageId", "deliveryId"].into_iter().any(|k| !m[k].as_str().is_some_and(|s| !s.is_empty() && s.len() <= 256 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')))) {
+            bail!("node_import_invalid_queue");
+        }
+        let submission = value["submission"].clone();
+        if matches!(submission["state"].as_str(), Some("queued" | "running")) || messages.iter().any(|m| m["ackPending"] == true) {
+            bail!("node_import_requires_idle_empty_queue");
+        }
+        let record = Record {
+            operation: operation.into(), fingerprint: String::new(), node_fingerprint: Some(hash.into()),
+            text: text.into(), delivery: value["delivery"].as_str().unwrap_or("").into(),
+            submission, receipt: value["receipt"].clone(), notify: value["notify"].clone(),
+            notified: value["notification"]["delivered"] == true, images: vec![], source_messages: messages,
+        };
+        records.push(record);
+    }
+    let state = json!({"schema":1,"threadId":thread_id,"dispatchBlocked":false,"records":records,"goals":null});
+    decode_records(&state)?;
+    Ok(state)
+}
+
+fn node_fingerprint(text: &str, delivery: &str, sender: &Value, notify: &Value) -> String {
+    use sha2::{Digest, Sha256};
+    // Match Node's insertion-order JSON, including its sender/notify normalization.
+    let sender_json = if sender.is_null() { "null".into() } else {
+        format!("{{\"agent_id\":{},\"path\":{},\"name\":{}}}", sender["agent_id"], sender["path"], sender["name"])
+    };
+    let notify_json = if notify.is_null() { "null".into() } else {
+        let mut on = notify["on"].as_array().cloned().unwrap_or_default();
+        on.sort_by_key(Value::to_string); on.dedup();
+        let to = notify.get("to").filter(|v| v.is_string()).or_else(|| sender.get("agent_id"));
+        format!("{{\"on\":{}{}}}", json!(on), to.map(|v| format!(",\"to\":{v}")).unwrap_or_default())
+    };
+    let input = format!("{{\"text\":{},\"delivery\":{},\"sender\":{},\"notify\":{}}}", json!(text), json!(delivery), sender_json, notify_json);
+    format!("{:x}", Sha256::digest(input.as_bytes()))
 }
 fn fingerprint(
     text: &str,
@@ -1433,6 +1518,13 @@ pub async fn message_command(args: &[String], input: Option<&str>) -> Result<Val
 }
 pub async fn watch_messages(handle: Handle, agent: String) {
     loop {
+        if let Ok(pending) = handle.call("message_pending_acks", Value::Null).await {
+            for id in pending.as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if message_command(&["ack".into(), id.into(), "--operation-id".into(), format!("launcher-message-ack/{id}")], None).await.is_ok() {
+                    let _ = handle.call("message_ack", json!({"id":id})).await;
+                }
+            }
+        }
         let received = message_command(
             &[
                 "receive".into(),
@@ -1464,6 +1556,12 @@ pub async fn watch_messages(handle: Handle, agent: String) {
                 let Some(body) = message["body"].as_str() else {
                     continue;
                 };
+                if handle.call("message_seen", json!({"id":id})).await.ok() == Some(json!(true)) {
+                    if message_command(&["ack".into(), delivery_id.into(), "--operation-id".into(), format!("launcher-message-ack/{delivery_id}")], None).await.is_ok() {
+                        let _ = handle.call("message_ack", json!({"id":delivery_id})).await;
+                    }
+                    continue;
+                }
                 let sender = message["sender"]["path"]
                     .as_str()
                     .or(message["sender"]["name"].as_str())
@@ -1481,6 +1579,32 @@ pub async fn watch_messages(handle: Handle, agent: String) {
 #[cfg(test)]
 mod journal_tests {
     use super::*;
+
+    #[test]
+    fn node_import_preserves_receipts_empty_terminal_text_and_retry_fingerprint() {
+        let text = "Node text 中文";
+        let hash = node_fingerprint(text, "queue", &Value::Null, &Value::Null);
+        let id = format!("sub_{}", uuid::Uuid::new_v4());
+        let record = json!({"operationId":"old-op","fingerprint":hash,"text":"","delivery":"queue","notify":null,"notification":null,"receipt":{"id":id,"disposition":"sent","position":null},"submission":{"id":id,"state":"done","sender":null,"created_at":"2026-10-18T00:00:00Z","position":null,"turn_id":"turn-1","text_preview":text,"assistant_preview":"answer","error":null},"sourceMessage":{"messageId":"msg_old","deliveryId":"dlv_old","ackPending":true}});
+        assert!(import_node_queue(&json!({"threadId":"thread"}), &json!({"version":1,"records":[record.clone()]})).is_err(), "pending Core ack must refuse import");
+        let mut record = record;
+        record["sourceMessage"]["ackPending"] = json!(false);
+        let source = json!({"version":1,"records":[record.clone()]});
+        let state = import_node_queue(&json!({"threadId":"thread"}), &source).unwrap();
+        let restored = decode_records(&state).unwrap();
+        assert_eq!(restored[0].receipt, record["receipt"]);
+        assert_eq!(restored[0].node_fingerprint.as_ref(), Some(&hash));
+        assert_eq!(restored[0].source_messages[0], record["sourceMessage"]);
+        assert!(restored[0].text.is_empty());
+        let mut queued = record.clone(); queued["submission"]["state"] = json!("queued");
+        assert!(import_node_queue(&json!({"threadId":"thread"}), &json!({"version":1,"records":[queued]})).is_err());
+        for state in ["queued", "running"] {
+            let mut busy = record.clone(); busy["text"] = json!(text); busy["submission"]["state"] = json!(state);
+            assert!(import_node_queue(&json!({"threadId":"thread"}), &json!({"version":1,"records":[busy]})).is_err(), "busy state must refuse even with valid prompt text");
+        }
+        let mut pending = record; pending["notification"] = json!({"delivered":false});
+        assert!(import_node_queue(&json!({"threadId":"thread"}), &json!({"version":1,"records":[pending]})).is_err());
+    }
 
     #[test]
     fn recovery_rejects_semantic_corruption_without_disclosing_values() {

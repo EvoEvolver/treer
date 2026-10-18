@@ -2,16 +2,19 @@
 
 This is a separate, unpublished Cargo workspace. It does not replace
 `launchers/agent`, enter the production bundle, change a saved profile, or change
-Core behavior. No production Agent is eligible for this experiment.
-The proposed [M4 prerequisites](M4-DESIGN.md) cover bidirectional migration,
-Controller quotas and proven process ownership before any team-agent switch;
-the limited fresh-session M3 pilot does not establish those guarantees.
+Core behavior. #158 decision 4767 resets the target to Node parity plus bounded
+memory. After a full-day pilot, the leader may authorize switching Codex Agents
+one at a time. New Controller quota/Host ownership APIs and bidirectional state
+conversion were cancelled as M4 prerequisites by 4767. Decision 4790 confirms
+simple migration only, with quota and detached-reaping choices held pending the
+user; this increment makes no decision on those items. The [earlier design](M4-DESIGN.md)
+is parked, not approved, and preserved as history.
 The offline library's `envelope::validate_manifest` currently validates only
 manifest grammar, declared byte/entry limits and typed metadata references.
 It reads no object files and grants no handoff authority. Object digests,
 cross-object semantics, Node/Rust conversion, Controller quotas and proven
-process ownership remain separate increments. There is no migration command,
-HTTP route or activation entry point in this increment.
+process ownership are outside that library. The separate local Node import
+and backup restore below do not use its envelope or any new Core capability.
 
 The first implementation covers one Codex app-server session: loopback AIS,
 HTTP/WebSocket state, prompt/queue/abort, transcript paging, operation-id receipts,
@@ -265,16 +268,49 @@ than unlinked. This is an advisory Rust-only lock: Node does not participate;
 never run Node and Rust concurrently on the same state. A saved Rust thread
 cannot be overridden with a different resume
 ID (`private_state_session_mismatch`), and refusal precedes provider startup.
-Node-to-Rust migration remains unsupported: finding the selected Agent's legacy
-`.treer/agents/ID` directory (including `standalone`), a linked/non-directory
-ancestor, or known Node state in the private root refuses startup with
-`legacy_state_migration_required`, without opening, parsing, modifying or
-discarding that state. No resume override bypasses this check. This is a
-fail-closed refusal, not a completed migration or a tested bidirectional rollback.
-Do not delete or relocate legacy state to bypass it: queued/uncertain receipts,
-acknowledgments, notification batches, goals and attachment bindings need a
-reviewed converter. Keeping Node's files untouched alone does not make a
-rollback after new Rust work lossless. Such a switch remains blocked.
+On the first managed Rust start without a Rust journal, the launcher discovers
+only its own `.treer/agents/ID` under the configured cwd. Stop Node first.
+It copies every regular file in that directory byte-for-byte into private
+`node-backup-v1`, with a SHA-256 inventory bound to Agent ID and cwd. Files are
+0600, the backup is 0700; no source file is renamed, rewritten or deleted.
+Bounds are 32 files, 32 MiB per file, 64 MiB total, no directories/links/devices.
+The backup manifest is synced last; incomplete/tampered backups refuse startup
+and remain for inspection. A complete backup can be reused after a conversion
+failure only if source bytes still match. Decode and publication happen after
+backup; any invalid/unrepresentable queue refuses the whole import before
+starting a provider. Existing Rust state is validated normally and never imports
+stale Node files again.
+
+Import is opt-in through `--import-node-state`; legacy-state refusal remains the
+default. Per decision #158/4790 the leader verifies provider idle and an empty
+queue before stopping Node. The importer independently refuses any queued or
+running record, pending completion notification or Core acknowledgement.
+This increment imports Node's `agent-ui.json` (or old `codex-ui.json`) thread ID
+and at most 4,096 settled text receipts, immutable submission IDs/receipts/Node
+retry hashes and sender/notify metadata. Empty terminal text is normal Node eviction and
+does not fabricate a userMessage. The provider resumes the same thread, never
+silently starts a new one. Native goals are read from that thread. Attachment
+references, pending completion outboxes and all additional sidecars still refuse
+this first import increment; support is needed before switching such an Agent.
+No state is discarded to make it fit the limits. These compatibility gaps are
+local adapters, not dependencies on the cancelled Core contracts.
+
+Rollback: stop Rust (and keep Node stopped), invoke the same Rust binary with
+`--restore-node-backup` under the same Agent/cwd/private-root settings, then
+restore the previous Node startup command through the Controller and start it.
+Restore validates the whole backup before replacing its files atomically one by
+one, with directory syncs; no provider is started. A durable rollback marker
+precedes any replacement, so partial restore can be retried but an old Rust
+journal cannot start again. Backup and Rust journal remain; no broad cleanup or
+automatic switch occurs. This restores the pre-switch queue, not later Rust
+work or external provider/tool effects. Accepted residual: a message handled
+during the Rust period may be repeated once after a rollback, or has to be resent.
+Backups alone are not a lossless bidirectional merge. The leader controls rollout
+and any recovery. The same same-account/concurrent-writer limitations as Node
+apply; the Rust lease does not stop a separately running Node process.
+The backup contains conversation text: retain it privately through the agreed
+acceptance period, then have the owner remove that exact backup directory.
+Never paste its content into logs or tickets.
 The main state file is
 `rust-spike.json`, atomically replaced with mode 0600 in a pre-existing 0700
 directory. Journal reads recheck placement, open without following the final

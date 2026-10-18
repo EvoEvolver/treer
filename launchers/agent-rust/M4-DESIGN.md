@@ -1,5 +1,12 @@
 # M4 prerequisites for switching team launchers
 
+**Superseded by #158 decision 4767 (2026-10-18).** The current target is Node
+parity plus bounded memory: one-way Node import after byte backup, rollback by
+restoring that backup and Node startup, and Node-equivalent group cleanup with
+its detached-descendant gap. New Core quota/Host APIs and bidirectional migration
+are cancelled prerequisites. This document remains design history only; use
+[the launcher README](README.md) for current implementation and limits.
+
 Proposal for #158, following leader decision 4578 and Security verdict 4580.
 The reviewed implementation remains frozen at
 `4df6db947ebfff21c2809d552f728d1454d7888d`. Limited M3 is a fresh Codex pilot;

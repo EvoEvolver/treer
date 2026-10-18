@@ -3,6 +3,7 @@ import test from 'node:test';
 import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { once } from 'node:events';
+import { createHash } from 'node:crypto';
 import { mkdtemp, mkdir, readFile, writeFile, realpath, rm, chmod, readdir, unlink, symlink, lstat, rename } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { resolve, join, dirname } from 'node:path';
@@ -51,9 +52,9 @@ async function fixture(t, extra={}, controllerOptions={}) {
   env.FAKE_CODEX_CALLS=env.RUST_SPIKE_PROVIDER_LOG;
   if(useNode&&process.env.NODE_LAUNCHER_RUNTIME){env.AGENT_UI_APP_ROOT=dirname(process.env.NODE_LAUNCHER_RUNTIME);env.AGENT_UI_PUBLIC_DIR=join(env.AGENT_UI_APP_ROOT,'public');}
   const children=[];let logs='';
-  const launch=async (overrides,waitReady=true)=>{
+  const launch=async (overrides,waitReady=true,rustArgs=[])=>{
     await rm(portFile,{force:true});
-    const child=spawn(useNode?process.execPath:binary,useNode?(process.env.NODE_LAUNCHER_RUNTIME?[process.env.NODE_LAUNCHER_RUNTIME]:['--import',join(nodeRoot,'node_modules/tsx/dist/loader.mjs'),join(nodeRoot,'src/index.ts')]):[],{cwd,env:{...env,...overrides},stdio:['ignore','pipe','pipe']});
+    const child=spawn(useNode?process.execPath:binary,useNode?(process.env.NODE_LAUNCHER_RUNTIME?[process.env.NODE_LAUNCHER_RUNTIME]:['--import',join(nodeRoot,'node_modules/tsx/dist/loader.mjs'),join(nodeRoot,'src/index.ts')]):rustArgs,{cwd,env:{...env,...overrides},stdio:['ignore','pipe','pipe']});
     children.push(child);child.stdout.on('data',b=>logs+=b);child.stderr.on('data',b=>logs+=b);
     const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(portFile,'utf8'))}`,x=>!x.endsWith('NaN'));
     if(waitReady)try {await until(()=>fetch(base+'/api/state').then(r=>r.json()),x=>x.ready===true);}catch(e){throw Error(e.message+' '+logs);}
@@ -63,7 +64,7 @@ async function fixture(t, extra={}, controllerOptions={}) {
   const {child,base}=await launch({});
   const headers={'x-treer-interface-source':'controller-api','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'contract-instance',host:'agent-interface'};
   const post=body=>fetch(base+'/v1/prompts',{method:'POST',headers,body:JSON.stringify(body)});
-  return {base,post,headers,child,root,state,launch,controller,logs:()=>logs,trackChild:child=>children.push(child)};
+  return {base,post,headers,child,root,state,launch,controller,env,logs:()=>logs,trackChild:child=>children.push(child)};
 }
 
 test('Rust serves its manifest while Controller registration probes it',{skip:useNode},async t=>{
@@ -416,7 +417,7 @@ test('Rust corrupt journal refuses startup before provider dispatch and preserve
   assert.equal(await readFile(path,'utf8'),bytes);
   assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8').catch(()=>null),providerBefore);
 });
-test('Rust refuses concurrent state writers, legacy migration and mismatched resume before provider startup',{skip:useNode,timeout:15000},async t=>{
+test('Rust refuses concurrent writers and mismatched resume; existing Rust journal is not re-imported',{skip:useNode,timeout:15000},async t=>{
   const s=await fixture(t);
   const path=join(s.state,'rust-spike.json');
   const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_AGENT_ID:'ag_contract',TREER_WORKLOAD_CREDENTIAL:'fixture-only',TREER_AGENT_SERVER_URL:s.controller.url,TREER_AGENT_PRIVATE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'),RUST_SPIKE_PROVIDER_LOG:join(s.root,'provider.jsonl')});
@@ -435,11 +436,60 @@ test('Rust refuses concurrent state writers, legacy migration and mismatched res
   await refuses('private_state_session_mismatch',{AGENT_UI_SESSION_ID:'different-synthetic-session'});
   const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
   const evidence='private legacy evidence; do not parse or discard';await writeFile(join(legacy,'queue.json'),evidence,{mode:0o600});
-  await refuses('legacy_state_migration_required');
   assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),evidence);
-  await rm(legacy,{recursive:true}); // Exact test-created Agent directory only.
   const restarted=await s.launch({});
   assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).ready,true,'lease must be released on exit');
+  assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),evidence,'existing Rust state never reimports stale Node files');
+});
+test('Rust imports a Node queue once, resumes its thread, preserves retries and restores byte backup',{skip:useNode,timeout:20000},async t=>{
+  const s=await fixture(t);
+  const thread=(await fetch(s.base+'/api/state').then(r=>r.json())).thread.id;
+  const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
+  await unlink(join(s.state,'rust-spike.json'));
+  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
+  const text='Node queued 中文', delivery='queue', sender=null, notify=null;
+  const fingerprint=createHash('sha256').update(JSON.stringify({text,delivery,sender,notify})).digest('hex');
+  const id='sub_11111111-1111-4111-8111-111111111111';
+  const receipt={id,disposition:'sent',position:null};
+  const queue=JSON.stringify({version:1,records:[{operationId:'node-op',fingerprint,text:'',delivery,notify,receipt,notification:null,submission:{id,state:'done',sender,created_at:'2026-10-18T00:00:00.000Z',position:null,text_preview:text,turn_id:'old-turn',assistant_preview:null,error:null}}]})+'\n';
+  const threadBytes=JSON.stringify({threadId:thread})+'\n';
+  await writeFile(join(legacy,'agent-ui.json'),threadBytes,{mode:0o600});await writeFile(join(legacy,'queue.json'),queue,{mode:0o600});
+  const imported=await s.launch({},true,['--import-node-state']);
+  const snapshot=await fetch(imported.base+'/api/state').then(r=>r.json());assert.equal(snapshot.thread.id,thread);
+  assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),queue);
+  assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),queue);
+  const post=body=>fetch(imported.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify(body)});
+  const duplicate=await post({text,delivery,operation_id:'node-op'}).then(r=>r.json());
+  assert.equal(duplicate.duplicate,true);assert.deepEqual(duplicate.submission,receipt);
+  assert.equal((await post({text:'different',delivery,operation_id:'node-op'})).status,409);
+  await until(()=>fetch(imported.base+'/v1/submissions/'+id,{headers:s.headers}).then(r=>r.json()),x=>['done','failed'].includes(x.submission?.state));
+  const stop=once(imported.child,'exit');imported.child.kill('SIGTERM');await stop;
+  const restarted=await s.launch({});
+  assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).thread.id,thread);
+  const end=once(restarted.child,'exit');restarted.child.kill('SIGTERM');await end;
+  await writeFile(join(legacy,'queue.json'),'changed Node file after import',{mode:0o600});
+  const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8');
+  const result=await execFileAsync(binary,['--restore-node-backup'],{cwd:join(s.root,'cwd'),env:s.env,timeout:5000});
+  assert.match(result.stdout,/node_state_backup_restored/);
+  assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),queue);
+  assert.equal(await readFile(join(legacy,'agent-ui.json'),'utf8'),threadBytes);
+  assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore,'restore must not start the provider');
+});
+test('Rust malformed Node state keeps exact backup and refuses before spawning provider',{skip:useNode,timeout:10000},async t=>{
+  const s=await fixture(t);const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
+  await unlink(join(s.state,'rust-spike.json'));
+  const legacy=join(s.root,'cwd/.treer/agents/ag_contract');await mkdir(legacy,{recursive:true,mode:0o700});
+  const malformed='{"version":1,"records":[],"records":["seeded-private-text"]}\n';
+  await writeFile(join(legacy,'agent-ui.json'),'{"threadId":"thread"}',{mode:0o600});
+  await writeFile(join(legacy,'queue.json'),malformed,{mode:0o600});
+  const providerBefore=await readFile(join(s.root,'provider.jsonl'),'utf8');
+  await assert.rejects(execFileAsync(binary,['--import-node-state'],{cwd:join(s.root,'cwd'),env:s.env,timeout:5000}),error=>{
+    assert.equal(error.code,1);assert.match(error.stderr,/node_state_import_failed/);assert.doesNotMatch(error.stderr,/seeded-private-text/);return true;
+  });
+  assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),malformed);
+  assert.equal(await readFile(join(s.state,'node-backup-v1/queue.json'),'utf8'),malformed);
+  assert.equal(await readFile(join(s.root,'provider.jsonl'),'utf8'),providerBefore);
+  await assert.rejects(readFile(join(s.state,'rust-spike.json')),{code:'ENOENT'});
 });
 test('Rust refuses a FIFO journal promptly before provider startup',{skip:useNode,timeout:10000},async t=>{
   const s=await fixture(t);

@@ -1,5 +1,11 @@
 # Launcher handoff envelope v1 — schema review gate
 
+**Historical proposal, superseded by #158 decision 4767.** M4 now uses one-way
+Node-state import plus byte backup/restore; no new Core handoff/quota/ownership
+API or bidirectional converter is a prerequisite. The offline validator remains
+tested but is not the import format or a production activation path. Current
+behavior is documented in [README](README.md).
+
 Concrete proposal for #158, following [M4](M4-DESIGN.md). This is the separate
 Security/Core schema gate requested in 4600/4610/4611, not an implemented API.
 All numeric limits below are proposed for review, not Controller defaults.
