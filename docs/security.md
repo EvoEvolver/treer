@@ -1286,10 +1286,12 @@ when the hash matches the one it accepted: the Agent document that later
 replaces the bootstrap shares the frame's window and origin but never learned
 the hash, so it cannot imitate a bootstrap failure to pull the Console back to
 the shared origin (a hash-less failure is accepted only before any `ready`).
-On such a failure the Console falls back to the
-Proxy-origin tunnel, visibly, or offers a new tab only when the operator set
-`--agent-embed-fallback refuse` (the tunnel then answers
-`503 embedded_ui_requires_isolated_origin`). Codes are never logged. Embed
+On such a failure the Console never switches origins by itself: it shows a
+notice and lets the user choose between the shared-origin Proxy tunnel,
+labelled as such, and opening the Agent in a new tab; where the operator set
+`--agent-embed-fallback refuse` only the new tab is offered (the tunnel then
+answers `503 embedded_ui_requires_isolated_origin`). Mint errors and
+timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged. Embed
 sessions are separate rows from standalone sessions: the token of one never
 authenticates through the other cookie. A request that authenticates through
 the embed cookie is served only with exactly one `Sec-Fetch-Site: same-origin`
