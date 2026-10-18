@@ -1566,11 +1566,15 @@ and an explicit isolation choice. Nothing is preselected. The owner chooses
 isolation were reviewed) or `"unverified_accepted"` (running without verified
 isolation; risk accepted). Both are owner statements, never App attestation.
 The second option is available for general deployments, not only sandboxes.
-Same-UID processes can read credentials/state even with 0600 files.
+Same-UID processes can read the token file, SQLite state and held content,
+and act as the endpoint even with 0600 files. A compromised same-user process
+defeats hub confinement.
 
 The choice and the bounded free-text `reference` commit atomically with resume
-in the existing owner audit (and its JSONL exports). A reference is plain text,
-not HTML; it must contain no secrets. For this functional smoke the truthful
+in the existing owner audit (and its JSONL exports). A reference is untrusted plain text,
+not HTML or executable input; exports must preserve that treatment. Cc controls
+and Unicode 15.0 Cf format characters (including bidi controls) are rejected,
+not escaped into a potentially misleading audit display. It must contain no secrets. For this functional smoke the truthful
 reference is `functional smoke, sandbox folder, same user, isolation untested`.
 The profile declaration remains required and must also be truthful.
 

@@ -53,13 +53,41 @@ pub struct ResumeEvidence {
     #[serde(default)]
     parked_count_ack: i64,
 }
+// Unicode 15.0 Cf ranges include bidi overrides/isolates and invisible format
+// characters. Reject rather than allowing references to disguise audit text.
+fn reference_control(c: char) -> bool {
+    c.is_control()
+        || matches!(c,
+                '\u{ad}' |
+                '\u{600}'..='\u{605}' |
+                '\u{61c}' |
+                '\u{6dd}' |
+                '\u{70f}' |
+                '\u{890}'..='\u{891}' |
+                '\u{8e2}' |
+                '\u{180e}' |
+                '\u{200b}'..='\u{200f}' |
+                '\u{202a}'..='\u{202e}' |
+                '\u{2060}'..='\u{2064}' |
+                '\u{2066}'..='\u{206f}' |
+                '\u{feff}' |
+                '\u{fff9}'..='\u{fffb}' |
+                '\u{110bd}' |
+                '\u{110cd}' |
+                '\u{13430}'..='\u{1343f}' |
+                '\u{1bca0}'..='\u{1bca3}' |
+                '\u{1d173}'..='\u{1d17a}' |
+                '\u{e0001}' |
+                '\u{e0020}'..='\u{e007f}'
+        )
+}
 impl ResumeEvidence {
     fn valid(&self) -> bool {
         self.parked_count_ack >= 0
             && self.profile_reviewed
             && !self.reference.trim().is_empty()
             && self.reference.len() <= 256
-            && !self.reference.chars().any(char::is_control)
+            && !self.reference.chars().any(reference_control)
     }
 }
 fn target<M: Mailbox + Directory>(hub: &Hub<M>, id: &str) -> Result<Target, Failure> {
@@ -365,6 +393,7 @@ mod tests {
     }
     #[test]
     fn explicit_isolation_choices_are_required_and_unknown_values_fail_closed() {
+        assert!(serde_json::from_str::<ResumeEvidence>(r#"{"profile_reviewed":true,"isolation":"reviewed","isolation":"unverified_accepted","reference":"fixture"}"#).is_err());
         for bad in [
             serde_json::json!(null),
             serde_json::json!(false),
@@ -589,6 +618,7 @@ mod tests {
         assert_eq!(events[0].actor_id, "human_owner");
         let evidence: serde_json::Value = serde_json::from_str(&events[0].transfer_id).unwrap();
         assert_eq!(evidence["kind"], "owner_declaration_not_attestation");
+        assert_eq!(evidence["isolation"], "reviewed");
         assert_eq!(evidence["reference"], "#159 reviewed manifest fixture");
         assert_eq!(evidence["target"]["account_id"], "bot_test");
         assert_eq!(evidence["pins_sha256"].as_str().unwrap().len(), 64);
@@ -816,6 +846,10 @@ mod tests {
             " ".into(),
             "a".repeat(257),
             "line\nnext".into(),
+            "hidden\u{202e}reference".into(),
+            "hidden\u{2066}reference".into(),
+            "hidden\u{200b}reference".into(),
+            "hidden\u{feff}reference".into(),
             "字".repeat(100),
         ] {
             let mut r = request(&s, &d, &o, &a);

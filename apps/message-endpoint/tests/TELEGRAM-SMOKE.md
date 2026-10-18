@@ -23,7 +23,8 @@ do not establish live Telegram delivery, Policy isolation or native memory use.
    outside VCS. The hub alone reads the bot token. Relay config contains no bot
    token. Do not pass secrets in argv, environment snippets, tickets, screenshots
    or command history. Same-UID 0600 is not isolation: record the dedicated OS
-   user/container boundary and actual Policy checks separately.
+   user/container boundary and actual Policy checks separately. Same-UID processes
+   can read the token file, SQLite state and held content, and act as the endpoint.
 4. Create one workspace-only Managed hub App, with its own runtime identity,
    dedicated App URL and selected loopback port. Never use `--public`. Inspect
    its actual ingress access and record IDs, SHA and address. Initially keep
@@ -47,7 +48,11 @@ do not establish live Telegram delivery, Policy isolation or native memory use.
    chat/topic and allowed human IDs. Do not edit SQLite to bypass the UI.
 8. Preview resume. Check current revision, relay release/profile pins, fresh
    Core metadata, verified bot status, Policy/OS isolation and held/parked counts.
-   Owner declarations are evidence, not attestation by the App. Confirm default
+   Explicitly choose either reviewed isolation or unverified isolation with risk
+   accepted; neither is preselected. Same-UID functional smoke must use the latter
+   and reference `functional smoke, sandbox folder, same user, isolation untested`.
+   Owner declarations are evidence, not attestation by the App. Verify the
+   persistent isolation-unverified badge and audit choice/reference. Confirm default
    held discard and resume only after reviewing those exact objects. A message
    before this step must not reach the recipient. Never reuse a stale preview.
 
