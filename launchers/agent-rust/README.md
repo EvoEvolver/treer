@@ -3,6 +3,9 @@
 This is a separate, unpublished Cargo workspace. It does not replace
 `launchers/agent`, enter the production bundle, change a saved profile, or change
 Core behavior. No production Agent is eligible for this experiment.
+The proposed [M4 prerequisites](M4-DESIGN.md) cover bidirectional migration,
+Controller quotas and proven process ownership before any team-agent switch;
+the limited fresh-session M3 pilot does not establish those guarantees.
 
 The first implementation covers one Codex app-server session: loopback AIS,
 HTTP/WebSocket state, prompt/queue/abort, transcript paging, operation-id receipts,
