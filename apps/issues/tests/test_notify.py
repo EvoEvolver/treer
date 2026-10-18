@@ -167,6 +167,12 @@ class TitleSanitizerTest(unittest.TestCase):
         self.assertLessEqual(len(clean_title('\U0001f600' * 500).encode()), 400, 'emoji cannot expand the line')
         self.assertEqual(clean_title('\u6807\u9898 ok'), '\u6807\u9898 ok', 'CJK passes')
 
+    def test_unicode_table_dependent_code_points_are_noticed(self):
+        """Category tables follow the interpreter's Unicode version: a recently added symbol must survive and an unassigned
+        code point must be dropped, so a change of interpreter that alters either shows up here instead of in production."""
+        self.assertEqual(clean_title('a\U0001fae8b'), 'a\U0001fae8b', 'Unicode 15.0 symbol (shaking face) is kept')
+        self.assertEqual(clean_title('a\u0378b\U0003fffeb'), 'abb', 'unassigned and noncharacter code points are dropped')
+
     def test_output_is_one_line_without_quotes_or_mentions(self):
         for name, (raw, _) in SANITIZER_CASES.items():
             out = clean_title(raw)
