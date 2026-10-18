@@ -10,13 +10,16 @@ import { MachineRecovery } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
 import { cn } from "@/lib/utils"
 import { t } from "@/i18n"
+import { IsolatedAgentInterface } from '@/components/isolated-agent-interface'
+import type { AgentEmbedMode } from '@/components/use-agent-origin-capability'
 
 export const WorkloadSurface = forwardRef<TerminalPaneHandle, {
   workspaceId: string; agent: Agent; app?: AppDeployment; machine?: Machine; path: string; tab: WorkspaceTab
   visible: boolean; mobile: boolean; theme: Theme; ctrlArmed: boolean
+  embedMode: AgentEmbedMode; embedOrigin?: string
   transformInput: (value: string) => string; onToggleCtrl: () => void
   onCopy: (value: string) => void; onLogs: (logs: boolean) => void
-}>(function WorkloadSurface({ workspaceId, agent, app, machine, path, tab, visible, mobile, theme, ctrlArmed, transformInput, onToggleCtrl, onCopy, onLogs }, ref) {
+}>(function WorkloadSurface({ workspaceId, agent, app, machine, path, tab, visible, mobile, theme, ctrlArmed, embedMode, embedOrigin, transformInput, onToggleCtrl, onCopy, onLogs }, ref) {
   const terminal = useRef<TerminalPaneHandle>(null)
   const frame = useRef<HTMLIFrameElement>(null)
   const [status, setStatus] = useState<TerminalState>("not attached")
@@ -36,8 +39,10 @@ export const WorkloadSurface = forwardRef<TerminalPaneHandle, {
   useEffect(() => { if (visible) { const id = requestAnimationFrame(() => terminal.current?.fit()); return () => cancelAnimationFrame(id) } }, [visible, mobile])
   if (!online) return <div className="grid size-full min-h-0 place-items-center bg-sidebar px-6 text-center"><div className="max-w-sm"><p className="text-sm font-medium">{t("surface.machine_is_offline")}</p><p className="mt-2 text-xs leading-5 text-muted-foreground">{t("surface.offline_detail", { machine: machineName(machine, agent.server_id) })}</p><MachineRecovery workspaceId={workspaceId} onCopy={onCopy} reason={t("surface.recovery_reason")} /></div></div>
   if (showApp && !url) return <div className="grid size-full place-items-center px-6 text-center"><div className="max-w-sm space-y-3"><p className="text-sm font-medium">{t("surface.app_is_not_running")}</p><p className="text-xs text-muted-foreground">{t("surface.start_this_app_from_its")}</p><Button variant="outline" onClick={() => onLogs(true)}>{t("surface.show_logs")}</Button></div></div>
-  if (url) return <div className="size-full min-h-0 min-w-0 overflow-hidden">
-    <iframe ref={frame} key={interfaceFrameKey(agent.agent_id, agentInterface?.instance_id ?? app?.hostname ?? "", agentInterface?.registered_at ?? String(agent.run_generation ?? ""), tab.revision)} src={url} title={`${path || "Agent"} interface`} className="block size-full min-h-0 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onLoad={() => postEmbedTheme(frame.current, theme, readEmbedAppearance())} />
+  if (url && agentInterface && embedMode !== 'legacy') return <IsolatedAgentInterface key={`${interfaceFrameKey(agent.agent_id, agentInterface.instance_id, agentInterface.registered_at, tab.revision)}:${embedMode}:${embedOrigin ?? ''}`} workspaceId={workspaceId} agentId={agent.agent_id} origin={embedMode === 'isolated' ? embedOrigin : undefined} pending={embedMode === 'pending'} fallbackUrl={url} title={`${path || 'Agent'} interface`} theme={theme} />
+  if (url) return <div className="flex size-full min-h-0 min-w-0 flex-col overflow-hidden">
+    {showApp && <p role="note" className="shrink-0 border-b bg-sidebar px-3 py-2 text-xs leading-5 text-foreground">{t("surface.app_shared_origin")}</p>}
+    <iframe ref={frame} key={interfaceFrameKey(agent.agent_id, agentInterface?.instance_id ?? app?.hostname ?? "", agentInterface?.registered_at ?? String(agent.run_generation ?? ""), tab.revision)} src={url} title={`${path || "Agent"} interface`} className="block w-full min-h-0 flex-1 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onLoad={() => postEmbedTheme(frame.current, theme, readEmbedAppearance())} />
   </div>
   return <div className={cn("flex size-full min-h-0 justify-center overflow-hidden px-3 pb-4 pt-4 sm:px-8 sm:pb-7 sm:pt-6 lg:px-16", mobile && "!p-0")}>
     <div className={cn("grid h-full min-h-0 w-full max-w-[1120px] grid-rows-[42px_minmax(0,1fr)] overflow-hidden rounded-md border border-zinc-800 bg-[#0f1215] shadow-[0_8px_28px_rgba(15,18,21,.14)]", mobile && "max-w-none grid-rows-[44px_minmax(0,1fr)_auto] rounded-none border-0 shadow-none")}>
