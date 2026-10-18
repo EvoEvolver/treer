@@ -1048,9 +1048,10 @@ impl ProxyClient {
                 directory,
                 file_name,
                 overwrite,
+                size,
             } => self
                 .runtime
-                .begin_upload(&upload_id, &directory, &file_name, overwrite)
+                .begin_upload(&upload_id, &directory, &file_name, overwrite, size)
                 .map(|()| {
                     CommandResult::success(
                         command_id.clone(),
@@ -1075,15 +1076,31 @@ impl ProxyClient {
             AgentCommand::UploadChunk {
                 upload_id,
                 content_base64,
+                offset,
             } => self
                 .runtime
-                .append_upload_chunk(&upload_id, &content_base64)
+                .append_upload_chunk(&upload_id, offset, &content_base64)
                 .map(|bytes_written| {
                     CommandResult::success(
                         command_id.clone(),
                         serde_json::json!({ "bytes_written": bytes_written }),
                     )
                 })
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::UploadPartCommit {
+                upload_id,
+                offset,
+                length,
+                sha256,
+            } => self
+                .runtime
+                .commit_upload_part(&upload_id, offset, length, &sha256)
+                .map(|value| CommandResult::success(command_id.clone(), value))
+                .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
+            AgentCommand::UploadResult { upload_id } => self
+                .runtime
+                .upload_result(&upload_id)
+                .map(|value| CommandResult::success(command_id.clone(), value))
                 .unwrap_or_else(|error| CommandResult::failure(command_id.clone(), error)),
             AgentCommand::UploadCommit { upload_id } => self
                 .runtime
@@ -1301,6 +1318,7 @@ pub fn server_info(
         status: ServerStatus::Online,
         connected_at: now,
         last_seen_at: now,
+        capabilities: vec![],
     }
 }
 

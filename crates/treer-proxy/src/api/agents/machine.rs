@@ -112,6 +112,7 @@ pub(crate) async fn upload_machine_file(
                 directory: request.directory.clone(),
                 file_name: request.file_name.clone(),
                 overwrite: request.overwrite,
+                size: None,
             },
         )
         .await?;
@@ -124,6 +125,7 @@ pub(crate) async fn upload_machine_file(
                     AgentCommand::UploadChunk {
                         upload_id: upload_id.clone(),
                         content_base64: base64::engine::general_purpose::STANDARD.encode(chunk),
+                        offset: None,
                     },
                 )
                 .await?;

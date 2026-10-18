@@ -302,6 +302,14 @@ pub struct UploadMachineFileResponse {
     pub server_id: String,
     pub path: String,
     pub bytes_written: u64,
+    /// Whole-file SHA-256 computed by the Controller (#166); absent on the
+    /// legacy route and from older Controllers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+    /// The file is published but its staging name could not be removed
+    /// (#166); the Controller reaper clears it. Never a failure.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cleanup_pending: bool,
 }
 
 const fn default_machine_exec_timeout_ms() -> u64 {
@@ -525,10 +533,33 @@ pub enum AgentCommand {
         directory: String,
         file_name: String,
         overwrite: bool,
+        /// Declared total size (#166): mandatory for the streamed route; the
+        /// Controller refuses a commit whose byte count differs. Absent on the
+        /// legacy base64 route and on commands from older Proxies.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        size: Option<u64>,
     },
     UploadChunk {
         upload_id: String,
         content_base64: String,
+        /// Write position (#166): required for uploads begun with a declared
+        /// size, where a retried part rewrites from the committed offset;
+        /// absent on the legacy append route.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        offset: Option<u64>,
+    },
+    /// Closes one part of a chunked upload (#166): the Controller verifies the
+    /// SHA-256 of the bytes written since the committed offset and advances it.
+    UploadPartCommit {
+        upload_id: String,
+        offset: u64,
+        length: u64,
+        sha256: String,
+    },
+    /// The Controller's view of an upload: committed receipt, active progress
+    /// or unknown (#166), so a Proxy can recover after losing a response.
+    UploadResult {
+        upload_id: String,
     },
     UploadCommit {
         upload_id: String,
@@ -583,6 +614,12 @@ impl AgentCommand {
             Self::FileTransfer { .. } | Self::FileTransferInfo {} => {
                 Some(CAPABILITY_MACHINE_FILE_TRANSFER)
             }
+            Self::UploadBegin { size: Some(_), .. }
+            | Self::UploadChunk {
+                offset: Some(_), ..
+            }
+            | Self::UploadPartCommit { .. }
+            | Self::UploadResult { .. } => Some(crate::CAPABILITY_MACHINE_UPLOAD_V3),
             Self::UploadBegin { .. }
             | Self::UploadChunk { .. }
             | Self::UploadCommit { .. }

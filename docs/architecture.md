@@ -432,12 +432,25 @@ entries can relay ordinary internet HTTP/HTTPS directly from the source machine.
 
 Machine exec and file upload reuse the authenticated Proxy-to-Controller
 command path. Exec is a non-interactive argv vector with a 30-second ceiling
-and bounded stdout/stderr. Upload accepts at most 16 MiB from the browser,
-crosses distributed Proxy routing in 192 KiB chunks, stages a temporary file in
-the requested directory, and renames it into place only after every chunk
-arrives. Directories are canonicalized beneath the enrolled Host root and file
-names cannot contain path separators. These operations run in the Controller,
-so a Controller hot update enables them without replacing the stable Host.
+and bounded stdout/stderr. The legacy upload route accepts at most 16 MiB of
+base64 JSON from the browser. The chunked, resumable upload (#166,
+`api/agents/machine_upload.rs`, rows in `upload_store.rs`, per-instance
+admission in `upload_gate.rs`) begins an upload (declared size, destination,
+`Idempotency-Key`, quotas counted in PostgreSQL), then takes parts of at most
+8 MiB as separate requests, each hashed on the Proxy, forwarded as offset
+chunks of 192 KiB with two commands in flight and closed with
+`UploadPartCommit`, which the Controller verifies before its committed offset
+advances; a database lease keeps one part in flight per upload across
+instances, status reconciles against `UploadResult`, commit is a detached,
+idempotent task, and a periodic job expires idle uploads and recovers
+committing rows. The Controller side (`machine_upload.rs`) stages through the
+platform `Root`/`StagedFile` boundary, journals intents and receipts next to
+the transfer journal, reaps after one hour idle or six hours, and advertises
+`machine.upload.v3`; the Proxy copies live Controller capabilities onto each
+machine entry of the read models. Directories are validated beneath the
+enrolled Host root and file names cannot contain path separators. These
+operations run in the Controller, so a Controller hot update enables them
+without replacing the stable Host.
 
 Single-file CLI transfer is a separate `machine.file-transfer.v1` capability;
 it does not change the legacy browser upload protocol. `machine put/get` use
@@ -448,7 +461,7 @@ requested filesystem path to the target Controller. Handles bind that identity,
 direction, path and connection generation. Disconnect invalidates handles;
 queued blocking tasks from older generations cannot recreate them. Proxy reconnect never
 replays pending file-transfer commands into a new Controller connection.
-The default per-file size is 64 MiB, configurable by
+The default per-file size is 128 MiB, configurable by
 `TREER_MACHINE_FILE_MAX_BYTES` up to 1 GiB; active
 handles are capped at eight per machine and two per caller, with 30-second idle
 and 15-minute total deadlines. Retrying starts a new transfer, never implicitly

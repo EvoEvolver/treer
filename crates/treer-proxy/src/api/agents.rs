@@ -7,6 +7,7 @@ mod interface;
 #[path = "agents/machine.rs"]
 mod machine;
 mod machine_files;
+mod machine_upload;
 mod policy;
 mod profiles;
 mod provider_cli;
@@ -20,6 +21,9 @@ pub(super) use context::*;
 pub(super) use interface::*;
 pub(super) use machine::*;
 pub(super) use machine_files::*;
+pub(super) use machine_upload::*;
+#[cfg(test)]
+pub(super) use machine_upload::{set_part_windows_for_test, PART_BUFFERED_PEAK};
 pub(super) use policy::*;
 pub(super) use profiles::*;
 pub(super) use provider_cli::*;

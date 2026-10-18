@@ -2,7 +2,7 @@
 use serde::{Deserialize, Serialize};
 pub const CAPABILITY_MACHINE_FILE_TRANSFER: &str = "machine.file-transfer.v1";
 pub const MACHINE_TRANSFER_CHUNK_BYTES: usize = 64 * 1024;
-pub const MACHINE_TRANSFER_DEFAULT_LIMIT: u64 = 64 * 1024 * 1024;
+pub const MACHINE_TRANSFER_DEFAULT_LIMIT: u64 = 128 * 1024 * 1024;
 pub const MACHINE_TRANSFER_HARD_LIMIT: u64 = 1024 * 1024 * 1024;
 pub const MACHINE_TRANSFER_IDLE_SECONDS: u64 = 30;
 pub const MACHINE_TRANSFER_TOTAL_SECONDS: u64 = 15 * 60;

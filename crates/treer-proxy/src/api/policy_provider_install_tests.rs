@@ -83,6 +83,7 @@ mod unix {
                     AgentCommand::UploadChunk {
                         upload_id,
                         content_base64,
+                        ..
                     } => {
                         let bytes = base64::engine::general_purpose::STANDARD
                             .decode(content_base64)

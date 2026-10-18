@@ -74,6 +74,10 @@ pub struct ServerInfo {
     pub status: ServerStatus,
     pub connected_at: DateTime<Utc>,
     pub last_seen_at: DateTime<Utc>,
+    /// Capabilities the live Controller advertised (#166), filled by the
+    /// Proxy read models from the connection; Controllers leave it empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

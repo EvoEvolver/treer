@@ -275,7 +275,8 @@ mod unix {
         /// Only a recorded random staging name can be removed by recovery.
         pub fn cleanup_staging(&self, path: &str, temporary_name: &str) -> io::Result<()> {
             if validate_relative_path(temporary_name)?.len() != 1
-                || !temporary_name.starts_with(".treer-transfer-xfer_")
+                || !(temporary_name.starts_with(".treer-transfer-xfer_")
+                    || temporary_name.starts_with(".treer-transfer-upl_"))
             {
                 return Err(protected());
             }
@@ -443,6 +444,28 @@ mod unix {
         pub fn file_mut(&mut self) -> &mut File {
             self.file.as_mut().expect("staged file is not committed")
         }
+        /// A read-only handle on the same staging inode, through the held
+        /// parent descriptor, so the caller can verify the bytes it wrote
+        /// before publishing (the write handle is write-only).
+        pub fn reopen_read(&self) -> io::Result<File> {
+            let written = self.file.as_ref().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "staged file is committed")
+            })?;
+            let file: File = sys::openat(
+                &self.parent,
+                self.temporary_name.as_str(),
+                OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NOCTTY,
+                Mode::empty(),
+            )?
+            .into();
+            if identity(&file)? != identity(written)? {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "staging name no longer refers to the staged file",
+                ));
+            }
+            Ok(file)
+        }
         pub fn commit(mut self, overwrite: bool) -> io::Result<()> {
             // A same-UID actor can still race this check using direct OS
             // operations; this boundary is not a sandbox against that actor.
@@ -487,16 +510,47 @@ mod unix {
                     self.name.as_str(),
                 )?;
             } else {
-                // Atomic no-replace on Linux/macOS, without exists()+rename race.
-                sys::linkat(
+                // Atomic no-replace without an exists()+rename race. Linux
+                // tries renameat2(RENAME_NOREPLACE) first (one name at every
+                // instant); kernels or filesystems that reject the flag, and
+                // other platforms, use linkat + unlinkat, where a failed unlink
+                // after a successful link is a published file with its staging
+                // name still present (publication_uncertain).
+                #[cfg(target_os = "linux")]
+                let renamed = match sys::renameat_with(
                     &self.parent,
                     self.temporary_name.as_str(),
                     &self.parent,
                     self.name.as_str(),
-                    AtFlags::empty(),
-                )?;
-                sys::unlinkat(&self.parent, self.temporary_name.as_str(), AtFlags::empty())
-                    .map_err(|_| publication_uncertain())?;
+                    sys::RenameFlags::NOREPLACE,
+                ) {
+                    Ok(()) => true,
+                    Err(error)
+                        if matches!(
+                            error,
+                            rustix::io::Errno::NOSYS
+                                | rustix::io::Errno::INVAL
+                                | rustix::io::Errno::NOTSUP
+                                | rustix::io::Errno::OPNOTSUPP
+                        ) =>
+                    {
+                        false
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                #[cfg(not(target_os = "linux"))]
+                let renamed = false;
+                if !renamed {
+                    sys::linkat(
+                        &self.parent,
+                        self.temporary_name.as_str(),
+                        &self.parent,
+                        self.name.as_str(),
+                        AtFlags::empty(),
+                    )?;
+                    sys::unlinkat(&self.parent, self.temporary_name.as_str(), AtFlags::empty())
+                        .map_err(|_| publication_uncertain())?;
+                }
             }
             self.installed = true;
             self.parent

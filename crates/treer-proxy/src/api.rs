@@ -78,6 +78,9 @@ const TERMINAL_FLOW_WINDOW_BYTES: usize = 256 * 1024;
 const MAX_MACHINE_FILE_BYTES: usize = 16 * 1024 * 1024;
 const MACHINE_FILE_CHUNK_BYTES: usize = 192 * 1024;
 const MAX_MACHINE_UPLOAD_BODY_BYTES: usize = 23 * 1024 * 1024;
+/// One chunked-upload part (8 MiB) plus slack; the handler enforces the exact
+/// Content-Length rules before reading.
+const MAX_MACHINE_UPLOAD_PART_BODY_BYTES: usize = 9 * 1024 * 1024;
 
 fn control_audit_actor<'a>(
     session: Option<&'a CurrentSession>,
@@ -445,6 +448,12 @@ pub fn router(
     )
 }
 
+/// Starts the periodic machine upload expiry (#166) on this instance.
+pub fn spawn_machine_upload_expiry(state: AppState, auth: AuthStore) {
+    let store = crate::upload_store::UploadStore::new(auth.pool());
+    agents::spawn_upload_expiry_task(state, auth, store);
+}
+
 async fn core_messages_rollout_disabled() -> ApiFailure {
     ApiFailure::service_unavailable(
         "core_messages_disabled",
@@ -454,7 +463,7 @@ async fn core_messages_rollout_disabled() -> ApiFailure {
 
 async fn health() -> Json<Value> {
     Json(
-        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION, treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN] }),
+        json!({ "status": "ok", "service": "treer-proxy", "capabilities": [treer_protocol::CAPABILITY_WORKLOAD_CREATE_PLACEMENT, treer_protocol::CAPABILITY_POLICY_PUBLISH_AUTHORITY, treer_protocol::CAPABILITY_MACHINE_FILE_TRANSFER, treer_protocol::CAPABILITY_APP_UPDATE, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL_V2, treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_PLAN_V2, treer_protocol::CAPABILITY_WORKSPACE_PINS, treer_protocol::CAPABILITY_INGRESS_PROTECTION, treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN, treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3] }),
     )
 }
 
@@ -495,6 +504,9 @@ mod provider_cli_tests;
 #[cfg(test)]
 #[path = "api/tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "api/upload_tests.rs"]
+mod upload_tests;
 
 #[cfg(test)]
 mod app_identity_forwarding_tests;

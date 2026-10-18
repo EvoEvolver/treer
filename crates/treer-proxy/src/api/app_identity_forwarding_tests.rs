@@ -492,6 +492,7 @@ async fn fixture() -> (
                 status: ServerStatus::Online,
                 connected_at: now,
                 last_seen_at: now,
+                capabilities: vec![],
             },
             connection,
             tx,

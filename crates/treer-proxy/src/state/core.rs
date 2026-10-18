@@ -58,6 +58,7 @@ impl AppState {
                 cluster,
                 traffic,
                 tombstone_pool,
+                upload_gate: std::sync::Arc::new(crate::upload_gate::UploadGate::default()),
             }),
         }
     }
@@ -359,6 +360,9 @@ impl AppState {
         server.status = ServerStatus::Online;
         server.connected_at = now;
         server.last_seen_at = now;
+        let capabilities: Vec<String> = capabilities.into_iter().collect();
+        // The read models carry the live Controller's capabilities (#166).
+        server.capabilities = capabilities.clone();
 
         let key = ServerKey {
             workspace_id: server.workspace_id.clone(),

@@ -1,12 +1,9 @@
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
-use std::fs::{File, OpenOptions};
-use std::io::Write;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use base64::Engine;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
@@ -48,7 +45,6 @@ const PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 const AGENT_INTERFACE_FAILURE_LIMIT: u8 = 5;
 const MACHINE_EXEC_TIMEOUT_MAX_MS: u64 = 30_000;
 const MACHINE_EXEC_STREAM_LIMIT_BYTES: usize = 64 * 1024;
-const MACHINE_UPLOAD_CHUNK_MAX_BYTES: usize = 192 * 1024;
 const BRIDGE_PROMPT_QUEUE_LIMIT: usize = 256;
 const BRIDGE_PROMPT_READ_LIMIT: usize = 100;
 const BRIDGE_PROMPT_MAX_BYTES: usize = 64 * 1024;
@@ -237,7 +233,7 @@ struct ControllerInner {
     private_state_ledger: Mutex<QuotaLedger>,
     provider_cli: crate::provider_cli::ProviderCliService,
     recovery_lock: tokio::sync::Mutex<()>,
-    uploads: Mutex<HashMap<String, PendingUpload>>,
+    uploads: crate::machine_upload::Uploads,
     file_transfers: crate::machine_file_transfer::Transfers,
     agents: RwLock<HashMap<String, Arc<Mutex<ControllerAgent>>>>,
     events: broadcast::Sender<AgentInfo>,
@@ -246,15 +242,6 @@ struct ControllerInner {
     virtual_hosts: RwLock<Option<VirtualNetworkHostsSnapshot>>,
     proxy_link: RwLock<ProxyLinkStatus>,
     workload_proxies: crate::workload_proxy::WorkloadProxies,
-}
-
-struct PendingUpload {
-    file: File,
-    temp_path: PathBuf,
-    final_path: PathBuf,
-    display_path: String,
-    overwrite: bool,
-    bytes_written: u64,
 }
 
 struct ControllerAgent {
@@ -355,24 +342,30 @@ impl ControllerRuntime {
                 }
             }
         }
-        let runtime = Self {
+        let protected_paths: Vec<PathBuf> = [
+            Some(config.startup_store_path.clone()),
+            Some(config.interface_cache_path.clone()),
+            Some(config.private_state_root.clone()),
+            Some(config.provider_cli_root.clone()),
+            treer_platform::config_directory(),
+        ]
+        .into_iter()
+        .flatten()
+        .chain(config.protected_paths.clone())
+        .collect();
+        let runtime_result = Self {
             inner: Arc::new(ControllerInner {
                 #[cfg(all(test, windows))]
                 hosted_test_module_cache: Mutex::new(None),
+                uploads: crate::machine_upload::Uploads::new(
+                    config.root.clone(),
+                    config.server_id.clone(),
+                    protected_paths.clone(),
+                ),
                 file_transfers: crate::machine_file_transfer::Transfers::new(
                     config.root.clone(),
                     config.workspace_id.clone(),
-                    [
-                        Some(config.startup_store_path.clone()),
-                        Some(config.interface_cache_path.clone()),
-                        Some(config.private_state_root.clone()),
-                        Some(config.provider_cli_root.clone()),
-                        treer_platform::config_directory(),
-                    ]
-                    .into_iter()
-                    .flatten()
-                    .chain(config.protected_paths.clone())
-                    .collect(),
+                    protected_paths,
                     std::env::var("TREER_MACHINE_FILE_MAX_BYTES")
                         .ok()
                         .and_then(|value| value.parse().ok())
@@ -403,7 +396,6 @@ impl ControllerRuntime {
                 private_state,
                 private_state_ledger: Mutex::new(ledger),
                 recovery_lock: tokio::sync::Mutex::new(()),
-                uploads: Mutex::new(HashMap::new()),
                 agents: RwLock::new(HashMap::new()),
                 events: agent_events,
                 terminal_events,
@@ -412,6 +404,10 @@ impl ControllerRuntime {
                 proxy_link: RwLock::new(ProxyLinkStatus::default()),
             }),
         };
+        let runtime = runtime_result;
+        // Sweep staging files recorded by a previous Controller instance now,
+        // not on the first upload command (#166).
+        runtime.inner.uploads.recover_at_startup();
         let replays: HashMap<_, _> = replay
             .into_iter()
             .map(|replay| (replay.process_id.clone(), replay))
@@ -1891,151 +1887,52 @@ impl ControllerRuntime {
         directory: &str,
         file_name: &str,
         overwrite: bool,
+        size: Option<u64>,
     ) -> Result<(), ProtocolError> {
-        validate_upload_id(upload_id)?;
-        validate_upload_file_name(file_name)?;
-        let directory = self.resolve_machine_directory(directory)?;
-        let final_path = directory.join(file_name);
-        if final_path.exists() && !overwrite {
-            return Err(ProtocolError::new(
-                "machine_file_exists",
-                format!(
-                    "{} already exists",
-                    machine_relative_path(&self.inner.root, &final_path)
-                ),
-            ));
-        }
-        let mut uploads = self
-            .inner
+        self.inner
             .uploads
-            .lock()
-            .map_err(|_| ProtocolError::new("state_error", "upload registry lock poisoned"))?;
-        if uploads.contains_key(upload_id) {
-            return Err(ProtocolError::new(
-                "machine_upload_exists",
-                "upload ID is already active",
-            ));
-        }
-        let temp_path = directory.join(format!(".treer-upload-{upload_id}.tmp"));
-        let file = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)
-            .map_err(|error| {
-                ProtocolError::new(
-                    "machine_upload_failed",
-                    format!("failed to create upload staging file: {error}"),
-                )
-            })?;
-        let pending = PendingUpload {
-            file,
-            temp_path,
-            display_path: machine_relative_path(&self.inner.root, &final_path),
-            final_path,
-            overwrite,
-            bytes_written: 0,
-        };
-        uploads.insert(upload_id.to_string(), pending);
-        Ok(())
+            .begin(upload_id, directory, file_name, overwrite, size)
     }
 
     pub fn append_upload_chunk(
         &self,
         upload_id: &str,
+        offset: Option<u64>,
         content_base64: &str,
     ) -> Result<u64, ProtocolError> {
-        let content = base64::engine::general_purpose::STANDARD
-            .decode(content_base64)
-            .map_err(|_| {
-                ProtocolError::new("invalid_machine_upload", "chunk is not valid base64")
-            })?;
-        if content.len() > MACHINE_UPLOAD_CHUNK_MAX_BYTES {
-            return Err(ProtocolError::new(
-                "machine_upload_chunk_too_large",
-                format!("upload chunks may contain at most {MACHINE_UPLOAD_CHUNK_MAX_BYTES} bytes"),
-            ));
-        }
-        let mut uploads = self
-            .inner
+        self.inner.uploads.chunk(upload_id, offset, content_base64)
+    }
+
+    pub fn commit_upload_part(
+        &self,
+        upload_id: &str,
+        offset: u64,
+        length: u64,
+        sha256: &str,
+    ) -> Result<serde_json::Value, ProtocolError> {
+        self.inner
             .uploads
-            .lock()
-            .map_err(|_| ProtocolError::new("state_error", "upload registry lock poisoned"))?;
-        let upload = uploads.get_mut(upload_id).ok_or_else(|| {
-            ProtocolError::new("machine_upload_not_found", "upload is not active")
-        })?;
-        upload.file.write_all(&content).map_err(|error| {
-            ProtocolError::new(
-                "machine_upload_failed",
-                format!("failed to write chunk: {error}"),
-            )
-        })?;
-        upload.bytes_written = upload.bytes_written.saturating_add(content.len() as u64);
-        Ok(upload.bytes_written)
+            .part_commit(upload_id, offset, length, sha256)
     }
 
     pub fn commit_upload(
         &self,
         upload_id: &str,
     ) -> Result<UploadMachineFileResponse, ProtocolError> {
-        let mut upload = self.take_upload(upload_id)?;
-        upload.file.flush().map_err(|error| {
-            ProtocolError::new(
-                "machine_upload_failed",
-                format!("failed to flush upload: {error}"),
-            )
-        })?;
-        drop(upload.file);
-        if upload.final_path.exists() && !upload.overwrite {
-            let _ = std::fs::remove_file(&upload.temp_path);
-            return Err(ProtocolError::new(
-                "machine_file_exists",
-                format!("{} already exists", upload.display_path),
-            ));
-        }
-        #[cfg(windows)]
-        if upload.overwrite && upload.final_path.exists() {
-            std::fs::remove_file(&upload.final_path).map_err(|error| {
-                ProtocolError::new(
-                    "machine_upload_failed",
-                    format!("failed to replace existing file: {error}"),
-                )
-            })?;
-        }
-        if let Err(error) = std::fs::rename(&upload.temp_path, &upload.final_path) {
-            let _ = std::fs::remove_file(&upload.temp_path);
-            return Err(ProtocolError::new(
-                "machine_upload_failed",
-                format!("failed to install uploaded file: {error}"),
-            ));
-        }
-        Ok(UploadMachineFileResponse {
-            server_id: self.inner.server_id.clone(),
-            path: upload.display_path,
-            bytes_written: upload.bytes_written,
-        })
+        self.inner.uploads.commit(upload_id)
+    }
+
+    pub fn upload_result(&self, upload_id: &str) -> Result<serde_json::Value, ProtocolError> {
+        self.inner.uploads.result(upload_id)
     }
 
     pub fn abort_upload(&self, upload_id: &str) -> Result<bool, ProtocolError> {
-        let mut uploads = self
-            .inner
-            .uploads
-            .lock()
-            .map_err(|_| ProtocolError::new("state_error", "upload registry lock poisoned"))?;
-        let Some(upload) = uploads.remove(upload_id) else {
-            return Ok(false);
-        };
-        drop(upload.file);
-        let _ = std::fs::remove_file(upload.temp_path);
-        Ok(true)
+        self.inner.uploads.abort(upload_id)
     }
 
-    fn take_upload(&self, upload_id: &str) -> Result<PendingUpload, ProtocolError> {
-        self.inner
-            .uploads
-            .lock()
-            .map_err(|_| ProtocolError::new("state_error", "upload registry lock poisoned"))?
-            .remove(upload_id)
-            .ok_or_else(|| ProtocolError::new("machine_upload_not_found", "upload is not active"))
+    /// Deletes staging files of abandoned uploads (#166); see `machine_upload`.
+    pub fn reap_uploads(&self) -> usize {
+        self.inner.uploads.reap()
     }
 
     fn resolve_machine_directory(&self, requested: &str) -> Result<PathBuf, ProtocolError> {
@@ -3416,6 +3313,7 @@ impl ControllerRuntime {
                     break;
                 };
                 inner.file_transfers.expire();
+                ControllerRuntime { inner }.reap_uploads();
             }
         });
         let output_runtime = self.clone();
@@ -3625,36 +3523,6 @@ async fn finish_bounded_read(
             (Vec::new(), true)
         }
     }
-}
-
-fn validate_upload_id(upload_id: &str) -> Result<(), ProtocolError> {
-    if upload_id.is_empty()
-        || upload_id.len() > 80
-        || !upload_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
-    {
-        return Err(ProtocolError::new(
-            "invalid_machine_upload",
-            "upload ID is invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_upload_file_name(file_name: &str) -> Result<(), ProtocolError> {
-    let mut components = Path::new(file_name).components();
-    let valid = matches!(components.next(), Some(Component::Normal(_)))
-        && components.next().is_none()
-        && !file_name.contains(['/', '\\'])
-        && !file_name.chars().any(char::is_control);
-    if !valid {
-        return Err(ProtocolError::new(
-            "invalid_machine_file_name",
-            "file_name must be one file name without path separators",
-        ));
-    }
-    Ok(())
 }
 
 fn machine_relative_path(root: &Path, path: &Path) -> String {

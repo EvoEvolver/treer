@@ -15,6 +15,8 @@ mod server;
 mod state;
 mod traffic;
 mod updater;
+mod upload_gate;
+mod upload_store;
 mod voice;
 mod voice_llm;
 
@@ -408,6 +410,7 @@ async fn main() -> anyhow::Result<()> {
         }
     };
     api::spawn_network_metadata_refresh(state.clone(), auth.clone());
+    api::spawn_machine_upload_expiry(state.clone(), auth.clone());
     let voice = voice::VoiceServices::from_env();
     if voice.asr.enabled() {
         info!(config = ?voice.asr, "qwen voice ASR is enabled");

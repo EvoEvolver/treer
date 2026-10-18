@@ -967,3 +967,33 @@ ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_ip_rate_burst BIGIN
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_max_body_bytes BIGINT;
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_response_timeout_secs BIGINT;
 ALTER TABLE service_ingresses ADD COLUMN IF NOT EXISTS limit_body_timeout_secs BIGINT;
+
+-- Chunked, resumable machine uploads (#166): the authorization binding,
+-- progress and receipt of one browser upload; bytes live in the Controller's
+-- staging file. Timestamps are fixed-width RFC 3339 UTC text.
+CREATE TABLE IF NOT EXISTS machine_uploads (
+    upload_id TEXT PRIMARY KEY,
+    workspace_id TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    directory TEXT NOT NULL,
+    file_name TEXT NOT NULL,
+    overwrite BOOLEAN NOT NULL,
+    size BIGINT NOT NULL,
+    subject_kind TEXT NOT NULL,
+    subject_id TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    state TEXT NOT NULL,
+    committed_offset BIGINT NOT NULL DEFAULT 0,
+    parts JSONB NOT NULL DEFAULT '[]'::jsonb,
+    lease_until TEXT,
+    created_at TEXT NOT NULL,
+    last_part_at TEXT NOT NULL,
+    finished_at TEXT,
+    result JSONB,
+    failure_code TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS machine_uploads_idempotency
+    ON machine_uploads(subject_kind, subject_id, workspace_id, server_id, idempotency_key);
+CREATE INDEX IF NOT EXISTS machine_uploads_workspace_state ON machine_uploads(workspace_id, state);
+CREATE INDEX IF NOT EXISTS machine_uploads_server_state ON machine_uploads(server_id, state);
+CREATE INDEX IF NOT EXISTS machine_uploads_subject_state ON machine_uploads(subject_kind, subject_id, state);

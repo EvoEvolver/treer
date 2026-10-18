@@ -133,6 +133,77 @@ or configuration contents. Failed launch retains the newly saved specification.
   `machine.exec` / `machine.file.write` Policy actions. Their paths are confined
   beneath the enrolled Host root, and audit records omit command arguments,
   output, and file content.
+- Chunked, resumable browser upload (#166; capability `machine.upload.v3`;
+  routes `POST .../machines/{id}/uploads`, `GET .../uploads`,
+  `GET|DELETE .../uploads/{upload_id}`, `PUT .../uploads/{upload_id}/parts`,
+  `POST .../uploads/{upload_id}/commit`). The Railway edge ends any request
+  body after five minutes, so a file travels as parts of at most 8 MiB (at
+  least 1 MiB except the last, at most 160 parts), each its own short request.
+  Every route re-authenticates, requires the exact Console origin (the routes
+  are Console-class), re-evaluates `machine.file.write` on the machine, and
+  must come from the subject that began the upload: anyone else, including
+  another member of the workspace, gets `404 upload_not_found`. Begin requires
+  an `Idempotency-Key` (32 to 128 characters, at least 128 random bits) scoped
+  to subject, workspace and machine: a replay with identical parameters
+  returns the same upload without consuming quota or a Controller slot, a
+  replay with different parameters is `409 upload_begin_conflict`. The upload
+  id is 256 random bits and only a handle. Quotas are counted in PostgreSQL
+  so they hold across Proxy instances: two active uploads per user, eight per
+  workspace, eight per machine, one gigabyte of declared size per machine and
+  ten begins per minute per user (`429` with `Retry-After`); a Proxy instance
+  additionally streams at most 32 part bodies at once and rate-limits parts
+  (30 per minute) and status polls (60 per minute) per upload. Everything
+  that can refuse a request is decided before its body is read (exactly one
+  numeric `Content-Length`, no `Transfer-Encoding`, part shape, offset against
+  the committed offset, the lease), and refusals answer `Connection: close`.
+  Parts are sequential and append-only: a part must start at the committed
+  offset (`409 upload_offset_gap` with the committed offset in the hint
+  otherwise), carries `X-Treer-Part-Sha256`, is hashed by the Proxy while it
+  streams in 192 KiB chunks with two commands in flight (about one megabyte of
+  Proxy memory per part), and is closed with `UploadPartCommit`, where the
+  Controller verifies its own hash of the written bytes before the committed
+  offset advances; a failed part is truncated back to the committed offset and
+  a retry rewrites from there; an identical committed part replays
+  idempotently without a body, a conflicting one is `409 upload_part_conflict`.
+  One part is in flight per upload across instances through a database lease
+  (`409 upload_busy`) that is released when the request ends for any reason,
+  including a dropped connection; a part has 30 s idle and 120 s total.
+  Commit requires every byte committed, runs as a detached task that completes
+  even if the client disconnects, and is idempotent for ten minutes; the
+  Controller publishes only when written, committed and declared sizes agree,
+  re-verifies the destination parent through the directory descriptor it held
+  since begin (platform `Root`/`StagedFile`, the CLI transfer boundary), and
+  publishes atomically without replacing when overwrite is off (link + unlink;
+  an existing file is `machine_file_exists`). Status reconciles an active row
+  against the Controller (`UploadResult`): a Controller ahead of the row after
+  a lost response is adopted, a committing row whose receipt the Controller
+  holds is finalized, so a client resumes from the Controller's truth. Before
+  publishing, the Controller flushes the staging file, checks that its length
+  equals the acknowledged byte count and re-reads it through the held
+  directory descriptor to compare its SHA-256 with the acknowledged digest,
+  refusing (`machine_upload_content_mismatch`, staging kept for abort) rather
+  than publishing a file whose receipt would not describe it; a failed chunk
+  write rewinds the staging file to the committed offset, and every part
+  commit checks the on-disk length. Staging files are owner-only (`0600`),
+  live under a recorded random name in the validated destination directory
+  (visible there while the upload is active) and are removed on abort, hash or
+  size failure, and by the Controller reaper (one hour idle, six hours
+  lifetime); a restarted Controller sweeps the staging names it recorded at
+  startup. The Controller keeps committed receipts for 24 hours so a Proxy that
+  died between publish and the row update recovers the result instead of
+  reporting failure. A row becomes `failed` only on a definitive Controller
+  refusal or when the Controller has neither staging nor receipt for an active
+  upload (`upload_lost`, after a Controller restart); a committing row with no
+  Controller evidence stays committing and ends at the six-hour lifetime as
+  `failed` with `failure_code outcome_unknown`, which the Console shows as an
+  unconfirmed outcome, never as a definitive failure. Audit: `machine.file.upload_begun`,
+  `machine.file.upload_aborted` (fixed reason) and `machine.file.uploaded`
+  (path, bytes, actor, the Controller's SHA-256), metadata only; parts are not
+  audited. The legacy base64 route keeps its 16 MiB cap; uploads begun without
+  a declared size accept only legacy appends and declared-size uploads accept
+  only offset-bearing chunks (`machine_upload_mode_mismatch`). No new
+  filesystem authority: destination validation beneath the Host root and the
+  single-component file-name rule are unchanged.
 - Agent private state (attachments) is never placed where tools scan or
   commit: the Controller refuses a private directory that lies in any
   version-controlled tree (a VCS marker of any file type at the directory or
@@ -768,7 +839,11 @@ Machine exec and file upload are likewise not restricted administration APIs:
 they run or write with the Controller account's filesystem permissions. Host
 root containment prevents accidental path targeting outside the enrolled tree,
 not access that the same account can obtain through commands, symlinks, or other
-same-account processes.
+same-account processes. Eight active 128 MiB uploads can stage up to 1 GiB in
+the destination directories of one machine for up to six hours; the free-space
+reserve (declared size plus the larger of 5 percent and 128 MiB, plus the other
+active declared sizes not yet written) keeps the volume from filling, not from
+being busy.
 
 Agent startup specs are an explicit persistence capability, not a sandbox or a
 reliable operating-system boot service. The machine-local private state file

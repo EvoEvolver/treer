@@ -39,6 +39,35 @@ pub const CAPABILITY_AGENT_PROMPT_DELIVERY: &str = "agent.prompt-delivery.v1";
 pub const CAPABILITY_AGENT_LIFECYCLE: &str = "agent.lifecycle.v1";
 pub const CAPABILITY_MACHINE_EXEC: &str = "machine.exec.v1";
 pub const CAPABILITY_MACHINE_UPLOAD: &str = "machine.upload.v1";
+/// Chunked, resumable browser upload (#166): `UploadBegin` carries the
+/// declared size, `UploadChunk` carries its offset, `UploadPartCommit` verifies
+/// a part's SHA-256 before the committed offset advances, `UploadResult`
+/// answers the terminal receipt, and the Controller caps the total at
+/// [`MACHINE_UPLOAD_MAX_BYTES`], bounds active uploads and reaps abandoned
+/// staging files.
+pub const CAPABILITY_MACHINE_UPLOAD_V3: &str = "machine.upload.v3";
+/// Largest single file the chunked upload and the Controller accept.
+pub const MACHINE_UPLOAD_MAX_BYTES: u64 = 128 * 1024 * 1024;
+/// Payload bytes per `UploadChunk` command (before base64).
+pub const MACHINE_UPLOAD_CHUNK_BYTES: usize = 192 * 1024;
+/// Largest part one HTTP request may carry (the server advertises it).
+pub const MACHINE_UPLOAD_PART_MAX_BYTES: u64 = 8 * 1024 * 1024;
+/// Smallest part, except the final one that reaches the declared size.
+pub const MACHINE_UPLOAD_PART_MIN_BYTES: u64 = 1024 * 1024;
+/// Parts per upload, so a client cannot advance the offset byte by byte.
+pub const MACHINE_UPLOAD_MAX_PARTS: usize = 160;
+/// Concurrent uploads one Controller stages at a time.
+pub const MACHINE_UPLOAD_MAX_ACTIVE: usize = 8;
+/// An upload with no part for this long is reaped (staging file deleted).
+pub const MACHINE_UPLOAD_IDLE_SECONDS: u64 = 60 * 60;
+/// Hard lifetime of one upload, however slowly it trickles.
+pub const MACHINE_UPLOAD_MAX_LIFETIME_SECONDS: u64 = 6 * 60 * 60;
+/// How long the Controller remembers a committed upload's receipt, so a Proxy
+/// that lost the commit response can still learn the outcome after a long
+/// Controller outage.
+pub const MACHINE_UPLOAD_RESULT_RETENTION_SECONDS: u64 = 24 * 60 * 60;
+/// How long the Proxy serves a terminal upload row (idempotent commit, status).
+pub const MACHINE_UPLOAD_RECEIPT_RETENTION_SECONDS: u64 = 10 * 60;
 pub const CAPABILITY_RUNTIME_RESTORE: &str = "runtime.restore.v1";
 pub const CAPABILITY_SERVICE_HTTP_FETCH: &str = "service.http-fetch.v1";
 pub const CAPABILITY_LAUNCHER_INSTALL: &str = "launcher.install.v1";
@@ -60,6 +89,7 @@ pub const CONTROLLER_CAPABILITIES: &[&str] = &[
     CAPABILITY_AGENT_LIFECYCLE,
     CAPABILITY_MACHINE_EXEC,
     CAPABILITY_MACHINE_UPLOAD,
+    CAPABILITY_MACHINE_UPLOAD_V3,
     CAPABILITY_MACHINE_FILE_TRANSFER,
     CAPABILITY_RUNTIME_RESTORE,
     CAPABILITY_SERVICE_HTTP_FETCH,

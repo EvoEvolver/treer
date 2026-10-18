@@ -50,6 +50,7 @@ async fn invalid_provider_contract_never_falls_back_to_stale_or_fail_open() {
                 status: treer_protocol::ServerStatus::Online,
                 connected_at: chrono::Utc::now(),
                 last_seen_at: chrono::Utc::now(),
+                capabilities: vec![],
             },
             connection,
             "synthetic".into(),

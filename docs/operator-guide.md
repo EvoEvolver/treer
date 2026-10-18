@@ -1724,11 +1724,28 @@ tools explicitly in the command or a trusted wrapper.
 The command still has the machine OS user's filesystem authority, so this is
 environment hygiene rather than credential or filesystem isolation.
 
-The machine details page also uploads one file of up to 16 MiB into an existing
-directory beneath the Host root. Proxy sends the content to the Controller in
-bounded chunks and the Controller stages it in the destination directory before
-renaming it into place. Replacing an existing file requires an explicit UI
-choice.
+The machine details page also uploads one file of up to 128 MiB into an
+existing directory beneath the Host root (16 MiB for Controllers that predate
+`machine.upload.v3`; the Console then falls back to the legacy route for small
+files and reports `controller_update_required` for larger ones). The browser
+sends the file in parts of at most 8 MiB, each a short request that survives a
+slow link and the five-minute request limit of hosted edges; a dropped
+connection resumes from the committed offset, and the Controller stages the
+bytes in the destination directory before renaming them into place once
+exactly the declared size has arrived. Replacing an existing file requires an
+explicit UI choice. Each machine stages at most eight uploads at a time, so
+plan for up to 1 GiB of staging space in the destination directories; the
+destination volume must keep the file size plus the larger of 5 percent and
+128 MiB free, and staging files (`.treer-transfer-upl_...`, owner-only) are
+visible in the destination directory while an upload is active. Two uploads
+per user and eight per workspace may be active at once; an upload with no part
+for an hour, or older than six hours, is cancelled and its staging file
+removed. The Controller remembers committed receipts for 24 hours; if a
+Controller is unreachable for longer than that right after publishing a file
+whose commit response the Proxy lost, the Console reports the outcome as
+unconfirmed (`outcome_unknown`) and the operator should check the destination
+directory. With authentication disabled (development only) the upload routes
+skip the Policy gate like every other machine route.
 
 Transfer single files from the CLI (directories and implicit parent creation are
 not supported):
@@ -1748,7 +1765,7 @@ example `/private/tmp` rather than the macOS `/tmp` symlink. `--force` explicitl
 permits destination replacement for either direction. Files default to 0600;
 `--mode 640` selects ordinary Unix bits, excluding group/other writes and special
 bits. Windows supports private current-user/SYSTEM ACLs and only mode 600.
-The default per-file limit is 64 MiB; set `TREER_MACHINE_FILE_MAX_BYTES` in the
+The default per-file limit is 128 MiB; set `TREER_MACHINE_FILE_MAX_BYTES` in the
 Controller launch environment to change it (maximum 1 GiB). Transfers verify
 SHA-256 before publishing downloads or uploads; `get ... -` buffers on private
 local disk before writing stdout. The limit also bounds that spool.

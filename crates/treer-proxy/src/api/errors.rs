@@ -80,7 +80,38 @@ impl From<ProtocolError> for ApiFailure {
             "file_transfer_unsupported" => StatusCode::NOT_IMPLEMENTED,
             "machine_file_denied" => StatusCode::FORBIDDEN,
             "machine_transfer_not_found" | "machine_file_not_found" => StatusCode::NOT_FOUND,
-            "machine_file_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+            "machine_file_too_large" | "machine_upload_too_large" => StatusCode::PAYLOAD_TOO_LARGE,
+            "machine_upload_busy" | "machine_upload_rate_limited" => StatusCode::TOO_MANY_REQUESTS,
+            "machine_upload_space_insufficient" => StatusCode::INSUFFICIENT_STORAGE,
+            "machine_upload_size_mismatch"
+            | "machine_upload_content_mismatch"
+            | "machine_upload_file_mismatch"
+            | "upload_part_length_mismatch"
+            | "upload_part_hash_mismatch"
+            | "upload_part_too_small"
+            | "invalid_upload_length" => StatusCode::BAD_REQUEST,
+            "machine_upload_not_found"
+            | "machine_upload_exists"
+            | "machine_upload_offset"
+            | "machine_upload_mode_mismatch"
+            | "machine_upload_publish_unsupported"
+            | "machine_upload_commit_uncertain"
+            | "upload_part_conflict"
+            | "upload_offset_gap"
+            | "upload_busy"
+            | "upload_committing"
+            | "upload_committed"
+            | "upload_incomplete"
+            | "upload_not_active"
+            | "upload_begin_conflict"
+            | "upload_lost"
+            | "controller_update_required" => StatusCode::CONFLICT,
+            "upload_not_found" => StatusCode::NOT_FOUND,
+            "upload_overrun" | "upload_too_many_parts" | "upload_part_too_large" => {
+                StatusCode::PAYLOAD_TOO_LARGE
+            }
+            "machine_upload_idle" | "machine_upload_timeout" => StatusCode::REQUEST_TIMEOUT,
+            "length_required" => StatusCode::LENGTH_REQUIRED,
             "machine_transfer_limit" | "machine_transfer_busy" => StatusCode::TOO_MANY_REQUESTS,
             "machine_file_checksum_mismatch"
             | "machine_file_changed"
