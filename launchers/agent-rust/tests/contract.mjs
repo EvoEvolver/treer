@@ -199,6 +199,15 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Rust observes an explicit terminal accepted turn without a completion event',{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv('observe'));
+  const receipt=await s.post({text:'observe only',operation_id:'observe'}).then(r=>r.json());
+  const result=await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
+  assert.equal(result.submission.turn_id,'fault-1');
+  const calls=await providerCalls(s);
+  assert.equal(calls.filter(c=>c.method==='turn/start').length,1);
+  assert.ok(calls.some(c=>c.method==='thread/read'));
+});
 test('Rust sparse completion keeps accepted user input alongside the assistant',{skip:useNode},async t=>{
   const s=await fixture(t,faultEnv('sparse'));
   await s.post({text:'keep this input',operation_id:'sparse-user'});

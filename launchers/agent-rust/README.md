@@ -22,6 +22,10 @@ does not yet establish full browser parity or authorize a team launcher switch.
 Accepted user text and Controller-attested sender metadata are projected from
 the durable submission journal into history, including after sparse completion
 events and restart. This does not resolve or replay uncertain dispatches.
+Read-only reconciliation uses one bounded background `thread/read` operation.
+Only an explicit terminal turn matching a known accepted running submission can
+settle its receipt. Missing turns, an idle flag and read failures never complete
+a submission or clear the persisted uncertainty fence.
 
 Build and focused checks (a private `CARGO_TARGET_DIR` is required). Default
 builds require native tools: if `codex` on PATH is an npm script wrapper, set

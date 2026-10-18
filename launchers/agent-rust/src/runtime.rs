@@ -117,6 +117,25 @@ pub fn spawn(config: Config) -> Result<Handle> {
             }
         });
         let mut notification_pending = false;
+        // Read-only reconciliation stays outside the actor with one pending
+        // read/result, so a slow read cannot block interrupts or grow a backlog.
+        let (observe_tx, mut observe_rx) = mpsc::channel::<Value>(1);
+        let (observed_tx, mut observed_rx) = mpsc::channel(1);
+        let observer_rpc = rt.rpc.clone();
+        let observer = tokio::spawn(async move {
+            while let Some(thread) = observe_rx.recv().await {
+                let result = observer_rpc
+                    .request(
+                        "thread/read",
+                        json!({"threadId":thread,"includeTurns":true}),
+                    )
+                    .await;
+                if observed_tx.send(result).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut observation_pending = false;
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         loop {
             tokio::select! {
@@ -133,6 +152,9 @@ pub fn spawn(config: Config) -> Result<Handle> {
                 },
                 _ = tick.tick() => {
                     if rt.drain().await.is_err() { eprintln!("Rust spike: queue dispatch failed; retained"); }
+                    if !observation_pending && !rt.dispatch_blocked && rt.thread["activeTurnId"].is_string() {
+                        observation_pending = observe_tx.try_send(rt.thread["id"].clone()).is_ok();
+                    }
                     if !notification_pending {
                         if let Some(job) = rt.next_notification() {
                             notification_pending = notify_tx.try_send(job).is_ok();
@@ -151,16 +173,51 @@ pub fn spawn(config: Config) -> Result<Handle> {
                         }
                     }
                 }
+                Some(observed) = observed_rx.recv() => {
+                    observation_pending = false;
+                    if let Ok(observed) = observed {
+                        if rt.observe(observed).await.is_err() { eprintln!("Rust spike: observation failed"); }
+                    }
+                }
             }
         }
         notification_worker.abort();
         let _ = notification_worker.await;
+        observer.abort();
+        let _ = observer.await;
         let _ = child.kill().await;
     });
     Ok(Handle { commands, state })
 }
 
 impl Runtime {
+    async fn observe(&mut self, observed: Value) -> Result<()> {
+        if self.dispatch_blocked || observed["thread"]["id"] != self.thread["id"] {
+            return Ok(());
+        }
+        // Absence and idle flags are not completion. Only an explicit terminal
+        // accepted turn settles a running receipt; uncertainty is never cleared.
+        let terminal = observed["thread"]["turns"]
+            .as_array()
+            .and_then(|turns| {
+                turns.iter().find(|turn| {
+                    turn["id"] == self.thread["activeTurnId"]
+                        && matches!(
+                            turn["status"].as_str(),
+                            Some("completed" | "failed" | "interrupted")
+                        )
+                        && self.records.iter().any(|r| {
+                            r.submission["turn_id"] == turn["id"]
+                                && r.submission["state"] == "running"
+                        })
+                })
+            })
+            .cloned();
+        if let Some(turn) = terminal {
+            self.event(json!({"method":"turn/completed","params":{"threadId":self.thread["id"],"turn":turn}})).await?;
+        }
+        Ok(())
+    }
     async fn start(&mut self, config: &Config, saved: Option<Value>) -> Result<()> {
         if let Some(saved) = &saved {
             self.records = serde_json::from_value(saved["records"].clone())?;

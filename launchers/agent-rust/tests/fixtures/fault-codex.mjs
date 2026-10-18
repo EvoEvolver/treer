@@ -29,6 +29,7 @@ for await(const line of readline.createInterface({input:process.stdin})) {
     } else {
       result={turn:{id:turn.id}};
       setTimeout(()=>{
+        if(mode==='observe') turn.status='completed'; // no event; thread/read is authoritative
         if(mode==='sparse') {
           turn.status='completed';
           turn.items=[{id:'answer',type:'agentMessage',text:'sparse answer'}];
