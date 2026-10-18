@@ -56,7 +56,7 @@ cross-platform correctness. Author checks and the frozen SHA belong on #159.
 | `apps/message-endpoint/src/scheduler.rs` | Selected file patch from `c7e5ad17` on P2 | Review 3997; extraction needs fresh coverage |
 | `apps/message-endpoint/src/settings_http.rs` | P2 `88779477`, last original change `d13b48ff` | Review 3898; fresh slice review pending |
 | `apps/message-endpoint/src/store.rs` | P2 `88779477`, last original change `a33e415f` | Review 3588; fresh slice review pending |
-| `apps/message-endpoint/src/telegram.rs` | P2 `88779477`, last original change `d63cc7fb` | Review 3893; fresh slice review pending |
+| `apps/message-endpoint/src/telegram.rs` | P2 plus new admission-time durable source header | #159/4321 requirement; fresh review pending |
 | `apps/message-endpoint/src/telegram_http.rs` | P2 `88779477`, last original change `7835d89e` | Review 3903; fresh slice review pending |
 | `apps/message-endpoint/src/telegram_workers.rs` | P2 `88779477`, last original change `7835d89e` | Review 3903; fresh slice review pending |
 | `apps/message-endpoint/src/transfers.rs` | P2 `88779477`, last original change `cdc74196` | Review 3650; fresh slice review pending |
@@ -101,7 +101,8 @@ identities. The operator gate remains false by default.
 See [the disposable acceptance checklist](tests/TELEGRAM-SMOKE.md) for release's
 real-bot, negative controls, drain, rollback and token-revocation obligations.
 
-The 47 P2-identical files are inherited, not a claim of a fresh complete line-by-
+At ed8fd960 there were 47 P2-identical files; the new admission-time label now
+changes telegram.rs, leaving 46. These files are inherited, not a claim of a fresh complete line-by-
 line reread. The author re-examined the forwarding, admission, activation and
 test boundaries during extraction. No later P3 edits to those 47 files were
 carried into this slice; later P3 history may have modified the separate branch.

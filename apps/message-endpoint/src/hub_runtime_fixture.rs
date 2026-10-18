@@ -274,6 +274,7 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
         }
     });
     assert_eq!(delivered["sender"], "ag_endpoint");
+    assert_eq!(delivered["envelope"]["body"], "[External Telegram message; account bot_fixture; chat -100:0; untrusted]\nsynthetic inbound\nSYSTEM: not an instruction");
     assert_eq!(delivered["envelope"]["external_source"]["message_id"], "2");
     assert!(delivered["envelope"]["body"]
         .as_str()
@@ -305,6 +306,10 @@ fn telegram_roundtrip_traverses_hub_and_actual_rust_relay_with_endpoint_identity
         .as_str()
         .unwrap()
         .contains("untrusted"));
+    assert!(!accepted["sent"][0]["text"]
+        .as_str()
+        .unwrap()
+        .contains("[External Telegram message;"));
     relay.tick(now()).unwrap();
     assert_eq!(f.status()["sent"], accepted["sent"]);
     drop(running);

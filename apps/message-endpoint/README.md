@@ -1463,3 +1463,19 @@ origin or test scheduling control exists in production configuration.
 
 See [the file provenance table](TELEGRAM-SLICE.md) for inherited review scope and
 newly changed files; prior verdicts do not approve this extracted candidate.
+
+## Inbound Telegram source label
+
+At admission the hub prepends a fixed `External Telegram message` warning with
+validated account/chat identifiers and `untrusted`. The label and text share
+the 32 KiB UTF-8 body budget; oversized text is ignored with the update cursor
+advanced and the fixed ignored counter incremented, never silently truncated.
+The complete labeled body is stored durably before forwarding, so retries use
+the same bytes. Structured external_source metadata remains attached. This is
+a readable source label, not prompt-injection isolation or proof of a human's
+Core identity. A normal outbound reply gets its own endpoint presentation and
+does not inherit this label automatically.
+
+Use fresh state for the disposable slice. Earlier local-development queued rows
+are not silently rewritten to add a label: their bytes and retry keys remain
+unchanged, and they must be drained/discarded before enabling this candidate.
