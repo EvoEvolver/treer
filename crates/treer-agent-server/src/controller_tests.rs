@@ -2513,9 +2513,18 @@ async fn chunked_upload_bounds_active_uploads_reaps_idle_ones_and_sweeps_after_r
     assert!(replacement.abort("upl_fresh00001").unwrap());
     std::fs::remove_file(root.join(".treer-transfer-upl_unrecorded")).unwrap();
     host_task.abort();
-    // The predecessor still holds its active staging files open; Windows
-    // refuses to remove the directory until both registries are dropped.
+    // The test leaves seven uploads active on purpose, so their staging
+    // handles stay open inside the predecessor's registry; on Windows the
+    // directory cannot be removed while they are. Abort them through the
+    // Controller API, which closes and removes each staging file
+    // deterministically, before dropping both registries.
     drop(replacement);
+    for index in 2..treer_protocol::MACHINE_UPLOAD_MAX_ACTIVE {
+        assert!(runtime
+            .abort_upload(&format!("upl_active{index:03}"))
+            .unwrap());
+    }
+    assert!(runtime.abort_upload("upl_extra0001").unwrap());
     drop(runtime);
     std::fs::remove_dir_all(root).unwrap();
 }
