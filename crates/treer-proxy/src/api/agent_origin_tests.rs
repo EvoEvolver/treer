@@ -433,7 +433,7 @@ async fn agent_origin_authorize_applies_the_interface_gate_before_creating_the_o
         (StatusCode::NOT_FOUND, "agent_not_found")
     );
     // A non-member never passes; a member denied by Policy gets no origin.
-    let (status, _) = error_of(
+    let (status, code) = error_of(
         authorize(
             &fixture,
             allow(),
@@ -446,9 +446,10 @@ async fn agent_origin_authorize_applies_the_interface_gate_before_creating_the_o
         .await,
     )
     .await;
-    assert!(
-        matches!(status, StatusCode::FORBIDDEN | StatusCode::NOT_FOUND),
-        "{status}"
+    assert_eq!(
+        (status, code.as_str()),
+        (StatusCode::NOT_FOUND, "agent_not_found"),
+        "a non-member is indistinguishable from an unknown id (#164 a)"
     );
     let (status, code) = error_of(
         authorize(
@@ -795,6 +796,38 @@ async fn ingress_hosts_refuse_same_site_and_foreign_origin_browser_requests() {
         StatusCode::FORBIDDEN,
         "ambiguous metadata is refused"
     );
+    // Without Fetch Metadata (old browser) a present Origin must name this
+    // host; a foreign Origin is refused, a matching one passes (#164 b).
+    {
+        let host = post(None)
+            .headers()
+            .get(header::HOST)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        let mut foreign = post(None);
+        foreign.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://other.example"),
+        );
+        let (status, code) = error_of(send(&fixture, allow(), &config, foreign).await).await;
+        assert_eq!(
+            (status, code.as_str()),
+            (StatusCode::FORBIDDEN, "ingress_request_rejected"),
+            "foreign Origin without Fetch Metadata"
+        );
+        let mut own = post(None);
+        own.headers_mut().insert(
+            header::ORIGIN,
+            HeaderValue::from_str(&format!("https://{host}")).unwrap(),
+        );
+        let response = send(&fixture, allow(), &config, own).await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "own Origin without Fetch Metadata"
+        );
+    }
     for site in [Some("same-origin"), Some("none"), None] {
         let response = send(&fixture, allow(), &config, post(site)).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK, "{site:?}");

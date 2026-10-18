@@ -1189,8 +1189,10 @@ reachable standalone on its own origin, `https://ag-<32 hex>.<apps domain>/`
 (#143 Phase 2). The origin is a workspace-access row in `service_ingresses`
 with `target_kind = agent_interface`; it cannot be switched to public, has no
 owner-editable limits, is created only by the authorize step below, and is
-deleted with the Agent together with every ingress session on it. Console
-logout ends the user's ingress sessions on every workspace host.
+deleted with the Agent together with every ingress session on it. An ingress
+session has its own 12-hour lifetime, independent of the Console session's
+expiry: membership and Policy are re-checked on every request, and Console
+logout ends the user's ingress sessions on every workspace host early.
 
 The origin accepts only a workspace ingress session cookie: `Treer-Authorization`
 Bearer tokens are refused (`401 ingress_authentication_required`), so an Agent
