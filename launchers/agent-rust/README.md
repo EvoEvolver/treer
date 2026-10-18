@@ -47,10 +47,16 @@ Files are exclusive 0600, reads refuse symlinks/hardlinks and verify SHA-256;
 only opaque image metadata reaches browser state. Sent images are retained with
 the submission journal for reload and restart, including image-only prompts.
 Limits are 10 MiB per image, 8 images/24 MiB per prompt, 256 MiB local storage,
-8,192 entries, and two combined upload/download slots. Response buffers remain
+8,192 entries, and two combined upload/download slots. Dimensions are bounded
+to 16,384 per side and 100 million pixels, matching Node. Retained entries never
+expire; reaching either storage bound rejects new uploads without evicting sent
+images. Response buffers remain
 under a slot until consumed or disconnected. Drafts expire after one hour on
-the next upload. Orphan cleanup and native Windows storage verification remain
-M2 work; this POSIX spike does not migrate Node attachment state.
+the next upload; a missing expired draft drops only its journal entry, while
+unsafe storage still fails closed. Controller quota requests time out after five
+seconds. Orphan cleanup and native Windows storage verification remain M2 work;
+native Windows image capability is off. This POSIX spike does not migrate Node
+attachment state.
 Plan snapshots and updates normalize Codex's `in_progress` to the browser's
 `inProgress`. HTML carries the existing permissions policy and CSP; script and
 CSS assets declare UTF-8 without an HTML document policy.
@@ -88,9 +94,10 @@ from the bound loopback Controller, and private physical ancestors outside the
 working directory and VCS. The status is rechecked before HTTP prompt admission;
 local placement is rechecked before each journal write. Standalone hermetic
 tests may use `TREER_RUST_SPIKE_STATE_DIR`. No cwd fallback or import/migration
-of Node's journal or session files is implemented. The only state file is
+of Node's journal or session files is implemented. The main state file is
 `rust-spike.json`, atomically replaced with mode 0600 in a pre-existing 0700
-directory. There is no image quota client: images are disabled. Queue metadata
+directory. Managed image storage uses a separate journal and Controller quota
+client as described above; standalone images are disabled. Queue metadata
 has a 32 MiB hard journal bound; quota integration for other private bytes is a
 port prerequisite.
 
@@ -166,12 +173,13 @@ security review and the leader's decision are required. No team switch is part
 of P0–P2.
 
 Known gaps: complete goals and goal recovery parity; attachment orphan cleanup;
-session export/import; file browser/task-output APIs; Node's relay-error
+session export/import; task-output APIs; Node's relay-error
 reconciliation/backoff; exact batched notification semantics; per-user resource
 admission; slow HTTP header/connection limits; containment of detached descendants;
 minimal harness environment; crash-dump policy; complete model-setting and item
 mapping parity; dependency advisory audit. These are reasons not to migrate a
-team Agent yet. Unknown routes fail closed instead of serving guessed APIs.
+team Agent yet. Unknown GET routes serve the UI shell, matching Node; unknown
+mutation APIs fail closed.
 
 See [experiment record](EXPERIMENT.md) for baseline and the pending comparison,
 and [P2 preflight](P2-PREFLIGHT.md) for the verified build inventory and pending

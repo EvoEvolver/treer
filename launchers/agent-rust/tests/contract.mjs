@@ -308,6 +308,41 @@ test('Rust image reads refuse replaced symlinks and preserve the outside sentine
   assert.equal((await fetch(s.base+'/api/attachments/'+attachment.id,{method:'DELETE'})).status,503);
   assert.equal(await readFile(sentinel,'utf8'),'sentinel');
 });
+test('Rust retained images stop admission at byte and entry bounds',{skip:useNode},async t=>{
+  for(const extra of [{RUST_SPIKE_IMAGE_QUOTA_BYTES:String(imageGif.length)},{RUST_SPIKE_IMAGE_ENTRY_LIMIT:'1'}]) {
+    const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_IMAGES:'1',...extra});
+    const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
+    await s.post({text:'retain',attachment_ids:[attachment.id],operation_id:'retained-bound'});
+    const r=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif});assert.equal(r.status,413);
+    assert.equal((await r.json()).error,'attachment_quota_exceeded');
+    assert.equal((await fetch(s.base+'/api/attachments/'+attachment.id)).status,200);
+  }
+});
+test('Rust quota timeout releases the image store for reads and deletes',{skip:useNode,timeout:12000},async t=>{
+  const s=await fixture(t);
+  const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
+  s.controller.options.hangCommit=true;
+  const stalled=fetch(s.base+'/api/attachments',{method:'POST',body:imageGif});
+  await until(async()=>s.controller.events.filter(e=>e.path.endsWith('/commit')).length,n=>n===2);
+  assert.equal((await fetch(s.base+'/api/health')).status,200);
+  const read=fetch(s.base+'/api/attachments/'+attachment.id);
+  assert.equal((await stalled).status,503);
+  assert.equal((await read).status,200);
+  assert.equal((await fetch(s.base+'/api/attachments/'+attachment.id,{method:'DELETE'})).status,200);
+  assert.equal(s.controller.reservations.size,0);
+});
+test('Rust missing expired drafts do not block a new upload',{skip:useNode},async t=>{
+  const s=await fixture(t);
+  const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const path=join(s.state,'rust-images','rust-spike.json');
+  const saved=JSON.parse(await readFile(path,'utf8'));saved.entries[0].created_ms=Date.now()-3_600_001;
+  await writeFile(path,JSON.stringify(saved),{mode:0o600});
+  await unlink(join(s.state,'rust-images',attachment.id+'.gif'));
+  const restarted=await s.launch({});
+  assert.equal((await fetch(restarted.base+'/api/attachments',{method:'POST',body:imageGif})).status,201);
+  assert.match(s.logs(),/missing expired image entry removed/);
+});
 test('concurrent queued submissions are FIFO, queue cancellation differs from abort',async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_LIVE:'1',FAKE_CODEX_STATUS:'active'});
   const a=await s.post({text:'a',operation_id:'a'}).then(r=>r.json());

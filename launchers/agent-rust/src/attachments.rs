@@ -38,6 +38,8 @@ pub struct Attachments {
     base: reqwest::Url,
     agent: String,
     credential: String,
+    quota_bytes: usize,
+    entry_limit: usize,
 }
 pub fn valid_id(id: &str) -> bool {
     id.len() == 36
@@ -112,6 +114,8 @@ impl Attachments {
             base,
             agent,
             credential,
+            quota_bytes: fixture_limit("RUST_SPIKE_IMAGE_QUOTA_BYTES", 256 * 1024 * 1024),
+            entry_limit: fixture_limit("RUST_SPIKE_IMAGE_ENTRY_LIMIT", 8192),
         })
     }
     fn save(&self) -> Result<()> {
@@ -215,11 +219,20 @@ impl Attachments {
             .map(|e| (e.id.clone(), e.session.clone()))
             .collect::<Vec<_>>();
         for (id, session) in expired {
-            self.discard(&id, &session)?;
+            self.store.recheck()?;
+            let entry = self.entry(&id, &session)?.clone();
+            match fs::symlink_metadata(self.path(&entry)) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    self.journal.entries.retain(|e| e.id != id);
+                    self.save()?;
+                    eprintln!("Rust spike: missing expired image entry removed");
+                }
+                _ => self.discard(&id, &session)?,
+            }
         }
-        if self.journal.entries.len() >= 8192
+        if self.journal.entries.len() >= self.entry_limit
             || self.journal.entries.iter().map(|e| e.size).sum::<usize>() + bytes.len()
-                > 256 * 1024 * 1024
+                > self.quota_bytes
         {
             bail!("attachment_quota_exceeded");
         }
@@ -356,5 +369,17 @@ impl Attachments {
         fs::remove_file(self.path(&e))?;
         self.journal.entries.retain(|e| e.id != id);
         self.save()
+    }
+}
+fn fixture_limit(name: &str, default: usize) -> usize {
+    if cfg!(feature = "fixture-harness") {
+        std::env::var(name)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .filter(|n| *n > 0)
+            .map(|n: usize| n.min(default))
+            .unwrap_or(default)
+    } else {
+        default
     }
 }
