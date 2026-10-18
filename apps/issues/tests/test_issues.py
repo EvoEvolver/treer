@@ -68,6 +68,26 @@ class IssuesTest(unittest.TestCase):
         self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':'t'})[0],400,'a title never replaces the text')
         self.assertEqual(self.req(f'v1/issues/{id}/comment','POST',{'title':'标题'*30,'body':'b'})[0],200,'200 bytes, not characters')
 
+    def test_notify_policy_permissions_audit_and_validation(self):
+        put=lambda body,token:self.req('v1/notify-policy','PUT',body,token)
+        self.assertEqual(put({'mode':'asks'},'agent-a')[0],200,'an agent changes its own policy')
+        status,result=self.req('v1/notify-policy');self.assertEqual((status,result['policies'],result['default']),(200,{'ag_a':'asks'},'all'))
+        self.assertEqual(put({'mode':'asks','agent':'ag_a'},'agent-b')[0],403,'an agent can never change another principal')
+        self.assertEqual(put({'mode':'all','agent':'ag_a'},'human')[0],403,'a plain member cannot either')
+        self.assertEqual(put({'mode':'all','agent':'ag_a'},'admin')[0],200,'a human admin can')
+        self.assertEqual(self.req('v1/notify-policy')[1]['policies'],{'ag_a':'all'})
+        for body in ({'mode':'maybe'},{},{'mode':'asks','agent':'usr_a'},{'mode':'asks','agent':'ag_missing'},{'mode':'asks','role':'admin'},{'mode':5}):
+            self.assertEqual(put(body,'admin')[0],400,body)
+        self.assertEqual(put({'mode':'asks'},'admin')[0],400,'admin is a human: policies are for Agents')
+        self.assertEqual(self.req('v1/notify-policy','PUT',{'mode':'asks'},None)[0],401)
+        audit=self.req('v1/notify-policy?audit=1')[1]['audit']
+        self.assertEqual([(e['actor'],e['subject'],e['old'],e['new']) for e in audit],[('usr_admin','ag_a','asks','all'),('ag_a','ag_a','all','asks')])
+    def test_comment_intent_is_stored_and_reported(self):
+        id=self.create()
+        status,result=self.req(f'v1/issues/{id}/comment','POST',{'title':'[Decision] pick one','body':'b'});self.assertEqual(status,200)
+        self.assertEqual(next(e for e in result['activity'] if e['kind']=='comment')['intent'],'decision')
+        status,result=self.req(f'v1/issues/{id}/comment','POST',{'title':'[action-nobody] x','body':'b'});self.assertEqual(status,200)
+        self.assertEqual(result['notification'].get('intent_note'),'action_unknown')
     def test_directory_reports_paths_without_guessing_missing_ones(self):
         status,result=self.req('v1/directory');self.assertEqual(status,200)
         self.assertEqual(result['paths'],'supported');self.assertEqual(result['capabilities'],['app.directory-paths.v1'])

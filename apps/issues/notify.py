@@ -22,6 +22,11 @@ WINDOW = 300
 FLUSH_EVERY = 30
 MAX_ATTEMPTS = 3
 MAX_MENTIONS = 10
+HOURLY = '~hourly'            # pseudo-actor of the per-(recipient, issue) hourly digest for filtered updates
+HOURLY_WINDOW = 3600
+HOURLY_ISSUES = 10            # open hourly digests per recipient before the rest fold into the overflow digest
+ASK_PER_AUTHOR = 5            # ask-type pushes per author per recipient per hour
+POLICY_MODES = ('all', 'asks')
 DEFAULT_HOURLY = 20
 MENTION = re.compile(r'(?<![\w@/.\-])@(/[\w./\-]+|\w[\w.\-]*)')
 SAFE_PATH = re.compile(r'[A-Za-z0-9 ._/\-]{1,120}')
@@ -83,6 +88,31 @@ def digest_form(notice, limit=DIGEST_TITLE_LIMIT):
     if len(title) > limit:
         title = title[:limit - 1].rstrip() + '\u2026'
     return head + mark + title + quote + tail
+
+
+INTENT = re.compile(r'\[(decision|blocker|incident|action-([a-z0-9._\-]{1,24}))\](?:\s|$)')
+ASK_INTENTS = ('decision', 'blocker', 'incident')
+
+
+def parse_intent(title, directory):
+    """(intent, target, note) of a comment from the FIRST token of its title: [decision] [blocker] [incident] or
+    [action-<agent>], case-insensitive, after NFKC and trimming, followed by a space or the end ('[decision]x',
+    '(decision)' and a prefix after other text do not count). action-<name> must match exactly one Agent in the
+    directory (unique name or stable ID), else the comment is plain `fyi` and `note` says why. The vocabulary is fixed:
+    nothing the author wrote is executed or stored beyond the matched word."""
+    if not isinstance(title, str):
+        return 'fyi', None, None
+    match = INTENT.match(unicodedata.normalize('NFKC', title).strip().lower())
+    if not match:
+        return 'fyi', None, None
+    if not match.group(2):
+        return match.group(1), None, None
+    name = match.group(2)
+    agents = [p for p in directory if p.get('kind') == 'agent']
+    hits = [p for p in agents if p['id'].lower() == name] or [p for p in agents if str(p.get('name', '')).lower() == name]
+    if len(hits) == 1:
+        return 'action', hits[0]['id'], None
+    return 'fyi', None, 'action_unknown' if not hits else 'action_ambiguous'
 
 
 SAFE_NAME = re.compile(r'[A-Za-z0-9 ._/\-]{1,24}')
@@ -218,15 +248,15 @@ def issue_ref(issue_id, agent):
     return f'issues show {int(issue_id)} --titles' if agent else ''
 
 
-def digest_body(issue_id, summaries, link, agent=False):
+def digest_body(issue_id, summaries, link, agent=False, period='5 minutes'):
     unique = list(dict.fromkeys(summaries))
     shown = '; '.join(unique[:4]) + (f'; +{len(unique) - 4} more' if len(unique) > 4 else '')
     noun = f'update{"s" if len(summaries) != 1 else ""}'
     if issue_id == 0:   # the per-recipient overflow digest: updates over the hourly limit, across issues
-        text = f'Issues \u00b7 {len(summaries)} more {noun} (over the hourly limit) in the last 5 minutes: {shown}'
+        text = f'Issues \u00b7 {len(summaries)} more {noun} (over the hourly limit) in the last {period}: {shown}'
         tail = 'issues list --assignee me --unresolved' if agent else link
     else:
-        text = f'Issue #{issue_id} \u00b7 {len(summaries)} more {noun} in the last 5 minutes: {shown}'
+        text = f'Issue #{issue_id} \u00b7 {len(summaries)} more {noun} in the last {period}: {shown}'
         tail = issue_ref(issue_id, True) if agent else (f'{link}#issue={issue_id}' if link else '')
     return text + (f'\n{tail}' if tail else '')
 
@@ -246,7 +276,7 @@ class Digest:
         for row in self.store.due_digests(now):
             link = link if link is not None else safe_link(self.base_url)
             agent = not row['recipient'].startswith('usr_')   # an unknown kind gets the Agent form (no link)
-            status, _ = self.runner(['message', 'send', '--to', row['recipient'], '--body', digest_body(row['issue_id'], row['pending'], link, agent),
+            status, _ = self.runner(['message', 'send', '--to', row['recipient'], '--body', digest_body(row['issue_id'], row['pending'], link, agent, 'hour' if row['actor'] == HOURLY else '5 minutes'),
                                      '--idempotency-key', f"issues-digest-{row['recipient']}-{row['issue_id']}-{row['actor'] or 'any'}-{int(row['start'])}"])
             if status == 0:
                 self.store.digest_done(row['recipient'], row['issue_id'], row['actor'], now)

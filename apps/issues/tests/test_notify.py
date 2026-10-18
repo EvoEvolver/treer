@@ -11,7 +11,7 @@ clean = hermetic_env(); os.environ.clear(); os.environ.update(clean)
 sys.path.insert(0, str(ROOT))
 from auth import Error
 from issues import Application
-from notify import WINDOW, Digest, candidates, clean_title, digest_form, digest_body, enabled, path_tokens, resolve_mentions
+from notify import WINDOW, Digest, candidates, clean_title, digest_form, parse_intent, digest_body, enabled, path_tokens, resolve_mentions
 from store import Store
 
 DIRECTORY = [
@@ -249,6 +249,139 @@ class TitleNotificationTest(Base):
         self.assertTrue(by_key['issues-event-77']['body'].endswith(f'issues show {issue} --titles'))
         self.assertEqual(by_key['issues-event-77-human']['recipients'], ['usr_lead'])
         self.assertTrue(by_key['issues-event-77-human']['body'].endswith(f'https://issues.example/#issue={issue}'))
+
+
+class IntentTest(unittest.TestCase):
+    D = DIRECTORY + [{'id': 'ag_dup1', 'kind': 'agent', 'name': 'twin'}, {'id': 'ag_dup2', 'kind': 'agent', 'name': 'Twin'}]
+
+    def test_first_token_vocabulary_only(self):
+        for title, expected in (
+            ('[decision] ship it?', ('decision', None, None)),
+            ('[DECISION] ship it?', ('decision', None, None)),
+            ('  [Blocker]  stuck', ('blocker', None, None)),
+            ('\uff3bincident\uff3d outage', ('incident', None, None)),        # NFKC first: full-width brackets are the same token
+            ('[decision]x', ('fyi', None, None)),
+            ('[decision', ('fyi', None, None)),
+            ('(decision) x', ('fyi', None, None)),
+            ('note: [decision] later', ('fyi', None, None)),
+            ('fyi\n[decision] x', ('fyi', None, None)),
+            ('[decisions] x', ('fyi', None, None)),
+            ('[action-worker] do it', ('action', 'ag_work', None)),
+            ('[ACTION-ag_rev] do it', ('action', 'ag_rev', None)),
+            ('[action-nobody] x', ('fyi', None, 'action_unknown')),
+            ('[action-twin] x', ('fyi', None, 'action_ambiguous')),
+            ('[action-usr_lead] x', ('fyi', None, 'action_unknown')),      # only Agents can be asked to act
+            ('', ('fyi', None, None)), (None, ('fyi', None, None)), (5, ('fyi', None, None)),
+        ):
+            self.assertEqual(parse_intent(title, self.D), expected, repr(title))
+
+
+class PolicyTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.issue = self.create(assignee='ag_work')
+        self.now += WINDOW + 1
+        self.auth.requests.clear()
+
+    def ask(self, mode='asks', agent='ag_author'):
+        self.store.set_policy(agent, mode, 'usr_lead', self.now)
+
+    def prove(self, actor='ag_work', recipient='ag_author'):
+        self.store.prove_notifications([recipient], actor, self.now)
+
+    def comment(self, body, actor=WORKER, **values):
+        return self.mutate(self.issue, 'comment', dict(body=body, **values), actor)
+
+    def sent_to(self):
+        return sorted(r for request in self.auth.requests for r in request['recipients'])
+
+    def test_default_policy_is_unchanged(self):
+        self.comment('hello @author', title='progress')
+        self.assertEqual(self.sent_to(), ['ag_author'])
+
+    def test_asks_policy_filters_progress_into_an_hourly_digest(self):
+        self.ask(); self.prove()
+        result = self.comment('cc @author', title='progress report')
+        self.assertEqual(self.auth.requests, [], 'nothing is pushed to a recipient who only wants asks')
+        self.assertEqual(result['notification']['status'], 'filtered')
+        self.assertEqual(result['notification']['hints'][0]['delivery'], 'digest')
+        self.assertIn('[decision]', result['notification']['hints'][0]['tip'])
+        sent = []
+        digest = Digest(self.store, lambda: 'https://issues.example/', clock=lambda: self.now, runner=lambda a: sent.append(a) or (0, ''))
+        self.assertEqual(digest.flush(), 0, 'not due before an hour')
+        self.now += 3600
+        self.assertEqual(digest.flush(), 1)
+        body = sent[0][sent[0].index('--body') + 1]
+        self.assertEqual(sent[0][sent[0].index('--to') + 1], 'ag_author')
+        self.assertIn('in the last hour', body); self.assertIn('title (untrusted): "progress report"', body)
+        self.assertTrue(body.endswith(f'issues show {self.issue} --titles'))
+
+    def test_ask_intents_reach_an_asks_recipient_at_once(self):
+        self.ask()
+        for title in ('[decision] pick one', '[blocker] stuck', '[incident] down', '[action-author] please look'):
+            self.now += WINDOW + 1
+            self.auth.requests.clear()
+            self.comment('cc @author', title=title)
+            self.assertEqual(self.sent_to(), ['ag_author'], title)
+
+    def test_action_for_someone_else_is_not_an_ask_for_me(self):
+        self.ask(); self.prove()
+        self.comment('cc @author', title='[action-reviewer] please look')
+        self.assertEqual(self.auth.requests, [])
+
+    def test_blocked_and_assignment_stay_immediate(self):
+        self.ask('asks', 'ag_work')
+        self.mutate(self.issue, 'update', {'status': 'blocked'}, LEAD)
+        self.assertEqual(self.sent_to(), ['ag_work'], 'status to blocked')
+        self.auth.requests.clear(); self.now += WINDOW + 1
+        other = self.create(assignee='ag_author')
+        self.ask('asks', 'ag_author'); self.auth.requests.clear(); self.now += WINDOW + 1
+        self.mutate(other, 'update', {'assignee': 'ag_work'}, LEAD); self.auth.requests.clear(); self.now += WINDOW + 1
+        self.mutate(other, 'update', {'assignee': 'ag_author'}, LEAD)
+        self.assertEqual(self.sent_to(), ['ag_author'], 'a work assignment is never hidden by the policy')
+        self.auth.requests.clear(); self.now += WINDOW + 1
+        self.mutate(other, 'update', {'priority': 'high'}, LEAD)
+        self.assertEqual(self.auth.requests, [], 'other changes to an asks recipient are filtered')
+
+    def test_unproven_actors_are_dropped_not_digested(self):
+        self.ask()                          # ag_work was never let through to ag_author by Core this hour
+        result = self.comment('cc @author', title='progress')
+        self.assertEqual(result['notification']['hints'][0]['delivery'], 'not_delivered')
+        self.assertIn('may not receive', result['notification']['hints'][0]['tip'])
+        self.now += 7200
+        sent = []
+        Digest(self.store, lambda: '', clock=lambda: self.now, runner=lambda a: sent.append(a) or (0, '')).flush()
+        self.assertEqual(sent, [], 'no author text or actor name reaches a recipient Core would not let the actor message')
+
+    def test_ask_pushes_are_capped_per_author_per_recipient_per_hour(self):
+        self.ask()
+        delivered = 0
+        for i in range(8):
+            self.now += 1
+            self.auth.requests.clear()
+            self.comment(f'cc @author {i}', title='[decision] again', actor=WORKER)
+            delivered += len(self.auth.requests)
+        self.assertLessEqual(delivered, 5, 'prefixing every comment with [decision] cannot flood a recipient')
+
+    def test_hourly_digests_beyond_ten_open_issues_fold_into_the_overflow_digest(self):
+        self.ask(); self.prove()
+        outcomes = [self.store.queue_hourly('ag_author', n, 'x', self.now) for n in range(1, 13)]
+        self.assertEqual(outcomes[:10], ['hourly'] * 10); self.assertEqual(outcomes[10:], ['overflow'] * 2)
+
+    def test_intent_is_stored_on_the_event_not_rederived(self):
+        result = self.comment('x', title='[Blocker] stuck')
+        event = next(e for e in result['activity'] if e['kind'] == 'comment')
+        self.assertEqual(event['intent'], 'blocker')
+        plain = self.comment('x', title='stuck [blocker]')
+        self.assertNotIn('intent', next(e for e in plain['activity'] if e['kind'] == 'comment' and e['id'] != event['id']))
+
+    def test_policy_audit_is_append_only_and_bounded(self):
+        for i in range(1100):
+            self.store.set_policy('ag_author', 'asks' if i % 2 == 0 else 'all', 'usr_lead', self.now + i)
+        audit = self.store.policy_audit(2000)
+        self.assertLessEqual(len(audit), 1000)
+        self.assertEqual({'at', 'actor', 'subject', 'old', 'new'}, set(audit[0]))
+        self.assertEqual(self.store.policies(), {'ag_author': 'all'})
 
 
 class WindowTest(Base):

@@ -30,6 +30,9 @@ for command, field in (('comment', 'body'), ('assign', 'assignee'), ('status', '
     a = s.add_parser(command); a.add_argument('id', type=int); a.add_argument(field)
     if command == 'comment':
         a.add_argument('--title', help='one-line summary (<= 200 bytes); readers can list titles and open the text on demand')
+a = s.add_parser('policy', help='who gets which Issues notifications at once: `policy` lists, `policy set asks|all [--agent ID]`')
+a.add_argument('action', nargs='?', choices=('set',)); a.add_argument('mode', nargs='?', choices=('all', 'asks')); a.add_argument('--agent')
+a.add_argument('--audit', action='store_const', const='1', help='include the change audit')
 a = s.add_parser('claim'); a.add_argument('id', type=int)
 a.add_argument('--action', choices=('acquire', 'renew', 'release'), default='acquire')
 a.add_argument('--seconds', type=int, default=900)
@@ -40,6 +43,14 @@ if command == 'list':
 elif command == 'create':
     method, body = 'POST', dict(args, labels=args.pop('label'))
     body.pop('label', None)
+elif command == 'policy':
+    path = 'v1/notify-policy'
+    if args['action'] == 'set':
+        if not args['mode']:
+            p.error('policy set needs asks or all')
+        method, body = 'PUT', {k: v for k, v in (('mode', args['mode']), ('agent', args['agent'])) if v}
+    elif args['audit']:
+        path += '?audit=1'
 elif command == 'activity':
     path += f"/{args['id']}/activity/{args['event']}"
 else:

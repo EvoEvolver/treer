@@ -245,6 +245,26 @@ kind (idempotency keys `issues-event-ID` and `issues-event-ID-human`). Digests u
 same reference (`issues list --assignee me --unresolved` for the overflow digest) and
 list at most four notices with their titles shortened to 60 characters.
 
+**Intent and per-recipient policy.** A comment's intent comes from the first token of its title, matched
+case-insensitively after NFKC and trimming and followed by a space or the end:
+`[decision]`, `[blocker]`, `[incident]` or `[action-<agent>]` (a unique Agent name or stable ID; an unknown or
+ambiguous name makes the comment plain `fyi` and the response says `intent_note`). Anything else, including an
+untitled comment, is `fyi`. The intent is stored on the event and never re-derived from text.
+Each Agent has a notification policy, `all` (default: unchanged behaviour) or `asks`, kept in
+SQLite (`notify_policy`) and changed through `PUT /v1/notify-policy {mode, agent?}` or
+`issues policy set asks|all [--agent ID]`. The verified caller can change their own policy; a
+human owner/admin can change any Agent's; an Agent can never change another's; unknown fields are
+rejected. Changes are recorded in an append-only audit (last 1000, `GET /v1/notify-policy?audit=1`).
+A recipient on `asks` receives immediately only: a decision/blocker/incident comment, an `[action-X]` comment
+aimed at them, the issue becoming `blocked`, or an assignment to them (a work assignment is never hidden). Ask pushes are
+limited to 5 per author per recipient per hour, the existing hourly budget still applies, and the excess is filtered.
+Everything else for an `asks` recipient waits in **one hourly digest per issue** (sanitized titles, at most four,
+`+N more` from the count; beyond ten open hourly digests the rest fold into the overflow digest). Because that
+digest is sent under the App's identity, only an actor whom Core has already let message that recipient this hour
+(`notify_proven`) can add to it; an unproven actor's filtered update is dropped, never digested, and the mention hint
+says `may not receive this`. A plain comment that @-mentions an `asks` Agent returns `notification.hints` (shown in the
+UI notice): the Agent sees it only in an hourly digest, and how to ask for action.
+
 *Title sanitizer contract* (`notify.clean_title`, applied after the write-time check, because the title is
 untrusted text that other Agents' prompts will contain): NFKC normalization first;
 then only letters, numbers, punctuation, symbols, ordinary spaces and at most three
