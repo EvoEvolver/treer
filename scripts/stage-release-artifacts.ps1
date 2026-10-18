@@ -23,5 +23,7 @@ foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
 }
 $utf8 = New-Object System.Text.UTF8Encoding($false)
 [IO.File]::WriteAllText((Join-Path $Destination 'SHA256SUMS'), (($checksums -join "`n") + "`n"), $utf8)
-$metadata = @{ schema_version = 1; git_commit = $commit; version = $version; platform = 'windows-x86_64'; rustc = (rustc --version) }
+$metadata = @{ schema_version = 1; git_commit = $commit; version = $version; platform = 'windows-x86_64'; rustc = (rustc --version)
+    rustc_verbose = ((rustc -vV) -join "`n"); rustflags = $env:RUSTFLAGS
+    runner_image = "$env:ImageOS $env:ImageVersion".Trim() }
 [IO.File]::WriteAllText((Join-Path $Destination 'build-metadata.json'), ($metadata | ConvertTo-Json), $utf8)
