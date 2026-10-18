@@ -363,6 +363,16 @@ class PolicyTest(Base):
             delivered += len(self.auth.requests)
         self.assertLessEqual(delivered, 5, 'prefixing every comment with [decision] cannot flood a recipient')
 
+    def test_blocked_and_assignment_pushes_share_the_per_author_cap(self):
+        self.ask('asks', 'ag_work')
+        delivered = 0
+        for i in range(8):
+            self.now += WINDOW + 1
+            self.auth.requests.clear()
+            self.mutate(self.issue, 'update', {'status': 'blocked' if i % 2 == 0 else 'open'}, LEAD)
+            delivered += len(self.auth.requests)
+        self.assertLessEqual(delivered, 5, 'toggling blocked cannot use the whole recipient budget')
+
     def test_hourly_digests_beyond_ten_open_issues_fold_into_the_overflow_digest(self):
         self.ask(); self.prove()
         outcomes = [self.store.queue_hourly('ag_author', n, 'x', self.now) for n in range(1, 13)]

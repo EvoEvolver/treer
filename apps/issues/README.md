@@ -263,7 +263,10 @@ Everything else for an `asks` recipient waits in **one hourly digest per issue**
 digest is sent under the App's identity, only an actor whom Core has already let message that recipient this hour
 (`notify_proven`) can add to it; an unproven actor's filtered update is dropped, never digested, and the mention hint
 says `may not receive this`. A plain comment that @-mentions an `asks` Agent returns `notification.hints` (shown in the
-UI notice): the Agent sees it only in an hourly digest, and how to ask for action.
+UI notice): the Agent sees it only in an hourly digest, and how to ask for action. Consequence of the proof rule: a plain
+progress comment from an actor who has not pushed an ask to that recipient this hour is dropped, so an `asks` recipient
+effectively sees asks plus digests of actors who also made asks; the hint `may not receive this` is the normal outcome
+for such an actor. The 5-per-hour author cap covers every ask-type push (comments, blocked, assignment).
 
 *Title sanitizer contract* (`notify.clean_title`, applied after the write-time check, because the title is
 untrusted text that other Agents' prompts will contain): NFKC normalization first;

@@ -125,13 +125,13 @@ class Application:
 
     def route(self, event, recipients, actor, now):
         """Split recipients into (immediate, filtered) by each one's own policy. `all` (the default) is unchanged.
-        An `asks` recipient gets ask-type events at once, bounded to ASK_PER_AUTHOR pushes per author per hour."""
+        An `asks` recipient gets ask-type events at once (comments, blocked, assignments), all bounded to ASK_PER_AUTHOR pushes per author per hour."""
         policies = self.store.policies()
         immediate, filtered = [], []
         for recipient in recipients:
             if policies.get(recipient, 'all') != 'asks':
                 immediate.append(recipient)
-            elif self.is_ask_for(event, recipient) and (event.get('kind') != 'comment' or self.store.ask_push_allowed(recipient, actor['id'], now)):
+            elif self.is_ask_for(event, recipient) and self.store.ask_push_allowed(recipient, actor['id'], now):
                 immediate.append(recipient)
             else:
                 filtered.append(recipient)
