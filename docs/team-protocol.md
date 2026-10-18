@@ -176,12 +176,24 @@ had nothing to do with the change (#112, #125, #128, #129). `just check`,
 machine-wide slot through `scripts/gate-lock.py` (an advisory `flock` under
 `~/.cache/treer-gate/`, released by the OS if the holder dies):
 
-- One holder at a time. A waiting gate prints
-  `gate-lock: waiting for gate slot held by <name> (pid ..., since ...)`.
+- One holder at a time, and waiters are served in arrival order. Every waiting
+  gate takes a numbered ticket under `~/.cache/treer-gate/queue/` and only the
+  head of the queue contends for the slot, so a gate that arrived later can no
+  longer win it from an older one (launcher-dev's Rust M2 gate waited more than
+  twenty minutes behind newer gates before this, #174). A waiting gate prints
+  `gate-lock: waiting for gate slot held by <name> (pid ..., since ...)`, plus how
+  many waiters are ahead of it when it is not the head.
 - Release gates take priority: the release scripts set `TREER_GATE_ROLE=release`
-  (`scripts/release-canary.sh` does it for `just check`); while a live release
-  gate is waiting or running, author gates do not start, and a release gate
-  that arrives goes before queued authors.
+  (`scripts/release-canary.sh` does it for `just check`). Release tickets sort
+  before author tickets, so a release gate that arrives goes before queued
+  authors, and release gates keep their own arrival order.
+- A waiting gate refreshes its ticket every poll. A ticket whose process died,
+  or that was not refreshed for 30 seconds (a hung waiter or a reused pid), is
+  removed by the next waiter that sees it; a crashed waiter never blocks the
+  queue. Waiters started before this change take no ticket and can still cut
+  in until they have run.
+- `python3 scripts/gate-lock.py --status` (add `--json` for scripts) shows the
+  holder and the queue in order; use it instead of guessing who is next.
 - Nested use is free (the child gets `TREER_GATE_HELD=1`), so `just check`
   can call `just agent-launcher-test`.
 - Focused runs (one spec, `cargo test -p <crate> <filter>`, a single script
