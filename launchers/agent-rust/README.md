@@ -23,6 +23,10 @@ Outbound operations include mutex acquisition, writing and flushing within a
 five-second deadline; the event-pumping RPC wait has an absolute 60-second
 deadline. A write timeout can mean partial delivery. It poisons the transport,
 preserves accepted-operation uncertainty and stops further dispatch without retry.
+The same five-second deadline applies to every valid RPC input (at most 128 KiB),
+so a slow provider can also trigger it. Oversized input is refused before writing.
+Before fencing after a cancelled wait, receipts and goals are restored from the
+last published checkpoint; partially handled events cannot become durable.
 Raw stderr capture is disabled by default. Only the explicit launch setting
 `RUST_SPIKE_CAPTURE_STDERR=1` retains the last 8 KiB in memory and saves it at
 shutdown as 0600 `rust-provider-stderr.log` under the validated private root,

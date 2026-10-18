@@ -710,15 +710,25 @@ for(const mode of ['omit','timeout'])test('Rust uncertain '+mode+' blocks all la
   const first=s.post({text:'accepted but ambiguous',operation_id:'uncertain'});
   await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
   const second=s.post({text:'must remain queued',operation_id:'later'});
-  assert.equal((await first).status,202);
-  const admission=await (await second).json();assert.equal(admission.submission.disposition,'queued');
+  const initial=await first;assert.equal(initial.status,202);
+  const accepted=await initial.json();
+  const following=await second;
+  const admission=await following.json();
+  if(mode==='timeout') {
+    assert.ok(following.status>=400,'poisoned transport refuses new writes');
+    assert.equal((await fetch(s.base+'/api/state').then(r=>r.json())).runtime.provider.transport,'rpc_timeout');
+  } else assert.equal(admission.submission.disposition,'queued');
+  const original=await fetch(s.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json());
+  assert.equal(original.submission.state,'failed');assert.match(original.submission.error,/uncertain/);
   await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
   await new Promise(resolve=>setTimeout(resolve,2200));
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const restarted=await s.launch({});
   const retry=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'must remain queued',operation_id:'later'})}).then(r=>r.json());
-  assert.deepEqual(retry.submission,admission.submission);
+  if(mode==='timeout')assert.equal(retry.submission.disposition,'queued');
+  else assert.deepEqual(retry.submission,admission.submission);
+  assert.deepEqual(await fetch(restarted.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json()),original);
   await new Promise(resolve=>setTimeout(resolve,2200));
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
 });
@@ -822,11 +832,14 @@ test('Rust shutdown cancels a stalled provider reply write without duplicate dis
   const pending=s.post({text:'stop while replying',operation_id:'stopped'}).then(()=>null,()=>null);
   await until(()=>providerCalls(s),calls=>calls.some(c=>c.method==='turn/start'));
   await new Promise(r=>setTimeout(r,200));
+  const before=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
   const started=Date.now(),exit=once(s.child,'exit');s.child.kill('SIGTERM');
   assert.deepEqual(await exit,[0,null]);assert.ok(Date.now()-started<7000);
   await pending;
   assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
-  assert.equal(JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8')).dispatchBlocked,true);
+  const after=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(after.dispatchBlocked,true);
+  assert.deepEqual(after.records,before.records);assert.deepEqual(after.goals,before.goals);
 });
 test('Rust stalled notification worker permits continuous provider deltas and prompt abort',{skip:useNode},async t=>{
   const s=await fixture(t,{...faultEnv('stream'),PATH:resolve(import.meta.dirname,'fixtures')+':'+process.env.PATH,RUST_SPIKE_NOTIFY_BLOCK:'1'});

@@ -1028,6 +1028,9 @@ impl Runtime {
     }
     fn stop_for_transport_error(&mut self) -> Result<()> {
         let reason = "Provider transport failed; dispatch outcome uncertain; queue paused";
+        // A timed-out wait may have cancelled an event handler. Only the last
+        // published receipts/goals may become durable with the failure fence.
+        (self.records, self.goals) = self.checkpoint.clone();
         if self.thread["id"].is_string() {
             return self.stop_for_history_error(reason.into());
         }
