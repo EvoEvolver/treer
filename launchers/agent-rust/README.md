@@ -38,6 +38,9 @@ delivery. A lost native acknowledgement is reconciled by reading the goal;
 an unmatched result is retained as an error rather than replaying the mutation.
 This is still partial goal parity: non-null round budgets, slash commands and
 managed Agent goal-exit requests remain unsupported. Images remain disabled.
+Plan snapshots and updates normalize Codex's `in_progress` to the browser's
+`inProgress`. HTML carries the existing permissions policy and CSP; script and
+CSS assets declare UTF-8 without an HTML document policy.
 
 Build and focused checks (a private `CARGO_TARGET_DIR` is required). Default
 builds require native tools: if `codex` on PATH is an npm script wrapper, set

@@ -71,7 +71,18 @@ pub fn item(raw: &Value, turn: &str, order: usize) -> Value {
         result["changes"] = json!(raw["changes"].as_array().unwrap_or(&vec![]).iter().map(|c|json!({"path":c["path"],"diff":c["diff"].as_str().unwrap_or(""),"kind":c["kind"].as_str().or(c["kind"]["type"].as_str()).unwrap_or("update")})).collect::<Vec<_>>());
     }
     if kind == "plan" {
-        result["steps"] = raw["plan"].clone();
+        result["steps"] = json!(raw["plan"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .map(|step| {
+                json!({"step":step["step"],"status": match step["status"].as_str() {
+                    Some("in_progress" | "inProgress") => "inProgress",
+                    Some("completed") => "completed",
+                    _ => "pending",
+                }})
+            })
+            .collect::<Vec<_>>());
     }
     result
 }
@@ -83,6 +94,21 @@ pub fn turn(raw: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plan_steps_use_browser_statuses() {
+        let mapped = item(
+            &json!({"type":"plan","plan":[
+                {"step":"first","status":"completed"},
+                {"step":"current","status":"in_progress"},
+                {"step":"next","status":"pending"}
+            ]}),
+            "t",
+            0,
+        );
+        assert_eq!(mapped["steps"][1]["status"], "inProgress");
+        assert_eq!(mapped["steps"][0]["status"], "completed");
+        assert_eq!(mapped["steps"][2]["status"], "pending");
+    }
     #[test]
     fn utf8_preview_and_command_mapping() {
         assert_eq!(preview("é文x", 4), "é");

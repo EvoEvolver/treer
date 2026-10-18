@@ -896,6 +896,25 @@ impl Runtime {
                     }
                 }
             }
+            "turn/plan/updated" => {
+                let turn_id = p["turnId"].as_str().unwrap_or("");
+                if let Some(turn) = self.turns.iter_mut().find(|t| t["id"] == turn_id) {
+                    let items = turn["items"]
+                        .as_array_mut()
+                        .ok_or_else(|| anyhow!("invalid turn items"))?;
+                    let id = format!("plan-{turn_id}");
+                    let mapped = model::item(
+                        &json!({"id":id,"type":"plan","plan":p["plan"]}),
+                        turn_id,
+                        items.len(),
+                    );
+                    if let Some(old) = items.iter_mut().find(|i| i["id"] == id) {
+                        *old = mapped;
+                    } else {
+                        items.push(mapped);
+                    }
+                }
+            }
             "item/agentMessage/delta"
             | "item/reasoning/textDelta"
             | "item/reasoning/summaryTextDelta"

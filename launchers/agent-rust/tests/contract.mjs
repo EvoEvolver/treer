@@ -86,6 +86,16 @@ test('browser mutations return full state with the requested history window',asy
   assert.equal(missing.status,404);
   assert.equal(typeof (await missing.json()).error,'string');
 });
+test('HTML permissions and script media headers match browser expectations',async t=>{
+  const s=await fixture(t);
+  const html=await fetch(s.base+'/');
+  assert.match(html.headers.get('permissions-policy'),/camera=\(\)/);
+  assert.ok(html.headers.get('content-security-policy'));
+  const script=await fetch(s.base+'/ui.js');
+  assert.equal(script.status,200);
+  assert.match(script.headers.get('content-type'),/charset=utf-8/);
+  assert.equal(script.headers.get('content-security-policy'),null);
+});
 test('mutating-route native versus browser authorization matrix matches Node',async t=>{
   const s=await fixture(t);
   const routes=[

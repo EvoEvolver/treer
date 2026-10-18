@@ -569,13 +569,28 @@ async fn static_file(app: &App, path: &str) -> Response {
     };
     let mime = match file.extension().and_then(|s| s.to_str()).unwrap_or("") {
         "html" => "text/html; charset=utf-8",
-        "js" => "text/javascript",
-        "css" => "text/css",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
         "svg" => "image/svg+xml",
         "woff2" => "font/woff2",
         _ => "application/octet-stream",
     };
-    (StatusCode::OK,[("content-type",mime),("cache-control","no-store"),("x-content-type-options","nosniff"),("referrer-policy","no-referrer"),("content-security-policy","default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'")],data).into_response()
+    let mut response = (
+        StatusCode::OK,
+        [
+            ("content-type", mime),
+            ("cache-control", "no-store"),
+            ("x-content-type-options", "nosniff"),
+            ("referrer-policy", "no-referrer"),
+        ],
+        data,
+    )
+        .into_response();
+    if mime.starts_with("text/html") {
+        response.headers_mut().insert("content-security-policy", "default-src 'self'; connect-src 'self'; img-src 'self' data: blob:; style-src 'self'; script-src 'self'; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'".parse().unwrap());
+        response.headers_mut().insert("permissions-policy", "camera=(), microphone=(), geolocation=(), payment=(), usb=(), display-capture=(), clipboard-read=(), bluetooth=(), hid=(), serial=(), midi=(), accelerometer=(), gyroscope=(), magnetometer=(), screen-wake-lock=()".parse().unwrap());
+    }
+    response
 }
 
 // Controller percent-encodes non-alphanumeric bytes, including UUID hyphens.
