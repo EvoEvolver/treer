@@ -137,6 +137,8 @@ Submissions contain these required fields:
   A running record and any source dispatch fence must remain fenced, even if a
   provider snapshot claims idle or an old turn is terminal. Migration never
   settles a receipt, clears a fence, sends a prompt or retries a goal mutation.
+  Converters derive the destination fence from actual records/goal/ack state;
+  a false manifest declaration cannot clear any running or uncertain record.
 - `image_ids`: unique ordered IDs, at most 8, aggregate <=24 MiB per submission;
   `notify_on`: unique sorted subset of terminal outcomes;
   `notify_to`: null or <=1,024 byte recipient. A nonempty on-list needs recipient.

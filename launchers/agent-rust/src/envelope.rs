@@ -7,6 +7,7 @@ pub const MANIFEST_BYTES: usize = 1024 * 1024;
 const TOTAL_BYTES: u64 = 384 * 1024 * 1024;
 const METADATA_BYTES: u64 = 32 * 1024 * 1024;
 const IMAGE_BYTES: u64 = 10 * 1024 * 1024;
+const TOTAL_IMAGE_BYTES: u64 = 256 * 1024 * 1024;
 const SAFE_INTEGER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, PartialEq, Eq)]
@@ -117,6 +118,7 @@ pub fn validate_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
     let mut total = 0_u64;
     let mut previous = "";
     let mut images = 0;
+    let mut image_bytes = 0_u64;
     for object in &m.objects {
         if !digest(&object.sha256) || object.sha256.as_str() <= previous {
             return Err(Error::Reference);
@@ -136,6 +138,10 @@ pub fn validate_manifest(bytes: &[u8]) -> Result<Manifest, Error> {
         }
         if object.kind == Kind::Image {
             images += 1;
+            image_bytes = image_bytes.checked_add(object.bytes).ok_or(Error::Limit)?;
+            if image_bytes > TOTAL_IMAGE_BYTES {
+                return Err(Error::Limit);
+            }
         }
     }
     if images > 8_192 {
@@ -290,17 +296,32 @@ mod tests {
     #[test]
     fn exact_total_and_image_limits_accept_boundary_and_refuse_one_over() {
         let mut f = fixture();
-        f["objects"][0]["bytes"] = json!(24 * 1024 * 1024 - 8);
-        for i in 6..42 {
+        for o in f["objects"].as_array_mut().unwrap() {
+            o["bytes"] = json!(METADATA_BYTES);
+        }
+        // 160 MiB metadata +224 MiB images, under the separate image cap.
+        for i in 6..29 {
             f["objects"].as_array_mut().unwrap().push(json!({
-            "sha256":format!("{i:064x}"),"kind":"image","bytes":IMAGE_BYTES}));
+            "sha256":format!("{i:064x}"),"kind":"image","bytes":if i==28 {4*1024*1024} else {IMAGE_BYTES}}));
         }
         assert!(validate(&f).is_ok());
-        f["objects"][0]["bytes"] = json!(24 * 1024 * 1024 - 7);
+        f["objects"][27]["bytes"] = json!(4 * 1024 * 1024 + 1);
         assert!(matches!(validate(&f), Err(Error::Limit)));
         let mut f = fixture();
         f["objects"].as_array_mut().unwrap().push(json!({
             "sha256":format!("{:064x}",6),"kind":"image","bytes":IMAGE_BYTES+1}));
+        assert!(matches!(validate(&f), Err(Error::Limit)));
+    }
+    #[test]
+    fn image_total_boundary_is_independent_of_envelope_total() {
+        let mut f = fixture();
+        for i in 6..32 {
+            f["objects"].as_array_mut().unwrap().push(json!({
+                "sha256":format!("{i:064x}"),"kind":"image","bytes":if i==31 {6*1024*1024} else {IMAGE_BYTES}
+            }));
+        }
+        assert!(validate(&f).is_ok());
+        f["objects"][30]["bytes"] = json!(6 * 1024 * 1024 + 1);
         assert!(matches!(validate(&f), Err(Error::Limit)));
     }
     #[test]
