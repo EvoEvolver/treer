@@ -1,3 +1,4 @@
+mod files;
 mod model;
 mod rpc;
 mod runtime;
@@ -43,6 +44,7 @@ struct App {
     agent: String,
     instance: String,
     public: PathBuf,
+    files: files::Files,
 }
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.is_empty())
@@ -58,6 +60,7 @@ async fn main() -> Result<()> {
             .map(PathBuf::from)
             .unwrap_or(std::env::current_dir()?),
     )?;
+    let files_root = cwd.clone();
     let agent = env("TREER_AGENT_ID").unwrap_or_default();
     if agent.len() > 128
         || !agent
@@ -128,7 +131,9 @@ async fn main() -> Result<()> {
         agent: agent.clone(),
         instance: instance.clone(),
         public,
+        files: files::Files::new(files_root),
     };
+    let files_idle = app.files.idle;
     let router = Router::new().fallback(any(route)).with_state(app);
     println!("Rust Agent spike listening on http://127.0.0.1:{port}");
     let should_register = !agent.is_empty() && env("RUST_SPIKE_REGISTER").as_deref() == Some("1");
@@ -172,7 +177,7 @@ async fn main() -> Result<()> {
         tokio::spawn(runtime::watch_messages(handle, agent));
     }
     let serve = async {
-        axum::serve(listener, router)
+        axum::serve(files::IdleListener { listener, idle: files_idle }, router)
         .with_graceful_shutdown(async {
             #[cfg(unix)]
             {
@@ -274,6 +279,9 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
     let path = request.uri().path().trim_end_matches('/').to_string();
     let path = if path.is_empty() { "/".into() } else { path };
     let method = request.method().to_string();
+    if path == "/v1/files" || path == "/v1/files/tree" || path == "/v1/files/download" {
+        return app.files.handle(&method, request.uri().query().unwrap_or(""), request.headers(), &path).await;
+    }
     let queue_route = path == "/v1/prompts"
         || path == "/v1/queue"
         || path.starts_with("/v1/queue/")
