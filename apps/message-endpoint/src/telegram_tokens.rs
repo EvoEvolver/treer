@@ -281,6 +281,16 @@ impl Service {
             if valid_shape(token).ok_or(Failure::Invalid)? != config.bot_id {
                 return Err(Failure::DifferentBot);
             }
+            // Cheap refusal before exposing a candidate credential to Telegram.
+            // The same pause condition is checked again after network I/O.
+            {
+                let hub = storage(shared.lock())?;
+                for id in storage(hub.binding_ids())? {
+                    if !storage(hub.view(&id))?.paused {
+                        return Err(Failure::Active);
+                    }
+                }
+            }
             (self.verify)(account, token, config.bot_id)?;
         }
         {
@@ -672,7 +682,16 @@ mod tests {
     fn active_bindings_block_set_but_remove_pauses_and_pins_cannot_change_bot() {
         let r = root();
         let c = config(r.path());
-        let service = Service::with_verifier(vec![c], Arc::new(|_, _, _| Ok(()))).unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let counted = calls.clone();
+        let service = Service::with_verifier(
+            vec![c],
+            Arc::new(move |_, _, _| {
+                counted.fetch_add(1, Ordering::Relaxed);
+                Ok(())
+            }),
+        )
+        .unwrap();
         let shared = state(r.path());
         let workers = workers();
         {
@@ -699,6 +718,7 @@ mod tests {
             service.execute(&shared, &workers, &owner(), set(TOKEN)),
             Err(Failure::Active)
         ));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
         service
             .execute(&shared, &workers, &owner(), remove())
             .unwrap();

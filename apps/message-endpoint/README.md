@@ -1549,3 +1549,9 @@ Focused token UI checks: `node tests/token-browser.mjs <debug-hub> <playwright-m
 <browser-cache> <screenshot-directory>`. These use local synthetic identities and
 an explicitly mocked successful UI submission; actual getMe rejection, atomic
 storage and secret-persistence checks are separate Rust/real-handler tests.
+
+`restart_required` is an in-memory process status and resets after the hub is
+restarted. The durable binding pause and bot identity pin survive restart; a
+cleared restart hint never means that an endpoint resumed automatically. Set
+also checks pause state before getMe and again before stopping workers/committing,
+so an already-active binding causes refusal without a Telegram request.
