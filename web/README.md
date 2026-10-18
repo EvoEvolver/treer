@@ -277,8 +277,10 @@ the PTY to a zero-size container or take focus when they reconnect.
 
 `treer:tabs:v1:<user_id>:<workspace_id>` stores only up to 64 stable IDs in tab
 order. It contains no titles, URLs, tokens, draft text, terminal output or session
-state. Refresh restores the list with Overview selected and all workload pages
-cold, connecting only on explicit selection. Successful inventory reads prune
+state. Refresh at the workspace URL restores the list with Overview selected and
+all workload pages cold; a workload deep link restores that workload. Returning
+to Overview clears the workload URL in the click handler, so an immediate refresh
+or URL copy cannot select the workload just left. Successful inventory reads prune
 deleted IDs; invalid/oversized cache data is ignored. Storage access is guarded;
 when unavailable, tabs operate in memory. App/Agent Interface sandbox and Proxy
 permissions are unchanged; hidden iframes retain their existing trusted authority.
