@@ -108,21 +108,28 @@ jobs:
         env:
           RUSTFLAGS: -C link-arg=/Brepro
         run: ./scripts/stage-release-artifacts.ps1 -Destination release-artifacts/windows-x86_64
-      - name: Verify the staged binary rebuilds to the same bytes
-        # Fails closed before upload: the hash compared is the staged (published) one.
-        # The staged copy survives the clean; the rebuild uses the same flags and path.
+      - name: Verify the staged binaries rebuild to the same bytes
+        # Fails closed before upload: the hashes compared are the staged (published) ones.
+        # The staged copies survive the clean; the rebuild uses the same flags, path and
+        # package set, because building fewer packages can change feature unification.
         env:
           RUSTFLAGS: -C link-arg=/Brepro
         run: |
-          $staged = (Get-FileHash -Algorithm SHA256 release-artifacts/windows-x86_64/treer).Hash.ToLowerInvariant()
+          $staged = @{}
+          foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
+            $staged[$binary] = (Get-FileHash -Algorithm SHA256 "release-artifacts/windows-x86_64/$binary").Hash.ToLowerInvariant()
+          }
           cargo clean --release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo build --locked --release -p treer-cli
+          cargo build --locked --release -p treer-cli -p treer-agent-host -p treer-agent-server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $rebuilt = (Get-FileHash -Algorithm SHA256 target/release/treer.exe).Hash.ToLowerInvariant()
-          Write-Host "staged  treer sha256 $staged"
-          Write-Host "rebuilt treer sha256 $rebuilt"
-          if ($staged -ne $rebuilt) { throw 'Clean rebuild of treer is not byte-identical to the staged artifact.' }
+          $different = @()
+          foreach ($binary in @('treer', 'treer-agent-host', 'treer-agent-server')) {
+            $rebuilt = (Get-FileHash -Algorithm SHA256 "target/release/$binary.exe").Hash.ToLowerInvariant()
+            Write-Host "$binary staged $($staged[$binary]) rebuilt $rebuilt"
+            if ($staged[$binary] -ne $rebuilt) { $different += $binary }
+          }
+          if ($different.Count -gt 0) { throw "Clean rebuild is not byte-identical to the staged artifact: $($different -join ', ')." }
       - name: Test Windows installation and PATH
         run: ./scripts/test-windows-install.ps1 -ArtifactDirectory release-artifacts/windows-x86_64
       - name: Test Windows PowerShell installer compatibility
