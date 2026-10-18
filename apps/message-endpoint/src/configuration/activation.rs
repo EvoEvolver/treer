@@ -26,6 +26,7 @@ pub struct ResumePreview {
     revision: i64,
     target: Target,
     held_fragments: i64,
+    oldest_held_at: Option<i64>,
     held_snapshot: String,
     parked_transfers: i64,
 }
@@ -86,7 +87,7 @@ fn backlog<M: Mailbox + Directory>(
     hub: &Hub<M>,
     id: &str,
     generation: i64,
-) -> Result<(i64, String, i64), Failure> {
+) -> Result<(i64, String, i64, Option<i64>), Failure> {
     hub.hold_schema().map_err(map_hub)?;
     let mut q=hub.store.db.prepare("SELECT delivery,message,created_at,expires FROM hub_holds WHERE endpoint=?1 AND generation=?2 ORDER BY delivery LIMIT 21").map_err(|_|Failure::Unavailable)?;
     let rows = q
@@ -120,7 +121,12 @@ fn backlog<M: Mailbox + Directory>(
             |r| r.get(0),
         )
         .map_err(|_| Failure::Unavailable)?;
-    Ok((rows.len() as i64, fingerprint, parked))
+    Ok((
+        rows.len() as i64,
+        fingerprint,
+        parked,
+        rows.iter().map(|r| r.2).min(),
+    ))
 }
 /// Core queries happen outside state. A second locked snapshot refuses changes
 /// during those queries; confirmation calls this again rather than trusting JSON.
@@ -175,6 +181,7 @@ fn observe<M: Mailbox + Directory, D: Directory>(
             revision,
             target: expected_target,
             held_fragments: expected_backlog.0,
+            oldest_held_at: expected_backlog.3,
             held_snapshot: expected_backlog.1,
             parked_transfers: expected_backlog.2,
         },
@@ -228,7 +235,7 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
     let evidence=serde_json::to_string(&serde_json::json!({
         "kind":"owner_declaration_not_attestation", "profile_reviewed":true,"isolation_reviewed":true,
         "reference":evidence.reference,"pins_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&current.pins).map_err(|_|Failure::Invalid)?)),
-        "target":current.target,"held_action":evidence.held_action,"held_fragments":current.held_fragments,"held_snapshot":current.held_snapshot,"parked_count_ack":evidence.parked_count_ack
+        "target":current.target,"held_action":evidence.held_action,"held_fragments":current.held_fragments,"oldest_held_at":current.oldest_held_at,"held_snapshot":current.held_snapshot,"parked_count_ack":evidence.parked_count_ack
     })).map_err(|_|Failure::Invalid)?;
     let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
     let now = check_owner(owner)?;
@@ -241,6 +248,7 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
                 current.held_fragments,
                 current.held_snapshot.clone(),
                 current.parked_transfers,
+                current.oldest_held_at,
             )
         || !(activation.account_ready)(&current.target.account_id)
     {
@@ -480,6 +488,7 @@ mod tests {
             seed_hold(&s, 1);
             let mut r = request(&s, &d, &o, &a);
             assert_eq!(r.expected.held_fragments, 1);
+            assert!(r.expected.oldest_held_at.is_some());
             if release {
                 r.evidence.held_action = HeldAction::Release;
             }

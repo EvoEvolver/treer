@@ -32,6 +32,7 @@ try {
   const surface=mode==='embedded'?page.frameLocator('iframe[title="Endpoint App"]'):page;
   await surface.getByText('Signed in as:',{exact:false}).waitFor();
   await surface.getByText('ag_demo',{exact:true}).waitFor();
+  await surface.getByText('Old updates were discarded. Check the hub clock; downtime over ten minutes skips older queued messages.',{exact:true}).waitFor();
   if(await surface.getByRole('link',{name:'Continue with Treer'}).count())throw new Error('injected owner was sent to login');
   if(await surface.getByRole('button',{name:'Create paused binding'}).count())throw new Error('embedded/forward view exposed editing');
   if(await surface.getByRole('link',{name:'Open settings'}).getAttribute('href')!==config.url)throw new Error('wrong dedicated editing URL');
@@ -84,6 +85,7 @@ try {
  await card.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
  const resumeButton=card.getByRole('button',{name:'Resume and send pending messages',exact:true});
  await resumeButton.waitFor();
+ await card.getByText(/Approximate oldest held age/).waitFor();
  const heldChoice=card.getByLabel('Held content from the pause');
  if(await heldChoice.inputValue()!=='discard')throw new Error('held content defaults to release');
  await heldChoice.selectOption('release');await heldChoice.selectOption('discard');

@@ -1378,3 +1378,31 @@ complete serialized export object, including the compatibility `records` copy,
 JSON string escaping and emergency evidence; 1 KiB is reserved for the fixed HTTP
 outcome wrapper. Canonical download SHA-256 continues covering only the exact
 JSONL bytes. Audit deletion/hash-chain pruning is still not implemented.
+
+
+### Positive runtime fixture and clock/held-age limits
+
+The `cfg(test)` positive fixture invokes the **same runtime assembly** as the hub
+executable, with real loopback owner HTTP/router, Bot API HTTP client, SQLite,
+pinned Core CLI subprocess fixture, account/worker threads, activation, inbound
+Core handoff, accepted outbound chunk, and an active restart. It then restarts
+with the gate disabled and checks the durable pause and absence of Bot calls.
+It waits for durable commits, not just observation of requests at fake services.
+The Core fixture stands in for the endpoint's Core messages; this test does not
+claim final recipient Agent delivery or actual bot acceptance.
+
+Only `cfg(test)` can construct the fake Bot origin/account factory; no Cargo
+feature, config field or environment variable can enable it. The App gate scans
+both debug and optimized release hub executables for the test origin/factory markers and verifies the
+fixed production Telegram origin remains. Running an unmodified production
+binary against a fake Bot API is intentionally impossible without changing
+system DNS/trust; tests do neither. Actual release acceptance still needs a
+throwaway bot/chat and real installed profile/Policy evidence, never a user's bot.
+
+Timestamp filtering uses the **hub** clock against Telegram's date. A hub clock
+more than thirty seconds behind can drop fresh updates, and downtime exceeding
+ten minutes drops older queued messages; the status warns when stale observations
+are nonzero. The resume preview includes the oldest held creation timestamp and
+shows its approximate age using the browser clock. Explicit release can send
+content up to the one-hour hold TTL; the default remains irreversible discard.
+Age/status/evidence are display/declarations, never authorization decisions.

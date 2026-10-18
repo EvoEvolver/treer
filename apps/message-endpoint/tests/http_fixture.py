@@ -136,6 +136,7 @@ if __name__=='__main__':
     with fixture(Path(sys.argv[1]).resolve(),editable='--editable' in sys.argv[2:]) as f:
         if '--seed-recovery' in sys.argv[2:]:
             db=sqlite3.connect(f['state']/'hub.sqlite3')
+            db.execute("INSERT INTO hub_activity(endpoint,generation,activated_at,stale_updates) VALUES('ag_demo',1,?,1)",(int(time.time()),))
             db.execute("INSERT INTO transfers(endpoint,generation,direction,transfer,digest,parts,state,expires) VALUES('ag_demo',1,0,'fixture_transfer','fixture_digest',1,1,9999999999)")
             db.execute("INSERT INTO fragments(endpoint,generation,direction,transfer,part,wire,digest) VALUES('ag_demo',1,0,'fixture_transfer',0,'PRIVATE RECOVERY BODY',x'00')")
             db.execute("INSERT INTO hub_parked(endpoint,generation,transfer,reason,created_at) VALUES('ag_demo',1,'fixture_transfer','transport_rejected',1)")

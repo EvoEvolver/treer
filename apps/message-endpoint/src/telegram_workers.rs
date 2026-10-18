@@ -122,6 +122,11 @@ impl Health {
     }
 }
 impl Account {
+    #[cfg(test)]
+    pub(crate) fn fixture_account_159(client: BotClient) -> Self {
+        Self::new("bot_fixture".into(), 12345, Arc::new(client))
+    }
+
     fn new(id: String, bot_id: i64, client: Arc<dyn AccountTransport>) -> Self {
         Self {
             id,

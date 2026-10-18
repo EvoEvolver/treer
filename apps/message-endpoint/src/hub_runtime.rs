@@ -1,5 +1,5 @@
 //! Executable composition: private state + own Core workers + owner HTTP.
-//! Transport workers remain a separate increment; owner writes use audited commands.
+//! Telegram workers and owner writes share the audited configuration boundary.
 use crate::{
     core::Core,
     hub::Hub,
@@ -88,13 +88,31 @@ impl Config {
 /// Call from a synchronous main. Reqwest's blocking client and owned Core
 /// threads are constructed outside Tokio; no global logger is installed.
 pub fn run(config: Config) -> Result<(), Error> {
+    // Keep the executable pin check before even reading transport secret files.
     if crate::relay::hash_executable(&config.cli).map_err(|_| Error::Configuration)?
         != config.cli_sha256
     {
         return Err(Error::Configuration);
     }
+
     let accounts = crate::telegram_workers::load(&config.telegram_accounts)
         .map_err(|_| Error::Configuration)?;
+    run_prepared(config, accounts, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+}
+// Same assembly for the executable and cfg(test) fixture. The public entry point
+// always uses private account files and OS Ctrl-C; no config/feature/env override.
+fn run_prepared(
+    config: Config,
+    accounts: Vec<crate::telegram_workers::Account>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), Error> {
+    if crate::relay::hash_executable(&config.cli).map_err(|_| Error::Configuration)?
+        != config.cli_sha256
+    {
+        return Err(Error::Configuration);
+    }
     let core = Core::new_pinned(&config.cli, &config.hub_id, &config.cli_sha256)
         .map_err(|_| Error::Configuration)?;
     let auth = OwnerAuth::new(
@@ -210,7 +228,7 @@ pub fn run(config: Config) -> Result<(), Error> {
                 let handoffs = handoffs.clone();
                 let telegram = telegram.clone();
                 async move {
-                    let _ = tokio::signal::ctrl_c().await;
+                    shutdown.await;
                     if let Ok(w) = workers.lock() {
                         w.request_stop();
                     }
@@ -263,3 +281,7 @@ mod tests {
         assert!(c.validate("app_hub", None).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "hub_runtime_fixture.rs"]
+mod positive_fixture;

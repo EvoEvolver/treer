@@ -26,7 +26,10 @@ with tempfile.TemporaryDirectory(prefix='treer-endpoint-check-') as home:
         [str(cargo), 'fmt', '--check'],
         [str(cargo), 'test', '--offline', '--locked', '--all-features'],
         [str(cargo), 'build', '--offline', '--locked', '--features', 'hub', '--bin', 'treer-message-hub'],
+        ['/usr/bin/python3', '-I', str(root / 'tests/test_production_boundary.py'), str(repo / 'target/debug/treer-message-hub')],
         ['/usr/bin/python3', '-I', str(root / 'tests/test_http_runtime.py'), str(repo / 'target/debug/treer-message-hub')],
         [str(cargo), 'clippy', '--offline', '--locked', '--all-features', '--all-targets', '--', '-D', 'warnings'],
+        [str(cargo), 'build', '--release', '--offline', '--locked', '--all-features', '--bins'],
+        ['/usr/bin/python3', '-I', str(root / 'tests/test_production_boundary.py'), str(repo / 'target/release/treer-message-hub')],
     ]:
         subprocess.run(command, cwd=root, env=environment, check=True)

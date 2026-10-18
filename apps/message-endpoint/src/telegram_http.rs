@@ -15,6 +15,22 @@ pub struct BotClient {
     test_origin: Option<String>,
 }
 impl BotClient {
+    #[cfg(test)]
+    pub(crate) fn with_test_origin_159(
+        account_id: String,
+        token: String,
+        bot_id: i64,
+        origin: String,
+    ) -> Self {
+        assert!(
+            origin.starts_with("http://127.0.0.1:")
+                && origin.ends_with("/TREER_TEST_ONLY_BOT_ORIGIN_159")
+        );
+        let mut client = Self::new(account_id, token, bot_id).unwrap();
+        client.test_origin = Some(origin);
+        client
+    }
+
     pub fn new(account_id: String, token: String, bot_id: i64) -> Result<Self, Error> {
         if !crate::store::valid_id(&account_id) || !valid_token(&token, bot_id) {
             return Err(Error::Invalid);
