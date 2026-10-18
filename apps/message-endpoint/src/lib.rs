@@ -57,3 +57,6 @@ pub mod telegram_workers;
 
 #[cfg(all(unix, feature = "hub"))]
 pub mod telegram_tokens;
+
+#[cfg(all(unix, feature = "hub"))]
+pub mod email;

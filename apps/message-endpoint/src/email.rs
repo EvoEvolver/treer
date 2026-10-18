@@ -1,0 +1,950 @@
+//! Durable email mechanics. Not wired into the HTTP/runtime activation path yet.
+//! Callers must supply freshly verified owner/member authority and Core readback;
+//! these storage primitives are not authentication or an alternative owner API.
+use crate::{
+    protocol::{Envelope, SenderKind, MAX_BODY},
+    store::{valid_id, Store},
+};
+use rusqlite::{params, OptionalExtension, Transaction};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+pub const REAL_RECIPIENT: &str = "doomspec@outlook.com";
+const MAX_MESSAGES: i64 = 10_000;
+const MAX_BYTES: i64 = 128 * 1024 * 1024;
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("email_storage_unavailable")]
+    Storage(#[from] rusqlite::Error),
+    #[error("email_private_storage_unavailable")]
+    PrivateStorage,
+    #[error("email_input_invalid")]
+    Invalid,
+    #[error("email_reply_unavailable")]
+    Denied,
+    #[error("email_idempotency_conflict")]
+    Conflict,
+    #[error("email_capacity_exceeded")]
+    Full,
+    #[error("email_rate_limited")]
+    Rate,
+    #[error("email_lease_unavailable")]
+    Lease,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Contact {
+    pub address: String,
+    pub member_id: String,
+}
+impl Contact {
+    pub fn normalized(mut self) -> Result<Self, Error> {
+        if !valid_id(&self.member_id)
+            || self.member_id.len() > 128
+            || !self.address.is_ascii()
+            || self.address.len() > 254
+        {
+            return Err(Error::Invalid);
+        }
+        let (local, domain) = self.address.split_once('@').ok_or(Error::Invalid)?;
+        if local.is_empty()
+            || local.len() > 64
+            || local.starts_with('.')
+            || local.ends_with('.')
+            || local.contains("..")
+            || !local
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._+-".contains(&b))
+            || !domain.contains('.')
+            || domain.len() > 253
+            || domain.split('.').any(|label| {
+                label.is_empty()
+                    || label.len() > 63
+                    || label.starts_with('-')
+                    || label.ends_with('-')
+                    || !label
+                        .bytes()
+                        .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            })
+        {
+            return Err(Error::Invalid);
+        }
+        self.address.make_ascii_lowercase();
+        Ok(self)
+    }
+}
+#[derive(Clone, Copy, Default, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    Outbox,
+    Proxy,
+}
+#[derive(Clone, Serialize)]
+pub struct Notification {
+    pub to: String,
+    pub subject: String,
+    pub text: String,
+    pub idempotency_key: String,
+}
+/// Private lease capability: never serialized to browser status or audit.
+pub struct Intent {
+    id: String,
+    nonce: String,
+    thread: String,
+    endpoint: String,
+    generation: i64,
+    address: String,
+}
+impl Intent {
+    pub fn notification(&self, public_url: &str, mode: Mode) -> Result<Notification, Error> {
+        if mode == Mode::Proxy && self.address != REAL_RECIPIENT {
+            return Err(Error::Denied);
+        }
+        let mut url = reqwest::Url::parse(public_url).map_err(|_| Error::Invalid)?;
+        let loopback = url
+            .host_str()
+            .and_then(|h| h.trim_matches(['[', ']']).parse::<std::net::IpAddr>().ok())
+            .is_some_and(|ip| ip.is_loopback());
+        if !(url.scheme() == "https" || (url.scheme() == "http" && loopback))
+            || url.host_str().is_none()
+            || !url.username().is_empty()
+            || url.password().is_some()
+            || url.path() != "/"
+            || url.query().is_some()
+            || url.fragment().is_some()
+        {
+            return Err(Error::Invalid);
+        }
+        url.set_fragment(Some(&format!("email-thread={}", self.thread)));
+        Ok(Notification {
+            to: self.address.clone(),
+            subject: "Treer conversation update".into(),
+            text: format!(
+                "New Agent message in thread {}.\n\nRead and reply (Treer login required):\n{}",
+                self.thread, url
+            ),
+            idempotency_key: self.id.clone(),
+        })
+    }
+}
+#[derive(Serialize)]
+pub struct Thread {
+    pub id: String,
+    pub endpoint_id: String,
+    pub recipient_agent_id: String,
+    pub messages: Vec<Text>,
+}
+#[derive(Serialize)]
+pub struct Text {
+    pub source_id: String,
+    pub body: String,
+    pub created_at: i64,
+}
+fn digest(parts: &[&str]) -> String {
+    let mut hash = Sha256::new();
+    for p in parts {
+        hash.update((p.len() as u64).to_be_bytes());
+        hash.update(p.as_bytes());
+    }
+    format!("{:x}", hash.finalize())
+}
+fn valid_time(now: i64) -> bool {
+    (0..=i64::MAX - 172800).contains(&now)
+}
+fn nonce(value: &str) -> bool {
+    value.len() == 64 && value.bytes().all(|b| b.is_ascii_hexdigit())
+}
+fn capacity(
+    tx: &Transaction<'_>,
+    limits: crate::store::Limits,
+    endpoint: &str,
+    bytes: usize,
+) -> Result<(), Error> {
+    let (count, size): (i64, i64) = tx.query_row(
+        "SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM email_messages",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    let (local,local_size):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(length(CAST(m.body AS BLOB))),0) FROM email_messages m JOIN email_threads t ON t.id=m.thread WHERE t.endpoint=?1",[endpoint],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    if count >= limits.global_count.min(MAX_MESSAGES)
+        || size.saturating_add(bytes as i64) > limits.global_bytes.min(MAX_BYTES)
+        || local >= limits.endpoint_count.min(1000)
+        || local_size.saturating_add(bytes as i64) > limits.endpoint_bytes.min(16 * 1024 * 1024)
+    {
+        return Err(Error::Full);
+    }
+    Ok(())
+}
+fn active(
+    tx: &Transaction<'_>,
+    endpoint: &str,
+    generation: i64,
+) -> Result<(String, Contact), Error> {
+    tx.query_row("SELECT e.recipient,t.address,t.member FROM endpoints e JOIN email_targets t ON e.id=t.endpoint AND e.generation=t.generation WHERE e.id=?1 AND e.generation=?2 AND e.paused=0 AND t.revoked=0",params![endpoint,generation],|r|Ok((r.get(0)?,Contact{address:r.get(1)?,member_id:r.get(2)?}))).optional()?.ok_or(Error::Denied)
+}
+/// Shared private SQLite, with additive tables only. This does not start workers.
+pub struct Queue<'a> {
+    store: &'a mut Store,
+}
+impl<'a> Queue<'a> {
+    pub fn new(store: &'a mut Store) -> Result<Self, Error> {
+        store.db.execute_batch("CREATE TABLE IF NOT EXISTS email_targets(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),generation INTEGER NOT NULL,address TEXT NOT NULL,member TEXT NOT NULL,revoked INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS email_threads(id TEXT PRIMARY KEY,endpoint TEXT NOT NULL REFERENCES endpoints(id),generation INTEGER NOT NULL,recipient TEXT NOT NULL,address TEXT NOT NULL,member TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS email_messages(thread TEXT NOT NULL REFERENCES email_threads(id),source TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,at INTEGER NOT NULL,PRIMARY KEY(thread,source));
+        CREATE TABLE IF NOT EXISTS email_intents(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,state INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_try INTEGER NOT NULL DEFAULT 0,nonce TEXT,lease_until INTEGER,mode TEXT);
+        CREATE TABLE IF NOT EXISTS email_attempts(id INTEGER PRIMARY KEY,endpoint TEXT NOT NULL,at INTEGER NOT NULL);")?;
+        Ok(Self { store })
+    }
+    /// Owner executor must check current membership and atomically audit binding
+    /// before exposing this through any request handler. No automatic activation.
+    pub fn bind_paused(
+        &mut self,
+        endpoint: &str,
+        generation: i64,
+        contact: Contact,
+    ) -> Result<(), Error> {
+        let contact = contact.normalized()?;
+        let tx = self.store.db.transaction()?;
+        let paused: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM endpoints WHERE id=?1 AND generation=?2 AND paused=1)",
+            params![endpoint, generation],
+            |r| r.get(0),
+        )?;
+        if !paused {
+            return Err(Error::Denied);
+        }
+        tx.execute(
+            "INSERT INTO email_targets(endpoint,generation,address,member) VALUES(?1,?2,?3,?4)",
+            params![endpoint, generation, contact.address, contact.member_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+    /// The owner revoke primitive is containment: pending leases cannot be newly
+    /// dispatched afterwards. An already-issued network request is not recalled.
+    pub fn revoke(&mut self, endpoint: &str) -> Result<(), Error> {
+        self.store.db.execute(
+            "UPDATE email_targets SET revoked=1 WHERE endpoint=?1",
+            [endpoint],
+        )?;
+        Ok(())
+    }
+    /// Only a reassembled authenticated endpoint envelope, after current Core
+    /// readback/member admission. Body is stored privately; mail never uses it.
+    pub fn admit(
+        &mut self,
+        endpoint: &str,
+        generation: i64,
+        envelope: &Envelope,
+        now: i64,
+    ) -> Result<String, Error> {
+        let Envelope::Outbound {
+            message_id,
+            original_sender,
+            body,
+            context_ids,
+            ..
+        } = envelope
+        else {
+            return Err(Error::Invalid);
+        };
+        if !valid_time(now)
+            || !valid_id(message_id)
+            || body.len() > MAX_BODY
+            || context_ids.len() > 64
+            || context_ids.iter().any(|id| !valid_id(id))
+        {
+            return Err(Error::Invalid);
+        }
+        let tx = self.store.db.transaction()?;
+        let (recipient, contact) = active(&tx, endpoint, generation)?;
+        if original_sender.kind != SenderKind::Agent || original_sender.id != recipient {
+            return Err(Error::Denied);
+        }
+        let mut thread = None;
+        for context in context_ids {
+            thread=tx.query_row("SELECT t.id FROM email_threads t JOIN email_messages m ON m.thread=t.id WHERE t.endpoint=?1 AND t.generation=?2 AND m.source=?3",params![endpoint,generation,context],|r|r.get::<_,String>(0)).optional()?;
+            if thread.is_some() {
+                break;
+            }
+        }
+        let thread = thread.unwrap_or_else(|| {
+            digest(&[
+                "email-thread",
+                endpoint,
+                &generation.to_string(),
+                message_id,
+            ])
+        });
+        let prior:Option<(String,String)>=tx.query_row("SELECT t.id,m.digest FROM email_threads t JOIN email_messages m ON m.thread=t.id WHERE t.endpoint=?1 AND t.generation=?2 AND m.source=?3",params![endpoint,generation,message_id],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let mut fingerprint = vec![body.as_str()];
+        fingerprint.extend(context_ids.iter().map(String::as_str));
+        let hash = digest(&fingerprint);
+        if let Some((old, old_hash)) = prior {
+            if old_hash != hash {
+                return Err(Error::Conflict);
+            }
+            return Ok(old);
+        }
+        capacity(&tx, self.store.limits, endpoint, body.len())?;
+        tx.execute(
+            "INSERT OR IGNORE INTO email_threads VALUES(?1,?2,?3,?4,?5,?6)",
+            params![
+                thread,
+                endpoint,
+                generation,
+                recipient,
+                contact.address,
+                contact.member_id
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO email_messages VALUES(?1,?2,?3,?4,?5)",
+            params![thread, message_id, body, hash, now],
+        )?;
+        let id = digest(&[
+            "email-notify",
+            endpoint,
+            &generation.to_string(),
+            message_id,
+        ]);
+        tx.execute(
+            "INSERT INTO email_intents(id,thread,endpoint,generation) VALUES(?1,?2,?3,?4)",
+            params![id, thread, endpoint, generation],
+        )?;
+        tx.commit()?;
+        Ok(thread)
+    }
+    /// Fresh member authentication is required BEFORE calling; an owner does
+    /// not receive implicit read access to another member's private threads.
+    pub fn thread(&self, id: &str, verified_member: &str) -> Result<Thread, Error> {
+        let (endpoint,generation,recipient,address,member):(String,i64,String,String,String)=self.store.db.query_row("SELECT endpoint,generation,recipient,address,member FROM email_threads WHERE id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?))).optional()?.ok_or(Error::Denied)?;
+        let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation WHERE t.endpoint=?1 AND t.generation=?2 AND t.address=?3 AND t.member=?4 AND t.revoked=0)",params![endpoint,generation,address,member],|r|r.get(0))?;
+        if !current || member != verified_member {
+            return Err(Error::Denied);
+        }
+        let mut query = self.store.db.prepare(
+            "SELECT source,body,at FROM email_messages WHERE thread=?1 ORDER BY at,source LIMIT 50",
+        )?;
+        let messages = query
+            .query_map([id], |r| {
+                Ok(Text {
+                    source_id: r.get(0)?,
+                    body: r.get(1)?,
+                    created_at: r.get(2)?,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Thread {
+            id: id.into(),
+            endpoint_id: endpoint,
+            recipient_agent_id: recipient,
+            messages,
+        })
+    }
+    /// Caller supplies CSPRNG nonce; limits count attempts, not successful mail.
+    /// Do not hold the store mutex while sending the returned frozen intent.
+    pub fn claim(
+        &mut self,
+        endpoint: &str,
+        generation: i64,
+        now: i64,
+        lease_nonce: &str,
+    ) -> Result<Option<Intent>, Error> {
+        if !valid_time(now) || !nonce(lease_nonce) {
+            return Err(Error::Invalid);
+        }
+        let tx = self.store.db.transaction()?;
+        let (_, contact) = active(&tx, endpoint, generation)?;
+        tx.execute(
+            "DELETE FROM email_attempts WHERE at<?1",
+            [now.saturating_sub(172800)],
+        )?;
+        let candidate:Option<(String,String)>=tx.query_row("SELECT id,thread FROM email_intents WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts<8 AND next_try<=?3 AND (lease_until IS NULL OR lease_until<=?3) ORDER BY rowid LIMIT 1",params![endpoint,generation,now],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        let Some((id, thread)) = candidate else {
+            return Ok(None);
+        };
+        for (seconds, local_cap, global_cap) in [(60, 10, 60), (86400, 100, 1000)] {
+            let (local, global): (i64, i64) = tx.query_row(
+                "SELECT coalesce(sum(endpoint=?1),0),count(*) FROM email_attempts WHERE at>?2",
+                params![endpoint, now.saturating_sub(seconds)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?;
+            if local >= local_cap || global >= global_cap {
+                return Err(Error::Rate);
+            }
+        }
+        tx.execute(
+            "INSERT INTO email_attempts(endpoint,at) VALUES(?1,?2)",
+            params![endpoint, now],
+        )?;
+        tx.execute("UPDATE email_intents SET attempts=attempts+1,nonce=?2,lease_until=?3,next_try=?3 WHERE id=?1",params![id,lease_nonce,now.saturating_add(60)])?;
+        tx.commit()?;
+        Ok(Some(Intent {
+            id,
+            nonce: lease_nonce.into(),
+            thread,
+            endpoint: endpoint.into(),
+            generation,
+            address: contact.address,
+        }))
+    }
+    /// Fence against pause/revoke immediately before dispatch. Current directory
+    /// membership and Hub Core readback are separate caller checks, never cached.
+    pub fn dispatchable(&self, intent: &Intent, now: i64) -> Result<bool, Error> {
+        let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_intents i JOIN endpoints e ON e.id=i.endpoint AND e.generation=i.generation JOIN email_targets t ON t.endpoint=e.id AND t.generation=e.generation WHERE i.id=?1 AND i.nonce=?2 AND i.state=0 AND i.lease_until>?3 AND e.paused=0 AND t.revoked=0 AND t.address=?4)",params![intent.id,intent.nonce,now,intent.address],|r|r.get(0))?;
+        Ok(current)
+    }
+    /// Persist acceptance even if owner paused after the send. Never turn a
+    /// possible external success into a retry merely because pause raced it.
+    pub fn complete(&mut self, intent: &Intent, mode: Mode) -> Result<(), Error> {
+        if mode == Mode::Proxy && intent.address != REAL_RECIPIENT {
+            return Err(Error::Denied);
+        }
+        let changed=self.store.db.execute("UPDATE email_intents SET state=1,mode=?3,nonce=NULL,lease_until=NULL WHERE id=?1 AND nonce=?2 AND endpoint=?4 AND generation=?5 AND state=0",params![intent.id,intent.nonce,if mode==Mode::Outbox{"outbox"}else{"proxy"},intent.endpoint,intent.generation])?;
+        if changed != 1 {
+            return Err(Error::Lease);
+        }
+        Ok(())
+    }
+    pub fn failed(&mut self, intent: &Intent, now: i64, permanent: bool) -> Result<(), Error> {
+        if !valid_time(now) {
+            return Err(Error::Invalid);
+        }
+        let changed=self.store.db.execute("UPDATE email_intents SET state=CASE WHEN ?3 OR attempts>=8 THEN 2 ELSE 0 END,next_try=?4+min(3600,30*(1<<min(attempts,6))),nonce=NULL,lease_until=NULL WHERE id=?1 AND nonce=?2 AND state=0",params![intent.id,intent.nonce,permanent,now])?;
+        if changed != 1 {
+            return Err(Error::Lease);
+        }
+        Ok(())
+    }
+}
+
+/// Persist only the generated notification, using a private directory descriptor.
+/// Exclusive publication prevents partial files from being mistaken for receipts.
+/// A retry verifies the exact prior bytes; changed or unsafe files fail closed.
+pub fn write_outbox(
+    intent: &Intent,
+    public_url: &str,
+    directory: &std::path::Path,
+) -> Result<(), Error> {
+    use rustix::fs::{self, AtFlags, Mode as FileMode, OFlags};
+    use std::io::{Read, Write};
+    fn private<T, E>(result: Result<T, E>) -> Result<T, Error> {
+        result.map_err(|_| Error::PrivateStorage)
+    }
+    let bytes = serde_json::to_vec(&intent.notification(public_url, Mode::Outbox)?)
+        .map_err(|_| Error::Invalid)?;
+    let directory = private(crate::private_store::open_directory(directory, false))?;
+    let name = format!("{}.json", intent.id);
+    let flags = OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY;
+    let existing = || -> Result<(), Error> {
+        let file = private(fs::openat(
+            &directory,
+            name.as_str(),
+            OFlags::RDONLY | flags,
+            FileMode::empty(),
+        ))?;
+        private(crate::private_store::check_file(&file))?;
+        let mut prior = Vec::new();
+        private(std::fs::File::from(file).take(8193).read_to_end(&mut prior))?;
+        if prior != bytes {
+            return Err(Error::Conflict);
+        }
+        Ok(())
+    };
+    match fs::statat(&directory, name.as_str(), AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(_) => return existing(),
+        Err(rustix::io::Errno::NOENT) => {}
+        Err(_) => return Err(Error::PrivateStorage),
+    }
+    let mut random = [0u8; 16];
+    private(getrandom::fill(&mut random))?;
+    let temporary = format!(
+        ".email-{}.tmp",
+        random
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>()
+    );
+    let file = private(fs::openat(
+        &directory,
+        temporary.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | flags,
+        FileMode::from_raw_mode(0o600),
+    ))?;
+    let result = (|| {
+        private(crate::private_store::check_file(&file))?;
+        let mut file = std::fs::File::from(file);
+        private(file.write_all(&bytes))?;
+        private(file.sync_all())?;
+        match fs::linkat(
+            &directory,
+            temporary.as_str(),
+            &directory,
+            name.as_str(),
+            AtFlags::empty(),
+        ) {
+            Ok(()) => {}
+            Err(rustix::io::Errno::EXIST) => {
+                return existing();
+            }
+            Err(_) => return Err(Error::PrivateStorage),
+        }
+        Ok(())
+    })();
+    let cleanup = fs::unlinkat(&directory, temporary.as_str(), AtFlags::empty());
+    result?;
+    private(cleanup)?;
+    private(fs::fsync(&directory))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{protocol::Sender, store::Limits};
+    fn fixture() -> Store {
+        let mut store = Store::memory(Limits::default()).unwrap();
+        store.register_paused("ag_email", 1, "ag_internal").unwrap();
+        Queue::new(&mut store)
+            .unwrap()
+            .bind_paused(
+                "ag_email",
+                1,
+                Contact {
+                    address: "PERSON@example.test".into(),
+                    member_id: "user_alice".into(),
+                },
+            )
+            .unwrap();
+        // Production activation is deliberately not exposed by this increment.
+        store
+            .db
+            .execute("UPDATE endpoints SET paused=0", [])
+            .unwrap();
+        store
+    }
+    fn message(id: &str, body: &str, context: &[&str]) -> Envelope {
+        Envelope::Outbound {
+            delivery_id: format!("delivery_{id}"),
+            message_id: id.into(),
+            original_sender: Sender {
+                kind: SenderKind::Agent,
+                id: "ag_internal".into(),
+            },
+            body: body.into(),
+            context_ids: context.iter().map(|v| (*v).into()).collect(),
+        }
+    }
+    fn claim(queue: &mut Queue<'_>, time: i64, n: u8) -> Intent {
+        queue
+            .claim("ag_email", 1, time, &format!("{n:064x}"))
+            .unwrap()
+            .unwrap()
+    }
+    #[test]
+    fn email_contact_rejects_headers_lists_display_names_and_invalid_domains() {
+        for address in [
+            "person@example.test\r\nBcc:evil@example.test",
+            "a@example.test,b@example.test",
+            "Name <a@example.test>",
+            "a@localhost",
+            "a@-example.test",
+            "a@foo..test",
+            "a..b@example.test",
+            "ü@example.test",
+            "a@example.test ",
+        ] {
+            assert!(Contact {
+                address: address.into(),
+                member_id: "user_alice".into()
+            }
+            .normalized()
+            .is_err());
+        }
+        let contact = Contact {
+            address: "Person+Tag@EXAMPLE.TEST".into(),
+            member_id: "user_alice".into(),
+        }
+        .normalized()
+        .unwrap();
+        assert_eq!(contact.address, "person+tag@example.test");
+    }
+    #[test]
+    fn email_fixed_template_never_contains_message_text_and_proxy_has_immutable_cap() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        q.admit(
+            "ag_email",
+            1,
+            &message("msg_one", "ATTACKER_SECRET\r\nclick https://evil.test", &[]),
+            100,
+        )
+        .unwrap();
+        let intent = claim(&mut q, 100, 1);
+        let notification = intent
+            .notification("https://hub.example.test/", Mode::default())
+            .unwrap();
+        let encoded = serde_json::to_string(&notification).unwrap();
+        assert!(!encoded.contains("ATTACKER_SECRET"));
+        assert!(!encoded.contains("evil.test"));
+        assert_eq!(notification.to, "person@example.test");
+        assert!(notification
+            .text
+            .contains("https://hub.example.test/#email-thread="));
+        assert!(matches!(
+            intent.notification("https://hub.example.test/", Mode::Proxy),
+            Err(Error::Denied)
+        ));
+        assert!(matches!(
+            q.complete(&intent, Mode::Proxy),
+            Err(Error::Denied)
+        ));
+        for origin in [
+            "https://hub.example.test/?next=evil",
+            "https://secret@hub.example.test/",
+            "https://hub.example.test/path",
+            "https://hub.example.test/#token",
+            "http://example.test/",
+        ] {
+            assert!(intent.notification(origin, Mode::Outbox).is_err());
+        }
+        q.complete(&intent, Mode::Outbox).unwrap();
+        assert!(q
+            .claim("ag_email", 1, 101, &format!("{:064x}", 2))
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn email_replay_is_idempotent_and_context_changes_conflict() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        let first = q
+            .admit("ag_email", 1, &message("msg_one", "first", &[]), 100)
+            .unwrap();
+        assert_eq!(
+            first,
+            q.admit("ag_email", 1, &message("msg_one", "first", &[]), 101)
+                .unwrap()
+        );
+        assert!(matches!(
+            q.admit("ag_email", 1, &message("msg_one", "changed", &[]), 102),
+            Err(Error::Conflict)
+        ));
+        assert!(matches!(
+            q.admit(
+                "ag_email",
+                1,
+                &message("msg_one", "first", &["msg_other"]),
+                102
+            ),
+            Err(Error::Conflict)
+        ));
+        assert_eq!(
+            first,
+            q.admit(
+                "ag_email",
+                1,
+                &message("msg_two", "second", &["msg_one"]),
+                103
+            )
+            .unwrap()
+        );
+        assert_eq!(q.thread(&first, "user_alice").unwrap().messages.len(), 2);
+    }
+    #[test]
+    fn email_only_fixed_initiator_and_generation_may_create_threads() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        let mut envelope = message("msg_one", "body", &[]);
+        if let Envelope::Outbound {
+            original_sender, ..
+        } = &mut envelope
+        {
+            original_sender.id = "ag_other".into();
+        }
+        assert!(matches!(
+            q.admit("ag_email", 1, &envelope, 100),
+            Err(Error::Denied)
+        ));
+        assert!(matches!(
+            q.admit("ag_email", 2, &message("msg_one", "body", &[]), 100),
+            Err(Error::Denied)
+        ));
+        q.store.pause("ag_email").unwrap();
+        assert!(matches!(
+            q.admit("ag_email", 1, &message("msg_one", "body", &[]), 100),
+            Err(Error::Denied)
+        ));
+    }
+    #[test]
+    fn email_thread_id_is_not_authority_and_revocation_blocks_read_and_dispatch() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        let thread = q
+            .admit("ag_email", 1, &message("msg_one", "private", &[]), 100)
+            .unwrap();
+        let intent = claim(&mut q, 100, 1);
+        assert!(q.thread(&thread, "user_alice").is_ok());
+        assert!(matches!(q.thread(&thread, "user_bob"), Err(Error::Denied)));
+        assert!(matches!(
+            q.thread(&thread, "user_owner"),
+            Err(Error::Denied)
+        ));
+        q.revoke("ag_email").unwrap();
+        assert!(matches!(
+            q.thread(&thread, "user_alice"),
+            Err(Error::Denied)
+        ));
+        assert!(!q.dispatchable(&intent, 101).unwrap());
+    }
+    #[test]
+    fn email_lease_reclaim_fences_stale_worker_and_pause_allows_receipt_only() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        q.admit("ag_email", 1, &message("msg_one", "body", &[]), 100)
+            .unwrap();
+        let old = claim(&mut q, 100, 1);
+        assert!(q
+            .claim("ag_email", 1, 159, &format!("{:064x}", 2))
+            .unwrap()
+            .is_none());
+        let current = claim(&mut q, 160, 2);
+        assert!(!q.dispatchable(&old, 161).unwrap());
+        assert!(matches!(q.complete(&old, Mode::Outbox), Err(Error::Lease)));
+        assert!(q.dispatchable(&current, 161).unwrap());
+        q.store.pause("ag_email").unwrap();
+        assert!(!q.dispatchable(&current, 162).unwrap());
+        q.complete(&current, Mode::Outbox).unwrap();
+        assert!(matches!(
+            q.claim("ag_email", 1, 200, &format!("{:064x}", 3)),
+            Err(Error::Denied)
+        ));
+    }
+    #[test]
+    fn email_retry_backoff_and_attempt_budget_are_bounded() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        q.admit("ag_email", 1, &message("msg_one", "body", &[]), 100)
+            .unwrap();
+        let first = claim(&mut q, 100, 1);
+        q.failed(&first, 100, false).unwrap();
+        assert!(q
+            .claim("ag_email", 1, 159, &format!("{:064x}", 2))
+            .unwrap()
+            .is_none());
+        for i in 2..=8 {
+            let intent = claim(&mut q, i as i64 * 4000, i);
+            q.failed(&intent, i as i64 * 4000, false).unwrap();
+        }
+        assert!(q
+            .claim("ag_email", 1, 100000, &format!("{:064x}", 9))
+            .unwrap()
+            .is_none());
+        assert!(matches!(q.failed(&first, -1, false), Err(Error::Invalid)));
+        assert!(q
+            .claim("ag_email", 1, i64::MAX, &format!("{:064x}", 9))
+            .is_err());
+    }
+    #[test]
+    fn email_per_binding_and_global_attempt_limits_fail_closed() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        for i in 0..11 {
+            q.admit(
+                "ag_email",
+                1,
+                &message(&format!("msg_{i}"), "body", &[]),
+                100,
+            )
+            .unwrap();
+        }
+        for n in 0..10 {
+            let intent = claim(&mut q, 100, n);
+            q.complete(&intent, Mode::Outbox).unwrap();
+        }
+        assert!(matches!(
+            q.claim("ag_email", 1, 100, &format!("{:064x}", 12)),
+            Err(Error::Rate)
+        ));
+        // A separate binding cannot bypass the global attempt window.
+        for _ in 0..50 {
+            q.store
+                .db
+                .execute(
+                    "INSERT INTO email_attempts(endpoint,at) VALUES('ag_other',100)",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(q
+            .claim("ag_email", 1, 160, &format!("{:064x}", 12))
+            .unwrap()
+            .is_some());
+        // At 160 the 60-second window expires. Day limit is still enforced.
+        for _ in 0..90 {
+            q.store
+                .db
+                .execute(
+                    "INSERT INTO email_attempts(endpoint,at) VALUES('ag_email',160)",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            q.claim("ag_email", 1, 221, &format!("{:064x}", 13)),
+            Err(Error::Rate)
+        ));
+    }
+    #[test]
+    fn email_admission_is_atomic_on_queue_failure() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        q.store.db.execute_batch("CREATE TRIGGER reject_intent BEFORE INSERT ON email_intents BEGIN SELECT RAISE(ABORT,'test'); END;").unwrap();
+        assert!(q
+            .admit("ag_email", 1, &message("msg_one", "body", &[]), 100)
+            .is_err());
+        for table in ["email_messages", "email_threads", "email_intents"] {
+            let n: i64 = q
+                .store
+                .db
+                .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(n, 0);
+        }
+    }
+    #[test]
+    fn email_outbox_is_private_atomic_idempotent_and_rejects_file_aliases() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().canonicalize().unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        q.admit(
+            "ag_email",
+            1,
+            &message("msg_one", "SYNTHETIC_PRIVATE_BODY", &[]),
+            100,
+        )
+        .unwrap();
+        let intent = claim(&mut q, 100, 1);
+        write_outbox(&intent, "https://hub.example.test/", &directory).unwrap();
+        write_outbox(&intent, "https://hub.example.test/", &directory).unwrap();
+        let path = directory.join(format!("{}.json", intent.id));
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(!String::from_utf8_lossy(&bytes).contains("SYNTHETIC_PRIVATE_BODY"));
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(std::fs::read_dir(&directory).unwrap().count(), 1);
+        std::fs::write(&path, b"changed").unwrap();
+        assert!(matches!(
+            write_outbox(&intent, "https://hub.example.test/", &directory),
+            Err(Error::Conflict)
+        ));
+        std::fs::write(&path, &bytes).unwrap();
+        let alias = directory.join("alias");
+        std::fs::hard_link(&path, &alias).unwrap();
+        assert!(write_outbox(&intent, "https://hub.example.test/", &directory).is_err());
+        std::fs::remove_file(&alias).unwrap();
+        std::fs::rename(&path, &alias).unwrap();
+        std::os::unix::fs::symlink(&alias, &path).unwrap();
+        assert!(write_outbox(&intent, "https://hub.example.test/", &directory).is_err());
+        assert_eq!(std::fs::read(&alias).unwrap(), bytes);
+    }
+    #[test]
+    fn email_capacity_uses_private_store_limits_and_existing_state_survives_reopen() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().canonicalize().unwrap();
+        std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let limits = Limits {
+            endpoint_count: 1,
+            ..Limits::default()
+        };
+        let thread;
+        {
+            let mut store = Store::open(&directory, limits).unwrap();
+            store.register_paused("ag_email", 1, "ag_internal").unwrap();
+            let mut q = Queue::new(&mut store).unwrap();
+            q.bind_paused(
+                "ag_email",
+                1,
+                Contact {
+                    address: "person@example.test".into(),
+                    member_id: "user_alice".into(),
+                },
+            )
+            .unwrap();
+            q.store
+                .db
+                .execute("UPDATE endpoints SET paused=0", [])
+                .unwrap();
+            thread = q
+                .admit("ag_email", 1, &message("msg_one", "private", &[]), 100)
+                .unwrap();
+            assert!(matches!(
+                q.admit("ag_email", 1, &message("msg_two", "another", &[]), 101),
+                Err(Error::Full)
+            ));
+            let _abandoned = claim(&mut q, 100, 1);
+        }
+        let mut store = Store::open(&directory, limits).unwrap();
+        let mut q = Queue::new(&mut store).unwrap();
+        assert_eq!(
+            q.thread(&thread, "user_alice").unwrap().messages[0].body,
+            "private"
+        );
+        assert!(q
+            .claim("ag_email", 1, 159, &format!("{:064x}", 2))
+            .unwrap()
+            .is_none());
+        let retry = claim(&mut q, 160, 2);
+        q.complete(&retry, Mode::Outbox).unwrap();
+        assert!(q
+            .claim("ag_email", 1, 300, &format!("{:064x}", 3))
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn email_global_caps_apply_even_when_local_counter_is_empty() {
+        let mut store = fixture();
+        let mut q = Queue::new(&mut store).unwrap();
+        q.admit("ag_email", 1, &message("msg_one", "body", &[]), 100)
+            .unwrap();
+        for _ in 0..60 {
+            q.store
+                .db
+                .execute(
+                    "INSERT INTO email_attempts(endpoint,at) VALUES('ag_other',100)",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            q.claim("ag_email", 1, 101, &format!("{:064x}", 1)),
+            Err(Error::Rate)
+        ));
+        q.store
+            .db
+            .execute("DELETE FROM email_attempts", [])
+            .unwrap();
+        for _ in 0..1000 {
+            q.store
+                .db
+                .execute(
+                    "INSERT INTO email_attempts(endpoint,at) VALUES('ag_other',100)",
+                    [],
+                )
+                .unwrap();
+        }
+        assert!(matches!(
+            q.claim("ag_email", 1, 200, &format!("{:064x}", 1)),
+            Err(Error::Rate)
+        ));
+    }
+}

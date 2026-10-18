@@ -82,3 +82,21 @@ State/backups contain plaintext conversation content. 0600 does not isolate
 Agents sharing the OS user. Use dedicated OS users/containers and narrow enforce
 Policy/mount/network access. No automatic production migration, old email-thread
 URL transfer, inbound email or nonmember participation is implemented yet.
+
+## Increment status
+
+The current additive storage module implements fixed-target thread admission,
+notification intents, private outbox records, byte/count/attempt limits, lease
+reclaim, retry/backoff and pause/revocation fencing. It is **not connected to the
+runtime, browser routes, OAuth member sessions or a Proxy email worker yet**.
+The storage methods accept already-verified inputs; they do not authenticate a
+member or authorize activation by themselves. No existing endpoint is changed.
+
+Outbox publication uses an fsynced temporary file and exclusive hard-link
+publication in a private directory, then removes the temporary link and fsyncs
+the directory. Existing files must be private single-link regular files with
+identical bytes. A crash between publication and temporary-link removal fails
+closed on retry; an operator must inspect and reconcile that private record.
+Do not remove or overwrite it automatically or interpret an outbox record as
+actual mail delivery. Plaintext outbox records need the same backup/retention
+and OS isolation as hub state.
