@@ -2395,3 +2395,100 @@ async fn nats_cluster_routes_projection_commands_terminal_and_network() {
         .disconnect_server(&workspace_id, &source_id, source_connection)
         .await;
 }
+
+async fn read_model_capabilities(state: &AppState) -> Vec<String> {
+    state
+        .resolve_server("alpha", "server")
+        .await
+        .expect("server is known")
+        .capabilities
+}
+
+#[tokio::test]
+async fn cluster_replica_keeps_read_model_capabilities_when_the_owner_snapshot_has_none() {
+    let state = AppState::new();
+    state.ensure_workspace("alpha", "Alpha").await;
+    let owner = crate::cluster::ConnectionOwner {
+        proxy_id: "remote-proxy".to_string(),
+        connection_id: Uuid::new_v4(),
+    };
+    let update = |revision: u64, capabilities: Vec<&str>| ClusterServerSnapshot {
+        owner: owner.clone(),
+        revision,
+        snapshot: AgentServerSnapshot {
+            server: ServerInfo {
+                capabilities: capabilities.into_iter().map(str::to_string).collect(),
+                ..test_server()
+            },
+            agents: Vec::new(),
+        },
+    };
+    let upload = treer_protocol::CAPABILITY_MACHINE_UPLOAD;
+    let v3 = treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3;
+    state
+        .apply_cluster_snapshot(update(1, vec![upload, v3]))
+        .await;
+    assert_eq!(read_model_capabilities(&state).await, vec![upload, v3]);
+    // The owning instance republishes after a Controller snapshot that
+    // carries no capabilities: the replica keeps what it knows (#173).
+    state.apply_cluster_snapshot(update(2, Vec::new())).await;
+    assert_eq!(read_model_capabilities(&state).await, vec![upload, v3]);
+    // An explicit list from the owner still replaces it (a re-registered
+    // Controller without v3, e.g. Windows).
+    state.apply_cluster_snapshot(update(3, vec![upload])).await;
+    assert_eq!(read_model_capabilities(&state).await, vec![upload]);
+}
+
+#[tokio::test]
+async fn disconnect_keeps_last_known_capabilities_and_reconnect_replaces_them() {
+    let state = AppState::new();
+    let upload = treer_protocol::CAPABILITY_MACHINE_UPLOAD;
+    let v3 = treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3;
+    let first = Uuid::new_v4();
+    let (first_tx, _first_rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            first,
+            "controller-1".to_string(),
+            [upload, v3, treer_protocol::CAPABILITY_MACHINE_EXEC].map(str::to_string),
+            first_tx,
+        )
+        .await
+        .expect("register");
+    // Only the allow-listed names reach the read model.
+    assert_eq!(read_model_capabilities(&state).await, vec![upload, v3]);
+    // While offline the last known list stays; the dialog gates on status.
+    state.disconnect_server("alpha", "server", first).await;
+    assert_eq!(read_model_capabilities(&state).await, vec![upload, v3]);
+    // A legacy-only Controller reconnecting replaces the list ...
+    let second = Uuid::new_v4();
+    let (second_tx, _second_rx) = mpsc::unbounded_channel();
+    state
+        .register_server_instance_with_capabilities(
+            test_server(),
+            second,
+            "controller-2".to_string(),
+            [upload].map(str::to_string),
+            second_tx,
+        )
+        .await
+        .expect("re-register");
+    assert_eq!(read_model_capabilities(&state).await, vec![upload]);
+    // ... and its snapshots cannot add a capability the connection did not
+    // declare, nor erase the one it did.
+    state
+        .apply_snapshot(
+            second,
+            AgentServerSnapshot {
+                server: ServerInfo {
+                    capabilities: vec![v3.to_string()],
+                    ..test_server()
+                },
+                agents: Vec::new(),
+            },
+        )
+        .await
+        .expect("snapshot");
+    assert_eq!(read_model_capabilities(&state).await, vec![upload]);
+}
