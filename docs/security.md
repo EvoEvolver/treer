@@ -1050,10 +1050,20 @@ The flat workspace inventory is membership-based (#141): `GET
 /api/workspaces/{ws}/snapshot` and the browser event stream
 (`/api/workspaces/{ws}/events`) give every current member the same facts about
 every workload and machine: IDs, names, kinds, status, machine IDs, the
-workload's working directory (`cwd`, a path on the user's machine), `pid`,
-build versions, the machine root and the machine's allow-listed upload
-capabilities (`machine.upload`, `machine.upload.v3`; the Controller's full
-capability set stays in the Proxy connection table, #173). Policy
+workload's working directory (`cwd`, a path on the user's machine), build
+versions, the machine root and the machine's allow-listed upload capabilities
+(`machine.upload`, `machine.upload.v3`; the Controller's full capability set
+stays in the Proxy connection table, #173). The workload `pid` is not part of
+the browser-visible inventory (#153): a request authenticated with the session
+cookie receives an allow-listed Agent shape without it from the snapshot, the
+event stream (including replayed or buffered events, which are re-serialized
+through the view at delivery) and the Agent routes, while a `Bearer`
+credential (a human's CLI or API token, an Agent token, a machine token) keeps
+the full `AgentInfo`, still subject to membership and Policy `agent.discover`.
+The split is by credential kind, not by client name, so a member who holds a
+CLI token can still read `pid`; the change removes it from browser-delivered
+data only. `cwd` remains visible to members and is the next candidate for
+minimization once the Console has an explicit affordance for it. Policy
 `agent.discover` filters this list
 for machine and Agent principals only; applying it to browser sessions is a
 separate decision (#152), as is minimising `cwd`/`pid` (#153). The stream

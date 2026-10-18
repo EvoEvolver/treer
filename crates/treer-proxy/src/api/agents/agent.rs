@@ -37,7 +37,10 @@ pub(crate) async fn list_agents(
             Err(error) => return Err(error),
         }
     }
-    Ok(Json(json!({ "agents": agents })))
+    let view = super::super::inventory_view::inventory_view(&headers);
+    Ok(Json(json!({
+        "agents": super::super::inventory_view::agents_value(view, &agents)?
+    })))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -88,7 +91,8 @@ pub(crate) async fn get_agent(
         &mut agent,
     )
     .await?;
-    let mut value = serde_json::to_value(&agent)?;
+    let view = super::super::inventory_view::inventory_view(&headers);
+    let mut value = super::super::inventory_view::agent_value(view, &agent)?;
     if agent
         .interface
         .as_ref()
