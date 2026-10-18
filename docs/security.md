@@ -672,6 +672,12 @@ to detect encoded or unknown secrets. Deploy critical Apps under separate accoun
 or externally managed containers with minimal mounts and resource limits; the
 shared machine account is not a sandbox.
 
+For the message endpoint hub, processes running under the same UID can read the
+bot token file, SQLite state and held message content, and impersonate the
+endpoint. The hub cannot attest OS/container confinement or Policy isolation.
+An owner's explicit acceptance of unverified isolation records that risk; it
+does not establish or verify an isolation boundary.
+
 Treer does not currently provide deny-by-default workspace permissions. Absent
 an enforcing Policy, the default permits authenticated workspace actions; monitor
 mode does not enforce denials. Use explicit enforce-mode rules and treat workspace
