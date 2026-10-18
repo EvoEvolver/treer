@@ -2733,12 +2733,12 @@ impl ControllerRuntime {
             ui_path,
             registered_at: Utc::now(),
         };
-        self.validate_interface_manifest(agent_id, &descriptor)
-            .await?;
         let agent = self.get(agent_id)?;
-        // Rate limit after authentication and validation and before any
-        // mutation: an excess registration is refused and the existing
-        // registration stays exactly as it was.
+        // Rate limit after authentication (the caller resolved the Agent from
+        // its credential) and the cheap shape checks, but BEFORE the manifest
+        // fetch from the Agent's port and before any mutation: a flood of
+        // registrations costs no fetch once the window is spent, and an
+        // excess registration leaves the existing one exactly as it was.
         {
             let mut limiter =
                 self.inner.interface_registrations.lock().map_err(|_| {
@@ -2754,6 +2754,8 @@ impl ControllerRuntime {
                 ));
             }
         }
+        self.validate_interface_manifest(agent_id, &descriptor)
+            .await?;
         let info = {
             let mut agent = agent
                 .lock()

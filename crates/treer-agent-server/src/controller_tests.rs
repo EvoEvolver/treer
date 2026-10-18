@@ -2850,3 +2850,238 @@ async fn chunked_upload_capability_matches_the_dispatch_gate_and_legacy_stays() 
     host_task.abort();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn receipt_cap_evicts_failed_receipts_before_the_oldest_committed_one() {
+    let (runtime, root, host_task) = upload_fixture().await;
+    drop(runtime);
+    let uploads = crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
+    uploads.recover_at_startup();
+    // The oldest receipt is committed, then one failed receipt, then enough
+    // committed ones to sit exactly at the cap.
+    uploads.seed_receipt_for_test("upl_capoldest01", false);
+    uploads.seed_receipt_for_test("upl_capfailed01", true);
+    for index in 0..(crate::machine_upload::MAX_STORED_RESULTS - 2) {
+        uploads.seed_receipt_for_test(&format!("upl_cap{index:08}"), false);
+    }
+    assert_eq!(
+        uploads.receipts_for_test().len(),
+        crate::machine_upload::MAX_STORED_RESULTS
+    );
+    // A real commit pushes the journal over the cap: the failed receipt goes,
+    // not the oldest committed one.
+    uploads
+        .begin("upl_capnewest01", ".", "newest.bin", false, Some(2))
+        .unwrap();
+    uploads
+        .chunk("upl_capnewest01", Some(0), &b64(b"ok"))
+        .unwrap();
+    uploads
+        .part_commit("upl_capnewest01", 0, 2, &sha(b"ok"))
+        .unwrap();
+    uploads.commit("upl_capnewest01").unwrap();
+    let receipts = uploads.receipts_for_test();
+    assert_eq!(receipts.len(), crate::machine_upload::MAX_STORED_RESULTS);
+    assert!(receipts.iter().all(|(_, failed)| !failed));
+    assert_eq!(receipts.first().unwrap().0, "upl_capoldest01");
+    assert_eq!(receipts.last().unwrap().0, "upl_capnewest01");
+    // Once no failed receipt is left, the oldest committed one goes.
+    uploads.seed_receipt_for_test("upl_capnewest02", false);
+    let receipts = uploads.receipts_for_test();
+    assert_eq!(receipts.len(), crate::machine_upload::MAX_STORED_RESULTS);
+    assert_eq!(receipts.first().unwrap().0, "upl_cap00000000");
+    // The journal on disk agrees: a replacement Controller answers the kept
+    // receipts and no longer knows the evicted ones.
+    let replacement = crate::machine_upload::Uploads::new(root.clone(), "server".into(), vec![]);
+    assert_eq!(
+        replacement.result("upl_capnewest01").unwrap()["state"],
+        "committed"
+    );
+    assert_eq!(
+        replacement.result("upl_capfailed01").unwrap()["state"],
+        "unknown"
+    );
+    assert_eq!(
+        replacement.result("upl_capoldest01").unwrap()["state"],
+        "unknown"
+    );
+    host_task.abort();
+    drop(uploads);
+    drop(replacement);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+/// A Controller whose Host inventory holds one running Agent `command`, so
+/// `register_interface` passes `get(agent_id)`; nothing else is spawned.
+async fn agent_fixture() -> (ControllerRuntime, PathBuf, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt;
+    use treer_host_protocol::{
+        decode_message, encode_message, HostBuildInfo, HostMessage, HostRequest,
+    };
+    let temp = std::env::temp_dir().join(format!("trr-agent-{}", Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&temp).unwrap();
+    #[cfg(unix)]
+    let socket = temp.join("host.sock");
+    let root = std::fs::canonicalize(&temp).unwrap();
+    #[cfg(windows)]
+    let socket = treer_platform::endpoint_name(
+        &Uuid::new_v4().to_string(),
+        &treer_platform::current_user_sid().unwrap(),
+    );
+    let mut listener = treer_platform::LocalListener::bind(&socket).unwrap();
+    let now = chrono::DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
+    let metadata = AgentMetadata {
+        agent_id: "command".into(),
+        run_generation: 1,
+        workspace_id: "workspace".into(),
+        server_id: "server".into(),
+        kind: "command".into(),
+        name: "command".into(),
+        cwd: ".".into(),
+        workload_credential: new_workload_credential(),
+        http_proxy_port: None,
+    };
+    let initial = HostResponse::Synced {
+        host_epoch: "agent-host".into(),
+        host_build: HostBuildInfo {
+            version: "test".into(),
+            git_commit: "test".into(),
+        },
+        processes: vec![HostProcessInfo {
+            process_id: "command".into(),
+            pid: Some(1234),
+            cwd: ".".into(),
+            running: true,
+            started_at: now,
+            last_output_at: now,
+            exited_at: None,
+            exit_code: None,
+            stream_epoch: "epoch-command".into(),
+            first_revision: 1,
+            next_revision: 1,
+            bracketed_paste: false,
+            metadata: serde_json::to_string(&metadata).unwrap(),
+        }],
+        replay: vec![HostOutputReplay {
+            process_id: "command".into(),
+            stream_epoch: "epoch-command".into(),
+            first_available_revision: 1,
+            next_revision: 1,
+            gap: false,
+            chunks: vec![],
+        }],
+    };
+    let inventory = initial.clone();
+    let task = tokio::spawn(async move {
+        let mut stream = listener.accept().await.unwrap();
+        while let Ok(length) = stream.read_u32().await {
+            let mut bytes = vec![0; length as usize];
+            stream.read_exact(&mut bytes).await.unwrap();
+            let request: HostRequest = decode_message(&bytes).unwrap();
+            let encoded = encode_message(&HostMessage::Response {
+                request_id: request.request_id,
+                response: Some(inventory.clone()),
+                error: None,
+            })
+            .unwrap();
+            stream.write_u32(encoded.len() as u32).await.unwrap();
+            stream.write_all(&encoded).await.unwrap();
+        }
+    });
+    let (host, events) = HostClient::connect(&socket).await.unwrap();
+    let config = ControllerConfig {
+        protected_paths: vec![],
+        workspace_id: "workspace".into(),
+        server_id: "server".into(),
+        agent_server_url: "http://127.0.0.1:1".into(),
+        proxy_public_url: "https://proxy.example/".into(),
+        treer_binary: None,
+        interface_cache_path: root.join("interfaces.json"),
+        startup_store_path: root.join("startup.json"),
+        private_state_root: root.join("agent-private"),
+        provider_cli_root: root.join("provider-cli"),
+        root: root.clone(),
+    };
+    let (runtime, _) = ControllerRuntime::from_sync(host, initial, events, config).unwrap();
+    (runtime, root, task)
+}
+
+#[tokio::test]
+async fn eleventh_interface_registration_is_refused_before_any_manifest_request() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let (runtime, root, host_task) = agent_fixture().await;
+    // The Agent's "interface port" counts connections and hangs up at once,
+    // so every manifest fetch that happens is observable and fails.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let accepted = Arc::new(AtomicUsize::new(0));
+    let counter = accepted.clone();
+    let accept_task = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            counter.fetch_add(1, Ordering::SeqCst);
+            drop(stream);
+        }
+    });
+    // An existing registration that every refused attempt must leave intact.
+    let existing = AgentInterfaceDescriptor {
+        origin_url: None,
+        protocol: AGENT_INTERFACE_PROTOCOL_V1.into(),
+        instance_id: "existing".into(),
+        port: 1,
+        capabilities: vec![],
+        ui_path: None,
+        registered_at: Utc::now(),
+    };
+    runtime
+        .get("command")
+        .unwrap()
+        .lock()
+        .unwrap()
+        .info
+        .interface = Some(existing.clone());
+    let request = || RegisterAgentInterfaceRequest {
+        protocol: AGENT_INTERFACE_PROTOCOL_V1.into(),
+        instance_id: "flood".into(),
+        port,
+        capabilities: vec![],
+        ui_path: None,
+    };
+    for attempt in 1..=INTERFACE_REGISTRATIONS_PER_WINDOW {
+        let error = runtime
+            .register_interface("command", request())
+            .await
+            .unwrap_err();
+        assert_ne!(
+            error.code, "agent_interface_rate_limited",
+            "attempt {attempt} is within the window"
+        );
+        assert_eq!(
+            accepted.load(Ordering::SeqCst),
+            attempt as usize,
+            "attempt {attempt} reached the Agent port"
+        );
+    }
+    // The eleventh is refused with the fixed code and never opens a
+    // connection: the port count stays where the tenth left it.
+    let refused = runtime
+        .register_interface("command", request())
+        .await
+        .unwrap_err();
+    assert_eq!(refused.code, "agent_interface_rate_limited");
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        accepted.load(Ordering::SeqCst),
+        INTERFACE_REGISTRATIONS_PER_WINDOW as usize
+    );
+    // Unknown Agents are answered before the limiter counts anything.
+    let unknown = runtime
+        .register_interface("missing", request())
+        .await
+        .unwrap_err();
+    assert_ne!(unknown.code, "agent_interface_rate_limited");
+    assert_eq!(runtime.interface("command").unwrap(), Some(existing));
+    accept_task.abort();
+    host_task.abort();
+    drop(runtime);
+    std::fs::remove_dir_all(root).unwrap();
+}

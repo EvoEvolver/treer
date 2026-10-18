@@ -1743,7 +1743,10 @@ visible in the destination directory while an upload is active. Two uploads
 per user and eight per workspace may be active at once; an upload with no part
 for an hour, or older than six hours, is cancelled and its staging file
 removed. The Controller remembers committed receipts for 24 hours (at most
-256 receipts; the oldest go first); if a Controller is unreachable for longer
+256 receipts; failed receipts are evicted first, then the oldest committed
+ones, so with the two-per-user and eight-per-machine quotas a committed
+receipt can only be lost before the Proxy reconciled it if one Controller
+publishes more than 256 uploads in a day); if a Controller is unreachable for longer
 than that right after publishing a file whose commit response the Proxy lost,
 the Console reports the outcome as unconfirmed (`outcome_unknown`) and the
 operator should check the destination directory. A commit whose publish

@@ -110,7 +110,7 @@ enum StoredOutcome {
 
 /// Receipts kept beyond the 24-hour retention are also capped by count so
 /// `upload-results.json` cannot grow without bound; the oldest go first.
-const MAX_STORED_RESULTS: usize = 256;
+pub(crate) const MAX_STORED_RESULTS: usize = 256;
 
 struct Upload {
     path: String,
@@ -306,6 +306,44 @@ impl Uploads {
         self.unswept
             .lock()
             .map(|u| u.iter().map(|r| (r.path.clone(), r.id.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// Journals a synthetic receipt as if an earlier upload had ended that
+    /// way, for the receipt-cap tests; goes through `store_result` so the cap
+    /// and eviction order apply exactly as in production.
+    #[cfg(test)]
+    pub fn seed_receipt_for_test(&self, upload_id: &str, failed: bool) {
+        self.store_result(StoredResult {
+            upload_id: upload_id.to_string(),
+            path: if failed {
+                String::new()
+            } else {
+                format!("{upload_id}.bin")
+            },
+            bytes_written: 1,
+            sha256: String::new(),
+            committed_at: now_epoch(),
+            cleanup_pending: false,
+            outcome: if failed {
+                StoredOutcome::Failed
+            } else {
+                StoredOutcome::Committed
+            },
+            code: failed.then(|| "machine_upload_failed".to_string()),
+        });
+    }
+
+    /// Every journaled receipt as `(upload_id, failed)` in storage order.
+    #[cfg(test)]
+    pub fn receipts_for_test(&self) -> Vec<(String, bool)> {
+        self.results
+            .lock()
+            .map(|r| {
+                r.iter()
+                    .map(|r| (r.upload_id.clone(), r.outcome == StoredOutcome::Failed))
+                    .collect()
+            })
             .unwrap_or_default()
     }
 
@@ -853,9 +891,15 @@ impl Uploads {
         });
         let upload_id = receipt.upload_id.clone();
         results.push(receipt);
-        if results.len() > MAX_STORED_RESULTS {
-            let excess = results.len() - MAX_STORED_RESULTS;
-            results.drain(..excess);
+        // Over the cap, failed receipts go first (oldest first), then the
+        // oldest committed ones: a committed receipt the Proxy has not
+        // reconciled yet is the one worth keeping (#169, security 4567).
+        while results.len() > MAX_STORED_RESULTS {
+            let victim = results
+                .iter()
+                .position(|r| r.outcome == StoredOutcome::Failed)
+                .unwrap_or(0);
+            results.remove(victim);
         }
         let snapshot = results.clone();
         drop(results);
