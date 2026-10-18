@@ -2513,6 +2513,10 @@ async fn chunked_upload_bounds_active_uploads_reaps_idle_ones_and_sweeps_after_r
     assert!(replacement.abort("upl_fresh00001").unwrap());
     std::fs::remove_file(root.join(".treer-transfer-upl_unrecorded")).unwrap();
     host_task.abort();
+    // The predecessor still holds its active staging files open; Windows
+    // refuses to remove the directory until both registries are dropped.
+    drop(replacement);
+    drop(runtime);
     std::fs::remove_dir_all(root).unwrap();
 }
 
