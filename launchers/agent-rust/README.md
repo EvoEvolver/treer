@@ -32,6 +32,17 @@ group. Periodic scans, process names, cwd, UID and inherited environment markers
 are not ownership proofs and are not used to broaden cleanup. The general M2
 descendant-reaping criterion remains unmet; a future supervised OS containment
 boundary and its native tests are required before claiming that guarantee.
+The snapshot's `runtime.cleanup` distinguishes direct-provider exit confirmed
+versus unverified, group termination requested but unverified, and detached
+descendants not guaranteed. History-limit and startup-failure notices expose
+the same distinction through the existing browser error display. Direct exit
+confirmation is bounded to five seconds; timeout or kill/wait failure is never
+reported as confirmed. This does not yet cover the full stop/delete lifecycle.
+Resuming an already oversized thread fails with an owner-visible history-limit
+reason and no fresh-thread fallback. The durable journal remains byte-for-byte
+unchanged; this implementation does not silently select a partial history.
+An operator must use a launcher supporting that thread's history; there is no
+automatic state deletion, migration or fresh-session recovery.
 
 M1 compatibility increments preserve the separate browser and AIS contracts:
 `/api/prompt`, `/api/settings` and `/api/interrupt` return the full browser state
@@ -76,6 +87,8 @@ unsafe storage still fails closed. Controller quota requests time out after five
 seconds. Orphan cleanup and native Windows storage verification remain M2 work;
 native Windows image capability is off. This POSIX spike does not migrate Node
 attachment state.
+The [dated dependency advisory query](DEPENDENCY-AUDIT.md) records the exact
+lockfile checked and the limits of that result.
 Plan snapshots and updates normalize Codex's `in_progress` to the browser's
 `inProgress`. HTML carries the existing permissions policy and CSP; script and
 CSS assets declare UTF-8 without an HTML document policy.
@@ -120,6 +133,8 @@ symlink and use nonblocking mode before rejecting non-regular files, so a FIFO
 cannot stall startup. A failed write/sync/rename removes only that attempt's
 exclusively created temporary file; cleanup failures use a fixed diagnostic and
 never replace the primary failure. Other temporary files are never swept.
+A crash can still leave a temporary file. A UUID-shaped name and private mode
+alone do not prove ownership; automatic orphan recovery remains unimplemented.
 Managed image storage uses a separate journal and Controller quota
 client as described above; standalone images are disabled. Queue metadata
 has a 32 MiB hard journal bound; quota integration for other private bytes is a

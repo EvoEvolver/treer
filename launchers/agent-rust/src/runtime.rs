@@ -65,6 +65,7 @@ struct Runtime {
     ready: bool,
     turns: Transcript,
     history_failed: bool,
+    provider_exit: &'static str,
     records: VecDeque<Record>,
     dispatch_blocked: bool,
     goals: Goals,
@@ -108,6 +109,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
         ready: false,
         turns: Transcript::default(),
         history_failed: false,
+        provider_exit: "not_requested",
         records: VecDeque::new(),
         dispatch_blocked: false,
         goals: Goals::default(),
@@ -117,11 +119,18 @@ pub fn spawn(config: Config) -> Result<Handle> {
     };
     tokio::spawn(async move {
         let startup = rt.start(&config, saved).await;
-        if startup.is_err() {
+        if let Err(error) = startup {
             eprintln!("Rust spike: Codex startup failed (no fresh-thread fallback)");
-            rt.thread = json!({"status":"error","lastError":"Codex startup failed","turns":[]});
+            let reason = if error.is::<HistoryLimit>() {
+                rt.dispatch_blocked = true;
+                "Codex thread exceeds launcher history limit; use a launcher supporting larger history; no fresh-thread fallback"
+            } else {
+                "Codex startup failed"
+            };
+            rt.turns = Transcript::default();
+            rt.thread = json!({"status":"error","lastError":reason,"turns":[]});
             rt.publish();
-            let _ = child.kill().await;
+            rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
             return;
         }
         // One bounded sender, one bounded result, at most one in-flight send.
@@ -205,7 +214,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                 }
             }
             if rt.history_failed && !provider_stopped {
-                let _ = child.kill().await;
+                rt.record_provider_stop(timeout(Duration::from_secs(5), child.kill()).await);
                 events.close();
                 while events.try_recv().is_ok() {}
                 provider_stopped = true;
@@ -326,7 +335,7 @@ impl Runtime {
         let mut thread = self.thread.clone();
         thread["turns"] = Value::Array(self.history());
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
-        let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"]},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
+        let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
         self.changed.send_replace(Arc::new(snapshot));
     }
@@ -865,6 +874,21 @@ impl Runtime {
     }
     fn upsert_turn(&mut self, turn: Value) -> Result<()> {
         self.turns.insert(turn)
+    }
+    fn record_provider_stop(
+        &mut self,
+        result: std::result::Result<std::io::Result<()>, tokio::time::error::Elapsed>,
+    ) {
+        self.provider_exit = if matches!(result, Ok(Ok(()))) {
+            "confirmed"
+        } else {
+            "unverified"
+        };
+        let reason = self.thread["lastError"]
+            .as_str()
+            .unwrap_or("Provider stopped");
+        self.thread["lastError"] = json!(format!("{reason}; provider exit {}; process-group termination requested but unverified; detached-descendant cleanup not guaranteed", self.provider_exit));
+        self.publish();
     }
     fn stop_for_history_limit(&mut self) -> Result<()> {
         self.history_failed = true;

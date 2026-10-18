@@ -51,7 +51,7 @@ async function fixture(t, extra={}, controllerOptions={}) {
   const {child,base}=await launch({});
   const headers={'x-treer-interface-source':'controller-api','x-treer-agent-id':'ag_contract','x-treer-interface-instance':'contract-instance',host:'agent-interface'};
   const post=body=>fetch(base+'/v1/prompts',{method:'POST',headers,body:JSON.stringify(body)});
-  return {base,post,headers,child,root,state,launch,controller,logs:()=>logs};
+  return {base,post,headers,child,root,state,launch,controller,logs:()=>logs,trackChild:child=>children.push(child)};
 }
 
 test('Rust serves its manifest while Controller registration probes it',{skip:useNode},async t=>{
@@ -84,6 +84,10 @@ test('many-turn history limit stops provider, preserves receipts and remains rea
   assert.match(state.runtime.error,/history limit/);
   assert.ok(Buffer.byteLength(JSON.stringify(state.thread.turns))<17*1024*1024);
   await until(async()=>{try{process.kill(providerPid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
+  const cleanup=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>state.runtime.cleanup.providerExit==='confirmed');
+  assert.equal(cleanup.runtime.cleanup.processGroup,'termination_requested_unverified');
+  assert.equal(cleanup.runtime.cleanup.detachedDescendants,'not_guaranteed');
+  assert.match(cleanup.runtime.error,/detached-descendant cleanup not guaranteed/);
   const receipt=await fetch(s.base+'/v1/submissions/'+rejected,{headers:s.headers}).then(r=>r.json());
   assert.equal(receipt.submission.state,'running','oversized completion must not invent success');
   const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
@@ -120,6 +124,26 @@ test('streaming deltas stop at admission limit without replacing accepted text',
   assert.equal(saved.records.find(r=>r.submission.id===receipt.submission.id).submission.state,'running');
   const pid=Number(await readFile(join(s.root,'cwd/provider.pid'),'utf8'));
   await until(async()=>{try{process.kill(pid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
+});
+
+test('oversized resumed history fails visibly without rewriting the durable journal',{skip:useNode,timeout:10000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const original=await readFile(join(s.state,'rust-spike.json'),'utf8');
+  const portFile=join(s.root,'oversized-port');
+  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'oversized.pid',HISTORY_OVERSIZED:'1',AGENT_UI_PORT_FILE:portFile});
+  const child=spawn(binary,[],{cwd:join(s.root,'cwd'),env,stdio:'ignore'});
+  s.trackChild(child);
+  const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(portFile,'utf8'))}`,x=>!x.endsWith('NaN'));
+  const state=await until(()=>fetch(base+'/api/state').then(r=>r.json()),state=>state.runtime?.cleanup?.providerExit==='confirmed');
+  assert.equal(state.ready,false);
+  assert.equal(state.runtime.state,'blocked');
+  assert.match(state.runtime.error,/thread exceeds launcher history limit/);
+  assert.match(state.runtime.error,/no fresh-thread fallback/);
+  assert.match(state.runtime.error,/detached-descendant cleanup not guaranteed/);
+  assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),original);
+  const pid=Number(await readFile(join(s.root,'cwd/oversized.pid'),'utf8'));
+  assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
 });
 
 test('same manifest and initial transcript contract',async t=>{

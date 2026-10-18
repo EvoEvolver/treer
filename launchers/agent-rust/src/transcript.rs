@@ -2,7 +2,7 @@
 //! exceeding the budget never evicts an accepted turn or receipt.
 use anyhow::Result;
 use serde_json::Value;
-use std::{fmt, io, ops::Deref};
+use std::{collections::HashMap, fmt, io, ops::Deref};
 
 const MAX_BYTES: usize = 16 * 1024 * 1024;
 const MAX_TURNS: usize = 10_000;
@@ -20,6 +20,7 @@ impl std::error::Error for HistoryLimit {}
 pub struct Transcript {
     turns: Vec<Value>,
     sizes: Vec<usize>,
+    positions: HashMap<String, usize>,
     bytes: usize,
 }
 impl Deref for Transcript {
@@ -30,7 +31,10 @@ impl Deref for Transcript {
 }
 impl Transcript {
     pub fn insert(&mut self, turn: Value) -> Result<()> {
-        let index = self.turns.iter().position(|old| old["id"] == turn["id"]);
+        let id = turn["id"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("invalid turn identity"))?;
+        let index = self.positions.get(id).copied();
         let old_size = index.map(|i| self.sizes[i]).unwrap_or(0);
         if index.is_none() && self.turns.len() >= MAX_TURNS {
             return Err(HistoryLimit.into());
@@ -50,6 +54,7 @@ impl Transcript {
             self.turns[i] = turn;
             self.sizes[i] = counter.bytes;
         } else {
+            self.positions.insert(id.to_owned(), self.turns.len());
             self.turns.push(turn);
             self.sizes.push(counter.bytes);
         }

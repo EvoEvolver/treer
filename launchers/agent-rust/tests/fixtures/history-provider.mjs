@@ -11,7 +11,8 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (request.id === undefined) continue;
   let result = {};
   if (request.method === 'model/list') result = { data: [] };
-  if (request.method.startsWith('thread/')) result = { thread: { id: threadId, turns: [] } };
+  if (request.method.startsWith('thread/')) result = { thread: { id: threadId, turns:
+    process.env.HISTORY_OVERSIZED === '1' ? Array.from({length:10_001},(_,n)=>({id:`old-${n}`,status:'completed',items:[]})) : [] } };
   if (request.method === 'turn/start') {
     const id = `history-${++next}`;
     result = { turn: { id } };
