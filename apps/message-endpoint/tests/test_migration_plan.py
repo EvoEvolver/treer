@@ -96,6 +96,10 @@ class MigrationPlan(unittest.TestCase):
         with self.assertRaises(FileExistsError):plan.write_private(output,report)
         link=self.root/'link';link.symlink_to(output)
         with self.assertRaises(FileExistsError):plan.write_private(link,report)
+    def test_private_report_rejected_inside_an_unrelated_checkout(self):
+        (self.root/'.git').mkdir()
+        with self.assertRaises(plan.Invalid):plan.write_private(self.root/'report.json',plan.inventory(self.path))
+        self.assertFalse((self.root/'report.json').exists())
     def test_cli_errors_hide_source_metadata_and_paths(self):
         self.db.execute("UPDATE metadata SET value='SYNTHETIC_TOKEN' WHERE key='bot_id'");self.db.commit()
         result=subprocess.run([sys.executable,'-I',str(TOOL),'--legacy-db',str(self.path),'--output',str(self.root/'out')],capture_output=True,text=True,env={'HOME':str(self.root),'PATH':'/usr/bin:/bin'})

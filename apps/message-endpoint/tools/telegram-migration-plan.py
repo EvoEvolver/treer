@@ -118,6 +118,8 @@ def write_private(path, report):
     for part in [parent, *parent.parents]:
         if part.is_symlink():
             raise Invalid('symlink_output_parent')
+        if any((part/marker).exists() for marker in ['.git','.hg','.svn']):
+            raise Invalid('report_must_be_outside_repository')
     s = parent.stat()
     if s.st_uid != os.getuid() or s.st_mode & 0o077:
         raise Invalid('output_directory_not_private')
