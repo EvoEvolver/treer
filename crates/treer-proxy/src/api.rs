@@ -395,6 +395,7 @@ mod app_ui;
 mod apps;
 mod errors;
 mod events;
+mod inventory_view;
 mod machines;
 mod messages;
 mod network;

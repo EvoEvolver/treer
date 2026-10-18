@@ -5888,7 +5888,9 @@ async fn app_email_requires_owned_managed_app_identity_and_policy() {
 /// Keys a streamed `AgentInfo` may carry (#141): the member-visible flat
 /// inventory. `path` is tolerated only as null; folders, placements and pins
 /// never appear on the stream.
-const STREAMED_AGENT_KEYS: [&str; 17] = [
+// The browser-visible Agent inventory (#153): `pid` is deliberately absent;
+// bearer, Agent and machine credentials receive the full AgentInfo.
+const STREAMED_AGENT_KEYS: [&str; 16] = [
     "path",
     "agent_id",
     "workspace_id",
@@ -5897,7 +5899,6 @@ const STREAMED_AGENT_KEYS: [&str; 17] = [
     "name",
     "cwd",
     "status",
-    "pid",
     "run_generation",
     "started_at",
     "updated_at",
@@ -6015,12 +6016,16 @@ async fn workspace_event_payloads_carry_only_the_flat_inventory() {
     let state = state_with_managed_agent().await;
     let mut events = state.subscribe();
     let snapshot = state.snapshot("default").await.unwrap();
-    assert_stream_event_shape(&WorkspaceEvent {
-        revision: snapshot.revision,
-        workspace_id: "default".into(),
-        event: "workspace.snapshot".into(),
-        data: serde_json::to_value(&snapshot).unwrap(),
-    });
+    let browser = super::inventory_view::InventoryView::Browser;
+    assert_stream_event_shape(&super::inventory_view::event_for_view(
+        browser,
+        &WorkspaceEvent {
+            revision: snapshot.revision,
+            workspace_id: "default".into(),
+            event: "workspace.snapshot".into(),
+            data: serde_json::to_value(&snapshot).unwrap(),
+        },
+    ));
     assert!(snapshot.agents.iter().all(|agent| agent.path.is_none()));
     state
         .rename_agent("default", "agent-a", "renamed".into())
@@ -6039,13 +6044,259 @@ async fn workspace_event_payloads_carry_only_the_flat_inventory() {
     let mut kinds = Vec::new();
     for _ in 0..3 {
         let event = events.recv().await.unwrap();
-        assert_stream_event_shape(&event);
+        assert_stream_event_shape(&super::inventory_view::event_for_view(browser, &event));
         kinds.push(event.event);
     }
     assert_eq!(
         kinds,
         ["agent.renamed", "server.renamed", "workspace.pins.changed"]
     );
+}
+
+#[tokio::test]
+async fn pid_is_absent_for_browser_sessions_and_kept_for_bearer_and_machine_callers() {
+    // #153: the browser inventory (session cookie) never carries pid; a
+    // bearer credential (human CLI token, machine) keeps it.
+    let auth = AuthStore::for_test("admin-password").await;
+    auth.seed_test_workspace("default").await;
+    sqlx::query("INSERT INTO users(id,email,preferred_name,password_hash,created_at) VALUES('member','member@example.test','Member','fixture','now')")
+        .execute(&auth.pool()).await.unwrap();
+    sqlx::query("INSERT INTO organization_members(organization_id,user_id,role,joined_at) VALUES('org_default','member','member','now')")
+        .execute(&auth.pool()).await.unwrap();
+    sqlx::query("INSERT INTO sessions(token,user_id,created_at,expires_at) VALUES('tok-member','member','2026-01-01T00:00:00Z','2999-01-01T00:00:00Z')")
+        .execute(&auth.pool()).await.unwrap();
+    let messages = MessageStore::open(auth.pool()).await.unwrap();
+    let identity = IdentityIssuer::load(&auth, &Url::parse("https://treer.example/").unwrap())
+        .await
+        .unwrap();
+    let state = state_with_managed_agent().await;
+    // Give agent-a a pid through a fresh Controller connection and snapshot.
+    let snapshot = state.snapshot("default").await.unwrap();
+    let server = snapshot
+        .servers
+        .iter()
+        .find(|server| server.server_id == "machine-a")
+        .cloned()
+        .unwrap();
+    let mut agents = snapshot.agents.clone();
+    for agent in &mut agents {
+        agent.pid = Some(4242);
+        agent.path = None;
+    }
+    let connection = Uuid::new_v4();
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    state
+        .register_server(server.clone(), connection, tx)
+        .await
+        .unwrap();
+    state
+        .apply_snapshot(
+            connection,
+            treer_protocol::AgentServerSnapshot { server, agents },
+        )
+        .await
+        .unwrap();
+    let app = router(
+        state.clone(),
+        test_config(),
+        auth.clone(),
+        PolicyEngine::allow_all(),
+        identity,
+        BrowserAccess::new(
+            &Url::parse("https://app.treer.example/").unwrap(),
+            &Url::parse("https://proxy.treer.example/").unwrap(),
+        )
+        .unwrap(),
+        test_ingress_config(),
+        messages,
+        CapabilityRollout::all_enabled(),
+        crate::updater::UpdaterClient::disabled(),
+        crate::voice::VoiceServices::disabled(),
+    );
+    let fetch = |uri: &'static str, cookie: bool| {
+        let app = app.clone();
+        async move {
+            let mut request = Request::builder().uri(uri);
+            request = if cookie {
+                request.header(header::COOKIE, "treer_session=tok-member")
+            } else {
+                request.header(header::AUTHORIZATION, "Bearer tok-member")
+            };
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri} cookie={cookie}");
+            let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+                .await
+                .unwrap();
+            serde_json::from_slice::<Value>(&body).unwrap()
+        }
+    };
+    fn agents_of(value: &Value) -> Vec<&Value> {
+        match value.get("agents") {
+            Some(Value::Array(items)) => items.iter().collect(),
+            _ => vec![value],
+        }
+    }
+    for uri in [
+        "/api/workspaces/default/snapshot",
+        "/api/workspaces/default/agents",
+        "/api/workspaces/default/agents/agent-a",
+    ] {
+        let browser = fetch(uri, true).await;
+        for agent in agents_of(&browser) {
+            assert!(
+                agent.get("pid").is_none(),
+                "{uri}: browser view carries pid: {agent}"
+            );
+            assert!(agent.get("cwd").is_some(), "{uri}: cwd stays visible");
+        }
+        let bearer = fetch(uri, false).await;
+        for agent in agents_of(&bearer) {
+            assert_eq!(agent["pid"], 4242, "{uri}: bearer keeps pid: {agent}");
+        }
+    }
+    // Selection follows authentication (security 4536): a cookie session
+    // with a malformed or non-Bearer Authorization header stays Browser; an
+    // invalid Bearer token is refused rather than falling back to the cookie.
+    for authorization in [
+        "bearer tok-member",
+        "BEARER tok-member",
+        "Basic abc",
+        "Bearer ",
+    ] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/workspaces/default/agents")
+                    .header(header::COOKIE, "treer_session=tok-member")
+                    .header(header::AUTHORIZATION, authorization)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{authorization:?}");
+        let body = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_slice(&body).unwrap();
+        for agent in value["agents"].as_array().unwrap() {
+            assert!(
+                agent.get("pid").is_none(),
+                "{authorization:?}: cookie session leaked pid: {agent}"
+            );
+        }
+    }
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/workspaces/default/agents")
+                .header(header::COOKIE, "treer_session=tok-member")
+                .header(header::AUTHORIZATION, "Bearer bogus-token")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an invalid Bearer never falls back to the cookie"
+    );
+    // Delivered events: the browser stream re-serializes stored payloads
+    // through the view, so a buffered event with pid never reaches it.
+    let event = WorkspaceEvent {
+        revision: 7,
+        workspace_id: "default".into(),
+        event: "agent.updated".into(),
+        data: serde_json::to_value(
+            state
+                .snapshot("default")
+                .await
+                .unwrap()
+                .agents
+                .iter()
+                .find(|agent| agent.agent_id == "agent-a")
+                .unwrap(),
+        )
+        .unwrap(),
+    };
+    assert_eq!(event.data["pid"], 4242);
+    let browser_event = super::inventory_view::event_for_view(
+        super::inventory_view::InventoryView::Browser,
+        &event,
+    );
+    assert!(browser_event.data.get("pid").is_none());
+    assert_eq!(browser_event.data["cwd"], event.data["cwd"]);
+    let trusted_event = super::inventory_view::event_for_view(
+        super::inventory_view::InventoryView::Trusted,
+        &event,
+    );
+    assert_eq!(trusted_event.data, event.data);
+    // App deployments follow the same rule: the runtime pid copied from the
+    // Agent is omitted for the browser view and kept for bearer callers.
+    let deployment = auth
+        .create_app_deployment(
+            "default",
+            "member",
+            "machine-a".into(),
+            CreateAppDeploymentRequest {
+                folder_id: None,
+                server_id: Some("machine-a".into()),
+                name: "pid-view-app".into(),
+                command: "fixture".into(),
+                args: vec![],
+                cwd: ".".into(),
+                port: 8082,
+                hostname: String::new(),
+                public: false,
+            },
+        )
+        .await
+        .unwrap();
+    sqlx::query("UPDATE app_deployments SET runtime_agent_id='agent-a' WHERE app_id=$1")
+        .bind(&deployment.app_id)
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    let apps = fetch("/api/workspaces/default/apps", true).await;
+    let listed = apps["apps"].as_array().unwrap();
+    assert!(!listed.is_empty());
+    for app in listed {
+        assert!(
+            app.get("pid").is_none(),
+            "browser app view carries pid: {app}"
+        );
+    }
+    let apps = fetch("/api/workspaces/default/apps", false).await;
+    assert!(
+        apps["apps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|app| app["pid"] == 4242),
+        "bearer app view keeps the runtime pid: {apps}"
+    );
+    // Live stream opened with the cookie: initial snapshot without pid.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let mut member = connect_event_stream(addr, "tok-member").await;
+    let first = member.next().await.unwrap().unwrap();
+    let initial: WorkspaceEvent = serde_json::from_str(first.to_text().unwrap()).unwrap();
+    assert_eq!(initial.event, "workspace.snapshot");
+    for agent in initial.data["agents"].as_array().unwrap() {
+        assert!(
+            agent.get("pid").is_none(),
+            "stream snapshot carries pid: {agent}"
+        );
+    }
 }
 
 async fn connect_event_stream(

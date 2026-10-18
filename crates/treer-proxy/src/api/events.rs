@@ -50,8 +50,11 @@ pub(super) async fn workspace_events(
 ) -> Result<Response, ApiFailure> {
     browser.validate_if_present(&headers)?;
     state.snapshot(&workspace_id).await?;
+    // This route authenticates human sessions only; a bearer here is a
+    // human CLI or API token.
+    let view = super::inventory_view::inventory_view(&headers, false);
     Ok(ws.on_upgrade(move |socket| {
-        stream_workspace_events(socket, state, auth, session, workspace_id)
+        stream_workspace_events(socket, state, auth, session, workspace_id, view)
     }))
 }
 
@@ -136,6 +139,7 @@ pub(super) async fn stream_workspace_events(
     auth: AuthStore,
     session: CurrentSession,
     workspace_id: String,
+    view: super::inventory_view::InventoryView,
 ) {
     let (mut outgoing, mut incoming) = socket.split();
     let mut events = state.subscribe();
@@ -147,7 +151,7 @@ pub(super) async fn stream_workspace_events(
             revision: snapshot.revision,
             workspace_id: workspace_id.clone(),
             event: "workspace.snapshot".to_string(),
-            data: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+            data: super::inventory_view::snapshot_value(view, &snapshot).unwrap_or(Value::Null),
         };
         if send_event(&mut outgoing, &initial).await.is_err() {
             return;
@@ -164,6 +168,7 @@ pub(super) async fn stream_workspace_events(
                     if !still_subscribed(&auth, &session, &workspace_id, &mut check, &mut outgoing).await {
                         break;
                     }
+                    let event = super::inventory_view::event_for_view(view, &event);
                     if send_event(&mut outgoing, &event).await.is_err() {
                         break;
                     }
@@ -178,7 +183,8 @@ pub(super) async fn stream_workspace_events(
                         revision: snapshot.revision,
                         workspace_id: workspace_id.clone(),
                         event: "workspace.snapshot".to_string(),
-                        data: serde_json::to_value(snapshot).unwrap_or(Value::Null),
+                        data: super::inventory_view::snapshot_value(view, &snapshot)
+                            .unwrap_or(Value::Null),
                     };
                     if send_event(&mut outgoing, &event).await.is_err() {
                         break;
