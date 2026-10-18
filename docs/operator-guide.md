@@ -1746,7 +1746,10 @@ removed. The Controller remembers committed receipts for 24 hours (at most
 256 receipts; failed receipts are evicted first, then the oldest committed
 ones, so with the two-per-user and eight-per-machine quotas a committed
 receipt can only be lost before the Proxy reconciled it if one Controller
-publishes more than 256 uploads in a day); if a Controller is unreachable for longer
+publishes more than 256 uploads in a day; in that same case a new failed
+receipt is the one evicted at once, and the Console then learns of the
+failure only when the upload's lifetime ends instead of immediately); if a
+Controller is unreachable for longer
 than that right after publishing a file whose commit response the Proxy lost,
 the Console reports the outcome as unconfirmed (`outcome_unknown`) and the
 operator should check the destination directory. A commit whose publish
