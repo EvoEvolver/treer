@@ -63,6 +63,29 @@ test('same manifest and initial transcript contract',async t=>{
   assert.equal(transcript.page_count,2);assert.equal(transcript.next_page,1);assert.equal(transcript.entries[0].content,'remember 0');
   assert.equal((await fetch(s.base+'/')).status,200);
 });
+test('browser mutations return full state with the requested history window',async t=>{
+  const s=await fixture(t);
+  for(const [path,body] of [
+    ['/api/settings',{model:'synthetic-model',history_limit:150}],
+    ['/api/prompt',{prompt:'browser contract',history_limit:150}],
+    ['/api/interrupt',{history_limit:150}],
+  ]) {
+    const response=await fetch(s.base+path,{method:'POST',body:JSON.stringify(body)});
+    assert.equal(response.status,200,path);
+    const state=await response.json();
+    assert.equal(state.ready,true,path);
+    assert.equal(state.history.limit,150,path);
+    assert.ok(state.thread.id,path);
+    assert.ok(Array.isArray(state.thread.turns),path);
+    assert.ok(Array.isArray(state.queue),path);
+    assert.ok(state.runtime.state,path);
+    if(path==='/api/settings')assert.equal(state.thread.model,'synthetic-model');
+    if(path==='/api/prompt')assert.ok(state.submission.id);
+  }
+  const missing=await fetch(s.base+'/api/queue/missing',{method:'DELETE'});
+  assert.equal(missing.status,404);
+  assert.equal(typeof (await missing.json()).error,'string');
+});
 test('mutating-route native versus browser authorization matrix matches Node',async t=>{
   const s=await fixture(t);
   const routes=[

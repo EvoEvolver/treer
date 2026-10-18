@@ -363,6 +363,17 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
         let Some(id) = submission_segment(path.rsplit('/').next().unwrap_or("")) else {
             return failure(StatusCode::BAD_REQUEST, "invalid_submission_id");
         };
+        if path.starts_with("/api/queue/") {
+            return match app.runtime.call("cancel", json!({"id":id})).await {
+                Ok(value) if !value.is_null() && value["error"].is_null() => {
+                    json_response(StatusCode::OK, limited(&app.runtime.state.borrow(), 50))
+                }
+                _ => json_response(
+                    StatusCode::NOT_FOUND,
+                    json!({"error":"Queued prompt not found"}),
+                ),
+            };
+        }
         return call(&app, "cancel", json!({"id":id}), StatusCode::OK).await;
     }
     if method != "POST" {
@@ -407,6 +418,10 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
                     .unwrap_or(json!("steer"));
                 body["operation_id"] = json!(uuid::Uuid::new_v4().to_string());
             }
+            let ui_limit = history_limit(&body);
+            if path == "/api/prompt" {
+                return ui_call(&app, "submit", body, ui_limit).await;
+            }
             call(
                 &app,
                 "submit",
@@ -419,8 +434,15 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             )
             .await
         }
-        "/v1/abort" | "/api/interrupt" => call(&app, "abort", body, StatusCode::ACCEPTED).await,
-        "/api/settings" => call(&app, "settings", body, StatusCode::OK).await,
+        "/v1/abort" => call(&app, "abort", body, StatusCode::ACCEPTED).await,
+        "/api/interrupt" => {
+            let limit = history_limit(&body);
+            ui_call(&app, "abort", body, limit).await
+        }
+        "/api/settings" => {
+            let limit = history_limit(&body);
+            ui_call(&app, "settings", body, limit).await
+        }
         "/api/history/older" => json_response(
             StatusCode::OK,
             limited(
@@ -429,6 +451,29 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             ),
         ),
         _ => failure(StatusCode::NOT_IMPLEMENTED, "outside_rust_experiment_scope"),
+    }
+}
+fn history_limit(body: &Value) -> usize {
+    body["history_limit"]
+        .as_f64()
+        .filter(|n| n.is_finite())
+        .map(|n| n.floor().clamp(50.0, 10000.0) as usize)
+        .unwrap_or(50)
+}
+
+// Legacy browser mutations return a state snapshot, whereas AIS mutations keep
+// their receipt contract. Read the watch state only after the actor replies so
+// settings and queue changes are already published.
+async fn ui_call(app: &App, method: &str, body: Value, limit: usize) -> Response {
+    match app.runtime.call(method, body).await {
+        Ok(result) => {
+            let mut snapshot = limited(&app.runtime.state.borrow(), limit);
+            if method == "submit" {
+                snapshot["submission"] = result["submission"].clone();
+            }
+            json_response(StatusCode::OK, snapshot)
+        }
+        Err(_) => failure(StatusCode::BAD_REQUEST, "operation_refused"),
     }
 }
 async fn call(app: &App, method: &str, body: Value, status: StatusCode) -> Response {

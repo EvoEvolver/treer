@@ -14,6 +14,12 @@ The completed experiment is assessed in [P3](P3-REPORT.md): continue a staged
 port, but do not switch team launchers. The real-browser send failure, missing
 durable user items and detached-child reaping are explicit port blockers.
 
+M1 compatibility increments preserve the separate browser and AIS contracts:
+`/api/prompt`, `/api/settings` and `/api/interrupt` return the full browser state
+with the requested `history_limit`; prompt responses also include the submission.
+The `/v1` mutation routes continue returning their AIS receipts. This increment
+does not yet establish full browser parity or authorize a team launcher switch.
+
 Build and focused checks (a private `CARGO_TARGET_DIR` is required). Default
 builds require native tools: if `codex` on PATH is an npm script wrapper, set
 `TREER_SPIKE_BUILD_CODEX` at **build time** to the absolute native Codex binary.
