@@ -19,6 +19,9 @@ M1 compatibility increments preserve the separate browser and AIS contracts:
 with the requested `history_limit`; prompt responses also include the submission.
 The `/v1` mutation routes continue returning their AIS receipts. This increment
 does not yet establish full browser parity or authorize a team launcher switch.
+Accepted user text and Controller-attested sender metadata are projected from
+the durable submission journal into history, including after sparse completion
+events and restart. This does not resolve or replay uncertain dispatches.
 
 Build and focused checks (a private `CARGO_TARGET_DIR` is required). Default
 builds require native tools: if `codex` on PATH is an npm script wrapper, set

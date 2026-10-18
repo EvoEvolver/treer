@@ -151,6 +151,24 @@ test('durable operation deduplication, conflicting retry and correlated terminal
       assert.equal((await fetch(s.base+'/v1/submissions/'+invalid,{headers:s.headers})).status,400);
   }
 });
+test('Rust keeps journaled user text and attested sender after completion and restart',{skip:useNode},async t=>{
+  const s=await fixture(t);
+  const sender={kind:'user',agent_id:'ag_sender',path:'/fixture/sender',name:'Fixture sender'};
+  const accepted=await s.post({text:'durable user text',operation_id:'durable-user',sender}).then(r=>r.json());
+  await until(()=>fetch(s.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json()),x=>['done','failed'].includes(x.submission?.state));
+  const check=async base=>{
+    const state=await fetch(base+'/api/state').then(r=>r.json());
+    const items=state.thread.turns.flatMap(t=>t.items).filter(i=>i.kind==='userMessage'&&i.text==='durable user text');
+    assert.equal(items.length,1);
+    assert.deepEqual(items[0].sender,sender);
+    assert.equal(items[0].submissionId,accepted.submission.id);
+    return items[0].id;
+  };
+  const id=await check(s.base);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({});
+  assert.equal(await check(restarted.base),id);
+});
 test('concurrent queued submissions are FIFO, queue cancellation differs from abort',async t=>{
   const s=await fixture(t,{FAKE_CODEX_RELAY_RECOVERY:'',FAKE_CODEX_LIVE:'1',FAKE_CODEX_STATUS:'active'});
   const a=await s.post({text:'a',operation_id:'a'}).then(r=>r.json());
@@ -181,6 +199,14 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+test('Rust sparse completion keeps accepted user input alongside the assistant',{skip:useNode},async t=>{
+  const s=await fixture(t,faultEnv('sparse'));
+  await s.post({text:'keep this input',operation_id:'sparse-user'});
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='idle');
+  const items=state.thread.turns.flatMap(t=>t.items);
+  assert.equal(items.filter(i=>i.kind==='userMessage'&&i.text==='keep this input').length,1);
+  assert.ok(items.some(i=>i.kind==='agentMessage'&&i.text==='sparse answer'));
+});
 test('Rust shutdown kills the provider-owned process group including a descendant',{skip:useNode},async t=>{
   const s=await fixture(t,faultEnv('descendant'));
   const pid=Number(await readFile(join(s.root,'provider.jsonl.child'),'utf8'));

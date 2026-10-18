@@ -223,9 +223,48 @@ impl Runtime {
     }
     fn publish(&self) {
         let mut thread = self.thread.clone();
-        thread["turns"] = json!(self.turns);
+        thread["turns"] = json!(self.history());
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
         self.changed.send_replace(Arc::new(json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"]},"harness":{"id":"codex","name":"Codex","capabilities":{"images":false,"steer":true,"backgroundTasks":false,"goal":null,"sessionTransfer":null}},"thread":thread,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":null,"goalDelivery":null,"history":{"limit":50},"attachmentsAvailable":false,"attachmentStorageStatus":"agent_private_state_unavailable"})));
+    }
+    fn history(&self) -> Vec<Value> {
+        // Provider snapshots may omit locally submitted user items. The journal
+        // already owns their durable text and attested metadata; project it
+        // without changing dispatch state or trusting provider-supplied senders.
+        let mut turns = self.turns.clone();
+        let mut matched = std::collections::HashSet::new();
+        for record in &self.records {
+            let Some(id) = record.submission["turn_id"].as_str() else {
+                continue;
+            };
+            if !turns.iter().any(|t| t["id"] == id) {
+                turns.push(json!({"id":id,"status":if record.submission["state"] == "running" {"inProgress"} else {"completed"},"startedAt":record.submission["created_at"],"error":null,"items":[]}));
+            }
+            let turn = turns.iter_mut().find(|t| t["id"] == id).unwrap();
+            let items = turn["items"].as_array_mut().unwrap();
+            let item_id = format!("submission-{}", record.submission["id"].as_str().unwrap());
+            let existing = items.iter().position(|item| {
+                item["kind"] == "userMessage"
+                    && item["text"] == record.text
+                    && !matched.contains(&(id.to_string(), item["id"].to_string()))
+            });
+            if let Some(index) = existing {
+                items[index]["id"] = json!(item_id);
+                matched.insert((id.to_string(), items[index]["id"].to_string()));
+                items[index]["sender"] = record.submission["sender"].clone();
+                items[index]["submissionId"] = record.submission["id"].clone();
+            } else {
+                // Keep accepted user input before the provider's response. The
+                // stable journal-derived ID survives completion and restart.
+                let before = items
+                    .iter()
+                    .take_while(|i| i["kind"] == "userMessage")
+                    .count();
+                items.insert(before, json!({"id":item_id,"kind":"userMessage","text":record.text,"sender":record.submission["sender"],"submissionId":record.submission["id"],"detailText":null,"sourceTurnId":id,"attachments":[]}));
+                matched.insert((id.to_string(), json!(item_id).to_string()));
+            }
+        }
+        turns
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
         match method {

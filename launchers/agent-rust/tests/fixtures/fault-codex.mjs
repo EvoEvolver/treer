@@ -29,6 +29,11 @@ for await(const line of readline.createInterface({input:process.stdin})) {
     } else {
       result={turn:{id:turn.id}};
       setTimeout(()=>{
+        if(mode==='sparse') {
+          turn.status='completed';
+          turn.items=[{id:'answer',type:'agentMessage',text:'sparse answer'}];
+          emit('turn/completed',{turn});
+        }
         if(mode==='stream'&&started===1) {
           turn.status='completed';emit('turn/completed',{turn});
         } else if(mode==='stream') {
