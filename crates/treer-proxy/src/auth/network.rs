@@ -1457,6 +1457,21 @@ impl AuthStore {
         Ok(code)
     }
 
+    /// Unused, unexpired embed codes of one user (security 4750 P3-A): the
+    /// Agent page in the frame can ask the Console to mint again, so the
+    /// number outstanding is capped.
+    pub async fn outstanding_embed_codes(&self, user_id: &str) -> Result<i64, AuthFailure> {
+        sqlx::query_scalar(
+            "SELECT count(*) FROM ingress_browser_auth_codes \
+             WHERE user_id = $1 AND embed = TRUE AND used_at IS NULL AND expires_at > $2",
+        )
+        .bind(user_id)
+        .bind(Utc::now().to_rfc3339())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(AuthFailure::database)
+    }
+
     /// Redeems an embed code on the Agent origin it was minted for and opens
     /// an embed session; the plain authorize code path cannot redeem it and
     /// it cannot redeem plain codes. Consumed before the nonce is checked so

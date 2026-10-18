@@ -523,6 +523,14 @@ async fn proxy_agent_interface_origin(
         };
         Some(user_id)
     };
+    // An embed session (security 4750 P2): a browser that ignores
+    // `Partitioned` keeps the cookie as a plain SameSite=None cookie, so the
+    // framed document's own requests are the only ones admitted: exactly
+    // `Sec-Fetch-Site: same-origin`; missing, none, same-site and cross-site
+    // are refused before the Agent is even resolved.
+    if embedded {
+        require_embed_same_origin(request.headers())?;
+    }
     // Authenticated: existence and authority are decided now, per request.
     let (workspace_id, _server_id) = auth
         .agent_interface_target(&agent_id)
@@ -592,6 +600,21 @@ async fn proxy_agent_interface_origin(
         }
     }
     Ok(response)
+}
+
+/// Embed-cookie requests must prove they come from the framed document
+/// itself: one `Sec-Fetch-Site` header equal to `same-origin`. A missing
+/// header is refused too, because without Fetch Metadata the cookie could be
+/// riding a cross-site request in a browser that stored it unpartitioned.
+pub(super) fn require_embed_same_origin(headers: &HeaderMap) -> Result<(), ApiFailure> {
+    let mut sites = headers.get_all("sec-fetch-site").iter();
+    match (sites.next(), sites.next()) {
+        (Some(site), None) if site == "same-origin" => Ok(()),
+        _ => Err(ApiFailure::forbidden(
+            "ingress_request_rejected",
+            "embedded Agent interface requests must come from the embedded document itself",
+        )),
+    }
 }
 
 /// Same-site sibling defence for every ingress host (#143 Phase 2 V4): a

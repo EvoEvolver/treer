@@ -1285,11 +1285,25 @@ Proxy-origin tunnel, visibly, or offers a new tab only when the operator set
 `--agent-embed-fallback refuse` (the tunnel then answers
 `503 embedded_ui_requires_isolated_origin`). Codes are never logged. Embed
 sessions are separate rows from standalone sessions: the token of one never
-authenticates through the other cookie. Responses to requests carrying the
-embed cookie get `frame-ancestors` replaced with the Console origin and
-`X-Frame-Options` removed; standalone sessions keep the Agent's CSP untouched.
-Membership is re-checked on every request and Console logout and membership
-removal end embed sessions like standalone ones.
+authenticates through the other cookie. A request that authenticates through
+the embed cookie is served only with exactly one `Sec-Fetch-Site: same-origin`
+header (the framed document's own navigations, fetches and subresources);
+missing, `none`, `same-site` and `cross-site` are refused with
+`403 ingress_request_rejected`. This is what protects a browser that accepts
+third-party cookies but ignores `Partitioned`: it stores the embed cookie as a
+plain `SameSite=None` cookie and the check step passes, yet no cross-site page
+can use it, because such requests never carry `same-origin`. Responses to
+requests carrying the embed cookie get `frame-ancestors` replaced with the
+Console origin and `X-Frame-Options` removed; standalone sessions keep the
+Agent's CSP untouched. Membership is re-checked on every request and Console
+logout and membership removal end embed sessions like standalone ones. The
+Agent's own JavaScript running in the frame can post `ready` again and have
+the Console mint and relay further codes, and can redeem them: the embed
+session is therefore not a secret from the Agent page (the same trust as the
+Agent's own UI). The isolation gained is separation from the Proxy origin and
+the Console, not from the Agent; the Proxy bounds minting to 30 codes per user
+per minute and 8 outstanding unused codes per user (`429 embed_rate_limited`),
+and the Console answers at most one `ready` per frame navigation.
 
 A `Partitioned` cookie is keyed by the top-level **site** (scheme plus
 registrable domain), not the origin. When the Console and the apps domain
@@ -1300,8 +1314,10 @@ exact Console origin on embed responses, and the Fetch Metadata rule below,
 which refuses same-site and cross-site browser requests to the Agent origin.
 Operators should give the Console and the apps domain separate registrable
 domains where possible. Browser support for `Partitioned` (Chrome/Edge 114+,
-Firefox 141+, Safari 26.2) is verified in the canary window; the check step
-fails closed everywhere else.
+Firefox 141+, Safari 26.2) is verified in the canary window; browsers that
+block third-party cookies fail the check step closed, and browsers that
+accept them without honouring `Partitioned` are confined by the
+`same-origin` rule above.
 
 Agent origins are siblings of every other ingress host under the apps domain,
 so the ingress gateway refuses browser requests that could ride the ingress

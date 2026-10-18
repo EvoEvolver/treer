@@ -85,6 +85,23 @@ pub(in crate::api) async fn mint_agent_interface_embed(
                 "embedded Agent origins need an HTTPS wildcard ingress domain",
             )
         })?;
+    // Minting is bounded per user (security 4750 P3-A): the Agent page in the
+    // frame can replay 'ready' and have the Console ask again; it gains no
+    // authority, so the bound only keeps the table and the traffic finite.
+    if !state.upload_gate().allow(
+        &format!("embed-mint:{}", session.user_id),
+        EMBED_MINTS_PER_USER_PER_MINUTE,
+    ) || auth.outstanding_embed_codes(&session.user_id).await?
+        >= EMBED_OUTSTANDING_CODES_PER_USER
+    {
+        return Err(ApiFailure {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error: ProtocolError::new(
+                "embed_rate_limited",
+                "too many embed authorizations for this user; retry in a minute",
+            ),
+        });
+    }
     let base = config.base_domain()?;
     let ingress = auth
         .ensure_agent_interface_ingress(&workspace_id, &agent.agent_id, &session.user_id, base)
@@ -120,6 +137,8 @@ struct EmbedSessionRequest {
     nonce: String,
 }
 
+const EMBED_MINTS_PER_USER_PER_MINUTE: usize = 30;
+const EMBED_OUTSTANDING_CODES_PER_USER: i64 = 8;
 const EMBED_BOOTSTRAP_PATH: &str = "/.treer/embed";
 const EMBED_SESSION_PATH: &str = "/.treer/embed/session";
 const EMBED_CHECK_PATH: &str = "/.treer/embed/check";

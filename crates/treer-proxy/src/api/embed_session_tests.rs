@@ -257,6 +257,24 @@ async fn embed_mint_applies_membership_and_the_interface_gate() {
         .await
         .unwrap();
     assert_eq!(codes_after, codes_before + 1);
+    // Security 4750 P3-A: at most 8 unused, unexpired codes per user; the
+    // ninth mint is refused until one is redeemed or expires, and another
+    // user's budget is independent.
+    for _ in 0..7 {
+        minted_code(&fixture, &config, "member").await;
+    }
+    let (_, hash) = nonce_pair();
+    assert_eq!(
+        error_of(mint(&fixture, allow(), &config, Some("member"), AGENT_ID, &hash).await).await,
+        (StatusCode::TOO_MANY_REQUESTS, "embed_rate_limited".into())
+    );
+    minted_code(&fixture, &config, "owner").await;
+    sqlx::query("UPDATE ingress_browser_auth_codes SET used_at = $1 WHERE user_id = 'member' AND embed = TRUE")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    minted_code(&fixture, &config, "member").await;
 }
 
 #[tokio::test]
@@ -475,6 +493,7 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
             .uri("/?x=1")
             .header(header::HOST, AGENT_HOST)
             .header(header::COOKIE, format!("{embed}; app_pref=dark"))
+            .header("sec-fetch-site", "same-origin")
             .body(Body::empty())
             .unwrap(),
     )
@@ -581,6 +600,7 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
                     .uri("/")
                     .header(header::HOST, AGENT_HOST)
                     .header(header::COOKIE, &embed)
+                    .header("sec-fetch-site", "same-origin")
                     .body(Body::empty())
                     .unwrap(),
             )
@@ -589,6 +609,57 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
         .await,
         (StatusCode::FORBIDDEN, "policy_denied".into())
     );
+    // Security 4750 P2: with a valid embed cookie, only the framed document's
+    // own requests (exactly one Sec-Fetch-Site: same-origin) are served; a
+    // browser that stored the cookie unpartitioned cannot ride it cross-site.
+    for sites in [
+        vec![],
+        vec!["none"],
+        vec!["same-site"],
+        vec!["cross-site"],
+        vec!["same-origin", "same-origin"],
+    ] {
+        let mut request = Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, &embed);
+        for site in &sites {
+            request = request.header("sec-fetch-site", *site);
+        }
+        assert_eq!(
+            error_of(
+                send(
+                    &fixture,
+                    allow(),
+                    &config,
+                    request.body(Body::empty()).unwrap()
+                )
+                .await
+            )
+            .await,
+            (StatusCode::FORBIDDEN, "ingress_request_rejected".into()),
+            "{sites:?}"
+        );
+    }
+    // The standalone session is not subject to that rule for safe requests.
+    let response = send(
+        &fixture,
+        allow(),
+        &config,
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, &standalone)
+            .header("sec-fetch-site", "none")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    axum::body::to_bytes(response.into_body(), 64)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
