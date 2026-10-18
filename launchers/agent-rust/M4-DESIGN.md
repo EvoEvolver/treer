@@ -49,6 +49,15 @@ lock: it never launches another backend for the same active generation. Both
 supported launchers require the current Controller generation token before start.
 An older launcher lacking this check is not eligible for a migration handoff.
 
+Controller persists an idempotent handoff state machine: quiescing -> exported ->
+destination published -> active. Each transition records operation ID and a
+monotonically fenced generation, including which generation may restart after
+a crash. Fence admission, mutation, acknowledgements, notification delivery and
+old provider actions, not just process startup. Shared Agent credentials do not
+exclude stale processes. Reverse rollback allocates another new generation and
+never reactivates an old token. Test lost notification acknowledgements and
+stale-generation actions arriving after cutover.
+
 Validate versions, identities, limits, references and digests before publishing
 into a fresh private destination generation. Use exclusive descriptor-based files,
 private permissions, no symlink/hardlink adoption and bounded temporary space.
@@ -79,6 +88,13 @@ Reuse Controller private-state authority, never cwd fallback. Existing
 journal replacement or peak staging bytes are covered. Core must specify charges
 for logical retained bytes, physical staging, and atomic replacement of old data.
 
+Private-state v1 is NOT this transaction contract: its reservation request only
+carries bytes, reservations bind Agent/bytes/TTL, and commit rejects repeated or
+expired IDs. Introduce an explicitly versioned capability with durable transaction
+identity, Agent/machine/generation, object/digest, replacement predecessor and
+restart inventory. Do not silently change v1 image semantics or infer idempotent
+commit/reconcile from them.
+
 The accounting contract must include finite per-Agent AND machine-global caps.
 Reserve the peak simultaneous charge: old published bytes + new published bytes
 + additional staging bytes/metadata, without double-counting a new file that is
@@ -87,6 +103,13 @@ Exact cap values and overhead accounting are Core-reviewed schema requirements,
 not silently chosen implementation defaults. Quota denial uses the centralized
 4df6db94 rollback: previous checkpoint authoritative, fail-closed read-only state,
 no provider dispatch and no automatic retry that clears the fence.
+Logical retained bytes and physical peak space need distinct limits/counters.
+Retained rollback generations/backups also consume quota. Reserve the full new
+temporary object while the old object is charged; a negative replacement delta
+cannot justify space for staging. Retire predecessor charge only after published
+inode/digest reconciliation. Expiry or ambiguous publication cannot release
+headroom until inventory proves what remains. Cleanup requires an explicit
+bounded retention policy; failure is not permission to delete rollback evidence.
 
 Proposed transaction: reserve new object and bounded staging overhead under
 Agent/generation/object identity; write/fsync temporary bytes; publish by atomic
@@ -107,6 +130,10 @@ Publication must execute outside the cancellable runtime select region. Shutdown
 waits for its transaction owner with a finite deadline; timeout marks outcome
 uncertain and retains reservation/fence, never claims rollback or successful stop
 of an in-progress blocking OS call. Only the transaction owner can settle it.
+The serialized owner holds bounded immutable snapshots and exposes explicit
+cancellation/join states. Network timeout/abort is not transaction cancellation.
+Reads expose the last published snapshot with uncertainty, while shutdown retains
+the transaction identity and reservation for recovery.
 
 Use a real isolated Controller to test exhaustion, reserve/commit timeout,
 Controller restart, duplicate commits, concurrent generations, replacement peak
@@ -138,6 +165,9 @@ launcher, not by the launcher itself. Evaluate the already-reviewed
 alongside any native supervisor proposal; using a container does not automatically
 prove the required membership, owner-death and teardown semantics. If neither
 candidate proves them, macOS team switching remains explicitly unsupported.
+Authenticate that capability and bind it to Agent, machine, generation and an
+exact retained OS ownership object. Reject stale cleanup and PID reuse. Only
+Host/platform code acts on it; a launcher never turns it into arbitrary PID kills.
 
 Start Codex only after verified ownership exists. Controller/Host owns lifecycle;
 launcher requests cleanup through that capability and reports confirmed, timed
