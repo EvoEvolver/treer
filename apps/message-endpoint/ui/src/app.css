@@ -5,3 +5,7 @@
 form{display:grid;gap:14px;margin-top:14px;min-width:0}input{font:inherit;min-height:44px;min-width:0;width:100%;padding:9px 12px;border:1px solid hsl(var(--border));border-radius:var(--radius);background:hsl(var(--card));color:hsl(var(--foreground))}.confirm{flex-direction:row;align-items:center;min-height:44px}.confirm input{width:22px;min-width:22px;height:22px;min-height:22px;margin:11px;accent-color:hsl(var(--primary))}
 
 .isolation-choice{min-width:0;border:0;padding:0;margin:0}.isolation-choice legend{font-size:12px;color:hsl(var(--muted-foreground))}.badge[data-testid="isolation-unverified"]{white-space:normal;overflow-wrap:anywhere}
+
+.email-message{border-top:1px solid hsl(var(--border));padding:1rem 0}.email-message pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit}textarea{width:100%;min-height:120px;font:inherit;box-sizing:border-box;padding:.75rem;background:inherit;color:inherit;border:1px solid currentColor;border-radius:6px}
+
+.email-target{overflow-wrap:anywhere}

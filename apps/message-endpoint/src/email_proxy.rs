@@ -62,6 +62,51 @@ impl Sender {
             service: service.into(),
         })
     }
+    /// Current directory visibility is required at owner binding and dispatch.
+    /// The caller supplies a stable human ID, never an identity assertion.
+    pub fn current_member(&self, core: &Core, member: &str) -> Result<bool, Error> {
+        if !crate::store::valid_id(member) || member.len() > 128 {
+            return Err(Error::Rejected);
+        }
+        let token = core
+            .app_service_token(&self.service)
+            .map_err(|_| Error::Unavailable)?;
+        let mut url = self.url.clone();
+        url.set_path(&format!("/api/apps/{}/directory", self.service));
+        let response = self
+            .client
+            .get(url)
+            .bearer_auth(token)
+            .send()
+            .map_err(|_| Error::Unavailable)?;
+        if !response.status().is_success() {
+            return Err(Error::Unavailable);
+        }
+        let mut bytes = Vec::new();
+        response
+            .take(262145)
+            .read_to_end(&mut bytes)
+            .map_err(|_| Error::Unavailable)?;
+        if bytes.len() > 262144 {
+            return Err(Error::Unavailable);
+        }
+        let value: Value = serde_json::from_slice(&bytes).map_err(|_| Error::Unavailable)?;
+        let principals = value
+            .get("principals")
+            .and_then(Value::as_array)
+            .filter(|p| p.len() <= 1000)
+            .ok_or(Error::Unavailable)?;
+        let matches = principals
+            .iter()
+            .filter(|p| p.get("id").and_then(Value::as_str) == Some(member))
+            .collect::<Vec<_>>();
+        Ok(matches.len() == 1
+            && matches[0].get("kind").and_then(Value::as_str) == Some("human")
+            && matches!(
+                matches[0].get("role").and_then(Value::as_str),
+                Some("owner" | "member")
+            ))
+    }
     /// The fence runs after minting, so a pause or lease expiry while the CLI
     /// was waiting cannot dispatch a newly stale intent. No queue mutex may be
     /// held during the CLI or HTTP work. The callback must not cache positives.

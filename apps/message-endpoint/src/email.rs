@@ -1,4 +1,4 @@
-//! Durable email mechanics. Not wired into the HTTP/runtime activation path yet.
+//! Durable email mechanics for the explicitly configured outbox runtime.
 //! Callers must supply freshly verified owner/member authority and Core readback;
 //! these storage primitives are not authentication or an alternative owner API.
 use crate::{
@@ -191,6 +191,137 @@ fn active(
 ) -> Result<(String, Contact), Error> {
     tx.query_row("SELECT e.recipient,t.address,t.member FROM endpoints e JOIN email_targets t ON e.id=t.endpoint AND e.generation=t.generation WHERE e.id=?1 AND e.generation=?2 AND e.paused=0 AND t.revoked=0",params![endpoint,generation],|r|Ok((r.get(0)?,Contact{address:r.get(1)?,member_id:r.get(2)?}))).optional()?.ok_or(Error::Denied)
 }
+pub(crate) fn bound(store: &Store, endpoint: &str) -> Result<bool, Error> {
+    let exists: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='email_targets')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(false);
+    }
+    Ok(store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation WHERE e.id=?1)",[endpoint],|r|r.get(0))?)
+}
+/// Current non-revoked target, including while paused. Missing legacy tables
+/// mean no email binding, never a guessed target.
+pub(crate) fn contact(store: &Store, endpoint: &str) -> Result<Option<Contact>, Error> {
+    let exists: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='email_targets')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(None);
+    }
+    Ok(store.db.query_row("SELECT t.address,t.member FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation WHERE e.id=?1 AND t.revoked=0",[endpoint],|r|Ok(Contact{address:r.get(0)?,member_id:r.get(1)?})).optional()?)
+}
+impl<M: crate::relay::Mailbox + crate::hub::Directory> crate::hub::Hub<M> {
+    /// Called by the email worker only after fresh membership and Core checks.
+    /// The ordinary Core inbound lease and idempotency survive retries/restart.
+    pub(crate) fn prepare_email_forward(
+        &mut self,
+        endpoint: &str,
+        now: i64,
+        token: &str,
+    ) -> Result<Option<crate::telegram::CoreIntent>, Error> {
+        if self.blocked().map_err(|_| Error::Denied)? {
+            return Err(Error::Denied);
+        }
+        let view = self.active(endpoint, now).map_err(|_| Error::Denied)?;
+        if contact(&self.store, endpoint)?.is_none() {
+            return Err(Error::Denied);
+        }
+        let Some(job) = self
+            .store
+            .lease(endpoint, view.binding.generation, now, token)
+            .map_err(|_| Error::Lease)?
+        else {
+            return Ok(None);
+        };
+        let (thread,reply,context):(String,String,String)=self.store.db.query_row("SELECT thread,id,context FROM email_replies WHERE job=?1 AND endpoint=?2 AND generation=?3",params![job.job_id,endpoint,view.binding.generation],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)))?;
+        let envelope = Envelope::Deliver {
+            job_id: job.idempotency_key,
+            recipient: job.recipient,
+            body: job.body,
+            context_ids: serde_json::from_str(&context).map_err(|_| Error::Invalid)?,
+            source: crate::protocol::ExternalSource {
+                channel: crate::protocol::Channel::Email,
+                account_id: endpoint.into(),
+                conversation_id: thread,
+                message_id: reply,
+            },
+        };
+        let parts = envelope
+            .fragments(endpoint, view.binding.generation as u64)
+            .map_err(|_| Error::Invalid)?
+            .into_iter()
+            .map(|body| {
+                let frame = crate::protocol::Fragment::parse(&body).map_err(|_| Error::Invalid)?;
+                Ok((frame.idempotency_key(), body))
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        Ok(Some(crate::telegram::CoreIntent {
+            endpoint: endpoint.into(),
+            generation: view.binding.generation,
+            job: job.job_id,
+            token: token.into(),
+            parts,
+        }))
+    }
+    /// Owner executor has checked current membership without holding hub state.
+    /// Commit immutable target, revision and audit together; remain paused.
+    pub(crate) fn bind_email_audited(
+        &mut self,
+        endpoint: &str,
+        revision: i64,
+        contact: Contact,
+        actor: &str,
+        now: i64,
+    ) -> Result<(), Error> {
+        let contact = contact.normalized()?;
+        let view = self.view(endpoint).map_err(|_| Error::Denied)?;
+        if !view.paused || view.revision != revision {
+            return Err(Error::Conflict);
+        }
+        self.store
+            .recheck_private_storage()
+            .map_err(|_| Error::PrivateStorage)?;
+        self.recovery_schema().map_err(|_| Error::PrivateStorage)?;
+        self.telegram_schema().map_err(|_| Error::PrivateStorage)?;
+        Queue::new(&mut self.store)?;
+        let context =
+            crate::owner_actions::AuditContext::new(actor, now).map_err(|_| Error::Invalid)?;
+        let tx = self.store.db.transaction()?;
+        let telegram: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM telegram_targets WHERE endpoint=?1)",
+            [endpoint],
+            |r| r.get(0),
+        )?;
+        if telegram {
+            return Err(Error::Conflict);
+        }
+        crate::owner_actions::record(&tx, Some(&context), "bind_email", endpoint, revision)
+            .map_err(|_| Error::PrivateStorage)?;
+        tx.execute(
+            "INSERT INTO email_targets(endpoint,generation,address,member) VALUES(?1,?2,?3,?4)",
+            params![
+                endpoint,
+                view.binding.generation,
+                contact.address,
+                contact.member_id
+            ],
+        )?;
+        if tx.execute(
+            "UPDATE hub_bindings SET revision=revision+1 WHERE endpoint=?1 AND revision=?2",
+            params![endpoint, revision],
+        )? != 1
+        {
+            return Err(Error::Conflict);
+        }
+        tx.commit()?;
+        Ok(())
+    }
+}
 /// Shared private SQLite, with additive tables only. This does not start workers.
 pub struct Queue<'a> {
     store: &'a mut Store,
@@ -238,6 +369,16 @@ impl<'a> Queue<'a> {
             [endpoint],
         )?;
         Ok(())
+    }
+    /// Durable receipt state for a reassembled Core message; completion is
+    /// recorded only after the selected transport has accepted its intent.
+    pub(crate) fn receipt(
+        &self,
+        endpoint: &str,
+        generation: i64,
+        message: &str,
+    ) -> Result<Option<i64>, Error> {
+        Ok(self.store.db.query_row("SELECT i.state FROM email_intents i JOIN email_messages m ON m.thread=i.thread WHERE i.endpoint=?1 AND i.generation=?2 AND m.source=?3 AND i.id=?4",params![endpoint,generation,message,digest(&["email-notify",endpoint,&generation.to_string(),message])],|r|r.get(0)).optional()?)
     }
     /// Only a reassembled authenticated endpoint envelope, after current Core
     /// readback/member admission. Body is stored privately; mail never uses it.
@@ -488,8 +629,10 @@ impl<'a> Queue<'a> {
             "DELETE FROM email_attempts WHERE at<?1",
             [now.saturating_sub(172800)],
         )?;
+        tx.execute("UPDATE email_intents SET state=2,nonce=NULL,lease_until=NULL WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts>=8 AND (lease_until IS NULL OR lease_until<=?3)",params![endpoint,generation,now])?;
         let candidate:Option<(String,String)>=tx.query_row("SELECT id,thread FROM email_intents WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts<8 AND next_try<=?3 AND (lease_until IS NULL OR lease_until<=?3) ORDER BY rowid LIMIT 1",params![endpoint,generation,now],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         let Some((id, thread)) = candidate else {
+            tx.commit()?;
             return Ok(None);
         };
         for (seconds, local_cap, global_cap) in [(60, 10, 60), (86400, 100, 1000)] {
@@ -1225,5 +1368,53 @@ mod tests {
             )
             .unwrap()
         );
+    }
+    #[test]
+    fn crashed_eighth_send_becomes_terminal_after_lease_expiry() {
+        let mut store = Store::memory(crate::store::Limits::default()).unwrap();
+        store
+            .register_paused("ag_endpoint", 1, "ag_internal")
+            .unwrap();
+        let mut q = Queue::new(&mut store).unwrap();
+        q.bind_paused(
+            "ag_endpoint",
+            1,
+            Contact {
+                address: "person@example.test".into(),
+                member_id: "human_a".into(),
+            },
+        )
+        .unwrap();
+        q.store
+            .db
+            .execute("UPDATE endpoints SET paused=0", [])
+            .unwrap();
+        q.admit(
+            "ag_endpoint",
+            1,
+            &Envelope::Outbound {
+                delivery_id: "del_one".into(),
+                message_id: "msg_one".into(),
+                original_sender: crate::protocol::Sender {
+                    kind: SenderKind::Agent,
+                    id: "ag_internal".into(),
+                },
+                body: "body".into(),
+                context_ids: vec![],
+            },
+            100,
+        )
+        .unwrap();
+        for i in 0..8 {
+            assert!(q
+                .claim("ag_endpoint", 1, 100 + i * 1000, &format!("{i:064x}"))
+                .unwrap()
+                .is_some());
+        }
+        assert!(q
+            .claim("ag_endpoint", 1, 8100, &"f".repeat(64))
+            .unwrap()
+            .is_none());
+        assert_eq!(q.receipt("ag_endpoint", 1, "msg_one").unwrap(), Some(2));
     }
 }

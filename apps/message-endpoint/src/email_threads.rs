@@ -325,6 +325,23 @@ impl Service {
         {
             return secure(error(Error::Csrf));
         }
+        // OAuth callbacks are authenticated by one-use state+browser binding;
+        // their top-level cross-site navigation is expected. Other GETs must
+        // not serve private JSON to a foreign-site request context.
+        if parts.method == Method::GET && parts.uri.path() != "/api/email/auth/callback" {
+            let sites = parts
+                .headers
+                .get_all("sec-fetch-site")
+                .iter()
+                .collect::<Vec<_>>();
+            if sites.len() > 1
+                || sites
+                    .first()
+                    .is_some_and(|v| !matches!(v.to_str(), Ok("same-origin" | "none")))
+            {
+                return secure(error(Error::Csrf));
+            }
+        }
         let permit = match self.slots.clone().try_acquire_owned() {
             Ok(v) => v,
             Err(_) => return secure(error(Error::RateLimited)),
@@ -633,6 +650,29 @@ mod tests {
             .unwrap();
         let hosts = BTreeSet::from(["hub.example".to_owned()]);
         let path = format!("/api/email/thread/{id}");
+        for site in ["cross-site", "same-site"] {
+            let (parts, body) = axum::http::Request::builder()
+                .uri(&path)
+                .header("Host", "hub.example")
+                .header("Sec-Fetch-Site", site)
+                .header("X-Treer-Identity-Token", "synthetic.alice.signature")
+                .body(Body::empty())
+                .unwrap()
+                .into_parts();
+            let response = runtime.block_on(service.clone().handle(
+                "127.0.0.1:1234".parse().unwrap(),
+                parts,
+                body,
+                &hosts,
+            ));
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert_eq!(response.headers()["cache-control"], "no-store");
+            assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+            assert!(response.headers()["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("frame-ancestors 'none'"));
+        }
         let request =
             |method: Method, token: Option<&str>, origin: Option<&str>, body: Option<&str>| {
                 let mut request = axum::http::Request::builder()

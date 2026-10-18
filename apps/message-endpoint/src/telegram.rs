@@ -83,10 +83,10 @@ pub trait Transport {
 /// Owned work leaves the SQLite actor before any network call. Lease fields are
 /// private capabilities and must not be serialized to a browser or external API.
 pub struct CoreIntent {
-    endpoint: String,
-    generation: i64,
-    job: i64,
-    token: String,
+    pub(crate) endpoint: String,
+    pub(crate) generation: i64,
+    pub(crate) job: i64,
+    pub(crate) token: String,
     pub parts: Vec<(String, String)>,
 }
 pub struct ChunkIntent {
@@ -139,6 +139,10 @@ impl<M: Mailbox + Directory> Hub<M> {
         let view = self.view(endpoint)?;
         if !view.paused || view.revision != revision || !target.validate() {
             return Err(Error::Invalid);
+        }
+        #[cfg(feature = "hub")]
+        if crate::email::bound(&self.store, endpoint).map_err(|_| Error::Invalid)? {
+            return Err(Error::Conflict);
         }
         self.telegram_schema()?;
         let text = serde_json::to_string(&target).map_err(|_| Error::Invalid)?;

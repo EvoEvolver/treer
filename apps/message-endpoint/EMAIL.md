@@ -83,57 +83,85 @@ Agents sharing the OS user. Use dedicated OS users/containers and narrow enforce
 Policy/mount/network access. No automatic production migration, old email-thread
 URL transfer, inbound email or nonmember participation is implemented yet.
 
-## Increment status
+## Current outbox increment
 
-The current additive storage module implements fixed-target thread admission,
-notification intents, private outbox records, byte/count/attempt limits, lease
-reclaim, retry/backoff and pause/revocation fencing. It is **not connected to the
-runtime or a Proxy email worker yet**.
-The storage methods accept already-verified inputs; they do not authenticate a
-member or authorize activation by themselves. No existing endpoint is changed.
+The production assembly opts in only when private config has
+`"email":{"outbox_directory":"/absolute/private/email-outbox"}`. Omission
+keeps all member routes and email workers absent. The config accepts no mail
+mode/provider token: runtime is **outbox only**. The Proxy sender is a separately
+tested unused library helper; no real mail can be enabled from the browser or
+this config. The existing default-off operator activation gate and owner resume
+checks apply before either direction can leave a queue.
 
-Outbox publication uses an fsynced temporary file and exclusive hard-link
-publication in a private directory, then removes the temporary link and fsyncs
-the directory. Existing files must be private single-link regular files with
-identical bytes. A crash between publication and temporary-link removal fails
-closed on retry; an operator must inspect and reconcile that private record.
-Do not remove or overwrite it automatically or interpret an outbox record as
-actual mail delivery. Plaintext outbox records need the same backup/retention
-and OS isolation as hub state.
+Owner `bind_email` goes through the unchanged owner authenticator, confirms a
+fresh directory member outside the hub state lock, checks paused state/revision,
+and atomically commits target, revision and audit. The target is immutable and
+exclusive with Telegram for that endpoint. Failed membership, storage or CAS
+cannot partially install a target. Agent JSON cannot configure contacts.
 
-The next storage increment also has a distinct `MemberAuth` capability (current
-`verify_app` plus directory role on every call), and atomic member reply
-admission with fixed-recipient attribution and idempotency. Existing owner-only
-management remains owner-only. These capabilities now have an opt-in HTTP handler and separate member OAuth
-flow; the production runtime has not assembled that handler yet. A bare member ID from JSON cannot construct
-the verified capability.
+The per-endpoint outbox worker verifies current member visibility with a token
+minted from the hub's own workload identity, refreshes actual Core metadata,
+then checks pause/current generation/target and queue lease. No mutex spans
+CLI/directory I/O or outbox publication. A committed outbox receipt permits
+completion of the corresponding reassembled Core transfer; publication is never
+called email delivery. Human replies carry the original Core message context,
+a channel/thread/source label and App-asserted human attribution through the
+same actual endpoint relay. Current membership and Core pins are rechecked
+before forwarding; revocation/pause blocks subsequent dispatch. An already
+issued Core/network call cannot be recalled. Failed work remains leased/retryable
+or explicitly parked, never silently dropped. Crashing during attempt eight
+becomes terminal after lease expiry instead of leaving an unclaimable intent.
 
-Historical messages and replies count against the email quota even after
-revocation; there is currently no automatic expiry or owner purge UI. Cap-full
-state rejects new admissions. Do not delete database rows or outbox files to
-clear capacity while work is pending. A reviewed retention/purge mechanism with
-private outbox reconciliation is required before sustained production use.
-The eventual Proxy send deadline must be below the 60-second lease (20 seconds
-maximum); rate-limit/lease-unavailable results mean retry later, never permanent
-failure and never an extra consumed email attempt.
+### Member HTTP and browser
 
-Library transport/session helpers now include a separate, bounded PKCE member
-OAuth vault with the fixed `/api/email/auth/callback` path, and a Proxy sender
-that mints the hub's own service token through its pinned CLI. The sender checks
-its dispatch fence after minting, refuses redirects, bounds response bytes and
-uses a 20-second HTTP deadline. Fixed unavailable/retry/rejected outcomes never
-include upstream errors or credentials. These helpers remain **unwired**: their
-routes, cookie handling, current-member dispatch check and worker assembly are
-not exposed by the running hub. Tests exercise only synthetic loopback servers.
-Reply framing escapes Unicode line/paragraph separators U+2028 and U+2029 too.
+The opt-in member service uses separate `__Host-` Secure/HttpOnly/SameSite=Lax
+session and login cookies, separate bounded PKCE state and a generated-thread-
+only return destination. Session lifetime is capped by the verified capability
+expiry. Restart loses in-memory sessions and requires sign-in again. Management
+owner cookies cannot authorize a member session; an owner is not implicitly a
+recipient of other members' threads. Invalid injected identity never falls back
+to a valid member session. Every request verifies active human identity,
+audience, workspace, expiry and current directory membership, then exact thread
+scope in SQLite.
 
-The opt-in member HTTP service has separate `__Host-` session/login cookies,
-PKCE state and a generated-thread-only return destination. Its routes are
-`GET /api/email/auth/start?thread=<id>`, `GET /api/email/auth/callback`,
-`POST /api/email/auth/logout`, and `GET|POST /api/email/thread/<id>`.
-Thread POST accepts only `{key,body}` and returns queued, not delivered.
-It authenticates before reading a bounded body, holds a bounded admission slot
-through blocking work, and checks current membership on each request. Owner
-sessions are not member sessions. Invalid injected identity never falls back to
-a valid member cookie. This service is absent unless explicitly assembled with
-`Settings::with_email`; no existing runtime or endpoint is activated by it.
+Routes: `GET /api/email/auth/start?thread=<id>`,
+`GET /api/email/auth/callback`, `POST /api/email/auth/logout`, and
+`GET|POST /api/email/thread/<id>`. Reply POST accepts only `{key,body}` and returns
+queued, not delivered. One-use PKCE/state/browser binding protects the fixed
+OAuth callback, which must support normal cross-site navigation. Other GETs
+reject present Fetch-Site values except same-origin/none; absent Fetch metadata
+is allowed for non-browser clients. Writes require the exact configured Origin,
+custom CSRF header and Fetch-Site checks. Authentication precedes the bounded
+body read; JSON denies extra fields and has a three-second body deadline.
+
+Confirm the Managed App OAuth client permits the configured dedicated private
+App origin and the member callback `/api/email/auth/callback`; the existing
+owner callback stays unchanged. No redirect URL comes from request Host or a
+thread body. Pending member logins are bounded at 1,000 and use source rate
+limits. They remain a bounded member-login denial-of-service surface, separate
+from owner sessions. Four blocking HTTP slots and 20 verification requests per
+source per ten seconds protect Proxy verification; no positive membership cache
+is used. JSON responses have no-store/no-cache, nosniff, no-referrer and the
+existing restrictive CSP/frame policy, with no CORS grant. Dedicated-origin
+writes only; embedded/foreign App views link to the configured dedicated thread
+URL. All body/identity fields render as React text in desktop/390px light/dark.
+
+### Durable state and production blockers
+
+Outbox publication fsyncs an exclusive temporary file, publishes with an
+exclusive hard link, removes the temporary link and fsyncs the directory.
+Existing records must be private single-link regular files with identical bytes;
+verified replay fsyncs them again before accepting a receipt. A crash between
+publication and temporary-link removal fails closed: an operator must inspect
+and reconcile that private record, never blindly remove or overwrite it.
+
+State, backups and outbox files contain plaintext. Revocation blocks access but
+does not erase old records. Retained messages and replies count against the
+quota; there is **no TTL, owner purge UI or automated private outbox
+reconciliation yet**. Cap-full state refuses new work. Do not deploy this
+increment for sustained production or delete rows/files to clear capacity while
+work is pending. These are explicit blockers for the later real-mail increment,
+as are the wired author gate, security/Core approval and separate owner/release
+authorization. Runtime tests use fake loopback Proxy/CLI plus the actual Rust
+relay; browser tests use a native binary and synthetic identities, never a live
+bot or provider.

@@ -30,6 +30,7 @@ const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings 
 #[derive(Default, Serialize)]
 pub struct SettingsSnapshot {
     pub endpoints: Vec<EndpointSnapshot>,
+    pub email: Option<crate::email_workers::Snapshot>,
     pub activation_enabled: bool,
     pub workers: crate::scheduler::WorkerStatus,
     pub audit_full: bool,
@@ -983,6 +984,7 @@ mod tests {
         let value = snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                email: None,
                 endpoints: (0..20).map(|_| endpoint(4096)).collect(),
                 workers: Default::default(),
                 audit_full: false,
@@ -999,6 +1001,7 @@ mod tests {
         assert!(snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                email: None,
                 endpoints: (0..21).map(|_| endpoint(1)).collect(),
                 workers: Default::default(),
                 audit_full: false,
@@ -1012,6 +1015,7 @@ mod tests {
         assert!(snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                email: None,
                 endpoints: vec![endpoint(512 * 1024)],
                 workers: Default::default(),
                 audit_full: false,
