@@ -156,8 +156,22 @@ impl Store {
         )?;
         for table in ["inbound", "outbound"] {
             // Constant table names only, never caller-controlled SQL.
+            // Retained member replies still need their accepted Core context
+            // and idempotency row. Do not let their FK abort pruning for other
+            // channels. A later reviewed email purge owns releasing this link.
+            let email_replies: bool = table == "inbound"
+                && transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='email_replies')",
+                    [],
+                    |r| r.get(0),
+                )?;
+            let guard = if email_replies {
+                " AND NOT EXISTS(SELECT 1 FROM email_replies r WHERE r.job=inbound.id)"
+            } else {
+                ""
+            };
             removed += transaction.execute(
-                &format!("DELETE FROM {table} WHERE pending=0 AND terminal_at<=?1"),
+                &format!("DELETE FROM {table} WHERE pending=0 AND terminal_at<=?1{guard}"),
                 [before],
             )?;
         }

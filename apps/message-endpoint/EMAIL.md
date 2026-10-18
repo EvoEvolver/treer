@@ -157,7 +157,10 @@ and reconcile that private record, never blindly remove or overwrite it.
 
 State, backups and outbox files contain plaintext. Revocation blocks access but
 does not erase old records. Retained messages and replies count against the
-quota; there is **no TTL, owner purge UI or automated private outbox
+quota. Referenced accepted Core receipt rows are retained with email replies,
+so normal terminal pruning still works for other channels without breaking
+thread context/idempotency or aborting on the reply foreign key. There is
+**no TTL, owner purge UI or automated private outbox
 reconciliation yet**. Cap-full state refuses new work. Do not deploy this
 increment for sustained production or delete rows/files to clear capacity while
 work is pending. These are explicit blockers for the later real-mail increment,

@@ -822,7 +822,7 @@ mod tests {
                 },
             )
             .unwrap();
-        // Production activation is deliberately not exposed by this increment.
+        // Storage-only fixture; production activation uses the audited owner path.
         store
             .db
             .execute("UPDATE endpoints SET paused=0", [])
@@ -1416,5 +1416,58 @@ mod tests {
             .unwrap()
             .is_none());
         assert_eq!(q.receipt("ag_endpoint", 1, "msg_one").unwrap(), Some(2));
+    }
+    #[test]
+    fn retained_email_reply_does_not_abort_other_channel_terminal_pruning() {
+        let mut store = fixture();
+        let id = {
+            let mut q = Queue::new(&mut store).unwrap();
+            let thread = q
+                .admit("ag_email", 1, &message("msg_one", "body", &[]), 100)
+                .unwrap();
+            q.reply(&thread, &member("user_alice"), "reply", "human text", 101)
+                .unwrap()
+        };
+        let lease = "a".repeat(64);
+        store.lease("ag_email", 1, 101, &lease).unwrap().unwrap();
+        store
+            .complete("ag_email", 1, id, &lease, "msg_accepted")
+            .unwrap();
+        store
+            .enqueue(crate::store::Inbound {
+                endpoint: "ag_email",
+                generation: 1,
+                external_id: "other_transport_item",
+                recipient: "ag_internal",
+                body: "other text",
+            })
+            .unwrap();
+        let other = store.lease("ag_email", 1, 102, &lease).unwrap().unwrap();
+        store
+            .complete("ag_email", 1, other.job_id, &lease, "msg_other")
+            .unwrap();
+        store
+            .db
+            .execute("UPDATE inbound SET terminal_at=100", [])
+            .unwrap();
+        assert_eq!(
+            store
+                .prune_completed(crate::transfers::TOMBSTONE_TTL + 100)
+                .unwrap(),
+            1
+        );
+        let rows: i64 = store
+            .db
+            .query_row("SELECT count(*) FROM inbound", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 1);
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT core_id FROM inbound WHERE id=?1", [id], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            "msg_accepted"
+        );
     }
 }
