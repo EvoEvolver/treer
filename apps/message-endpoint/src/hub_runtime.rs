@@ -1,0 +1,309 @@
+//! Executable composition: private state + own Core workers + owner HTTP.
+//! Telegram workers and owner writes share the audited configuration boundary.
+use crate::{
+    core::Core,
+    hub::Hub,
+    owner_auth::OwnerAuth,
+    scheduler::CoreWorkers,
+    settings_http::{Settings, SettingsSnapshot},
+    store::{Limits, Store},
+};
+use serde::Deserialize;
+#[cfg(test)]
+use serde_json::json;
+use std::{
+    net::{IpAddr, Ipv4Addr, SocketAddr},
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+use thiserror::Error;
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("hub_configuration_unavailable")]
+    Configuration,
+    #[error("hub_storage_unavailable")]
+    Storage,
+    #[error("hub_runtime_unavailable")]
+    Runtime,
+}
+fn listen() -> SocketAddr {
+    SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 8786)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    hub_id: String,
+    workspace_id: String,
+    service_id: String,
+    proxy_url: String,
+    public_url: String,
+    /// Explicit assertion checked at startup; public settings unsupported.
+    access: String,
+    /// Release/operator gate; a browser can never enable this.
+    #[serde(default)]
+    activation_enabled: bool,
+    #[serde(default)]
+    virtual_hostname: Option<String>,
+    cli: PathBuf,
+    cli_sha256: String,
+    state_directory: PathBuf,
+    #[serde(default = "listen")]
+    listen: SocketAddr,
+    #[serde(default)]
+    telegram_accounts: Vec<crate::telegram_workers::AccountConfig>,
+}
+impl Config {
+    pub fn load(
+        path: &Path,
+        own_id: &str,
+        injected_workspace: Option<&str>,
+    ) -> Result<Self, Error> {
+        let raw = crate::private_store::read_config(path).map_err(|_| Error::Configuration)?;
+        let config: Self = serde_json::from_slice(&raw).map_err(|_| Error::Configuration)?;
+        config.validate(own_id, injected_workspace)?;
+        Ok(config)
+    }
+    fn validate(&self, own_id: &str, injected_workspace: Option<&str>) -> Result<(), Error> {
+        if own_id != self.hub_id
+            || !self.hub_id.starts_with("app_")
+            || !crate::store::valid_id(&self.hub_id)
+            || !crate::store::valid_id(&self.workspace_id)
+            || injected_workspace != Some(self.workspace_id.as_str())
+            || self.access != "workspace"
+            || !self.listen.ip().is_loopback()
+            || self.listen.port() == 0
+            || !self.cli.is_absolute()
+            || !self.state_directory.is_absolute()
+            || self.cli_sha256.len() != 64
+            || !self
+                .cli_sha256
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return Err(Error::Configuration);
+        }
+        Ok(())
+    }
+}
+/// Call from a synchronous main. Reqwest's blocking client and owned Core
+/// threads are constructed outside Tokio; no global logger is installed.
+pub fn run(config: Config) -> Result<(), Error> {
+    // Keep the executable pin check before even reading transport secret files.
+    if crate::relay::hash_executable(&config.cli).map_err(|_| Error::Configuration)?
+        != config.cli_sha256
+    {
+        return Err(Error::Configuration);
+    }
+
+    let accounts = crate::telegram_workers::load(&config.telegram_accounts)
+        .map_err(|_| Error::Configuration)?;
+    run_prepared(config, accounts, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+}
+// Same assembly for the executable and cfg(test) fixture. The public entry point
+// always uses private account files and OS Ctrl-C; no config/feature/env override.
+fn run_prepared(
+    config: Config,
+    accounts: Vec<crate::telegram_workers::Account>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+) -> Result<(), Error> {
+    run_assembled(config, accounts, shutdown, CoreWorkers::start)
+}
+// Production always selects CoreWorkers::start. Only cfg(test) assembly supplies
+// a scheduling gate; it is absent from the executable's input/configuration.
+fn run_assembled(
+    config: Config,
+    accounts: Vec<crate::telegram_workers::Account>,
+    shutdown: impl std::future::Future<Output = ()> + Send + 'static,
+    start_workers: impl FnOnce(crate::scheduler::SharedHub<Core>) -> std::io::Result<CoreWorkers>,
+) -> Result<(), Error> {
+    if crate::relay::hash_executable(&config.cli).map_err(|_| Error::Configuration)?
+        != config.cli_sha256
+    {
+        return Err(Error::Configuration);
+    }
+    let core = Core::new_pinned(&config.cli, &config.hub_id, &config.cli_sha256)
+        .map_err(|_| Error::Configuration)?;
+    let auth = OwnerAuth::new(
+        &config.proxy_url,
+        &config.service_id,
+        &config.workspace_id,
+        &config.public_url,
+    )
+    .map_err(|_| Error::Configuration)?;
+    let store =
+        Store::open(&config.state_directory, Limits::default()).map_err(|_| Error::Storage)?;
+    let mut initial = Hub::new(store, core.clone(), &config.hub_id, &config.workspace_id)
+        .map_err(|_| Error::Storage)?;
+    let startup_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|t| i64::try_from(t.as_secs()).ok())
+        .ok_or(Error::Runtime)?;
+    initial
+        .enforce_startup_activation_gate(config.activation_enabled, startup_at)
+        .map_err(|_| Error::Storage)?;
+    let hub = Arc::new(Mutex::new(initial));
+    let listener = std::net::TcpListener::bind(config.listen).map_err(|_| Error::Runtime)?;
+    listener.set_nonblocking(true).map_err(|_| Error::Runtime)?;
+    let workers = Arc::new(Mutex::new(
+        start_workers(hub.clone()).map_err(|_| Error::Runtime)?,
+    ));
+    let handoffs = Arc::new(Mutex::new(
+        crate::handoffs::CoreHandoffs::start(hub.clone()).map_err(|_| Error::Runtime)?,
+    ));
+    let telegram = Arc::new(Mutex::new(
+        if config.activation_enabled {
+            crate::telegram_workers::TelegramWorkers::start(hub.clone(), accounts)
+        } else {
+            crate::telegram_workers::TelegramWorkers::disabled(accounts)
+        }
+        .map_err(|_| Error::Runtime)?,
+    ));
+    let token_service = Arc::new(
+        crate::telegram_tokens::Service::new(config.telegram_accounts.clone())
+            .map_err(|_| Error::Configuration)?,
+    );
+    let snapshot_tokens = token_service.clone();
+    let activation_enabled = config.activation_enabled;
+    let account_ready = telegram.lock().map_err(|_| Error::Runtime)?.readiness();
+    let snapshot_telegram = telegram.clone();
+    let snapshot_handoffs = handoffs.clone();
+    let snapshot_hub = hub.clone();
+    let snapshot_workers = workers.clone();
+    let snapshot = Arc::new(move || {
+        let hub = snapshot_hub.lock().map_err(|_| ())?;
+        let endpoints = hub
+            .binding_ids()
+            .map_err(|_| ())?
+            .into_iter()
+            .map(|id| hub.view(&id).map(Into::into).map_err(|_| ()))
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut status = snapshot_workers.lock().map_err(|_| ())?.status();
+        let hs = snapshot_handoffs.lock().map_err(|_| ())?.status();
+        status.inbound_core_handoffs = hs.inbound_core_handoffs;
+        status.notice_core_handoffs = hs.notice_core_handoffs;
+        status.handoff_failures = hs.handoff_failures;
+        status.handoffs_stopped = hs.handoffs_stopped;
+        status.cli_integrity_failed = hub.backend().integrity_failed();
+        status.last_handoff_failure = hub.last_core_handoff_failure().map_err(|_| ())?;
+        let (audit_full, emergency_pause_bindings) = hub.owner_audit_capacity().map_err(|_| ())?;
+        Ok(SettingsSnapshot {
+            endpoints,
+            workers: status,
+            audit_full,
+            emergency_pause_bindings,
+            telegram_accounts: snapshot_telegram.lock().map_err(|_| ())?.status(),
+            activation_enabled,
+            telegram_tokens: snapshot_tokens.snapshot().map_err(|_| ())?,
+        })
+    });
+    let mutation = Arc::new(crate::configuration::core_executor(
+        hub.clone(),
+        core,
+        config.workspace_id.clone(),
+        crate::configuration::Activation {
+            enabled: activation_enabled,
+            account_ready,
+        },
+    ));
+    let token_hub = hub.clone();
+    let token_workers = telegram.clone();
+    let token_mutation = Arc::new(move |owner: &crate::owner_auth::Owner, command| {
+        token_service.execute(&token_hub, &token_workers, owner, command)
+    });
+    let serve = || -> Result<(), Error> {
+        let settings = Settings::new(auth, snapshot, include_str!("../dist/index.html"))
+            .map_err(|_| Error::Configuration)?
+            .with_configuration(mutation)
+            .with_tokens(token_mutation)
+            .with_loopback_listener(config.listen)
+            .map_err(|_| Error::Configuration)?
+            .with_assets(
+                include_str!("../dist/app.js"),
+                include_str!("../dist/app.css"),
+            );
+        let settings = match &config.virtual_hostname {
+            Some(host) => settings
+                .with_virtual_host(host)
+                .map_err(|_| Error::Configuration)?,
+            None => settings,
+        };
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .max_blocking_threads(16)
+            .enable_all()
+            .build()
+            .map_err(|_| Error::Runtime)?;
+        runtime.block_on(async {
+            let listener =
+                tokio::net::TcpListener::from_std(listener).map_err(|_| Error::Runtime)?;
+            axum::serve(
+                listener,
+                settings
+                    .router()
+                    .into_make_service_with_connect_info::<SocketAddr>(),
+            )
+            .with_graceful_shutdown({
+                let workers = workers.clone();
+                let handoffs = handoffs.clone();
+                let telegram = telegram.clone();
+                async move {
+                    shutdown.await;
+                    if let Ok(w) = workers.lock() {
+                        w.request_stop();
+                    }
+                    if let Ok(w) = handoffs.lock() {
+                        w.request_stop();
+                    }
+                    if let Ok(w) = telegram.lock() {
+                        w.request_stop();
+                    }
+                }
+            })
+            .await
+            .map_err(|_| Error::Runtime)
+        })
+    };
+    let result = serve();
+    // Stop only the threads owned by this process. No external signals/restarts.
+    if let Ok(mut telegram) = telegram.lock() {
+        telegram.stop();
+    }
+    if let Ok(mut handoffs) = handoffs.lock() {
+        handoffs.stop();
+    }
+    if let Ok(mut workers) = workers.lock() {
+        workers.stop();
+    }
+    result
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn config() -> Config {
+        serde_json::from_value(json!({"hub_id":"app_hub","workspace_id":"ws_test","service_id":"svc_hub","proxy_url":"https://proxy.example/","public_url":"https://hub.example/","access":"workspace","cli":"/private/cli","cli_sha256":"a".repeat(64),"state_directory":"/private/state"})).unwrap()
+    }
+    #[test]
+    fn runtime_requires_own_app_identity_private_access_and_loopback_listener() {
+        let c = config();
+        assert!(c.validate("app_hub", Some("ws_test")).is_ok());
+        assert!(c.listen.ip().is_loopback());
+        assert!(c.validate("ag_other", None).is_err());
+        assert!(c.validate("app_hub", Some("ws_other")).is_err());
+        let mut c = config();
+        c.access = "public".into();
+        assert!(c.validate("app_hub", None).is_err());
+        let mut c = config();
+        c.listen = "0.0.0.0:8786".parse().unwrap();
+        assert!(c.validate("app_hub", None).is_err());
+        let mut c = config();
+        c.cli_sha256 = "not-a-hash".into();
+        assert!(c.validate("app_hub", None).is_err());
+    }
+}
+
+#[cfg(test)]
+#[path = "hub_runtime_fixture.rs"]
+mod positive_fixture;

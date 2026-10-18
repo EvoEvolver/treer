@@ -1,0 +1,39 @@
+[package]
+name = "treer-message-endpoint"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[[bin]]
+name = "treer-message-hub"
+path = "src/bin/treer-message-hub.rs"
+required-features = ["hub"]
+
+# This App is released independently; do not add it to the Core workspace.
+[workspace]
+
+[features]
+default = []
+hub = ["dep:reqwest", "dep:getrandom", "dep:axum", "dep:tokio"]
+
+[dependencies]
+axum = { version = "0.8.9", optional = true, default-features = false, features = ["http1", "json", "tokio", "query"] }
+tokio = { version = "1.53.1", optional = true, features = ["rt-multi-thread", "net", "time", "signal", "sync"] }
+getrandom = { version = "0.4.3", optional = true }
+reqwest = { version = "0.12.28", optional = true, default-features = false, features = ["blocking", "json", "rustls-tls"] }
+base64 = "0.22"
+rusqlite = { version = "0.32.1", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+thiserror = "2"
+
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"] }
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[lints.rust]
+unsafe_code = "forbid"
