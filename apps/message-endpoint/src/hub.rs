@@ -55,7 +55,7 @@ impl Directory for Core {
 }
 
 /// Owner-provisioned expectations. Paths are drift detection, never authority.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Binding {
     pub endpoint_id: String,
@@ -81,6 +81,7 @@ pub struct View {
     pub checked_at: Option<i64>,
     /// Endpoint-asserted diagnostic, NOT verification of command or Policy.
     pub diagnostic: Option<Status>,
+    pub activity: crate::activation_state::Activity,
 }
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -149,6 +150,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);
         CREATE TABLE IF NOT EXISTS hub_core_handoff_health(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),generation INTEGER NOT NULL,failures INTEGER NOT NULL,last_job INTEGER NOT NULL,last_token TEXT NOT NULL,first_failure_at INTEGER NOT NULL DEFAULT 0,last_failure_at INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS hub_activity(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),generation INTEGER NOT NULL,activated_at INTEGER NOT NULL,inbound_updates INTEGER NOT NULL DEFAULT 0,outbound_chunks INTEGER NOT NULL DEFAULT 0,stale_updates INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_transport_health(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),consecutive_parks INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_parked(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,reason TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(endpoint,generation,transfer));
         CREATE TABLE IF NOT EXISTS hub_rejections(delivery TEXT PRIMARY KEY,reason TEXT NOT NULL,created_at INTEGER NOT NULL);
@@ -249,6 +251,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         let (definition,revision,paused,reason,observed,checked_at,diagnostic):(String,i64,bool,String,Option<String>,Option<i64>,Option<String>)=self.store.db.query_row(
             "SELECT b.definition,b.revision,e.paused,b.reason,b.observed,b.checked_at,b.diagnostic FROM hub_bindings b JOIN endpoints e ON e.id=b.endpoint WHERE e.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
         Ok(View {
+            activity: self.activation_activity(id)?,
             binding: serde_json::from_str(&definition).map_err(|_| Error::Binding)?,
             revision,
             paused,
@@ -370,9 +373,10 @@ impl<M: Mailbox + Directory> Hub<M> {
         readback: Readback,
         now: i64,
     ) -> Result<(), Error> {
-        self.resume_after_readback_inner(id, revision, readback, now, None)
+        self.resume_after_readback_inner(id, revision, readback, now, None, false)
     }
-    pub fn resume_after_readback_audited(
+    #[cfg(test)]
+    pub(crate) fn resume_after_readback_audited(
         &mut self,
         id: &str,
         revision: i64,
@@ -382,8 +386,22 @@ impl<M: Mailbox + Directory> Hub<M> {
     ) -> Result<(), Error> {
         let context = crate::owner_actions::AuditContext::new(actor, now)?;
         self.recovery_schema()?;
-        self.resume_after_readback_inner(id, revision, readback, now, Some(&context))
+        self.resume_after_readback_inner(id, revision, readback, now, Some(&context), false)
     }
+    #[cfg(feature = "hub")]
+    pub(crate) fn resume_with_context(
+        &mut self,
+        id: &str,
+        revision: i64,
+        readback: Readback,
+        context: crate::owner_actions::AuditContext<'_>,
+        now: i64,
+        discard_held: bool,
+    ) -> Result<(), Error> {
+        self.recovery_schema()?;
+        self.resume_after_readback_inner(id, revision, readback, now, Some(&context), discard_held)
+    }
+    #[cfg(any(test, feature = "hub"))]
     fn resume_after_readback_inner(
         &mut self,
         id: &str,
@@ -391,7 +409,9 @@ impl<M: Mailbox + Directory> Hub<M> {
         readback: Readback,
         now: i64,
         audit: Option<&crate::owner_actions::AuditContext<'_>>,
+        discard_held: bool,
     ) -> Result<(), Error> {
+        self.hold_schema()?;
         if self.blocked()? {
             return Err(Error::FailureBudget);
         }
@@ -411,7 +431,17 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(Error::Binding);
         }
         let tx = self.store.db.transaction()?;
+        if !self.mailbox.integrity_ok() {
+            return Err(Error::Integrity);
+        }
+        if let Some(files) = &self.store._private_files {
+            crate::private_store::recheck(files)?;
+        }
         crate::owner_actions::record(&tx, audit, "resume_binding", id, revision)?;
+        if discard_held {
+            crate::holds::discard_for_resume(&tx, id, view.binding.generation, now)?;
+        }
+        tx.execute("INSERT INTO hub_activity(endpoint,generation,activated_at) VALUES(?1,?2,?3) ON CONFLICT(endpoint) DO UPDATE SET generation=excluded.generation,activated_at=excluded.activated_at,inbound_updates=0,outbound_chunks=0,stale_updates=0",params![id,view.binding.generation,now])?;
         tx.execute("UPDATE endpoints SET paused=0 WHERE id=?1", [id])?;
         tx.execute(
             "UPDATE hub_bindings SET revision=revision+1,reason='active' WHERE endpoint=?1",
@@ -597,6 +627,15 @@ impl<M: Mailbox + Directory> Hub<M> {
                     return Ok(());
                 }
             }
+        }
+        self.hold_schema()?;
+        let discarded:Option<String>=self.store.db.query_row("SELECT message FROM hub_capacity_receipts WHERE endpoint=?1 AND generation=?2 AND delivery=?3 AND reason='owner_discarded_hold'",params![id,view.binding.generation,delivery.delivery_id],|r|r.get(0)).optional()?;
+        if let Some(message) = discarded {
+            return if message == delivery.message.message_id {
+                Ok(())
+            } else {
+                Err(Error::Binding)
+            };
         }
         // Only an unavailable/paused/stale binding permits the hold path.
         // Storage failures must propagate: a worker must not acknowledge Core

@@ -78,6 +78,28 @@ try {
  await card.getByLabel('Chat ID',{exact:true}).fill('');
  await card.getByLabel('Confirm pausing this endpoint at the displayed revision.',{exact:true}).check();await card.getByRole('button',{name:'Pause endpoint',exact:true}).click();
  await card.getByText('3',{exact:true}).waitFor();
+ // Keep production verification limits while exercising one more owner flow.
+ await new Promise(resolve=>setTimeout(resolve,10500));
+ await card.getByText('Resume endpoint',{exact:true}).click();
+ await card.getByRole('button',{name:'Preview resume conditions',exact:true}).click();
+ const resumeButton=card.getByRole('button',{name:'Resume and send pending messages',exact:true});
+ await resumeButton.waitFor();
+ const heldChoice=card.getByLabel('Held content from the pause');
+ if(await heldChoice.inputValue()!=='discard')throw new Error('held content defaults to release');
+ await heldChoice.selectOption('release');await heldChoice.selectOption('discard');
+ if(!await resumeButton.isDisabled())throw new Error('resume armed before owner declarations');
+ await card.getByLabel('I reviewed the fixed relay profile and release version.',{exact:true}).check();
+ const resumeConfirm=card.getByLabel('Confirm resuming these exact objects and sending pending messages.',{exact:true});
+ if(!await resumeConfirm.isDisabled())throw new Error('one owner declaration armed resume confirmation');
+ await card.getByLabel('I checked OS user/container separation and enforced Policy isolation.',{exact:true}).check();
+ await card.getByLabel('Evidence reference (ticket or manifest SHA, no secrets)',{exact:true}).fill('#159 synthetic release reference');
+ await resumeConfirm.check();
+ if(!await resumeButton.isDisabled())throw new Error('browser declarations bypassed default operator gate/unready account');
+ if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('resume preview overflow at 390px');
+ await edit.screenshot({path:join(screenshotPath,'owner-resume-390-light.png'),fullPage:true});
+ await edit.getByRole('button',{name:'Dark',exact:true}).click();
+ await edit.screenshot({path:join(screenshotPath,'owner-resume-390-dark.png'),fullPage:true});
+ await edit.getByRole('button',{name:'Light',exact:true}).click();
  await card.getByText('Recovery and audit',{exact:true}).click();
  await card.getByRole('button',{name:'Load recovery records',exact:true}).click();
  await card.getByText('No parked transfers.',{exact:true}).waitFor();
@@ -131,7 +153,7 @@ try {
  if(!await edit.locator('body').evaluate(el=>el.scrollWidth<=innerWidth))throw new Error('editing form overflow at 390px');
  await edit.screenshot({path:join(screenshotPath,'owner-edit-390-light.png'),fullPage:true});
  await edit.close();
- console.log('PASS: real hub, injected identity on wildcard + actual iframe prefix; 8 layout/theme screenshots + 390px confirmed owner create/bind/pause/recovery/archive; fallback + forged rejection');
+ console.log('PASS: real hub, injected identity on wildcard + actual iframe prefix; 8 layout/theme screenshots + 390px confirmed owner create/bind/pause/default-off-resume/recovery/archive; fallback + forged rejection');
 } finally {
  clearTimeout(timer);if(browser)await browser.close();fixture.kill('SIGTERM');
  if(fixture.exitCode===null)await once(fixture,'exit');lines.close();rmSync(home,{recursive:true,force:true});

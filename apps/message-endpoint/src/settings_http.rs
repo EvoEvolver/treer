@@ -24,10 +24,11 @@ use tokio::sync::Semaphore;
 
 const SESSION: &str = "__Host-treer-endpoint-session";
 const BROWSER: &str = "__Host-treer-endpoint-login";
-const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings and endpoint status. Browsers receive the human interface.\n\n## Inspect\n\n`GET /health` reports process health. `GET /api/settings` requires a current verified workspace human owner and returns bounded endpoint metadata.\n\n## Authentication\n\nTreer-injected App identity takes precedence; an invalid supplied identity is rejected. Without an identity, open this App in a browser and use Treer OAuth. Opaque sessions remain HttpOnly; never paste tokens into URLs. This settings service does not accept Agent administration credentials.\n\nPOST /api/configuration accepts confirmed owner create, pause and bind_telegram commands. New endpoints remain paused; transport activation is not exposed. State contains sensitive metadata: keep this Managed App workspace-only, use a dedicated OS user or container, and protect backups.\n";
+const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings and endpoint status. Browsers receive the human interface.\n\n## Inspect\n\n`GET /health` reports process health. `GET /api/settings` requires a current verified workspace human owner and returns bounded endpoint metadata.\n\n## Authentication\n\nTreer-injected App identity takes precedence; an invalid supplied identity is rejected. Without an identity, open this App in a browser and use Treer OAuth. Opaque sessions remain HttpOnly; never paste tokens into URLs. This settings service does not accept Agent administration credentials.\n\nPOST /api/configuration accepts confirmed owner create, pause, bind_telegram, recovery and metadata commands. Owner resume requires a separate default-off operator gate, fresh Core metadata, ready Telegram identity and explicit owner declarations about profile and isolation. These declarations are not attestation by the App. State contains sensitive metadata: keep this Managed App workspace-only, use a dedicated OS user or container, and protect backups.\n";
 #[derive(Default, Serialize)]
 pub struct SettingsSnapshot {
     pub endpoints: Vec<EndpointSnapshot>,
+    pub activation_enabled: bool,
     pub workers: crate::scheduler::WorkerStatus,
     pub audit_full: bool,
     pub emergency_pause_bindings: i64,
@@ -41,6 +42,7 @@ pub struct EndpointSnapshot {
     reason: String,
     observed: Option<ObservedSnapshot>,
     diagnostic: Option<DiagnosticSnapshot>,
+    activity: crate::activation_state::Activity,
 }
 #[derive(Serialize)]
 struct BindingSnapshot {
@@ -62,6 +64,7 @@ struct DiagnosticSnapshot {
 impl From<crate::hub::View> for EndpointSnapshot {
     fn from(view: crate::hub::View) -> Self {
         Self {
+            activity: view.activity,
             binding: BindingSnapshot {
                 endpoint_id: view.binding.endpoint_id,
                 generation: view.binding.generation,
@@ -843,6 +846,7 @@ mod tests {
     fn snapshots_are_fixed_metadata_projection_bounded_to_twenty_and_512k() {
         let endpoint = |size| {
             EndpointSnapshot::from(crate::hub::View {
+                activity: Default::default(),
                 binding: crate::hub::Binding {
                     endpoint_id: "ag_demo".into(),
                     generation: 1,
@@ -867,6 +871,7 @@ mod tests {
                 audit_full: false,
                 emergency_pause_bindings: 0,
                 telegram_accounts: vec![],
+                activation_enabled: false,
             },
         )
         .unwrap();
@@ -881,6 +886,7 @@ mod tests {
                 audit_full: false,
                 emergency_pause_bindings: 0,
                 telegram_accounts: vec![],
+                activation_enabled: false,
             }
         )
         .is_err());
@@ -892,6 +898,7 @@ mod tests {
                 audit_full: false,
                 emergency_pause_bindings: 0,
                 telegram_accounts: vec![],
+                activation_enabled: false,
             }
         )
         .is_err());

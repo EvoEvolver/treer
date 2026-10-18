@@ -37,7 +37,7 @@ impl From<rusqlite::Error> for Error {
         Self::Storage(e.into())
     }
 }
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct Target {
     pub account_id: String,
@@ -67,6 +67,7 @@ pub struct Update {
     pub message: Option<Incoming>,
 }
 pub struct Incoming {
+    pub date: i64,
     pub message_id: i64,
     pub chat_id: i64,
     pub topic_id: Option<i64>,
@@ -89,6 +90,7 @@ pub struct CoreIntent {
     pub parts: Vec<(String, String)>,
 }
 pub struct ChunkIntent {
+    activation_at: i64,
     endpoint: String,
     generation: i64,
     transfer: String,
@@ -234,38 +236,56 @@ impl<M: Mailbox + Directory> Hub<M> {
                         && !message.text.trim().is_empty()
                         && message.text.len() <= crate::protocol::MAX_BODY
                     {
-                        let view = self.active(&endpoint, now)?;
-                        let external_id = format!("tg-update-{}", update.update_id);
-                        let source = ExternalSource {
-                            channel: Channel::Telegram,
-                            account_id: account.into(),
-                            conversation_id: format!(
-                                "{}:{}",
-                                message.chat_id,
-                                message.topic_id.unwrap_or(0)
-                            ),
-                            message_id: message.message_id.to_string(),
-                        };
-                        let source = serde_json::to_string(&source).map_err(|_| Error::Invalid)?;
-                        self.store.enqueue(Inbound {
-                            endpoint: &endpoint,
-                            generation: view.binding.generation,
-                            external_id: &external_id,
-                            recipient: &view.binding.recipient,
-                            body: &message.text,
-                        })?;
-                        // Worker selects only jobs with committed source metadata.
-                        // Crash before this commit leaves offset unchanged; retry
-                        // deduplicates enqueue and completes metadata first.
-                        let tx = self.store.db.transaction()?;
-                        tx.execute("INSERT OR IGNORE INTO telegram_sources(endpoint,generation,external_id,source) VALUES(?1,?2,?3,?4)",params![endpoint,view.binding.generation,external_id,source])?;
-                        let existing:String=tx.query_row("SELECT source FROM telegram_sources WHERE endpoint=?1 AND generation=?2 AND external_id=?3",params![endpoint,view.binding.generation,external_id],|r|r.get(0))?;
-                        if existing != source {
-                            return Err(Error::Conflict);
+                        let activation = self
+                            .activation_activity(&endpoint)?
+                            .activated_at
+                            .unwrap_or(0);
+                        let stale = message.date <= 0
+                            || message.date < now.saturating_sub(600)
+                            || message.date > now.saturating_add(30)
+                            || activation <= 0
+                            || message.date < activation.saturating_sub(5);
+                        if stale {
+                            let generation = self.view(&endpoint)?.binding.generation;
+                            self.store.db.execute("INSERT INTO hub_activity(endpoint,generation,activated_at,stale_updates) VALUES(?1,?2,0,1) ON CONFLICT(endpoint) DO UPDATE SET stale_updates=CASE WHEN generation=excluded.generation THEN MIN(stale_updates+1,9223372036854775807) ELSE 1 END,activated_at=CASE WHEN generation=excluded.generation THEN activated_at ELSE 0 END,inbound_updates=CASE WHEN generation=excluded.generation THEN inbound_updates ELSE 0 END,outbound_chunks=CASE WHEN generation=excluded.generation THEN outbound_chunks ELSE 0 END,generation=excluded.generation",params![endpoint,generation])?;
+                        } else {
+                            let view = self.active(&endpoint, now)?;
+                            let external_id = format!("tg-update-{}", update.update_id);
+                            let source = ExternalSource {
+                                channel: Channel::Telegram,
+                                account_id: account.into(),
+                                conversation_id: format!(
+                                    "{}:{}",
+                                    message.chat_id,
+                                    message.topic_id.unwrap_or(0)
+                                ),
+                                message_id: message.message_id.to_string(),
+                            };
+                            let source =
+                                serde_json::to_string(&source).map_err(|_| Error::Invalid)?;
+                            self.store.enqueue(Inbound {
+                                endpoint: &endpoint,
+                                generation: view.binding.generation,
+                                external_id: &external_id,
+                                recipient: &view.binding.recipient,
+                                body: &message.text,
+                            })?;
+                            // Worker selects only jobs with committed source metadata.
+                            // Crash before this commit leaves offset unchanged; retry
+                            // deduplicates enqueue and completes metadata first.
+                            let tx = self.store.db.transaction()?;
+                            let inserted=tx.execute("INSERT OR IGNORE INTO telegram_sources(endpoint,generation,external_id,source) VALUES(?1,?2,?3,?4)",params![endpoint,view.binding.generation,external_id,source])?;
+                            let existing:String=tx.query_row("SELECT source FROM telegram_sources WHERE endpoint=?1 AND generation=?2 AND external_id=?3",params![endpoint,view.binding.generation,external_id],|r|r.get(0))?;
+                            if existing != source {
+                                return Err(Error::Conflict);
+                            }
+                            if inserted > 0 {
+                                tx.execute("UPDATE hub_activity SET inbound_updates=MIN(inbound_updates+1,9223372036854775807) WHERE endpoint=?1 AND generation=?2 AND activated_at=?3",params![endpoint,view.binding.generation,activation])?;
+                            }
+                            tx.commit()?;
+                            accepted = true;
+                            admitted += 1;
                         }
-                        tx.commit()?;
-                        accepted = true;
-                        admitted += 1;
                     }
                 }
             }
@@ -326,6 +346,7 @@ impl<M: Mailbox + Directory> Hub<M> {
     /// Count an actual failed Core send once per private lease, never idle polls.
     /// One bounded row per binding survives process restart. Queue data remains
     /// pending; at least eight failures spanning ten minutes stop new work until owner recovery.
+    #[cfg(any(test, feature = "hub"))]
     pub(crate) fn fail_telegram_forward(
         &mut self,
         intent: &CoreIntent,
@@ -364,6 +385,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         tx.commit()?;
         Ok(())
     }
+    #[cfg(any(test, feature = "hub"))]
     pub(crate) fn last_core_handoff_failure(&self) -> Result<Option<&'static str>, Error> {
         let failed:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM hub_core_handoff_health h JOIN endpoints e ON e.id=h.endpoint AND e.generation=h.generation WHERE h.failures>0)",[],|r|r.get(0))?;
         Ok(failed.then_some("core_send_unavailable"))
@@ -481,6 +503,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             tx.execute("UPDATE telegram_chunks SET attempts=CASE WHEN attempts<9223372036854775807 THEN attempts+1 ELSE attempts END,lease_token=?5,lease_until=?6,next_attempt=?7 WHERE endpoint=?1 AND generation=?2 AND transfer=?3 AND part=?4",params![endpoint,view.binding.generation,transfer,part as i64,token,until,next])?;
             tx.commit()?;
             return Ok(Some(ChunkIntent {
+                activation_at: view.activity.activated_at.unwrap_or(0),
                 endpoint: endpoint.into(),
                 generation: view.binding.generation,
                 transfer,
@@ -534,6 +557,9 @@ impl<M: Mailbox + Directory> Hub<M> {
             "UPDATE hub_transport_health SET consecutive_parks=0 WHERE endpoint=?1",
             [&intent.endpoint],
         )?;
+        if previous.is_none() {
+            tx.execute("UPDATE hub_activity SET outbound_chunks=MIN(outbound_chunks+1,9223372036854775807) WHERE endpoint=?1 AND generation=?2 AND activated_at=?3",params![intent.endpoint,intent.generation,intent.activation_at])?;
+        }
         tx.commit()?;
         if intent.last {
             self.store.finish_transfer(
@@ -778,6 +804,7 @@ mod tests {
         Update {
             update_id: id,
             message: Some(Incoming {
+                date: NOW,
                 message_id: id.checked_add(1).unwrap_or(1),
                 chat_id: -100,
                 topic_id: Some(7),
@@ -1100,6 +1127,87 @@ mod tests {
             )
             .unwrap();
         assert_eq!(pending, 1);
+    }
+    #[test]
+    fn paused_telegram_backlog_is_dropped_after_resume_and_old_or_future_updates_never_forward() {
+        let (mut hub, _) = fixture(Limits::default());
+        hub.pause("ag_endpoint", 3).unwrap();
+        assert!(hub
+            .admit_telegram("bot_test", vec![update(1)], NOW + 100)
+            .is_err());
+        assert_eq!(hub.telegram_offset("bot_test").unwrap(), 0);
+        hub.resume("ag_endpoint", 4, NOW + 100).unwrap();
+        assert_eq!(
+            hub.admit_telegram("bot_test", vec![update(1)], NOW + 101)
+                .unwrap(),
+            0
+        );
+        assert_eq!(hub.telegram_offset("bot_test").unwrap(), 2);
+        assert_eq!(
+            hub.store
+                .db
+                .query_row("SELECT COUNT(*) FROM inbound", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let mut fresh = update(2);
+        fresh.message.as_mut().unwrap().date = NOW + 101;
+        assert_eq!(
+            hub.admit_telegram("bot_test", vec![fresh], NOW + 101)
+                .unwrap(),
+            1
+        );
+        let mut old = update(3);
+        old.message.as_mut().unwrap().date = NOW + 101;
+        assert_eq!(
+            hub.admit_telegram("bot_test", vec![old], NOW + 800)
+                .unwrap(),
+            0
+        );
+        let mut future = update(4);
+        future.message.as_mut().unwrap().date = NOW + 10000;
+        assert_eq!(
+            hub.admit_telegram("bot_test", vec![future], NOW + 801)
+                .unwrap(),
+            0
+        );
+        let activity = hub.activation_activity("ag_endpoint").unwrap();
+        assert_eq!(activity.activated_at, Some(NOW + 100));
+        assert_eq!(activity.inbound_updates, 1);
+        assert_eq!(activity.stale_updates, 3);
+        assert_eq!(hub.telegram_offset("bot_test").unwrap(), 5);
+    }
+    #[test]
+    fn activation_counts_accepted_chunks_once_and_resume_resets_only_counters() {
+        let (mut hub, fake) = fixture(Limits::default());
+        outward(&mut hub, &fake, "small message");
+        let job = hub
+            .prepare_telegram_chunk("ag_endpoint", NOW, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        hub.complete_telegram_chunk(&job, 101, NOW).unwrap();
+        let _ = hub.complete_telegram_chunk(&job, 101, NOW);
+        assert_eq!(
+            hub.activation_activity("ag_endpoint")
+                .unwrap()
+                .outbound_chunks,
+            1
+        );
+        hub.pause("ag_endpoint", 3).unwrap();
+        hub.resume("ag_endpoint", 4, NOW + 1).unwrap();
+        assert_eq!(
+            hub.activation_activity("ag_endpoint")
+                .unwrap()
+                .outbound_chunks,
+            0
+        );
+        let _ = hub.complete_telegram_chunk(&job, 101, NOW + 1);
+        assert_eq!(
+            hub.activation_activity("ag_endpoint")
+                .unwrap()
+                .outbound_chunks,
+            0
+        );
     }
     #[test]
     fn brief_outage_does_not_pause_and_legacy_health_starts_a_new_durable_window() {

@@ -205,6 +205,25 @@ pub struct TelegramWorkers {
     joins: Vec<JoinHandle<()>>,
 }
 impl TelegramWorkers {
+    pub(crate) fn disabled(mut accounts: Vec<Account>) -> std::io::Result<Self> {
+        if accounts.len() > 20 {
+            return Err(std::io::Error::other("telegram_accounts_capacity"));
+        }
+        for account in &mut accounts {
+            let health = account
+                .health
+                .get_mut()
+                .map_err(|_| std::io::Error::other("telegram_state_unavailable"))?;
+            health.phase = "operator_disabled";
+            health.fatal = true;
+        }
+        Ok(Self {
+            accounts: accounts.into_iter().map(Arc::new).collect(),
+            stop: Arc::new(false.into()),
+            joins: vec![],
+        })
+    }
+
     pub fn start<M: Mailbox + Directory + Send + 'static>(
         state: SharedHub<M>,
         accounts: Vec<Account>,
@@ -256,6 +275,17 @@ impl TelegramWorkers {
             );
         }
         Ok(workers)
+    }
+    pub(crate) fn readiness(&self) -> Arc<dyn Fn(&str) -> bool + Send + Sync> {
+        let accounts = self.accounts.clone();
+        let stop = self.stop.clone();
+        Arc::new(move |id| {
+            !stop.load(Ordering::Acquire)
+                && accounts
+                    .iter()
+                    .find(|a| a.id == id)
+                    .is_some_and(|a| a.ready())
+        })
     }
     pub fn status(&self) -> Vec<Status> {
         self.accounts
@@ -746,6 +776,48 @@ mod tests {
         Arc::new(Mutex::new(hub))
     }
     #[test]
+    fn disabled_operator_gate_does_not_start_transport_threads_or_verify_credentials() {
+        let bot = Arc::new(FakeBot::default());
+        let workers =
+            TelegramWorkers::disabled(vec![Account::new("bot_fixture".into(), 12345, bot.clone())])
+                .unwrap();
+        assert!(workers.joins.is_empty());
+        assert_eq!(workers.status()[0].state, "operator_disabled");
+        assert!(!workers.readiness()("bot_fixture"));
+        assert!(bot.sent.lock().unwrap().is_empty());
+        assert_eq!(workers.accounts[0].polls.load(Ordering::Relaxed), 0);
+    }
+    #[test]
+    fn activation_readiness_is_live_expires_and_fails_closed_on_stop_or_cooldown() {
+        let account = Arc::new(Account::new(
+            "bot_fixture".into(),
+            12345,
+            Arc::new(FakeBot::default()),
+        ));
+        let mut workers = TelegramWorkers {
+            accounts: vec![account.clone()],
+            stop: Arc::new(false.into()),
+            joins: vec![],
+        };
+        let ready = workers.readiness();
+        assert!(!ready("bot_fixture"));
+        assert!(!ready("unknown"));
+        account.health.lock().unwrap().verified_at = Some(Instant::now());
+        assert!(ready("bot_fixture"));
+        account.health.lock().unwrap().retry_at = Some(Instant::now() + Duration::from_secs(30));
+        assert!(!ready("bot_fixture"));
+        account.health.lock().unwrap().retry_at = None;
+        account.health.lock().unwrap().verified_at = Some(Instant::now() - VERIFY_INTERVAL);
+        assert!(!ready("bot_fixture"));
+        account.health.lock().unwrap().verified_at = Some(Instant::now());
+        account.health.lock().unwrap().fatal = true;
+        assert!(!ready("bot_fixture"));
+        account.health.lock().unwrap().fatal = false;
+        assert!(ready("bot_fixture"));
+        workers.stop();
+        assert!(!ready("bot_fixture"));
+    }
+    #[test]
     fn actual_poll_admission_and_chunk_loop_require_verification_and_persist_both_directions() {
         let state = fixture();
         let bot = Arc::new(FakeBot::default());
@@ -756,6 +828,7 @@ mod tests {
         bot.polls.lock().unwrap().push_back(Ok(vec![Update {
             update_id: 1,
             message: Some(Incoming {
+                date: now().unwrap(),
                 message_id: 1,
                 chat_id: 100,
                 topic_id: None,

@@ -39,6 +39,9 @@ pub struct Config {
     public_url: String,
     /// Explicit assertion checked at startup; public settings unsupported.
     access: String,
+    /// Release/operator gate; a browser can never enable this.
+    #[serde(default)]
+    activation_enabled: bool,
     #[serde(default)]
     virtual_hostname: Option<String>,
     cli: PathBuf,
@@ -103,10 +106,17 @@ pub fn run(config: Config) -> Result<(), Error> {
     .map_err(|_| Error::Configuration)?;
     let store =
         Store::open(&config.state_directory, Limits::default()).map_err(|_| Error::Storage)?;
-    let hub = Arc::new(Mutex::new(
-        Hub::new(store, core.clone(), &config.hub_id, &config.workspace_id)
-            .map_err(|_| Error::Storage)?,
-    ));
+    let mut initial = Hub::new(store, core.clone(), &config.hub_id, &config.workspace_id)
+        .map_err(|_| Error::Storage)?;
+    let startup_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|t| i64::try_from(t.as_secs()).ok())
+        .ok_or(Error::Runtime)?;
+    initial
+        .enforce_startup_activation_gate(config.activation_enabled, startup_at)
+        .map_err(|_| Error::Storage)?;
+    let hub = Arc::new(Mutex::new(initial));
     let listener = std::net::TcpListener::bind(config.listen).map_err(|_| Error::Runtime)?;
     listener.set_nonblocking(true).map_err(|_| Error::Runtime)?;
     let workers = Arc::new(Mutex::new(
@@ -116,9 +126,15 @@ pub fn run(config: Config) -> Result<(), Error> {
         crate::handoffs::CoreHandoffs::start(hub.clone()).map_err(|_| Error::Runtime)?,
     ));
     let telegram = Arc::new(Mutex::new(
-        crate::telegram_workers::TelegramWorkers::start(hub.clone(), accounts)
-            .map_err(|_| Error::Runtime)?,
+        if config.activation_enabled {
+            crate::telegram_workers::TelegramWorkers::start(hub.clone(), accounts)
+        } else {
+            crate::telegram_workers::TelegramWorkers::disabled(accounts)
+        }
+        .map_err(|_| Error::Runtime)?,
     ));
+    let activation_enabled = config.activation_enabled;
+    let account_ready = telegram.lock().map_err(|_| Error::Runtime)?.readiness();
     let snapshot_telegram = telegram.clone();
     let snapshot_handoffs = handoffs.clone();
     let snapshot_hub = hub.clone();
@@ -146,12 +162,17 @@ pub fn run(config: Config) -> Result<(), Error> {
             audit_full,
             emergency_pause_bindings,
             telegram_accounts: snapshot_telegram.lock().map_err(|_| ())?.status(),
+            activation_enabled,
         })
     });
     let mutation = Arc::new(crate::configuration::core_executor(
         hub.clone(),
         core,
         config.workspace_id.clone(),
+        crate::configuration::Activation {
+            enabled: activation_enabled,
+            account_ready,
+        },
     ));
     let serve = || -> Result<(), Error> {
         let settings = Settings::new(auth, snapshot, include_str!("../dist/index.html"))

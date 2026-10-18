@@ -8,13 +8,27 @@ use rusqlite::{params, Transaction};
 pub(crate) struct AuditContext<'a> {
     actor: &'a str,
     now: i64,
+    detail: Option<&'a str>,
 }
 impl<'a> AuditContext<'a> {
+    #[cfg(feature = "hub")]
+    pub(crate) fn with_detail(actor: &'a str, now: i64, detail: &'a str) -> Result<Self, Error> {
+        if detail.len() > 4096 {
+            return Err(Error::Binding);
+        }
+        let mut context = Self::new(actor, now)?;
+        context.detail = Some(detail);
+        Ok(context)
+    }
     pub(crate) fn new(actor: &'a str, now: i64) -> Result<Self, Error> {
         if !valid_id(actor) || now < 0 {
             return Err(Error::Binding);
         }
-        Ok(Self { actor, now })
+        Ok(Self {
+            actor,
+            now,
+            detail: None,
+        })
     }
 }
 pub(crate) fn record(
@@ -27,6 +41,14 @@ pub(crate) fn record(
     let Some(context) = context else {
         return Ok(());
     };
+    // HTTP also rate-limits admission, but a slow Core readback must not bypass
+    // the commit-time budget. Audit rows cannot be cleared by an owner request.
+    if action == "resume_binding" {
+        let recent: i64 = tx.query_row("SELECT COUNT(*) FROM hub_owner_audit WHERE actor=?1 AND action='resume_binding' AND at>?2",params![context.actor,context.now.saturating_sub(60)],|r|r.get(0))?;
+        if recent >= 10 {
+            return Err(StorageError::Full.into());
+        }
+    }
     let count: i64 = tx.query_row("SELECT COUNT(*) FROM hub_owner_audit", [], |r| r.get(0))?;
     if count >= crate::recovery::AUDIT_LIMIT {
         if action == "pause_binding" {
@@ -38,6 +60,6 @@ pub(crate) fn record(
         }
         return Err(StorageError::Full.into());
     }
-    tx.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES(?1,?2,?3,'',?4,?5)",params![context.actor,action,endpoint,revision,context.now])?;
+    tx.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES(?1,?2,?3,?4,?5,?6)",params![context.actor,action,endpoint,context.detail.unwrap_or(""),revision,context.now])?;
     Ok(())
 }

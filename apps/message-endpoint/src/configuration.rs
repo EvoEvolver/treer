@@ -8,6 +8,9 @@ use crate::{
     scheduler::SharedHub,
     telegram::Target,
 };
+mod activation;
+pub(crate) use activation::Activation;
+pub use activation::{ResumeEvidence, ResumePreview};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,6 +33,15 @@ pub enum Command {
     Pause {
         endpoint_id: String,
         revision: i64,
+        confirm: bool,
+    },
+    PreviewResume {
+        endpoint_id: String,
+    },
+    Resume {
+        endpoint_id: String,
+        expected: ResumePreview,
+        evidence: ResumeEvidence,
         confirm: bool,
     },
     ExportMetadata {
@@ -67,6 +79,7 @@ impl Command {
                 | Self::Pause { .. }
                 | Self::InspectRecovery { .. }
                 | Self::ExportMetadata { .. }
+                | Self::PreviewResume { .. }
         )
     }
 }
@@ -90,6 +103,11 @@ pub enum Outcome {
     Saved {
         revision: i64,
         paused: bool,
+    },
+    ResumePreview {
+        preview: ResumePreview,
+        activation_enabled: bool,
+        account_ready: bool,
     },
     MetadataArchive {
         archive: crate::archive::Export,
@@ -190,7 +208,7 @@ fn recovery_status<M: Mailbox + Directory>(
         next_audit_before,
     })
 }
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Failure {
     Invalid,
     Conflict,
@@ -227,8 +245,51 @@ pub fn execute<M: Mailbox + Directory, D: Directory>(
     owner: &Owner,
     command: Command,
 ) -> Result<Outcome, Failure> {
+    execute_with_activation(
+        shared,
+        directory,
+        workspace,
+        owner,
+        command,
+        &Activation::default(),
+    )
+}
+fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
+    shared: &SharedHub<M>,
+    directory: &D,
+    workspace: &str,
+    owner: &Owner,
+    command: Command,
+    activation: &Activation,
+) -> Result<Outcome, Failure> {
     check_owner(owner)?;
     match command {
+        Command::PreviewResume { endpoint_id } => activation::preview_resume(
+            shared,
+            directory,
+            workspace,
+            owner,
+            &endpoint_id,
+            activation,
+        ),
+        Command::Resume {
+            endpoint_id,
+            expected,
+            evidence,
+            confirm,
+        } => activation::resume(
+            shared,
+            directory,
+            workspace,
+            owner,
+            activation::ResumeRequest {
+                endpoint_id,
+                expected,
+                evidence,
+                confirm,
+            },
+            activation,
+        ),
         Command::PreviewCreate {
             endpoint_id,
             generation,
@@ -352,10 +413,13 @@ pub fn execute<M: Mailbox + Directory, D: Directory>(
         }
     }
 }
-pub fn core_executor(
+pub(crate) fn core_executor(
     shared: SharedHub<Core>,
     core: Core,
     workspace: String,
+    activation: Activation,
 ) -> impl Fn(&Owner, Command) -> Result<Outcome, Failure> + Send + Sync {
-    move |owner, command| execute(&shared, &core, &workspace, owner, command)
+    move |owner, command| {
+        execute_with_activation(&shared, &core, &workspace, owner, command, &activation)
+    }
 }

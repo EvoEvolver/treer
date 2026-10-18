@@ -862,6 +862,7 @@ installation or activation instruction):
   "proxy_url": "https://PROXY_HOST/",
   "public_url": "https://DEDICATED_PRIVATE_APP_HOST/",
   "access": "workspace",
+  "activation_enabled": false,
   "virtual_hostname": "message-hub.treer",
   "cli": "/absolute/release/treer",
   "cli_sha256": "64-lowercase-hex-sha256-of-the-CLI",
@@ -880,7 +881,7 @@ SIGINT. Invalid configuration/storage/listener failures return nonzero with
 fixed error codes, never raw configuration or credentials. A changed CLI hash
 requires a human-reviewed config update. Confirmed owner configuration writes
 can create paused bindings, pin Telegram targets, and pause bindings. Telegram account poll/send workers can run from private operator files; owner
-resume and browser account administration are not connected, so **this is a development preview,
+resume is gated off by default and browser account administration is not connected, so **this is a development preview,
 not ready for activation/migration**. The React page supports these confirmed configuration writes only on its
 configured dedicated root URL. Embedded tunnels, forwarded preview origins and
 other direct origins stay read-only and link to that URL; they never widen the
@@ -985,11 +986,13 @@ Supported command objects (writes require `confirm:true`):
   The binding must be paused. This pins target metadata only, never accepts a bot
   token or verifies an account. Binding does not enable receiving or sending.
 
-Successful writes return `{"status":"saved","revision":N,"paused":true}`.
+Create/bind/pause writes return `{"status":"saved","revision":N,"paused":true}`.
+The separately gated owner resume returns `paused:false` (see below).
 Reload `/api/settings` for the current complete projection. Stale revisions return 409; malformed input 400; unavailable Core,
 storage or audit capacity 503, all with fixed body-free error codes. Owner proof
 expiry is rechecked after Core queries and mutex waits before committing. These
-routes do not expose resume, retarget, deletion, generation replacement, transport
+routes expose resume only behind the default-off operator gate described below.
+They do not expose retarget, deletion, generation replacement, transport
 secret writes, receipt refetch or audit erasure. Owner role is checked once per
 request through Proxy; there is no cross-system transaction with role revocation.
 
@@ -1001,8 +1004,9 @@ or optimistic activation is used. Target IDs are exact safe integers, and sender
 IDs must be positive and distinct. Inputs/errors are rendered as text, labels
 remain visible, and forms wrap at 390px. A stale save shows the fixed conflict
 error and requires refresh/reconfirmation rather than silently retrying. The UI
-never accepts a bot token. Account setup, channel readiness and resume controls
-are still absent; these forms do not claim a functioning channel.
+never accepts a bot token. Account setup remains operator-file based. Live bot
+readiness and gated owner resume are described below; no release acceptance is
+implied by these controls.
 
 
 Create and target-binding commands also have a per-verified-owner limit of ten
@@ -1046,8 +1050,9 @@ worker termination or a poisoned actor stops this owned worker group rather than
 hot-respawning. The owner snapshot/UI shows inbound handoffs, notice handoffs,
 failures and stopped state; no raw CLI errors or message bodies are exposed.
 These workers connect Core handoff from already admitted hub state. The next
-section describes Telegram account loops. Owner resume, browser account setup and
-recovery/retirement workflows remain unfinished; no live channel is approved for
+section describes Telegram account loops. Owner resume is gated off by default;
+browser account setup and complete recovery/retirement workflows remain unfinished.
+No live channel is approved for
 activation.
 
 
@@ -1120,7 +1125,7 @@ restarts another App/Agent or changes a remote machine.
 
 The page now separates the pause control and its own confirmation from Telegram
 target fields, and embedded cards deep-link to that endpoint's dedicated pause
-control. Browser token/account editing, owner resume, archive/receipt clearing,
+control. Browser token/account editing, capacity receipt recovery, full-audit clearing,
 header-read timeout, dated dependency audit, Policy evidence and live acceptance
 remain unfinished. These limitations must be closed before migration/activation.
 
@@ -1170,9 +1175,10 @@ an ambiguous external send; discard irreversibly clears remaining plaintext and
 records a distinct discarded state, never delivered. Each operation and revision
 change commit atomically with a server-derived owner audit row. A full audit blocks
 recovery writes until an eventual archive workflow; safety pause remains available.
-These controls never resume the binding or clear failure receipts. Owner resume,
-receipt clearing/archive, account editing, isolation evidence and release acceptance
-remain unfinished activation requirements.
+These parked-transfer controls never resume the binding or clear failure receipts.
+The later sections add separately gated owner resume and terminal receipt clear.
+Capacity receipt recovery, audit retention recovery, account editing, isolation
+evidence and release acceptance remain unfinished activation requirements.
 
 A successful recovery returns the updated bounded recovery projection (including
 its audit row) in the same verified request. The UI does not issue a second
@@ -1271,3 +1277,85 @@ the existing transaction; historical rows without that timestamp start a fresh
 window on their next distinct failure. The eight-attempt/ten-minute threshold,
 private lease fencing, sticky paused state and successful-completion reset remain.
 No expiry automatically resumes a paused binding.
+
+### Gated owner resume and declarations (development; default off)
+
+The private runtime configuration has `activation_enabled:false` by default.
+Only the operator's reviewed private configuration can turn it on; no browser or
+HTTP request can change it. It must remain false until release has real installed
+profile, enforced Policy isolation and channel acceptance evidence. No live
+activation/deployment has been performed as part of this implementation.
+
+**Resume endpoint** first calls `preview_resume` with the endpoint ID. The server
+reads current bindings, then queries Core by endpoint and recipient stable ID
+outside the hub mutex. The preview includes their current paths, machine,
+working-directory SHA-256, generation, revision and the immutable Telegram target.
+It refuses mismatched endpoint placement or a changed/active binding. An additional
+fresh endpoint observation is kept internally; it cannot be supplied in JSON.
+A preview is not authority and can be inspected while the operator gate is off.
+
+`resume` accepts endpoint ID, the exact preview under `expected`, `confirm:true`
+and `evidence:{profile_reviewed:true,isolation_reviewed:true,reference:"..."}`.
+The reference is a bounded 1–256-byte ticket/manifest reference, never a credential.
+The server repeats Core queries, compares the current preview, rechecks current
+owner proof, paused state, exact revision and immutable target under the state
+mutex, and requires current readiness for the startup-configured account. Readiness
+means its pinned bot identity passed getMe within five minutes, with no cooldown,
+fatal error or stopped workers. No global worker-list mutex or network request is
+held across the activation transaction. Workers independently recheck their live
+health/readback gates before each handoff.
+
+The owner must separately confirm the fixed relay launch profile/release and
+independent OS user/container plus actual enforced Policy isolation, provide the
+evidence reference, and then confirm sending the pending queue. These are **owner
+declarations, not App/Core attestation**: Core metadata does not prove startup argv,
+OS isolation or Policy enforcement; getMe does not prove target reachability.
+The App never probes Policy, starts an Agent or installs a profile. Same-OS-user
+0600 files cannot isolate a hostile Agent. Core metadata can change immediately
+after a query; periodic readback and Core authorization remain necessary.
+
+Resume and its owner audit commit in one transaction. For `resume_binding`, the
+legacy audit `transfer_id` field contains fixed JSON evidence: declaration kind,
+profile/isolation confirmations, reference, canonical preview SHA-256 and target.
+Actor/time/previous revision are the ordinary audit columns. Audit failure cannot
+activate; an independently obtained metadata observation may still be retained.
+Incomplete confirmation, default-off gate, unavailable/moved Core objects,
+stale preview/revision or unready account fail closed. Active pending queues,
+existing capacity receipts, refetch rates and circuit-breaker history remain;
+the existing consecutive transport-park counter is reset. Held content follows
+the explicit choice below. This never means downstream delivery succeeded.
+
+The preview also includes held fragment count plus a metadata-only snapshot hash
+and parked transfer count. `evidence.held_action` is `discard` by default; `release`
+is an explicit alternative. Discard deletes the held text in the same activation
+transaction and retains bounded `owner_discarded_hold` metadata tombstones to
+prevent Core redelivery from admitting it again. These tombstones cannot be
+refetched; a full receipt budget refuses the discard/resume. Release leaves the
+held fragments eligible for the existing promotion/expiry checks. The choice,
+count and snapshot hash are included in the audit evidence. Parked transfers are
+not automatically recovered: `evidence.parked_count_ack` must equal the displayed
+count (with a separate UI acknowledgement when nonzero). Any backlog change
+between preview and commit requires another preview.
+
+The commit checks the CLI integrity latch and private storage, the audit cap and
+a durable per-owner resume budget (10 successful resumes per 60 seconds). The
+HTTP admission quota applies separately. Evidence is plain text rendered as
+text, never fetched as a URL or logged; the form warns against pasting secrets.
+
+Before starting workers, a false operator gate forces existing active bindings
+paused with `operator_activation_disabled` and a `system_activation_gate` audit
+row; full audit capacity uses the existing bounded emergency pause evidence.
+Telegram transport workers do not start at all with this gate off. With the gate
+on, a legacy active binding lacking an activation timestamp is still forced
+paused (`activation_required`). Restarting never silently enables those bindings.
+
+Telegram message dates are required. Updates older than the current activation
+minus five seconds, older than ten minutes at admission, or more than thirty
+seconds in the future are discarded, counted and skipped in the durable poll
+offset; they are never forwarded. A small allowed skew can admit messages from
+up to five seconds before activation. The status shows the activation time,
+newly admitted Telegram updates, accepted outbound chunks and stale-update
+observations since activation (not final delivery). Duplicate callbacks do not
+increment the accepted counters; repeating a discarded update after a crash can
+count another observation before the account offset commits. Held Core content
+is a different queue with the explicit release/discard choice above.

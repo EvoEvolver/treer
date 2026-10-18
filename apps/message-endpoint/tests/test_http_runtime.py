@@ -184,6 +184,32 @@ class Runtime(unittest.TestCase):
             status,_,_=f['request']('/api/configuration',trusted,method='POST',body=json.dumps({'action':'pause','endpoint_id':'ag_demo','revision':endpoint['revision'],'confirm':True}).encode())
             self.assertEqual(status,200)
             self.assertFalse(marker.exists())
+    def test_owner_resume_is_default_off_and_no_request_can_override_unready_account(self):
+        for activation in [False,True]:
+            with self.subTest(activation=activation),fixture(BINARY,activation=activation) as f:
+                trusted={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+                def call(value,headers=None):
+                    status,_,body=f['request']('/api/configuration',headers or trusted,method='POST',body=json.dumps(value).encode())
+                    return status,json.loads(body)
+                snapshot=json.loads(f['request']('/api/settings',{'X-Treer-Identity-Token':TOKEN})[2])
+                self.assertEqual(snapshot['settings']['activation_enabled'],activation)
+                source={'endpoint_id':'ag_new','generation':1,'recipient':'ag_recipient'}
+                status,result=call({'action':'preview_create',**source});self.assertEqual(status,200)
+                self.assertEqual(call({'action':'create',**source,'expected':result['preview'],'confirm':True})[0],200)
+                self.assertEqual(call({'action':'bind_telegram','endpoint_id':'ag_new','revision':1,'target':{'account_id':'bot_fixture','chat_id':123,'topic_id':None,'allowed_senders':[456]},'confirm':True})[0],200)
+                status,result=call({'action':'preview_resume','endpoint_id':'ag_new'});self.assertEqual(status,200)
+                self.assertEqual(result['activation_enabled'],activation);self.assertFalse(result['account_ready'])
+                resume={'action':'resume','endpoint_id':'ag_new','expected':result['preview'],'evidence':{'profile_reviewed':True,'isolation_reviewed':True,'reference':'#159 synthetic fixture'},'confirm':True}
+                self.assertEqual(call({**resume,'confirm':False})[0],400)
+                self.assertEqual(call({**resume,'activation_enabled':True})[0],400)
+                self.assertEqual(call({**resume,'observed':{'path':'/forged'}})[0],400)
+                self.assertEqual(call(resume,{**trusted,'Origin':'https://evil.example'})[0],403)
+                self.assertEqual(call(resume,{**trusted,'X-Treer-Identity-Token':'forged'})[0],401)
+                self.assertEqual(call(resume)[0],409)
+                db=sqlite3.connect(f['state']/'hub.sqlite3')
+                self.assertEqual(db.execute("SELECT paused FROM endpoints WHERE id='ag_new'").fetchone()[0],1)
+                self.assertEqual(db.execute("SELECT COUNT(*) FROM hub_owner_audit WHERE action='resume_binding'").fetchone()[0],0)
+                db.close()
     def test_owner_metadata_export_clear_checks_scope_snapshot_and_confirmation(self):
         with fixture(BINARY) as f:
             trusted={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}

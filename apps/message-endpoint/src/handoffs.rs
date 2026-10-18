@@ -411,6 +411,7 @@ mod tests {
                 Update {
                     update_id: 1,
                     message: Some(Incoming {
+                        date: time,
                         message_id: 1,
                         chat_id: 10,
                         topic_id: None,
@@ -421,6 +422,7 @@ mod tests {
                 Update {
                     update_id: 2,
                     message: Some(Incoming {
+                        date: time,
                         message_id: 2,
                         chat_id: 20,
                         topic_id: None,

@@ -1,5 +1,7 @@
-//! App-owned Core Message envelope/queue helpers. No runtime activation yet.
+//! App-owned Core Message envelope/queue helpers. Runtime activation remains operator-gated and defaults off.
 #![forbid(unsafe_code)]
+#[cfg(unix)]
+pub mod activation_state;
 #[cfg(unix)]
 pub mod archive;
 #[cfg(unix)]

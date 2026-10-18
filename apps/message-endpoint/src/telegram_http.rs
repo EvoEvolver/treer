@@ -237,7 +237,9 @@ fn normalize_message(message: &Value) -> Option<Incoming> {
         .as_str()
         .filter(|s| !s.trim().is_empty() && s.len() <= crate::protocol::MAX_BODY)?
         .into();
+    let date = message.get("date")?.as_i64().filter(|n| *n > 0)?;
     Some(Incoming {
+        date,
         message_id,
         chat_id,
         topic_id,
@@ -363,7 +365,17 @@ mod tests {
         )
     }
     fn message() -> Value {
-        json!({"message_id":7,"chat":{"id":-100},"from":{"id":42,"is_bot":false},"message_thread_id":9,"text":"<script> is plain text"})
+        json!({"message_id":7,"date":1800000000,"chat":{"id":-100},"from":{"id":42,"is_bot":false},"message_thread_id":9,"text":"<script> is plain text"})
+    }
+    #[test]
+    fn missing_or_invalid_telegram_date_is_not_a_forwardable_message() {
+        let mut message = message();
+        message.as_object_mut().unwrap().remove("date");
+        assert!(normalize_message(&message).is_none());
+        for date in [json!(0), json!(-1), json!("1800000000")] {
+            message["date"] = date;
+            assert!(normalize_message(&message).is_none());
+        }
     }
     #[test]
     fn fixed_operations_use_verified_bot_stored_offset_and_plain_text() {

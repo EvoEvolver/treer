@@ -37,6 +37,13 @@ pub struct Owner {
     expires_at: i64,
 }
 impl Owner {
+    #[cfg(test)]
+    pub(crate) fn synthetic(id: &str, expires_at: i64) -> Self {
+        Self {
+            id: id.into(),
+            expires_at,
+        }
+    }
     pub fn id(&self) -> &str {
         &self.id
     }

@@ -60,6 +60,7 @@ fn reject(
     }
     let (capacity, expired, invalid) = match reason {
         "hold_expired" => (0, 1, 0),
+        "owner_discarded_hold" => (0, 0, 0),
         "invalid_held_fragment" | "generation_changed" => (0, 0, 1),
         "endpoint_hold_full" | "hub_hold_full" => (1, 0, 0),
         _ => return Err(Error::Binding),
@@ -83,6 +84,51 @@ fn reject(
     if global < GLOBAL_RECEIPTS && local < RECEIPT_CAP {
         tx.execute("INSERT INTO hub_capacity_receipts(endpoint,generation,delivery,message,reason,at) VALUES(?1,?2,?3,?4,?5,?6)",params![endpoint,generation,delivery,message,reason,now])?;
     }
+    Ok(())
+}
+
+/// A discarded held fragment leaves a metadata tombstone, never refetchable.
+/// Refuse rather than lose dedup evidence when the receipt budget cannot fit.
+#[cfg(any(test, feature = "hub"))]
+pub(crate) fn discard_for_resume(
+    tx: &Transaction<'_>,
+    endpoint: &str,
+    generation: i64,
+    now: i64,
+) -> Result<(), Error> {
+    let mut q=tx.prepare("SELECT delivery,message FROM hub_holds WHERE endpoint=?1 AND generation=?2 ORDER BY delivery LIMIT 21")?;
+    let rows = q
+        .query_map(params![endpoint, generation], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(q);
+    let (global, local): (i64, i64) = tx.query_row(
+        "SELECT COUNT(*),COALESCE(SUM(endpoint=?1),0) FROM hub_capacity_receipts",
+        [endpoint],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    if rows.len() > 20
+        || global + rows.len() as i64 > GLOBAL_RECEIPTS
+        || local + rows.len() as i64 > RECEIPT_CAP
+    {
+        return Err(StorageError::Full.into());
+    }
+    for (delivery, message) in rows {
+        reject(
+            tx,
+            endpoint,
+            generation,
+            &delivery,
+            &message,
+            "owner_discarded_hold",
+            now,
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM hub_holds WHERE endpoint=?1 AND generation=?2",
+        params![endpoint, generation],
+    )?;
     Ok(())
 }
 
