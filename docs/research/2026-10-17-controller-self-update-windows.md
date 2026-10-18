@@ -436,8 +436,12 @@ The owner still supplies its original expiry ceiling. No bytes enter the pipe
 exchange, and no file, clock, process observation, real record, lock, permit or
 production caller is added. Exact field equality is not proof of provenance,
 process liveness or once-only use; copied bytes with identical observations are
-not a replay fence. Native publication and authenticated process binding remain
-subsequent authority-reviewed work. This is not a stable on-disk format.
+not a replay fence. The tick model assumes a single boot; its fixture format has
+no boot/session identity field and cannot detect an otherwise matching record
+from before a reboot. Native registration must carry or be bound to a verified
+boot/session identity before any use. Native publication and authenticated
+process binding remain subsequent authority-reviewed work. This is not a stable
+on-disk format.
 
 The first implementation substep is the private `cfg(test)` model in
 `crates/treer-platform/src/update_deadline.rs`: a fixed five-second window,

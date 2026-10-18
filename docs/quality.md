@@ -7,8 +7,11 @@ synthetic, fixed-size registration format before native record publication is
 implemented. Focused tests reject malformed headers, truncation/trailing bytes,
 pipe-frame confusion, altered attempt/intent/process identities and invalid
 deadline windows. Independent readers compare the decoded fields with separate
-synthetic observations; the owner retains its original expiry ceiling. These
-tests do not read or write files, acquire OS identity or time, enforce replay
+synthetic observations; the owner retains its original expiry ceiling. The
+synthetic tick values assume the same boot; this model has no boot/session
+identity field and cannot reject a prior-boot record that otherwise matches.
+Native registration must bind a verified boot/session identity before use.
+These tests do not read or write files, acquire OS identity or time, enforce replay
 uniqueness, construct frame bindings, or grant update authority. Native record
 publication, suspended-child registration and real-machine acceptance remain
 separate gates. The byte layout is a fixture model, not a supported disk format.
