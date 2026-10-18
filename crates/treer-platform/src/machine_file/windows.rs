@@ -164,7 +164,8 @@ impl Root {
     }
     pub fn cleanup_staging(&self, path: &str, temporary_name: &str) -> io::Result<()> {
         if validate_relative_path(temporary_name)?.len() != 1
-            || !temporary_name.starts_with(".treer-transfer-xfer_")
+            || !(temporary_name.starts_with(".treer-transfer-xfer_")
+                || temporary_name.starts_with(".treer-transfer-upl_"))
         {
             return Err(denied());
         }

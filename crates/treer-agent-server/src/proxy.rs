@@ -752,6 +752,19 @@ impl ProxyClient {
                 ProtocolError::new("workspace_mismatch", "command targets another workspace"),
             );
         }
+        // The Controller's own capability set is the authority (#166): a
+        // command this Controller does not advertise is refused before any
+        // handler runs, whatever a Proxy's cached view says.
+        if !command_permitted(&self.runtime.advertised_capabilities(), &envelope.command) {
+            let required = envelope.command.required_capability().unwrap_or("unknown");
+            return CommandResult::failure(
+                envelope.command_id,
+                ProtocolError::new(
+                    "unsupported_command",
+                    format!("this Controller does not advertise capability {required}"),
+                ),
+            );
+        }
         if let Some(result) = self
             .command_cache
             .lock()
@@ -1391,6 +1404,16 @@ where
         .send(Message::Binary(encoded.into()))
         .await
         .context("failed to send network binary frame")
+}
+
+/// Whether `command` may run on a Controller that advertises exactly
+/// `advertised`: commands without a required capability always may; others
+/// only when their capability is advertised.
+pub(crate) fn command_permitted(advertised: &[String], command: &AgentCommand) -> bool {
+    match command.required_capability() {
+        None => true,
+        Some(required) => advertised.iter().any(|value| value == required),
+    }
 }
 
 #[cfg(test)]

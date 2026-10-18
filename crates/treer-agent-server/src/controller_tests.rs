@@ -2580,3 +2580,89 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
     host_task.abort();
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[tokio::test]
+async fn chunked_upload_capability_matches_the_dispatch_gate_and_legacy_stays() {
+    let (runtime, root, host_task) = upload_fixture().await;
+    let advertised = runtime.advertised_capabilities();
+    let v3 = advertised.contains(&treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3.to_string());
+    assert_eq!(
+        v3,
+        crate::machine_upload::chunked_upload_supported(),
+        "the capability is advertised exactly where chunked uploads are supported"
+    );
+    assert_eq!(v3, !cfg!(windows), "Windows waits for the #171 validation");
+    let begin = |size: Option<u64>| treer_protocol::AgentCommand::UploadBegin {
+        upload_id: "upl_gate000001".into(),
+        directory: ".".into(),
+        file_name: "gate.bin".into(),
+        overwrite: false,
+        size,
+    };
+    // The dispatch refuses every v3 command where the capability is not
+    // advertised and keeps the legacy commands.
+    assert_eq!(
+        crate::proxy::command_permitted(&advertised, &begin(Some(8))),
+        v3
+    );
+    assert_eq!(
+        crate::proxy::command_permitted(
+            &advertised,
+            &treer_protocol::AgentCommand::UploadChunk {
+                upload_id: "upl_gate000001".into(),
+                content_base64: String::new(),
+                offset: Some(0),
+            }
+        ),
+        v3
+    );
+    assert_eq!(
+        crate::proxy::command_permitted(
+            &advertised,
+            &treer_protocol::AgentCommand::UploadPartCommit {
+                upload_id: "upl_gate000001".into(),
+                offset: 0,
+                length: 1,
+                sha256: "00".into(),
+            }
+        ),
+        v3
+    );
+    assert_eq!(
+        crate::proxy::command_permitted(
+            &advertised,
+            &treer_protocol::AgentCommand::UploadResult {
+                upload_id: "upl_gate000001".into(),
+            }
+        ),
+        v3
+    );
+    assert!(crate::proxy::command_permitted(&advertised, &begin(None)));
+    assert!(crate::proxy::command_permitted(
+        &advertised,
+        &treer_protocol::AgentCommand::UploadChunk {
+            upload_id: "upl_gate000001".into(),
+            content_base64: String::new(),
+            offset: None,
+        }
+    ));
+    assert!(crate::proxy::command_permitted(
+        &advertised,
+        &treer_protocol::AgentCommand::UploadCommit {
+            upload_id: "upl_gate000001".into(),
+        }
+    ));
+    // Legacy begin, append and commit work on every platform.
+    runtime
+        .begin_upload("upl_legacy0002", ".", "legacy2.bin", false, None)
+        .unwrap();
+    runtime
+        .append_upload_chunk("upl_legacy0002", None, &b64(b"xy"))
+        .unwrap();
+    let legacy = runtime.commit_upload("upl_legacy0002").unwrap();
+    assert_eq!(legacy.bytes_written, 2);
+    assert_eq!(std::fs::read(root.join("legacy2.bin")).unwrap(), b"xy");
+    assert!(staging_files(&root).is_empty());
+    host_task.abort();
+    std::fs::remove_dir_all(root).unwrap();
+}

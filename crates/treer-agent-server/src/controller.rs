@@ -1792,6 +1792,12 @@ impl ControllerRuntime {
             .iter()
             .map(|value| (*value).to_string())
             .collect();
+        // Chunked uploads (#166) are advertised only where the Controller also
+        // accepts the commands (#171 for Windows); the dispatch refuses any
+        // command whose required capability is not advertised.
+        if !crate::machine_upload::chunked_upload_supported() {
+            capabilities.retain(|value| value != treer_protocol::CAPABILITY_MACHINE_UPLOAD_V3);
+        }
         if self.inner.provider_cli.capability_available() {
             capabilities.push(treer_protocol::CAPABILITY_MACHINE_PROVIDER_CLI_INSTALL.to_string());
             // v2 (#134): installations are observed and consent-gated.

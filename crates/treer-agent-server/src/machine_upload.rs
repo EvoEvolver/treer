@@ -123,6 +123,15 @@ pub struct Uploads {
     recovered: std::sync::atomic::AtomicBool,
 }
 
+/// Whether this Controller offers the chunked, resumable upload contract
+/// (`machine.upload.v3`). The Windows code path compiles and is exercised by
+/// the tests, but has not been validated on a real machine (#171), so the
+/// capability is not advertised there and the command dispatch refuses the
+/// v3 commands; the legacy append route stays available everywhere.
+pub const fn chunked_upload_supported() -> bool {
+    !cfg!(windows)
+}
+
 /// Test hook: the next chunk write stores only half its bytes and fails, as
 /// a full disk would.
 #[cfg(test)]
