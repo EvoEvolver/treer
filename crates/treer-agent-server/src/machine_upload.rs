@@ -154,11 +154,25 @@ pub const fn chunked_upload_supported() -> bool {
     !cfg!(windows)
 }
 
-/// Test hook: the next chunk write stores only half its bytes and fails, as
-/// a full disk would.
+/// Test hook: the next chunk write for the named upload stores only half its
+/// bytes and fails, as a full disk would. Keyed by upload id so parallel tests
+/// in the same process cannot consume each other's injected failure.
 #[cfg(test)]
-pub(crate) static FAIL_NEXT_WRITE: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+pub(crate) static FAIL_NEXT_WRITE_FOR: std::sync::Mutex<Option<String>> =
+    std::sync::Mutex::new(None);
+
+#[cfg(test)]
+fn take_injected_write_failure(upload_id: &str) -> bool {
+    let mut armed = FAIL_NEXT_WRITE_FOR
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if armed.as_deref() == Some(upload_id) {
+        *armed = None;
+        true
+    } else {
+        false
+    }
+}
 
 fn validate_upload_id(upload_id: &str) -> Result<(), ProtocolError> {
     if upload_id.len() < 8
@@ -524,7 +538,7 @@ impl Uploads {
                 .expect("active upload keeps its staging file")
                 .file_mut();
             #[cfg(test)]
-            if FAIL_NEXT_WRITE.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            if take_injected_write_failure(upload_id) {
                 let _ = file.write_all(&content[..content.len() / 2]);
                 Err(std::io::Error::other("injected short write"))
             } else {

@@ -2537,7 +2537,7 @@ async fn chunked_upload_rewinds_short_writes_and_refuses_to_publish_tampered_sta
     runtime
         .begin_upload("upl_short0002", ".", "short.bin", false, Some(6))
         .unwrap();
-    crate::machine_upload::FAIL_NEXT_WRITE.store(true, std::sync::atomic::Ordering::SeqCst);
+    *crate::machine_upload::FAIL_NEXT_WRITE_FOR.lock().unwrap() = Some("upl_short0002".into());
     let error = runtime
         .append_upload_chunk("upl_short0002", Some(0), &b64(b"abc"))
         .unwrap_err();
