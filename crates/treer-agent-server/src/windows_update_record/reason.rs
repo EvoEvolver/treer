@@ -6,6 +6,33 @@ use std::cell::Cell;
 
 const EVIDENCE_LIMIT: usize = 8192;
 
+// Portable transport check only, NOT a private-handle/attempt authenticator.
+// One extra byte detects a lying declared length without unbounded growth.
+fn read_evidence(reader: &mut impl std::io::Read, declared: u64) -> Result<Vec<u8>, Refusal> {
+    if declared == 0 || declared > EVIDENCE_LIMIT as u64 {
+        return Err("reason_source_unavailable");
+    }
+    let declared = declared as usize;
+    let mut bytes = vec![0; declared + 1];
+    let mut used = 0;
+    loop {
+        let count = reader
+            .read(&mut bytes[used..])
+            .map_err(|_| "reason_source_unavailable")?;
+        if count == 0 {
+            if used != declared {
+                return Err("reason_source_unavailable");
+            }
+            bytes.truncate(used);
+            return Ok(bytes);
+        }
+        used += count;
+        if used > declared {
+            return Err("reason_source_unavailable");
+        }
+    }
+}
+
 // These numeric identities are synthetic stand-ins, NOT native handles or
 // authenticated monitor/ownership identities. No serde constructor for a live
 // attempt or its single-use verification result exists.
@@ -115,17 +142,13 @@ struct SyntheticSource {
     reads: usize,
 }
 impl SyntheticSource {
-    fn read(&mut self) -> Result<&[u8], Refusal> {
+    fn read(&mut self) -> Result<Vec<u8>, Refusal> {
         self.reads += 1;
         match &self.result {
-            SourceResult::Read { declared, bytes }
-                if *declared > 0 && *declared <= EVIDENCE_LIMIT && bytes.len() == *declared =>
-            {
-                Ok(bytes)
+            SourceResult::Read { declared, bytes } => {
+                read_evidence(&mut bytes.as_slice(), *declared as u64)
             }
-            SourceResult::Read { .. } | SourceResult::Missing | SourceResult::Error => {
-                Err("reason_source_unavailable")
-            }
+            SourceResult::Missing | SourceResult::Error => Err("reason_source_unavailable"),
         }
     }
 }
@@ -158,11 +181,11 @@ fn verify<'a>(
         return Err("reason_context_mismatch");
     }
     let bytes = source.read()?;
-    if digest(bytes) != reference.evidence_sha256 {
+    if digest(&bytes) != reference.evidence_sha256 {
         return Err("reason_evidence_digest");
     }
     let observation: Observation =
-        serde_json::from_slice(bytes).map_err(|_| "reason_evidence_schema")?;
+        serde_json::from_slice(&bytes).map_err(|_| "reason_evidence_schema")?;
     if observation.binding != context.binding
         || observation.predecessor != context.predecessor
         || observation.images != context.images
@@ -767,6 +790,100 @@ fn independent_reason_accepts_only_predicates_required_for_its_health_phase() {
             assert_eq!(source.reads, 1);
             assert!(!live.entered.get());
         }
+    }
+}
+
+#[test]
+fn independent_reason_stream_reader_bounds_requests_and_refuses_before_body_read() {
+    struct Endless {
+        total: usize,
+        requests: Vec<usize>,
+    }
+    impl std::io::Read for Endless {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.requests.push(out.len());
+            out.fill(b'x');
+            self.total += out.len();
+            Ok(out.len())
+        }
+    }
+    let mut stream = Endless {
+        total: 0,
+        requests: vec![],
+    };
+    for declared in [0, EVIDENCE_LIMIT as u64 + 1, u64::MAX] {
+        assert!(read_evidence(&mut stream, declared).is_err());
+    }
+    assert!(stream.requests.is_empty());
+    // A stream never reaches EOF; declared+1 is the maximum consumed, even
+    // when the remote/input source can produce an unlimited amount of data.
+    assert!(read_evidence(&mut stream, EVIDENCE_LIMIT as u64).is_err());
+    assert_eq!(stream.total, EVIDENCE_LIMIT + 1);
+    assert_eq!(stream.requests, [EVIDENCE_LIMIT + 1]);
+    let mut tiny = Endless {
+        total: 0,
+        requests: vec![],
+    };
+    assert!(read_evidence(&mut tiny, 1).is_err());
+    assert_eq!(tiny.total, 2);
+    assert_eq!(tiny.requests, [2]);
+}
+
+#[test]
+fn independent_reason_stream_reader_handles_chunks_eof_and_failure_without_partial_success() {
+    struct Chunks {
+        remaining: usize,
+        fail_after: Option<usize>,
+        delivered: usize,
+        reads: usize,
+    }
+    impl std::io::Read for Chunks {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.reads += 1;
+            if self.fail_after.is_some_and(|limit| self.delivered >= limit) {
+                return Err(std::io::Error::other("synthetic failure"));
+            }
+            let count = self.remaining.min(out.len()).min(7);
+            out[..count].fill(b'x');
+            self.remaining -= count;
+            self.delivered += count;
+            Ok(count)
+        }
+    }
+    for length in [1, 7, 8, EVIDENCE_LIMIT] {
+        let mut stream = Chunks {
+            remaining: length,
+            fail_after: None,
+            delivered: 0,
+            reads: 0,
+        };
+        assert_eq!(
+            read_evidence(&mut stream, length as u64).unwrap(),
+            vec![b'x'; length]
+        );
+        assert_eq!(stream.delivered, length);
+    }
+    for (actual, declared) in [(7, 8), (8, 7)] {
+        let mut stream = Chunks {
+            remaining: actual,
+            fail_after: None,
+            delivered: 0,
+            reads: 0,
+        };
+        assert!(read_evidence(&mut stream, declared).is_err());
+        assert!(stream.delivered <= declared as usize + 1);
+    }
+    // An error after all declared bytes but before the EOF probe also fails;
+    // absence of the final length check cannot become a valid observation.
+    for fail_after in [0, 7, 14] {
+        let mut stream = Chunks {
+            remaining: 14,
+            fail_after: Some(fail_after),
+            delivered: 0,
+            reads: 0,
+        };
+        assert!(read_evidence(&mut stream, 14).is_err());
+        assert_eq!(stream.reads, fail_after / 7 + 1);
     }
 }
 

@@ -689,8 +689,16 @@ native publication or durable restart latch is exercised.
 A native source must enforce the 8 KiB limit while reading the private handle
 bound to the attempt, reading at most limit plus one and refusing before larger
 allocation. Hash comparison, schema decoding and binding must use those same
-single-read bytes. The synthetic source accepts an already allocated vector;
-it proves neither native allocation bounds nor handle custody.
+single-read bytes. The test-only portable transport now enforces a 1..8192
+declared length before reading, allocates exactly declared length plus one,
+and reads into that fixed buffer without growth. EOF at the declared length
+is mandatory; truncation, the extra byte and any I/O error (including after
+all declared bytes but before EOF) refuse without returning partial evidence.
+The synthetic source feeds this transport from an already allocated fixture
+vector; digest, parse and binding use its one returned buffer. Streaming tests
+cover chunked input, endless input, exact cap and failure at each read boundary.
+This establishes portable transport bounds only, not private-handle identity,
+attempt custody, native source acquisition or a bound on fixture construction.
 
 For the future private evidence store, the proposed readers are the owning OS
 user and SYSTEM only. Keep referenced evidence read-only through terminal state
