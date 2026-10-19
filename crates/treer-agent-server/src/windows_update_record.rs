@@ -278,7 +278,23 @@ fn check_successor_fields(
         .checked_add(1)
         .ok_or("revision_exhausted")?;
     let next = parse_pair(candidate.0, candidate.1, &next_binding)?;
-    if next.provenance != old.provenance || next.images != old.images {
+    // Exhaustive on purpose: adding ANY receipt field requires an explicit
+    // immutability/transition decision here, rather than silently making it
+    // mutable. Binding is checked by parse_pair above; state needs the later
+    // phase/evidence guard and is not accepted by this partial check.
+    let DraftFields {
+        binding: _,
+        provenance: old_provenance,
+        images: old_images,
+        state: _,
+    } = &old;
+    let DraftFields {
+        binding: _,
+        provenance: next_provenance,
+        images: next_images,
+        state: _,
+    } = &next;
+    if next_provenance != old_provenance || next_images != old_images {
         return Err("transaction_fields_changed");
     }
     Ok(next)

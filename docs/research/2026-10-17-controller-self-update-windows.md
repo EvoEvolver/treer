@@ -262,6 +262,18 @@ protection. The guard also permits an unchanged claimed state at the next
 revision; it does not validate phase edges or health evidence, authorize a
 publication or make the `Consistent` result mean complete. Those additional
 checks and integration with the marker-first publisher remain separate work.
+The guard destructures every `DraftFields` field without a remainder pattern:
+adding any field must fail compilation until its immutable or transition-owned
+status is explicitly chosen. Binding is handled by exact pair parsing; state
+remains reserved for the phase/evidence guard. That next guard must refuse a
+revision bump with no state change unless a separately specified typed no-op
+exists; the current field guard does not implement that requirement.
+The named W4 external-head gate requires storage outside both records, a durable
+compare-and-swap advance before publishing the new pair, and defined restart
+ownership. Replaying an older pair together with its old head is precisely the
+case this layer cannot detect. Storage ownership, crash reconciliation after
+head advance and before pair publication, and its protected authorization remain
+unimplemented and require separate review before W4.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
