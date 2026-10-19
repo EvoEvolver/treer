@@ -122,22 +122,17 @@ impl Queue<'_> {
         self.proxy_dispatchable_with_clock(intent, url, wall_time)
             .unwrap_or(false)
     }
-    /// Runtime callback adapter: every storage/configuration error refuses POST.
-    /// Preserve the journal reservation for containment, never log the error or
-    /// reinterpret it as a retry capability.
-    pub fn proxy_dispatch_allowed(&mut self, intent: &Intent, url: &str, now: i64) -> bool {
+    /// Deterministic fixture adapter; production must use the fresh-clock entry.
+    #[cfg(test)]
+    fn proxy_dispatch_allowed(&mut self, intent: &Intent, url: &str, now: i64) -> bool {
         self.proxy_dispatchable(intent, url, now).unwrap_or(false)
     }
     /// Positive local journal fence for the post-token-mint callback. This is
     /// not Core/member/allowlist/activation authorization and must use the
     /// caller's correct Hub Store. No CLI or network while this transaction is
     /// open; no atomicity with a later external request is claimed.
-    pub fn proxy_dispatchable(
-        &mut self,
-        intent: &Intent,
-        url: &str,
-        now: i64,
-    ) -> Result<bool, Error> {
+    #[cfg(test)]
+    fn proxy_dispatchable(&mut self, intent: &Intent, url: &str, now: i64) -> Result<bool, Error> {
         self.proxy_dispatchable_with_clock(intent, url, || Ok(now))
     }
 
@@ -249,9 +244,10 @@ impl Queue<'_> {
     /// Reserves capacity and freezes dispatch state BEFORE returning any bytes.
     /// Requires at least 45 seconds on the current lease under the same write
     /// transaction. Insufficient budget returns no attempt or reservation.
-    /// Caller must pass a fresh time, then reread the clock after token mint.
+    /// Test-only explicit-time seam; production uses begin_proxy_delivery_now.
     /// A commit failure returns no attempt; do not POST or acknowledge work.
-    pub fn begin_proxy_delivery(
+    #[cfg(test)]
+    fn begin_proxy_delivery(
         &mut self,
         intent: &Intent,
         url: &str,
