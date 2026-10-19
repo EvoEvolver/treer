@@ -931,6 +931,91 @@ mod tests {
     }
 
     #[test]
+    fn native_observer_distinguishes_equal_hash_objects_gaps_and_read_failures() {
+        use crate::windows_update_layout::Object::*;
+        use checked_files::{Attempt, RecordedImage, Slot};
+        let fixture = PrivateImage::new();
+        let name = "attempt-00000000000000000000000000000007";
+        let path = fixture.directory.join(name);
+        let attempt = Attempt::create(&fixture.directory, name).unwrap();
+        let source = open_pinned(&fixture.path, false).unwrap();
+        let expected = digest(&source).unwrap();
+        let old = attempt.copy_for_rename(&source, expected).unwrap();
+        let old_record = RecordedImage::capture(&old, expected).unwrap();
+        attempt
+            .rename_checked(&old, Slot::Candidate, Slot::Active, expected)
+            .unwrap();
+        let new = attempt.copy_for_rename(&source, expected).unwrap();
+        let new_record = RecordedImage::capture(&new, expected).unwrap();
+        // Drop the original writer FILE_OBJECTs before the read-only observer;
+        // DuplicateHandle access reduction alone retains their sharing record.
+        drop((old, new));
+        assert_eq!(
+            attempt.observe(&old_record, &new_record),
+            [Old, New, Absent]
+        );
+        let move_slot = |from: Slot, to: Slot, filename: &str| {
+            let pin = OpenOptions::new()
+                .access_mode(GENERIC_READ | DELETE)
+                .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+                .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                .open(path.join(filename))
+                .unwrap();
+            attempt.rename_checked(&pin, from, to, expected).unwrap();
+        };
+        move_slot(Slot::Active, Slot::Backup, "controller.exe");
+        assert_eq!(
+            attempt.observe(&old_record, &new_record),
+            [Absent, New, Old]
+        );
+        move_slot(Slot::Candidate, Slot::Active, "candidate.exe");
+        assert_eq!(
+            attempt.observe(&old_record, &new_record),
+            [New, Absent, Old]
+        );
+        // Same bytes and valid private ACL, but a third object is not N.
+        drop(attempt.copy_for_rename(&source, expected).unwrap());
+        assert_eq!(
+            attempt.observe(&old_record, &new_record),
+            [New, Unknown, Old]
+        );
+        std::fs::remove_file(path.join("candidate.exe")).unwrap();
+        let exclusive = OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path.join("controller.exe"))
+            .unwrap();
+        assert_eq!(
+            attempt.observe(&old_record, &new_record),
+            [Unreadable, Absent, Old]
+        );
+        drop(exclusive);
+        set_fixture_security(&path.join("controller.exe"), "(A;;GR;;;WD)");
+        assert_eq!(
+            attempt.observe(&old_record, &new_record),
+            [Unreadable, Absent, Old]
+        );
+        set_fixture_security(&path.join("controller.exe"), "");
+        move_slot(Slot::Active, Slot::Candidate, "controller.exe");
+        move_slot(Slot::Backup, Slot::Active, "controller.prev.exe");
+        assert_eq!(
+            attempt.observe(&old_record, &new_record),
+            [Old, New, Absent]
+        );
+        // An object directory must not be mistaken for a missing file.
+        std::fs::create_dir(path.join("controller.prev.exe")).unwrap();
+        assert_eq!(
+            attempt.observe(&old_record, &new_record),
+            [Old, New, Unreadable]
+        );
+        std::fs::remove_dir(path.join("controller.prev.exe")).unwrap();
+        drop((source, attempt));
+        std::fs::remove_file(path.join("controller.exe")).unwrap();
+        std::fs::remove_file(path.join("candidate.exe")).unwrap();
+        std::fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
     fn native_checked_rename_keeps_identity_and_reverses_activation() {
         use checked_files::{Attempt, Slot};
         let fixture = PrivateImage::new();

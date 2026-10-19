@@ -343,6 +343,27 @@ are original/restored; rolled-back still requires old-health. The pure model
 enumerates all eight flag combinations for each state on otherwise valid layouts. Stray evidence is a
 conflict, not ignored metadata that might conceal a reordered receipt write.
 
+The next native fixture adds `Attempt::observe` in `checked_files.rs`. This is
+still private test-only code over an exclusively created disposable attempt,
+not a production recovery observer. In-memory records capture the volume/file
+identity, attributes/link count, size and digest after checking a protected
+owner/SYSTEM-only ACL. Observation rechecks the retained directory binding and
+private ACL, opens only its three fixed slot names without write sharing, and
+checks each object again before labelling it old/new. Equal hashes with a
+different file ID are unknown. Only `ERROR_FILE_NOT_FOUND` means absent;
+sharing/read/ACL errors mean unreadable, including a directory occupying a file
+slot. A foreign read grant is refused under this private-attempt policy too.
+
+Its native regression observes equal-hash/different-ID originals and candidates
+through the actual rename gap, publication and reverse restoration, injects a
+third equal-hash object, an exclusive-reader conflict, foreign read ACL and an
+occupied directory. Hosted Server 2022/2025 execution is pending. Observation
+returns labels and drops its read pins; it is not an atomic multi-file snapshot
+or mutation authority. Production use still needs lock/quiescence enforcement,
+persisted authenticated records and marker binding, installation-specific ACL
+policy and retained pins through any authorized operation. No receipt/storage
+adapter, recovery command or installed-file access is added by this fixture.
+
 ### W1a: private directory and checked-copy fixture
 
 `windows_update_bootstrap/checked_files.rs` is private under `cfg(windows, test)`.

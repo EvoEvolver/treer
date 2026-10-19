@@ -4,7 +4,7 @@
 //! before producing Old/New, and distinguish absent from unreadable slots.
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Object {
+pub(crate) enum Object {
     Old,
     New,
     Absent,

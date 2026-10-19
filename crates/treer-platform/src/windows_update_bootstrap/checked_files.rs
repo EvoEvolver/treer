@@ -18,6 +18,93 @@ pub(super) enum Slot {
     Backup,
 }
 
+// Test-only snapshot of verified private objects, not a serializable receipt.
+// It grants no authority and does not survive loss of directory/lock ownership.
+pub(super) struct RecordedImage {
+    identity: (u32, u64, u32, u32),
+    size: u64,
+    hash: [u8; 32],
+}
+
+fn protected_private_acl(file: &File, owner: &str) -> io::Result<()> {
+    private_owner_dacl(file, owner)?;
+    let mut acl = ptr::null_mut();
+    let mut raw = ptr::null_mut();
+    let result = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut acl,
+            ptr::null_mut(),
+            &mut raw,
+        )
+    };
+    let _allocation = SecurityAllocation(raw);
+    if result != ERROR_SUCCESS || acl.is_null() || unsafe { IsValidAcl(acl) } == 0 {
+        return Err(denied());
+    }
+    let mut control = 0;
+    let mut revision = 0;
+    check(unsafe { GetSecurityDescriptorControl(raw, &mut control, &mut revision) })?;
+    if control & SE_DACL_PROTECTED == 0 {
+        return Err(denied());
+    }
+    // This stricter private-attempt policy also refuses foreign read grants.
+    for index in 0..u32::from(unsafe { (*acl).AceCount }) {
+        let mut ace = ptr::null_mut();
+        check(unsafe { GetAce(acl, index, &mut ace) })?;
+        let header = unsafe { ptr::read_unaligned(ace.cast::<ACE_HEADER>()) };
+        let offset = mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart);
+        if !matches!(
+            u32::from(header.AceType),
+            ACCESS_ALLOWED_ACE_TYPE | ACCESS_DENIED_ACE_TYPE
+        ) || usize::from(header.AceSize) < offset + 8
+        {
+            return Err(denied());
+        }
+        let sid = unsafe {
+            ace.cast::<u8>()
+                .add(mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart))
+        };
+        let sid_size = 8 + 4 * usize::from(unsafe { *sid.add(1) });
+        if offset + sid_size > usize::from(header.AceSize) {
+            return Err(denied());
+        }
+        let trustee = sid_text(sid.cast())?;
+        if trustee != owner && trustee != "S-1-5-18" {
+            return Err(denied());
+        }
+    }
+    Ok(())
+}
+
+impl RecordedImage {
+    pub(super) fn capture(file: &File, hash: [u8; 32]) -> io::Result<Self> {
+        let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
+        protected_private_acl(file, &owner)?;
+        let before = identity(file)?;
+        if before.2 != 1
+            || before.3 & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        {
+            return Err(denied());
+        }
+        let size = file.metadata()?.len();
+        let mut reader = file;
+        reader.seek(SeekFrom::Start(0))?;
+        if digest(file)? != hash || identity(file)? != before {
+            return Err(denied());
+        }
+        Ok(Self {
+            identity: before,
+            size,
+            hash,
+        })
+    }
+}
+
 impl Slot {
     fn name(self) -> &'static str {
         match self {
@@ -45,6 +132,82 @@ fn descriptor(owner: &str) -> io::Result<SecurityAllocation> {
 }
 
 impl Attempt {
+    // Only disposable fixture callers. Production observation still needs the
+    // installation lock, attested quiescence and persisted record validation.
+    // Returned labels are a momentary snapshot, never retained mutation pins.
+    pub(super) fn observe(
+        &self,
+        old: &RecordedImage,
+        new: &RecordedImage,
+    ) -> [crate::windows_update_layout::Object; 3] {
+        use crate::windows_update_layout::Object::*;
+        let observe = || -> io::Result<_> {
+            let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
+            protected_private_acl(&self.directory, &owner)?;
+            if identity(&open_pinned(&self.path, true)?)? != identity(&self.directory)? {
+                return Err(denied());
+            }
+            if old.identity == new.identity {
+                return Err(denied());
+            }
+            let directory = final_path(&self.directory)?;
+            let mut slots = [Unreadable; 3];
+            for (index, slot) in [Slot::Active, Slot::Candidate, Slot::Backup]
+                .into_iter()
+                .enumerate()
+            {
+                let path = directory.join(slot.name());
+                // Preserve Win32 open errors: generic helpers deliberately
+                // erase them, which would lose the absence/read-failure split.
+                let file = match OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+                    .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+                    .open(&path)
+                {
+                    Ok(file) => file,
+                    Err(error) => {
+                        slots[index] = if error.raw_os_error() == Some(ERROR_FILE_NOT_FOUND as i32)
+                        {
+                            Absent
+                        } else {
+                            Unreadable
+                        };
+                        continue;
+                    }
+                };
+                let verify = || -> io::Result<_> {
+                    protected_private_acl(&file, &owner)?;
+                    let id = identity(&file)?;
+                    if id.2 != 1
+                        || id.3 & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+                        || final_path(&file)? != path
+                    {
+                        return Ok(Unknown);
+                    }
+                    let size = file.metadata()?.len();
+                    let hash = digest(&file)?;
+                    if identity(&file)? != id {
+                        return Ok(Unknown);
+                    }
+                    let matches = |record: &RecordedImage| {
+                        id == record.identity && size == record.size && hash == record.hash
+                    };
+                    Ok(if matches(old) {
+                        Old
+                    } else if matches(new) {
+                        New
+                    } else {
+                        Unknown
+                    })
+                };
+                slots[index] = verify().unwrap_or(Unreadable);
+            }
+            Ok(slots)
+        };
+        observe().unwrap_or([Unreadable; 3])
+    }
+
     pub(super) fn create(parent: &Path, name: &str) -> io::Result<Self> {
         if name.len() != 40
             || !name.starts_with("attempt-")
