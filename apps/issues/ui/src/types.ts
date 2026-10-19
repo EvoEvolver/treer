@@ -3,10 +3,10 @@ export type Priority = "low" | "normal" | "high" | "urgent";
 
 export interface Principal { id: string; kind: "human" | "agent"; name: string; role?: string; path?: string | null }
 export interface Claim { holder: string; expires_at: string }
-export interface Progress { total: number; completed: number; by_status: Record<string, number> }
+export interface Progress { total: number; completed: number; truncated?: boolean; by_status: Record<string, number> }
 export interface Issue {
   id: number; title: string; description: string; status: Status; priority: Priority; labels: string[];
-  assignee: string | null; parent_id: number | null; blocked_by: number[]; creator: string;
+  assignee: string | null; parent_id: number | null; parent_ids?: number[]; blocked_by: number[]; creator: string;
   created_at: string; updated_at: string; version: number; claim: Claim | null;
   progress: Progress; unresolved_dependencies: number[];
   waiting_on?: string | null; waiting_by?: string | null; waiting_at?: string | null;

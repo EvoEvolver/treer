@@ -432,6 +432,28 @@ are derived again from the stored text on the first start after the upgrade. Lin
 referenced issue changes (not its version, status or activity). Anyone who can comment can create a backlink on any issue, which
 is why every entry shows its author.
 
+## Parents and children (#186)
+
+An issue can have **several parents** and a parent several children (a DAG), kept in `issue_parents`
+(child, parent, who linked it, when). `parent_ids` lists an issue's parents oldest link first and `parent_id` is
+the first of them: a read-only value derived from the relation for older clients, not a second source of truth (it is no
+longer stored in the issue). The first start after the upgrade moves every stored `parent_id` into the table in one transaction
+(idempotent; dangling or self parents are dropped). **Take the online SQLite backup before deploying** (`app-deploy` does).
+
+- Create or edit an issue with `parent_ids: [...]` (replaces its whole parent set) or the old `parent_id` (an ID, or null to
+  clear): the child's editors choose its parents. Do not send both.
+- **Attach existing issues** under a parent: `POST /v1/issues/PARENT/children {"add": [..], "remove": [..]}`, `issues link
+  PARENT CHILD...`, `issues unlink PARENT CHILD...` and the *Attach* box in the web UI. Adding needs edit rights on the
+  **parent** (you are arranging your own summary issue) and changes nothing about the child but the relation; removing
+  needs edit rights on the parent **or** the child, so a child's owner can always take a link out. Every link and unlink is
+  written to **both** issues' activity (who, when, the other issue). The call is idempotent.
+- No cycles through any path (a diamond is fine); at most 50 parents per issue and 50 children per issue; replacing the parent
+  set of a child that already holds 50 parents is still allowed, so a full set cannot lock its owner out; at most 30 relation
+  changes per minute per principal (429); every walk of the graph stops at 10,000 nodes.
+- A parent never changes how its children behave: reminders, leases, dependencies and permissions ignore the hierarchy.
+- Progress rollups count every descendant **once** however many paths lead to it, skip notes (not their subtrees) and say
+  `truncated` if the node cap was hit. The tree view shows a child under its first parent; the detail page lists all parents.
+
 ## Notes (#186)
 
 `note` is a status beside `done` and `closed`: a knowledge or memory entry rather than work. A note gets no reminders (not

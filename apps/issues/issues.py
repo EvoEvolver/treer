@@ -432,6 +432,8 @@ class Handler(BaseHTTPRequestHandler):
                     except ValueError:
                         fail('invalid_pagination', 'Invalid pagination')
                     self.json(200, result)
+                elif method == 'POST' and action == 'children':
+                    self.json(200, dict(app.store.link_children(issue_id, self.body(), actor), notification={'status': 'not_requested'}))
                 elif (method == 'PATCH' and not action) or (method == 'POST' and action in ('comment', 'claim')):
                     self.json(200, app.mutation(issue_id, action or 'update', self.body(), actor, directory, token))
                 else:

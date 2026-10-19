@@ -10,7 +10,7 @@ import { AssigneePicker } from "./Picker";
 const IssueLink = ({ id }: { id: number }) => <a href={"#issue=" + id}>#{id}</a>;
 
 const CHANGE_TITLES: Record<string, string> = {
-  title: "Title", description: "Description", assignee: "Assignee", parent_id: "Parent", blocked_by: "Blocked by",
+  title: "Title", description: "Description", assignee: "Assignee", parent_ids: "Parents", parent_id: "Parent", blocked_by: "Blocked by",
   labels: "Labels", priority: "Priority", status: "Status",
 };
 
@@ -75,6 +75,22 @@ function Children({ id, first }: { id: number; first: IssueDetailResult }) {
   );
 }
 
+// Attach EXISTING issues under this one (needs edit rights on this issue); one issue may sit under several parents.
+function AttachChildren({ id }: { id: number }) {
+  const { mutate, busy } = useApp();
+  const [ids, setIds] = useState("");
+  return (
+    <form className="attach" onSubmit={async (e) => {
+      e.preventDefault();
+      const add = ids.split(/[\s,]+/).filter(Boolean).map(Number);
+      if (add.length && add.every((n) => Number.isInteger(n) && n > 0) && await mutate(`v1/issues/${id}/children`, "POST", { add })) setIds("");
+    }}>
+      <input aria-label="Attach existing issues (IDs)" placeholder="Attach existing issues: 12, 15" value={ids} onChange={(e) => setIds(e.target.value)} />
+      <button type="submit" disabled={busy || !ids.trim()}>Attach</button>
+    </form>
+  );
+}
+
 function CommentForm({ id }: { id: number }) {
   const { mutate, busy } = useApp();
   const [body, setBody] = useState(""), [title, setTitle] = useState("");
@@ -105,7 +121,13 @@ export function IssueDetail({ result, startEdit }: { result: IssueDetailResult; 
       <div className="detail-bar">
         <button type="button" className="detail-back" onClick={back}>‹ Back to list</button>
         <span className="meta-id">ISS-{id}</span>
-        {issue.parent_id !== null && <span className="meta">in <IssueLink id={issue.parent_id} /></span>}
+        {(issue.parent_ids ?? []).length > 0 && (
+          <span className="meta">in {(issue.parent_ids ?? []).map((p) => (
+            <Fragment key={p}><IssueLink id={p} />
+              <button type="button" className="unlink" disabled={busy} title={`Remove from #${p}`} aria-label={`Remove from #${p}`}
+                onClick={() => mutate(`v1/issues/${p}/children`, "POST", { remove: [id] })}>×</button>{" "}</Fragment>
+          ))}</span>
+        )}
         <span className="grow"></span>
         <button type="button" className={closed ? "" : "primary"} disabled={busy || !allowed} title={allowed ? "" : NOT_ALLOWED}
             onClick={() => (closed ? reopenIssue : closeIssue)(issue)}>{closed ? "Reopen issue" : "Close issue"}</button>
@@ -155,6 +177,7 @@ export function IssueDetail({ result, startEdit }: { result: IssueDetailResult; 
         </>
       )}
       <h3>Children · {issue.progress.completed}/{issue.progress.total} descendants complete</h3>
+      <AttachChildren id={id} />
       <Children key={"c" + issue.version} id={id} first={result} />
       <h3>Comments &amp; activity</h3>
       <CommentForm id={id} />
