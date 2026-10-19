@@ -1012,7 +1012,9 @@ outage the Proxy keeps sockets for three failed checks (about 120 seconds) and
 then closes them with 1011; `tunnel session re-check failed` warnings show the
 retries. Public and Bearer-token upgrades are not re-checked. The Agent or App
 side of the socket is closed as well, so a UI that reconnects after 4401/4403
-gets the ordinary authorize redirect or 401 instead of a new socket.
+gets the ordinary authorize redirect or 401 instead of a new socket. Each
+check is bounded to 5 seconds and runs beside the relay, so a slow database
+delays the verdict, never the bytes.
 
 ## Serving the browser App from the Proxy
 

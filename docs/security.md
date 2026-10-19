@@ -1331,9 +1331,12 @@ a Policy denial with 4403, so Console logout, membership removal, the 12-hour
 expiry and a Policy change end an open socket within about 36 seconds. The same
 re-check covers Console-session sockets on the Proxy-origin interface tunnel
 and ingress-session sockets on workspace App hosts; public and Bearer upgrades
-are not re-checked. Database errors keep the socket (nothing new is granted)
-and are retried; after three consecutive failures, about 120 seconds worst
-case, the socket closes with 1011. The close code is best effort because the
+are not re-checked. The checks run beside the relay, each bounded to 5 seconds,
+so a slow lookup never pauses the socket. Database errors, Policy-store errors
+and timed-out checks keep the socket (nothing new is granted) and are retried;
+after three consecutive failures, about 120 seconds worst case, the socket
+closes with 1011. Any other lookup answer than a matching live session ends the
+socket at once with 4401. The close code is best effort because the
 relay is byte-level; closure within that window, including the Agent-side
 half, is the guarantee. Responses to
 requests carrying the embed cookie get `frame-ancestors` replaced with the

@@ -967,11 +967,63 @@ pub(in crate::api) fn websocket_close_frame(code: u16, reason: &str) -> Vec<u8> 
     frame
 }
 
+/// One re-check may take at most this long before it counts as unavailable,
+/// so a stalled database never holds a verdict (or a socket) open.
+pub(in crate::api) const TUNNEL_CHECK_TIMEOUT: Duration = Duration::from_secs(5);
+static TUNNEL_CHECK_TIMEOUT_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(TUNNEL_CHECK_TIMEOUT.as_millis() as u64);
+
+fn tunnel_check_timeout() -> Duration {
+    Duration::from_millis(TUNNEL_CHECK_TIMEOUT_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+#[cfg(test)]
+pub(in crate::api) fn set_tunnel_check_timeout_for_test(timeout: Duration) {
+    TUNNEL_CHECK_TIMEOUT_MS.store(
+        timeout.as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// Runs the periodic re-checks on their own task so a pending lookup never
+/// stops bytes from moving; resolves with the close code once the socket
+/// must go. Each check is bounded by [`TUNNEL_CHECK_TIMEOUT`] and a timed-out
+/// check counts as unavailable.
+async fn revalidation_verdict(revalidation: UpgradeRevalidation) -> (u16, UpgradeRevalidation) {
+    let mut unverified = 0_u32;
+    loop {
+        tokio::time::sleep(tunnel_revalidate_interval() + tunnel_revalidate_jitter()).await;
+        let outcome = tokio::time::timeout(tunnel_check_timeout(), revalidation.check())
+            .await
+            .unwrap_or(RevalidationOutcome::Unavailable);
+        match outcome {
+            RevalidationOutcome::Verified => unverified = 0,
+            RevalidationOutcome::Unavailable => {
+                unverified += 1;
+                tracing::warn!(
+                    revalidation = ?revalidation,
+                    unverified,
+                    "tunnel session re-check failed; keeping the socket until the next check"
+                );
+                if unverified >= TUNNEL_UNVERIFIED_MAX_CHECKS {
+                    return (TUNNEL_CLOSE_UNVERIFIED, revalidation);
+                }
+            }
+            RevalidationOutcome::SessionEnded => return (TUNNEL_CLOSE_SESSION_ENDED, revalidation),
+            RevalidationOutcome::AccessRevoked => {
+                return (TUNNEL_CLOSE_ACCESS_REVOKED, revalidation)
+            }
+        }
+    }
+}
+
 /// Relays the upgraded bytes until either side closes or a re-check fails;
 /// then sends a close frame to the browser and shuts both halves down, so the
 /// Agent or App stops receiving as well. The relay is byte-level: when the
 /// target was mid-frame the browser sees a protocol error instead of the code.
-/// Either way the socket is gone within one interval of the revocation.
+/// Either way the socket is gone within one interval of the revocation. The
+/// checks run concurrently with the relay (see [`revalidation_verdict`]), so
+/// a slow lookup never pauses the socket.
 async fn relay_with_revalidation<D, T>(
     downstream: &mut D,
     target: &mut T,
@@ -981,38 +1033,18 @@ async fn relay_with_revalidation<D, T>(
     T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     use tokio::io::AsyncWriteExt;
-    let code = {
-        let relay = tokio::io::copy_bidirectional(downstream, target);
-        tokio::pin!(relay);
-        let mut due =
-            tokio::time::Instant::now() + tunnel_revalidate_interval() + tunnel_revalidate_jitter();
-        let mut unverified = 0_u32;
-        loop {
-            tokio::select! {
-                _ = &mut relay => return,
-                _ = tokio::time::sleep_until(due) => {
-                    match revalidation.check().await {
-                        RevalidationOutcome::Verified => unverified = 0,
-                        RevalidationOutcome::Unavailable => {
-                            unverified += 1;
-                            tracing::warn!(
-                                revalidation = ?revalidation,
-                                unverified,
-                                "tunnel session re-check failed; keeping the socket until the next check"
-                            );
-                            if unverified >= TUNNEL_UNVERIFIED_MAX_CHECKS {
-                                break TUNNEL_CLOSE_UNVERIFIED;
-                            }
-                        }
-                        RevalidationOutcome::SessionEnded => break TUNNEL_CLOSE_SESSION_ENDED,
-                        RevalidationOutcome::AccessRevoked => break TUNNEL_CLOSE_ACCESS_REVOKED,
-                    }
-                    due = tokio::time::Instant::now()
-                        + tunnel_revalidate_interval()
-                        + tunnel_revalidate_jitter();
-                }
-            }
+    let verdict = tokio::spawn(revalidation_verdict(revalidation));
+    let verdict_handle = verdict.abort_handle();
+    let (code, revalidation) = tokio::select! {
+        _ = tokio::io::copy_bidirectional(downstream, target) => {
+            // The socket ended on its own; the token goes with the checker.
+            verdict_handle.abort();
+            return;
         }
+        verdict = verdict => match verdict {
+            Ok(verdict) => verdict,
+            Err(_) => return,
+        },
     };
     let reason = match code {
         TUNNEL_CLOSE_SESSION_ENDED => "session ended",
@@ -1020,9 +1052,9 @@ async fn relay_with_revalidation<D, T>(
         _ => "unverified",
     };
     tracing::info!(revalidation = ?revalidation, code, "closing tunnelled socket");
+    drop(revalidation);
     let frame = websocket_close_frame(code, reason);
     let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, downstream.write_all(&frame)).await;
     let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, downstream.shutdown()).await;
     let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, target.shutdown()).await;
-    drop(revalidation);
 }

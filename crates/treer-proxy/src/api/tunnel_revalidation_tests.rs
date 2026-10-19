@@ -8,9 +8,9 @@ use super::agent_origin_tests::{
 use super::embed_session_tests::establish_embed_session;
 use super::ingress_protection_tests::{config, Fixture};
 use super::network::{
-    set_tunnel_revalidation_for_test, websocket_close_frame, RevalidationOutcome,
-    UpgradeRevalidation, TUNNEL_CLOSE_ACCESS_REVOKED, TUNNEL_CLOSE_SESSION_ENDED,
-    TUNNEL_CLOSE_UNVERIFIED,
+    set_tunnel_check_timeout_for_test, set_tunnel_revalidation_for_test, websocket_close_frame,
+    RevalidationOutcome, UpgradeRevalidation, TUNNEL_CLOSE_ACCESS_REVOKED,
+    TUNNEL_CLOSE_SESSION_ENDED, TUNNEL_CLOSE_UNVERIFIED,
 };
 use super::*;
 use crate::state::SocketFrame;
@@ -21,6 +21,7 @@ use tokio::net::TcpStream;
 use treer_protocol::{NetworkBinaryFrame, NetworkBinaryKind};
 
 const INTERVAL: Duration = Duration::from_millis(250);
+const CHECK_TIMEOUT: Duration = Duration::from_millis(300);
 const DEADLINE: Duration = Duration::from_secs(10);
 
 struct Harness {
@@ -35,6 +36,7 @@ struct Harness {
 /// echoes every later byte, and notes when the Proxy closes its side.
 async fn harness(policy: PolicyEngine) -> Harness {
     set_tunnel_revalidation_for_test(INTERVAL, Duration::ZERO);
+    set_tunnel_check_timeout_for_test(CHECK_TIMEOUT);
     let mut fixture = agent_fixture().await;
     let state = fixture.state.clone();
     let connection = fixture.connection;
@@ -411,4 +413,39 @@ fn close_frames_are_unmasked_with_code_and_reason() {
     let long = websocket_close_frame(1011, &"x".repeat(200));
     assert_eq!(long[1], 125);
     assert_eq!(long.len(), 127);
+}
+
+/// A lookup that hangs (every pool connection held elsewhere) never pauses
+/// the relay: echoes keep flowing while checks time out, and the socket closes
+/// with 1011 after three timed-out checks.
+#[tokio::test]
+async fn stalled_lookups_keep_bytes_flowing_and_close_after_three_timeouts() {
+    let harness = harness(allow()).await;
+    let cookie = standalone_cookie(&harness, "member").await;
+    let mut client = open_socket(&harness, &cookie).await;
+    assert_echo(&mut client).await;
+    let pool = harness.fixture.auth.pool();
+    let max = pool.options().get_max_connections();
+    let mut held = Vec::new();
+    for _ in 0..max {
+        held.push(
+            tokio::time::timeout(DEADLINE, pool.acquire())
+                .await
+                .expect("acquire within the deadline")
+                .unwrap(),
+        );
+    }
+    let started = tokio::time::Instant::now();
+    // Past the first check's start and well into its timeout: still echoing.
+    tokio::time::sleep(INTERVAL + CHECK_TIMEOUT / 2).await;
+    assert_echo(&mut client).await;
+    tokio::time::sleep(INTERVAL + CHECK_TIMEOUT).await;
+    assert_echo(&mut client).await;
+    assert_closed(&mut client, TUNNEL_CLOSE_UNVERIFIED).await;
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed >= (INTERVAL + CHECK_TIMEOUT) * 3 - Duration::from_millis(50),
+        "three timed-out checks: {elapsed:?}"
+    );
+    drop(held);
 }
