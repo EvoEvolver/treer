@@ -6,7 +6,7 @@ use crate::{
     telegram_disposition_identity::Identity,
     telegram_dispositions::{ACKED_FLOOR, GLOBAL_ROWS, PER_BINDING_ROWS},
 };
-use rusqlite::{params, OptionalExtension, Transaction};
+use rusqlite::{params, DatabaseName, OptionalExtension, Transaction, TransactionState};
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Admission {
@@ -24,7 +24,7 @@ pub fn record_in_transaction(
     identity: &Identity,
     now: i64,
 ) -> Result<Admission, Error> {
-    if now < 0 {
+    if now < 0 || tx.transaction_state(Some(DatabaseName::Main))? != TransactionState::Write {
         return Err(Error::Invalid);
     }
     let version: i64 = tx.query_row(
@@ -154,6 +154,58 @@ mod tests {
         )
         .unwrap()
     }
+    #[test]
+    fn deferred_and_read_only_transactions_cannot_enter_admission() {
+        let mut s = fixture();
+        for establish_read in [false, true] {
+            let tx =
+                s.db.transaction_with_behavior(TransactionBehavior::Deferred)
+                    .unwrap();
+            if establish_read {
+                let _: i64 = tx
+                    .query_row("SELECT count(*) FROM inbound", [], |r| r.get(0))
+                    .unwrap();
+            }
+            assert!(matches!(
+                record_in_transaction(&tx, &identity(1, 1, 1), 1),
+                Err(Error::Invalid)
+            ));
+            tx.rollback().unwrap();
+        }
+        assert_eq!(count(&s), 0);
+        assert_eq!(record(&mut s, &identity(1, 1, 1)), Admission::Inserted);
+    }
+
+    #[test]
+    fn insertion_error_after_cleanup_requires_and_preserves_outer_rollback() {
+        let mut s = fixture();
+        for key in 0..32 {
+            record(&mut s, &identity(1, key, key as u8));
+        }
+        s.db.execute(
+            "UPDATE telegram_terminal_dispositions SET acked=1 WHERE ordinal<=9",
+            [],
+        )
+        .unwrap();
+        s.db.execute_batch("CREATE TRIGGER reject_admission BEFORE INSERT ON telegram_terminal_dispositions BEGIN SELECT RAISE(ABORT,'synthetic_insert_failure'); END;").unwrap();
+        let tx =
+            s.db.transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+        assert!(record_in_transaction(&tx, &identity(1, 32, 32), 1).is_err());
+        // SQLite ABORT rolls back the INSERT statement, not earlier cleanup.
+        let in_tx: i64 = tx
+            .query_row(
+                "SELECT count(*) FROM telegram_terminal_dispositions",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(in_tx, 31);
+        tx.rollback().unwrap();
+        assert_eq!(count(&s), 32);
+        assert_eq!(record(&mut s, &identity(1, 0, 0)), Admission::Replay);
+    }
+
     #[test]
     fn replay_and_changed_parent_or_digest_latch_without_overwriting() {
         let mut s = fixture();

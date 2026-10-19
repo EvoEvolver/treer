@@ -712,3 +712,13 @@ the mismatch counter, write owner recovery holds, validate current hub/binding o
 handoff mode, or acknowledge. Those checks and effects must be assembled in the
 authoritative completion transaction before *any* result can permit ACK. The
 confirmed-ACK marker, owner recovery and scheduler remain unimplemented.
+
+Admission now checks SQLite's main-database transaction state at entry and
+refuses unless it is already Write, before reading schema or parent state.
+Unpromoted deferred and read-only transactions are rejected; IMMEDIATE (or an
+already promoted write transaction) satisfies the check. Tests also inject an
+INSERT-statement failure after acked-row cleanup: SQLite ABORT leaves that prior
+cleanup inside the open transaction, so the caller must roll back the entire
+transaction on error. The explicit rollback restores the original row and count.
+This enforces write ownership, not the still-pending composed authorization,
+counter/hold or ACK contract.
