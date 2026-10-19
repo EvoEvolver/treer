@@ -26,7 +26,12 @@ both Server 2022 and 2025; the separate outside-Job owner round trip also passed
 on both. Each step exited zero. The three numeric 183 diagnostics per rename
 run correspond to the three deliberate occupied-target refusals in the collision
 test; test output can interleave. This is disposable-fixture evidence only,
-without a live installed update or real `win_native` run. Durable receipt/recovery states
+without a live installed update or real `win_native` run. A separate ignored
+`native_running_image_rename` fixture now launches only a checked disposable test
+copy, confirms kernel PID/image identity and live replies across forward/reverse
+renames, and confirms cleanup using its actual process handle. Its hosted
+Server 2022/2025 execution outside the runner Job remains pending; compilation
+does not establish running-image rename support. Durable receipt/recovery states
 and production installation remain subsequent work.
 
 ### Windows self-update registration model

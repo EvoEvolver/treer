@@ -204,6 +204,29 @@ result. This verifies only the disposable rename/reverse fixture, not an
 installed update or crash recovery. Receipt states and recovery classification
 remain the next W1b slice; no real `win_native` machine was used.
 
+### W1b running-image fixture (hosted execution pending)
+
+The ignored `windows_update_bootstrap::running_image::native_running_image_rename`
+test adds a separate disposable live-image probe. It refuses an ambient Job and
+launches only its private checked copy of the platform test executable, with
+explicit executable/cwd, empty environment, no inherited handles, no breakaway
+and one fixed ignored child test. Before resuming the child it compares the
+kernel-reported process image with the retained file identity and digest. The
+owned process handle and creation time bind all subsequent liveness checks.
+
+The child connects to the existing current-user/SYSTEM-only local pipe; the
+parent checks its kernel PID and requires a ready byte. It renames the retained
+running image active-to-backup, gets a fresh child reply, reverses backup-to-active
+and gets another reply. Both moves use the checked rename primitive, with
+identity/path checks and write denial. The child remains alive after its last
+reply until bounded cleanup of its actual process handle; its own ten-second
+deadline also bounds a lost parent. The parent confirms process termination
+before deleting only its exact test files. Failure leaves attempt evidence;
+there is no installed image, Controller/Host lifecycle operation or production
+entry. The child creates no descendants. This is a proposed test, not evidence
+that a running-image rename has passed Windows execution. Hosted Server
+2022/2025 must invoke the ignored parent separately outside the runner Job.
+
 Before W2 chooses the production parent directory, specify its required ACL and
 installer creation policy. The current verifier refuses Administrators mutation
 grants as foreign writes, so the disposable private-parent tests do not establish

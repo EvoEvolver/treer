@@ -42,6 +42,7 @@ const CLEANUP_MS: u32 = 5_000;
 
 mod checked_files;
 mod parent_proof;
+mod running_image;
 mod tick_deadline;
 
 fn denied() -> io::Error {
@@ -715,9 +716,9 @@ mod tests {
         Ok(())
     }
 
-    struct PrivateImage {
-        directory: PathBuf,
-        path: PathBuf,
+    pub(super) struct PrivateImage {
+        pub(super) directory: PathBuf,
+        pub(super) path: PathBuf,
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -839,7 +840,7 @@ mod tests {
     }
 
     impl PrivateImage {
-        fn new() -> Self {
+        pub(super) fn new() -> Self {
             let directory = std::env::temp_dir().join(format!("treer-bootstrap-{}", selector()));
             std::fs::create_dir(&directory).unwrap();
             set_fixture_security(&directory, "");
