@@ -187,6 +187,8 @@ impl<M: Mailbox + Directory> Hub<M> {
             workspace: workspace.into(),
             own_id: own_id.into(),
         };
+        #[cfg(feature = "hub")]
+        crate::management::schema(&hub.store.db)?;
         hub.notice_schema()?;
         hub.hold_schema()?;
         let telegram: bool = hub.store.db.query_row(
@@ -202,7 +204,7 @@ impl<M: Mailbox + Directory> Hub<M> {
     /// Internal owner-service boundary only. New bindings always start paused.
     #[cfg(test)]
     pub(crate) fn add_binding(&mut self, binding: Binding) -> Result<(), Error> {
-        self.add_binding_inner(binding, None)
+        self.add_binding_inner(binding, None, None)
     }
     pub fn add_binding_audited(
         &mut self,
@@ -212,12 +214,26 @@ impl<M: Mailbox + Directory> Hub<M> {
     ) -> Result<(), Error> {
         let context = crate::owner_actions::AuditContext::new(actor, now)?;
         self.recovery_schema()?;
-        self.add_binding_inner(binding, Some(&context))
+        self.add_binding_inner(binding, Some(&context), None)
+    }
+    #[cfg(feature = "hub")]
+    pub(crate) fn add_binding_idempotent(
+        &mut self,
+        binding: Binding,
+        actor: &str,
+        now: i64,
+        key: &str,
+        fingerprint: &str,
+    ) -> Result<(), Error> {
+        let context = crate::owner_actions::AuditContext::new(actor, now)?;
+        self.recovery_schema()?;
+        self.add_binding_inner(binding, Some(&context), Some((actor, key, fingerprint)))
     }
     fn add_binding_inner(
         &mut self,
         binding: Binding,
         audit: Option<&crate::owner_actions::AuditContext<'_>>,
+        receipt: Option<(&str, &str, &str)>,
     ) -> Result<(), Error> {
         if !stable(&binding.endpoint_id)
             || !stable(&binding.recipient)
@@ -232,11 +248,14 @@ impl<M: Mailbox + Directory> Hub<M> {
         }
         let definition = serde_json::to_string(&binding).map_err(|_| Error::Binding)?;
         let tx = self.store.db.transaction()?;
-        let count: i64 = tx.query_row("SELECT COUNT(*) FROM endpoints", [], |r| r.get(0))?;
+        #[cfg(feature="hub")]
+        let count_sql="SELECT COUNT(*) FROM endpoints WHERE NOT EXISTS(SELECT 1 FROM hub_retired_bindings r WHERE r.endpoint=endpoints.id)";
+        #[cfg(not(feature = "hub"))]
+        let count_sql = "SELECT COUNT(*) FROM endpoints";
+        let count: i64 = tx.query_row(count_sql, [], |r| r.get(0))?;
         if count >= 20 {
             return Err(StorageError::Full.into());
         }
-        crate::owner_actions::record(&tx, audit, "create_binding", &binding.endpoint_id, 0)?;
         tx.execute(
             "INSERT INTO endpoints(id,generation,recipient,paused) VALUES(?1,?2,?3,1)",
             params![binding.endpoint_id, binding.generation, binding.recipient],
@@ -245,10 +264,28 @@ impl<M: Mailbox + Directory> Hub<M> {
             "INSERT INTO hub_bindings(endpoint,definition) VALUES(?1,?2)",
             params![binding.endpoint_id, definition],
         )?;
+        #[cfg(feature = "hub")]
+        if let Some((actor, key, fingerprint)) = receipt {
+            tx.execute(
+                "INSERT INTO hub_create_requests VALUES(?1,?2,?3,?4)",
+                params![actor, key, fingerprint, binding.endpoint_id],
+            )?;
+        }
+        #[cfg(not(feature = "hub"))]
+        let _ = receipt;
+        crate::owner_actions::record(&tx, audit, "create_binding", &binding.endpoint_id, 0)?;
         tx.commit()?;
         Ok(())
     }
     pub fn view(&self, id: &str) -> Result<View, Error> {
+        #[cfg(feature = "hub")]
+        if self.store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM hub_retired_bindings WHERE endpoint=?1)",
+            [id],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Err(Error::Binding);
+        }
         let (definition,revision,paused,reason,observed,checked_at,diagnostic):(String,i64,bool,String,Option<String>,Option<i64>,Option<String>)=self.store.db.query_row(
             "SELECT b.definition,b.revision,e.paused,b.reason,b.observed,b.checked_at,b.diagnostic FROM hub_bindings b JOIN endpoints e ON e.id=b.endpoint WHERE e.id=?1",[id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)))?;
         Ok(View {
@@ -271,10 +308,11 @@ impl<M: Mailbox + Directory> Hub<M> {
     }
     /// Bounded internal worker snapshot; not a workspace directory enumeration.
     pub fn binding_ids(&self) -> Result<Vec<String>, Error> {
-        let mut query = self
-            .store
-            .db
-            .prepare("SELECT endpoint FROM hub_bindings ORDER BY endpoint LIMIT 20")?;
+        #[cfg(feature = "hub")]
+        let sql="SELECT endpoint FROM hub_bindings WHERE NOT EXISTS(SELECT 1 FROM hub_retired_bindings r WHERE r.endpoint=hub_bindings.endpoint) ORDER BY endpoint LIMIT 20";
+        #[cfg(not(feature = "hub"))]
+        let sql = "SELECT endpoint FROM hub_bindings ORDER BY endpoint LIMIT 20";
+        let mut query = self.store.db.prepare(sql)?;
         let rows = query.query_map([], |r| r.get(0))?;
         Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }

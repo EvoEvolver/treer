@@ -56,10 +56,48 @@ pub(crate) fn record(
             // emergency quota to exhaust. Keep the latest actor/revision/time
             // and a saturating count in the same pause transaction.
             tx.execute("INSERT INTO hub_emergency_pauses(endpoint,actor,revision,at,count) VALUES(?1,?2,?3,?4,1) ON CONFLICT(endpoint) DO UPDATE SET actor=excluded.actor,revision=excluded.revision,at=excluded.at,count=CASE WHEN count<9223372036854775807 THEN count+1 ELSE count END",params![endpoint,context.actor,revision,context.now])?;
+            #[cfg(feature = "hub")]
+            {
+                let notice_id: i64 = tx.query_row(
+                    "SELECT -rowid FROM endpoints WHERE id=?1",
+                    [endpoint],
+                    |r| r.get(0),
+                )?;
+                crate::management::changed(
+                    tx,
+                    context.actor,
+                    action,
+                    endpoint,
+                    revision,
+                    notice_id,
+                )?;
+            }
             return Ok(());
         }
         return Err(StorageError::Full.into());
     }
-    tx.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES(?1,?2,?3,?4,?5,?6)",params![context.actor,action,endpoint,context.detail.unwrap_or(""),revision,context.now])?;
+    #[cfg(feature = "hub")]
+    let masked = if crate::management::agent(tx, context.actor)? {
+        context
+            .detail
+            .map(|d| crate::management::masked_detail(tx, d))
+            .transpose()?
+    } else {
+        None
+    };
+    #[cfg(feature = "hub")]
+    let detail = masked.as_deref().or(context.detail).unwrap_or("");
+    #[cfg(not(feature = "hub"))]
+    let detail = context.detail.unwrap_or("");
+    tx.execute("INSERT INTO hub_owner_audit(actor,action,endpoint,transfer,revision,at) VALUES(?1,?2,?3,?4,?5,?6)",params![context.actor,action,endpoint,detail,revision,context.now])?;
+    #[cfg(feature = "hub")]
+    crate::management::changed(
+        tx,
+        context.actor,
+        action,
+        endpoint,
+        revision,
+        tx.last_insert_rowid(),
+    )?;
     Ok(())
 }

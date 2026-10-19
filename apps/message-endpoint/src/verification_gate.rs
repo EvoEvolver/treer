@@ -38,6 +38,27 @@ struct State {
 pub(crate) struct Gate {
     state: Mutex<State>,
 }
+/// Cheap rate-only accounting for the memory audit ring. No permit is held
+/// across auth, body reads, message state, or Core work.
+#[derive(Default)]
+pub(crate) struct AuditGate(Mutex<HashMap<IpAddr, (Instant, u32)>>);
+pub(crate) const AUDIT_REQUESTS: u32 = 1000;
+impl AuditGate {
+    pub(crate) fn admit(&self, source: IpAddr) -> Result<(), Error> {
+        let now = Instant::now();
+        let mut sources = self.0.lock().map_err(|_| Error::Proxy)?;
+        sources.retain(|_, (start, _)| now.duration_since(*start) < Duration::from_secs(1));
+        if !sources.contains_key(&source) && sources.len() >= SOURCES {
+            return Err(Error::RateLimited);
+        }
+        let (_, count) = sources.entry(source).or_insert((now, 0));
+        if *count >= AUDIT_REQUESTS {
+            return Err(Error::RateLimited);
+        }
+        *count += 1;
+        Ok(())
+    }
+}
 pub(crate) struct Permit<'a> {
     gate: &'a Gate,
     source: IpAddr,
@@ -47,6 +68,14 @@ impl Gate {
         &self,
         source: IpAddr,
         token: Option<[u8; 32]>,
+    ) -> Result<Permit<'_>, Error> {
+        self.enter_limit(source, token, REQUESTS)
+    }
+    fn enter_limit(
+        &self,
+        source: IpAddr,
+        token: Option<[u8; 32]>,
+        requests: u32,
     ) -> Result<Permit<'_>, Error> {
         let mut state = self.state.lock().map_err(|_| Error::Proxy)?;
         let now = Instant::now();
@@ -73,7 +102,7 @@ impl Gate {
             entry.requests = 0;
         }
         entry.last_seen = now;
-        if entry.inflight >= SOURCE || entry.requests >= REQUESTS {
+        if entry.inflight >= SOURCE || entry.requests >= requests {
             return Err(Error::RateLimited);
         }
         entry.inflight += 1;
@@ -126,6 +155,17 @@ mod tests {
     use super::*;
     fn ip(n: u8) -> IpAddr {
         IpAddr::from([127, 0, 0, n])
+    }
+    #[test]
+    fn audit_admission_is_rate_only_and_does_not_reserve_concurrency() {
+        let gate = AuditGate::default();
+        for _ in 0..AUDIT_REQUESTS {
+            gate.admit(ip(1)).unwrap();
+        }
+        assert!(matches!(gate.admit(ip(1)), Err(Error::RateLimited)));
+        gate.admit(ip(2)).unwrap();
+        gate.0.lock().unwrap().get_mut(&ip(1)).unwrap().0 -= Duration::from_secs(2);
+        gate.admit(ip(1)).unwrap();
     }
     #[test]
     fn global_and_source_concurrency_are_bounded_and_permits_release_on_drop() {

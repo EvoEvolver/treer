@@ -70,3 +70,8 @@ pub mod email_workers;
 // Stage-2 contract; no runtime dispatch or migration activation yet.
 pub mod telegram_receipts;
 pub mod telegram_reply_store;
+#[cfg(all(unix, feature = "hub"))]
+mod management;
+
+#[cfg(all(unix, feature = "hub"))]
+mod request_audit;

@@ -53,6 +53,52 @@ impl Owner {
         self.expires_at
     }
 }
+/// Binding administration capability; never accepted by the token editor or OAuth vault.
+pub enum BindingManager {
+    HumanOwner(Owner),
+    Agent(VerifiedAgent),
+}
+pub struct VerifiedAgent {
+    id: String,
+    expires_at: i64,
+}
+impl BindingManager {
+    pub fn id(&self) -> &str {
+        match self {
+            Self::HumanOwner(v) => v.id(),
+            Self::Agent(v) => &v.id,
+        }
+    }
+    pub(crate) fn expires_at(&self) -> i64 {
+        match self {
+            Self::HumanOwner(v) => v.expires_at(),
+            Self::Agent(v) => v.expires_at,
+        }
+    }
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::HumanOwner(_) => "human",
+            Self::Agent(_) => "agent",
+        }
+    }
+    pub(crate) fn owner(&self) -> Result<&Owner, Error> {
+        match self {
+            Self::HumanOwner(v) => Ok(v),
+            Self::Agent(_) => Err(Error::OwnerRequired),
+        }
+    }
+    #[cfg(test)]
+    pub(crate) fn synthetic_agent(id: &str, exp: i64) -> Self {
+        Self::Agent(VerifiedAgent {
+            id: id.into(),
+            expires_at: exp,
+        })
+    }
+    #[cfg(test)]
+    pub(crate) fn synthetic(id: &str, exp: i64) -> Self {
+        Self::HumanOwner(Owner::synthetic(id, exp))
+    }
+}
 /// Verified current human member, intentionally distinct from management Owner.
 /// Constructed only by per-request verify_app plus current directory checks.
 pub struct Member {
@@ -324,6 +370,138 @@ impl OwnerAuth {
         }
         result
     }
+    /// Explicit service identity or owner OAuth, verified afresh for each request.
+    pub fn authenticate_manager_from(
+        &self,
+        headers: Headers<'_>,
+        session: Option<&str>,
+        now: i64,
+        source: std::net::IpAddr,
+    ) -> Result<BindingManager, Error> {
+        if now < 0 {
+            return Err(Error::InvalidIdentity);
+        }
+        let token = select_token(headers, session)?;
+        let hash = crate::verification_gate::token_hash(token);
+        let _permit = self.gate.enter(source, Some(hash))?;
+        let result = self.verify_manager_token(token, now);
+        if let Err(error) = &result {
+            self.gate.remember_failure(hash, error.clone());
+        }
+        result
+    }
+    fn verify_manager_token(&self, token: &str, now: i64) -> Result<BindingManager, Error> {
+        let verify = self
+            .proxy
+            .join(".treer/apps/identity/verify")
+            .map_err(|_| Error::Configuration)?;
+        let claims = self.read(
+            self.client
+                .post(verify)
+                .json(&json!({"token":token,"audience":self.service}))
+                .send()
+                .map_err(|_| Error::Proxy)?,
+        )?;
+        let c = claims.get("claims").ok_or(Error::InvalidIdentity)?;
+        let id = c
+            .get("sub")
+            .and_then(Value::as_str)
+            .filter(|id| valid_id(id))
+            .ok_or(Error::InvalidIdentity)?;
+        let kind = c
+            .get("principal_kind")
+            .and_then(Value::as_str)
+            .ok_or(Error::InvalidIdentity)?;
+        let exp = c
+            .get("exp")
+            .and_then(Value::as_i64)
+            .ok_or(Error::InvalidIdentity)?;
+        if claims.get("active") != Some(&Value::Bool(true))
+            || c.get("service_id").and_then(Value::as_str) != Some(self.service.as_str())
+            || c.get("workspace_id").and_then(Value::as_str) != Some(self.workspace.as_str())
+            || !matches!(kind, "human" | "agent")
+            || exp <= now
+        {
+            return Err(Error::InvalidIdentity);
+        }
+        let url = self
+            .proxy
+            .join(&format!("api/apps/{}/directory", self.service))
+            .map_err(|_| Error::Configuration)?;
+        let directory = self.read(
+            self.client
+                .get(url)
+                .bearer_auth(token)
+                .send()
+                .map_err(|_| Error::Proxy)?,
+        )?;
+        let principals = directory
+            .get("principals")
+            .and_then(Value::as_array)
+            .ok_or(Error::Proxy)?;
+        let mut matching = principals
+            .iter()
+            .filter(|p| p.get("id").and_then(Value::as_str) == Some(id));
+        let principal = matching.next().ok_or(Error::MemberRequired)?;
+        if matching.next().is_some() || principal.get("kind").and_then(Value::as_str) != Some(kind)
+        {
+            return Err(Error::InvalidIdentity);
+        }
+        if kind == "agent" {
+            if !c
+                .get("machine_id")
+                .and_then(Value::as_str)
+                .is_some_and(valid_id)
+            {
+                return Err(Error::InvalidIdentity);
+            }
+            for key in ["machine_id", "server_id"] {
+                if principal
+                    .get(key)
+                    .and_then(Value::as_str)
+                    .is_some_and(|machine| {
+                        Some(machine) != c.get("machine_id").and_then(Value::as_str)
+                    })
+                {
+                    return Err(Error::InvalidIdentity);
+                }
+            }
+            Ok(BindingManager::Agent(VerifiedAgent {
+                id: id.into(),
+                expires_at: exp,
+            }))
+        } else if principal.get("role").and_then(Value::as_str) == Some("owner") {
+            Ok(BindingManager::HumanOwner(Owner {
+                id: id.into(),
+                expires_at: exp,
+            }))
+        } else {
+            Err(Error::OwnerRequired)
+        }
+    }
+    /// Only authenticated Agent service requests without any browser context
+    /// may omit Origin. Cookies and Fetch metadata always keep the CSRF checks.
+    pub fn check_manager_mutation(
+        &self,
+        manager: &BindingManager,
+        headers: Headers<'_>,
+    ) -> Result<(), Error> {
+        let browser = headers.iter().any(|(k, _)| {
+            k.eq_ignore_ascii_case("cookie")
+                || k.eq_ignore_ascii_case("origin")
+                || k.to_ascii_lowercase().starts_with("sec-fetch-")
+        });
+        let explicit = unique(headers, "x-treer-identity-token")?.is_some()
+            || unique(headers, "authorization")?.is_some();
+        if manager.kind() == "agent" && !browser && explicit {
+            if unique(headers, "x-endpoint-request")? != Some("1") {
+                return Err(Error::Csrf);
+            }
+            Ok(())
+        } else {
+            self.check_mutation(headers)
+        }
+    }
     fn verify_token(&self, token: &str, now: i64) -> Result<Owner, Error> {
         let (human, role) = self.verify_human_token(token, now)?;
         if role != "owner" {
@@ -486,6 +664,127 @@ mod tests {
     }
     fn directory(role: &str) -> Value {
         json!({"principals":[{"kind":"human","id":"human_owner","role":role,"name":"synthetic owner","path":null}]})
+    }
+    fn agent_claims(id: &str) -> Value {
+        json!({"active":true,"claims":{"service_id":"svc_hub","workspace_id":"ws_test","sub":id,"principal_kind":"agent","machine_id":"machine_fixture","exp":NOW+60}})
+    }
+    fn agent_directory(id: &str) -> Value {
+        json!({"principals":[{"kind":"agent","id":id,"path":null}]})
+    }
+    #[test]
+    fn binding_manager_verifies_service_agents_and_app_runtime_as_current_directory_agents() {
+        for id in ["ag_worker", "ag_app_runtime"] {
+            let (auth, server) = fake(
+                vec![
+                    agent_claims(id),
+                    agent_directory(id),
+                    agent_claims(id),
+                    agent_directory(id),
+                ],
+                TOKEN,
+            );
+            for _ in 0..2 {
+                let m = auth
+                    .authenticate_manager_from(
+                        &[("Authorization", &format!("Bearer {TOKEN}"))],
+                        None,
+                        NOW,
+                        "127.0.0.1".parse().unwrap(),
+                    )
+                    .unwrap();
+                assert_eq!(m.id(), id);
+                assert_eq!(m.kind(), "agent");
+                assert!(m.owner().is_err());
+            }
+            server.join().unwrap();
+        }
+    }
+    #[test]
+    fn binding_manager_rejects_active_but_absent_duplicate_wrong_kind_and_invalid_claims() {
+        for directory in [
+            json!({"principals":[]}),
+            json!({"principals":[{"kind":"human","id":"ag_worker","role":"owner"}]}),
+            json!({"principals":[{"kind":"agent","id":"ag_worker"},{"kind":"agent","id":"ag_worker"}]}),
+            json!({"principals":[{"kind":"agent","id":"ag_worker"},{"kind":"human","id":"ag_worker","role":"owner"}]}),
+            json!({"principals":[{"kind":"agent","id":"ag_worker","server_id":"machine_other"}]}),
+        ] {
+            let (auth, server) = fake(vec![agent_claims("ag_worker"), directory], TOKEN);
+            assert!(auth
+                .authenticate_manager_from(
+                    &[("X-Treer-Identity-Token", TOKEN)],
+                    None,
+                    NOW,
+                    "127.0.0.1".parse().unwrap()
+                )
+                .is_err());
+            server.join().unwrap();
+        }
+        for (key, value) in [
+            ("exp", json!(NOW)),
+            ("workspace_id", json!("ws_other")),
+            ("service_id", json!("svc_other")),
+            ("principal_kind", json!("app")),
+        ] {
+            let mut c = agent_claims("ag_worker");
+            c["claims"][key] = value;
+            let (auth, server) = fake(vec![c], TOKEN);
+            assert!(auth
+                .authenticate_manager_from(
+                    &[("X-Treer-Identity-Token", TOKEN)],
+                    Some(TOKEN),
+                    NOW,
+                    "127.0.0.1".parse().unwrap()
+                )
+                .is_err());
+            server.join().unwrap();
+        }
+        let mut c = agent_claims("ag_worker");
+        c["active"] = json!(false);
+        let (auth, server) = fake(vec![c], TOKEN);
+        assert!(auth
+            .authenticate_manager_from(
+                &[("X-Treer-Identity-Token", TOKEN)],
+                Some(TOKEN),
+                NOW,
+                "127.0.0.1".parse().unwrap()
+            )
+            .is_err());
+        server.join().unwrap();
+    }
+    #[test]
+    fn agent_mutations_without_browser_context_do_not_weaken_owner_or_browser_csrf() {
+        let auth = OwnerAuth::new(
+            "https://proxy.example/",
+            "svc_hub",
+            "ws_test",
+            "https://hub.example/",
+        )
+        .unwrap();
+        let agent = BindingManager::Agent(VerifiedAgent {
+            id: "ag_worker".into(),
+            expires_at: NOW + 60,
+        });
+        let base = [
+            ("X-Treer-Identity-Token", TOKEN),
+            ("X-Endpoint-Request", "1"),
+        ];
+        assert!(auth.check_manager_mutation(&agent, &base).is_ok());
+        assert!(auth
+            .check_manager_mutation(&BindingManager::synthetic("user_owner", NOW + 60), &base)
+            .is_err());
+        for extra in [
+            ("Origin", "https://evil.example"),
+            ("Sec-Fetch-Site", "cross-site"),
+            ("Cookie", "anything=1"),
+            ("Sec-Fetch-Mode", "cors"),
+        ] {
+            let mut h = base.to_vec();
+            h.push(extra);
+            assert!(auth.check_manager_mutation(&agent, &h).is_err());
+        }
+        assert!(auth
+            .check_manager_mutation(&agent, &[("X-Treer-Identity-Token", TOKEN)])
+            .is_err());
     }
     fn fake(replies: Vec<Value>, token: &str) -> (OwnerAuth, thread::JoinHandle<()>) {
         fake_status(replies.into_iter().map(|v| (200, v)).collect(), token)

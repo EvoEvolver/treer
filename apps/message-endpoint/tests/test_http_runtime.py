@@ -46,8 +46,9 @@ class Runtime(unittest.TestCase):
             slot=json.loads(result[2])['settings']['telegram_tokens'][0]
             self.assertFalse(slot['configured']);self.assertTrue(slot['restart_required'])
             self.assertFalse((f['root']/'bot-token.json').exists())
-            for path in f['state'].iterdir():
-                self.assertNotIn(secret.encode(),path.read_bytes())
+            for path in f['state'].rglob('*'):
+                if path.is_file():
+                    self.assertNotIn(secret.encode(),path.read_bytes())
             captured=f['stderr']
         self.assertNotIn(secret.encode(),b''.join(captured))
 
@@ -75,8 +76,9 @@ class Runtime(unittest.TestCase):
             for path in ['/assets/app.js','/assets/app.css']:
                 self.assertEqual(request(path)[0],200)
             self.assertEqual(request('/api/endpoint/auth/logout',{'X-Treer-Identity-Token':TOKEN,'Origin':'https://evil.example','X-Endpoint-Request':'1'},method='POST')[0],403)
-            for p in f['state'].iterdir():
-                self.assertEqual(p.stat().st_mode&0o777,0o600)
+            for p in f['state'].rglob('*'):
+                self.assertFalse(p.is_symlink())
+                self.assertEqual(p.stat().st_mode&0o777,0o700 if p.is_dir() else 0o600)
             self.assertEqual(f['state'].stat().st_mode&0o777,0o700)
     def test_owner_configuration_csrf_strict_json_core_readback_and_atomic_audit(self):
         with fixture(BINARY) as f:
