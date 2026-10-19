@@ -275,6 +275,11 @@ after any inconclusive decision.
    `Queue::dispatchable` deliberately rejects every journal row and must not be
    reused for this purpose. Bind the fence to the correct Store/Hub and all the
    current checks above; the opaque attempt alone is not runtime authorization.
+   Keep durable lease/contact/generation/pause/revocation checks inside the
+   IMMEDIATE `begin_proxy_delivery` transaction, and repeat the journal-specific
+   durable fence after token mint immediately before POST. An earlier positive
+   check cannot replace either step. Fresh Core/member checks stay outside the
+   hub mutex and SQL transaction; no cross-system atomicity is claimed.
 3. Finish recovery/retention requirements before sustained use: bounded uncertain
    queue, explicit operator reconciliation, byte/count limits and private outbox
    reconciliation; specify purge/TTL semantics without deleting pending work.
