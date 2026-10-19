@@ -207,7 +207,7 @@ result. This verifies only the disposable rename/reverse fixture, not an
 installed update or crash recovery. Receipt states and recovery classification
 remain the next W1b slice; no real `win_native` machine was used.
 
-### W1b running-image fixture (hosted execution pending)
+### W1b running-image fixture (hosted verified, still inert)
 
 The ignored `windows_update_bootstrap::running_image::native_running_image_rename`
 test adds a separate disposable live-image probe. It refuses an ambient Job and
@@ -220,10 +220,11 @@ owned process handle and creation time bind all subsequent liveness checks.
 The initial hosted run 39213059404 on `723f772d` failed on both Windows versions
 at `create_process`, Win32 32 (sharing violation); the running-image rename was
 never reached. The old rename tests, full platform library (41 passed, four
-ignored) and separate owner round trip passed on that SHA. Lowering the granted
+ignored) and separate owner round trip passed on that SHA. The cap-only
+`5fd9f0a6` rerun 39213575115 reproduced that failure. Lowering the granted
 access through DuplicateHandle may leave the original write-open file object's
-sharing record alive (security5251); that is the correction's hypothesis, not
-proof of a successful execution pin.
+sharing record alive (security5251); that is the correction's mechanism
+hypothesis, not an isolated measurement of Windows internals.
 
 The successor fixture tightens only its freshly created private active image's
 DACL to protected owner/SYSTEM read/execute/delete before dropping the last
@@ -261,9 +262,21 @@ reply until bounded cleanup of its actual process handle; its own ten-second
 deadline also bounds a lost parent. The parent confirms process termination
 before deleting only its exact test files. Failure leaves attempt evidence;
 there is no installed image, Controller/Host lifecycle operation or production
-entry. The child creates no descendants. This is a revised test, not evidence
-that a running-image rename has passed Windows execution. Hosted Server
-2022/2025 must invoke the ignored parent separately outside the runner Job.
+entry. The child creates no descendants.
+
+Hosted run 39214676528 on exact `07c3d30cd010e5f48f0596b01f68ded065abd2db`
+passed on Server 2022 and 2025: rename tests two passed, full platform library
+41 passed/zero failed/four ignored (including the 256 MiB+1 refusal), and both
+separately invoked outside-Job tests `native_owner_round_trip` and
+`native_running_image_rename` each one passed. All four step exit codes were
+zero, with actual test `ok` lines in
+`.treer/releases/boot-111-07c3d30c/run.log`. The latter test's assertions cover
+child execution, live forward/reverse renames, write denial and confirmed
+owned-child termination before exact cleanup. This verifies the corrected
+fixture sequence, not the inferred internal reason for the earlier conflict.
+It does not verify a running service, Host Job integration, production directory
+ACLs, antivirus interactions, receipts or interrupted recovery. No installed
+machine or `win_native` run occurred; W4 still needs explicit leader approval.
 
 Before W2 chooses the production parent directory, specify its required ACL and
 installer creation policy. The current verifier refuses Administrators mutation

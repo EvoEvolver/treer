@@ -35,9 +35,14 @@ at CreateProcess, Win32 32 (sharing violation). The correction uses a narrowed,
 verified owner/SYSTEM RX/DELETE DACL on the newly created fixture image across
 the transition from the old write-open object to a separately reopened read-only
 execution pin, then derives checked read/DELETE handles only for each rename.
-It specifically tests that writing is refused during the transition. The new
-sharing/ACL boundary needs review and hosted execution; compilation does not
-establish running-image rename support. Durable receipt/recovery states
+It specifically tests that writing is refused during the transition. The
+sharing/ACL boundary received static content review; hosted run 39214676528 on
+exact `07c3d30c` then passed both Server versions: rename tests two passed, full
+lib 41 passed/zero failed/four ignored, separate outside-Job owner round trip
+and running-image rename each one passed, all four step exit codes zero. This
+establishes only the disposable running-image sequence, including liveness and
+owned-child cleanup, without a service, production directory ACL, Host Job
+integration or real `win_native` update. Durable receipt/recovery states
 and production installation remain subsequent work.
 
 ### Windows self-update registration model
