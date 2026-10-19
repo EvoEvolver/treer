@@ -16,8 +16,10 @@ wired by this fixture. A subsequent native rename fixture uses the same verified
 object with read/DELETE access to move between three fixed attempt-local slots,
 never replacing an occupied destination. Two new Windows tests cover identity
 across activation/reverse rollback and second-rename failure with preserved
-candidate/backup and collision refusal. These new tests await hosted execution;
-the earlier W1a hosted run does not cover them. Durable receipt/recovery states
+candidate/backup and collision refusal. Both new tests failed at the first rename
+on hosted Server 2022/2025 at `ba665a24`; fixed-stage diagnostics are awaiting a
+rerun and this slice is not passing. The earlier W1a hosted run does not cover
+rename behavior. Durable receipt/recovery states
 and production installation remain subsequent work.
 
 ### Windows self-update registration model

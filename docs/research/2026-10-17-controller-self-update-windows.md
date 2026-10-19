@@ -173,8 +173,16 @@ both images rather than deleting evidence. The fixture explicitly retains the
 failure until that test injection is removed; this is not automatic recovery.
 These calls do not yet persist a receipt, make the multi-rename sequence atomic,
 establish power-loss durability, or update a running installed executable. Hosted
-Windows execution of this new slice is pending; W1a's hosted result above does
-not cover it. Receipt states and recovery classification remain the next slice.
+Windows execution initially failed: hosted run 39210214944 on `ba665a24` reported
+39 passed, two failed, two ignored on both Server 2022 and 2025. Both new tests
+refused their first candidate-to-active rename; the fixed generic error does not
+identify which check or native call failed. W1a's tests still passed; its hosted
+result does not establish rename support. The follow-up adds fixed check-stage
+codes and, only for a failed native call, numeric Win32 status; no paths, file
+content or OS error strings are printed. No validation is relaxed and no fallback
+is attempted. This slice remains non-passing until an exact-SHA hosted rerun
+establishes the cause and verifies a correction. Receipt states and recovery
+classification follow resolution of this failure.
 
 Before W2 chooses the production parent directory, specify its required ACL and
 installer creation policy. The current verifier refuses Administrators mutation

@@ -233,23 +233,32 @@ impl Attempt {
         to: Slot,
         expected: [u8; 32],
     ) -> io::Result<()> {
+        // Native fixture diagnostics are fixed stage codes, never paths, bytes
+        // or OS error strings. This remains test-only, not a public status API.
+        let refused = |stage: &'static str| io::Error::new(io::ErrorKind::PermissionDenied, stage);
         let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
-        private_owner_dacl(&self.directory, &owner)?;
-        private_owner_dacl(file, &owner)?;
-        let directory = final_path(&self.directory)?;
-        let before = identity(file)?;
-        if final_path(file)? != directory.join(from.name())
+        private_owner_dacl(&self.directory, &owner).map_err(|_| refused("rename_directory_acl"))?;
+        private_owner_dacl(file, &owner).map_err(|_| refused("rename_file_acl"))?;
+        let directory =
+            final_path(&self.directory).map_err(|_| refused("rename_directory_path"))?;
+        let before = identity(file).map_err(|_| refused("rename_source_identity"))?;
+        if final_path(file).map_err(|_| refused("rename_source_path"))?
+            != directory.join(from.name())
             || before.2 != 1
             || before.3 & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
         {
-            return Err(denied());
+            return Err(refused("rename_source_slot_or_attributes"));
         }
         let mut reader = file;
-        reader.seek(SeekFrom::Start(0)).map_err(|_| denied())?;
-        let actual = digest(file)?;
-        reader.seek(SeekFrom::Start(0)).map_err(|_| denied())?;
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| refused("rename_seek_before_hash"))?;
+        let actual = digest(file).map_err(|_| refused("rename_source_digest"))?;
+        reader
+            .seek(SeekFrom::Start(0))
+            .map_err(|_| refused("rename_seek_after_hash"))?;
         if actual != expected {
-            return Err(denied());
+            return Err(refused("rename_digest_mismatch"));
         }
         // Relative fixed name resolves against the retained directory handle,
         // not cwd or caller text. usize storage supplies struct alignment.
@@ -267,16 +276,26 @@ impl Attempt {
                 name.len(),
             );
         }
-        check(unsafe {
+        let renamed = unsafe {
             SetFileInformationByHandle(
                 file.as_raw_handle(),
                 FileRenameInfo,
                 info.cast(),
                 bytes as u32,
             )
-        })?;
-        if identity(file)? != before || final_path(file)? != directory.join(to.name()) {
-            return Err(denied());
+        };
+        if renamed == 0 {
+            // Numeric Win32 status cannot contain private data. Capture it
+            // immediately, before any other API call overwrites last-error.
+            let code = unsafe { GetLastError() };
+            eprintln!("rename_fixture stage=set_file_information win32={code}");
+            return Err(refused("rename_native_call"));
+        }
+        if identity(file).map_err(|_| refused("rename_target_identity"))? != before
+            || final_path(file).map_err(|_| refused("rename_target_path"))?
+                != directory.join(to.name())
+        {
+            return Err(refused("rename_postcheck"));
         }
         Ok(())
     }
