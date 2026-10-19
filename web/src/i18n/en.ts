@@ -2,6 +2,13 @@
 // Keys are namespaced by screen. Values may contain {name} placeholders filled by t(key, { name }).
 export const en = {
   "as.buckets": "Combined time buckets",
+  "as.chart_summary": "{category}: {count} events, peak bucket {peak}. Exact values are in the activity table.",
+  "as.zero_categories": "No events in: {categories}.",
+  "as.signal_explanation": "How these signals are calculated",
+  "as.utc_days": "UTC bucket start (day)",
+  "as.utc_hours": "UTC bucket start (hour)",
+  "as.table_region": "{caption} data table",
+  "as.version_update": "Update the Console to read this audit category table version.",
   "as.retention": "Retention: {days} days. Recorded activity is not a complete or tamper-proof history.",
   "as.deleted": "Retention has removed records through {date} UTC.",
   "as.title": "Activity at a glance",
@@ -23,7 +30,7 @@ export const en = {
   "as.partial": "Incomplete coverage. Backfill is complete only since {since}; bars show counted events, and zero does not prove no activity. Totals are withheld.",
   "as.unknown": "an unknown time",
   "as.activity": "Activity by category",
-  "as.chart_hint": "Select a category or a combined-chart time bucket to view its exact events below. Scroll or use arrow keys/Home/End for more buckets; the chart starts at the newest. ◆ marks a notable event or an unusual bucket. Zero is a baseline mark; tiny segments can be thinner than a pixel.",
+  "as.chart_hint": "Select a category or a combined-chart time bucket to view its exact events below. Scroll or use arrow keys/Home/End for more buckets; the chart starts at the newest. ◆ marks notable events; ▲ marks unusual buckets. Zero is a baseline mark; tiny segments can be thinner than a pixel.",
   "as.scale": "0–{count}",
   "as.skew": "One category exceeds 70% of events. Separate charts use their own scales: compare values, not heights between categories.",
   "as.combined": "Combined · shared count scale",

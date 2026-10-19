@@ -19,6 +19,7 @@ export interface AuditSummary {
   maintenance: { retention_days: number; deleted_through?: string }
   coverage: { backfill_complete: boolean; complete_since?: string; oldest_in_range?: string }
 }
+export class AuditSummaryVersionError extends Error {}
 const fail = (): never => { throw new Error('invalid audit summary') }
 const obj = (v: unknown): Record<string, unknown> => v !== null && typeof v === 'object' && !Array.isArray(v) ? v as Record<string, unknown> : fail()
 const str = (v: unknown, max = 16384): string => typeof v === 'string' && v.length <= max ? v : fail()
@@ -40,7 +41,9 @@ const rank = <T extends AuditCount>(value: unknown, read: (v: unknown) => T): Au
 
 export function readAuditSummary(value: unknown, workspaceId: string, query: URLSearchParams): AuditSummary {
   const v = obj(value), r = obj(v.range)
-  if (v.workspace_id !== workspaceId || v.category_table_version !== 1) fail()
+  if (v.workspace_id !== workspaceId) fail()
+  if (Number.isSafeInteger(v.category_table_version) && (v.category_table_version as number) > 1) throw new AuditSummaryVersionError()
+  if (v.category_table_version !== 1) fail()
   const range = { since: instant(r.since), until: instant(r.until), bucket: str(r.bucket) as AuditSummary['range']['bucket'], tz: str(r.tz, 128) }
   const since = Date.parse(range.since), until = Date.parse(range.until)
   const duration = query.get('range') === '24h' ? 1 : query.get('range') === '7d' ? 7 : query.get('range') === '30d' ? 30 : undefined

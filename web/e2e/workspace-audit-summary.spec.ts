@@ -70,9 +70,9 @@ for (const theme of ['light', 'dark']) for (const width of [1360, 390]) for (con
   await expect(view.getByText(lang === 'zh' ? /某一类别占比超过/ : /One category exceeds/)).toBeVisible()
   await expect(view.getByText(lang === 'zh' ? /受限选集/ : /Capped selection/)).toBeVisible()
   // Patterned bars are supplemented by counts, exact tables and keyboard controls.
-  const graph = view.getByRole('img', { name: lang === 'zh' ? '消息与提示词' : 'Messages and prompts', exact: true })
+  const graph = view.getByRole('img', { name: lang === 'zh' ? /^消息与提示词：/ : /^Messages and prompts:/ })
   await expect(graph.locator('rect')).toHaveCount(7)
-  const table = view.locator('details').first()
+  const table = view.locator('details').filter({ has: page.locator('table') }).first()
   await table.locator('summary').click()
   await expect(table.getByRole('table')).toBeVisible()
   await expect(table.getByRole('columnheader', { name: lang === 'zh' ? '其他' : 'Other', exact: true })).toBeVisible()
@@ -160,7 +160,7 @@ for (const mutation of ['workspace', 'version', 'totals', 'range', 'filters']) t
     return route.fulfill({ json: data })
   })
   const view = await open(page)
-  await expect(view.getByRole('alert')).toContainText('Unable to load activity charts')
+  await expect(view.getByRole('alert')).toContainText(mutation === 'version' ? 'Update the Console' : 'Unable to load activity charts')
   await expect(view.getByRole('region', { name: 'Top actors', exact: true })).toHaveCount(0)
 })
 

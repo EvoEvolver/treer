@@ -863,9 +863,12 @@ capability leaves the existing event list available; malformed or failed summary
 responses show an explicit error without partial aggregates or server error text.
 Incomplete coverage withholds KPI totals and warns that zeros do not prove no
 activity. Fixed category totals include Other; if one category exceeds 70%,
-eight compact previews show the full interval before the combined chart, with
+compact previews of non-zero categories show the full interval before the combined
+chart (zero categories remain listed with totals), with
 a warning against comparing heights across independent scales. The combined
-chart starts at the newest buckets and supports scrolling and Home/End navigation. Patterns, text counts, exact data
+chart starts at the newest buckets and supports scrolling and Home/End navigation. Eight categorical chart tokens (not status colors) pass 3:1 against the card in
+both themes; the contrast script checks them. Patterned legend swatches, distinct
+notable/anomaly markers, visible bucket totals, text counts, exact data
 tables, UTC labels and keyboard-operable bucket buttons supplement color.
 
 Selecting a category, bucket, actor, resource or notable event resets list paging

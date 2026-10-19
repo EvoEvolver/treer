@@ -3,6 +3,13 @@ import type { Messages } from "./en"
 // 简体中文。键必须与 en.ts 完全一致(缺键会导致类型检查失败)。术语沿用 launcher 的中英对照。
 export const zh: Messages = {
   "as.buckets": "合并时间桶",
+  "as.chart_summary": "{category}：共 {count} 条事件，最高时间桶为 {peak} 条。精确数值见活动表格。",
+  "as.zero_categories": "以下类别无事件：{categories}。",
+  "as.signal_explanation": "这些信号如何计算",
+  "as.utc_days": "UTC 时间桶起点（日）",
+  "as.utc_hours": "UTC 时间桶起点（时）",
+  "as.table_region": "{caption}数据表格",
+  "as.version_update": "请更新 Console 以读取此版本的审计分类表。",
   "as.retention": "保留 {days} 天。已记录活动并非完整或防篡改的历史。",
   "as.deleted": "保留策略已删除截至 {date} UTC 的部分记录。",
   "as.title": "活动概览",
@@ -24,7 +31,7 @@ export const zh: Messages = {
   "as.partial": "覆盖不完整。仅自 {since} 起回填完整；柱形表示已统计事件，零不代表没有活动。暂不显示总数。",
   "as.unknown": "未知时间",
   "as.activity": "按类别查看活动",
-  "as.chart_hint": "选择类别或合并图的时间桶可在下方查看精确匹配的事件。可滚动或使用方向键、Home、End 查看更多时间桶，默认显示最新时间。◆ 表示值得关注的事件或异常时间桶。零显示为基线标记；很小的色块可能不足一个像素。",
+  "as.chart_hint": "选择类别或合并图的时间桶可在下方查看精确匹配的事件。可滚动或使用方向键、Home、End 查看更多时间桶，默认显示最新时间。◆ 表示值得关注的事件；▲ 表示异常时间桶。零显示为基线标记；很小的色块可能不足一个像素。",
   "as.scale": "0–{count}",
   "as.skew": "某一类别占比超过 70%。分图使用各自刻度，请比较数值，勿跨图比较柱高。",
   "as.combined": "合并视图 · 统一计数刻度",
