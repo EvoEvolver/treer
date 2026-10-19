@@ -479,10 +479,10 @@ at completion. It is terminal for that job ID. A later attempt requires a new
 job; the rolled-back job must never automatically retry the same candidate.
 The reason reference and health verifier remain unimplemented format/API gates.
 
-#### Proposed rollback-reason record contract (not implemented)
+#### Proposed rollback-reason lifecycle (partial inert schema only)
 
-Before adding a field to `DraftFields`, use the following draft lifecycle and
-immutability contract. The required `rollback_reason` key is explicitly null
+The following is the target draft lifecycle and immutability contract. The
+required `rollback_reason` key is explicitly null
 in Prepared, Activating, CoreHealthy and Complete; omission is not equivalent
 to null. RollbackCli, RollbackController and RolledBack require a strict object
 with exactly these fields; duplicate, missing and unknown fields are refused:
@@ -493,6 +493,16 @@ with exactly these fields; duplicate, missing and unknown fields are refused:
 | `entry_revision` | Integer greater than one and no greater than the enclosing revision |
 | `predecessor_receipt_sha256` | Lowercase 64-hex digest of the exact receipt envelope preceding entry |
 | `evidence_sha256` | Lowercase 64-hex reference to independently verified reason evidence |
+
+The private `cfg(test)` schema now requires the key, parses null or the strict
+six-kind object, and bounds its revision/digests. The partial successor guard
+currently requires exact preservation, including refusing null-to-object
+creation. Phase-dependent presence, entry creation and kind/phase binding are
+not wired yet: the parser accepts a well-shaped reference even in a forward
+claim and the existing rollback fixtures still carry explicit null. Tests
+demonstrate these limits, required-key/strict-field refusal, and rejection of
+clearing/replacing each reference field. This slice is neither the lifecycle
+implementation nor reason authorization; it adds no verifier capability.
 
 On entry only, null may become an object, with `entry_revision` equal to the
 candidate revision and `predecessor_receipt_sha256` equal to the trusted prior
@@ -542,9 +552,10 @@ mutation independently, and reason preservation across every rollback branch
 through RolledBack. For every kind, exercise a matching entry and mismatched
 phase/step cases, including Prepared/Original, pre-final CLI steps, Complete
 and existing rollback phases. It must also demonstrate that valid JSON/digest references
-alone cannot construct a verified reason. Existing draft fixtures lack the
-field; the inert format change must update them explicitly rather than add a
-permissive default or claim backward compatibility with an installed format.
+alone cannot construct a verified reason. The current fixtures explicitly use
+null; a lifecycle slice must update rollback fixtures to reason references
+rather than add a permissive default or claim backward compatibility with an
+installed format.
 
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a

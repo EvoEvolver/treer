@@ -193,6 +193,50 @@ struct DraftFields {
     provenance: Provenance,
     images: Images,
     state: ClaimedState,
+    rollback_reason: ReasonClaim,
+}
+
+// Required key: unlike Option, absence is not accepted as null by serde.
+// Both variants are untrusted serialized claims, never verified capabilities.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ReasonClaim {
+    None(()),
+    Reference(ReasonReference),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ReasonKind {
+    ControllerActivationFailed,
+    NewControllerUnhealthy,
+    CliActivationFailed,
+    FinalHealthFailed,
+    DeadlineExceeded,
+    HumanAbort,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReasonReference {
+    kind: ReasonKind,
+    entry_revision: u64,
+    predecessor_receipt_sha256: String,
+    evidence_sha256: String,
+}
+
+impl ReasonClaim {
+    fn valid(&self, revision: u64) -> bool {
+        match self {
+            Self::None(()) => true,
+            Self::Reference(reason) => {
+                reason.entry_revision > 1
+                    && reason.entry_revision <= revision
+                    && hex(&reason.predecessor_receipt_sha256, 64)
+                    && hex(&reason.evidence_sha256, 64)
+            }
+        }
+    }
 }
 
 impl DraftFields {
@@ -205,6 +249,7 @@ impl DraftFields {
             &self.images.cli.new,
         ];
         self.binding.valid()
+            && self.rollback_reason.valid(self.binding.revision)
             && hex(&p.release_sha, 40)
             && hex(&p.artifact_source_sha, 40)
             && hex(&p.sums_sha256, 64)
@@ -287,15 +332,21 @@ fn check_successor_fields(
         provenance: old_provenance,
         images: old_images,
         state: _,
+        rollback_reason: old_reason,
     } = &old;
     let DraftFields {
         binding: _,
         provenance: next_provenance,
         images: next_images,
         state: _,
+        rollback_reason: next_reason,
     } = &next;
     if next_provenance != old_provenance || next_images != old_images {
         return Err("transaction_fields_changed");
+    }
+    // Conservative schema slice: creation at entry is deliberately not wired.
+    if next_reason != old_reason {
+        return Err("rollback_reason_changed");
     }
     Ok(next)
 }
@@ -496,6 +547,7 @@ fn fixture() -> DraftFields {
             final_health_recorded: false,
             old_health_recorded: false,
         },
+        rollback_reason: ReasonClaim::None(()),
     }
 }
 
@@ -1681,6 +1733,135 @@ fn rollback_chains_advance_exact_heads_and_refuse_replay_or_rewriting() {
                 ),
                 Err("invalid_rollback_transition")
             );
+        }
+    }
+}
+
+#[test]
+fn reason_schema_requires_explicit_key_and_strict_bounded_reference() {
+    let mut fields = fixture();
+    fields.binding.revision = 2;
+    let value = serde_json::to_value(&fields).unwrap();
+    assert!(value["rollback_reason"].is_null());
+    let accepts = |value: &serde_json::Value| {
+        let (r, m) = envelopes(&serde_json::to_vec(value).unwrap(), &fields.binding);
+        parse_pair(&r, &m, &fields.binding).is_ok()
+    };
+    let mut missing = value.clone();
+    missing.as_object_mut().unwrap().remove("rollback_reason");
+    assert!(!accepts(&missing));
+    for kind in [
+        "controller_activation_failed",
+        "new_controller_unhealthy",
+        "cli_activation_failed",
+        "final_health_failed",
+        "deadline_exceeded",
+        "human_abort",
+    ] {
+        let mut valid = value.clone();
+        valid["rollback_reason"] = serde_json::json!({
+            "kind":kind, "entry_revision":2,
+            "predecessor_receipt_sha256":"a".repeat(64), "evidence_sha256":"b".repeat(64)
+        });
+        assert!(accepts(&valid)); // Shape only, even in a forward claim.
+        for key in [
+            "kind",
+            "entry_revision",
+            "predecessor_receipt_sha256",
+            "evidence_sha256",
+        ] {
+            let mut bad = valid.clone();
+            bad["rollback_reason"].as_object_mut().unwrap().remove(key);
+            assert!(!accepts(&bad));
+        }
+        for (key, replacement) in [
+            ("kind", serde_json::json!("unknown")),
+            ("entry_revision", serde_json::json!(0)),
+            ("entry_revision", serde_json::json!(1)),
+            ("entry_revision", serde_json::json!(3)),
+            ("entry_revision", serde_json::json!("2")),
+            ("entry_revision", serde_json::json!(-1)),
+            ("evidence_sha256", serde_json::json!("B".repeat(64))),
+            (
+                "predecessor_receipt_sha256",
+                serde_json::json!("a".repeat(63)),
+            ),
+            ("extra", serde_json::json!(true)),
+        ] {
+            let mut bad = valid.clone();
+            bad["rollback_reason"][key] = replacement;
+            assert!(!accepts(&bad), "{key}");
+        }
+        let encoded = serde_json::to_string(&valid).unwrap();
+        let duplicate = encoded.replace(
+            "\"entry_revision\":2",
+            "\"entry_revision\":2,\"entry_revision\":2",
+        );
+        assert!(serde_json::from_str::<serde_json::Value>(&duplicate).is_ok());
+        let (r, m) = envelopes(duplicate.as_bytes(), &fields.binding);
+        assert!(parse_pair(&r, &m, &fields.binding).is_err());
+    }
+    for bad in [
+        serde_json::json!([]),
+        serde_json::json!(false),
+        serde_json::json!("null"),
+    ] {
+        let mut malformed = value.clone();
+        malformed["rollback_reason"] = bad;
+        assert!(!accepts(&malformed));
+    }
+}
+
+#[test]
+fn reason_schema_slice_preserves_reference_but_refuses_creation_or_replacement() {
+    for has_reason in [false, true] {
+        let mut old = fixture();
+        old.binding.revision = 2;
+        let reference = ReasonClaim::Reference(ReasonReference {
+            kind: ReasonKind::DeadlineExceeded,
+            entry_revision: 2,
+            predecessor_receipt_sha256: "a".repeat(64),
+            evidence_sha256: "b".repeat(64),
+        });
+        if has_reason {
+            old.rollback_reason = reference.clone();
+        }
+        let (r, m) = envelopes(&serde_json::to_vec(&old).unwrap(), &old.binding);
+        let head = ExpectedHead {
+            binding: old.binding.clone(),
+            receipt_sha256: digest(&r),
+        };
+        let mut next = old.clone();
+        next.binding.revision += 1;
+        let check = |fields: &DraftFields| {
+            let (nr, nm) = envelopes(&serde_json::to_vec(fields).unwrap(), &fields.binding);
+            assert!(parse_pair(&nr, &nm, &fields.binding).is_ok());
+            check_successor_fields((&r, &m), (&nr, &nm), &head).map(|_| ())
+        };
+        assert_eq!(check(&next), Ok(()));
+        let mut changed = next.clone();
+        changed.rollback_reason = if has_reason {
+            ReasonClaim::None(())
+        } else {
+            reference
+        };
+        assert_eq!(check(&changed), Err("rollback_reason_changed"));
+        if has_reason {
+            for field in [
+                "kind",
+                "entry_revision",
+                "predecessor_receipt_sha256",
+                "evidence_sha256",
+            ] {
+                let mut changed = serde_json::to_value(&next).unwrap();
+                changed["rollback_reason"][field] = match field {
+                    "kind" => serde_json::json!("human_abort"),
+                    "entry_revision" => serde_json::json!(3),
+                    _ => serde_json::json!("c".repeat(64)),
+                };
+                let changed = serde_json::from_value(changed).unwrap();
+                assert_eq!(check(&changed), Err("rollback_reason_changed"));
+            }
         }
     }
 }
