@@ -260,15 +260,20 @@ impl Attempt {
         if actual != expected {
             return Err(refused("rename_digest_mismatch"));
         }
-        // Relative fixed name resolves against the retained directory handle,
-        // not cwd or caller text. usize storage supplies struct alignment.
-        let name = wide(OsStr::new(to.name()));
+        // Use the Win32 full-path form with a NULL RootDirectory. The relative
+        // form was rejected with ERROR_INVALID_PARAMETER on hosted 2022/2025.
+        // This path comes only from the retained directory's final path plus a
+        // fixed slot. The directory and all ancestors remain pinned without
+        // delete sharing, so their names cannot be redirected during this call.
+        // No cwd/caller path or native-API fallback is involved. usize storage
+        // supplies struct alignment.
+        let name = wide(directory.join(to.name()).as_os_str());
         let bytes = mem::offset_of!(FILE_RENAME_INFO, FileName) + name.len() * 2;
         let mut storage = vec![0usize; bytes.div_ceil(mem::size_of::<usize>())];
         let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         unsafe {
             (*info).Anonymous.ReplaceIfExists = false;
-            (*info).RootDirectory = self.directory.as_raw_handle();
+            (*info).RootDirectory = ptr::null_mut();
             (*info).FileNameLength = ((name.len() - 1) * 2) as u32;
             ptr::copy_nonoverlapping(
                 name.as_ptr(),

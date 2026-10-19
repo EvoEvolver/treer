@@ -160,8 +160,11 @@ sharing. The original W1a read-only copy API is unchanged. Rename accepts only
 three fixed slots inside the retained attempt directory: `candidate.exe`,
 `controller.exe`, and `controller.prev.exe`. It rechecks owner/DACL, file identity,
 single-link/non-reparse status, current slot and SHA-256 before calling
-`SetFileInformationByHandle(FileRenameInfo)` against the same file handle and the
-retained destination-directory handle. ReplaceIfExists is false. It verifies
+`SetFileInformationByHandle(FileRenameInfo)` against the same file handle, using
+a NULL RootDirectory and the retained directory handle's final full path joined
+with the fixed destination slot. The directory and all ancestors remain pinned
+without delete sharing, preventing path redirection; no caller path or cwd is
+used. ReplaceIfExists is false. It verifies
 identity and final slot afterwards. Caller paths, external install destinations,
 and replacement of occupied destinations are unsupported.
 
@@ -177,11 +180,17 @@ Windows execution initially failed: hosted run 39210214944 on `ba665a24` reporte
 39 passed, two failed, two ignored on both Server 2022 and 2025. Both new tests
 refused their first candidate-to-active rename; the fixed generic error does not
 identify which check or native call failed. W1a's tests still passed; its hosted
-result does not establish rename support. The follow-up adds fixed check-stage
+result does not establish rename support. The follow-up added fixed check-stage
 codes and, only for a failed native call, numeric Win32 status; no paths, file
 content or OS error strings are printed. No validation is relaxed and no fallback
-is attempted. This slice remains non-passing until an exact-SHA hosted rerun
-establishes the cause and verifies a correction. Receipt states and recovery
+is attempted. Hosted run 39210740394 on `aa50cd59` narrowed both failures to
+`set_file_information`, Win32 87 (ERROR_INVALID_PARAMETER), after the ACL,
+identity, link-count and hash checks passed. The next correction changes only the
+destination addressing from a directory handle plus relative name to the full
+path form described above, retaining all checks and permissions. This is a
+compatibility hypothesis pending hosted execution, not a passing rename result.
+This slice remains non-passing until an exact-SHA hosted rerun verifies the
+correction on both Windows versions. Receipt states and recovery
 classification follow resolution of this failure.
 
 Before W2 chooses the production parent directory, specify its required ACL and

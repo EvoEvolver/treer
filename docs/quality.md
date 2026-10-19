@@ -17,8 +17,11 @@ object with read/DELETE access to move between three fixed attempt-local slots,
 never replacing an occupied destination. Two new Windows tests cover identity
 across activation/reverse rollback and second-rename failure with preserved
 candidate/backup and collision refusal. Both new tests failed at the first rename
-on hosted Server 2022/2025 at `ba665a24`; fixed-stage diagnostics are awaiting a
-rerun and this slice is not passing. The earlier W1a hosted run does not cover
+on hosted Server 2022/2025 at `ba665a24`; diagnostics at `aa50cd59` identified
+Win32 87 at SetFileInformationByHandle after all verification checks passed.
+The correction uses the pinned directory's final full destination path with a
+NULL RootDirectory; its hosted rerun is pending and this slice is not passing.
+The earlier W1a hosted run does not cover
 rename behavior. Durable receipt/recovery states
 and production installation remain subsequent work.
 
