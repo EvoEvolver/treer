@@ -610,18 +610,15 @@ async fn proxy_agent_interface_origin(
         .map_err(|error| ApiFailure::bad_gateway("invalid_tunnel_uri", &error.to_string()))?;
     *request.version_mut() = Version::HTTP_11;
     let upgraded = request.headers().contains_key(header::UPGRADE);
-    // Prewarm rotation (#198, security 5580 refinement 1): the first authorized
-    // document navigation of a prewarm session gets a normal 12-hour session;
-    // only navigations rotate, never subresources, fetches or upgrades.
-    let rotated_cookie = match (
-        &session_token,
-        embedded && !upgraded && is_document_navigation(request.headers()),
-    ) {
-        (Some(token), true) => auth
-            .rotate_prewarm_embed_session(&hostname, token)
-            .await?
-            .map(|new_token| embed_cookie_header(&config, &new_token, 12 * 60 * 60))
-            .transpose()?,
+    // Prewarm rotation candidate (#198, security 5580 refinement 1 / 5618
+    // item 3): the first authorized document navigation of a prewarm session
+    // gets a normal 12-hour session, but only once the upstream response that
+    // can carry the new cookie exists; only navigations rotate, never
+    // subresources, fetches or upgrades.
+    let rotation_candidate = match &session_token {
+        Some(token) if embedded && !upgraded && is_document_navigation(request.headers()) => {
+            Some(token.clone())
+        }
         _ => None,
     };
     sanitize_agent_interface_headers(request.headers_mut(), upgraded, &agent.agent_id, interface)?;
@@ -664,8 +661,18 @@ async fn proxy_agent_interface_origin(
             .or_insert(HeaderValue::from_static("no-referrer"));
         if embedded {
             allow_console_frame_only(headers, &config.console_origin())?;
-            if let Some(cookie) = rotated_cookie {
-                headers.insert(header::SET_COOKIE, cookie);
+            if let Some(token) = rotation_candidate {
+                // The Agent's own Set-Cookie headers were already removed by
+                // sanitize_tunnel_response_headers (embedded responses strip
+                // cookies), so the rotated cookie is the only one here.
+                if let Some(new_token) =
+                    auth.rotate_prewarm_embed_session(&hostname, &token).await?
+                {
+                    headers.insert(
+                        header::SET_COOKIE,
+                        embed_cookie_header(&config, &new_token, 12 * 60 * 60)?,
+                    );
+                }
             }
         }
     }

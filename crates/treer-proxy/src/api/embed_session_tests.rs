@@ -1677,3 +1677,124 @@ async fn prewarm_bootstrap_is_rendered_only_with_both_flags_and_never_navigates(
         assert!(!body.contains(AGENT_ID));
     }
 }
+
+/// #198 (security 5618 item 3): rotation happens only once the upstream
+/// response exists and the request passed the gate; a tunnel failure or a
+/// Policy denial leaves the prewarm row unrotated so the next navigation can
+/// still rotate it.
+#[tokio::test]
+async fn prewarm_rotation_waits_for_the_upstream_response_and_the_gate() {
+    let mut fixture = agent_fixture().await;
+    let config = config(None);
+    let (warm_pair, _) =
+        establish_embed_session_with_purpose(&fixture, &config, "member", Some("prewarm")).await;
+    let warm_token = warm_pair.split_once('=').unwrap().1.to_string();
+    let rotated = |pool: sqlx::PgPool, token: String| async move {
+        sqlx::query_as::<_, (bool, i64)>(
+            "SELECT (SELECT rotated FROM ingress_sessions WHERE token = $1), \
+             (SELECT count(*) FROM ingress_sessions WHERE user_id = 'member' AND embed = TRUE)",
+        )
+        .bind(token)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    let navigation = |cookie: String| {
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, cookie)
+            .header("sec-fetch-site", "same-origin")
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "iframe")
+            .body(Body::empty())
+            .unwrap()
+    };
+    // Policy denies: 403 before any tunnel, nothing rotated.
+    let (status, _) =
+        error_of(send(&fixture, deny(), &config, navigation(warm_pair.clone())).await).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(
+        rotated(fixture.auth.pool(), warm_token.clone()).await,
+        (false, 1)
+    );
+    // No machine side at all: the tunnel fails, nothing rotated, no orphan row.
+    drop(fixture.rx.take());
+    let result = send(&fixture, allow(), &config, navigation(warm_pair.clone())).await;
+    assert!(
+        result
+            .as_ref()
+            .map(|r| !r.status().is_success())
+            .unwrap_or(true),
+        "tunnel failure expected: {:?}",
+        result.as_ref().map(|r| r.status())
+    );
+    assert_eq!(
+        rotated(fixture.auth.pool(), warm_token.clone()).await,
+        (false, 1)
+    );
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&warm_pair)).await,
+        StatusCode::NO_CONTENT
+    );
+}
+
+/// With a healthy upstream the same prewarm row rotates on its next navigation
+/// and the rotated cookie is the only Set-Cookie on the response.
+#[tokio::test]
+async fn prewarm_rotation_succeeds_on_the_next_navigation_with_an_upstream() {
+    let mut fixture = agent_fixture().await;
+    let config = config(None);
+    let (warm_pair, _) =
+        establish_embed_session_with_purpose(&fixture, &config, "member", Some("prewarm")).await;
+    let (_, _) = upstream(
+        fixture.state.clone(),
+        fixture.connection,
+        fixture.rx.take().unwrap(),
+        Upstream::Head(
+            "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\nSet-Cookie: agent=own\r\n",
+        ),
+    );
+    let response = send(
+        &fixture,
+        allow(),
+        &config,
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, warm_pair.clone())
+            .header("sec-fetch-site", "same-origin")
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "document")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let cookies: Vec<String> = response
+        .headers()
+        .get_all(header::SET_COOKIE)
+        .iter()
+        .map(|v| v.to_str().unwrap().to_string())
+        .collect();
+    assert_eq!(cookies.len(), 1, "{cookies:?}");
+    assert!(
+        cookies[0].starts_with("__Host-treer_ingress_embed=ies_")
+            && cookies[0].ends_with("Max-Age=43200"),
+        "{cookies:?}"
+    );
+    axum::body::to_bytes(response.into_body(), 64)
+        .await
+        .unwrap();
+    let (old_rotated, count): (bool, i64) = sqlx::query_as(
+        "SELECT (SELECT rotated FROM ingress_sessions WHERE token = $1), \
+         (SELECT count(*) FROM ingress_sessions WHERE user_id = 'member' AND embed = TRUE)",
+    )
+    .bind(warm_pair.split_once('=').unwrap().1)
+    .fetch_one(&fixture.auth.pool())
+    .await
+    .unwrap();
+    assert!(old_rotated);
+    assert_eq!(count, 2);
+}

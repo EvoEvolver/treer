@@ -88,15 +88,6 @@ pub const AUDIT_CATEGORY_EXACT: &[(&str, AuditCategory)] = &[
     ),
     ("server.updated", AuditCategory::AgentLifecycle),
     ("session.finished", AuditCategory::AgentLifecycle),
-    // Embed handshake mints (#198): a prewarm is a hover, never an access.
-    (
-        "agent.interface.embed.minted",
-        AuditCategory::AgentLifecycle,
-    ),
-    (
-        "agent.interface.embed.prewarmed",
-        AuditCategory::AgentLifecycle,
-    ),
     // Messages and prompts.
     ("message.created", AuditCategory::Messages),
     ("message.imported", AuditCategory::Messages),
@@ -114,6 +105,13 @@ pub const AUDIT_CATEGORY_EXACT: &[(&str, AuditCategory)] = &[
     ("app.restarted", AuditCategory::AppsIngress),
     ("app.startup.updated", AuditCategory::AppsIngress),
     ("app.access.updated", AuditCategory::AppsIngress),
+    // Embed handshake mints (#198) are ingress events, kept out of the
+    // lifecycle counts; a prewarm is a hover, never an access.
+    ("agent.interface.embed.minted", AuditCategory::AppsIngress),
+    (
+        "agent.interface.embed.prewarmed",
+        AuditCategory::AppsIngress,
+    ),
     // Machines and files.
     ("machine.enroll", AuditCategory::MachinesFiles),
     ("machine.reenroll", AuditCategory::MachinesFiles),

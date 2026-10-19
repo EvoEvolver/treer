@@ -1339,22 +1339,27 @@ that advertises intent (pointer dwell on a Tree row) may mint with
 client that lies about the purpose can only shorten its own session), prewarm
 mints have their own authoritative budget of 6 per user per minute across all
 tabs and devices on top of the 30 per minute and 8 outstanding codes, and every
-mint is audited as `agent.interface.embed.minted` or
-`agent.interface.embed.prewarmed` so a hover is never read as an access. The
+mint is audited (best effort, after the mint) as `agent.interface.embed.minted`
+or `agent.interface.embed.prewarmed`, both in the `apps_ingress` category so
+they never inflate lifecycle counts and a hover is never read as an access. The
 hidden prewarm frame loads the bootstrap with `reuse=1&prewarm=1`, rendered
 server side only for that exact pair; its only difference is that it never
 navigates to Agent HTML: a verified session ends in the terminal
 `{treer_embed: "warmed", version: 2, nonce_hash}` and any failure in the quiet
 `{treer_embed: "warm_failed", version: 2, nonce_hash}`. The click then runs the
 normal reuse handshake; the first authorized document navigation of a prewarm
-session rotates it into a normal 12-hour session (new row and cookie, the old
-row kept until its own 10-minute expiry and never extended; subresources,
-fetches and WebSocket upgrades never rotate). Live embed sessions are capped at
-8 per user and Agent origin, evicting unrotated prewarm rows first, then the
-oldest, never the row just issued; a prewarm itself may only evict other
-unrotated prewarm rows and is refused when the cap is full of normal or rotated
-sessions, and a rotation never evicts the predecessor it just replaced. Logout,
-membership removal and Policy deny end prewarm sessions exactly like any other.
+session rotates it into a normal 12-hour session: the mark and the new row are
+written in one transaction, only after the upstream response that carries the
+new cookie exists (a tunnel failure or a refused request leaves the prewarm
+row unrotated, so the next navigation can still rotate), the old row is kept
+until its own 10-minute expiry and never extended, and subresources, fetches
+and WebSocket upgrades never rotate. Live embed sessions are capped at 8 per
+user and Agent origin under a per-pair lock: rotated rows are outside the cap
+(they die by their own expiry, bounded by the prewarm budget), eviction takes
+unrotated prewarm rows first and then, for a normal insert only, the oldest
+normal row; a prewarm never evicts a normal session and is refused instead,
+and the row just issued is never evicted. Logout, membership removal and
+Policy deny end prewarm sessions exactly like any other.
 Agent UI. Embed
 sessions are separate rows from standalone sessions: the token of one never
 authenticates through the other cookie. The request context is decided before

@@ -1070,10 +1070,11 @@ Agent UI is loaded. Handshake responses carry no timing headers.
 Prewarm (`agent.interface-embed-prewarm.v1`): a Console may start the handoff
 in a hidden frame when the user dwells on a Tree row, minting with
 `purpose: "prewarm"`. Those codes redeem into 10-minute sessions, are limited
-to 6 per user per minute (429 `embed_rate_limited`) and are audited as
+to 6 per user per minute (429 `embed_rate_limited`; the budget is kept in the
+Proxy process, so it is per replica) and are audited as
 `agent.interface.embed.prewarmed` (ordinary opens as
-`agent.interface.embed.minted`), so the audit feed and summary tell hovers from
-opens. The hidden frame uses the bootstrap with `?reuse=1&prewarm=1`, which
+`agent.interface.embed.minted`, both `apps_ingress`), so the audit feed and
+summary tell hovers from opens. The hidden frame uses the bootstrap with `?reuse=1&prewarm=1`, which
 never loads Agent HTML and reports `warmed` or `warm_failed`; the real click
 reuses the short session and the Proxy rotates it into a normal 12-hour
 session on that first document load (the old cookie stays valid until its own

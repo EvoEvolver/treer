@@ -1516,16 +1516,16 @@ impl AuthStore {
         let user_id: String = row.get("user_id");
         self.require_workspace_member(&workspace_id, &user_id)
             .await?;
-        sqlx::query("DELETE FROM ingress_sessions WHERE expires_at <= $1")
-            .bind(now.to_rfc3339())
-            .execute(&self.pool)
-            .await
-            .map_err(AuthFailure::database)?;
         let prewarm: bool = row.get("prewarm");
         let ingress_id: String = row.get("ingress_id");
-        let token = self
-            .insert_embed_session(&ingress_id, &user_id, prewarm, None)
-            .await?;
+        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
+        sqlx::query("DELETE FROM ingress_sessions WHERE expires_at <= $1")
+            .bind(now.to_rfc3339())
+            .execute(&mut *tx)
+            .await
+            .map_err(AuthFailure::database)?;
+        let token = Self::insert_embed_session(&mut tx, &ingress_id, &user_id, prewarm).await?;
+        tx.commit().await.map_err(AuthFailure::database)?;
         Ok(IssuedEmbedSession {
             token,
             max_age_seconds: if prewarm {
@@ -1537,21 +1537,27 @@ impl AuthStore {
     }
 
     /// One embed session row (12 h, or 10 minutes for a prewarm), then the
-    /// per-(user, Agent) cap (#198, security 5580 B): at most
-    /// [`EMBED_SESSIONS_PER_USER_AGENT`] live embed sessions besides a
-    /// `protect`ed predecessor (the prewarm row a rotation just replaced,
-    /// which keeps its own expiry). Eviction takes unrotated prewarm rows
-    /// first (oldest first), then the oldest overall; the row just created is
-    /// never the one evicted. A speculative prewarm may only evict other
-    /// unrotated prewarm rows: when the cap is full of normal or rotated
-    /// sessions the prewarm is refused instead (web-dev 5615).
+    /// per-(user, Agent) cap (#198, security 5580 B / 5618): at most
+    /// [`EMBED_SESSIONS_PER_USER_AGENT`] live embed sessions, counted and
+    /// evicted without rotated rows, which die by their own expiry and are
+    /// bounded by the prewarm mint budget. Eviction takes unrotated prewarm
+    /// rows first (oldest first), then, only for a normal insert, the oldest
+    /// normal row; the row just created is never evicted. A prewarm insert
+    /// never evicts a normal session: when only normal rows remain over the
+    /// cap, the speculative row is taken back and the exchange fails quietly.
+    /// Runs inside the caller's transaction under an advisory lock on the
+    /// (user, ingress) pair, so concurrent inserts see one bound.
     async fn insert_embed_session(
-        &self,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         ingress_id: &str,
         user_id: &str,
         prewarm: bool,
-        protect: Option<&str>,
     ) -> Result<String, AuthFailure> {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("embed-sessions:{user_id}:{ingress_id}"))
+            .execute(&mut **tx)
+            .await
+            .map_err(AuthFailure::database)?;
         let now = Utc::now();
         let token = format!("ies_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let expires_at = if prewarm {
@@ -1569,47 +1575,46 @@ impl AuthStore {
         .bind(now.to_rfc3339())
         .bind(expires_at.to_rfc3339())
         .bind(prewarm)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(AuthFailure::database)?;
         sqlx::query(
             "DELETE FROM ingress_sessions WHERE token IN ( \
                 SELECT token FROM ingress_sessions \
                 WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 \
-                AND token <> $4 AND ($6::TEXT IS NULL OR token <> $6) \
-                AND (NOT $7::BOOLEAN OR (prewarm AND NOT rotated)) \
-                ORDER BY (prewarm AND NOT rotated) DESC, created_at ASC \
+                AND NOT rotated AND token <> $4 \
+                AND (NOT $6::BOOLEAN OR prewarm) \
+                ORDER BY prewarm DESC, created_at ASC \
                 LIMIT GREATEST((SELECT count(*) FROM ingress_sessions \
                     WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 \
-                    AND ($6::TEXT IS NULL OR token <> $6)) - $5, 0))",
+                    AND NOT rotated) - $5, 0))",
         )
         .bind(user_id)
         .bind(ingress_id)
         .bind(now.to_rfc3339())
         .bind(&token)
         .bind(EMBED_SESSIONS_PER_USER_AGENT)
-        .bind(protect)
         .bind(prewarm)
-        .execute(&self.pool)
+        .execute(&mut **tx)
         .await
         .map_err(AuthFailure::database)?;
         if prewarm {
-            // Still over the cap: only normal or rotated sessions remain, and
-            // a hover never evicts one of those. Take the speculative row back.
+            // Still over the cap: only normal sessions remain, and a hover
+            // never evicts one of those. Take the speculative row back.
             let live: i64 = sqlx::query_scalar(
                 "SELECT count(*) FROM ingress_sessions \
-                 WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3",
+                 WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 AND NOT rotated",
             )
             .bind(user_id)
             .bind(ingress_id)
             .bind(now.to_rfc3339())
-            .fetch_one(&self.pool)
+            .fetch_one(&mut **tx)
             .await
             .map_err(AuthFailure::database)?;
             if live > EMBED_SESSIONS_PER_USER_AGENT {
                 sqlx::query("DELETE FROM ingress_sessions WHERE token = $1")
                     .bind(&token)
-                    .execute(&self.pool)
+                    .execute(&mut **tx)
                     .await
                     .map_err(AuthFailure::database)?;
                 return Err(invalid_ingress_authorization());
@@ -1630,6 +1635,9 @@ impl AuthStore {
         token: &str,
     ) -> Result<Option<String>, AuthFailure> {
         let now = Utc::now();
+        // Mark and insert in one transaction (security 5618 item 3): a failed
+        // insert never leaves a rotated predecessor behind.
+        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
         let row = sqlx::query(
             "UPDATE ingress_sessions s SET rotated = TRUE \
              FROM service_ingresses i \
@@ -1640,7 +1648,7 @@ impl AuthStore {
         .bind(token)
         .bind(hostname)
         .bind(now.to_rfc3339())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .map_err(AuthFailure::database)?;
         let Some(row) = row else {
@@ -1648,11 +1656,9 @@ impl AuthStore {
         };
         let ingress_id: String = row.get("ingress_id");
         let user_id: String = row.get("user_id");
-        // The predecessor keeps its own expiry (refinement 1): it is never the
-        // row the cap evicts to make room for its successor.
-        self.insert_embed_session(&ingress_id, &user_id, false, Some(token))
-            .await
-            .map(Some)
+        let successor = Self::insert_embed_session(&mut tx, &ingress_id, &user_id, false).await?;
+        tx.commit().await.map_err(AuthFailure::database)?;
+        Ok(Some(successor))
     }
 
     pub async fn authenticate_ingress_session(
