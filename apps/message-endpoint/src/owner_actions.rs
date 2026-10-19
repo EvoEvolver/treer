@@ -78,7 +78,10 @@ pub(crate) fn record(
     }
     #[cfg(feature = "hub")]
     let masked = if crate::management::agent(tx, context.actor)? {
-        context.detail.map(crate::management::masked_detail)
+        context
+            .detail
+            .map(|d| crate::management::masked_detail(tx, d))
+            .transpose()?
     } else {
         None
     };

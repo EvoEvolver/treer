@@ -40,7 +40,9 @@ class AgentBindings(unittest.TestCase):
             notices=db.execute('SELECT recipient,body FROM hub_management_notices').fetchall()
             self.assertTrue(all(to=='ag_recipient' for to,_ in notices))
             self.assertTrue(all('577127289' not in text and 'ag_manager' in text for _,text in notices))
-            self.assertTrue(db.execute("SELECT count(*) FROM hub_management_requests WHERE actor='ag_manager' AND status=400").fetchone()[0])
+            time.sleep(.2)
+            with sqlite3.connect(f['auditdb']) as audit:
+                self.assertTrue(audit.execute("SELECT count(*) FROM hub_management_requests WHERE actor='ag_manager' AND status=400").fetchone()[0])
             db.close()
     def test_agent_authentication_csrf_denials_and_owner_token_boundary(self):
         with fixture(BINARY,tokens=True) as f:
@@ -55,7 +57,9 @@ class AgentBindings(unittest.TestCase):
             trusted={**base,'Origin':'https://hub.example','X-Treer-Identity-Token':AGENT}
             self.assertNotEqual(r('/api/telegram/token',trusted,'POST',json.dumps({'action':'remove','account_id':'bot_fixture','confirm':True}))[0],200)
             db=sqlite3.connect(f['state']/'hub.sqlite3')
-            self.assertGreaterEqual(db.execute('SELECT count(*) FROM hub_management_requests WHERE status>=400').fetchone()[0],6)
+            time.sleep(.2)
+            with sqlite3.connect(f['auditdb']) as audit:
+                self.assertGreaterEqual(audit.execute('SELECT count(*) FROM hub_management_requests WHERE status>=400').fetchone()[0],6)
             self.assertFalse(db.execute("SELECT count(*) FROM endpoints WHERE id='ag_new'").fetchone()[0]);db.close()
 
     def test_parallel_creation_has_one_receipt_one_notice_and_identical_results(self):
@@ -79,5 +83,6 @@ class AgentBindings(unittest.TestCase):
             self.assertEqual(statuses[:20],[200]*20)
             self.assertEqual(statuses[20:],[429]*4)
             self.assertEqual(f['proxy'].verify_requests,20)
-            with sqlite3.connect(f['state']/'hub.sqlite3') as db:
+            time.sleep(.2)
+            with sqlite3.connect(f['auditdb']) as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM hub_management_requests WHERE status=429').fetchone()[0],4)

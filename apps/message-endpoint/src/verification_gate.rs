@@ -48,6 +48,19 @@ impl Gate {
         source: IpAddr,
         token: Option<[u8; 32]>,
     ) -> Result<Permit<'_>, Error> {
+        self.enter_limit(source, token, REQUESTS)
+    }
+    /// A distinct cheap HTTP admission bucket; Proxy verification keeps its
+    /// stricter quota. Browser-shape refusals do not exhaust verification.
+    pub(crate) fn enter_audit(&self, source: IpAddr) -> Result<Permit<'_>, Error> {
+        self.enter_limit(source, None, 100)
+    }
+    fn enter_limit(
+        &self,
+        source: IpAddr,
+        token: Option<[u8; 32]>,
+        requests: u32,
+    ) -> Result<Permit<'_>, Error> {
         let mut state = self.state.lock().map_err(|_| Error::Proxy)?;
         let now = Instant::now();
         state.negative.retain(|_, n| n.until > now);
@@ -73,7 +86,7 @@ impl Gate {
             entry.requests = 0;
         }
         entry.last_seen = now;
-        if entry.inflight >= SOURCE || entry.requests >= REQUESTS {
+        if entry.inflight >= SOURCE || entry.requests >= requests {
             return Err(Error::RateLimited);
         }
         entry.inflight += 1;

@@ -271,11 +271,20 @@ fn observe<M: Mailbox + Directory, D: Directory>(
         },
     ))
 }
-fn redacted_preview(preview: &ResumePreview) -> Result<ResumePreview, Failure> {
+fn redacted_preview<M: Mailbox + Directory>(
+    shared: &SharedHub<M>,
+    preview: &ResumePreview,
+) -> Result<ResumePreview, Failure> {
     let bytes = serde_json::to_vec(preview).map_err(|_| Failure::Unavailable)?;
     let mut copy: ResumePreview =
         serde_json::from_slice(&bytes).map_err(|_| Failure::Unavailable)?;
-    copy.confirmation_hash = Some(format!("{:x}", Sha256::digest(&bytes)));
+    let key = crate::management::key(&shared.lock().map_err(|_| Failure::Unavailable)?.store.db)
+        .map_err(|_| Failure::Unavailable)?;
+    copy.confirmation_hash = Some(crate::management::commitment(
+        &key,
+        "resume-preview-v1",
+        &bytes,
+    ));
     match &mut copy.target {
         ResumeTarget::Telegram(t) => {
             t.chat_id = 0;
@@ -284,6 +293,7 @@ fn redacted_preview(preview: &ResumePreview) -> Result<ResumePreview, Failure> {
         }
         ResumeTarget::Email(t) => {
             t.contact.address = "[redacted]".into();
+            t.contact.member_id.clear();
         }
     }
     Ok(copy)
@@ -299,7 +309,7 @@ pub(super) fn preview_resume<M: Mailbox + Directory, D: Directory>(
     let (preview, _) = observe(shared, directory, workspace, owner, id)?;
     let account_ready = activation.ready(&preview.target) && activation.member(&preview.target);
     let preview = if owner.kind() == "agent" {
-        redacted_preview(&preview)?
+        redacted_preview(shared, &preview)?
     } else {
         preview
     };
@@ -331,7 +341,7 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
     }
     let (current, readback) = observe(shared, directory, workspace, owner, &endpoint_id)?;
     let comparison = if owner.kind() == "agent" {
-        redacted_preview(&current)?
+        redacted_preview(shared, &current)?
     } else {
         serde_json::from_slice(&serde_json::to_vec(&current).map_err(|_| Failure::Unavailable)?)
             .map_err(|_| Failure::Unavailable)?

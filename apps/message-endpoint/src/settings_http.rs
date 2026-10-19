@@ -90,6 +90,11 @@ impl From<crate::hub::View> for EndpointSnapshot {
         }
     }
 }
+fn agent_snapshot(id: &str, snapshot: &SettingsSnapshot) -> Value {
+    let endpoints:Vec<_>=snapshot.endpoints.iter().map(|e|json!({"binding":{"endpoint_id":e.binding.endpoint_id,"generation":e.binding.generation,"recipient":e.binding.recipient,"expected_path":e.binding.expected_path,"expected_server_id":e.binding.expected_server_id},"revision":e.revision,"paused":e.paused,"reason":e.reason,"isolation":e.isolation})).collect();
+    let accounts:Vec<_>=snapshot.telegram_accounts.iter().map(|a|json!({"account_id":a.account_id,"state":a.state,"bot_identity_validated":a.bot_identity_validated})).collect();
+    json!({"actor_id":id,"principal_kind":"agent","owner_id":null,"settings":{"endpoints":endpoints,"telegram_accounts":accounts,"activation_enabled":snapshot.activation_enabled,"management_notices":snapshot.management_notices,"audit_full":snapshot.audit_full}})
+}
 fn snapshot_value(owner: &str, snapshot: SettingsSnapshot) -> Result<Value, ()> {
     if snapshot.endpoints.len() > 20
         || snapshot.telegram_accounts.len() > 20
@@ -147,6 +152,7 @@ pub struct Settings {
     email: Option<Arc<crate::email_threads::Service>>,
     slots: Arc<Semaphore>,
     writes: WriteGate,
+    request_admission: crate::verification_gate::Gate,
     exports: WriteGate,
     token_attempts: WriteGate,
     html: &'static str,
@@ -188,6 +194,7 @@ impl Settings {
             email: None,
             slots: Arc::new(Semaphore::new(16)),
             writes: WriteGate::default(),
+            request_admission: Default::default(),
             exports: WriteGate::default(),
             token_attempts: WriteGate::default(),
             html,
@@ -384,13 +391,24 @@ async fn handle(
     request: axum::extract::Request,
 ) -> Response {
     if request.method() != Method::GET || request.uri().path() != "/api/settings" {
-        return handle_inner(State(app), ConnectInfo(peer), request).await;
+        return handle_inner(State(app.clone()), ConnectInfo(peer), request).await;
     }
     let mut nonce = [0u8; 16];
     if getrandom::fill(&mut nonce).is_err() {
         return secure(error(Error::Proxy));
     }
     let id: String = nonce.iter().map(|v| format!("{v:02x}")).collect();
+    // Cheap in-memory admission precedes the bounded nonblocking audit queue.
+    let _admission = match app.request_admission.enter_audit(peer.ip()) {
+        Ok(permit) => permit,
+        Err(e) => {
+            if let Some(audit) = &app.management_audit {
+                let _ = audit(&id, None, 429);
+            }
+            return secure(error(e));
+        }
+    };
+
     if let Some(audit) = &app.management_audit {
         if audit(&id, None, 102).is_err() {
             return secure(error(Error::Proxy));
@@ -580,6 +598,17 @@ async fn configuration_request(
         return secure(error(Error::Proxy));
     }
     let request_id: String = nonce.iter().map(|v| format!("{v:02x}")).collect();
+    // Cheap in-memory admission precedes the bounded nonblocking audit queue.
+    let _admission = match app.request_admission.enter_audit(peer.ip()) {
+        Ok(permit) => permit,
+        Err(e) => {
+            if let Some(audit) = &app.management_audit {
+                let _ = audit(&request_id, None, 429);
+            }
+            return secure(error(e));
+        }
+    };
+
     // Record admission before Proxy work; cancelled/unfinished calls stay 102.
     if let Some(audit) = &app.management_audit {
         if audit(&request_id, None, 102).is_err() {
@@ -922,11 +951,18 @@ fn dispatch(
         Err(e) => return error(e),
     };
     match (app.snapshot)() {
+        Ok(snapshot) if owner.kind() == "agent" => {
+            if snapshot.endpoints.len() > 20 || snapshot.telegram_accounts.len() > 20 {
+                return fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable");
+            }
+            let value = agent_snapshot(owner.id(), &snapshot);
+            if value.to_string().len() > 512 * 1024 {
+                return fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable");
+            }
+            response(StatusCode::OK, value)
+        }
         Ok(snapshot) => match snapshot_value(owner.id(), snapshot) {
             Ok(mut value) => {
-                if owner.kind() == "agent" {
-                    crate::management::mask(&mut value);
-                }
                 value["principal_kind"] = json!(owner.kind());
                 value["actor_id"] = json!(owner.id());
                 if owner.kind() == "agent" {
@@ -1039,6 +1075,74 @@ mod tests {
             json!({"active":true,"claims":{"sub":"user_owner","principal_kind":"human","workspace_id":"ws_test","service_id":"svc_hub","exp":2000}}),
             json!({"principals":[{"id":"user_owner","kind":"human","role":"owner"}]}),
         ]
+    }
+    #[test]
+    fn rejected_flood_is_bounded_without_taking_busy_hub_mutex() {
+        let (hub, _) = crate::recovery::tests::fixture(
+            crate::store::Store::memory(Default::default()).unwrap(),
+        );
+        let shared = Arc::new(Mutex::new(hub));
+        let snapshot_hub = shared.clone();
+        let mut settings = app("https://proxy.example/");
+        settings.snapshot = Arc::new(move || {
+            let _guard = snapshot_hub.try_lock().expect("rejected flood reached hub");
+            Ok(SettingsSnapshot::default())
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let audit = Arc::new(
+            crate::request_audit::RequestAudit::start(
+                &temp.path().canonicalize().unwrap().join("audit"),
+            )
+            .unwrap(),
+        );
+        let queue = audit.clone();
+        settings = settings.with_management_audit(Arc::new(move |id, actor, status| {
+            queue.record(id, actor, status)
+        }));
+        let peer: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        for _ in 0..100 {
+            drop(settings.request_admission.enter_audit(peer.ip()).unwrap());
+        }
+        let settings = Arc::new(settings);
+        let _busy = shared.lock().unwrap();
+        let started = Instant::now();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for n in 0..100 {
+                    let request = axum::http::Request::builder()
+                        .uri(if n % 2 == 0 {
+                            "/api/settings"
+                        } else {
+                            "/api/configuration"
+                        })
+                        .method(if n % 2 == 0 {
+                            Method::GET
+                        } else {
+                            Method::POST
+                        })
+                        .body(Body::empty())
+                        .unwrap();
+                    assert_eq!(
+                        handle(State(settings.clone()), ConnectInfo(peer), request)
+                            .await
+                            .status(),
+                        StatusCode::TOO_MANY_REQUESTS
+                    );
+                }
+            });
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+    #[test]
+    fn agent_snapshot_allowlist_omits_external_and_future_fields() {
+        let snapshot = SettingsSnapshot::default();
+        let value = agent_snapshot("ag_manager", &snapshot);
+        assert!(value["settings"].get("email").is_none());
+        assert!(value["settings"].get("telegram_tokens").is_none());
+        assert_eq!(value["principal_kind"], "agent");
+        assert!(value["owner_id"].is_null());
     }
     #[test]
     fn export_read_quota_is_independent_per_owner_and_resets_after_one_minute() {

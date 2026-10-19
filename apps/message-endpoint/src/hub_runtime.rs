@@ -297,22 +297,12 @@ fn run_assembled(
     let token_mutation = Arc::new(move |owner: &crate::owner_auth::Owner, command| {
         token_service.execute(&token_hub, &token_workers, owner, command)
     });
-    let audit_hub = hub.clone();
+    let request_audit = Arc::new(
+        crate::request_audit::RequestAudit::start(&config.state_directory.join("management-audit"))
+            .map_err(|_| Error::Storage)?,
+    );
     let management_audit = Arc::new(move |request: &str, actor: Option<&str>, status: u16| {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|_| ())?
-            .as_secs();
-        let mut h = audit_hub.lock().map_err(|_| ())?;
-        h.store.recheck_private_storage().map_err(|_| ())?;
-        crate::management::record_request(
-            &mut h.store.db,
-            request,
-            actor,
-            status,
-            i64::try_from(now).map_err(|_| ())?,
-        )
-        .map_err(|_| ())
+        request_audit.record(request, actor, status)
     });
     let serve = || -> Result<(), Error> {
         let settings = Settings::new(auth, snapshot, include_str!("../dist/index.html"))

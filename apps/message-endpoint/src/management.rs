@@ -7,12 +7,22 @@ use crate::{
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use sha2::{Digest, Sha256};
 pub(crate) fn schema(db: &Connection) -> rusqlite::Result<()> {
-    db.execute_batch("CREATE TABLE IF NOT EXISTS hub_create_requests(actor TEXT NOT NULL,key TEXT NOT NULL,fingerprint TEXT NOT NULL,endpoint TEXT NOT NULL,PRIMARY KEY(actor,key));
+    db.execute_batch("CREATE TABLE IF NOT EXISTS hub_mask_key(singleton INTEGER PRIMARY KEY CHECK(singleton=1),key BLOB NOT NULL CHECK(length(key)=32));
+    CREATE TABLE IF NOT EXISTS hub_create_requests(actor TEXT NOT NULL,key TEXT NOT NULL,fingerprint TEXT NOT NULL,endpoint TEXT NOT NULL,PRIMARY KEY(actor,key));
     CREATE TABLE IF NOT EXISTS hub_agent_managers(actor TEXT PRIMARY KEY);
     CREATE TABLE IF NOT EXISTS hub_binding_creators(endpoint TEXT PRIMARY KEY,actor TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS hub_retired_bindings(endpoint TEXT PRIMARY KEY,generation INTEGER NOT NULL,at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS hub_management_notices(id INTEGER PRIMARY KEY,recipient TEXT NOT NULL,body TEXT NOT NULL,state INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_at INTEGER NOT NULL DEFAULT 0,lease_until INTEGER NOT NULL DEFAULT 0);
-    CREATE TABLE IF NOT EXISTS hub_management_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,request_id TEXT NOT NULL UNIQUE,actor TEXT NOT NULL,status INTEGER NOT NULL,at INTEGER NOT NULL);")
+    CREATE TABLE IF NOT EXISTS hub_management_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,request_id TEXT NOT NULL UNIQUE,actor TEXT NOT NULL,status INTEGER NOT NULL,at INTEGER NOT NULL);")?;
+    if db.query_row("SELECT COUNT(*) FROM hub_mask_key", [], |r| {
+        r.get::<_, i64>(0)
+    })? == 0
+    {
+        let mut key = [0u8; 32];
+        getrandom::fill(&mut key).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        db.execute("INSERT INTO hub_mask_key VALUES(1,?1)", [key.as_slice()])?;
+    }
+    Ok(())
 }
 #[derive(Default, serde::Serialize)]
 pub struct NoticeStatus {
@@ -41,14 +51,28 @@ pub(crate) fn register(db: &Connection, id: &str) -> rusqlite::Result<()> {
     db.execute("INSERT OR IGNORE INTO hub_agent_managers VALUES(?1)", [id])?;
     Ok(())
 }
-/// External target identifiers become irreversible short fingerprints. Core IDs
-/// are retained because the recipient needs to identify and pause the binding.
-pub(crate) fn mask(value: &mut serde_json::Value) {
+/// Private per-hub keyed commitments prevent enumerating low-entropy targets.
+pub(crate) fn key(db: &Connection) -> rusqlite::Result<[u8; 32]> {
+    let bytes: Vec<u8> =
+        db.query_row("SELECT key FROM hub_mask_key WHERE singleton=1", [], |r| {
+            r.get(0)
+        })?;
+    bytes.try_into().map_err(|_| rusqlite::Error::InvalidQuery)
+}
+pub(crate) fn commitment(key: &[u8; 32], domain: &str, bytes: &[u8]) -> String {
+    use hmac::{Hmac, Mac};
+    let mut hmac = Hmac::<Sha256>::new_from_slice(key).expect("fixed 32-byte HMAC key");
+    hmac.update(domain.as_bytes());
+    hmac.update(&[0]);
+    hmac.update(bytes);
+    format!("{:x}", hmac.finalize().into_bytes())
+}
+pub(crate) fn mask(value: &mut serde_json::Value, key: &[u8; 32]) {
     match value {
         serde_json::Value::Object(o) => {
-            for (key, v) in o.iter_mut() {
+            for (name, v) in o.iter_mut() {
                 if matches!(
-                    key.as_str(),
+                    name.as_str(),
                     "chat_id"
                         | "topic_id"
                         | "allowed_senders"
@@ -58,29 +82,29 @@ pub(crate) fn mask(value: &mut serde_json::Value) {
                         | "bot_id"
                         | "expected_bot_id"
                         | "verified_bot_id"
+                        | "member_id"
                 ) {
                     *v = serde_json::json!(format!(
-                        "masked:{:x}",
-                        Sha256::digest(v.to_string().as_bytes())
-                    )[..19]
-                        .to_owned());
+                        "masked:{}",
+                        &commitment(key, name, v.to_string().as_bytes())[..24]
+                    ));
                 } else {
-                    mask(v);
+                    mask(v, key);
                 }
             }
         }
         serde_json::Value::Array(a) => {
             for v in a {
-                mask(v);
+                mask(v, key);
             }
         }
         _ => {}
     }
 }
-pub(crate) fn masked_detail(detail: &str) -> String {
+pub(crate) fn masked_detail(db: &Connection, detail: &str) -> rusqlite::Result<String> {
     let mut v = serde_json::from_str(detail).unwrap_or(serde_json::Value::Null);
-    mask(&mut v);
-    v.to_string()
+    mask(&mut v, &key(db)?);
+    Ok(v.to_string())
 }
 /// Enqueued in the SAME transaction as the mutation and its authoritative audit.
 pub(crate) fn changed(
@@ -130,6 +154,7 @@ pub(crate) fn changed(
     )?;
     Ok(())
 }
+#[cfg(test)]
 pub(crate) fn record_request(
     db: &mut Connection,
     request: &str,
@@ -246,6 +271,24 @@ impl<M: Mailbox + Directory> Hub<M> {
 mod tests {
     use super::*;
     #[test]
+    fn per_hub_keys_persist_and_commitments_match_hmac_sha256() {
+        assert_eq!(
+            commitment(&[1; 32], "fixture", b"message"),
+            "cd2994cd6e765138f9de385b312a610358542d2ebe2a1c22f94dcf7935fadda6"
+        );
+        let a = Connection::open_in_memory().unwrap();
+        let b = Connection::open_in_memory().unwrap();
+        schema(&a).unwrap();
+        schema(&b).unwrap();
+        let ka = key(&a).unwrap();
+        schema(&a).unwrap();
+        assert_eq!(ka, key(&a).unwrap());
+        assert_ne!(
+            commitment(&ka, "resume-preview-v1", b"same preview"),
+            commitment(&key(&b).unwrap(), "resume-preview-v1", b"same preview")
+        );
+    }
+    #[test]
     fn rejected_request_ring_is_bounded_and_contains_only_server_metadata() {
         let mut db = Connection::open_in_memory().unwrap();
         schema(&db).unwrap();
@@ -271,7 +314,10 @@ mod tests {
     #[test]
     fn identifiers_are_masked_recursively_but_core_ids_remain() {
         let mut v = serde_json::json!({"endpoint":"ag_endpoint","nested":{"chat_id":577127289,"address":"synthetic@example.test","allowed_senders":[577127289]}});
-        mask(&mut v);
+        mask(&mut v, &[1; 32]);
+        let mut other = serde_json::json!({"nested":{"chat_id":577127289}});
+        mask(&mut other, &[2; 32]);
+        assert_ne!(v["nested"]["chat_id"], other["nested"]["chat_id"]);
         assert_eq!(v["endpoint"], "ag_endpoint");
         assert!(!v.to_string().contains("577127289"));
         assert!(!v.to_string().contains("synthetic@example.test"));

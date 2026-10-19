@@ -69,3 +69,6 @@ pub mod email_workers;
 
 #[cfg(all(unix, feature = "hub"))]
 mod management;
+
+#[cfg(all(unix, feature = "hub"))]
+mod request_audit;

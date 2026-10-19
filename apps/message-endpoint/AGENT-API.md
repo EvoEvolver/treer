@@ -98,12 +98,26 @@ create has its receipt key, while other mutations use compare-and-swap revisions
 Agent mutation audit records contain the verified caller Agent ID, action,
 endpoint, prior revision and time. Resume declarations include the explicit
 isolation choice/reference and hashed pins. External identifiers in Agent
-responses and Agent audit detail are masked, including nested targets; no token
+responses and Agent audit detail are masked with domain-separated HMAC-SHA256 commitments under a random per-hub
+private key, including nested targets and resume confirmation. The key persists
+in the private primary SQLite state, is never returned, and must be included in
+private backups. Agent settings use a safe-field allowlist: every endpoint's Core
+ID/path/revision/pause/isolation metadata is visible to every workspace Agent,
+plus account slot names/status and bounded notice counters. Email membership,
+contact mappings, bot IDs and secret-file metadata are omitted. No token
 or message body is copied to audit. Do not put secrets in the free-text reference.
-A bounded1000-row request ring records request ID, verified caller if available
+A separate bounded1000-row request ring records request ID, verified caller if available
 (or `unverified`), HTTP status and time for rejected/denied calls too. Unfinished
 requests retain102. It never trusts a claimed caller ID or records headers/body.
-It is a local operational audit, not tamper-proof or a permanent forensic log.
+Cheap in-memory admission runs before enqueueing. HTTP callbacks never take the
+message hub mutex or perform SQLite writes. A bounded1000-entry memory queue
+is flushed every100ms in one batch to an independently locked private database
+at `management-audit/hub.sqlite3` under the hub state directory (0700/0600).
+Back up the whole private state directory, including that database and its WAL.
+Rejected floods also enqueue only bounded metadata; oldest records roll off.
+Up to one queued batch can be lost on a process crash. A failed storage worker
+makes management admission fail closed until storage recovers. This is a local
+operational audit, not tamper-proof or a permanent forensic log.
 
 Every Agent-made create/target change/resume/pause/delete queues a Core notice to
 the binding's pinned recipient **in the mutation's SQLite transaction**. Audit or
@@ -120,7 +134,9 @@ recipient read the notice; exhausted sends require operator investigation.
 Limits: five non-retired bindings created per caller Agent, twenty active
 bindings total; ten non-pause configuration attempts per caller per60 seconds,
 including failed mutations. Pause is containment and exempt from this write
-quota. Verification admission precedes Proxy calls: at mostfour concurrent
+quota. A separate cheap HTTP-admission bucket allows100 requests/socket source/10
+seconds with bounded concurrency before the in-memory audit queue. Verification
+admission precedes Proxy calls: at mostfour concurrent
 globally, two per socket source, twenty requests/source/10 seconds, bounded512
 source/negative entries. Forwarded clients may share the same source quota.
 There is no positive identity cache. The local manager-ID registry is bounded
@@ -132,3 +148,11 @@ separate rolling ring. Limits fail closed rather than silently dropping audit.
 No deployment, binding activation, real Telegram polling or email delivery is
 authorized by installing this code. Use a disposable bot and separate sandbox;
 never run two pollers for the production bot.
+
+Availability limits: the verification bucket is shared behind the Proxy; there
+is no reserved human-owner slot. Write/admission rate limits are process-local.
+The10000-row authoritative audit has no owner-reserved headroom, so trusted
+Agents can exhaust ordinary editing capacity; containment pause remains available.
+The request ring records fixed HTTP status, not parsed action/reason strings.
+These are known limits of this increment, not denial-of-service or forensic
+completeness guarantees.

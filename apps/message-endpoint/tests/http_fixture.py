@@ -145,7 +145,7 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False)
                         self.end_headers();self.wfile.write(body)
                 return Forward
             with server(forward_handler(False)) as wildcard, server(forward_handler(True)) as embedded:
-                yield {'url':f'http://127.0.0.1:{port}/','wildcard':f'http://127.0.0.1:{wildcard.server_port}/','embedded':f'http://127.0.0.1:{embedded.server_port}/console','prefix':PREFIX,'request':request,'pid':process.pid,'state':root/'state','root':root,'stderr':captured_stderr,'proxy':proxy}
+                yield {'url':f'http://127.0.0.1:{port}/','wildcard':f'http://127.0.0.1:{wildcard.server_port}/','embedded':f'http://127.0.0.1:{embedded.server_port}/console','prefix':PREFIX,'request':request,'pid':process.pid,'state':root/'state','root':root,'stderr':captured_stderr,'proxy':proxy,'auditdb':root/'state/management-audit/hub.sqlite3'}
         finally:
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)
