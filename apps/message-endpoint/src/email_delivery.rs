@@ -295,16 +295,28 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
             thread,
             time::Duration,
         };
-        for reply in [
-            "HTTP/1.1 200 OK\r\nContent-Length: 41\r\nConnection: close\r\n\r\n{\"status\":\"sent\",\"email_id\":\"email_test\"}",
-            "", // Connection lost after the whole payload was consumed.
-            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}",
-            "HTTP/1.1 503 Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        const ACCEPTED: &str = "HTTP/1.1 200 OK\r\nContent-Length: 41\r\nConnection: close\r\n\r\n{\"status\":\"sent\",\"email_id\":\"email_test\"}";
+        for (reply, fail_commit) in [
+            (ACCEPTED, false),
+            (ACCEPTED, true),
+            ("", false), // Connection lost after the whole payload was consumed.
+            (
+                "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}",
+                false,
+            ),
+            (
+                "HTTP/1.1 503 Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+                false,
+            ),
         ] {
             let dir = tempfile::tempdir().unwrap();
             let core = fake_core(dir.path(), true);
             let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-            let sender = Sender::new(&format!("http://{}/", listener.local_addr().unwrap()), "svc_hub").unwrap();
+            let sender = Sender::new(
+                &format!("http://{}/", listener.local_addr().unwrap()),
+                "svc_hub",
+            )
+            .unwrap();
             let mut store = Store::memory(Limits::default()).unwrap();
             setup(&mut store);
             let mut q = Queue::new(&mut store).unwrap();
@@ -314,7 +326,9 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
             let expected = a.payload().to_vec();
             let join = thread::spawn(move || {
                 let (mut stream, _) = listener.accept().unwrap();
-                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(3)))
+                    .unwrap();
                 let mut head = Vec::new();
                 let mut byte = [0];
                 while !head.ends_with(b"\r\n\r\n") {
@@ -326,7 +340,12 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
                 assert!(head.starts_with("post /api/apps/svc_hub/email http/1.1\r\n"));
                 assert!(head.contains("content-type: application/json\r\n"));
                 assert!(head.contains("authorization: bearer synthetic.app.signature\r\n"));
-                let size = head.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().parse::<usize>().unwrap();
+                let size = head
+                    .lines()
+                    .find_map(|l| l.strip_prefix("content-length: "))
+                    .unwrap()
+                    .parse::<usize>()
+                    .unwrap();
                 assert_eq!(size, expected.len());
                 let mut actual = vec![0; size];
                 stream.read_exact(&mut actual).unwrap();
@@ -337,14 +356,49 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
             let completed = sender.send_committed(&core, a, || true);
             // HTTP acceptance alone did not complete the durable intent.
             assert_eq!(state(&q, &i.id), "dispatching");
-            completed.commit(&mut q).unwrap();
-            let accepted = reply.starts_with("HTTP/1.1 200 OK\r\nContent-Length: 41");
-            assert_eq!(state(&q, &i.id), if accepted { "provider_accepted" } else { "uncertain" });
+            if fail_commit {
+                // In-memory test only: never replace a persistent store's #217 hook.
+                q.store.db.commit_hook(Some(|| true));
+                assert!(completed.commit(&mut q).is_err());
+                q.store.db.commit_hook(None::<fn() -> bool>);
+                assert_eq!(state(&q, &i.id), "dispatching");
+                assert!(q.begin_proxy_delivery(&i, URL, 61).is_err());
+                assert_eq!(q.recover_interrupted_proxy_deliveries().unwrap(), 1);
+                assert_eq!(state(&q, &i.id), "uncertain");
+                let pending: bool = q
+                    .store
+                    .db
+                    .query_row(
+                        "SELECT state=0 AND mode IS NULL FROM email_intents WHERE id=?1",
+                        [&i.id],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert!(pending);
+                assert!(reserved(&q.store.db, &i.id).unwrap());
+            } else {
+                completed.commit(&mut q).unwrap();
+                assert_eq!(
+                    state(&q, &i.id),
+                    if reply == ACCEPTED {
+                        "provider_accepted"
+                    } else {
+                        "uncertain"
+                    }
+                );
+            }
+            assert!(q.begin_proxy_delivery(&i, URL, 61).is_err());
             assert!(q.begin_proxy_delivery(&i, URL, 100000).is_err());
-            assert!(q.claim_proxy("ag_email", 1, 100000, &"e".repeat(64)).unwrap().is_none());
+            assert!(q
+                .claim_proxy("ag_email", 1, 100000, &"e".repeat(64))
+                .unwrap()
+                .is_none());
             let listener = join.join().unwrap();
             listener.set_nonblocking(true).unwrap();
-            assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
         }
     }
     #[cfg(feature = "hub")]

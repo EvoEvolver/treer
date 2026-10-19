@@ -88,6 +88,28 @@ compare the entire received body with the frozen payload, exercise acceptance,
 connection loss/truncation/503, and show no second POST or claim. They are not
 process-kill tests or evidence of real provider delivery.
 
+Before wiring these primitives into workers, the remaining storage lifecycle
+requirements from review 5999 must also be implemented and tested:
+
+- Run interrupted-attempt recovery in the single startup path before starting
+  any worker. Convention alone does not enforce this ordering today.
+- Give the owner an audited abandonment path for **prepared only** rows after
+  configuration changes or revocation. Do not extend it to dispatching,
+  uncertain or accepted rows. Coordinate payload removal with the intent foreign
+  key and future retention jobs; preserve dedup/history semantics.
+- Define and implement bounded retention/purge for accepted payloads (addresses
+  and thread URLs), with no removal of unresolved work. Current shared caps
+  bound storage size, but do not provide a time-based privacy retention policy.
+- Expose masked reserved/uncertain counts and containment reasons so a binding
+  stopped by 32 unresolved attempts is diagnosable without bodies or keys.
+
+Any completion error or dropped attempt remains ambiguous and must never cause
+a second POST. The loopback test includes a successful fake acceptance followed
+by a refused SQLite commit: queue completion rolls back, a second attempt is
+refused with the original lease still valid, and startup containment retains
+the row and reservation as uncertain. No logging Drop guard is needed: the
+already committed dispatching row is the durable fail-closed record.
+
 ## Proposed transport boundary for review
 
 Keep email absent as disabled and existing `email.outbox_directory` configurations
