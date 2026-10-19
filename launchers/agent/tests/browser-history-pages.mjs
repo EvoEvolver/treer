@@ -11,7 +11,7 @@ export async function testHistoryPages(browser, base, screenshots, pageName) {
   const turn=(id,text)=>({id,status:'completed',items:[{id:id+'-message',kind:'agentMessage',text}]});
   latest.thread.turns=[turn('latest-page','Latest history page')];
   for(const lang of ['en','zh']) {
-    const context=await browser.newContext({viewport:{width:390,height:844}});
+    const context=await browser.newContext({viewport:{width:390,height:844},extraHTTPHeaders:{'x-treer-interface-source':'proxy-ui','x-treer-agent-id':'ag_browser_ui','x-treer-interface-instance':'browser-ui'}});
     try {
       const page=await context.newPage();let socket,olderReads=0,requests=0;
       await page.routeWebSocket('**/ws',ws=>{socket=ws;});
