@@ -1422,6 +1422,7 @@ impl AuthStore {
         user_id: &str,
         agent_id: &str,
         browser_nonce_hash: &str,
+        prewarm: bool,
     ) -> Result<String, AuthFailure> {
         if !valid_ingress_nonce(browser_nonce_hash) {
             return Err(invalid_ingress_authorization());
@@ -1442,8 +1443,8 @@ impl AuthStore {
         .await
         .map_err(AuthFailure::database)?;
         sqlx::query(
-            "INSERT INTO ingress_browser_auth_codes(code, ingress_id, user_id, return_path, expires_at, browser_nonce_hash, embed, agent_id) \
-             VALUES($1, $2, $3, '/', $4, $5, TRUE, $6)",
+            "INSERT INTO ingress_browser_auth_codes(code, ingress_id, user_id, return_path, expires_at, browser_nonce_hash, embed, agent_id, prewarm) \
+             VALUES($1, $2, $3, '/', $4, $5, TRUE, $6, $7)",
         )
         .bind(&code)
         .bind(&ingress.ingress_id)
@@ -1451,6 +1452,7 @@ impl AuthStore {
         .bind((now + Duration::seconds(INGRESS_EMBED_CODE_TTL_SECONDS)).to_rfc3339())
         .bind(browser_nonce_hash)
         .bind(agent_id)
+        .bind(prewarm)
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
@@ -1482,7 +1484,7 @@ impl AuthStore {
         agent_id: &str,
         code: &str,
         browser_nonce: &str,
-    ) -> Result<String, AuthFailure> {
+    ) -> Result<IssuedEmbedSession, AuthFailure> {
         let now = Utc::now();
         let row = sqlx::query(
             "UPDATE ingress_browser_auth_codes c SET used_at = $3 \
@@ -1490,7 +1492,7 @@ impl AuthStore {
              WHERE c.code = $1 AND lower(i.hostname) = lower($2) AND i.enabled = TRUE \
              AND i.ingress_id = c.ingress_id AND c.used_at IS NULL AND c.expires_at > $3 \
              AND c.embed = TRUE AND c.agent_id = $4 \
-             RETURNING c.ingress_id, c.user_id, c.browser_nonce_hash, i.workspace_id",
+             RETURNING c.ingress_id, c.user_id, c.browser_nonce_hash, c.prewarm, i.workspace_id",
         )
         .bind(code)
         .bind(hostname)
@@ -1514,25 +1516,109 @@ impl AuthStore {
         let user_id: String = row.get("user_id");
         self.require_workspace_member(&workspace_id, &user_id)
             .await?;
-        let session_token = format!("ies_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         sqlx::query("DELETE FROM ingress_sessions WHERE expires_at <= $1")
             .bind(now.to_rfc3339())
             .execute(&self.pool)
             .await
             .map_err(AuthFailure::database)?;
+        let prewarm: bool = row.get("prewarm");
+        let ingress_id: String = row.get("ingress_id");
+        let token = self
+            .insert_embed_session(&ingress_id, &user_id, prewarm)
+            .await?;
+        Ok(IssuedEmbedSession {
+            token,
+            max_age_seconds: if prewarm {
+                INGRESS_PREWARM_SESSION_TTL_SECONDS
+            } else {
+                INGRESS_SESSION_TTL_HOURS * 3600
+            },
+        })
+    }
+
+    /// One embed session row (12 h, or 10 minutes for a prewarm), then the
+    /// per-(user, Agent) cap (#198, security 5580 B): at most
+    /// [`EMBED_SESSIONS_PER_USER_AGENT`] live embed sessions, evicting
+    /// unrotated prewarm rows first (oldest first), then the oldest overall;
+    /// the row just created is never the one evicted.
+    async fn insert_embed_session(
+        &self,
+        ingress_id: &str,
+        user_id: &str,
+        prewarm: bool,
+    ) -> Result<String, AuthFailure> {
+        let now = Utc::now();
+        let token = format!("ies_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
+        let expires_at = if prewarm {
+            now + Duration::seconds(INGRESS_PREWARM_SESSION_TTL_SECONDS)
+        } else {
+            now + Duration::hours(INGRESS_SESSION_TTL_HOURS)
+        };
         sqlx::query(
-            "INSERT INTO ingress_sessions(token, ingress_id, user_id, created_at, expires_at, embed) \
-             VALUES($1, $2, $3, $4, $5, TRUE)",
+            "INSERT INTO ingress_sessions(token, ingress_id, user_id, created_at, expires_at, embed, prewarm) \
+             VALUES($1, $2, $3, $4, $5, TRUE, $6)",
         )
-        .bind(&session_token)
-        .bind(row.get::<String, _>("ingress_id"))
-        .bind(&user_id)
+        .bind(&token)
+        .bind(ingress_id)
+        .bind(user_id)
         .bind(now.to_rfc3339())
-        .bind((now + Duration::hours(INGRESS_SESSION_TTL_HOURS)).to_rfc3339())
+        .bind(expires_at.to_rfc3339())
+        .bind(prewarm)
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
-        Ok(session_token)
+        sqlx::query(
+            "DELETE FROM ingress_sessions WHERE token IN ( \
+                SELECT token FROM ingress_sessions \
+                WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 AND token <> $4 \
+                ORDER BY (prewarm AND NOT rotated) DESC, created_at ASC \
+                LIMIT GREATEST((SELECT count(*) FROM ingress_sessions \
+                    WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3) - $5, 0))",
+        )
+        .bind(user_id)
+        .bind(ingress_id)
+        .bind(now.to_rfc3339())
+        .bind(&token)
+        .bind(EMBED_SESSIONS_PER_USER_AGENT)
+        .execute(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        Ok(token)
+    }
+
+    /// Rotation of a prewarm session on its first authorized document request
+    /// (#198, security 5580 refinement 1): a new 12-hour embed session is
+    /// issued for the same user and Agent origin; the prewarm row is marked
+    /// rotated and kept until its own 10-minute expiry so in-flight requests
+    /// carrying the old cookie still authenticate. `None` when the token is
+    /// not a live, unrotated prewarm session for this host.
+    pub async fn rotate_prewarm_embed_session(
+        &self,
+        hostname: &str,
+        token: &str,
+    ) -> Result<Option<String>, AuthFailure> {
+        let now = Utc::now();
+        let row = sqlx::query(
+            "UPDATE ingress_sessions s SET rotated = TRUE \
+             FROM service_ingresses i \
+             WHERE s.token = $1 AND lower(i.hostname) = lower($2) AND i.ingress_id = s.ingress_id \
+             AND s.embed = TRUE AND s.prewarm = TRUE AND s.rotated = FALSE AND s.expires_at > $3 \
+             RETURNING s.ingress_id, s.user_id",
+        )
+        .bind(token)
+        .bind(hostname)
+        .bind(now.to_rfc3339())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(AuthFailure::database)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let ingress_id: String = row.get("ingress_id");
+        let user_id: String = row.get("user_id");
+        self.insert_embed_session(&ingress_id, &user_id, false)
+            .await
+            .map(Some)
     }
 
     pub async fn authenticate_ingress_session(
@@ -1697,4 +1783,12 @@ impl AuthStore {
             .await?;
         Ok(grant)
     }
+}
+
+/// The session a redeemed embed code produced: the cookie value and the
+/// `Max-Age` the browser must receive (12 h, or 10 minutes for a prewarm).
+#[derive(Debug)]
+pub struct IssuedEmbedSession {
+    pub token: String,
+    pub max_age_seconds: i64,
 }

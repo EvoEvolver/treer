@@ -51,6 +51,12 @@ const INGRESS_SESSION_TTL_HOURS: i64 = 12;
 /// Embed codes (#156) travel Console -> iframe -> Agent origin within one
 /// page load; 30 seconds covers slow networks and nothing more.
 const INGRESS_EMBED_CODE_TTL_SECONDS: i64 = 30;
+/// A prewarm embed session (#198) lives this long unless its first authorized
+/// document request rotates it into a normal session.
+pub(crate) const INGRESS_PREWARM_SESSION_TTL_SECONDS: i64 = 600;
+/// Live embed sessions per (user, Agent origin); unrotated prewarm rows are
+/// evicted first, then the oldest.
+pub(crate) const EMBED_SESSIONS_PER_USER_AGENT: i64 = 8;
 const APP_OAUTH_CODE_TTL_MINUTES: i64 = 5;
 const MAX_LAUNCH_PROFILE_DESCRIPTION_CHARS: usize = 1_000;
 const MAX_LAUNCH_PROFILE_COMMAND_BYTES: usize = 4_096;

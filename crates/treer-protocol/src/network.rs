@@ -343,6 +343,12 @@ pub const CAPABILITY_AGENT_INTERFACE_ORIGIN: &str = "agent.interface-origin.v1";
 /// Agent interface on its own `ag-<id>` origin with a partitioned session
 /// (#156); the Console falls back to the Proxy-origin tunnel without it.
 pub const CAPABILITY_AGENT_INTERFACE_EMBED: &str = "agent.interface-embed.v1";
+/// The Proxy renders the prewarm bootstrap (`reuse=1&prewarm=1`, terminal
+/// `warmed`), mints purpose-bound 10-minute prewarm sessions with their own
+/// per-user budget, rotates them on the first authorized document request and
+/// caps live embed sessions per user and Agent (#198 step 3). A Console must
+/// never open a hidden prewarm frame without it.
+pub const CAPABILITY_AGENT_INTERFACE_EMBED_PREWARM: &str = "agent.interface-embed-prewarm.v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

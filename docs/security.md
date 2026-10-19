@@ -1333,6 +1333,26 @@ binding, expiry or revocation: the same cookie is presented, logout and
 membership removal end it, and the UI request and the socket re-check apply
 the gate again. Handshake and UI responses carry no `Server-Timing`; load-time
 measurement is a development-only, fixture-only runner on the Console side.
+Prewarm (#198 step 3, capability `agent.interface-embed-prewarm.v1`): a Console
+that advertises intent (pointer dwell on a Tree row) may mint with
+`purpose: "prewarm"`; such a code redeems into a 10-minute embed session (a
+client that lies about the purpose can only shorten its own session), prewarm
+mints have their own authoritative budget of 6 per user per minute across all
+tabs and devices on top of the 30 per minute and 8 outstanding codes, and every
+mint is audited as `agent.interface.embed.minted` or
+`agent.interface.embed.prewarmed` so a hover is never read as an access. The
+hidden prewarm frame loads the bootstrap with `reuse=1&prewarm=1`, rendered
+server side only for that exact pair; its only difference is that it never
+navigates to Agent HTML: a verified session ends in the terminal
+`{treer_embed: "warmed", version: 2, nonce_hash}` and any failure in the quiet
+`{treer_embed: "warm_failed", version: 2, nonce_hash}`. The click then runs the
+normal reuse handshake; the first authorized document navigation of a prewarm
+session rotates it into a normal 12-hour session (new row and cookie, the old
+row kept until its own 10-minute expiry and never extended; subresources,
+fetches and WebSocket upgrades never rotate). Live embed sessions are capped at
+8 per user and Agent origin, evicting unrotated prewarm rows first, then the
+oldest, never the row just issued. Logout, membership removal and Policy deny
+end prewarm sessions exactly like any other.
 Agent UI. Embed
 sessions are separate rows from standalone sessions: the token of one never
 authenticates through the other cookie. The request context is decided before

@@ -610,6 +610,20 @@ async fn proxy_agent_interface_origin(
         .map_err(|error| ApiFailure::bad_gateway("invalid_tunnel_uri", &error.to_string()))?;
     *request.version_mut() = Version::HTTP_11;
     let upgraded = request.headers().contains_key(header::UPGRADE);
+    // Prewarm rotation (#198, security 5580 refinement 1): the first authorized
+    // document navigation of a prewarm session gets a normal 12-hour session;
+    // only navigations rotate, never subresources, fetches or upgrades.
+    let rotated_cookie = match (
+        &session_token,
+        embedded && !upgraded && is_document_navigation(request.headers()),
+    ) {
+        (Some(token), true) => auth
+            .rotate_prewarm_embed_session(&hostname, token)
+            .await?
+            .map(|new_token| embed_cookie_header(&config, &new_token, 12 * 60 * 60))
+            .transpose()?,
+        _ => None,
+    };
     sanitize_agent_interface_headers(request.headers_mut(), upgraded, &agent.agent_id, interface)?;
     let revalidation = match (&user_id, session_token) {
         (Some(user_id), Some(token)) if upgraded => Some(
@@ -650,9 +664,27 @@ async fn proxy_agent_interface_origin(
             .or_insert(HeaderValue::from_static("no-referrer"));
         if embedded {
             allow_console_frame_only(headers, &config.console_origin())?;
+            if let Some(cookie) = rotated_cookie {
+                headers.insert(header::SET_COOKIE, cookie);
+            }
         }
     }
     Ok(response)
+}
+
+/// A top-level or frame document navigation (`Sec-Fetch-Mode: navigate` with
+/// `Sec-Fetch-Dest` `document` or `iframe`), as the bootstrap's own
+/// `location.replace` produces; everything else is a subresource.
+fn is_document_navigation(headers: &HeaderMap) -> bool {
+    let one = |name: &str| {
+        let mut values = headers.get_all(name).iter();
+        match (values.next(), values.next()) {
+            (Some(value), None) => value.to_str().ok().map(str::trim),
+            _ => None,
+        }
+    };
+    one("sec-fetch-mode") == Some("navigate")
+        && matches!(one("sec-fetch-dest"), Some("document") | Some("iframe"))
 }
 
 /// Whether a request on an Agent origin may use the embed cookie at all

@@ -54,6 +54,9 @@ pub(crate) async fn oauth_config(
             capabilities.push(Value::String(
                 treer_protocol::CAPABILITY_AGENT_INTERFACE_EMBED.to_string(),
             ));
+            capabilities.push(Value::String(
+                treer_protocol::CAPABILITY_AGENT_INTERFACE_EMBED_PREWARM.to_string(),
+            ));
         }
     }
     Json(config)

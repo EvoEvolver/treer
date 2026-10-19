@@ -36,6 +36,18 @@ async fn mint(
     agent: &str,
     nonce_hash: &str,
 ) -> Result<Response, ApiFailure> {
+    mint_with_purpose(fixture, policy, config, user, agent, nonce_hash, None).await
+}
+
+async fn mint_with_purpose(
+    fixture: &Fixture,
+    policy: PolicyEngine,
+    config: &IngressConfig,
+    user: Option<&str>,
+    agent: &str,
+    nonce_hash: &str,
+    purpose: Option<&str>,
+) -> Result<Response, ApiFailure> {
     mint_agent_interface_embed(
         State(fixture.state.clone()),
         Extension(fixture.auth.clone()),
@@ -45,9 +57,49 @@ async fn mint(
         Path(("default".to_string(), agent.to_string())),
         Json(EmbedAuthorizationRequest {
             browser_nonce_hash: nonce_hash.to_string(),
+            purpose: purpose.map(str::to_owned),
         }),
     )
     .await
+}
+
+/// Mint with a purpose and redeem; returns (cookie pair, Set-Cookie line).
+async fn establish_embed_session_with_purpose(
+    fixture: &Fixture,
+    config: &IngressConfig,
+    user: &str,
+    purpose: Option<&str>,
+) -> (String, String) {
+    let (nonce, hash) = nonce_pair();
+    let response = mint_with_purpose(
+        fixture,
+        allow(),
+        config,
+        Some(user),
+        AGENT_ID,
+        &hash,
+        purpose,
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let code = serde_json::from_slice::<Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let response = redeem(fixture, config, AGENT_HOST, &code, &nonce)
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let cookie = response.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .to_string();
+    let pair = cookie.split_once("; ").unwrap().0.to_string();
+    (pair, cookie)
 }
 
 async fn minted_code(fixture: &Fixture, config: &IngressConfig, user: &str) -> (String, String) {
@@ -1159,7 +1211,7 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
         let v2 = [
             "post({ treer_embed: \"ready\", version: 2, nonce_hash: hash });",
             "data.treer_embed === \"probe\" && data.version === 2 && data.nonce_hash === hash && Object.keys(data).length === 3",
-            "post({ treer_embed: \"reused\", version: 2, nonce_hash: hash }); navigate();",
+            "post({ treer_embed: \"reused\", version: 2, nonce_hash: hash }); finish();",
             "post({ treer_embed: \"mint\", version: 2, nonce_hash: hash });",
         ];
         for needle in v2 {
@@ -1182,5 +1234,365 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
             assert!(body.contains(needle), "{query}: missing {needle}\n{body}");
         }
         assert!(!body.contains(AGENT_ID), "{body}");
+    }
+}
+
+/// #198 step 3 (security 5580/5583/5595): prewarm mints have their own budget
+/// and redeem into 10-minute sessions; live embed sessions per (user, Agent)
+/// are capped with unrotated prewarm rows evicted first; the first authorized
+/// document navigation rotates a prewarm session into a 12-hour one and keeps
+/// the old row until its own expiry; every mint is audited by purpose.
+#[tokio::test]
+async fn prewarm_sessions_are_short_budgeted_capped_rotated_and_audited() {
+    let fixture = agent_fixture().await;
+    let config = config(None);
+    // Purpose validation and the cookie lifetimes.
+    let (_, hash) = nonce_pair();
+    assert_eq!(
+        error_of(
+            mint_with_purpose(
+                &fixture,
+                allow(),
+                &config,
+                Some("member"),
+                AGENT_ID,
+                &hash,
+                Some("hover")
+            )
+            .await
+        )
+        .await,
+        (StatusCode::BAD_REQUEST, "invalid_request".into())
+    );
+    let (open_pair, open_cookie) =
+        establish_embed_session_with_purpose(&fixture, &config, "member", Some("open")).await;
+    assert!(open_cookie.ends_with("Max-Age=43200"), "{open_cookie}");
+    let (warm_pair, warm_cookie) =
+        establish_embed_session_with_purpose(&fixture, &config, "member", Some("prewarm")).await;
+    assert!(warm_cookie.ends_with("Max-Age=600"), "{warm_cookie}");
+    let warm_token = warm_pair.split_once('=').unwrap().1.to_string();
+    let (prewarm, expires_at): (bool, String) =
+        sqlx::query_as("SELECT prewarm, expires_at FROM ingress_sessions WHERE token = $1")
+            .bind(&warm_token)
+            .fetch_one(&fixture.auth.pool())
+            .await
+            .unwrap();
+    assert!(prewarm);
+    let expires = expires_at.parse::<chrono::DateTime<Utc>>().unwrap();
+    let left = expires - Utc::now();
+    assert!(
+        left <= chrono::Duration::minutes(10) && left > chrono::Duration::minutes(9),
+        "{left}"
+    );
+    // Audit by purpose.
+    let actions: Vec<String> = sqlx::query_scalar(
+        "SELECT action FROM organization_audit_events WHERE action LIKE 'agent.interface.embed.%' ORDER BY sequence",
+    )
+    .fetch_all(&fixture.auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        actions,
+        [
+            "agent.interface.embed.minted",
+            "agent.interface.embed.prewarmed"
+        ]
+    );
+
+    // Prewarm budget: 6 per user per minute, independent of the 30 overall;
+    // the 7th prewarm is refused while an open mint still passes.
+    for i in 0..5 {
+        let (_, hash) = nonce_pair();
+        let response = mint_with_purpose(
+            &fixture,
+            allow(),
+            &config,
+            Some("member"),
+            AGENT_ID,
+            &hash,
+            Some("prewarm"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "prewarm mint {i}");
+        // Keep the outstanding-code cap out of the way: redeem each one.
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let code = serde_json::from_slice::<Value>(&body).unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let _ = code;
+        sqlx::query("UPDATE ingress_browser_auth_codes SET used_at = '2000-01-01T00:00:00Z' WHERE used_at IS NULL")
+            .execute(&fixture.auth.pool())
+            .await
+            .unwrap();
+    }
+    let (_, hash) = nonce_pair();
+    assert_eq!(
+        error_of(
+            mint_with_purpose(
+                &fixture,
+                allow(),
+                &config,
+                Some("member"),
+                AGENT_ID,
+                &hash,
+                Some("prewarm")
+            )
+            .await
+        )
+        .await,
+        (StatusCode::TOO_MANY_REQUESTS, "embed_rate_limited".into())
+    );
+    let (_, hash) = nonce_pair();
+    assert_eq!(
+        mint(&fixture, allow(), &config, Some("member"), AGENT_ID, &hash)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::OK
+    );
+    sqlx::query("UPDATE ingress_browser_auth_codes SET used_at = '2000-01-01T00:00:00Z' WHERE used_at IS NULL")
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+
+    // Rotation: a document navigation with the prewarm cookie gets a new
+    // 12-hour cookie; the prewarm row is marked rotated and still valid; a
+    // subresource request never rotates.
+    let mut fixture_with_upstream = fixture;
+    let (_, _) = upstream(
+        fixture_with_upstream.state.clone(),
+        fixture_with_upstream.connection,
+        fixture_with_upstream.rx.take().unwrap(),
+        Upstream::Head("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n"),
+    );
+    let fixture = fixture_with_upstream;
+    let navigate = |cookie: String, navigation: bool| {
+        let fixture = &fixture;
+        let config = &config;
+        async move {
+            let mut request = Request::builder()
+                .uri("/")
+                .header(header::HOST, AGENT_HOST)
+                .header(header::COOKIE, cookie)
+                .header("sec-fetch-site", "same-origin");
+            if navigation {
+                request = request
+                    .header("sec-fetch-mode", "navigate")
+                    .header("sec-fetch-dest", "iframe");
+            }
+            let response = send(
+                fixture,
+                allow(),
+                config,
+                request.body(Body::empty()).unwrap(),
+            )
+            .await
+            .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let set_cookie = response
+                .headers()
+                .get(header::SET_COOKIE)
+                .map(|v| v.to_str().unwrap().to_string());
+            axum::body::to_bytes(response.into_body(), 64)
+                .await
+                .unwrap();
+            set_cookie
+        }
+    };
+    assert_eq!(
+        navigate(warm_pair.clone(), false).await,
+        None,
+        "subresource never rotates"
+    );
+    assert_eq!(
+        navigate(open_pair.clone(), true).await,
+        None,
+        "a normal session never rotates"
+    );
+    let rotated = navigate(warm_pair.clone(), true)
+        .await
+        .expect("rotation sets the new cookie");
+    assert!(
+        rotated.starts_with("__Host-treer_ingress_embed=ies_")
+            && rotated.ends_with("Max-Age=43200"),
+        "{rotated}"
+    );
+    let new_pair = rotated.split_once("; ").unwrap().0.to_string();
+    assert_ne!(new_pair, warm_pair);
+    // Old row: rotated, still authenticating until its own expiry; rotating it
+    // again does nothing.
+    let (old_rotated, old_prewarm): (bool, bool) =
+        sqlx::query_as("SELECT rotated, prewarm FROM ingress_sessions WHERE token = $1")
+            .bind(&warm_token)
+            .fetch_one(&fixture.auth.pool())
+            .await
+            .unwrap();
+    assert!(old_rotated && old_prewarm);
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&warm_pair)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        navigate(warm_pair.clone(), true).await,
+        None,
+        "rotation happens once"
+    );
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&new_pair)).await,
+        StatusCode::NO_CONTENT
+    );
+    let (new_prewarm, new_expires): (bool, String) =
+        sqlx::query_as("SELECT prewarm, expires_at FROM ingress_sessions WHERE token = $1")
+            .bind(new_pair.split_once('=').unwrap().1)
+            .fetch_one(&fixture.auth.pool())
+            .await
+            .unwrap();
+    assert!(!new_prewarm);
+    assert!(
+        new_expires.parse::<chrono::DateTime<Utc>>().unwrap() - Utc::now()
+            > chrono::Duration::hours(11)
+    );
+
+    // Cap: at most 8 live embed sessions per (user, Agent); unrotated prewarm
+    // rows go first, then the oldest; the newest row always survives.
+    let live = |user: &'static str| {
+        let pool = fixture.auth.pool();
+        async move {
+            sqlx::query_as::<_, (i64, i64)>(
+                "SELECT count(*), count(*) FILTER (WHERE prewarm AND NOT rotated) FROM ingress_sessions \
+                 WHERE user_id = $1 AND embed = TRUE AND expires_at > $2",
+            )
+            .bind(user)
+            .bind(Utc::now().to_rfc3339())
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    // Owner: 2 unrotated prewarm + 7 open sessions -> 8 live, prewarm gone first.
+    establish_embed_session_with_purpose(&fixture, &config, "owner", Some("prewarm")).await;
+    establish_embed_session_with_purpose(&fixture, &config, "owner", Some("prewarm")).await;
+    let mut owner_pairs = Vec::new();
+    for _ in 0..7 {
+        owner_pairs.push(
+            establish_embed_session_with_purpose(&fixture, &config, "owner", None)
+                .await
+                .0,
+        );
+        sqlx::query("UPDATE ingress_browser_auth_codes SET used_at = '2000-01-01T00:00:00Z' WHERE used_at IS NULL")
+            .execute(&fixture.auth.pool())
+            .await
+            .unwrap();
+    }
+    assert_eq!(live("owner").await, (8, 1), "one prewarm evicted first");
+    owner_pairs.push(
+        establish_embed_session_with_purpose(&fixture, &config, "owner", None)
+            .await
+            .0,
+    );
+    assert_eq!(live("owner").await, (8, 0), "second prewarm evicted next");
+    owner_pairs.push(
+        establish_embed_session_with_purpose(&fixture, &config, "owner", None)
+            .await
+            .0,
+    );
+    assert_eq!(live("owner").await, (8, 0));
+    // The oldest open session is the one evicted now; the newest still works.
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&owner_pairs[0])).await,
+        StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        check(
+            &fixture,
+            &config,
+            AGENT_HOST,
+            Some(owner_pairs.last().unwrap())
+        )
+        .await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&owner_pairs[1])).await,
+        StatusCode::NO_CONTENT
+    );
+
+    // Logout removes prewarm sessions like any other.
+    fixture.auth.logout("tok-owner").await.unwrap();
+    assert_eq!(live("owner").await, (0, 0));
+}
+
+/// #198 step 3: the prewarm bootstrap exists only with both flags, never
+/// navigates, and uses the `warmed` / `warm_failed` terminal shapes; every
+/// other page carries no prewarm text.
+#[tokio::test]
+async fn prewarm_bootstrap_is_rendered_only_with_both_flags_and_never_navigates() {
+    let fixture = agent_fixture().await;
+    let config = config(None);
+    for (query, prewarm, reuse) in [
+        ("?reuse=1&prewarm=1", true, true),
+        ("?prewarm=1&reuse=1&theme=dark", true, true),
+        ("?prewarm=1", false, false),
+        ("?reuse=1", false, true),
+        ("?reuse=1&prewarm=true", false, true),
+        ("", false, false),
+    ] {
+        let response = send(
+            &fixture,
+            allow(),
+            &config,
+            Request::builder()
+                .uri(format!("/.treer/embed{query}"))
+                .header(header::HOST, AGENT_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(body.contains("warmed"), prewarm, "{query}");
+        assert_eq!(body.contains("warm_failed"), prewarm, "{query}");
+        assert_eq!(
+            body.contains("window.location.replace(next)"),
+            !prewarm,
+            "{query}: a prewarm page never navigates"
+        );
+        assert_eq!(
+            body.contains("\"reused\""),
+            reuse && !prewarm,
+            "{query}: prewarm never reports reused"
+        );
+        assert_eq!(body.contains("\"probe\""), reuse, "{query}");
+        assert!(
+            body.contains("params.delete(\"reuse\"); params.delete(\"prewarm\");"),
+            "{query}"
+        );
+        if prewarm {
+            assert!(
+                body.contains("post({ treer_embed: \"warmed\", version: 2, nonce_hash: hash });"),
+                "{body}"
+            );
+            assert!(
+                body.contains(
+                    "var message = { treer_embed: \"warm_failed\", version: 2, nonce_hash: hash };"
+                ),
+                "{body}"
+            );
+            assert!(!body.contains("cookies_blocked\" }"), "{body}");
+        } else {
+            assert!(
+                body.contains("var message = { treer_embed: kind };"),
+                "{body}"
+            );
+        }
+        assert!(!body.contains(AGENT_ID));
     }
 }
