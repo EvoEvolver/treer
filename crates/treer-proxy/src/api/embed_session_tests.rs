@@ -1521,6 +1521,87 @@ async fn prewarm_sessions_are_short_budgeted_capped_rotated_and_audited() {
         StatusCode::NO_CONTENT
     );
 
+    // A hover never evicts a normal or rotated session (web-dev 5615): with
+    // the cap full of normal rows the prewarm exchange is refused and nothing
+    // else changes.
+    let (nonce, hash) = nonce_pair();
+    let minted = mint_with_purpose(
+        &fixture,
+        allow(),
+        &config,
+        Some("owner"),
+        AGENT_ID,
+        &hash,
+        Some("prewarm"),
+    )
+    .await
+    .unwrap();
+    let body = axum::body::to_bytes(minted.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let code = serde_json::from_slice::<Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, error) =
+        error_of(redeem(&fixture, &config, AGENT_HOST, &code, &nonce).await).await;
+    assert_eq!(
+        (status, error.as_str()),
+        (StatusCode::UNAUTHORIZED, "invalid_ingress_authorization")
+    );
+    assert_eq!(live("owner").await, (8, 0));
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&owner_pairs[1])).await,
+        StatusCode::NO_CONTENT
+    );
+
+    // At the cap, rotating the oldest prewarm row never evicts that row: the
+    // predecessor keeps its own expiry beside the eight others (5615).
+    fixture.auth.logout("tok-owner").await.unwrap();
+    sqlx::query("INSERT INTO sessions(token,user_id,created_at,expires_at) VALUES('tok-owner','owner',$1,'2999-01-01T00:00:00Z')")
+        .bind(Utc::now().to_rfc3339())
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    let (oldest_warm, _) =
+        establish_embed_session_with_purpose(&fixture, &config, "owner", Some("prewarm")).await;
+    let mut normals = Vec::new();
+    for _ in 0..7 {
+        normals.push(
+            establish_embed_session_with_purpose(&fixture, &config, "owner", None)
+                .await
+                .0,
+        );
+        sqlx::query("UPDATE ingress_browser_auth_codes SET used_at = '2000-01-01T00:00:00Z' WHERE used_at IS NULL")
+            .execute(&fixture.auth.pool())
+            .await
+            .unwrap();
+    }
+    assert_eq!(live("owner").await, (8, 1));
+    let rotated = navigate(oldest_warm.clone(), true)
+        .await
+        .expect("rotation at the cap");
+    let successor = rotated.split_once("; ").unwrap().0.to_string();
+    assert_eq!(
+        live("owner").await,
+        (9, 0),
+        "predecessor kept beside eight live rows"
+    );
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&oldest_warm)).await,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&successor)).await,
+        StatusCode::NO_CONTENT
+    );
+    for pair in &normals {
+        assert_eq!(
+            check(&fixture, &config, AGENT_HOST, Some(pair)).await,
+            StatusCode::NO_CONTENT
+        );
+    }
+
     // Logout removes prewarm sessions like any other.
     fixture.auth.logout("tok-owner").await.unwrap();
     assert_eq!(live("owner").await, (0, 0));

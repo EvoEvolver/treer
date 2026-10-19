@@ -1351,8 +1351,10 @@ session rotates it into a normal 12-hour session (new row and cookie, the old
 row kept until its own 10-minute expiry and never extended; subresources,
 fetches and WebSocket upgrades never rotate). Live embed sessions are capped at
 8 per user and Agent origin, evicting unrotated prewarm rows first, then the
-oldest, never the row just issued. Logout, membership removal and Policy deny
-end prewarm sessions exactly like any other.
+oldest, never the row just issued; a prewarm itself may only evict other
+unrotated prewarm rows and is refused when the cap is full of normal or rotated
+sessions, and a rotation never evicts the predecessor it just replaced. Logout,
+membership removal and Policy deny end prewarm sessions exactly like any other.
 Agent UI. Embed
 sessions are separate rows from standalone sessions: the token of one never
 authenticates through the other cookie. The request context is decided before

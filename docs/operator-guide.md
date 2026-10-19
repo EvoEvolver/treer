@@ -1078,7 +1078,9 @@ never loads Agent HTML and reports `warmed` or `warm_failed`; the real click
 reuses the short session and the Proxy rotates it into a normal 12-hour
 session on that first document load (the old cookie stays valid until its own
 expiry). At most 8 live embed sessions per user and Agent are kept, unused
-prewarm sessions being evicted first.
+prewarm sessions being evicted first; a hover never evicts a session that is
+in use (the prewarm is refused instead), and a rotation keeps the row it
+replaced until that row's own expiry.
 `TREER_AGENT_EMBED_FALLBACK=refuse` (`--agent-embed-fallback refuse`) closes
 that fallback: the tunnel answers `503 embedded_ui_requires_isolated_origin`
 and the Console offers "open in new tab" only. Every Console host (Proxy `app_dist`, Worker, nginx) must send the same

@@ -1524,7 +1524,7 @@ impl AuthStore {
         let prewarm: bool = row.get("prewarm");
         let ingress_id: String = row.get("ingress_id");
         let token = self
-            .insert_embed_session(&ingress_id, &user_id, prewarm)
+            .insert_embed_session(&ingress_id, &user_id, prewarm, None)
             .await?;
         Ok(IssuedEmbedSession {
             token,
@@ -1538,14 +1538,19 @@ impl AuthStore {
 
     /// One embed session row (12 h, or 10 minutes for a prewarm), then the
     /// per-(user, Agent) cap (#198, security 5580 B): at most
-    /// [`EMBED_SESSIONS_PER_USER_AGENT`] live embed sessions, evicting
-    /// unrotated prewarm rows first (oldest first), then the oldest overall;
-    /// the row just created is never the one evicted.
+    /// [`EMBED_SESSIONS_PER_USER_AGENT`] live embed sessions besides a
+    /// `protect`ed predecessor (the prewarm row a rotation just replaced,
+    /// which keeps its own expiry). Eviction takes unrotated prewarm rows
+    /// first (oldest first), then the oldest overall; the row just created is
+    /// never the one evicted. A speculative prewarm may only evict other
+    /// unrotated prewarm rows: when the cap is full of normal or rotated
+    /// sessions the prewarm is refused instead (web-dev 5615).
     async fn insert_embed_session(
         &self,
         ingress_id: &str,
         user_id: &str,
         prewarm: bool,
+        protect: Option<&str>,
     ) -> Result<String, AuthFailure> {
         let now = Utc::now();
         let token = format!("ies_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
@@ -1570,19 +1575,46 @@ impl AuthStore {
         sqlx::query(
             "DELETE FROM ingress_sessions WHERE token IN ( \
                 SELECT token FROM ingress_sessions \
-                WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 AND token <> $4 \
+                WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 \
+                AND token <> $4 AND ($6::TEXT IS NULL OR token <> $6) \
+                AND (NOT $7::BOOLEAN OR (prewarm AND NOT rotated)) \
                 ORDER BY (prewarm AND NOT rotated) DESC, created_at ASC \
                 LIMIT GREATEST((SELECT count(*) FROM ingress_sessions \
-                    WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3) - $5, 0))",
+                    WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3 \
+                    AND ($6::TEXT IS NULL OR token <> $6)) - $5, 0))",
         )
         .bind(user_id)
         .bind(ingress_id)
         .bind(now.to_rfc3339())
         .bind(&token)
         .bind(EMBED_SESSIONS_PER_USER_AGENT)
+        .bind(protect)
+        .bind(prewarm)
         .execute(&self.pool)
         .await
         .map_err(AuthFailure::database)?;
+        if prewarm {
+            // Still over the cap: only normal or rotated sessions remain, and
+            // a hover never evicts one of those. Take the speculative row back.
+            let live: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM ingress_sessions \
+                 WHERE user_id = $1 AND ingress_id = $2 AND embed = TRUE AND expires_at > $3",
+            )
+            .bind(user_id)
+            .bind(ingress_id)
+            .bind(now.to_rfc3339())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(AuthFailure::database)?;
+            if live > EMBED_SESSIONS_PER_USER_AGENT {
+                sqlx::query("DELETE FROM ingress_sessions WHERE token = $1")
+                    .bind(&token)
+                    .execute(&self.pool)
+                    .await
+                    .map_err(AuthFailure::database)?;
+                return Err(invalid_ingress_authorization());
+            }
+        }
         Ok(token)
     }
 
@@ -1616,7 +1648,9 @@ impl AuthStore {
         };
         let ingress_id: String = row.get("ingress_id");
         let user_id: String = row.get("user_id");
-        self.insert_embed_session(&ingress_id, &user_id, false)
+        // The predecessor keeps its own expiry (refinement 1): it is never the
+        // row the cap evicts to make room for its successor.
+        self.insert_embed_session(&ingress_id, &user_id, false, Some(token))
             .await
             .map(Some)
     }
