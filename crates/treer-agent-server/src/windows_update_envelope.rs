@@ -63,6 +63,18 @@ fn draft_envelope_has_fixed_little_endian_header_and_borrowed_payload() {
 }
 
 #[test]
+fn every_envelope_starts_outside_json_even_before_payload_parsing() {
+    for kind in [Kind::Receipt, Kind::Marker] {
+        let bytes = encode(b"{}", kind).unwrap();
+        // JSON values may start with an object, array, string, literal, number
+        // or whitespace. Magic must exclude all of them, not just `{`.
+        assert!(!b"{[\"tfn-0123456789 \t\r\n".contains(&bytes[0]));
+        assert_eq!(bytes[0], b'T');
+        assert!(serde_json::from_slice::<serde_json::Value>(&bytes).is_err());
+    }
+}
+
+#[test]
 fn draft_envelope_refuses_truncation_bad_headers_lengths_and_trailing_bytes() {
     let bytes = encode(b"opaque", Kind::Receipt).unwrap();
     for end in 0..bytes.len() {

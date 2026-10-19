@@ -160,6 +160,15 @@ and reopen must refuse with existing bytes and directory entries unchanged.
 The legacy Unix parser cannot treat the binary magic as JSON; no migration or
 Windows payload parsing is added to it. These tests establish rejection, not
 Windows inner-field/schema validation, native storage or production support.
+This separation is an invariant of the format: every envelope starts with
+uppercase `T`, outside all legal JSON value starts and JSON leading whitespace.
+Keep that exclusion if the magic changes; both receipt and marker encodings
+have a regression check independent of their opaque payloads. Unix refusal
+currently comes from this JSON parse failure, not a new Unix discriminator
+reader. The envelope itself has no integrity protection: before any payload
+use, the independent marker/receipt binding, revision, header and exact-byte
+digest agreement remain mandatory. A structurally valid envelope alone must
+never authorize payload use or hide torn/in-place payload damage.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
