@@ -1171,9 +1171,32 @@ numeric native errors, never evidence bytes or private paths. Hosted 2022 and
 2025 execution must show the read-stage failure and successful control on the
 exact commit; a seek/ACL/identity refusal does not satisfy this experiment.
 
-This is an implementation contract, not new coverage. No reader changes or new
-native tests are included here. Actual read-failure coverage, production
+The contract checkpoint alone added no reader changes or native tests.
+Actual read-failure coverage, production
 committed-head binding and durable consume/CAS remain open; W4 stays disabled.
+
+The subsequent inert implementation uses one synchronous `ReadFile` reader with
+an explicit offset for preparation readback, pin readback and verification. The
+first read must return the exact observed length; short or zero reads refuse.
+A separate one-byte probe at that length must establish EOF, followed by the
+existing metadata/identity recheck and digest comparison. Allocation remains
+bounded to length plus one, at most 8193 bytes. `Win32_System_IO` is enabled only
+as a Windows dev dependency for the `OVERLAPPED` offset structure; the entire
+bootstrap fixture remains absent from production builds.
+
+The new composed fixture runs both operation roles. Its readable control
+asserts successful prevalidation, two native read calls, postvalidation and hash
+comparison. It then duplicates the retained evidence handle with only
+`FILE_READ_ATTRIBUTES | READ_CONTROL`, proves the same full file identity, and
+replaces the pin handle while preserving the original. Failed consumption must
+report successful ACL/identity/length prevalidation, exactly one read call and
+actual `ERROR_ACCESS_DENIED`, with no postvalidation or hash comparison and zero
+sink acceptance. Fixed `Read` and `ReadControl` stage diagnostics expose no bytes
+or paths. Restoring the original must reproduce the unchanged evidence bytes
+through the same checked reader, but cannot renew consumption or evidence-store
+authority. Compilation is not native execution: exact-SHA hosted 2022/2025
+results and security acceptance remain required for this new coverage. This
+adds no durable latch, production reason adapter, restart recovery or W4 caller.
 
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.

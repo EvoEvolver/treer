@@ -176,6 +176,89 @@ impl<'a> BoundStored<'a> {
 }
 
 #[test]
+fn native_operation_bound_context_actual_evidence_read_failure() {
+    for operation in [Operation::MoveOld, Operation::Publish] {
+        let fixture = Fixture::new(operation);
+        let binding = Binding::before_acquisition(&fixture, 1).unwrap();
+        let context = fixture.context();
+        let composition = Composition::new(
+            &context,
+            &fixture.attempt,
+            &fixture.source,
+            &fixture.target,
+            context.intent,
+        )
+        .unwrap();
+        let Captured::Failure(failure) = composition.acquisition.capture(|_| Ok(())) else {
+            panic!("native collision required");
+        };
+        let mut stored = BoundStored::store(&composition, &binding, &failure).unwrap();
+        let expected_bytes = stored.pin.read().unwrap();
+        assert_eq!(
+            stored.pin.read_trace(),
+            evidence_file::ReadTrace {
+                validated: true,
+                read_calls: 2,
+                read_error: None,
+                post_validated: true,
+                hash_compared: true,
+            }
+        );
+        eprintln!("evidence_fixture stage=ReadControl win32=0");
+        let mut raw = ptr::null_mut();
+        // Keep ACL/metadata rights; specifically remove FILE_READ_DATA. The
+        // original remains held until the duplicate and full-ID proof exist.
+        check(unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                stored.pin.fixture_file().as_raw_handle(),
+                GetCurrentProcess(),
+                &mut raw,
+                FILE_READ_ATTRIBUTES | READ_CONTROL,
+                0,
+                0,
+            )
+        })
+        .unwrap();
+        let reduced = unsafe { File::from_raw_handle(raw) };
+        assert_eq!(
+            file_id(&reduced).unwrap(),
+            file_id(stored.pin.fixture_file()).unwrap()
+        );
+        let original = stored.pin.fixture_replace_file(reduced);
+        let mut sink = Sink {
+            accepted: 0,
+            refuse: false,
+        };
+        assert!(stored
+            .consume(&binding, &mut sink, || panic!("read must fail first"))
+            .is_err());
+        assert_eq!(sink.accepted, 0);
+        assert_eq!(
+            stored.pin.read_trace(),
+            evidence_file::ReadTrace {
+                validated: true,
+                read_calls: 1,
+                read_error: Some(ERROR_ACCESS_DENIED),
+                post_validated: false,
+                hash_compared: false,
+            }
+        );
+        drop(stored.pin.fixture_replace_file(original));
+        // The original pin proves exact bytes/length/hash unchanged. Reading it
+        // grants no fresh consumption authority after the failed verification.
+        assert_eq!(stored.pin.read().unwrap(), expected_bytes);
+        assert!(stored
+            .consume(&binding, &mut sink, || panic!("spent"))
+            .is_err());
+        assert_eq!(sink.accepted, 0);
+        assert!(BoundStored::store(&composition, &binding, &failure).is_err());
+        drop(stored);
+        cleanup(fixture);
+    }
+}
+
+#[test]
 fn native_operation_bound_context_custody_and_single_use() {
     for operation in [Operation::MoveOld, Operation::Publish] {
         for scenario in 0..5 {

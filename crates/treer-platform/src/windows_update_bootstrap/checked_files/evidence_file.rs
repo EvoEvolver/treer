@@ -1,5 +1,16 @@
 //! Disposable opaque evidence storage only. No reason schema or authority.
 use super::*;
+use std::cell::Cell;
+use windows_sys::Win32::System::IO::OVERLAPPED;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct ReadTrace {
+    pub(super) validated: bool,
+    pub(super) read_calls: u32,
+    pub(super) read_error: Option<u32>,
+    pub(super) post_validated: bool,
+    pub(super) hash_compared: bool,
+}
 
 const LIMIT: usize = 8192;
 const PREPARE: u32 =
@@ -29,6 +40,7 @@ pub(super) struct EvidencePin<'a> {
     file: File,
     identity: (u32, u64, u32, u32),
     hash: [u8; 32],
+    trace: Cell<ReadTrace>,
 }
 
 pub(super) fn directory(attempt: &Attempt, owner: &str) -> io::Result<PathBuf> {
@@ -45,6 +57,7 @@ fn read(
     owner: &str,
     expected: (u32, u64, u32, u32),
     hash: [u8; 32],
+    trace: &mut ReadTrace,
 ) -> io::Result<Vec<u8>> {
     let validate = || -> io::Result<u64> {
         protected_private_acl(file, owner)?;
@@ -64,24 +77,46 @@ fn read(
         Ok(length)
     };
     let length = validate()? as usize;
-    let mut reader = file;
-    reader.seek(SeekFrom::Start(0))?;
+    trace.validated = true;
     let mut bytes = vec![0; length + 1];
-    let mut used = 0;
-    loop {
-        let count = reader.read(&mut bytes[used..]).map_err(|_| denied())?;
-        if count == 0 {
-            break;
-        }
-        used += count;
-        if used > length {
+    let mut read_at = |buffer: &mut [u8], offset: u32| -> io::Result<usize> {
+        // These handles are synchronous disk handles. An explicit offset avoids
+        // SetFilePointerEx failing before the ReadFile rights check.
+        let mut overlapped: OVERLAPPED = unsafe { mem::zeroed() };
+        overlapped.Anonymous.Anonymous.Offset = offset;
+        let mut count = 0;
+        trace.read_calls += 1;
+        let result = unsafe {
+            ReadFile(
+                file.as_raw_handle(),
+                buffer.as_mut_ptr(),
+                buffer.len() as u32,
+                &mut count,
+                &mut overlapped,
+            )
+        };
+        if result == 0 {
+            let status = unsafe { GetLastError() };
+            // Only the one-byte probe at the independently observed end may
+            // establish EOF. A zero/short first read is never accepted.
+            if offset == length as u32 && status == ERROR_HANDLE_EOF {
+                return Ok(0);
+            }
+            trace.read_error = Some(status);
+            eprintln!("evidence_fixture stage=Read win32={status}");
             return Err(denied());
         }
-    }
-    if used != length || validate()? != length as u64 {
+        Ok(count as usize)
+    };
+    if read_at(&mut bytes[..length], 0)? != length
+        || read_at(&mut bytes[length..], length as u32)? != 0
+        || validate()? != length as u64
+    {
         return Err(denied());
     }
+    trace.post_validated = true;
     bytes.truncate(length);
+    trace.hash_compared = true;
     if <[u8; 32]>::from(Sha256::digest(&bytes)) != hash {
         return Err(denied());
     }
@@ -134,7 +169,11 @@ impl Attempt {
         at("sync", writer.sync_all())?;
         hook(Stage::Synced)?;
         let object = identity(&writer)?;
-        if at("prepare_readback", read(&writer, &owner, object, expected))? != bytes {
+        if at(
+            "prepare_readback",
+            read(&writer, &owner, object, expected, &mut ReadTrace::default()),
+        )? != bytes
+        {
             return Err(denied());
         }
         drop(writer);
@@ -158,7 +197,10 @@ impl Attempt {
         }
         let file = unsafe { File::from_raw_handle(raw) };
         if final_path(&file)? != path
-            || at("pin_readback", read(&file, &owner, object, expected))? != bytes
+            || at(
+                "pin_readback",
+                read(&file, &owner, object, expected, &mut ReadTrace::default()),
+            )? != bytes
         {
             return Err(denied());
         }
@@ -168,6 +210,7 @@ impl Attempt {
             file,
             identity: object,
             hash: expected,
+            trace: Cell::new(ReadTrace::default()),
         })
     }
 }
@@ -179,7 +222,24 @@ impl EvidencePin<'_> {
         if final_path(&self.file)? != directory(self.attempt, &owner)?.join("reason.evidence") {
             return Err(denied());
         }
-        read(&self.file, &owner, self.identity, self.hash)
+        let mut trace = ReadTrace::default();
+        let result = read(&self.file, &owner, self.identity, self.hash, &mut trace);
+        self.trace.set(trace);
+        result
+    }
+
+    pub(super) fn read_trace(&self) -> ReadTrace {
+        self.trace.get()
+    }
+
+    // Fixture-only access reduction; no reopening, record-derived handle or
+    // production caller. Tests prove full object identity before replacement.
+    pub(super) fn fixture_file(&self) -> &File {
+        &self.file
+    }
+
+    pub(super) fn fixture_replace_file(&mut self, file: File) -> File {
+        mem::replace(&mut self.file, file)
     }
 }
 
