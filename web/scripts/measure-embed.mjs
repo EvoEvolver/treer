@@ -44,7 +44,7 @@ function endpoint(request) {
 
 async function measure(temperature, pair, context, version, engine) {
   const page = await context.newPage()
-  const marks = [], network = [], pending = [], requests = new Map()
+  const marks = [], network = [], requests = new Map(), entries = new Map()
   await page.exposeBinding('__treerEmbedTiming', ({ frame }, stage, epoch) => {
     if (!stages.has(stage) || !Number.isFinite(epoch)) return
     const expected = stage === 'frame-created' || stage === 'ready-received' ? consoleOrigin : agentOrigin
@@ -90,18 +90,23 @@ async function measure(temperature, pair, context, version, engine) {
     }
   }, { consoleOrigin, agentOrigin })
   page.on('request', (request) => { const name = endpoint(request); if (name) requests.set(request, name) })
-  page.on('requestfinished', (request) => {
+  const record = (request, status) => {
     if (!requests.has(request)) return
-    pending.push((async () => {
-      const timing = request.timing(), response = await request.response()
-      // Deliberately omit URL, headers, bodies, cookies, codes, nonces and errors.
-      network.push({ endpoint: requests.get(request), status: response?.status() ?? null,
+      const timing = request.timing()
+      // Record response headers arrival even when a browser omits the finished
+      // event for a bodyless 204; unavailable responseEnd remains -1.
+      const value = { endpoint: requests.get(request), status,
         start_epoch_ms: timing.startTime, dns_start_ms: timing.domainLookupStart,
         dns_end_ms: timing.domainLookupEnd, connect_start_ms: timing.connectStart,
         tls_start_ms: timing.secureConnectionStart, connect_end_ms: timing.connectEnd,
         request_start_ms: timing.requestStart, response_start_ms: timing.responseStart,
-        response_end_ms: timing.responseEnd })
-    })())
+        response_end_ms: timing.responseEnd }
+      if (entries.has(request)) Object.assign(entries.get(request), value)
+      else { entries.set(request, value); network.push(value) }
+  }
+  page.on('response', (response) => record(response.request(), response.status()))
+  page.on('requestfinished', (request) => {
+    if (entries.has(request)) record(request, entries.get(request).status)
   })
   const run = { engine, version, pair, temperature, marks, network, success: false }
   report.runs.push(run)
@@ -115,7 +120,6 @@ async function measure(temperature, pair, context, version, engine) {
     await actual.locator('header.top').waitFor({ state: 'visible', timeout: 10000 })
     run.success = true
   } catch { run.failure = 'fixture-did-not-reach-isolated-ui' }
-  await Promise.allSettled(pending)
   const start = network.find((n) => n.endpoint === 'bootstrap')?.start_epoch_ms
   const consoleStart = network.find((n) => n.endpoint === 'console-document')?.start_epoch_ms
   if (Number.isFinite(start)) {
