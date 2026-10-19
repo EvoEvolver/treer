@@ -1198,6 +1198,53 @@ authority. Compilation is not native execution: exact-SHA hosted 2022/2025
 results and security acceptance remain required for this new coverage. This
 adds no durable latch, production reason adapter, restart recovery or W4 caller.
 
+### Next binding boundary: retained committed head under fixture ownership
+
+The read-failure fixture passed exact `5a99ade8` on hosted Server 2022 and 2025
+(run 39340099443). Both emitted the real `Read win32=5` and readable-control
+lines, with 15 filtered tests and 73 ordinary tests passed, four ignored. Core
+and security read and accepted the raw evidence (6158 and 6157). This closes the
+read-error fixture only; the current predecessor remains a fixed synthetic hash.
+
+The next increment must obtain expectations from an independently published,
+retained record before acquiring an operation. Keep it wholly inside a
+disposable native fixture. First specify and test ownership: a fixed protected
+lock file in the pinned fixture directory, exclusively opened without write or
+delete sharing, retained for the whole head/acquisition/evidence/consume
+sequence. Verify its ACL, single-link regular-file type, full file identity and
+directory binding; a competing opener or changed directory must refuse. A
+process-local `Cell`, a lock pathname or a digest cannot substitute for this
+retained object. This fixture lock is not the production installation lock, Host
+ownership or attested quiescence, and must never be exposed as such.
+
+Only while holding that fixture ownership may a writer publish the initial
+head through the existing fixed record replacement primitive. Use a separately
+versioned, strictly bounded head encoding with no error-status field: operation
+failure status cannot already exist in the predecessor. Its committed fields
+must bind the actual attempt directory, component, image role, operation,
+nonzero intent revision and full expected image identities, lengths and digests.
+These values originate in the independent fixture setup before the attempted
+operation; do not learn expectations from failure evidence or whichever current
+image is found. Fix the exact encoding before implementing it, with golden
+bytes and refusal of every truncation, trailing bytes and unsupported fields.
+
+After publication, retain the exact read-back head handle and its full file id.
+The context predecessor is the digest of these validated committed bytes, not
+the current fixed label. Revalidate the fixed head name against that retained
+object, bytes, ACL and directory before acquisition and before/after evidence
+consumption. A same-byte replacement with a different identity, changed revision
+or component, a foreign attempt, lost lock custody or a head advance must refuse
+without renewing acquisition or consumption. No reopen may reconstruct authority
+after process death. Tests must distinguish live fixture ownership and pinned
+head checks from an atomic compare-and-swap: the existing replacement helper is
+explicitly not a CAS against a non-cooperating writer.
+
+This checkpoint specifies the boundary only; no lock, head codec or adapter is
+implemented by it. Native lock exclusion, head codec and composed acquisition
+need separate review and hosted evidence. Durable consume-plus-head publication,
+crash ordering, real supervisor-owned installation locking and W2/W3 transaction
+assembly remain open. W4 and recovery remain disabled.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
