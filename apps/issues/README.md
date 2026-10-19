@@ -158,6 +158,7 @@ this way after #51.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `ISSUES_PROXY_URL` | required | Trusted Proxy origin for verification, directory, OAuth and messages |
+| `ISSUES_LEADER_AGENT` / `--leader-agent` | unset | Stable ID (`ag_` + 32 hex digits) of the leader Agent: `leader`/`user` in `waiting_on` resolve to it and ownerless issues are reminded to it. Unset: those values are refused and ownerless issues are not reminded. A deployed App carries it as a fixed argument, like `--proxy-url` |
 | `ISSUES_LISTEN` | `127.0.0.1:9440` | Private listener host:port, matching App declared port |
 | `ISSUES_DB` | `.treer/apps/issues/issues.sqlite3` | Durable SQLite file, relative to runtime cwd if not absolute |
 | `ISSUES_SERVICE_ID` | own Managed App record | Registered service audience; configure together with public URL |
@@ -343,12 +344,24 @@ later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) 
 `ISSUES_REMINDER_MAX` (default `24h`): **10m, 20m, 40m, 1h20m, 2h40m, 5h20m, 10h40m,
 21h20m, then every 24h**.
 
-- **Reset.** Any real activity on the issue (a comment, status or assignee change, an
-  edit, a lease) restarts the sequence at the first interval, counted from when the
-  activity happened; a new assignee starts from scratch and the old state is dropped. An
-  issue that stops needing reminders (resolved, labelled `epic`, unassigned, assigned to a
-  human) loses its state and starts fresh if it returns. Note that comments reset the
-  clock: they count as activity, including comments by other people.
+- **Who is reminded (#185).** The party that can move the issue: the Agent it **waits on**
+  (`waiting_on`), else its Agent assignee. `waiting_on` is `null`, an Agent's stable ID, `leader` or `user`
+  (both resolve to the configured leader Agent, who relays to the user; no human is ever messaged). It only exists
+  while the status is `blocked` (set together with the status) and clears when the status leaves `blocked` or it
+  is set to `null`, after which reminders return to the assignee. Whoever may edit the issue can set it (the same
+  authority as assigning), the setter and time are recorded (`waiting_by`, `waiting_at`) and shown, and the target must
+  be an Agent in the directory (checked again when reminding: a deleted Agent is replaced by the leader as an ownerless
+  issue if `agent ls` can be read). Unassigned unresolved issues, and only those, are reminded to the leader
+  (`with no owner: …`); an issue assigned to a human has a clear owner (intentionally: the leader is not nagged about it) and is
+  not reminded to anyone. If `waiting_on` is `leader`/`user` but this App was started without a leader Agent (for
+  example the saved command was changed), nobody is reminded: the Stale view then shows `responsible: none`. Each recipient gets at
+  most 4 reminder Messages per hour; whatever is still due merges into a later one.
+- **Reset (#185).** Only **progress** restarts the sequence, counted from when it happened: the responsible party
+  commenting on or editing the issue, or the responsibility passing to a party that was *not* responsible in the last
+  24 hours (so flipping `blocked`/`in_progress` or bouncing between the same two parties resets nothing). Other
+  people's comments, edits and lease changes do not. A change of recipient without progress keeps the schedule. An
+  issue that stops needing reminders (resolved, labelled `epic`, assigned to a human) loses its state and starts
+  fresh if it returns.
 - **Only when idle.** At the due time the App runs `treer agent show ID`; only when the
   Agent's `status` is `idle` and it is not busy does it send. A busy, unknown or
   unreachable Agent gets nothing and its interval does **not** grow; the next poll looks
@@ -375,6 +388,38 @@ later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) 
 
 The App's Policy must allow `agent show` and Messages to the assignee Agents; denials are
 skipped and logged by exit status only.
+
+## Shipped-but-open reminder (#185)
+
+With `--release-agent ag_…` (or `ISSUES_RELEASE_AGENT`; **off when unset**) a comment written by *that* Agent
+(identity from the verified principal, never from the title) whose title is `[release]` or `[deployed]`, contains
+the word `canary_passed` and names a commit as 8–40 lowercase hex digits records one signal per (issue, first 8
+hex digits). The signal is stored in SQLite (`shipped_signals`, so a restart neither loses nor repeats it) and is
+delivered once, by the reminder worker, to the issue's *current* Agent assignee when it is idle and under the hourly
+cap: `Issues reminder: these look shipped (canary_passed commit); close them if done: #12 (95ab3c1a).` plus the fixed
+`issues list …` command. Nothing else from the title reaches the Message. Issues that are `done`/`closed` or have no
+Agent assignee by then are settled without a Message. The deployed App needs `--release-agent` as a fixed argument of
+its saved command, like `--leader-agent`.
+
+## Notes (#186)
+
+`note` is a status beside `done` and `closed`: a knowledge or memory entry rather than work. A note gets no reminders (not
+even as an ownerless issue), is never in the Stale view, is not `unresolved` (so not in **Needs me**), never counts in a
+parent's progress rollup (its own subtree still does) and is treated as resolved when another issue lists it in
+`blocked_by`. Anything else works as usual: notes can be searched, referenced, edited, commented, and made a child or a
+parent (a summary epic can itself be a note). Conversion in either direction is a plain status change and appears in
+the activity (who and when); there are no extra rules. Create one with `issues create --status note`, filter with
+`issues list --status note` or the web status filter.
+
+## Stale view (#185)
+
+`GET /v1/stale?hours=4&limit=50&offset=0` (hours 1..720) lists unresolved issues (not `done`/`closed`, no skip label)
+whose last **progress** is older than that, oldest first, for any authenticated principal: id, title, status, assignee,
+the responsible Agent and whether it is `own` or `waiting`, `waiting_on` with who set it and when, `stale_hours`,
+`since_any_activity_hours` (so a stall hidden behind other people's comments is visible), `progress_reason` and
+`progress_resets`. Comment bodies are never returned. `issues stale [--hours N]` and the **Stale** view in the web UI
+use it. Issues stored before this version start with `progress_at` = their last update and `rv` = their version, so
+deploying it does not remind anyone at once.
 
 ## Agent client
 

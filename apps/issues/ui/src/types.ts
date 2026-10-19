@@ -1,4 +1,4 @@
-export type Status = "open" | "in_progress" | "blocked" | "done" | "closed";
+export type Status = "open" | "in_progress" | "blocked" | "done" | "closed" | "note";
 export type Priority = "low" | "normal" | "high" | "urgent";
 
 export interface Principal { id: string; kind: "human" | "agent"; name: string; role?: string; path?: string | null }
@@ -9,7 +9,14 @@ export interface Issue {
   assignee: string | null; parent_id: number | null; blocked_by: number[]; creator: string;
   created_at: string; updated_at: string; version: number; claim: Claim | null;
   progress: Progress; unresolved_dependencies: number[];
+  waiting_on?: string | null; waiting_by?: string | null; waiting_at?: string | null;
 }
+export interface StaleIssue {
+  id: number; title: string; status: Status; assignee: string | null; responsible: string | null; responsible_kind: string;
+  waiting_on: string | null; waiting_by: string | null; waiting_at: string | null; stale_hours: number;
+  since_any_activity_hours: number; progress_reason: string; progress_resets: number;
+}
+export interface StaleResult { issues: StaleIssue[]; total: number; hours: number; next_offset: number | null }
 export interface Notification { status: string; code?: string; message?: string; unresolved_mentions?: string[]; mention_candidates?: Record<string, string[]>; hints?: { agent: string; delivery: string; tip: string }[] }
 export interface ActivityEvent {
   id: number; actor: string; kind: string; at: string; summary: string;

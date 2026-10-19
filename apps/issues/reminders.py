@@ -97,9 +97,34 @@ def safe_link(base_url):
     return value
 
 
+REMINDER_MESSAGES_PER_HOUR = 4     # per recipient, however many issues point at them; the rest wait for the next hour and merge
+
+
+def roster(treer_bin='treer', clock=time.time, runner=None, ttl=60):
+    """Callable returning the set of live Agent IDs (from `treer agent ls -R /`, cached for `ttl` seconds), or None when it
+    cannot be read: an unanswerable roster never reroutes a reminder."""
+    state = {'at': -1e18, 'ids': None}
+    run = runner or (lambda args: run_cli(treer_bin, args))
+
+    def live():
+        if clock() - state['at'] >= ttl:
+            state['at'] = clock()
+            status, output = run(['agent', 'ls', '-R', '/'])
+            ids = None
+            if status == 0:
+                try:
+                    ids = {a['agent_id'] for a in json.loads(output).get('agents', []) if isinstance(a, dict) and isinstance(a.get('agent_id'), str)}
+                except (ValueError, AttributeError):
+                    ids = None
+            state['ids'] = ids
+        return state['ids']
+    return live
+
+
 class Reminders:
-    def __init__(self, store, treer_bin='treer', clock=time.time, runner=None, log=None, skip=None, schedule=None):
+    def __init__(self, store, treer_bin='treer', clock=time.time, runner=None, log=None, skip=None, schedule=None, live_agents=None):
         self.store, self.treer_bin, self.clock = store, treer_bin, clock
+        self.live_agents = live_agents or (lambda: None)
         self.skip = skip
         self.schedule = schedule or backoff()
         self.runner = runner or self.run_treer
@@ -123,11 +148,26 @@ class Reminders:
 
     REF = 'issues list --assignee me --unresolved'   # reminders only go to Agents: a fixed command, no URL, no tree path
 
-    def body(self, issue_ids):
-        shown = ', '.join(f'#{i}' for i in issue_ids[:MAX_LISTED])
-        more = f' (+{len(issue_ids) - MAX_LISTED} more)' if len(issue_ids) > MAX_LISTED else ''
+    def body(self, issue_ids, kinds=None):
+        """Issue IDs only (plus fixed words). Issues assigned to the recipient read as before; issues that wait on them or
+        that nobody owns (leader fallback) are listed under their own fixed label."""
+        kinds = kinds or {}
+        groups = [(label, [i for i in issue_ids if kinds.get(i, 'own') == kind])
+                  for label, kind in (('assigned to you', 'own'), ('waiting on you', 'waiting'), ('with no owner', 'orphan'))]
+        groups = [(label, ids) for label, ids in groups if ids]
+        if len(groups) <= 1 and (not groups or groups[0][0] == 'assigned to you'):
+            shown = ', '.join(f'#{i}' for i in issue_ids[:MAX_LISTED])
+            more = f' (+{len(issue_ids) - MAX_LISTED} more)' if len(issue_ids) > MAX_LISTED else ''
+            noun = 'issue' if len(issue_ids) == 1 else 'issues'
+            return f'Issues reminder: you are idle and have {len(issue_ids)} unresolved {noun} assigned to you: {shown}{more}.\n{self.REF}'
+        room = MAX_LISTED
+        parts = []
+        for label, ids in groups:
+            take = ids[:max(room, 0)]
+            room -= len(take)
+            parts.append(f'{label}: ' + ', '.join(f'#{i}' for i in take) + (f' (+{len(ids) - len(take)} more)' if len(ids) > len(take) else ''))
         noun = 'issue' if len(issue_ids) == 1 else 'issues'
-        return f'Issues reminder: you are idle and have {len(issue_ids)} unresolved {noun} assigned to you: {shown}{more}.\n{self.REF}'
+        return f'Issues reminder: you are idle and have {len(issue_ids)} unresolved {noun} \u2014 ' + '; '.join(parts) + f'.\n{self.REF}'
 
     @staticmethod
     def key(agent, rows):
@@ -139,21 +179,37 @@ class Reminders:
     def tick(self, now=None):
         """One poll: align the schedule with the issues, then remind every idle Agent that has issues due."""
         now = self.clock() if now is None else now
-        self.store.reminder_sync(self.store.reminder_candidates(skip_labels=skip_labels() if self.skip is None else self.skip), now, self.schedule.first)
+        candidates = self.store.reminder_candidates(skip_labels=skip_labels() if self.skip is None else self.skip)
+        kinds = {c[0]: c[4] for c in candidates}
+        self.store.reminder_sync(candidates, now, self.schedule.first)
         due = self.store.reminder_due(now)
+        leader = getattr(self.store, 'leader_agent', None)
+        live = self.live_agents()
         by_agent = {}
         for row in due:
-            by_agent.setdefault(row['assignee'], []).append(row)
+            recipient = row['assignee']
+            if live is not None and recipient not in live:
+                # The Agent it points at is gone: nobody clear owns it now, so the leader (if configured and alive) hears of it.
+                if leader and leader in live and leader != recipient:
+                    kinds[row['issue_id']] = 'orphan'
+                    recipient = leader
+                else:
+                    continue
+            by_agent.setdefault(recipient, []).append(row)
         sent = skipped = 0
         for agent, rows in by_agent.items():
             if self.retry_after.get(agent, 0) > now:
                 skipped += 1            # looked at a moment ago and it was busy: do not probe again before the next poll
                 continue
+            if self.store.reminder_budget_left(agent, now, REMINDER_MESSAGES_PER_HOUR) <= 0:
+                self.retry_after[agent] = now + POLL
+                skipped += 1            # already got its hourly share of reminders: everything still due merges into a later one
+                continue
             if not self.idle(agent):
                 self.retry_after[agent] = now + POLL
                 skipped += 1            # busy, unknown or unreachable: no message and no growth; look again next poll
                 continue
-            status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body([r['issue_id'] for r in rows]),
+            status, _ = self.runner(['message', 'send', '--to', agent, '--body', self.body([r['issue_id'] for r in rows], kinds),
                                      '--idempotency-key', self.key(agent, rows)])
             if status != 0:
                 self.retry_after[agent] = now + POLL
@@ -161,9 +217,39 @@ class Reminders:
                 self.log(f'Issues reminder not delivered to {agent} (treer exit {status})')
                 continue
             self.retry_after.pop(agent, None)
+            self.store.reminder_budget_spend(agent, now)
             self.store.reminder_advance([r['issue_id'] for r in rows], now, self.schedule.factor, self.schedule.maximum)
             sent += 1
-        return {'sent': sent, 'skipped': skipped, 'due': len(due)}
+        shipped = self.shipped_tick(now)
+        return {'sent': sent + shipped, 'skipped': skipped, 'due': len(due)}
+
+    def shipped_tick(self, now):
+        """One-off 'looks shipped' reminders raised by the release Agent's canary_passed comment (see Store.shipped_pending):
+        fixed words, integer issue IDs and the 8 hex digits of the commit only; delivered once per (issue, commit)."""
+        pending = self.store.shipped_pending()
+        self.store.shipped_done([(i, sha) for i, sha, assignee in pending if assignee is None], now)   # nobody left to tell
+        by_agent = {}
+        for issue_id, sha8, assignee in pending:
+            if assignee:
+                by_agent.setdefault(assignee, []).append((issue_id, sha8))
+        sent = 0
+        for agent, pairs in by_agent.items():
+            if self.retry_after.get(agent, 0) > now or self.store.reminder_budget_left(agent, now, REMINDER_MESSAGES_PER_HOUR) <= 0 or not self.idle(agent):
+                self.retry_after[agent] = now + POLL
+                continue
+            shown = ', '.join(f'#{i} ({sha})' for i, sha in pairs[:MAX_LISTED]) + (f' (+{len(pairs) - MAX_LISTED} more)' if len(pairs) > MAX_LISTED else '')
+            key = 'issues-shipped-' + agent + '-' + hashlib.sha256(json.dumps(pairs[:MAX_LISTED]).encode()).hexdigest()[:20]
+            status, _ = self.runner(['message', 'send', '--to', agent, '--body',
+                                     f'Issues reminder: these look shipped (canary_passed commit); close them if done: {shown}.\n{self.REF}',
+                                     '--idempotency-key', key])
+            if status != 0:
+                self.retry_after[agent] = now + POLL
+                self.log(f'Issues shipped reminder not delivered to {agent} (treer exit {status})')
+                continue
+            self.store.reminder_budget_spend(agent, now)
+            self.store.shipped_done(pairs[:MAX_LISTED], now)
+            sent += 1
+        return sent
 
     def loop(self, wait=None):
         wait = wait or self.stop.wait

@@ -1,6 +1,7 @@
 """Transactional issue state. All ownership checks run under BEGIN IMMEDIATE."""
 import json
 import os
+import re
 import sqlite3
 import time
 import unicodedata
@@ -11,7 +12,10 @@ from auth import Error
 from notify import (ASK_PER_AUTHOR, HOURLY, HOURLY_ISSUES, HOURLY_WINDOW, POLICY_MODES, WINDOW, notice_for, parse_intent,
                     recipients_for, resolve_mentions, unresolved_mentions)
 
-STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed')
+STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed', 'note')
+RESOLVED = ('done', 'closed', 'note')      # nothing left to do: no reminders, not stale, not unresolved, not a pending dependency
+SHIPPED = re.compile(r'\[(?:release|deployed)\].*\bcanary_passed\b')
+HEX = re.compile(r'(?<![0-9A-Za-z])([0-9a-f]{8,40})(?![0-9A-Za-z])')
 PRIORITIES = ('low', 'normal', 'high', 'urgent')
 
 
@@ -29,6 +33,15 @@ def fields(body, allowed):
 
 
 COMMENT_TITLE_BYTES = 200
+
+
+def shipped_sha(title):
+    """First 8 hex digits of the commit named in a `[release] … canary_passed … <8-40 hex>` comment title, else None.
+    Only the matched hex is used afterwards: no other author text reaches the reminder."""
+    if not isinstance(title, str) or not SHIPPED.match(title):
+        return None
+    found = HEX.search(title)
+    return found.group(1)[:8] if found else None
 EXCERPT_CHARS = 160
 
 
@@ -45,8 +58,10 @@ def ident(value):
 
 
 class Store:
-    def __init__(self, path, clock=time.time):
+    def __init__(self, path, clock=time.time, leader_agent=None, release_agent=None):
         self.path, self.clock = str(path), clock
+        self.release_agent = release_agent     # only THIS Agent's comments can raise a 'looks shipped' signal; unset: the feature is off
+        self.leader_agent = leader_agent       # stable ID that `leader` and `user` in waiting_on resolve to (unset: those values are refused)
         os.umask(0o077)
         Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         Path(path).parent.chmod(0o700)
@@ -73,6 +88,10 @@ class Store:
                     subject TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS notify_ask_budget(recipient TEXT NOT NULL, author TEXT NOT NULL, hour INTEGER NOT NULL,
                     pushes INTEGER NOT NULL, PRIMARY KEY(recipient, author, hour));
+                CREATE TABLE IF NOT EXISTS shipped_signals(issue_id INTEGER NOT NULL, sha8 TEXT NOT NULL, created_at REAL NOT NULL,
+                    sent_at REAL, PRIMARY KEY(issue_id, sha8));
+                CREATE TABLE IF NOT EXISTS reminder_budget(recipient TEXT NOT NULL, hour INTEGER NOT NULL, messages INTEGER NOT NULL,
+                    PRIMARY KEY(recipient, hour));
                 CREATE TABLE IF NOT EXISTS reminder_backoff(issue_id INTEGER PRIMARY KEY, assignee TEXT NOT NULL, version INTEGER NOT NULL,
                     interval REAL NOT NULL, next_due REAL NOT NULL, count INTEGER NOT NULL DEFAULT 0);
                 CREATE INDEX IF NOT EXISTS reminder_backoff_due ON reminder_backoff(next_due);
@@ -97,8 +116,27 @@ class Store:
             db.close()
 
     def all(self, db):
-        return {row['id']: dict(json.loads(row['data']), id=row['id'])
+        return {row['id']: self.normal(dict(json.loads(row['data']), id=row['id']))
                 for row in db.execute('SELECT id,data FROM issues')}
+
+    @staticmethod
+    def normal(issue):
+        """Issues written before #185 get its fields: no waiting_on, the reminder version is the issue version and the
+        last progress is the last update (so a deployment starts every clock from what already happened)."""
+        issue.setdefault('waiting_on', None)
+        issue.setdefault('rv', issue.get('version', 0))
+        issue.setdefault('progress_at', issue.get('updated_at'))
+        return issue
+
+    def responsible(self, issue):
+        """(Agent who can move the issue, kind): the Agent it waits on (`leader`/`user` resolve to the configured leader
+        Agent), else its Agent assignee; (None, None) when nobody clear. kind is 'waiting' or 'own'."""
+        waiting = issue.get('waiting_on')
+        if waiting:
+            target = self.leader_agent if waiting in ('leader', 'user') else waiting
+            return (target, 'waiting') if target else (None, None)
+        assignee = issue.get('assignee')
+        return (assignee, 'own') if assignee and assignee.startswith('ag_') else (None, None)
 
     def get(self, items, issue_id):
         if issue_id not in items:
@@ -120,10 +158,11 @@ class Store:
             children = [i for i in items.values() if i['parent_id'] == parent]
             descendants.extend(children)
             pending.extend(i['id'] for i in children)
-        result['progress'] = {'total': len(descendants),
-            'completed': sum(i['status'] in ('done', 'closed') for i in descendants),
-            'by_status': {s: sum(i['status'] == s for i in descendants) for s in STATUSES}}
-        result['unresolved_dependencies'] = [i for i in issue['blocked_by'] if items[i]['status'] not in ('done', 'closed')]
+        counted = [i for i in descendants if i['status'] != 'note']      # notes are memory, not work: they do not count in rollups
+        result['progress'] = {'total': len(counted),
+            'completed': sum(i['status'] in ('done', 'closed') for i in counted),
+            'by_status': {s: sum(i['status'] == s for i in counted) for s in STATUSES}}
+        result['unresolved_dependencies'] = [i for i in issue['blocked_by'] if items[i]['status'] not in RESOLVED]
         return result
 
     def list(self, filters):
@@ -146,7 +185,7 @@ class Store:
                 if value not in ('1', 'true', '0', 'false'):
                     fail('invalid_field', 'unresolved must be 1 or 0')
                 if value in ('1', 'true'):
-                    result = [i for i in result if i['status'] not in ('done', 'closed')]
+                    result = [i for i in result if i['status'] not in RESOLVED]
             elif key == 'label':
                 result = [i for i in result if value in i['labels']]
             elif key == 'parent_id':
@@ -222,6 +261,15 @@ class Store:
             fail('invalid_field', 'Labels must be unique')
         if issue['assignee'] is not None and (not isinstance(issue['assignee'], str) or issue['assignee'] not in {p['id'] for p in directory}):
             fail('assignee_unavailable', 'Use a stable ID from the Treer directory')
+        waiting = issue.get('waiting_on')
+        if waiting is not None:
+            if not isinstance(waiting, str) or issue['status'] != 'blocked':
+                fail('invalid_field', 'waiting_on needs status blocked and a string value')
+            if waiting in ('leader', 'user'):
+                if not self.leader_agent:
+                    fail('leader_unconfigured', 'This Issues App has no leader Agent configured, so waiting_on leader/user is unavailable')
+            elif waiting not in {p['id'] for p in directory if p.get('kind') == 'agent'}:
+                fail('invalid_field', 'waiting_on must be an Agent from the directory, leader or user')
         parent = issue['parent_id']
         if parent is not None:
             ident(parent)
@@ -248,8 +296,37 @@ class Store:
                 seen.add(dependency)
                 pending.extend(items[dependency]['blocked_by'])
 
+    RESP_MEMORY = 24 * 3600     # a party that was responsible within this window does not restart the clock when it becomes responsible again
+
+    def track_progress(self, issue, before, action, actor, now):
+        """Moves the reminder clock (`rv`, `progress_at`) only for real progress: the party that was responsible acting on
+        the issue, or the responsibility passing to a party that was NOT responsible in the last 24 hours (so flipping
+        blocked/in_progress or bouncing between two parties cannot keep an issue out of the stale view). Other people's
+        comments and edits never move it."""
+        if action == 'create':
+            reason = 'created'
+        else:
+            old, _ = self.responsible(before)
+            new, _ = self.responsible(issue)
+            reason = None
+            if old != new:
+                earlier = issue.get('resp_seen') or {}
+                seen = dict(earlier)
+                if old:
+                    seen[old] = now
+                if not (new is not None and now - earlier.get(new, -self.RESP_MEMORY) < self.RESP_MEMORY):
+                    reason = 'responsible_changed'
+                issue['resp_seen'] = dict(sorted(seen.items(), key=lambda kv: kv[1])[-8:])
+            elif action in ('update', 'comment') and old and actor['id'] == old:
+                reason = 'responsible_activity'
+        if reason:
+            issue['rv'] = issue.get('rv', 0) + 1
+            issue['progress_at'] = stamp(now)
+            issue['progress_reason'] = reason
+            issue['progress_resets'] = issue.get('progress_resets', 0) + 1
+
     def mutate(self, issue_id, action, body, actor, directory, paths=None):
-        allowed = ('title', 'description', 'status', 'priority', 'labels', 'assignee', 'parent_id', 'blocked_by')
+        allowed = ('title', 'description', 'status', 'priority', 'labels', 'assignee', 'parent_id', 'blocked_by', 'waiting_on')
         fields(body, allowed if action == 'create' else (*allowed, 'version') if action == 'update'
                else ('body', 'title') if action == 'comment' else ('action', 'seconds'))
         with self.connect() as db:
@@ -258,8 +335,8 @@ class Store:
             items = self.all(db)
             if action == 'create':
                 issue = dict(title='', description='', status='open', priority='normal', labels=[],
-                             assignee=None, parent_id=None, blocked_by=[], creator=actor['id'],
-                             created_at=stamp(now), updated_at=stamp(now), version=0, claim=None, **{'id': -1})
+                             assignee=None, parent_id=None, blocked_by=[], creator=actor['id'], waiting_on=None,
+                             created_at=stamp(now), updated_at=stamp(now), version=0, claim=None, rv=0, progress_at=stamp(now), **{'id': -1})
                 issue.update(body)
                 self.validate(issue, items, directory)
                 issue_id = db.execute('INSERT INTO issues(data) VALUES(?)', ('{}',)).lastrowid
@@ -280,6 +357,8 @@ class Store:
                     if 'version' in body and (type(body['version']) is not int or body['version'] != issue['version']):
                         fail('version_conflict', 'Reload the issue before editing', 409)
                     issue.update({k: v for k, v in body.items() if k != 'version'})
+                    if issue['status'] != 'blocked' and 'waiting_on' not in body:
+                        issue['waiting_on'] = None          # leaving blocked ends the wait; the assignee is responsible again
                     self.validate(issue, items, directory)
                     summary = 'Issue updated: ' + ', '.join(k for k in body if k != 'version')
                 elif action == 'comment':
@@ -297,9 +376,9 @@ class Store:
                     if operation in ('renew', 'release') and (not claim or claim['holder'] != actor['id']):
                         fail('claim_missing', 'No active lease owned by caller', 409)
                     if operation != 'release':
-                        if issue['status'] in ('done', 'closed') or issue['assignee'] not in (None, actor['id']):
+                        if issue['status'] in RESOLVED or issue['assignee'] not in (None, actor['id']):
                             fail('not_claimable', 'Issue must be active and unassigned or assigned to caller', 409)
-                        if any(items[d]['status'] not in ('done', 'closed') for d in issue['blocked_by']):
+                        if any(items[d]['status'] not in RESOLVED for d in issue['blocked_by']):
                             fail('dependencies_unresolved', 'Resolve blocking issues before claiming', 409)
                         issue['claim'] = {'holder': actor['id'], 'expires_at': stamp(now+seconds)}
                     else:
@@ -317,10 +396,14 @@ class Store:
                 mention_text = earlier = ''
             mentions = sorted(resolve_mentions(mention_text, directory, paths) - resolve_mentions(earlier, directory, paths) - {actor['id']})
             if action in ('create', 'update') and issue['status'] in ('in_progress', 'done'):
-                if any(items[d]['status'] not in ('done', 'closed') for d in issue['blocked_by']):
+                if any(items[d]['status'] not in RESOLVED for d in issue['blocked_by']):
                     fail('dependencies_unresolved', 'Resolve blocking issues before starting or completing', 409)
-            if issue['status'] in ('done', 'closed'):
+            if issue['status'] in RESOLVED:
                 issue['claim'] = None
+            if issue.get('waiting_on') != before.get('waiting_on'):
+                issue['waiting_by'] = actor['id'] if issue.get('waiting_on') else None
+                issue['waiting_at'] = stamp(now) if issue.get('waiting_on') else None
+            self.track_progress(issue, before, action, actor, now)
             issue['version'] += 1
             issue['updated_at'] = stamp(now)
             event = {'actor': actor['id'], 'kind': action, 'at': stamp(now), 'summary': summary,
@@ -340,6 +423,10 @@ class Store:
             if mentions:
                 event['mentions'] = mentions
             db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(issue), issue_id))
+            if action == 'comment' and self.release_agent and actor['id'] == self.release_agent:
+                sha8 = shipped_sha(body.get('title'))
+                if sha8 and issue['status'] not in RESOLVED and (issue.get('assignee') or '').startswith('ag_'):
+                    db.execute('INSERT OR IGNORE INTO shipped_signals(issue_id,sha8,created_at) VALUES(?,?,?)', (issue_id, sha8, now))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
             names = {p['id']: p.get('name', p['id']) for p in directory}
             notice = notice_for(action, actor, before, issue, changed, mentions, names, body.get('title') if action == 'comment' else None)
@@ -494,7 +581,7 @@ class Store:
         return 'hourly'
 
     def unresolved_by_assignee(self, prefix='ag_', skip_labels=()):
-        """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix. Issues carrying
+        """Unresolved (not done/closed/note) issue IDs per assignee whose stable ID starts with prefix. Issues carrying
         any of skip_labels (e.g. long-lived epics) are not counted."""
         skip = {label.lower() for label in skip_labels}
         with self.connect() as db:
@@ -502,41 +589,114 @@ class Store:
         result = {}
         for issue in sorted(items.values(), key=lambda i: i['id']):
             assignee = issue['assignee']
-            if assignee and assignee.startswith(prefix) and issue['status'] not in ('done', 'closed') and not skip & {label.lower() for label in issue['labels']}:
+            if assignee and assignee.startswith(prefix) and issue['status'] not in RESOLVED and not skip & {label.lower() for label in issue['labels']}:
                 result.setdefault(assignee, []).append(issue['id'])
         return result
 
     def reminder_candidates(self, prefix='ag_', skip_labels=()):
-        """(issue ID, assignee, version, updated-at epoch) of every issue that needs reminding: unresolved, assigned to an Agent, not skipped.
-        The version changes on every real write (edit, comment, status/assignee change, lease), which resets the backoff."""
+        """(issue ID, recipient, reminder version, progress epoch, kind) of every unresolved, non-skipped issue that needs
+        reminding. The recipient is the party who can move it: the Agent it waits on (`waiting`), else its Agent assignee
+        (`own`); an issue nobody clear owns (unassigned) goes to the leader Agent as `orphan` when one is configured.
+        The version is `rv`, which only real progress by the responsible party (or a change of party) moves."""
         skip = {label.lower() for label in skip_labels}
         with self.connect() as db:
             items = self.all(db)
-        return [(i['id'], i['assignee'], i['version'], datetime.fromisoformat(i['updated_at'].replace('Z', '+00:00')).timestamp())
-                for i in sorted(items.values(), key=lambda i: i['id'])
-                if i['assignee'] and i['assignee'].startswith(prefix) and i['status'] not in ('done', 'closed')
-                and not skip & {label.lower() for label in i['labels']}]
+        result = []
+        for i in sorted(items.values(), key=lambda i: i['id']):
+            if i['status'] in RESOLVED or skip & {label.lower() for label in i['labels']}:
+                continue
+            party, kind = self.responsible(i)
+            if party is None and i['assignee'] is None and not i.get('waiting_on') and self.leader_agent:
+                party, kind = self.leader_agent, 'orphan'
+            if party is None or not party.startswith(prefix):
+                continue
+            result.append((i['id'], party, i['rv'], datetime.fromisoformat(i['progress_at'].replace('Z', '+00:00')).timestamp(), kind))
+        return result
 
     def reminder_sync(self, candidates, now, first):
         """Aligns the persisted backoff with the issues: issues that stopped needing a reminder lose their state; a new one
-        starts at `first` from now (so a fresh deployment does not remind anyone at once); a changed assignee or any new
-        activity (version) starts over. Idempotent."""
-        wanted = {issue_id: (assignee, version, updated) for issue_id, assignee, version, updated in candidates}
+        starts at `first` from now (so a fresh deployment does not remind anyone at once); progress (rv) starts over; a
+        change of recipient without progress keeps the schedule. Idempotent."""
+        wanted = {c[0]: c[1:4] for c in candidates}
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             current = {row['issue_id']: row for row in db.execute('SELECT * FROM reminder_backoff')}
             for issue_id in set(current) - set(wanted):
                 db.execute('DELETE FROM reminder_backoff WHERE issue_id=?', (issue_id,))
-            for issue_id, (assignee, version, updated) in wanted.items():
+            for issue_id, (recipient, version, updated) in wanted.items():
                 row = current.get(issue_id)
                 if row is None:
                     start = now                       # newly tracked (also: just deployed): the first interval starts now
-                elif row['assignee'] != assignee or row['version'] != version:
-                    start = min(now, max(updated, now - first))   # activity: counted from when it happened (never in the future)
+                elif row['version'] != version:
+                    start = min(now, max(updated, now - first))   # progress: counted from when it happened (never in the future)
+                elif row['assignee'] != recipient:
+                    db.execute('UPDATE reminder_backoff SET assignee=? WHERE issue_id=?', (recipient, issue_id))
+                    continue
                 else:
                     continue
                 db.execute('INSERT OR REPLACE INTO reminder_backoff(issue_id,assignee,version,interval,next_due,count) VALUES(?,?,?,?,?,0)',
-                           (issue_id, assignee, version, first, max(now, start + first)))
+                           (issue_id, recipient, version, first, max(now, start + first)))
+
+    def shipped_pending(self):
+        """(issue ID, sha8, assignee) of recorded 'looks shipped' signals not yet delivered. Signals for issues that were
+        resolved or lost their Agent assignee in the meantime are settled without a message."""
+        with self.connect() as db:
+            rows = db.execute('SELECT issue_id,sha8 FROM shipped_signals WHERE sent_at IS NULL ORDER BY created_at,issue_id').fetchall()
+            items = self.all(db)
+        out = []
+        for row in rows:
+            issue = items.get(row['issue_id'])
+            assignee = issue['assignee'] if issue else None
+            out.append((row['issue_id'], row['sha8'], assignee if issue and issue['status'] not in RESOLVED and (assignee or '').startswith('ag_') else None))
+        return out
+
+    def shipped_done(self, pairs, now):
+        with self.connect() as db:
+            for issue_id, sha8 in pairs:
+                db.execute('UPDATE shipped_signals SET sent_at=? WHERE issue_id=? AND sha8=?', (now, issue_id, sha8))
+
+    def reminder_budget_left(self, recipient, now, limit):
+        """Messages a recipient may still get this hour (a cap on reminder volume however many issues point at them)."""
+        with self.connect() as db:
+            row = db.execute('SELECT messages FROM reminder_budget WHERE recipient=? AND hour=?', (recipient, int(now // 3600))).fetchone()
+        return limit - (row['messages'] if row else 0)
+
+    def reminder_budget_spend(self, recipient, now):
+        hour = int(now // 3600)
+        with self.connect() as db:
+            db.execute('INSERT INTO reminder_budget(recipient,hour,messages) VALUES(?,?,1) ON CONFLICT(recipient,hour) DO UPDATE SET messages=messages+1', (recipient, hour))
+            db.execute('DELETE FROM reminder_budget WHERE hour < ?', (hour - 2,))
+
+    def stale(self, hours, limit, offset, skip_labels=()):
+        """Unresolved, non-skipped issues without progress for more than `hours`, oldest first: who is responsible, what
+        they wait on (and who set it, when), how long since ANY activity, and how often/why the clock was last moved."""
+        if type(hours) is not int or not 1 <= hours <= 720:
+            fail('invalid_field', 'hours must be an integer 1..720')
+        if type(limit) is not int or type(offset) is not int or not 1 <= limit <= 100 or offset < 0:
+            fail('invalid_pagination', 'limit 1..100; offset >=0')
+        skip = {label.lower() for label in skip_labels}
+        now = self.clock()
+        with self.connect() as db:
+            items = self.all(db)
+        rows = []
+        for i in items.values():
+            if i['status'] in RESOLVED or skip & {label.lower() for label in i['labels']}:
+                continue
+            progress = datetime.fromisoformat(i['progress_at'].replace('Z', '+00:00')).timestamp()
+            if now - progress <= hours * 3600:
+                continue
+            party, kind = self.responsible(i)
+            rows.append((progress, {
+                'id': i['id'], 'title': i['title'], 'status': i['status'], 'priority': i['priority'], 'assignee': i['assignee'],
+                'responsible': party, 'responsible_kind': kind or 'none', 'waiting_on': i.get('waiting_on'),
+                'waiting_by': i.get('waiting_by'), 'waiting_at': i.get('waiting_at'),
+                'stale_hours': int((now - progress) // 3600),
+                'since_any_activity_hours': int((now - datetime.fromisoformat(i['updated_at'].replace('Z', '+00:00')).timestamp()) // 3600),
+                'progress_at': i['progress_at'], 'progress_reason': i.get('progress_reason', 'before_tracking'),
+                'progress_resets': i.get('progress_resets', 0)}))
+        rows.sort(key=lambda r: (r[0], r[1]['id']))
+        page = [r[1] for r in rows[offset:offset + limit]]
+        return {'issues': page, 'total': len(rows), 'hours': hours, 'next_offset': offset + limit if offset + limit < len(rows) else None}
 
     def reminder_due(self, now):
         with self.connect() as db:

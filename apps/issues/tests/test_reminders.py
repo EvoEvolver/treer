@@ -18,6 +18,7 @@ PEOPLE = [{'id': 'ag_a', 'kind': 'agent'}, {'id': 'ag_b', 'kind': 'agent'}, {'id
           {'id': 'usr_h', 'kind': 'human'}]
 ACTOR = {'id': 'usr_h', 'kind': 'human', 'role': 'admin', 'name': 'h'}
 OTHER = {'id': 'ag_b', 'kind': 'agent', 'name': 'b'}
+A = {'id': 'ag_a', 'kind': 'agent', 'name': 'a'}          # the assignee of most issues: only ITS activity moves the clock
 T0 = 1_800_000_000.0
 MIN = 60.0
 HOUR = 3600.0
@@ -80,8 +81,8 @@ class ReminderBase(unittest.TestCase):
     def act(self, issue_id, action, body, actor=ACTOR):
         return self.store.mutate(issue_id, action, body, actor, PEOPLE)
 
-    def reminders(self, treer, schedule=DEFAULT, store=None, skip=None):
-        return Reminders(store or self.store, clock=lambda: self.now, runner=treer, log=self.logs.append, schedule=schedule, skip=skip)
+    def reminders(self, treer, schedule=DEFAULT, store=None, skip=None, live=None):
+        return Reminders(store or self.store, clock=lambda: self.now, runner=treer, log=self.logs.append, schedule=schedule, skip=skip, live_agents=live)
 
     def advance(self, seconds):
         self.now += seconds
@@ -162,11 +163,14 @@ class StateRulesTest(ReminderBase):
         self.assertEqual(self.store.reminder_states()[a]['count'], 3)
         grown = self.store.reminder_states()[a]['interval']
         self.assertEqual(grown, 80 * MIN)
-        self.act(a, 'comment', {'body': 'any news?'}, OTHER)                 # real activity
+        self.act(a, 'comment', {'body': 'any news?'}, OTHER)
+        r.tick()
+        self.assertEqual(self.store.reminder_states()[a]['count'], 3, "someone else's comment does not move the clock")
+        self.act(a, 'comment', {'body': 'working on it'}, A)                 # real activity by the responsible party
         r.tick()
         state = self.store.reminder_states()[a]
         self.assertEqual((state['count'], state['interval'], state['next_due']), (0, FIRST, self.now + FIRST), 'comment: back to ten minutes')
-        self.act(a, 'update', {'status': 'in_progress'})
+        self.act(a, 'update', {'status': 'in_progress'}, A)
         self.advance(5 * MIN)
         r.tick()
         self.assertEqual(self.store.reminder_states()[a]['next_due'], self.now - 5 * MIN + FIRST, 'a status change restarts the clock')
@@ -230,6 +234,253 @@ class StateRulesTest(ReminderBase):
         self.assertEqual(self.reminders(treer, store=reopened).tick()['sent'], 1)
 
 
+C = {'id': 'ag_c', 'kind': 'agent', 'name': 'c'}
+B = OTHER
+
+
+class WaitingOnTest(ReminderBase):
+    """#185: reminders go to whoever can unblock the issue; only the responsible party's activity moves the clock."""
+    def setUp(self):
+        super().setUp()
+        self.store = Store(self.path, clock=lambda: self.now, leader_agent='ag_c')
+
+    def block(self, issue, waiting, actor=A):
+        return self.act(issue, 'update', {'status': 'blocked', 'waiting_on': waiting}, actor)
+
+    def test_validation_and_clearing(self):
+        issue = self.issue(assignee='ag_a')
+        for body in ({'waiting_on': 'ag_b'}, {'status': 'blocked', 'waiting_on': 'ag_missing'}, {'status': 'blocked', 'waiting_on': 'usr_h'},
+                     {'status': 'blocked', 'waiting_on': 5}, {'status': 'blocked', 'waiting_on': ''}):
+            with self.assertRaises(Exception) as caught:
+                self.act(issue, 'update', body, A)
+            self.assertEqual(getattr(caught.exception, 'status', 400), 400, body)
+        self.block(issue, 'ag_b')
+        shown = self.store.show(issue)['issue']
+        self.assertEqual((shown['waiting_on'], shown['waiting_by']), ('ag_b', 'ag_a'))
+        self.act(issue, 'update', {'status': 'in_progress'}, A)
+        self.assertIsNone(self.store.show(issue)['issue']['waiting_on'], 'leaving blocked ends the wait')
+        with self.assertRaises(Exception):
+            self.act(issue, 'update', {'status': 'open', 'waiting_on': 'ag_b'}, A)
+
+    def test_leader_and_user_need_a_configured_leader(self):
+        plain = Store(Path(self.directory.name) / 'other.sqlite3', clock=lambda: self.now)
+        issue = plain.mutate(None, 'create', {'title': 't', 'assignee': 'ag_a'}, ACTOR, PEOPLE)[0]
+        for who in ('leader', 'user'):
+            with self.assertRaises(Exception) as caught:
+                plain.mutate(issue, 'update', {'status': 'blocked', 'waiting_on': who}, A, PEOPLE)
+            self.assertEqual(caught.exception.code, 'leader_unconfigured')
+        issue = self.issue(assignee='ag_a')
+        self.block(issue, 'user')
+        self.assertEqual(self.store.responsible(self.store.show(issue)['issue']), ('ag_c', 'waiting'))
+
+    def test_only_editors_may_set_it(self):
+        issue = self.issue(assignee='ag_a')
+        with self.assertRaises(Exception) as caught:
+            self.act(issue, 'update', {'status': 'blocked', 'waiting_on': 'ag_c'}, B)
+        self.assertEqual(caught.exception.status, 403)
+
+    def test_reminders_follow_the_wait_then_revert_to_the_assignee(self):
+        issue = self.issue(assignee='ag_a')
+        treer = FakeTreer({'ag_a': 'idle', 'ag_b': 'idle'})
+        r = self.reminders(treer)
+        r.tick()
+        self.block(issue, 'ag_b')
+        r.tick(); self.advance(FIRST); r.tick()
+        self.assertEqual(treer.recipients(), ['ag_b'])
+        self.assertIn('waiting on you: #%d' % issue, treer.body())
+        self.assertNotIn('assigned to you', treer.body())
+        self.act(issue, 'update', {'waiting_on': None, 'status': 'in_progress'}, A)
+        r.tick(); self.advance(2 * FIRST); r.tick()          # the schedule b's reminder started goes on: nobody made progress
+        self.assertEqual(treer.recipients(), ['ag_b', 'ag_a'], 'cleared: the assignee again')
+        self.assertIn('assigned to you', treer.body())
+
+    def test_others_comments_do_not_move_the_clock_but_the_responsible_partys_do(self):
+        issue = self.issue(assignee='ag_a')
+        self.block(issue, 'ag_b')
+        before = self.store.show(issue)['issue']['rv']
+        self.advance(HOUR)
+        self.act(issue, 'comment', {'body': 'any news?'}, A)               # the assignee is not the responsible party now
+        self.act(issue, 'comment', {'body': 'me too'}, ACTOR)
+        self.assertEqual(self.store.show(issue)['issue']['rv'], before)
+        self.act(issue, 'comment', {'body': 'on it'}, B)
+        shown = self.store.show(issue)['issue']
+        self.assertEqual((shown['rv'], shown['progress_reason']), (before + 1, 'responsible_activity'))
+
+    def test_flipping_between_parties_cannot_keep_an_issue_out_of_the_stale_view(self):
+        issue = self.issue(assignee='ag_a')
+        self.advance(5 * HOUR)
+        self.block(issue, 'ag_b')                      # a genuinely new party: progress
+        rv = self.store.show(issue)['issue']['rv']
+        self.advance(HOUR)
+        for _ in range(3):
+            self.act(issue, 'update', {'status': 'in_progress', 'waiting_on': None}, A)   # back to ag_a (responsible within 24 h)
+            self.act(issue, 'update', {'status': 'blocked', 'waiting_on': 'ag_b'}, A)
+        self.assertEqual(self.store.show(issue)['issue']['rv'], rv, 'bouncing between the same two parties does not reset')
+        self.advance(25 * HOUR)
+        self.act(issue, 'update', {'status': 'in_progress', 'waiting_on': None}, A)
+        self.assertGreater(self.store.show(issue)['issue']['rv'], rv, 'after 24 h a return counts again')
+
+    def test_ownerless_issues_go_to_the_leader_only(self):
+        issue = self.issue()
+        human = self.issue(assignee='usr_h')
+        treer = FakeTreer({'ag_c': 'idle'})
+        r = self.reminders(treer)
+        r.tick(); self.advance(FIRST); r.tick()
+        self.assertEqual(treer.recipients(), ['ag_c'])
+        self.assertIn('with no owner: #%d' % issue, treer.body())
+        self.assertNotIn('#%d' % human, treer.body(), 'a human assignee is a clear owner, not a stall for the leader')
+        self.assertNotIn('http', treer.body())
+        plain = Store(Path(self.directory.name) / 'plain.sqlite3', clock=lambda: self.now)
+        plain.mutate(None, 'create', {'title': 't'}, ACTOR, PEOPLE)
+        treer2 = FakeTreer({'ag_c': 'idle'})
+        self.reminders(treer2, store=plain).tick(); self.advance(FIRST)
+        self.reminders(treer2, store=plain).tick()
+        self.assertEqual(treer2.recipients(), [], 'no leader configured: nobody is nagged')
+
+    def test_a_deleted_agent_is_replaced_by_the_leader(self):
+        issue = self.issue(assignee='ag_a')
+        self.block(issue, 'ag_b')
+        treer = FakeTreer({'ag_c': 'idle', 'ag_b': 'idle'})
+        r = self.reminders(treer, live=lambda: {'ag_a', 'ag_c'})           # ag_b no longer exists
+        r.tick(); self.advance(FIRST); r.tick()
+        self.assertEqual(treer.recipients(), ['ag_c'])
+        self.assertIn('with no owner', treer.body())
+        again = self.issue(assignee='ag_a')
+        self.block(again, 'ag_b')
+        unknown = FakeTreer({'ag_b': 'idle'})
+        other = self.reminders(unknown, live=lambda: None)                  # roster unreadable: no rerouting
+        other.tick(); self.advance(FIRST); other.tick()
+        self.assertIn('ag_b', unknown.recipients())
+        self.assertNotIn('ag_c', unknown.recipients())
+
+    def test_recipients_have_an_hourly_message_cap(self):
+        treer = FakeTreer({'ag_a': 'idle'})
+        r = self.reminders(treer)
+        r.tick()
+        for _ in range(7):                              # seven issues falling due one after another
+            self.issue(assignee='ag_a')
+            self.advance(2 * MIN)
+            r.tick()
+        self.advance(FIRST)
+        for _ in range(12):
+            r.tick(); self.advance(MIN)
+        self.assertLessEqual(len(treer.sends()), 4, 'no more than 4 reminder Messages per hour per recipient')
+        self.advance(HOUR)
+        r.tick()
+        self.assertGreater(len(treer.sends()), 0)
+
+    def test_notes_get_no_reminders_and_are_never_stale(self):
+        note = self.issue(assignee='ag_a', status='note')
+        work = self.issue(assignee='ag_a')
+        orphan_note = self.issue(status='note')
+        treer = FakeTreer({'ag_a': 'idle', 'ag_c': 'idle'})
+        r = self.reminders(treer)
+        r.tick(); self.advance(FIRST); r.tick()
+        self.assertIn('#%d' % work, treer.body()); self.assertNotIn('#%d' % note, treer.body())
+        self.assertEqual(treer.recipients(), ['ag_a'], 'not even the ownerless note is raised with the leader')
+        self.advance(10 * HOUR)
+        self.assertEqual([i['id'] for i in self.store.stale(4, 50, 0)['issues']], [work])
+        self.act(work, 'update', {'status': 'note'}, A)
+        self.assertEqual(self.store.stale(4, 50, 0)['issues'], [], 'converting to a note takes it out of the stale view')
+
+    def test_stale_view(self):
+        old = self.issue(assignee='ag_a')
+        self.advance(5 * HOUR)
+        fresh = self.issue(assignee='ag_b')
+        self.act(old, 'comment', {'body': 'someone else says hi'}, B)
+        self.block(fresh, 'ag_a', B)
+        rows = self.store.stale(4, 50, 0)
+        self.assertEqual([r['id'] for r in rows['issues']], [old], 'stale: no progress by the responsible party for > 4 h')
+        entry = rows['issues'][0]
+        self.assertEqual((entry['responsible'], entry['responsible_kind'], entry['stale_hours'], entry['progress_reason']), ('ag_a', 'own', 5, 'created'))
+        self.assertEqual(entry['since_any_activity_hours'], 0, "someone else's comment shows as activity, not as progress")
+        self.act(old, 'update', {'labels': ['epic']}, A)
+        self.assertEqual(self.store.stale(4, 50, 0, ('epic',))['issues'], [], 'skip labels are excluded')
+        self.advance(3 * HOUR)
+        two = self.store.stale(1, 1, 0)
+        self.assertEqual((two['total'], len(two['issues']), two['next_offset']), (2, 1, 1))
+        for bad in (0, 721, '4', None):
+            with self.assertRaises(Exception):
+                self.store.stale(bad, 50, 0)
+        with self.assertRaises(Exception):
+            self.store.stale(4, 101, 0)
+
+
+R = {'id': 'ag_rel', 'kind': 'agent', 'name': 'release'}
+SHA = '95ab3c1a1d1ee43f890b3009c15279cd4f9322dd'
+
+
+class ShippedReminderTest(ReminderBase):
+    """#185 step 5: a release Agent's canary_passed comment reminds the assignee to close, once per (issue, commit)."""
+    def setUp(self):
+        super().setUp()
+        self.store = Store(self.path, clock=lambda: self.now, release_agent='ag_rel')
+
+    def release(self, issue, title, actor=R):
+        return self.act(issue, 'comment', {'body': 'details', 'title': title}, actor)
+
+    def pending(self):
+        return [p for p in self.store.shipped_pending()]
+
+    def test_only_the_release_agents_strictly_shaped_titles_count(self):
+        issue = self.issue(assignee='ag_a')
+        for actor, title in ((R, '[release] canary ' + SHA + ' canary_passed'), (R, '[deployed] #5 canary_passed ' + SHA[:8])):
+            self.release(issue, title, actor)
+        self.assertEqual({sha for _, sha, _ in self.pending()}, {'95ab3c1a', '95ab3c1a'})
+        forged = self.issue(assignee='ag_a')
+        for actor, title in ((A, '[release] ' + SHA + ' canary_passed'),                  # right words, wrong principal
+                             (B, '[release] ' + SHA + ' canary_passed'),
+                             (R, 'canary_passed ' + SHA),                                  # no [release] prefix
+                             (R, '[release] canary_passed deadbee'),                       # 7 hex digits
+                             (R, '[release] canary_passed ' + 'g' * 12),                   # not hex
+                             (R, '[release] canary_passed ' + 'a' * 41),                   # too long to be a commit
+                             (R, '[release] canary_passed 95AB3C1A'),                      # upper case is not a git SHA here
+                             (R, '[release] ci passed ' + SHA)):                           # no canary_passed
+            self.release(forged, title, actor)
+        self.assertEqual([p for p in self.pending() if p[0] == forged], [])
+
+    def test_off_without_a_release_agent_and_for_resolved_or_unassigned_issues(self):
+        plain = Store(Path(self.directory.name) / 'p.sqlite3', clock=lambda: self.now)
+        issue = plain.mutate(None, 'create', {'title': 't', 'assignee': 'ag_a'}, ACTOR, PEOPLE)[0]
+        plain.mutate(issue, 'comment', {'body': 'b', 'title': '[release] canary_passed ' + SHA}, R, PEOPLE)
+        self.assertEqual(plain.shipped_pending(), [], 'no --release-agent: the feature is off')
+        done = self.issue(assignee='ag_a'); self.act(done, 'update', {'status': 'done'}, A)
+        orphan = self.issue()
+        self.release(done, '[release] canary_passed ' + SHA); self.release(orphan, '[release] canary_passed ' + SHA)
+        self.assertEqual(self.pending(), [])
+
+    def test_delivered_once_per_issue_and_commit_and_across_restarts(self):
+        issue = self.issue(assignee='ag_a')
+        self.release(issue, '[release] canary_passed ' + SHA)
+        self.release(issue, '[release] canary_passed ' + SHA)           # the same commit again: still one signal
+        treer = FakeTreer({'ag_a': 'idle'})
+        r = self.reminders(treer)
+        self.assertEqual(len(self.pending()), 1)
+        r.tick()
+        shipped = [c for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]]
+        self.assertEqual(len(shipped), 1)
+        body = shipped[0][shipped[0].index('--body') + 1]
+        self.assertIn(f'#{issue} (95ab3c1a)', body); self.assertNotIn(SHA, body); self.assertNotIn('Secret', body)
+        reopened = Store(self.path, clock=lambda: self.now, release_agent='ag_rel')    # a restart
+        self.assertEqual(reopened.shipped_pending(), [])
+        r.tick(); self.advance(MIN); r.tick()
+        self.assertEqual(len([c for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]]), 1)
+        self.release(issue, '[release] canary_passed ' + 'b' * 40)       # a different commit is a new signal
+        self.assertEqual(len(self.pending()), 1)
+
+    def test_a_busy_assignee_is_told_later_and_a_closed_issue_is_settled_silently(self):
+        issue = self.issue(assignee='ag_a'); other = self.issue(assignee='ag_a')
+        self.release(issue, '[release] canary_passed ' + SHA); self.release(other, '[release] canary_passed ' + SHA)
+        treer = FakeTreer({'ag_a': 'working'})
+        r = self.reminders(treer)
+        r.tick()
+        self.assertEqual([c for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]], [])
+        self.act(other, 'update', {'status': 'closed'}, A)
+        treer.states['ag_a'] = 'idle'; self.advance(2 * MIN); r.tick()
+        shipped = [c[c.index('--body') + 1] for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]]
+        self.assertEqual(len(shipped), 1); self.assertIn(f'#{issue}', shipped[0]); self.assertNotIn(f'#{other}', shipped[0])
+
+
 class AggregationAndDeliveryTest(ReminderBase):
     def test_everything_due_for_one_agent_is_one_message_with_independent_state(self):
         a1 = self.issue(assignee='ag_a')
@@ -246,7 +497,7 @@ class AggregationAndDeliveryTest(ReminderBase):
         self.assertIn('2 unresolved issues', body)
         self.assertNotIn('Secret', body, 'titles and descriptions never leave the App')
         self.assertIn('issues list --assignee me --unresolved', body)
-        self.act(a2, 'comment', {'body': 'ping'}, OTHER)                       # only a2 resets, counted from this moment
+        self.act(a2, 'comment', {'body': 'ping'}, A)                           # only a2 resets (its assignee acted), counted from this moment
         self.advance(10 * MIN)
         r.tick()                                                               # a2 is due again (10m after its activity), a1 is not (20m)
         states = self.store.reminder_states()
@@ -402,7 +653,7 @@ class SchedulerTest(ReminderBase):
         self.advance(FIRST)
         r.tick()
         first_key = treer.key()
-        self.act(a, 'comment', {'body': 'activity'}, OTHER)    # resets the sequence to step 0 again
+        self.act(a, 'comment', {'body': 'activity'}, A)        # the assignee's own activity resets the sequence to step 0 again
         r.tick()
         self.advance(FIRST)
         r.tick()

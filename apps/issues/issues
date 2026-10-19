@@ -14,7 +14,7 @@ s = p.add_subparsers(dest='command', required=True)
 a = s.add_parser('list')
 for key in ('status', 'assignee', 'label', 'parent-id', 'limit', 'offset'):
     a.add_argument('--'+key)
-a.add_argument('--unresolved', action='store_const', const='1', help='only issues that are not done/closed')
+a.add_argument('--unresolved', action='store_const', const='1', help='only issues that are not done/closed/note')
 for command in ('show', 'children'):
     a = s.add_parser(command); a.add_argument('id', type=int); a.add_argument('--limit', type=int); a.add_argument('--offset', type=int)
     if command == 'show':
@@ -25,11 +25,16 @@ a.add_argument('id', type=int); a.add_argument('event', type=int)
 a = s.add_parser('create'); a.add_argument('title'); a.add_argument('--description', default='')
 a.add_argument('--parent-id', type=int); a.add_argument('--assignee')
 a.add_argument('--priority', choices=('low','normal','high','urgent'), default='normal')
+a.add_argument('--status', choices=('open','in_progress','blocked','done','closed','note'), help='initial status; `note` makes a knowledge entry (no reminders, not counted as work)')
 a.add_argument('--label', action='append', default=[]); a.add_argument('--blocked-by', type=int, action='append', default=[])
 for command, field in (('comment', 'body'), ('assign', 'assignee'), ('status', 'status')):
     a = s.add_parser(command); a.add_argument('id', type=int); a.add_argument(field)
     if command == 'comment':
         a.add_argument('--title', help='one-line summary (<= 200 bytes); readers can list titles and open the text on demand')
+a = s.add_parser('wait', help='mark an issue blocked on someone: reminders go to them (an Agent ID, leader, user, or none)')
+a.add_argument('id', type=int); a.add_argument('who')
+a = s.add_parser('stale', help='unresolved issues without progress for more than N hours (default 4), oldest first, with who is responsible and what they wait on')
+a.add_argument('--hours', type=int); a.add_argument('--limit', type=int); a.add_argument('--offset', type=int)
 a = s.add_parser('policy', help='who gets which Issues notifications at once: `policy` lists, `policy set asks|all [--agent ID]`')
 a.add_argument('action', nargs='?', choices=('set',)); a.add_argument('mode', nargs='?', choices=('all', 'asks')); a.add_argument('--agent')
 a.add_argument('--audit', action='store_const', const='1', help='include the change audit')
@@ -43,6 +48,9 @@ if command == 'list':
 elif command == 'create':
     method, body = 'POST', dict(args, labels=args.pop('label'))
     body.pop('label', None)
+    body = {k: v for k, v in body.items() if v is not None}     # an omitted --status/--assignee/--parent-id is not sent
+elif command == 'stale':
+    path = 'v1/stale?' + urllib.parse.urlencode({k: v for k, v in args.items() if v is not None})
 elif command == 'policy':
     path = 'v1/notify-policy'
     if args['action'] == 'set':
@@ -59,7 +67,9 @@ else:
         path += '/' + command
     if command in ('show', 'children'):
         path += '?' + urllib.parse.urlencode({k: v for k, v in args.items() if v is not None})
-    if command in ('comment', 'claim'):
+    if command == 'wait':
+        method, body = 'PATCH', {'status': 'blocked', 'waiting_on': None if args['who'] == 'none' else args['who']}
+    elif command in ('comment', 'claim'):
         method, body = 'POST', {k: v for k, v in args.items() if v is not None}
     elif command in ('assign', 'status'):
         method, body = 'PATCH', args

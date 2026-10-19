@@ -4,7 +4,7 @@ import { NOT_ALLOWED, PRIORITY_GLYPH, STATUSES, canEdit, displayName, words } fr
 import type { Issue, Route, Status } from "../types";
 import { Avatar } from "./Avatar";
 
-export type View = "list" | "tree";
+export type View = "list" | "tree" | "stale";
 
 export function IssueLine({ issue, selected = false, focused = false }: { issue: Issue; selected?: boolean; focused?: boolean }) {
   const { people, me, open, closeIssue, reopenIssue, busy } = useApp();

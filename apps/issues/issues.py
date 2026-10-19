@@ -5,6 +5,7 @@ import http.cookies
 import json
 import mimetypes
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -14,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from auth import Auth, Error
 from notify import ASK_INTENTS, Digest, POLICY_MODES, candidates, digest_form, issue_ref, label, enabled as notify_enabled, hourly_limit, path_tokens
-from reminders import Reminders, backoff as reminder_backoff, enabled as reminders_enabled
+from reminders import Reminders, backoff as reminder_backoff, enabled as reminders_enabled, roster, skip_labels
 from store import Store, fields, fail
 
 ROOT = Path(__file__).resolve().parent
@@ -370,6 +371,13 @@ class Handler(BaseHTTPRequestHandler):
                 capabilities = sorted(getattr(directory, 'capabilities', ()))
                 self.json(200, {'principals': directory, 'capabilities': capabilities,
                                 'paths': 'supported' if 'app.directory-paths.v1' in capabilities else 'unsupported'})
+            elif path == '/v1/stale' and method == 'GET':
+                fields(query, ('hours', 'limit', 'offset'))
+                try:
+                    hours, limit, offset = int(query.get('hours', 4)), int(query.get('limit', 50)), int(query.get('offset', 0))
+                except ValueError:
+                    fail('invalid_field', 'hours, limit and offset must be integers')
+                self.json(200, app.store.stale(hours, limit, offset, skip_labels()))
             elif path == '/v1/notify-policy' and method == 'GET':
                 fields(query, ('audit',))
                 result = {'default': 'all', 'modes': list(POLICY_MODES), 'policies': app.store.policies()}
@@ -440,6 +448,10 @@ def parse_args(argv=None):
     # Managed Apps deployed with scripts/app-deploy cannot carry environment variables in their saved command; the
     # deployment's fixed arguments can carry this one. It overrides ISSUES_PROXY_URL.
     parser.add_argument('--proxy-url', help='trusted Treer Proxy public URL (default: $ISSUES_PROXY_URL)')
+    parser.add_argument('--release-agent', help='stable ID of the Agent whose `[release] … canary_passed <sha>` comments remind assignees to close shipped issues '
+                        '(default: $ISSUES_RELEASE_AGENT; unset: the feature is off)')
+    parser.add_argument('--leader-agent', help='stable ID of the leader Agent that `leader`/`user` in waiting_on and ownerless issues '
+                        'resolve to (default: $ISSUES_LEADER_AGENT; unset: those are refused / not reminded)')
     return parser.parse_args(argv)
 
 
@@ -455,7 +467,13 @@ def main(argv=None):
         raise ValueError('ISSUES_PROXY_URL must be an HTTP(S) URL without credentials')
     schedule = reminder_backoff() if reminders_enabled() else None   # invalid reminder settings stop the start-up, before any side effect
     host, port = os.environ.get('ISSUES_LISTEN', '127.0.0.1:9440').rsplit(':', 1)
-    application = Application(Store(os.environ.get('ISSUES_DB', '.treer/apps/issues/issues.sqlite3')))
+    leader = arguments.leader_agent or os.environ.get('ISSUES_LEADER_AGENT') or None
+    if leader is not None and not re.fullmatch(r'ag_[0-9a-f]{32}', leader):
+        raise ValueError('the leader Agent must be a stable Agent ID (ag_ plus 32 hex digits)')
+    release = arguments.release_agent or os.environ.get('ISSUES_RELEASE_AGENT') or None
+    if release is not None and not re.fullmatch(r'ag_[0-9a-f]{32}', release):
+        raise ValueError('the release Agent must be a stable Agent ID (ag_ plus 32 hex digits)')
+    application = Application(Store(os.environ.get('ISSUES_DB', '.treer/apps/issues/issues.sqlite3'), leader_agent=leader, release_agent=release))
     server = Server((host, int(port)), application)
     print(f'Issues listening on {host}:{server.server_port}', flush=True)
     if notify_enabled():
@@ -467,7 +485,8 @@ def main(argv=None):
         Digest(application.store, digest_link, os.environ.get('TREER_BIN', 'treer')).start()
         print('Issues change notifications enabled (ISSUES_NOTIFY=off disables)', flush=True)
     if reminders_enabled():
-        Reminders(application.store, os.environ.get('TREER_BIN', 'treer'), schedule=schedule).start()
+        Reminders(application.store, os.environ.get('TREER_BIN', 'treer'), schedule=schedule,
+                  live_agents=roster(os.environ.get('TREER_BIN', 'treer'))).start()
         print(f'Issues reminders enabled with exponential backoff first={schedule.first:g}s factor={schedule.factor:g} max={schedule.maximum:g}s '
               '(ISSUES_REMINDERS=off disables)', flush=True)
     server.serve_forever()
