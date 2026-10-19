@@ -397,6 +397,41 @@ cases, candidate phase/step alternatives, health changes and uncertain slots.
 This is not rollback continuation, an executable exit or a substitute for the
 missing pinned actor, quiescence proof, authenticated health or trusted head.
 
+Rollback entry is a downgrade and must require the same trusted external head,
+exclusive installation ownership and pinned old-object identity/hash as a
+forward update. A future entry API must also take a verifier-constructed typed
+reason: authenticated new-Controller failure, expiration established by the
+deadline monitor, or human abort through the protected authorization channel.
+Record the verified reason with the successor revision, but never let a bare
+receipt field or its deserialization construct that authorization. Neither the
+reason verifier nor that channel exists; the current entry guard validates no
+downgrade reason and cannot authorize a downgrade.
+
+The proposed continuation graph is below. It is not yet implemented; no row
+authorizes execution. Both claims must match the same fresh current observation
+for intent/handoff edges and the real post-operation observation for result
+edges. The other image remains checked in its required unchanged layout.
+
+| Proposed edge | Required observation and ordering |
+| --- | --- |
+| RL/RC MoveNewAsideIntent -> NewAside | Fresh post-move gap; verify new image moved aside before recording result |
+| RL/RC NewAside -> RestoreOldIntent | Same current gap; publish/read back restoration intent before restoring old |
+| RL/RC RestoreOldIntent -> Restored | Fresh post-restoration original layout; verify old identity/hash before recording result |
+| RL Original/Restored -> RC MoveNewAsideIntent | CLI original/restored and Controller still published; publish/read back Controller intent before its move |
+| RC Original/Restored -> RolledBack | Both images original/restored; verifier-constructed old-Controller health evidence required before recording terminal state |
+
+The continuation preserves `new_health_recorded` as a historical statement
+about the replaced Controller. It never means the restored Controller is
+currently healthy. `final_health_recorded` stays false throughout rollback;
+`old_health_recorded` becomes true only on the final edge to RolledBack after
+fresh verified old-Controller health. The broad layout classifier can accept
+some RC claims with old health already set; the future graph must explicitly
+diagnose-and-stop on those claims rather than treating them as a shortcut.
+Complete and RolledBack are terminal. Every classifier-consistent rollback
+tuple must mechanically map to one graph edge or an explicit diagnostic stop;
+until that proof and graph exist, the existing coverage test continues to
+classify all rollback phases as diagnosis only.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual
