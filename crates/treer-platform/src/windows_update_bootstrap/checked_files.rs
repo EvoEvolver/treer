@@ -1,9 +1,12 @@
 //! W1a native fixture: private attempt creation and bounded, read-back checked
-//! copies plus W1b fixed-slot rename fixtures. No installed destination, process,
-//! receipt or public caller.
+//! copies, W1b fixed-slot rename and opaque-record replacement fixtures.
+//! No installed destination, process, production journal or public caller.
 use super::*;
 use std::io::{Seek, SeekFrom, Write};
 use windows_sys::Win32::System::WindowsProgramming::FS_PERSISTENT_ACLS;
+
+mod record_file;
+pub(super) use record_file::RecordFault;
 
 pub(super) struct Attempt {
     path: PathBuf,

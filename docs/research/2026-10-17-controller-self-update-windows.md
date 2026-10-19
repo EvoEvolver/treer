@@ -372,6 +372,30 @@ persisted authenticated records and marker binding, installation-specific ACL
 policy and retained pins through any authorized operation. No receipt/storage
 adapter, recovery command or installed-file access is added by this fixture.
 
+The following native storage increment is an opaque-byte fixture in
+`checked_files/record_file.rs`, not the receipt schema or installation marker.
+`Attempt::replace_record` accepts 1-65,536 bytes and an optional retained previous
+record handle, validates the exact current object's identity/content and private
+ACL, then exclusively creates `receipt.next` with a protected owner/SYSTEM DACL.
+It writes, syncs and reads back before a same-directory full-path handle rename
+to `receipt.json`, with replacement allowed only for the expected old record.
+It never deletes the old name first. After replacement it rechecks identity,
+ACL and bytes, closes the original writer object and returns a freshly opened
+read pin with delete sharing so later replacement can retain the old reader.
+
+The fixture rechecks the prior record before publication, but this is not an
+atomic compare-and-swap against another writer: production must serialize it
+under the installation lock and enforce the independent marker protocol.
+Injected failures before publication and after publication return an error and
+retain the old or new record respectively; complete staged evidence is retained
+on pre-publication/native-sharing refusal and blocks silent retry. Tests cover
+the 64 KiB boundary and oversize/empty refusal before temporary creation, stale
+previous-handle refusal, old-reader retention, both injected boundaries and a
+real delete-sharing conflict. Hosted native execution is pending. These tests
+do not establish schema validation, revision/marker ordering, child quiescence,
+production ACL provisioning or power-loss durability. No production journal or
+recovery command uses this primitive.
+
 ### W1a: private directory and checked-copy fixture
 
 `windows_update_bootstrap/checked_files.rs` is private under `cfg(windows, test)`.

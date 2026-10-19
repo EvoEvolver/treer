@@ -931,6 +931,97 @@ mod tests {
     }
 
     #[test]
+    fn native_record_replacement_preserves_old_reader_and_enforces_bound() {
+        use checked_files::{Attempt, RecordFault};
+        let fixture = PrivateImage::new();
+        let name = "attempt-00000000000000000000000000000008";
+        let path = fixture.directory.join(name);
+        let attempt = Attempt::create(&fixture.directory, name).unwrap();
+        assert!(attempt
+            .replace_record(&[], None, RecordFault::None)
+            .is_err());
+        assert!(attempt
+            .replace_record(&vec![0; 65537], None, RecordFault::None)
+            .is_err());
+        assert!(!path.join("receipt.next").exists());
+        let old = attempt
+            .replace_record(b"old", None, RecordFault::None)
+            .unwrap();
+        assert!(attempt
+            .replace_record(b"unacknowledged", None, RecordFault::None)
+            .is_err());
+        let replacement = vec![7; 65536];
+        let new = attempt
+            .replace_record(&replacement, Some(&old), RecordFault::None)
+            .unwrap();
+        assert_ne!(identity(&old).unwrap(), identity(&new).unwrap());
+        let mut old_reader = &old;
+        use std::io::{Seek, SeekFrom};
+        old_reader.seek(SeekFrom::Start(0)).unwrap();
+        let mut old_bytes = Vec::new();
+        old_reader.read_to_end(&mut old_bytes).unwrap();
+        assert_eq!(old_bytes, b"old");
+        assert_eq!(
+            std::fs::read(path.join("receipt.json")).unwrap(),
+            replacement
+        );
+        assert!(attempt
+            .replace_record(b"stale", Some(&old), RecordFault::None)
+            .is_err());
+        assert!(!path.join("receipt.next").exists());
+        drop((old, new, attempt));
+        std::fs::remove_file(path.join("receipt.json")).unwrap();
+        std::fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn native_record_faults_preserve_old_or_new_and_refuse_staged_retry() {
+        use checked_files::{Attempt, RecordFault};
+        let fixture = PrivateImage::new();
+        for (suffix, fault, blocked) in [
+            (9, RecordFault::BeforePublish, false),
+            (10, RecordFault::AfterPublish, false),
+            (11, RecordFault::None, true),
+        ] {
+            let name = format!("attempt-{suffix:032x}");
+            let path = fixture.directory.join(&name);
+            let attempt = Attempt::create(&fixture.directory, &name).unwrap();
+            let old = attempt
+                .replace_record(b"old", None, RecordFault::None)
+                .unwrap();
+            let blocker = blocked.then(|| {
+                OpenOptions::new()
+                    .read(true)
+                    .share_mode(FILE_SHARE_READ)
+                    .open(path.join("receipt.json"))
+                    .unwrap()
+            });
+            assert!(attempt.replace_record(b"new", Some(&old), fault).is_err());
+            let before_publish = fault == RecordFault::BeforePublish || blocked;
+            let expected: &[u8] = if before_publish { b"old" } else { b"new" };
+            assert_eq!(std::fs::read(path.join("receipt.json")).unwrap(), expected);
+            if before_publish {
+                assert_eq!(std::fs::read(path.join("receipt.next")).unwrap(), b"new");
+                assert!(attempt
+                    .replace_record(b"retry", Some(&old), RecordFault::None)
+                    .is_err());
+                assert_eq!(std::fs::read(path.join("receipt.next")).unwrap(), b"new");
+            } else {
+                assert!(!path.join("receipt.next").exists());
+                assert!(attempt
+                    .replace_record(b"retry", Some(&old), RecordFault::None)
+                    .is_err());
+            }
+            drop((blocker, old, attempt));
+            std::fs::remove_file(path.join("receipt.json")).unwrap();
+            if before_publish {
+                std::fs::remove_file(path.join("receipt.next")).unwrap();
+            }
+            std::fs::remove_dir(path).unwrap();
+        }
+    }
+
+    #[test]
     fn native_observer_distinguishes_equal_hash_objects_gaps_and_read_failures() {
         use crate::windows_update_layout::Object::*;
         use checked_files::{Attempt, RecordedImage, Slot};
