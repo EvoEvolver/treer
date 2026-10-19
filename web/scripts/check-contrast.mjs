@@ -42,7 +42,7 @@ const floors = [["input", "background", 1.4, "soft control edge floor"]];
 
 let failed = 0, total = 0;
 for (const [name, t] of [["light", light], ["dark", dark]]) {
-  for (const [f, b, base, role] of [...text, ...nonText, ...floors]) {
+  for (const [f, b, base, role] of [...text, ...nonText, ...floors, ...Array.from({ length: 8 }, (_, i) => [`chart-${i + 1}`, "card", 3, "categorical chart"])]) {
     const need = known[name]?.[`${f}|${b}`] ?? base;
     const r = ratio(t[f], t[b]); total++;
     if (process.argv.includes("--table")) console.log(name, role, f, "on", b, r.toFixed(2));

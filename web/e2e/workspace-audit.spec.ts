@@ -335,7 +335,10 @@ test('audit suggestions are bounded and do not invent identities from audit resp
   await audit.getByRole('combobox', { name: 'Choose Actor ID', exact: true }).click()
   await expect(page.getByRole('option')).toHaveCount(201)
   await expect(page.getByRole('option', { name: /Do not suggest|hidden-agent/ })).toHaveCount(0)
+  // Wait for the Select's focus handoff before sending a keyboard dismissal.
+  await expect(page.getByRole('option', { name: 'Any', exact: true })).toBeFocused()
   await page.keyboard.press('Escape')
+  await expect(audit.getByRole('combobox', { name: 'Choose Actor ID', exact: true })).toBeFocused()
   await audit.getByRole('combobox', { name: 'Choose Action', exact: true }).click()
   await expect(page.getByRole('option', { name: 'invalid/action', exact: true })).toHaveCount(0)
 })

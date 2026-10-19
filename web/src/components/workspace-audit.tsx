@@ -1,5 +1,7 @@
-import { useEffect, useState, type FormEvent } from "react"
+import { useEffect, useRef, useState, type FormEvent } from "react"
 import { ChevronDown, RotateCw } from "lucide-react"
+import { WorkspaceAuditSummary } from "@/components/workspace-audit-summary"
+import { type AuditDrill } from "@/lib/audit-summary"
 import { AuditEventList } from "@/components/audit-view"
 import { Field } from "@/components/control-plane-ui"
 import { Button } from "@/components/ui/button"
@@ -29,6 +31,9 @@ function auditPage(value: unknown, workspaceId: string): Page {
 }
 
 export function WorkspaceAudit({ workspaceId, agents, members, preview }: { workspaceId: string; agents: Agent[]; members: Member[]; preview: boolean }) {
+  const [drill, setDrill] = useState<AuditDrill>({})
+  const [selection, setSelection] = useState<string>()
+  const listHeading = useRef<HTMLHeadingElement>(null)
   const [filtersOpen, setFiltersOpen] = useState(false)
   const [draft, setDraft] = useState<Filters>(emptyFilters)
   const [filters, setFilters] = useState<Filters>(emptyFilters)
@@ -69,7 +74,7 @@ export function WorkspaceAudit({ workspaceId, agents, members, preview }: { work
         if (!config.capabilities?.includes("workspace.audit.v1")) { setError(t("waudit.unsupported")); return }
         const query = new URLSearchParams({ limit: "50" })
         if (cursor !== undefined) query.set("before", String(cursor))
-        for (const [key, value] of Object.entries(filters)) if (value) query.set(key, value)
+        for (const [key, value] of Object.entries({ ...filters, ...drill })) if (value) query.set(key, value)
         const data = await api<unknown>(`/api/workspaces/${encodeURIComponent(workspaceId)}/audit-events?${query}`, { signal: controller.signal, cache: "no-store" })
         if (!controller.signal.aborted) setPage(auditPage(data, workspaceId))
       } catch (reason) {
@@ -79,7 +84,7 @@ export function WorkspaceAudit({ workspaceId, agents, members, preview }: { work
     }
     void load()
     return () => controller.abort()
-  }, [workspaceId, filters, cursor, revision, preview])
+  }, [workspaceId, filters, drill, cursor, revision, preview])
 
   function apply(event: FormEvent) {
     event.preventDefault()
@@ -95,7 +100,7 @@ export function WorkspaceAudit({ workspaceId, agents, members, preview }: { work
       next[key] = new Date(time).toISOString()
     }
     if (next.since && next.until && (Date.parse(next.until) <= Date.parse(next.since) || Date.parse(next.until) - Date.parse(next.since) > 366 * 86_400_000)) { setValidation(t("waudit.invalid_time")); return }
-    setValidation(undefined); setPage(undefined); setCursors([undefined]); setFilters(next)
+    setDrill({}); setSelection(undefined); setValidation(undefined); setPage(undefined); setCursors([undefined]); setFilters(next)
   }
 
   return <section aria-label={t("waudit.title")} className="min-w-0 space-y-5">
@@ -105,10 +110,16 @@ export function WorkspaceAudit({ workspaceId, agents, members, preview }: { work
     <form id="workspace-audit-filters" onSubmit={apply} aria-label={t("waudit.filters")} className={cn("min-w-0 gap-3 rounded-md border bg-muted/20 p-4 sm:grid sm:grid-cols-2 lg:grid-cols-3", filtersOpen ? "grid" : "hidden")}>
       {(["since", "until"] as const).map((key) => <Field key={key} label={t(`waudit.${key}`)}><Input aria-label={t(`waudit.${key}`)} className="min-h-11 min-w-0 w-full" type="datetime-local" maxLength={128} value={draft[key]} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} /></Field>)}
       {(["actor_id", "action", "resource_kind"] satisfies AuditFilterKey[]).map((key) => <WorkspaceAuditFilter key={key} field={key} value={draft[key]} options={choices[key]} onChange={(value) => setDraft((current) => ({ ...current, [key]: value }))} />)}
-      <div className="flex flex-wrap items-end gap-2"><Button className="min-h-11" type="submit">{t("waudit.apply")}</Button><Button className="min-h-11" variant="outline" type="button" onClick={() => { setDraft(emptyFilters); setFilters({ ...emptyFilters }); setPage(undefined); setValidation(undefined); setCursors([undefined]) }}>{t("waudit.clear")}</Button></div>
+      <div className="flex flex-wrap items-end gap-2"><Button className="min-h-11" type="submit">{t("waudit.apply")}</Button><Button className="min-h-11" variant="outline" type="button" onClick={() => { setDrill({}); setSelection(undefined); setDraft(emptyFilters); setFilters({ ...emptyFilters }); setPage(undefined); setValidation(undefined); setCursors([undefined]) }}>{t("waudit.clear")}</Button></div>
       <p className="text-xs leading-5 text-muted-foreground sm:col-span-2 lg:col-span-3">{t("waudit.filter_hint")}</p>
       {validation && <p role="alert" className="text-xs text-destructive sm:col-span-2 lg:col-span-3">{validation}</p>}
     </form>
+    <WorkspaceAuditSummary workspaceId={workspaceId} agents={agents} members={members} filters={{ ...filters }} revision={revision} preview={preview} selected={drill.category} onReset={() => { setDrill({}); setSelection(undefined); setPage(undefined); setCursors([undefined]) }} onDrill={(next, label) => {
+      setDrill(next); setSelection(label); setPage(undefined); setCursors([undefined])
+      requestAnimationFrame(() => { listHeading.current?.focus(); listHeading.current?.scrollIntoView({ block: "start" }) })
+    }} />
+    <div className="flex flex-wrap items-center justify-between gap-2"><h3 ref={listHeading} tabIndex={-1} className="break-words text-sm font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-ring">{selection ? t("as.feed_selected", { selection }) : t("as.feed_all")}</h3>{selection && <Button variant="outline" className="min-h-11" onClick={() => { setDrill({}); setSelection(undefined); setPage(undefined); setCursors([undefined]) }}>{t("as.reset_selection")}</Button>}</div>
+    {selection && <p className="break-words text-xs text-muted-foreground">{drill.since} – {drill.until} · UTC</p>}
     {error ? <p role="alert" className="rounded-md border p-4 text-sm">{error}</p> : <div aria-busy={loading}><AuditEventList events={page?.events ?? []} agents={agents} members={members} loading={loading} workspace /></div>}
     <nav aria-label={t("waudit.pagination")} className="flex flex-wrap items-center justify-between gap-3">
       <Button className="min-h-11" variant="outline" disabled={loading || cursors.length <= 1} onClick={() => { setPage(undefined); setCursors((current) => current.slice(0, -1)) }}>{t("waudit.newer")}</Button>

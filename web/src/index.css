@@ -20,6 +20,15 @@
     --muted-foreground: 40 3% 38%;
     --accent: 45 6% 92%;
     --accent-foreground: 45 5% 20%;
+    /* Categorical audit palette: colors have no status meaning. */
+    --chart-1: 169.09 40.74% 26.47%;
+    --chart-2: 206.49 53.11% 40.98%;
+    --chart-3: 41.71 55.56% 37.06%;
+    --chart-4: 291.15 27.11% 44.12%;
+    --chart-5: 120.00 9.50% 43.33%;
+    --chart-6: 15.29 45.13% 44.31%;
+    --chart-7: 225.56 23.48% 45.10%;
+    --chart-8: 200.00 2.54% 46.27%;
     --status-online: 150 47% 38%;
     --status-working-text: 209 80% 39%;
     --status-attention-text: 2 72% 42%;
@@ -49,6 +58,15 @@
     --muted-foreground: 40 6% 62%;
     --accent: 40 6% 18%;
     --accent-foreground: 45 10% 90%;
+    /* Categorical audit palette: colors have no status meaning. */
+    --chart-1: 151.70 36.05% 71.18%;
+    --chart-2: 207.41 65.17% 65.10%;
+    --chart-3: 44.00 55.56% 62.94%;
+    --chart-4: 277.81 53.28% 73.14%;
+    --chart-5: 136.67 24.32% 43.53%;
+    --chart-6: 23.76 69.66% 71.57%;
+    --chart-7: 324.38 51.61% 87.84%;
+    --chart-8: 157.50 3.33% 47.06%;
     --status-online: 150 46% 56%;
     --status-working-text: 209 80% 64%;
     --status-attention-text: 2 70% 70%;
