@@ -615,23 +615,21 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
         .await,
         (StatusCode::FORBIDDEN, "policy_denied".into())
     );
-    // Security 4750 P2, refined after the canary acceptance 5118: with a
-    // valid embed cookie, non-navigation requests are served only when they
-    // prove they come from the framed document (exactly one Sec-Fetch-Site:
-    // same-origin, or an Origin equal to this host); a browser that stored the
-    // cookie unpartitioned cannot ride it from another page.
-    for (sites, origin) in [
-        (vec![], None),
-        (vec!["none"], None),
-        (vec!["same-site"], None),
-        (vec!["cross-site"], None),
-        (vec!["same-origin", "same-origin"], None),
-        (vec![], Some("https://evil.example")),
-        (
-            vec!["cross-site"],
-            Some(&*format!("https://x.{AGENT_HOST}")),
-        ),
-        (vec![], Some(&*format!("http://{AGENT_HOST}"))),
+    // Security 5125/5129: the embed cookie grants authority only in a
+    // same-origin context. In every other context it is ignored and the
+    // request takes the standalone path: with only the embed cookie that is
+    // the authorize redirect (303) or, when the request says it is not a
+    // top-level navigation, 401 invalid_ingress_authorization; never 403 and
+    // never an embedded (Console-framed) response.
+    for (sites, origin, dest) in [
+        (vec![], None, None),
+        (vec!["none"], None, None),
+        (vec!["same-site"], None, None),
+        (vec!["cross-site"], None, None),
+        (vec!["same-origin", "same-origin"], None, None),
+        (vec![], Some(&*format!("https://{AGENT_HOST}")), None),
+        (vec!["cross-site"], None, Some("iframe")),
+        (vec!["same-site"], None, Some("iframe")),
     ] {
         let mut request = Request::builder()
             .uri("/")
@@ -643,46 +641,45 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
         if let Some(origin) = origin {
             request = request.header(header::ORIGIN, origin);
         }
-        assert_eq!(
-            error_of(
-                send(
-                    &fixture,
-                    allow(),
-                    &config,
-                    request.body(Body::empty()).unwrap()
-                )
-                .await
+        if let Some(dest) = dest {
+            request = request.header("sec-fetch-dest", dest);
+        }
+        let (status, code) = error_of(
+            send(
+                &fixture,
+                allow(),
+                &config,
+                request.body(Body::empty()).unwrap(),
             )
             .await,
-            (StatusCode::FORBIDDEN, "ingress_request_rejected".into()),
-            "{sites:?} {origin:?}"
+        )
+        .await;
+        assert!(
+            (status == StatusCode::SEE_OTHER && code.is_empty())
+                || (status == StatusCode::UNAUTHORIZED && code == "invalid_ingress_authorization"),
+            "{sites:?} {origin:?} {dest:?}: {status} {code}"
         );
     }
-    // Admitted embedded requests: the frame's own navigation (any site value;
-    // frame-ancestors decides rendering), a same-origin fetch, and a request
-    // naming this host as its Origin without Fetch Metadata (WebSocket
-    // handshakes and CORS fetches in browsers that omit Sec-Fetch-Site).
-    for (dest, site, origin) in [
-        (Some("iframe"), Some("cross-site"), None),
-        (Some("iframe"), Some("same-site"), None),
-        (Some("frame"), None, None),
-        (Some("empty"), Some("same-origin"), None),
-        (None, None, Some(&*format!("https://{AGENT_HOST}"))),
-        (
-            None,
-            None,
-            Some(&*format!("https://{}", AGENT_HOST.to_ascii_uppercase())),
-        ),
+    // Admitted embedded requests: a same-origin fetch or navigation, and a
+    // WebSocket upgrade that names this origin exactly without Fetch Metadata
+    // (Chromium); a same-origin upgrade with Fetch Metadata too.
+    let ws_origin = format!("https://{AGENT_HOST}");
+    for (site, upgrade, origin) in [
+        (Some("same-origin"), false, None),
+        (None, true, Some(ws_origin.as_str())),
+        (Some("same-origin"), true, Some(ws_origin.as_str())),
     ] {
         let mut request = Request::builder()
             .uri("/")
             .header(header::HOST, AGENT_HOST)
             .header(header::COOKIE, &embed);
-        if let Some(dest) = dest {
-            request = request.header("sec-fetch-dest", dest);
-        }
         if let Some(site) = site {
             request = request.header("sec-fetch-site", site);
+        }
+        if upgrade {
+            request = request
+                .header(header::UPGRADE, "websocket")
+                .header(header::CONNECTION, "Upgrade");
         }
         if let Some(origin) = origin {
             request = request.header(header::ORIGIN, origin);
@@ -698,7 +695,7 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
         assert_eq!(
             response.status(),
             StatusCode::OK,
-            "{dest:?} {site:?} {origin:?}"
+            "{site:?} {upgrade} {origin:?}"
         );
         assert_eq!(
             response.headers()[header::CONTENT_SECURITY_POLICY],
@@ -709,7 +706,40 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
             .await
             .unwrap();
     }
-    // A top-level document ignores the embed cookie: alone it is an
+    // WebSocket upgrades without Fetch Metadata: the Origin must be exactly
+    // this origin; anything else is refused by the ingress Origin rule or
+    // never reaches the embed cookie, and is never served as embedded.
+    for origin in [
+        "https://evil.example",
+        &*format!("https://x.{AGENT_HOST}"),
+        &*format!("http://{AGENT_HOST}"),
+        &*format!("https://user@{AGENT_HOST}/extra"),
+        &*format!("https://{AGENT_HOST}:8443"),
+    ] {
+        let (status, _) = error_of(
+            send(
+                &fixture,
+                allow(),
+                &config,
+                Request::builder()
+                    .uri("/")
+                    .header(header::HOST, AGENT_HOST)
+                    .header(header::COOKIE, &embed)
+                    .header(header::UPGRADE, "websocket")
+                    .header(header::CONNECTION, "Upgrade")
+                    .header(header::ORIGIN, origin)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await,
+        )
+        .await;
+        assert!(
+            status.is_client_error() || status.is_redirection(),
+            "{origin}: {status}"
+        );
+    }
+    // A top-level navigation ignores the embed cookie: alone it is an
     // unauthenticated standalone visit (authorize redirect, never 403), and
     // next to the standalone cookie it is the standalone session with the
     // Agent's own framing policy, even though the browser sent both cookies
@@ -724,7 +754,7 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
             .header(header::COOKIE, &embed)
             .header("sec-fetch-mode", "navigate")
             .header("sec-fetch-dest", "document")
-            .header("sec-fetch-site", "cross-site")
+            .header("sec-fetch-site", "none")
             .body(Body::empty())
             .unwrap(),
     )
@@ -757,6 +787,33 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
     axum::body::to_bytes(response.into_body(), 64)
         .await
         .unwrap();
+    // With both cookies, a same-origin fetch is the embed session (Console
+    // framing) and a cross-site fetch falls back to the standalone session.
+    for (site, expect_console) in [("same-origin", true), ("cross-site", false)] {
+        let response = send(
+            &fixture,
+            allow(),
+            &config,
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, AGENT_HOST)
+                .header(header::COOKIE, format!("{embed}; {standalone}"))
+                .header("sec-fetch-site", site)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{site}");
+        let csp = response.headers()[header::CONTENT_SECURITY_POLICY]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(csp.contains(CONSOLE), expect_console, "{site}: {csp}");
+        axum::body::to_bytes(response.into_body(), 64)
+            .await
+            .unwrap();
+    }
     // The standalone session is not subject to that rule for safe requests.
     let response = send(
         &fixture,

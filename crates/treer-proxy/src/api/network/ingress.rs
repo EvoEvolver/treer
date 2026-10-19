@@ -496,20 +496,25 @@ async fn proxy_agent_interface_origin(
         ));
     }
     enforce_ingress_fetch_metadata(&request, &hostname, false)?;
-    // An embed session (#156) is recognised by its own cookie; its token
-    // never authenticates through the standalone cookie or the reverse. The
-    // embed cookie is honoured only for requests that can come from the
-    // embedded frame: a top-level document (Sec-Fetch-Dest: document) ignores
-    // it entirely, because a browser whose Console and apps domain share one
-    // site, or that ignores `Partitioned`, sends it on standalone visits too
-    // (canary acceptance 5118).
-    let top_level = fetch_dest(request.headers()).is_some_and(|dest| dest == "document");
+    // Embed sessions (#156, security 5125/5129): decide the request context
+    // first, then pick credentials. The embed cookie grants authority only
+    // when the request provably comes from the framed document itself:
+    // exactly one `Sec-Fetch-Site: same-origin`, or, for a WebSocket upgrade
+    // only, no Fetch Metadata but exactly one `Origin` byte-equal to this
+    // Agent origin (Chromium sends Origin without Sec-Fetch-* on an iframe's
+    // same-origin handshake). In every other context the embed cookie is
+    // treated as absent and the request takes the standalone path, so a
+    // browser whose Console and apps domain share one site, or that ignores
+    // `Partitioned`, still gets standalone pages and never a 403 for a request
+    // a standalone cookie would authorize.
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    let embed_context = embed_cookie_context(request.headers(), upgraded, &config, &hostname)?;
     let mut embedded = false;
     let user_id = if auth.authentication_disabled() {
         None
     } else {
         let mut user_id = None;
-        if !top_level {
+        if embed_context {
             if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
                 user_id = auth.authenticate_embed_session(&hostname, &token).await?;
                 embedded = user_id.is_some();
@@ -531,14 +536,6 @@ async fn proxy_agent_interface_origin(
         };
         Some(user_id)
     };
-    // Security 4750 P2, refined after 5118: a browser that stores the embed
-    // cookie unpartitioned must not be able to ride it from another page.
-    // Frame navigations are admitted (the response's frame-ancestors, set to
-    // the Console origin only, decides whether they render); everything else
-    // must prove it comes from the framed document itself.
-    if embedded {
-        require_embed_request_from_frame(request.headers(), &hostname)?;
-    }
     // Authenticated: existence and authority are decided now, per request.
     let (workspace_id, _server_id) = auth
         .agent_interface_target(&agent_id)
@@ -610,63 +607,37 @@ async fn proxy_agent_interface_origin(
     Ok(response)
 }
 
-/// The single `Sec-Fetch-Dest` value, if the browser sent exactly one.
-pub(super) fn fetch_dest(headers: &HeaderMap) -> Option<&str> {
-    let mut dests = headers.get_all("sec-fetch-dest").iter();
-    match (dests.next(), dests.next()) {
-        (Some(dest), None) => dest.to_str().ok(),
-        _ => None,
-    }
-}
-
-/// Requests authenticated through the embed cookie must come from the
-/// embedded frame. Admitted: a navigation of the frame itself
-/// (`Sec-Fetch-Dest: iframe` or `frame`; rendering is then decided by the
-/// `frame-ancestors` the response carries), any request with exactly one
-/// `Sec-Fetch-Site: same-origin`, and a request whose `Origin` header is
-/// exactly this host (CORS fetches and WebSocket handshakes name their
-/// origin even where Fetch Metadata is absent). Everything else, including a
-/// request with no Fetch Metadata and no Origin, is refused: without them the
-/// cookie could be riding a cross-site request in a browser that stored it
-/// unpartitioned or that shares one site between the Console and the apps
-/// domain.
-pub(super) fn require_embed_request_from_frame(
+/// Whether a request on an Agent origin may use the embed cookie at all
+/// (security 5125/5129): exactly one `Sec-Fetch-Site: same-origin`; or, for a
+/// WebSocket upgrade with no Fetch Metadata, exactly one `Origin` header whose
+/// serialization is byte-equal to this Agent origin. `none`, `same-site`,
+/// `cross-site`, a missing header on an ordinary request, duplicated headers
+/// and any other Origin all answer `false`: the cookie is then ignored, never
+/// an error.
+pub(super) fn embed_cookie_context(
     headers: &HeaderMap,
+    upgraded: bool,
+    config: &IngressConfig,
     hostname: &str,
-) -> Result<(), ApiFailure> {
-    let rejected = || {
-        ApiFailure::forbidden(
-            "ingress_request_rejected",
-            "embedded Agent interface requests must come from the embedded document itself",
-        )
+) -> Result<bool, ApiFailure> {
+    let sites: Vec<&HeaderValue> = headers.get_all("sec-fetch-site").iter().collect();
+    match sites.as_slice() {
+        [site] => return Ok(*site == "same-origin"),
+        [] => {}
+        _ => return Ok(false),
+    }
+    if !upgraded {
+        return Ok(false);
+    }
+    let origins: Vec<&HeaderValue> = headers.get_all(header::ORIGIN).iter().collect();
+    let [origin] = origins.as_slice() else {
+        return Ok(false);
     };
-    if matches!(fetch_dest(headers), Some("iframe") | Some("frame")) {
-        return Ok(());
-    }
-    let mut sites = headers.get_all("sec-fetch-site").iter();
-    if let (Some(site), None) = (sites.next(), sites.next()) {
-        if site == "same-origin" {
-            return Ok(());
-        }
-    }
-    let mut origins = headers.get_all(header::ORIGIN).iter();
-    if let (Some(origin), None) = (origins.next(), origins.next()) {
-        let matches = origin
-            .to_str()
-            .ok()
-            .and_then(|value| url::Url::parse(value).ok())
-            .is_some_and(|url| {
-                url.scheme() == "https"
-                    && url.port().is_none()
-                    && url
-                        .host_str()
-                        .is_some_and(|host| host.eq_ignore_ascii_case(hostname))
-            });
-        if matches {
-            return Ok(());
-        }
-    }
-    Err(rejected())
+    let expected = config
+        .url_for_hostname(hostname)?
+        .origin()
+        .ascii_serialization();
+    Ok(origin.as_bytes() == expected.as_bytes())
 }
 
 /// Same-site sibling defence for every ingress host (#143 Phase 2 V4): a
