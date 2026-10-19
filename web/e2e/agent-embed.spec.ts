@@ -81,6 +81,7 @@ async function send(page: Page, data: unknown) {
 
 test('v2 reuse probes once, skips mint and ignores Agent controls after navigation', async ({ page }) => {
   const s = await setup(page, 'manual')
+  await expect.poll(() => page.frames().some(f => f.url().startsWith(origin))).toBe(true)
   const child = page.frames().find(f => f.url().startsWith(origin))!
   await child.evaluate(() => {
     document.body.innerHTML = '<output aria-label="probe"></output>'
@@ -92,6 +93,8 @@ test('v2 reuse probes once, skips mint and ignores Agent controls after navigati
   await expect(child.getByLabel('probe')).toHaveText(JSON.stringify({ treer_embed: 'probe', version: 2, nonce_hash: hash }))
   expect(s.mints()).toBe(0)
   await send(page, { treer_embed: 'reused', version: 2, nonce_hash: hash })
+  await send(page, { treer_embed: 'cookies_blocked', nonce_hash: hash })
+  await expect(page.getByRole('alert')).toHaveCount(0)
   await child.goto(origin + '/')
   await expect(page.frameLocator('iframe').getByRole('heading')).toHaveText('Isolated interface')
   await expect(page.getByText('Checking interface isolation…', { exact: true })).toHaveCount(0)
@@ -127,7 +130,15 @@ test('v2 failed reuse mints once and retains bound cookie-failure compatibility 
   await send(page, { treer_embed: 'ready', version: 2, nonce_hash: hash })
   await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash })
   await expect.poll(s.delivered).toBe(1)
-  await send(page, { treer_embed: 'cookies_blocked', nonce_hash: hash })
+  await send(page, { treer_embed: 'cookies_blocked', nonce_hash: 'c'.repeat(64) })
+  await send(page, { treer_embed: 'cookies_blocked', nonce_hash: hash, extra: true })
+  await page.evaluate(({ origin, hash }) => {
+    window.dispatchEvent(new MessageEvent('message', { origin, source: window, data: { treer_embed: 'cookies_blocked', nonce_hash: hash } }))
+  }, { origin, hash })
+  const child = page.frames().find(f => f.url().startsWith(origin))!
+  await child.evaluate(({ hash, target }) => {
+    for (let i = 0; i < 2; i++) parent.postMessage({ treer_embed: 'cookies_blocked', nonce_hash: hash }, target)
+  }, { hash, target: new URL(page.url()).origin })
   await expect(page.getByRole('button', { name: 'Load compatibility view (shared origin)' })).toBeVisible()
   expect(s.mints()).toBe(1); expect(s.probes()).toBe(1)
 })

@@ -15,6 +15,7 @@ const suffixes = need('EMBED_ALLOWED_HOST_SUFFIXES').split(',')
 if (suffixes.some((s) => s.split('.').length < 3 || s.length > 253 || !s.split('.').every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)))) throw new Error('Invalid fixture host allowlist')
 const agentHost = new URL(agentOrigin).hostname
 if (!suffixes.some((s) => agentHost.endsWith(`.${s}`) && /^ag-[0-9a-f]{32}$/.test(agentHost.slice(0, -(s.length + 1))))) throw new Error('Agent host is outside the fixture allowlist')
+if (agentHost !== need('EMBED_FIXTURE_AGENT_HOST')) throw new Error('Agent host does not match the disposable fixture')
 const deployedSha = need('EMBED_DEPLOYED_SHA')
 if (!/^[0-9a-f]{40}$/.test(deployedSha)) throw new Error('Invalid deployed SHA')
 const engines = (process.env.EMBED_ENGINES || 'chromium,firefox,webkit').split(',')

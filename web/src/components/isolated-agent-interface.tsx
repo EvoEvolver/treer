@@ -54,6 +54,7 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
     if (!origin || pending) return
     const expectedOrigin = new URL(origin).origin
     let active = true, ended = false, acceptedHash: string | undefined, sent = false, loads = 0
+    let reused = false
     let handshake: 'awaiting-ready' | 'awaiting-outcome' | 'minting' | 'settled' = 'awaiting-ready'
     const deadline = Date.now() + 20_000
     const mint = new AbortController(), fallback = new AbortController()
@@ -87,7 +88,7 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
       }).catch(() => { if (!mint.signal.aborted) unavailable() })
     }
     const receive = (event: MessageEvent) => {
-      if (!active || ended || event.origin !== expectedOrigin || event.source !== frame.current?.contentWindow || Date.now() >= deadline) return
+      if (!active || ended || reused || event.origin !== expectedOrigin || event.source !== frame.current?.contentWindow || Date.now() >= deadline) return
       const data: unknown = event.data
       if (!data || typeof data !== 'object' || Array.isArray(data)) return
       const message = data as Record<string, unknown>
@@ -102,6 +103,7 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
         if (message.treer_embed === 'mint') requestCode(event.source!)
         else if (message.treer_embed === 'reused') {
           handshake = 'settled'
+          reused = true
           sent = true
           // The UI request still authorizes freshly. This only clears its notice.
           if (loads >= 2) { stop(); setPhase('framed') }

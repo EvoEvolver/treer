@@ -913,8 +913,9 @@ to avoid overlapping mint bursts.
 `EMBED_ALLOWED_HOST_SUFFIXES` is also required: an explicit comma-separated
 allowlist of fixture DNS suffixes with at least three labels (for example
 `canary.apps.treer.ai`). Only an `ag-<32 hex digits>` host directly below one
-of these suffixes is accepted. The operator still verifies the disposable
-fixture identity; the host guard cannot distinguish users on the same domain.
+of these suffixes is accepted. `EMBED_FIXTURE_AGENT_HOST` must also equal the
+exact host derived from the operator's fixture state file, and is compared to
+the requested origin. The operator verifies that fixture identity.
 The report includes the executed runner's SHA-256 and exact deployed SHA;
 release pins that hash with the measurement evidence.
 
@@ -945,8 +946,9 @@ from the exact frame window and Agent origin. A `mint` outcome runs the existing
 nonce-bound code handoff once; `reused` only changes the loading notice, while
 the UI request still enforces authorization. Old two-field `ready` messages
 continue to mint immediately. Unknown versions and replayed outcomes are
-ignored. The existing nonce-bound `cookies_blocked` failure remains accepted
-until the UI loads, preserving the explicit compatibility choice or operator
+ignored. After a code handoff, the existing nonce-bound `cookies_blocked`
+failure remains accepted until the UI loads, preserving the compatibility choice or operator
 refusal. After UI load all handshake controls are ignored. Tab visibility and
 appearance updates do not run the handshake again; scope/interface changes
 replace the frame and cancel its pending requests as before.
+After a successful `reused` outcome every later control is ignored immediately.
