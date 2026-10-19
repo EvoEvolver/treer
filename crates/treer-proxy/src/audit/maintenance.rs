@@ -232,6 +232,80 @@ pub(crate) async fn cleanup_batch(pool: &PgPool) -> Result<u64, sqlx::Error> {
     Ok(rows.len() as u64)
 }
 
+/// One backfill batch for `occurred_at_ts` (#191): newest rows first, the
+/// only column written is the derived instant (plus the unparsable mark);
+/// a malformed `occurred_at` leaves NULL and is marked so it is not revisited.
+/// Returns the number of rows visited; fewer than `BATCH` means the backfill
+/// reached the oldest row and is done.
+pub(crate) async fn backfill_batch(pool: &PgPool) -> Result<u64, sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET LOCAL statement_timeout = '5s'")
+        .execute(&mut *tx)
+        .await?;
+    let rows = sqlx::query(
+        "UPDATE organization_audit_events e SET \
+            occurred_at_ts = treer_audit_parse_instant(e.occurred_at), \
+            occurred_at_ts_unparsable = treer_audit_parse_instant(e.occurred_at) IS NULL \
+         WHERE e.sequence IN ( \
+            SELECT sequence FROM organization_audit_events \
+            WHERE occurred_at_ts IS NULL AND NOT occurred_at_ts_unparsable \
+            ORDER BY sequence DESC LIMIT $1 FOR UPDATE SKIP LOCKED) \
+         RETURNING e.sequence, (extract(epoch FROM e.occurred_at_ts)*1000000)::BIGINT AS occurred_at_micros",
+    )
+    .bind(BATCH)
+    .fetch_all(&mut *tx)
+    .await?;
+    let visited = rows.len() as u64;
+    let oldest_sequence = rows.iter().map(|r| r.get::<i64, _>("sequence")).min();
+    let oldest_micros = rows
+        .iter()
+        .filter_map(|r| r.get::<Option<i64>, _>("occurred_at_micros"))
+        .min();
+    if let Some(sequence) = oldest_sequence {
+        sqlx::query(
+            "UPDATE audit_maintenance_settings SET \
+                backfill_watermark_sequence = LEAST(COALESCE(backfill_watermark_sequence, $1), $1), \
+                backfill_complete_since = CASE WHEN $2::BIGINT IS NULL THEN backfill_complete_since \
+                    ELSE LEAST(COALESCE(backfill_complete_since, to_timestamp($2::BIGINT / 1000000.0)), \
+                        to_timestamp($2::BIGINT / 1000000.0)) END \
+             WHERE singleton",
+        )
+        .bind(sequence)
+        .bind(oldest_micros)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if visited < BATCH as u64 {
+        sqlx::query("UPDATE audit_maintenance_settings SET backfill_done = TRUE WHERE singleton")
+            .execute(&mut *tx)
+            .await?;
+    }
+    tx.commit().await?;
+    Ok(visited)
+}
+
+/// Runs backfill batches under the same one-second budget as cleanup; `Ok(true)`
+/// means more work remains.
+async fn backfill_cycle(pool: &PgPool) -> Result<bool, sqlx::Error> {
+    let done: bool =
+        sqlx::query_scalar("SELECT backfill_done FROM audit_maintenance_settings WHERE singleton")
+            .fetch_one(pool)
+            .await?;
+    if done {
+        return Ok(false);
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    for batch in 0..64 {
+        if batch > 0 && tokio::time::Instant::now() >= deadline {
+            return Ok(true);
+        }
+        if backfill_batch(pool).await? < BATCH as u64 {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 pub(crate) struct Worker {
     stop: oneshot::Sender<()>,
     task: JoinHandle<()>,
@@ -262,12 +336,24 @@ impl Worker {
         let task = tokio::spawn(async move {
             let mut tick = tokio::time::interval(Duration::from_secs(1));
             let mut cleanup_due = tokio::time::Instant::now();
+            let mut backfill_due = tokio::time::Instant::now();
             loop {
                 tokio::select! {
                     _ = &mut stopped => break,
                     _ = tick.tick() => {
                         if drain_batch(&pool).await.is_err() {
                             tracing::warn!(code="audit_drain_failed", "audit outbox drain failed; entries retained");
+                        }
+                        if tokio::time::Instant::now() >= backfill_due {
+                            let delay = match backfill_cycle(&pool).await {
+                                Ok(false) => 300,
+                                Ok(true) => 1,
+                                Err(_) => {
+                                    tracing::warn!(code="audit_backfill_failed", "audit occurred_at_ts backfill batch failed");
+                                    5
+                                }
+                            };
+                            backfill_due=tokio::time::Instant::now()+Duration::from_secs(delay);
                         }
                         if tokio::time::Instant::now() >= cleanup_due {
                             let delay = match cleanup_cycle(&pool).await {

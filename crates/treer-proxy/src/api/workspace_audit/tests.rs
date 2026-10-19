@@ -4,7 +4,7 @@ use tower::ServiceExt;
 use treer_protocol::{PolicyMode, PolicyPrincipalKind, PolicyPrincipalRef};
 use treer_proxy::policy_store::WorkspacePolicyStore;
 
-async fn fixture() -> AuthStore {
+pub(super) async fn fixture() -> AuthStore {
     let auth = AuthStore::for_test("audit-test").await;
     auth.seed_test_workspace("a").await;
     sqlx::query("INSERT INTO workspaces(workspace_id,organization_id,name,created_at,created_by,access_mode) VALUES('b','org_a','B','test','test','restricted')")
@@ -36,14 +36,14 @@ fn human(user: &str) -> PolicySubject {
     }
 }
 
-fn test_router(auth: &AuthStore, policy: PolicyEngine) -> Router {
+pub(super) fn test_router(auth: &AuthStore, policy: PolicyEngine) -> Router {
     routes(auth.clone())
         .layer(Extension(auth.clone()))
         .layer(Extension(policy))
         .with_state(AppState::new())
 }
 
-async fn response(router: Router, uri: &str, user: Option<&str>) -> Response {
+pub(super) async fn response(router: Router, uri: &str, user: Option<&str>) -> Response {
     let mut request = Request::builder().uri(uri);
     if let Some(user) = user {
         request = request.header(
@@ -57,7 +57,7 @@ async fn response(router: Router, uri: &str, user: Option<&str>) -> Response {
         .unwrap()
 }
 
-async fn body(response: Response) -> Value {
+pub(super) async fn body(response: Response) -> Value {
     serde_json::from_slice(
         &axum::body::to_bytes(response.into_body(), 1024 * 1024)
             .await
@@ -516,6 +516,7 @@ fn workspace_audit_query_and_page_protocol_round_trip() {
         events: vec![],
         next_cursor: None,
         maintenance: None,
+        category_table_version: None,
     };
     let restored: WorkspaceAuditEventsPage =
         serde_json::from_value(serde_json::to_value(page).unwrap()).unwrap();

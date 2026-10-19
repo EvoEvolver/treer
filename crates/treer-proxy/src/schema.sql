@@ -208,6 +208,37 @@ CREATE INDEX IF NOT EXISTS organization_audit_events_workspace_sequence
     ON organization_audit_events(organization_id, workspace_id, sequence DESC);
 CREATE INDEX IF NOT EXISTS organization_audit_events_correlation
     ON organization_audit_events(correlation_id) WHERE correlation_id IS NOT NULL;
+-- Audit summary (#191): a typed instant derived from occurred_at so range
+-- scans use an index. New rows get it from a trigger (no call site can forget
+-- it); old rows are backfilled newest-first by the maintenance worker, which
+-- touches only this column. The parse is total: malformed text leaves NULL
+-- and is marked so the backfill does not retry it forever.
+ALTER TABLE organization_audit_events ADD COLUMN IF NOT EXISTS occurred_at_ts TIMESTAMPTZ;
+ALTER TABLE organization_audit_events ADD COLUMN IF NOT EXISTS occurred_at_ts_unparsable BOOLEAN NOT NULL DEFAULT FALSE;
+CREATE OR REPLACE FUNCTION treer_audit_parse_instant(value TEXT) RETURNS TIMESTAMPTZ AS $$
+BEGIN
+    RETURN value::TIMESTAMPTZ;
+EXCEPTION WHEN OTHERS THEN
+    RETURN NULL;
+END;
+-- STABLE, not IMMUTABLE: a text to timestamptz cast of a value without an
+-- offset depends on the session time zone; recorded values carry one, and the
+-- function is not used in an index.
+$$ LANGUAGE plpgsql STABLE;
+CREATE OR REPLACE FUNCTION treer_audit_fill_instant() RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.occurred_at_ts IS NULL THEN
+        NEW.occurred_at_ts := treer_audit_parse_instant(NEW.occurred_at);
+        NEW.occurred_at_ts_unparsable := NEW.occurred_at_ts IS NULL;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+CREATE OR REPLACE TRIGGER organization_audit_events_fill_instant
+    BEFORE INSERT ON organization_audit_events FOR EACH ROW
+    EXECUTE FUNCTION treer_audit_fill_instant();
+CREATE INDEX IF NOT EXISTS organization_audit_events_workspace_time
+    ON organization_audit_events((COALESCE(workspace_id, workspace_origin_id)), occurred_at_ts);
 
 -- Shared across replicas. Omitted startup configuration preserves these values.
 CREATE TABLE IF NOT EXISTS audit_maintenance_settings (
@@ -218,6 +249,13 @@ CREATE TABLE IF NOT EXISTS audit_maintenance_settings (
     overflow_total BIGINT NOT NULL DEFAULT 0 CHECK(overflow_total >= 0)
 );
 INSERT INTO audit_maintenance_settings(singleton) VALUES(TRUE) ON CONFLICT DO NOTHING;
+-- occurred_at_ts backfill watermark (#191): rows with sequence >= the
+-- watermark sequence carry occurred_at_ts (or are marked unparsable);
+-- complete_since is the instant of the oldest such row; done once every
+-- older row was visited.
+ALTER TABLE audit_maintenance_settings ADD COLUMN IF NOT EXISTS backfill_watermark_sequence BIGINT;
+ALTER TABLE audit_maintenance_settings ADD COLUMN IF NOT EXISTS backfill_complete_since TIMESTAMPTZ;
+ALTER TABLE audit_maintenance_settings ADD COLUMN IF NOT EXISTS backfill_done BOOLEAN NOT NULL DEFAULT FALSE;
 CREATE TABLE IF NOT EXISTS prompt_audit_outbox (
     event_id TEXT PRIMARY KEY,
     organization_id TEXT NOT NULL REFERENCES organizations(organization_id) ON DELETE CASCADE,

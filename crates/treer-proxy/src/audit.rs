@@ -5,6 +5,7 @@ use treer_protocol::{OrganizationAuditEvent, WorkspaceAuditEventsPage, Workspace
 use uuid::Uuid;
 
 pub(crate) mod maintenance;
+pub(crate) mod summary;
 
 #[cfg(test)]
 mod mutation_tests;
@@ -102,10 +103,27 @@ pub(crate) struct NewWorkspaceAuditEvent<'a> {
     pub payload: Value,
 }
 
+/// Actions the category table (#192) does not know, counted so operators can
+/// see a recorder drifted from the table before the chart hides it in `other`.
+pub(crate) static UNCATEGORIZED_ACTIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn note_action_category(action: &str) {
+    if treer_protocol::audit_category(action) == treer_protocol::AuditCategory::Other {
+        UNCATEGORIZED_ACTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::warn!(
+            code = "audit_action_uncategorized",
+            action,
+            "audit action is not in the category table"
+        );
+    }
+}
+
 pub(crate) async fn insert(
     transaction: &mut Transaction<'_, Postgres>,
     event: NewAuditEvent<'_>,
 ) -> Result<(), sqlx::Error> {
+    note_action_category(event.action);
     sqlx::query(
         "INSERT INTO organization_audit_events(\
          event_id, organization_id, workspace_id, occurred_at, actor_kind, actor_id, \
@@ -193,7 +211,7 @@ pub(crate) async fn list_workspace(
     query: &WorkspaceAuditEventsQuery,
 ) -> Result<WorkspaceAuditEventsPage, sqlx::Error> {
     let limit = i64::from(query.limit.unwrap_or(50).clamp(1, 100));
-    let rows = sqlx::query(
+    let sql = format!(
         "SELECT e.sequence, left(e.event_id,128) AS event_id, \
          left(e.organization_id,128) AS organization_id, left(e.workspace_id,128) AS workspace_id, e.occurred_at, \
          left(e.actor_kind,32) AS actor_kind, left(e.actor_id,128) AS actor_id, NULL::TEXT AS actor_name, \
@@ -204,7 +222,7 @@ pub(crate) async fn list_workspace(
            FROM unnest(ARRAY['server_id','startup_revision','exit_code','timed_out','truncated','timeout_ms','rate_limit_per_minute','rate_burst','concurrency_limit','ip_rate_limit_per_minute','ip_rate_burst','max_body_bytes','response_timeout_secs','body_timeout_secs']) AS k \
            WHERE (jsonb_typeof(e.payload->k) IN ('number','boolean','null') AND octet_length((e.payload->k)::TEXT) <= 64) \
            OR (k = 'server_id' AND jsonb_typeof(e.payload->k) = 'string' AND octet_length((e.payload->k)::TEXT) <= 130)), \
-           '{}'::JSONB) AS payload \
+           '{{}}'::JSONB) AS payload \
          FROM organization_audit_events e JOIN workspaces w \
          ON w.workspace_id = e.workspace_id AND w.organization_id = e.organization_id \
          WHERE w.workspace_id = $1 AND w.deleted_at IS NULL \
@@ -214,18 +232,32 @@ pub(crate) async fn list_workspace(
          AND ($5::TEXT IS NULL OR e.actor_id = $5) \
          AND ($6::TEXT IS NULL OR e.action = $6) \
          AND ($7::TEXT IS NULL OR e.resource_kind = $7) \
+         AND ($9::TEXT IS NULL OR e.actor_kind = $9) \
+         AND ($10::TEXT IS NULL OR e.resource_id = $10) \
+         AND ($11::TEXT IS NULL OR e.outcome = $11) \
+         AND ($12::BIGINT IS NULL OR e.sequence = $12) \
+         AND ($13::TEXT IS NULL OR {category} = $13) \
+         AND (NOT $14::BOOLEAN OR {notable}) \
          ORDER BY e.sequence DESC LIMIT $8",
-    )
-    .bind(workspace_id)
-    .bind(query.before)
-    .bind(query.since.map(|v| v.to_rfc3339()))
-    .bind(query.until.map(|v| v.to_rfc3339()))
-    .bind(&query.actor_id)
-    .bind(&query.action)
-    .bind(&query.resource_kind)
-    .bind(limit + 1)
-    .fetch_all(pool)
-    .await?;
+        category = CATEGORY_SQL,
+        notable = NOTABLE_SQL,
+    );
+    let statement = sqlx::query(&sql)
+        .bind(workspace_id)
+        .bind(query.before)
+        .bind(query.since.map(|v| v.to_rfc3339()))
+        .bind(query.until.map(|v| v.to_rfc3339()))
+        .bind(&query.actor_id)
+        .bind(&query.action)
+        .bind(&query.resource_kind)
+        .bind(limit + 1)
+        .bind(&query.actor_kind)
+        .bind(&query.resource_id)
+        .bind(&query.outcome)
+        .bind(query.sequence)
+        .bind(query.category.map(|c| c.as_str()))
+        .bind(query.notable);
+    let rows = bind_category_terms(statement).fetch_all(pool).await?;
     let mut events = decode_events(rows)?;
     let has_more = events.len() > limit as usize;
     events.truncate(limit as usize);
@@ -244,7 +276,81 @@ pub(crate) async fn list_workspace(
         maintenance: Some(
             maintenance::metadata(pool, None, Some(workspace_id), query.include_statistics).await?,
         ),
+        category_table_version: Some(treer_protocol::AUDIT_CATEGORY_TABLE_VERSION),
     })
+}
+
+/// The category of `e.action` in SQL, from the same table as
+/// [`treer_protocol::audit_category`]: exact name first, then the longest
+/// `prefix.` match, else `other`. Parameters `$15..$18` are bound by
+/// [`bind_category_terms`]; the parity test checks it against the Rust rule.
+pub(crate) const CATEGORY_SQL: &str = "COALESCE(\
+    (SELECT x.c FROM unnest($15::TEXT[], $16::TEXT[]) AS x(a, c) WHERE x.a = e.action LIMIT 1), \
+    (SELECT y.c FROM unnest($17::TEXT[], $18::TEXT[]) AS y(p, c) \
+        WHERE left(e.action, length(y.p)) = y.p ORDER BY length(y.p) DESC LIMIT 1), \
+    'other')";
+
+/// [`treer_protocol::is_notable`] in SQL; `$19..$21` bound by
+/// [`bind_category_terms`].
+pub(crate) const NOTABLE_SQL: &str = "(e.action = ANY($19::TEXT[]) \
+    OR EXISTS (SELECT 1 FROM unnest($20::TEXT[]) AS np(p) WHERE left(e.action, length(np.p)) = np.p) \
+    OR (e.outcome = 'failed' AND (e.action = ANY($21::TEXT[]) OR COALESCE(\
+    (SELECT x.c FROM unnest($15::TEXT[], $16::TEXT[]) AS x(a, c) WHERE x.a = e.action LIMIT 1), \
+    (SELECT y.c FROM unnest($17::TEXT[], $18::TEXT[]) AS y(p, c) \
+        WHERE left(e.action, length(y.p)) = y.p ORDER BY length(y.p) DESC LIMIT 1), \
+    'other') IN ('other', 'access_admin'))))";
+
+/// Binds the seven term arrays used by [`CATEGORY_SQL`] and [`NOTABLE_SQL`]
+/// as `$15..$21`; the statement must already hold fourteen parameters.
+pub(crate) fn bind_category_terms<'q>(
+    statement: sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments>,
+) -> sqlx::query::Query<'q, Postgres, sqlx::postgres::PgArguments> {
+    let terms = category_terms();
+    statement
+        .bind(terms.exact_actions)
+        .bind(terms.exact_categories)
+        .bind(terms.prefixes)
+        .bind(terms.prefix_categories)
+        .bind(terms.notable_actions)
+        .bind(terms.notable_prefixes)
+        .bind(terms.notable_when_failed)
+}
+
+struct CategoryTerms {
+    exact_actions: Vec<&'static str>,
+    exact_categories: Vec<&'static str>,
+    prefixes: Vec<String>,
+    prefix_categories: Vec<&'static str>,
+    notable_actions: Vec<&'static str>,
+    notable_prefixes: Vec<String>,
+    notable_when_failed: Vec<&'static str>,
+}
+
+fn category_terms() -> CategoryTerms {
+    CategoryTerms {
+        exact_actions: treer_protocol::AUDIT_CATEGORY_EXACT
+            .iter()
+            .map(|(a, _)| *a)
+            .collect(),
+        exact_categories: treer_protocol::AUDIT_CATEGORY_EXACT
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect(),
+        prefixes: treer_protocol::AUDIT_CATEGORY_PREFIXES
+            .iter()
+            .map(|(p, _)| format!("{p}."))
+            .collect(),
+        prefix_categories: treer_protocol::AUDIT_CATEGORY_PREFIXES
+            .iter()
+            .map(|(_, c)| c.as_str())
+            .collect(),
+        notable_actions: treer_protocol::NOTABLE_ACTIONS.to_vec(),
+        notable_prefixes: treer_protocol::NOTABLE_PREFIXES
+            .iter()
+            .map(|p| format!("{p}."))
+            .collect(),
+        notable_when_failed: treer_protocol::NOTABLE_WHEN_FAILED.to_vec(),
+    }
 }
 
 fn workspace_payload(action: &str, payload: &Value) -> Value {
