@@ -237,6 +237,20 @@ impl ReasonClaim {
             }
         }
     }
+
+    fn matches_phase(&self, phase: layout::Transaction) -> bool {
+        use layout::Transaction::*;
+        matches!(
+            (phase, self),
+            (
+                Prepared | Activating | CoreHealthy | Complete,
+                Self::None(())
+            ) | (
+                RollbackCli | RollbackController | RolledBack,
+                Self::Reference(_)
+            )
+        )
+    }
 }
 
 // Untrusted-label compatibility only, not evidence verification or permission.
@@ -281,6 +295,7 @@ impl DraftFields {
         ];
         self.binding.valid()
             && self.rollback_reason.valid(self.binding.revision)
+            && self.rollback_reason.matches_phase(self.state.transaction)
             && hex(&p.release_sha, 40)
             && hex(&p.artifact_source_sha, 40)
             && hex(&p.sums_sha256, 64)
@@ -375,8 +390,13 @@ fn check_successor_fields(
     if next_provenance != old_provenance || next_images != old_images {
         return Err("transaction_fields_changed");
     }
-    // Conservative schema slice: creation at entry is deliberately not wired.
-    if next_reason != old_reason {
+    // Only entry may create a reference. The phase parser and the entry graph
+    // below must also accept it; this partial guard alone is not an entry.
+    let creation = matches!((old_reason, next_reason),
+        (ReasonClaim::None(()), ReasonClaim::Reference(reason))
+            if reason.entry_revision == next_binding.revision
+                && reason.predecessor_receipt_sha256 == head.receipt_sha256);
+    if next_reason != old_reason && !creation {
         return Err("rollback_reason_changed");
     }
     Ok(next)
@@ -474,6 +494,12 @@ fn check_rollback_entry(
     };
     if expected != next.state {
         return Err("invalid_rollback_entry");
+    }
+    let ReasonClaim::Reference(reason) = &next.rollback_reason else {
+        return Err("rollback_reason_missing");
+    };
+    if !reason_kind_matches_entry(reason.kind, &old.state, slots) {
+        return Err("rollback_reason_incompatible");
     }
     Ok(())
 }
@@ -580,6 +606,17 @@ fn fixture() -> DraftFields {
         },
         rollback_reason: ReasonClaim::None(()),
     }
+}
+
+// Synthetic references for standalone rollback fixtures. Entry tests instead
+// construct references from their actual synthetic predecessor envelope.
+fn fixture_reason() -> ReasonClaim {
+    ReasonClaim::Reference(ReasonReference {
+        kind: ReasonKind::DeadlineExceeded,
+        entry_revision: 2,
+        predecessor_receipt_sha256: "a".repeat(64),
+        evidence_sha256: "b".repeat(64),
+    })
 }
 
 fn envelopes(payload: &[u8], binding: &Binding) -> (Vec<u8>, Vec<u8>) {
@@ -932,7 +969,8 @@ fn parsed_claims_require_independent_layouts_and_ordered_health_flags() {
         ),
     ] {
         for flags in 0..8 {
-            let fields = fixture();
+            let mut fields = fixture();
+            fields.binding.revision = 2;
             let mut value = serde_json::to_value(&fields).unwrap();
             value["state"] = serde_json::json!({
                 "transaction": phase, "controller_step": c_step, "cli_step": l_step,
@@ -940,6 +978,12 @@ fn parsed_claims_require_independent_layouts_and_ordered_health_flags() {
                 "final_health_recorded": flags & 2 != 0,
                 "old_health_recorded": flags & 4 != 0,
             });
+            if matches!(
+                phase,
+                "rollback_cli" | "rollback_controller" | "rolled_back"
+            ) {
+                value["rollback_reason"] = serde_json::to_value(fixture_reason()).unwrap();
+            }
             let (receipt, marker) =
                 envelopes(&serde_json::to_vec(&value).unwrap(), &fields.binding);
             let parsed = parse_pair(&receipt, &marker, &fields.binding).unwrap();
@@ -1200,6 +1244,14 @@ fn forward_fixture_check(
     let mut candidate = prior;
     candidate.binding.revision += 1;
     candidate.state = next.clone();
+    if matches!(next.transaction, layout::Transaction::RollbackController) {
+        candidate.rollback_reason = ReasonClaim::Reference(ReasonReference {
+            kind: ReasonKind::DeadlineExceeded,
+            entry_revision: candidate.binding.revision,
+            predecessor_receipt_sha256: head.receipt_sha256.clone(),
+            evidence_sha256: "b".repeat(64),
+        });
+    }
     let (receipt, marker) = envelopes(&serde_json::to_vec(&candidate).unwrap(), &candidate.binding);
     check_forward_successor(
         (&old_receipt, &old_marker),
@@ -1244,10 +1296,7 @@ fn forward_graph_accepts_only_adjacent_claims_not_noops_skips_or_reversals() {
         forward_fixture_check(&trace[0].0, &rollback, trace[0].1, trace[0].1),
         Err("invalid_forward_transition")
     );
-    assert_eq!(
-        forward_fixture_check(&rollback, &trace[0].0, trace[0].1, trace[0].1),
-        Err("invalid_forward_transition")
-    );
+    assert!(forward_fixture_check(&rollback, &trace[0].0, trace[0].1, trace[0].1).is_err());
 }
 
 #[test]
@@ -1341,6 +1390,12 @@ fn rollback_entry_uses_current_layout_and_preserves_other_image_and_health() {
         };
         let mut candidate = old.clone();
         candidate.binding.revision += 1;
+        candidate.rollback_reason = ReasonClaim::Reference(ReasonReference {
+            kind: ReasonKind::DeadlineExceeded,
+            entry_revision: candidate.binding.revision,
+            predecessor_receipt_sha256: head.receipt_sha256.clone(),
+            evidence_sha256: "b".repeat(64),
+        });
         let cli = old_state.transaction == CoreHealthy;
         candidate.state.transaction = if cli { RollbackCli } else { RollbackController };
         if cli {
@@ -1694,8 +1749,9 @@ fn rollback_chains_advance_exact_heads_and_refuse_replay_or_rewriting() {
                 .enumerate()
                 .map(|(index, (claim, _))| {
                     let mut fields = fixture();
-                    fields.binding.revision = index as u64 + 1;
+                    fields.binding.revision = index as u64 + 2;
                     fields.state = claim.clone();
+                    fields.rollback_reason = fixture_reason();
                     fields.state.new_health_recorded = historical_new_health;
                     let pair = envelopes(&serde_json::to_vec(&fields).unwrap(), &fields.binding);
                     (fields, pair)
@@ -1742,6 +1798,37 @@ fn rollback_chains_advance_exact_heads_and_refuse_replay_or_rewriting() {
                     check((old_receipt, old_marker), (&r, &m)),
                     Err("transaction_fields_changed")
                 );
+                // Including the final edge: no continuation may clear or
+                // replace any part of the entry reference, even if the
+                // replacement passes the standalone parser.
+                for field in [
+                    "kind",
+                    "entry_revision",
+                    "predecessor_receipt_sha256",
+                    "evidence_sha256",
+                ] {
+                    let mut changed = serde_json::to_value(next).unwrap();
+                    changed["rollback_reason"][field] = match field {
+                        "kind" => serde_json::json!("human_abort"),
+                        "entry_revision" => serde_json::json!(next.binding.revision),
+                        _ => serde_json::json!("c".repeat(64)),
+                    };
+                    let changed: DraftFields = serde_json::from_value(changed).unwrap();
+                    let (r, m) =
+                        envelopes(&serde_json::to_vec(&changed).unwrap(), &changed.binding);
+                    assert!(parse_pair(&r, &m, &changed.binding).is_ok());
+                    assert_eq!(
+                        check((old_receipt, old_marker), (&r, &m)),
+                        Err("rollback_reason_changed")
+                    );
+                }
+                let mut cleared = next.clone();
+                cleared.rollback_reason = ReasonClaim::None(());
+                let (r, m) = envelopes(&serde_json::to_vec(&cleared).unwrap(), &cleared.binding);
+                assert_eq!(
+                    check((old_receipt, old_marker), (&r, &m)),
+                    Err("invalid_receipt_fields")
+                );
                 // Advance only this synthetic in-memory test head after the
                 // successful edge. This is not a durable CAS or restart test.
                 head = ExpectedHead {
@@ -1766,6 +1853,111 @@ fn rollback_chains_advance_exact_heads_and_refuse_replay_or_rewriting() {
             );
         }
     }
+}
+
+#[test]
+fn reason_reference_survives_forward_entry_through_terminal_rollback() {
+    use layout::{Object::*, Step::*, Transaction::*};
+    // The remaining fixture traces begin after rollback has already progressed
+    // (for example a restored CLI). They test continuation separately; do not
+    // invent a forward predecessor for those intermediate records.
+    let mut branches: Vec<_> = rollback_fixture_traces()
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, branch)| matches!(index, 0 | 2 | 4).then_some(branch))
+        .collect();
+    // Controller activation can fail before any CLI operation. Reuse the
+    // physical Controller rollback suffix but retain the untouched CLI label.
+    let mut controller_only = rollback_fixture_traces()[0][4..].to_vec();
+    for (claim, _) in &mut controller_only {
+        claim.cli_step = Original;
+    }
+    branches.push(controller_only);
+    let mut exercised_kinds = Vec::new();
+    for mut branch in branches {
+        let first = &branch[0];
+        let cli = first.0.transaction == RollbackCli;
+        let mut prior = fixture();
+        prior.state.transaction = if cli { CoreHealthy } else { Activating };
+        prior.state.new_health_recorded = cli;
+        if cli {
+            prior.state.controller_step = Published;
+        }
+        let moving = if cli {
+            &mut prior.state.cli_step
+        } else {
+            &mut prior.state.controller_step
+        };
+        *moving = match first.1[usize::from(cli)] {
+            [Old, New, Absent] => Original,
+            [Absent, New, Old] => OldMoved,
+            [New, Absent, Old] => Published,
+            _ => unreachable!(),
+        };
+        // Preserve the actual entry history: only the CoreHealthy exits have
+        // already recorded new-Controller health.
+        for (claim, _) in &mut branch {
+            claim.new_health_recorded = cli;
+        }
+        for kind in [
+            ReasonKind::ControllerActivationFailed,
+            ReasonKind::NewControllerUnhealthy,
+            ReasonKind::CliActivationFailed,
+            ReasonKind::FinalHealthFailed,
+            ReasonKind::DeadlineExceeded,
+            ReasonKind::HumanAbort,
+        ] {
+            if !reason_kind_matches_entry(kind, &prior.state, branch[0].1) {
+                continue;
+            }
+            if !exercised_kinds.contains(&kind) {
+                exercised_kinds.push(kind);
+            }
+            let (mut r, mut m) = envelopes(&serde_json::to_vec(&prior).unwrap(), &prior.binding);
+            let mut head = ExpectedHead {
+                binding: prior.binding.clone(),
+                receipt_sha256: digest(&r),
+            };
+            let reason = ReasonClaim::Reference(ReasonReference {
+                kind,
+                entry_revision: 2,
+                predecessor_receipt_sha256: head.receipt_sha256.clone(),
+                evidence_sha256: "b".repeat(64),
+            });
+            for (index, (claim, slots)) in branch.iter().enumerate() {
+                let mut next = prior.clone();
+                next.binding.revision = index as u64 + 2;
+                next.state = claim.clone();
+                next.rollback_reason = reason.clone();
+                let (nr, nm) = envelopes(&serde_json::to_vec(&next).unwrap(), &next.binding);
+                let result = if index == 0 {
+                    check_rollback_entry((&r, &m), (&nr, &nm), &head, *slots)
+                } else {
+                    check_rollback_successor((&r, &m), (&nr, &nm), &head, *slots)
+                };
+                assert_eq!(
+                    result,
+                    Ok(()),
+                    "branch entry={:?}, kind={kind:?}, index={index}",
+                    branch[0].0
+                );
+                assert_eq!(
+                    parse_pair(&nr, &nm, &next.binding).unwrap().rollback_reason,
+                    reason
+                );
+                head = ExpectedHead {
+                    binding: next.binding,
+                    receipt_sha256: digest(&nr),
+                };
+                (r, m) = (nr, nm);
+            }
+            assert_eq!(
+                parse_pair(&r, &m, &head.binding).unwrap().state.transaction,
+                RolledBack
+            );
+        }
+    }
+    assert_eq!(exercised_kinds.len(), 6);
 }
 
 #[test]
@@ -1794,7 +1986,12 @@ fn reason_schema_requires_explicit_key_and_strict_bounded_reference() {
             "kind":kind, "entry_revision":2,
             "predecessor_receipt_sha256":"a".repeat(64), "evidence_sha256":"b".repeat(64)
         });
-        assert!(accepts(&valid)); // Shape only, even in a forward claim.
+        assert!(!accepts(&valid)); // A forward phase must retain explicit null.
+        valid["state"]["transaction"] = serde_json::json!("rollback_controller");
+        assert!(accepts(&valid));
+        let mut no_reason = valid.clone();
+        no_reason["rollback_reason"] = serde_json::Value::Null;
+        assert!(!accepts(&no_reason));
         for key in [
             "kind",
             "entry_revision",
@@ -1844,7 +2041,31 @@ fn reason_schema_requires_explicit_key_and_strict_bounded_reference() {
 }
 
 #[test]
-fn reason_schema_slice_preserves_reference_but_refuses_creation_or_replacement() {
+fn reason_phase_presence_and_reference_preservation_are_required() {
+    use layout::Transaction::*;
+    for phase in [
+        Prepared,
+        Activating,
+        CoreHealthy,
+        Complete,
+        RollbackCli,
+        RollbackController,
+        RolledBack,
+    ] {
+        for has_reason in [false, true] {
+            let mut fields = fixture();
+            fields.binding.revision = 2;
+            fields.state.transaction = phase;
+            if has_reason {
+                fields.rollback_reason = fixture_reason();
+            }
+            let (r, m) = envelopes(&serde_json::to_vec(&fields).unwrap(), &fields.binding);
+            assert_eq!(
+                parse_pair(&r, &m, &fields.binding).is_ok(),
+                has_reason == matches!(phase, RollbackCli | RollbackController | RolledBack)
+            );
+        }
+    }
     for has_reason in [false, true] {
         let mut old = fixture();
         old.binding.revision = 2;
@@ -1856,6 +2077,7 @@ fn reason_schema_slice_preserves_reference_but_refuses_creation_or_replacement()
         });
         if has_reason {
             old.rollback_reason = reference.clone();
+            old.state.transaction = layout::Transaction::RollbackController;
         }
         let (r, m) = envelopes(&serde_json::to_vec(&old).unwrap(), &old.binding);
         let head = ExpectedHead {
@@ -1866,7 +2088,6 @@ fn reason_schema_slice_preserves_reference_but_refuses_creation_or_replacement()
         next.binding.revision += 1;
         let check = |fields: &DraftFields| {
             let (nr, nm) = envelopes(&serde_json::to_vec(fields).unwrap(), &fields.binding);
-            assert!(parse_pair(&nr, &nm, &fields.binding).is_ok());
             check_successor_fields((&r, &m), (&nr, &nm), &head).map(|_| ())
         };
         assert_eq!(check(&next), Ok(()));
@@ -1876,7 +2097,7 @@ fn reason_schema_slice_preserves_reference_but_refuses_creation_or_replacement()
         } else {
             reference
         };
-        assert_eq!(check(&changed), Err("rollback_reason_changed"));
+        assert_eq!(check(&changed), Err("invalid_receipt_fields"));
         if has_reason {
             for field in [
                 "kind",
@@ -1893,6 +2114,89 @@ fn reason_schema_slice_preserves_reference_but_refuses_creation_or_replacement()
                 let changed = serde_json::from_value(changed).unwrap();
                 assert_eq!(check(&changed), Err("rollback_reason_changed"));
             }
+        }
+    }
+}
+
+#[test]
+fn rollback_entry_binds_reason_kind_revision_and_exact_predecessor() {
+    use layout::{Object::*, Step::*, Transaction::*};
+    use ReasonKind::*;
+    // Independent forward-trace inventory. These indices cover Prepared,
+    // Controller activation and CLI activation, excluding terminal Complete.
+    let kinds = [
+        ControllerActivationFailed,
+        NewControllerUnhealthy,
+        CliActivationFailed,
+        FinalHealthFailed,
+        DeadlineExceeded,
+        HumanAbort,
+    ];
+    for (index, (claim, slots)) in forward_fixture_trace().into_iter().take(11).enumerate() {
+        let mut old = fixture();
+        old.binding.revision = 2;
+        old.state = claim;
+        let (r, m) = envelopes(&serde_json::to_vec(&old).unwrap(), &old.binding);
+        let head = ExpectedHead {
+            binding: old.binding.clone(),
+            receipt_sha256: digest(&r),
+        };
+        let mut next = old.clone();
+        next.binding.revision = 3;
+        let cli = index >= 6;
+        next.state.transaction = if cli { RollbackCli } else { RollbackController };
+        let moving = if cli {
+            &mut next.state.cli_step
+        } else {
+            &mut next.state.controller_step
+        };
+        *moving = match slots[usize::from(cli)] {
+            [Old, New, Absent] => Original,
+            [Absent, New, Old] => RestoreOldIntent,
+            [New, Absent, Old] => MoveNewAsideIntent,
+            _ => unreachable!(),
+        };
+        let check = |fields: &DraftFields| {
+            let (nr, nm) = envelopes(&serde_json::to_vec(fields).unwrap(), &fields.binding);
+            check_rollback_entry((&r, &m), (&nr, &nm), &head, slots)
+        };
+        for kind in kinds {
+            next.rollback_reason = ReasonClaim::Reference(ReasonReference {
+                kind,
+                entry_revision: 3,
+                predecessor_receipt_sha256: head.receipt_sha256.clone(),
+                evidence_sha256: "b".repeat(64),
+            });
+            let permitted = match kind {
+                ControllerActivationFailed => (2..=5).contains(&index),
+                NewControllerUnhealthy => index == 5,
+                CliActivationFailed => (7..=10).contains(&index),
+                FinalHealthFailed => index == 10,
+                DeadlineExceeded | HumanAbort => true,
+            };
+            assert_eq!(check(&next).is_ok(), permitted, "{index} / {kind:?}");
+            if !permitted {
+                continue;
+            }
+            // Both mutated references remain syntactically valid at revision
+            // three; rejection must come from binding to this actual entry.
+            for change_revision in [false, true] {
+                let mut changed = next.clone();
+                let ReasonClaim::Reference(reason) = &mut changed.rollback_reason else {
+                    unreachable!()
+                };
+                if change_revision {
+                    reason.entry_revision = 2;
+                } else {
+                    reason.predecessor_receipt_sha256 = "c".repeat(64);
+                }
+                let (nr, nm) = envelopes(&serde_json::to_vec(&changed).unwrap(), &changed.binding);
+                assert!(parse_pair(&nr, &nm, &changed.binding).is_ok());
+                assert_eq!(check(&changed), Err("rollback_reason_changed"));
+            }
+            let mut cleared = next.clone();
+            cleared.rollback_reason = ReasonClaim::None(());
+            assert_eq!(check(&cleared), Err("invalid_receipt_fields"));
         }
     }
 }
@@ -2018,6 +2322,8 @@ fn assert_rollback_record_trace(trace: &[(ClaimedState, [[layout::Object; 3]; 2]
     for (i, (old, _)) in trace.iter().enumerate() {
         let mut fields = fixture();
         fields.state = old.clone();
+        fields.binding.revision = 2;
+        fields.rollback_reason = fixture_reason();
         let (receipt, marker) = envelopes(&serde_json::to_vec(&fields).unwrap(), &fields.binding);
         let head = ExpectedHead {
             binding: fields.binding.clone(),

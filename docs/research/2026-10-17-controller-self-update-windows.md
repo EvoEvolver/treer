@@ -494,15 +494,21 @@ with exactly these fields; duplicate, missing and unknown fields are refused:
 | `predecessor_receipt_sha256` | Lowercase 64-hex digest of the exact receipt envelope preceding entry |
 | `evidence_sha256` | Lowercase 64-hex reference to independently verified reason evidence |
 
-The private `cfg(test)` schema now requires the key, parses null or the strict
-six-kind object, and bounds its revision/digests. The partial successor guard
-currently requires exact preservation, including refusing null-to-object
-creation. Phase-dependent presence, entry creation and kind/phase binding are
-not wired yet: the parser accepts a well-shaped reference even in a forward
-claim and the existing rollback fixtures still carry explicit null. Tests
-demonstrate these limits, required-key/strict-field refusal, and rejection of
-clearing/replacing each reference field. This slice is neither the lifecycle
-implementation nor reason authorization; it adds no verifier capability.
+The private `cfg(test)` schema requires the key, parses null or the strict
+six-kind object, and bounds its revision/digests. Forward phases require null;
+rollback phases including RolledBack require the object. The partial successor
+guard permits creation only at the candidate revision with the exact prior
+head digest; the entry graph also checks kind/phase/step compatibility.
+Continuations preserve the entire reference. Tests reject missing keys, wrong
+phase presence, clearing/replacing each reference field and otherwise valid
+entry references with stale revision or a different predecessor digest. Four
+synthetic branches run from a forward predecessor through rollback entry to
+RolledBack with the same reference; six standalone rollback histories test
+preservation and field-mutation refusal through their terminal edges. These
+advance a synthetic in-memory head only after successful checks. Intermediate
+rollback fixtures are not relabeled as forward entry points. This implements
+claim lifecycle checks, not reason authorization, a durable head or a verifier
+capability.
 
 On entry only, null may become an object, with `entry_revision` equal to the
 candidate revision and `predecessor_receipt_sha256` equal to the trusted prior
@@ -517,14 +523,14 @@ guard alone never accepts an entry. Forward edges require null throughout.
 The entry guard must also enforce this closed kind/phase/step table against the
 verified predecessor claim. All rows remain subject to the independent layout,
 ownership and evidence gates; a matching label alone proves no failure.
-An independent private test-only compatibility helper now enforces the table
+The private test-only entry guard uses a compatibility helper enforcing the table
 against a classifier-consistent predecessor and both synthetic layouts. Its
 test crosses all seven phases, both nine-step sets, three layouts per image,
 all eight health claims and all six kinds against an explicit row inventory;
 each kind must have accepted and refused cases. Unknown/unreadable slots are
-also refused. This helper is not yet connected to record entry: predecessor
-digest/revision binding and reason creation remain unwired, and successful
-label compatibility is not a verified reason capability.
+also refused. Separate entry tests cross all six kinds with the canonical
+forward trace and an explicit index inventory, independently of that helper.
+Successful label compatibility is not a verified reason capability.
 
 | Kind | Allowed predecessor phase and moving step | Required evidence meaning |
 | --- | --- | --- |
