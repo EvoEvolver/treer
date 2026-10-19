@@ -477,9 +477,10 @@ RolledBack must carry or reference the verified entry reason from the entry
 revision, preserving its chain of custody rather than inventing a new reason
 at completion. It is terminal for that job ID. A later attempt requires a new
 job; the rolled-back job must never automatically retry the same candidate.
-The reason reference and health verifier remain unimplemented format/API gates.
+The private inert record now preserves the reason reference through RolledBack;
+the evidence verifier and authenticated health API remain unimplemented gates.
 
-#### Proposed rollback-reason lifecycle (partial inert schema only)
+#### Rollback-reason lifecycle (private inert model only)
 
 The following is the target draft lifecycle and immutability contract. The
 required `rollback_reason` key is explicitly null
@@ -560,16 +561,84 @@ or unavailable evidence must stop the update, not fall back to trusting JSON.
 The evidence store, authentication scheme and capability API need separate
 design review; this table creates none of them and adds no public format.
 
-The eventual inert format slice must test required-null versus missing,
-all strict-object refusals, entry revision/head binding, each reason-field
-mutation independently, and reason preservation across every rollback branch
-through RolledBack. For every kind, exercise a matching entry and mismatched
-phase/step cases, including Prepared/Original, pre-final CLI steps, Complete
-and existing rollback phases. It must also demonstrate that valid JSON/digest references
-alone cannot construct a verified reason. The current fixtures explicitly use
-null; a lifecycle slice must update rollback fixtures to reason references
-rather than add a permissive default or claim backward compatibility with an
-installed format.
+The inert format tests cover required-null versus missing, strict-object
+refusals, entry revision/head binding, each reason-field mutation independently,
+and reason preservation through RolledBack. Every kind has matching and
+mismatched phase/step cases, including Prepared/Original, pre-final CLI steps,
+Complete and existing rollback phases. Rollback fixtures carry explicit reason
+references; there is no permissive default or compatibility claim for an
+installed format. A subsequent verifier model must demonstrate that valid
+JSON and digest references alone cannot construct a verified reason.
+
+#### Proposed independent reason-verifier boundary (design only)
+
+This is the next inert API contract for review, not a native evidence format,
+an implemented source of authority or permission to enable rollback. The
+existing parser and graph return structural acceptance only. A future adapter
+must separately require a verifier-produced reason before entering rollback.
+
+The caller supplies a locally constructed entry context from its owned attempt:
+workspace/server/job, candidate entry revision, exact predecessor receipt digest,
+both pinned old/new image records, and the independently checked predecessor
+state/current layouts. Do not construct this context from the candidate reason
+reference. Recheck the expected head and exclusive ownership at the mutation
+boundary; constructing a reason must neither advance the head nor extend a
+deadline. The current synthetic ExpectedHead has no protected durable source.
+
+The proposed verifier performs these steps in order:
+
+1. Check the reference against the entry context, including exact revision,
+   predecessor digest and the existing kind/phase/step table. Refuse terminal
+   and rollback predecessors, unknown layouts and mismatched pinned objects.
+2. Obtain evidence through a separately supplied trusted source. The source
+   selects one fixed attempt-local evidence slot; the receipt contains no path,
+   URL, executable or source selector. An inert test source can return a typed
+   synthetic observation or an error, but its successful return proves no
+   native authentication. Production source construction remains unavailable
+   until actor/process ownership and the observation channel are reviewed.
+3. Independently bind the observation to the same workspace/server/job,
+   entry revision, exact predecessor digest, reason kind and complete pinned
+   image set. Compare the bounded evidence bytes with evidence_sha256, but do
+   not treat that digest match as source authentication. A source from another
+   attempt with identical artifact hashes is still a mismatch.
+4. Check kind-specific semantics below. Only then construct a private,
+   non-deserializable verified-reason value. It must have no public field
+   constructor, Default or conversion from ReasonReference. Passing a JSON
+   parser result to the entry graph cannot substitute for this value.
+
+| Kind family | Required independent observation |
+| --- | --- |
+| Controller/CLI activation failure | An attempted operation on the selected pinned image and fixed slot, with its intent revision and a fixed failure stage; caller-supplied error text or an absent success flag is insufficient |
+| New Controller/final health failure | A completed failed health evaluation bound to the process handle identity, start instance, intended pinned image and required health predicates; a missing reply alone requires an independently established deadline instead |
+| Deadline exceeded | The independent supervisor/rollback actor's original bounded budget and a coherent monotonic sample in that same live monitor instance; Controller timestamps, wall-clock arithmetic and a restarted monitor do not renew or reconstruct it |
+| Human abort | Explicit authorization for this attempt and predecessor through a protected human channel; no such channel exists, so a native adapter must refuse this kind |
+
+The monitor must be independent of the Controller being evaluated. This live
+monitor contract makes no boot-identity or cross-reboot claim and adds no
+registry, reboot experiment or privileged initialization. After monitor loss,
+unknown ownership or restart, preserve evidence and diagnose; do not create a
+fresh timeout budget and continue. A valid reason proves the reason only:
+rollback still requires a pinned independent actor, exclusive installation
+ownership, quiescence, checked file observations and a trusted exact head.
+Old-Controller health after restoration remains a separate verifier result.
+
+Before publishing the entry receipt/marker, any retained evidence it references
+must be stored and read back through a bounded private checked handle. A failed
+write, sync, readback, source acquisition or authentication stops the attempt
+without fallback, automatic retry or a different kind. An interrupted evidence
+write cannot become success by reparsing the receipt. This proposes ordering
+only; evidence serialization, storage slot, authentication and native acquisition
+remain unimplemented and need review before an adapter consumes them. The
+source must never accept arbitrary receipt-provided bytes as authenticated input.
+
+The next test-only verifier increment should independently mutate every bound
+context field, source kind and process/monitor instance; refuse absent, failed,
+oversized and hash-mismatched evidence; reject a well-formed receipt with no
+independent observation; and exercise every kind's success/refusal semantics.
+Tests must also show that verification neither mutates records/head nor grants
+ownership, and that a reference preserved to RolledBack is not automatically
+reverified as a new rollback entry. Those tests would establish synthetic
+composition only, without a production verifier constructor or real I/O.
 
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
