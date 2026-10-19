@@ -317,12 +317,19 @@ Production parent ACL policy, the storage adapter and these fault tests remain
 unimplemented; the hosted running-image fixture does not establish them.
 
 `treer-platform/src/windows_update_layout.rs` now exercises only the per-image
-table as a private, test-only pure model on all platforms. Its two tests cover
+table as a private, test-only pure model on all platforms. Its tests cover
 both sides of every rename intent, direct restoration after failed publication,
 and refusal of unreadable/unknown slots, occupied destinations, missing objects
 and duplicate object references. Inputs labelled old/new are assumed verified;
-there is no native observer or identity verifier in this model. It neither
-validates cross-image transaction combinations nor reads/writes a receipt or
+there is no native observer or identity verifier in this model. The model also
+checks the cross-image table, requiring durable original/published/restored
+steps at the corresponding boundaries, CLI restoration before Controller
+restoration, and explicit new/final/old health evidence for the relevant states.
+Health inputs represent assumed validated records, not probes or authenticated
+evidence supplied by this model. Additional tests reject early CLI replacement,
+missing health evidence, a forward intent disguised as restoration, a CLI
+forward gap in the CLI rollback substep, and either invalid/unreadable image
+even when all health inputs claim success. It never reads/writes a receipt or
 marker, grants recovery authority, or implements a production command. Native
 storage/identity and fault-injection tests remain necessary.
 
