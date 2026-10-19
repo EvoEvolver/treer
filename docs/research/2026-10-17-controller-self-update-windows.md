@@ -187,11 +187,22 @@ is attempted. Hosted run 39210740394 on `aa50cd59` narrowed both failures to
 `set_file_information`, Win32 87 (ERROR_INVALID_PARAMETER), after the ACL,
 identity, link-count and hash checks passed. The next correction changes only the
 destination addressing from a directory handle plus relative name to the full
-path form described above, retaining all checks and permissions. This is a
-compatibility hypothesis pending hosted execution, not a passing rename result.
-This slice remains non-passing until an exact-SHA hosted rerun verifies the
-correction on both Windows versions. Receipt states and recovery
-classification follow resolution of this failure.
+path form described above, retaining all checks and permissions. Hosted run
+39211335874 verified exact commit `2f71c4ac0768ef914eb35989611dfc6e6c84510a`
+on Server 2022 and 2025: both rename tests passed; the full platform library
+reported 41 passed, zero failed, two ignored; the separately invoked
+`native_owner_round_trip` outside the runner Job passed with exit zero. The
+rename step, full library step and round-trip step all exited zero on both
+images. Raw evidence: `.treer/releases/boot-111-2f71c4ac/run.log`.
+
+Each rename-only run prints three Win32 183 refusals, matching the three
+intentional occupied-target calls in the collision test (existing active image,
+injected directory for candidate activation, and that same directory for backup
+restoration). Test output is concurrent: a diagnostic before the other test's
+`ok` line does not attribute it to that test. All successful moves unwrap their
+result. This verifies only the disposable rename/reverse fixture, not an
+installed update or crash recovery. Receipt states and recovery classification
+remain the next W1b slice; no real `win_native` machine was used.
 
 Before W2 chooses the production parent directory, specify its required ACL and
 installer creation policy. The current verifier refuses Administrators mutation

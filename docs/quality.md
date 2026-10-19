@@ -20,9 +20,13 @@ candidate/backup and collision refusal. Both new tests failed at the first renam
 on hosted Server 2022/2025 at `ba665a24`; diagnostics at `aa50cd59` identified
 Win32 87 at SetFileInformationByHandle after all verification checks passed.
 The correction uses the pinned directory's final full destination path with a
-NULL RootDirectory; its hosted rerun is pending and this slice is not passing.
-The earlier W1a hosted run does not cover
-rename behavior. Durable receipt/recovery states
+NULL RootDirectory. Hosted run 39211335874 on exact `2f71c4ac` passed both rename
+tests and the full platform library (41 passed, zero failed, two ignored) on
+both Server 2022 and 2025; the separate outside-Job owner round trip also passed
+on both. Each step exited zero. The three numeric 183 diagnostics per rename
+run correspond to the three deliberate occupied-target refusals in the collision
+test; test output can interleave. This is disposable-fixture evidence only,
+without a live installed update or real `win_native` run. Durable receipt/recovery states
 and production installation remain subsequent work.
 
 ### Windows self-update registration model
