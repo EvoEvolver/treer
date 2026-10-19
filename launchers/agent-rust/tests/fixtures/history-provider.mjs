@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Synthetic history only. No credential, config or real provider access.
 import { createInterface } from 'node:readline';
-import { writeFileSync } from 'node:fs';
+import { writeFileSync, appendFileSync } from 'node:fs';
 
 const threadId = 'synthetic-history';
 let next = 0;
@@ -13,6 +13,14 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (request.method === 'model/list') result = { data: [] };
   if (request.method.startsWith('thread/')) result = { thread: { id: threadId, turns:
     process.env.HISTORY_OVERSIZED === '1' ? Array.from({length:10_001},(_,n)=>({id:`old-${n}`,status:'completed',items:[]})) : [] } };
+  if (request.method === 'thread/resume' && process.env.HISTORY_LARGE_RESUME === '1') {
+    result.thread.turns = Array.from({length:530},(_,n)=>({id:`old-${n}`,status:'completed',items:[
+      {id:`answer-${n}`,type:'agentMessage',text:'x'.repeat(12*1024)},
+    ]}));
+  }
+  if (request.method === 'thread/resume' && process.env.HISTORY_FRAME_OVER_LIMIT === '1') {
+    result.syntheticPadding = 'x'.repeat(64*1024*1024);
+  }
   if (request.method === 'turn/start') {
     const id = `history-${++next}`;
     result = { turn: { id } };
@@ -34,5 +42,7 @@ for await (const line of createInterface({ input: process.stdin })) {
       } }));
     }, 20);
   }
-  console.log(JSON.stringify({ id: request.id, result }));
+  const response=JSON.stringify({ id: request.id, result });
+  if (process.env.HISTORY_FRAME_LOG) appendFileSync(process.env.HISTORY_FRAME_LOG,JSON.stringify({method:request.method,bytes:Buffer.byteLength(response)})+'\n');
+  console.log(response);
 }

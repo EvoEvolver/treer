@@ -250,6 +250,39 @@ test('invalid provider turn identity blocks dispatch without echoing provider co
   assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
 });
 
+test('large resumed thread over 4 MiB preserves 530 turns and accepts the next turn',{skip:useNode,timeout:30000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({HISTORY_LARGE_RESUME:'1'});
+  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.ok(frames.some(x=>x.method==='thread/resume'&&x.bytes>4*1024*1024&&x.bytes<16*1024*1024));
+  const state=await fetch(restarted.base+'/api/state').then(r=>r.json());
+  assert.equal(state.thread.id,'synthetic-history');
+  assert.equal(state.runtime.provider.transport,'open');
+  const history=await fetch(restarted.base+'/v1/transcript?page=0&limit=1').then(r=>r.json());
+  assert.equal(history.page_count,530);
+  const receipt=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'after large resume',operation_id:'after-large-resume'})});
+  assert.equal(receipt.status,202);
+  const accepted=await receipt.json();
+  await until(()=>fetch(restarted.base+'/v1/submissions/'+accepted.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
+  assert.equal(restarted.child.exitCode,null);
+});
+
+test('provider frame over 64 MiB fails with explicit diagnostic and preserves the journal',{skip:useNode,timeout:30000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const original=await readFile(join(s.state,'rust-spike.json'),'utf8');
+  const restarted=await s.launch({HISTORY_FRAME_OVER_LIMIT:'1',HISTORY_FRAME_LOG:'over-limit-frames.jsonl'},false);
+  const state=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime?.cleanup?.providerExit==='confirmed');
+  assert.equal(state.ready,false);
+  assert.equal(state.runtime.provider.transport,'line_too_large');
+  assert.match(state.runtime.error,/Codex startup failed/);
+  const frames=(await readFile(join(s.root,'cwd/over-limit-frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.ok(frames.some(x=>x.method==='thread/resume'&&x.bytes>64*1024*1024));
+  assert.ok(!frames.some(x=>x.method==='thread/start'),'no fresh-thread fallback');
+  assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),original);
+});
+
 test('oversized resumed history fails visibly without rewriting the durable journal',{skip:useNode,timeout:10000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;

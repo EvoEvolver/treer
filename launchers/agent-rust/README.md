@@ -29,10 +29,17 @@ The runtime continues processing events while awaiting RPC responses, prioritize
 ready responses, and preserves early turn items/completion before the response
 identifies the accepted submission. Queue saturation does not close the stream.
 No automatic provider retry is performed. Fixed transport reasons (`open`,
-`stdout_eof`, `line_error`, `invalid_json`, `consumer_closed`, `stdin_write_error`,
+`stdout_eof`, `line_too_large`, `line_error`, `invalid_json`, `consumer_closed`, `stdin_write_error`,
 `stdin_write_timeout`, `rpc_timeout`) and independently
 observed child status/signal before cleanup appear in AIS diagnostics and the
 shutdown line. Stream closure alone is never called spontaneous provider exit.
+Provider JSON-RPC lines are capped at 64 MiB, so long-lived thread/resume replies
+above the former 4 MiB cap can be read. Over-cap frames fail closed with
+`line_too_large`; other framing/I/O errors retain `line_error`. The eight-entry
+event queue and 16 MiB retained-history cap remain separate bounds. Frame parsing
+can transiently allocate more than the retained-history budget; this is not a
+64 MiB total RSS promise. Synthetic regression resumes 530 turns in one >4 MiB
+reply and submits the next turn; a >64 MiB reply preserves the journal and stops.
 Outbound operations include mutex acquisition, writing and flushing within a
 five-second deadline; the event-pumping RPC wait has an absolute 60-second
 deadline. A write timeout can mean partial delivery. It poisons the transport,

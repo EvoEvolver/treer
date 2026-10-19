@@ -15,7 +15,11 @@ use tokio::{
     sync::{mpsc, oneshot, Mutex},
     time::{timeout, Duration},
 };
-use tokio_util::codec::{FramedRead, LinesCodec};
+use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
+
+// Long-lived Codex threads arrive as one thread/resume JSON-RPC line.
+// This is a frame bound, separate from the 16 MiB retained-history budget.
+const PROVIDER_LINE_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct ProviderChild {
     child: Child,
@@ -111,16 +115,18 @@ impl Rpc {
         let reader_rpc = rpc.clone();
         let stdout_reader = tokio::spawn(async move {
             let mut lines =
-                FramedRead::new(stdout, LinesCodec::new_with_max_length(4 * 1024 * 1024));
+                FramedRead::new(stdout, LinesCodec::new_with_max_length(PROVIDER_LINE_BYTES));
             let reason = loop {
                 let line = match lines.next().await {
                     Some(Ok(line)) => line,
+                    Some(Err(LinesCodecError::MaxLineLengthExceeded)) => break "line_too_large",
                     Some(Err(_)) => break "line_error",
                     None => break "stdout_eof",
                 };
-                let Ok(message) = serde_json::from_str::<Value>(&line) else {
+                let Ok(mut message) = serde_json::from_str::<Value>(&line) else {
                     break "invalid_json";
                 };
+                drop(line);
                 if message.get("method").is_some() {
                     // Runtime pumps this bounded queue while awaiting its RPCs.
                     // Full means lossless backpressure, never transport failure.
@@ -132,7 +138,7 @@ impl Rpc {
                         let result = if message.get("error").is_some() {
                             Err(anyhow!("Codex RPC refused"))
                         } else {
-                            Ok(message["result"].clone())
+                            Ok(message["result"].take())
                         };
                         let _ = reply.send(result);
                     }
