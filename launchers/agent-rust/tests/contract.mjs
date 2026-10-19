@@ -442,6 +442,19 @@ test('Rust refuses concurrent writers and mismatched resume; existing Rust journ
   assert.equal((await fetch(restarted.base+'/api/state').then(r=>r.json())).ready,true,'lease must be released on exit');
   assert.equal(await readFile(join(legacy,'queue.json'),'utf8'),evidence,'existing Rust state never reimports stale Node files');
 });
+test('Rust history failure is visible but live receipts still publish',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t);const stopped=once(s.child,'exit');s.child.kill('SIGTERM');await stopped;
+  const history=join(s.state,'rust-journal-history');await mkdir(history,{recursive:true,mode:0o700});
+  const extra=join(history,'unexpected-private-entry');await writeFile(extra,'keep untouched',{mode:0o600});
+  const restarted=await s.launch({});
+  const snapshot=await fetch(restarted.base+'/api/state').then(r=>r.json());
+  assert.equal(snapshot.runtime.journalHistory.state,'journal_history_unavailable');assert.equal(snapshot.ready,true);
+  const response=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'history failure must not block live work',operation_id:'history-live-op',delivery:'queue'})});
+  assert.equal(response.status,202);
+  const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.ok(saved.records.some(r=>r.operation==='history-live-op'));
+  assert.equal(await readFile(extra,'utf8'),'keep untouched');
+});
 test('Rust imports a Node queue once, resumes its thread, preserves retries and restores byte backup',{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t);
   const thread=(await fetch(s.base+'/api/state').then(r=>r.json())).thread.id;

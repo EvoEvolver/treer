@@ -4,10 +4,13 @@ This is a separate, unpublished Cargo workspace. It does not replace
 `launchers/agent`, enter the production bundle, change a saved profile, or change
 Core behavior. The scope reset 4767 was retracted by #158/4773. Current decision
 4790 simplifies migration only: one-way import after byte backup, manual restore
-rollback, and switching only while idle with an empty queue. Quota and detached
-reaping remain on hold pending the user. This increment does not authorize a
-team switch or decide those items. See [M4 design](M4-DESIGN.md); its migration
-proposal is parked, not approved, while the other prerequisites remain open.
+rollback, and switching only while idle with an empty queue. Decision 4814 then
+accepts Node-equivalent process-group cleanup; correction 4822 sets a local
+128 MiB disk journal/log cap; no new Controller quota or Host ownership contract
+is needed. Those earlier
+Core designs are cancelled. This increment authorizes no team switch; the leader
+owns the one-by-one rollout after the pilot day. See [M4 design](M4-DESIGN.md) for
+parked design history, not an approved stronger isolation claim.
 The offline library's `envelope::validate_manifest` currently validates only
 manifest grammar, declared byte/entry limits and typed metadata references.
 It reads no object files and grants no handoff authority. Object digests,
@@ -46,7 +49,8 @@ text: it is never served by AIS, printed to the terminal or copied into a ticket
 Only the owner may inspect it locally and supply a reviewed excerpt. An abrupt
 launcher kill can lose this tail; capture failure is reported without its text.
 It is diagnostic retention, not Controller quota or detached-process containment.
-This separate 8 KiB file is outside the local journal cap and Controller quota.
+This separate 8 KiB file and its publication temporary are reserved inside the
+local 128 MiB journal/log cap. It is not sent to Controller quota accounting.
 It lives until replaced by another opted-in run or until normal Controller
 deletion purges that Agent's private root; disabling capture never deletes an
 earlier evidence file. No team-wide opt-in is implied by a pilot wrapper.
@@ -317,7 +321,7 @@ owner removes that exact backup directory after confirming rollback is no longer
 needed. It is never deleted automatically or on a failed switch.
 Never paste its content into logs or tickets.
 
-Per-Agent switch checklist (leader/owner only; gated on the outstanding M4 decisions):
+Per-Agent switch checklist (leader/owner only, after the reviewed increment and pilot day):
 
 1. Verify the running Node provider is idle, the queue is empty and there are no
    pending acknowledgements, notifications, goal edits or image drafts. Stop Node
@@ -337,6 +341,51 @@ Per-Agent switch checklist (leader/owner only; gated on the outstanding M4 decis
 
 On subsequent Rust starts, a prior import's Node source inventory must still
 match the verified backup; divergent Node history refuses startup.
+The local journal/log cap is **128 MiB per Agent** (#158/4822). The live recovery
+checkpoint stays at 32 MiB and existing shape/record limits remain; no reader or
+JSON decoder accepts a 128 MiB state. After publishing a live checkpoint, at most
+once per five minutes per runtime, Rust samples it to private `rust-journal-history`
+for optional evidence/manual inspection with a fixed 32 KiB buffer,
+fsyncs a new exclusive 0600 segment and its directory, then publishes by rename
+and directory sync. History is plaintext and is never loaded, decoded, replayed
+or exposed as an alternate recovery source. Any future history reader needs its
+own bounded decoder/review. The bounded copy is synchronous after publication;
+it may briefly occupy the actor but never delays or rolls back live publication.
+Browser history keeps its existing
+bounded provider pagination. A segment interrupted before publication remains
+disk-only history and counts toward retention on restart.
+
+The history byte budget reserves the full live checkpoint, its 32 MiB publication
+temporary, and both 8 KiB stderr-tail files (current and temporary) within 128 MiB.
+This leaves just under 64 MiB for history: at a maximum-size 32 MiB live state,
+only one full-size prior checkpoint fits (with remaining room for smaller ones).
+At most 64 history files are retained; the oldest sequence is retired first when
+either bound would be exceeded. These are redundant old checkpoints: the live
+file keeps every queued/running/uncertain receipt, pending ack/notification, goal
+edit and retry ID under its existing limits. Rotation never deletes live records
+or widens those limits; a full live journal still refuses new work. Under the
+exclusive runtime lease, only validated UUID-named orphan journal/stderr
+temporaries are retired before any startup writes and during history sampling;
+unsafe orphan temporaries prevent startup, unrelated names are left alone.
+A bounded metadata scan refuses unexpected history files, links, unsafe
+ownership/modes or excess file count. No directory tree or history payload is
+read into memory. Migration backups and image payloads are separate stores and
+are not journal/log retention targets.
+
+History is best-effort: copy/rotation/fsync failure sets fixed
+`runtime.journalHistory.state=journal_history_unavailable`; it never fails or
+undoes the live checkpoint. Live checkpoint write/fsync failures still use the
+existing read-only/dispatch-stop path. The live recovery file is never deleted
+to make room. There is no Controller
+quota or machine-wide free-space reserve: N Agents may retain N times 128 MiB of
+journal/log data. The conservative configured-file budgets add up to
+128 MiB journal/log + 64 MiB backup payload + 64 KiB backup manifest + 256 MiB
+image payload + two 32 MiB image journal files (live/publication), i.e. 512 MiB +
+64 KiB per Agent, before filesystem metadata, original Node cwd files and
+provider/worktree data. This is not a machine-wide disk quota. A live-checkpoint
+full-disk error stops the runtime; history-only failures do not. Retention lasts until oldest-first rotation or Agent
+private-root deletion; conversation text remains plaintext for that duration.
+
 The main state file is
 `rust-spike.json`, atomically replaced with mode 0600 in a pre-existing 0700
 directory. Journal reads recheck placement, open without following the final

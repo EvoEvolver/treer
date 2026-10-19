@@ -2,8 +2,10 @@
 
 **Migration proposal parked, not approved, per #158/4790.** Scope reset 4767 was
 retracted by 4773. Only migration was simplified: one-way Node import after byte
-backup, manual restore, and switching only while idle with an empty queue. Quota
-and detached reaping remain open pending the user. The offline validator remains
+backup, manual restore, and switching only while idle with an empty queue. Decision
+4814 then accepts local disk retention and Node-equivalent group cleanup
+(4822 corrects the cap to 128 MiB),
+cancelling new Core quota/Host contracts. The offline validator remains
 tested but is not the import format or a production activation path. Current
 behavior is documented in [README](README.md); this document approves no switch.
 

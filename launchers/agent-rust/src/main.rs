@@ -2,6 +2,7 @@ mod attachments;
 use treer_agent_rust_spike::bounded_json;
 mod files;
 mod goals;
+mod disk_history;
 mod http;
 mod image_format;
 mod model;
@@ -103,6 +104,7 @@ async fn main() -> Result<()> {
         println!("node_state_backup_restored; set startup back to Node before starting it");
         return Ok(());
     }
+    disk_history::prepare(&private_root, &cwd)?;
     node_import::prepare(&private_root, &cwd, &agent,
         env("AGENT_UI_SESSION_ID").or_else(|| env("CODEX_UI_THREAD_ID")).as_deref(),
         std::env::args().any(|arg| arg == "--import-node-state"))?;

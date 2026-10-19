@@ -188,6 +188,9 @@ impl Store {
         }
         result
     }
+    pub fn retain_history(&self) -> Result<()> {
+        crate::disk_history::retain(&self.root, &self.cwd)
+    }
 }
 
 #[cfg(feature = "fixture-harness")]

@@ -4,8 +4,10 @@
 uses one-way Node import after byte backup, manual restore and Node startup,
 switching only while idle with an empty queue. The bidirectional migration and
 migration-specific private-state v2 proposal below is parked, not approved.
-Quota and detached-reaping prerequisites remain open pending the user; no team
-switch is approved here. Use [the launcher README](README.md) for implementation.
+Decision 4814 later accepts Node-equivalent group cleanup and cancels both new
+Core contracts; correction 4822 sets the local disk journal/log cap to 128 MiB. The stronger designs
+below remain parked history; no team switch is approved here. Use
+[the launcher README](README.md) for implementation.
 
 Proposal for #158, following leader decision 4578 and Security verdict 4580.
 The reviewed implementation remains frozen at

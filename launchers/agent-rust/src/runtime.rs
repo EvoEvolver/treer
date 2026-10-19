@@ -85,6 +85,8 @@ struct Runtime {
     // Sticky stop for history admission OR private journal failure.
     history_failed: bool,
     state_failed: bool,
+    last_disk_snapshot: Option<std::time::Instant>,
+    disk_history_status: &'static str,
     provider_exit: &'static str,
     records: VecDeque<Record>,
     dispatch_blocked: bool,
@@ -149,6 +151,8 @@ pub fn spawn(config: Config) -> Result<Handle> {
         turns: Transcript::default(),
         history_failed: false,
         state_failed: false,
+        last_disk_snapshot: None,
+        disk_history_status: "not_requested",
         provider_exit: "not_requested",
         records: VecDeque::new(),
         dispatch_blocked: false,
@@ -451,6 +455,13 @@ impl Runtime {
             bail!("private_state_write_failed");
         }
         self.checkpoint = (self.records.clone(), self.goals.clone());
+        // Non-authoritative evidence is sampled only after the live checkpoint
+        // commits, at most once per five minutes. Its failure cannot undo that
+        // commit or fence dispatch. The copy is bounded to one 32 MiB snapshot.
+        if self.last_disk_snapshot.is_none_or(|at| at.elapsed() >= Duration::from_secs(300)) {
+            self.last_disk_snapshot = Some(std::time::Instant::now());
+            self.disk_history_status = if self.store.retain_history().is_ok() { "available" } else { "journal_history_unavailable" };
+        }
         Ok(())
     }
     fn stop_for_state_error(&mut self) {
@@ -470,6 +481,7 @@ impl Runtime {
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
         snapshot["runtime"]["provider"] = self.rpc.diagnostics();
+        snapshot["runtime"]["journalHistory"] = json!({"state":self.disk_history_status,"diskLimitBytes":crate::disk_history::DISK_LIMIT,"sampleIntervalSeconds":300});
         self.changed.send_replace(Arc::new(snapshot));
     }
     fn history(&self) -> Vec<Value> {
