@@ -766,6 +766,37 @@ observation acquisition, external head, durable consumption and health/actor
 ownership remain separate contracts. A real win_native installation run still
 requires the leader's coordination at its approved milestone.
 
+The first fixture implementation is private to `cfg(all(windows, test))` in
+`checked_files::evidence_file`. Preparation requests only FILE_READ_DATA,
+FILE_WRITE_DATA, FILE_READ_ATTRIBUTES, READ_CONTROL and SYNCHRONIZE; the final
+pin requests only FILE_READ_DATA, FILE_READ_ATTRIBUTES and READ_CONTROL.
+Neither requests DELETE, WRITE_DAC or WRITE_OWNER. FILE_SHARE_READ during
+preparation prevents another opener from acquiring write/delete access before
+writer close; the native tests check this both after creation and after sync,
+then again while the final pin lives. The handle-inheritance bit is checked.
+
+Only the pin API reads the slot; there is no public path reader, recovery
+constructor or conversion into a reason source. A failed store returns no pin,
+so a future verifier must receive a source error, never read a leftover file by
+path. The live Attempt latches the first valid-input store invocation before
+native I/O; later calls refuse even after a pre-creation failure. Invalid
+length/digest inputs are rejected before this invocation and create nothing.
+Three stage-fault tests retain the empty/complete slot and reject later stores;
+a close-gap replacement test substitutes identical bytes with a different file
+identity and requires refusal. Tests alone may inspect failed fixture files to
+assert preservation; that does not establish a production evidence reader.
+
+Retention remains a future operator workflow: after verified terminal state and
+the minimum seven-day retention, the installation owner may explicitly invoke
+a separately reviewed cleanup operation as that same OS user (or SYSTEM for a
+SYSTEM-owned installation), verifying the exact attempt/slot and ownership
+before removal. There is currently no cleanup command or timer. No store/read
+error path, drop handler or ordinary update job may perform that cleanup;
+uncertain/nonterminal jobs remain retained. Fixture tests remove only their
+exact test-owned paths after dropping all pins. Native sharing, ACL, sync and
+readback behavior still require exact-SHA hosted execution on both Windows
+images; cross-target compilation is not evidence of runtime success.
+
 For the future private evidence store, the proposed readers are the owning OS
 user and SYSTEM only. Keep referenced evidence read-only through terminal state
 and for at least seven days afterwards, then require an explicit reviewed

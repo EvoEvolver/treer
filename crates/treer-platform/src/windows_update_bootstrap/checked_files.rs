@@ -5,6 +5,7 @@ use super::*;
 use std::io::{Seek, SeekFrom, Write};
 use windows_sys::Win32::System::WindowsProgramming::FS_PERSISTENT_ACLS;
 
+mod evidence_file;
 mod record_file;
 pub(super) use record_file::RecordFault;
 
@@ -12,6 +13,7 @@ pub(super) struct Attempt {
     path: PathBuf,
     directory: File,
     _parents: Vec<File>,
+    evidence_used: std::cell::Cell<bool>,
 }
 
 #[derive(Clone, Copy)]
@@ -285,6 +287,7 @@ impl Attempt {
             path,
             directory,
             _parents: parents,
+            evidence_used: std::cell::Cell::new(false),
         })
     }
 
