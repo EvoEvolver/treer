@@ -3,6 +3,113 @@
 //! A future observer must verify identity, content, ACL and directory binding
 //! before producing Old/New, and distinguish absent from unreadable slots.
 
+#[test]
+fn proposed_exit_table_covers_every_consistent_tuple_without_overlap() {
+    use Object::{Absent, New, Old, Unknown, Unreadable};
+    use Step::*;
+    use Transaction::*;
+    let original = [Old, New, Absent];
+    let gap = [Absent, New, Old];
+    let published = [New, Absent, Old];
+    // Independent transcription of the design table, not an executable exit
+    // selector. No actor, ownership proof or recovery permission exists here.
+    let rows = [
+        (Prepared, Original, Original, original, original),
+        (Activating, Original, Original, original, original),
+        (Activating, MoveOldIntent, Original, original, original),
+        (Activating, MoveOldIntent, Original, gap, original),
+        (Activating, OldMoved, Original, gap, original),
+        (Activating, PublishIntent, Original, gap, original),
+        (Activating, PublishIntent, Original, published, original),
+        (Activating, Published, Original, published, original),
+        (CoreHealthy, Published, Original, published, original),
+        (CoreHealthy, Published, MoveOldIntent, published, original),
+        (CoreHealthy, Published, MoveOldIntent, published, gap),
+        (CoreHealthy, Published, OldMoved, published, gap),
+        (CoreHealthy, Published, PublishIntent, published, gap),
+        (CoreHealthy, Published, PublishIntent, published, published),
+        (CoreHealthy, Published, Published, published, published),
+        (Complete, Published, Published, published, published),
+    ];
+    let mut hits = [0; 16];
+    let mut images = Vec::new();
+    for step in [
+        Original,
+        MoveOldIntent,
+        OldMoved,
+        PublishIntent,
+        Published,
+        MoveNewAsideIntent,
+        NewAside,
+        RestoreOldIntent,
+        Restored,
+    ] {
+        for active in [Old, New, Absent, Unknown, Unreadable] {
+            for candidate in [Old, New, Absent, Unknown, Unreadable] {
+                for backup in [Old, New, Absent, Unknown, Unreadable] {
+                    let slots = [active, candidate, backup];
+                    if inspect(step, slots) != Inspection::Conflict {
+                        images.push(Image { step, slots });
+                    }
+                }
+            }
+        }
+    }
+    let mut diagnostic_cases = 0;
+    for phase in [
+        Prepared,
+        Activating,
+        CoreHealthy,
+        Complete,
+        RollbackCli,
+        RollbackController,
+        RolledBack,
+    ] {
+        for &controller in &images {
+            for &cli in &images {
+                for flags in 0..8 {
+                    if inspect_pair(
+                        phase,
+                        controller,
+                        cli,
+                        flags & 1 != 0,
+                        flags & 2 != 0,
+                        flags & 4 != 0,
+                    ) != PairInspection::Consistent
+                    {
+                        continue;
+                    }
+                    let tuple = (
+                        phase,
+                        controller.step,
+                        cli.step,
+                        controller.slots,
+                        cli.slots,
+                    );
+                    let mut matched = 0;
+                    for (index, row) in rows.iter().enumerate() {
+                        if *row == tuple {
+                            hits[index] += 1;
+                            matched += 1;
+                        }
+                    }
+                    // Existing rollback states deliberately have no forward
+                    // exit row: preserve evidence and diagnose, never resume.
+                    let diagnose = matches!(phase, RollbackCli | RollbackController | RolledBack);
+                    assert_eq!(
+                        matched + usize::from(diagnose),
+                        1,
+                        "undefined or overlapping exit: {tuple:?}, health={flags}"
+                    );
+                    diagnostic_cases += usize::from(diagnose);
+                }
+            }
+        }
+    }
+    assert!(hits.into_iter().all(|count| count == 1));
+    assert!(diagnostic_cases > 0);
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Object {
     Old,

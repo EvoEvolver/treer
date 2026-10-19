@@ -379,6 +379,12 @@ the shared classifier, including its health-claim combinations. Each consistent
 case must select exactly one proposed exit or diagnose-and-stop; overlapping
 exits and missing cases must fail the test. This checks coverage, not the
 authenticity of observations or the authority to execute an exit.
+The shared model now checks this coverage by enumerating all single-image
+slot combinations (including unknown/unreadable objects), all seven phases,
+both steps and all eight health-claim combinations. Each consistent forward
+tuple must match exactly one of the 16 design rows; existing rollback-phase
+tuples explicitly select diagnosis only. This is a coverage test, not an exit
+executor or proof of rollback ordering.
 
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
