@@ -169,6 +169,39 @@ reader. The envelope itself has no integrity protection: before any payload
 use, the independent marker/receipt binding, revision, header and exact-byte
 digest agreement remain mandatory. A structurally valid envelope alone must
 never authorize payload use or hide torn/in-place payload damage.
+
+The next test-only Controller module `windows_update_record` proposes only the
+inner binding/provenance/object fields; it is not the complete receipt schema.
+Both envelope kinds contain strict JSON objects, with unknown, duplicate and
+missing fields refused at every typed object level. Their fields are:
+
+| Payload | Required fields |
+| --- | --- |
+| Marker | `binding`, `receipt_sha256` (SHA-256 of the entire receipt envelope) |
+| Draft receipt fields | `binding`, `provenance`, `images` |
+| Binding | `workspace_id`, `server_id`, canonical nonnil `job_id`, positive `revision` |
+| Provenance | Lowercase hex `release_sha`/`artifact_source_sha` (40), `sums_sha256` (64) |
+| Images | Exactly `controller` and `cli`, each with exactly `old` and `new` objects |
+| Object | `volume_serial` (u32), `file_id` (u64), `bytes` (u64), `sha256`, `links`, `attributes`, `acl_policy` |
+
+Parsing requires an independently supplied expected binding. It validates the
+marker envelope/fields/binding first, then the receipt envelope and whole-byte
+digest, and only then invokes the draft receipt JSON parser. A test with invalid
+receipt JSON and a mismatched marker asserts the digest refusal happens first.
+The parsed binding must match that expectation again. All four recorded object
+identities must differ; equal hashes remain valid for different identities.
+Object lengths range from 1 byte through 256 MiB, with lowercase SHA-256, one link,
+non-directory/non-reparse attributes and the sole `owner_system_protected` policy
+label. There are no caller-supplied paths, SIDs or arbitrary diagnostics.
+
+These checks validate serialized field shapes and pair consistency only. They
+do not authenticate the expected binding, supply the external durable anchor,
+prove provenance or ACLs, reopen objects or compare them to real NTFS state.
+The draft fields deliberately have no phase, health, slot progression or archive
+disposition yet; they cannot accept a transaction state or establish a valid
+state transition. Those fields, transition validation and integration with the
+marker-first model require the next separate increment. No production reader,
+file I/O adapter or recovery command uses these parsed fields.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 

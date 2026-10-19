@@ -17,6 +17,8 @@ mod startup_store;
 mod tui;
 #[cfg(test)]
 mod windows_update_envelope;
+#[cfg(test)]
+mod windows_update_record;
 mod workload_proxy;
 
 use std::io::{self, BufRead, IsTerminal, Write};
