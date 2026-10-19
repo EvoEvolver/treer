@@ -10,7 +10,7 @@ import { resolve, join, dirname } from 'node:path';
 import { createRequire } from 'node:module';
 import { pathToFileURL } from 'node:url';
 import { connect } from 'node:net';
-import { get as httpGet } from 'node:http';
+import { get as httpGet, request as httpRequest } from 'node:http';
 import { hermeticEnv, localFetch as fetch } from '../../agent/tests/hermetic.mjs';
 import { fakePrivateState } from '../../agent/tests/fake-private-state.mjs';
 
@@ -265,10 +265,18 @@ test('streamed 50 MiB resume retains a recent window, fetches older pages on dem
   assert.equal(state.thread.turns[0].id,'old-480');
   const cursor=state.history.cursor;assert.equal(typeof cursor,'string');
   assert.equal((await fetch(restarted.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor:'bad-cursor'})})).status,400);
-  const older=fetch(restarted.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor})});
+  const older=await new Promise((resolve,reject)=>{
+    const request=httpRequest(restarted.base+'/api/history/older',{method:'POST',headers:{'content-type':'application/json'}},response=>{response.pause();resolve(response);});
+    request.on('error',reject);request.end(JSON.stringify({cursor}));
+  });
+  t.after(()=>older.destroy());assert.equal(older.statusCode,200);
+  // Let the rate window expire while the first large response is paused.
+  // A transfer slot, not just the request timer, must prevent a second scan.
+  await new Promise(resolve=>setTimeout(resolve,2300));
   const concurrent=await fetch(restarted.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor})});
   assert.equal(concurrent.status,429);
-  const page=await (await older).json();
+  const chunks=[];for await(const chunk of older)chunks.push(chunk);
+  const page=JSON.parse(Buffer.concat(chunks).toString());
   assert.equal(page.thread.turns[0].id,'history-1');assert.equal(page.thread.turns.length,50);
   assert.ok(page.thread.turns[0].items.some(i=>i.kind==='userMessage'&&i.text==='local text belongs only to this requested old turn'&&i.submissionId===originalReceipt.submission.id));
   assert.equal(page.history.page,true);

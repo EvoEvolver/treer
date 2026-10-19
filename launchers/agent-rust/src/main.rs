@@ -711,7 +711,15 @@ async fn history_page(app: &App, body: Value, ais: bool) -> Response {
         Ok(snapshot)=>{
             let value=if ais {transcript(app,&snapshot,"limit=50")}else{snapshot};
             let bytes=match serde_json::to_vec(&value) {Ok(bytes)=>bytes,Err(_)=>return failure(StatusCode::SERVICE_UNAVAILABLE,"history_page_unavailable")};
-            let stream=futures_util::stream::once(async move {let _permit=permit;Ok::<_,std::io::Error>(bytes)});
+            // Keep the slot with the remaining response under socket
+            // backpressure instead of releasing it when yielding one huge chunk.
+            let stream=futures_util::stream::unfold((bytes,0,permit),|(bytes,offset,permit)|async move {
+                if offset==bytes.len(){return None;}
+                let end=(offset+64*1024).min(bytes.len());
+                let chunk=bytes[offset..end].to_vec();
+                Some((Ok::<_,std::io::Error>(chunk),(bytes,end,permit)))
+            });
+            let stream=futures_util::StreamExt::take_until(stream,tokio::time::sleep(app.files.max_duration()));
             (StatusCode::OK,[("content-type","application/json"),("cache-control","no-store")],Body::from_stream(stream)).into_response()
         },
         Err(error)=>{let (status,code)=match error.to_string().as_str() {"history_cursor_invalid"=>(StatusCode::BAD_REQUEST,"history_cursor_invalid"),"history_page_busy"=>(StatusCode::TOO_MANY_REQUESTS,"history_page_busy"),_=>(StatusCode::SERVICE_UNAVAILABLE,"history_page_unavailable")};failure(status,code)}

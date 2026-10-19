@@ -50,6 +50,12 @@ not equal heap bytes (Value/map/string allocations add overhead). Materializing
 the one response disposes other ranges before unwrapping the shared values.
 The runtime normally has one older-range scan plus one observer target; the
 256 MiB regression threshold is measured evidence, not an analytic OS RSS limit.
+Conservative reader-only serialized-content accounting is five windows ×16 MiB
++ four out-of-window targets ×16 MiB + one active ×16 MiB + the parsed turn
+×16 MiB =176 MiB, plus4 MiB non-history content and shape/container overhead.
+Sharing reduces overlap; this is not a heap/RSS upper bound. The runtime's one
+range plus one observer target limits the corresponding content accounting to
+80 MiB before response materialization; HTTP/watch snapshots are separate bounds.
 The eight-entry event queue remains separate. A 530-turn, roughly 50 MiB fixture
 checks recent history, on-demand older reads and the next turn under a 256 MiB
 launcher RSS regression ceiling; exactly 256 MiB passes and +1 byte is refused.
@@ -170,6 +176,8 @@ window; WebSocket status/queue updates continue without appending page caches.
 Opaque per-runtime cursors select at most 50 turns. Requests are serialized,
 rate-limited to one per two seconds, and use the same origin/identity guard as
 other transcript reads. No client path or provider thread ID is accepted.
+The page slot stays with chunked output while backpressured, under the existing
+transfer-duration limit, so a slow client cannot queue another full page scan.
 Provider pagination is not assumed: `thread/read` may return the entire thread,
 so the same streaming validator selects the requested range under the wire/time
 limits. Invalid, oversized or compacted-away pages return a bounded error rather

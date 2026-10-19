@@ -12,11 +12,11 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (request.id === undefined) continue;
   let result = {};
   if (request.method === 'model/list') result = { data: [] };
-  if (request.method.startsWith('thread/')) result = { thread: { id: threadId, turns:
+  if (['thread/start','thread/resume','thread/read'].includes(request.method)) result = { thread: { id: threadId, turns:
     process.env.HISTORY_OVERSIZED === '1' ? [{id:'too-large',status:'completed',items:[{id:'large',type:'agentMessage',text:'x'.repeat(17*1024*1024)}]}] : [] } };
   if (['thread/resume','thread/read'].includes(request.method) && process.env.HISTORY_LARGE_RESUME === '1') {
     result.thread.turns = Array.from({length:530},(_,n)=>({id:`old-${n}`,status:'completed',items:[
-      {id:`answer-${n}`,type:'agentMessage',text:'x'.repeat(96*1024)},
+      {id:`answer-${n}`,type:'agentMessage',text:'x'.repeat((n>=430&&n<480?256:96)*1024)},
     ]}));
     if(process.env.HISTORY_LARGE_ACTIVE==='1')result.thread.turns[0].status='inProgress';
     if(process.env.HISTORY_PROJECTION_OLD==='1')result.thread.turns[430]={id:'history-1',status:'completed',items:[]};
