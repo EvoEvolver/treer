@@ -30,6 +30,8 @@ mod update_binding;
 mod update_deadline;
 #[cfg(test)]
 mod update_registration;
+#[cfg(test)]
+mod windows_update_layout;
 pub use environment::{
     clean_process_environment_before_threads, inherited_environment, inherited_variable_allowed,
     machine_exec_environment, machine_exec_variable_allowed,

@@ -316,6 +316,16 @@ never produces success, automatic replay, cleanup or acceptance of a new job.
 Production parent ACL policy, the storage adapter and these fault tests remain
 unimplemented; the hosted running-image fixture does not establish them.
 
+`treer-platform/src/windows_update_layout.rs` now exercises only the per-image
+table as a private, test-only pure model on all platforms. Its two tests cover
+both sides of every rename intent, direct restoration after failed publication,
+and refusal of unreadable/unknown slots, occupied destinations, missing objects
+and duplicate object references. Inputs labelled old/new are assumed verified;
+there is no native observer or identity verifier in this model. It neither
+validates cross-image transaction combinations nor reads/writes a receipt or
+marker, grants recovery authority, or implements a production command. Native
+storage/identity and fault-injection tests remain necessary.
+
 ### W1a: private directory and checked-copy fixture
 
 `windows_update_bootstrap/checked_files.rs` is private under `cfg(windows, test)`.
