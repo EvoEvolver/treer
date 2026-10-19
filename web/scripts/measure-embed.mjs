@@ -25,13 +25,20 @@ const report = {
 
 function endpoint(request) {
   const u = new URL(request.url())
+  if (u.origin === consoleOrigin && request.isNavigationRequest() && request.frame() === request.frame().page().mainFrame()) return 'console-document'
   if (u.origin === agentOrigin) {
     if (u.pathname === '/.treer/embed') return 'bootstrap'
     if (u.pathname === '/.treer/embed/session') return 'session'
     if (u.pathname === '/.treer/embed/check') return 'check'
     if (u.pathname === '/' && request.isNavigationRequest()) return 'ui-document'
+    if (u.pathname === '/api/state') return 'ui-state'
   }
-  if (u.origin === proxyOrigin && request.method() === 'POST' && /\/interface\/embed-authorization$/.test(u.pathname)) return 'mint'
+  if (u.origin === proxyOrigin) {
+    if (request.method() === 'POST' && /\/interface\/embed-authorization$/.test(u.pathname)) return 'mint'
+    if (u.pathname.endsWith('/snapshot')) return 'inventory'
+    if (u.pathname.endsWith('/apps')) return 'apps'
+    if (u.pathname === '/api/auth/config') return 'capabilities'
+  }
   return null
 }
 
@@ -110,10 +117,15 @@ async function measure(temperature, pair, context, version, engine) {
   } catch { run.failure = 'fixture-did-not-reach-isolated-ui' }
   await Promise.allSettled(pending)
   const start = network.find((n) => n.endpoint === 'bootstrap')?.start_epoch_ms
+  const consoleStart = network.find((n) => n.endpoint === 'console-document')?.start_epoch_ms
   if (Number.isFinite(start)) {
     run.marks = marks.map(({ stage, epoch_ms }) => ({ stage, ms: Math.round((epoch_ms - start) * 10) / 10 }))
     run.ui_visible_ms = Math.round((run.ui_visible_epoch_ms - start) * 10) / 10
     run.network = network.map(({ start_epoch_ms, ...rest }) => ({ ...rest, start_ms: Math.round((start_epoch_ms - start) * 10) / 10 }))
+    if (Number.isFinite(consoleStart)) {
+      run.console_to_bootstrap_ms = Math.round((start - consoleStart) * 10) / 10
+      run.console_to_ui_visible_ms = Math.round((run.ui_visible_epoch_ms - consoleStart) * 10) / 10
+    }
   } else { run.marks = []; run.network = []; run.failure = 'bootstrap-not-observed'; run.success = false }
   delete run.ui_visible_epoch_ms
   await page.close()
