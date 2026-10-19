@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { test, expect, type Page } from '@playwright/test'
 import { securityHeaders } from '../worker/security-headers'
+import { renderCoreEmbedBootstrap } from './fixtures/embed-bootstrap'
 import { fixture, gotoWorkspace, open, switchTab } from './fixtures/workspace-tabs'
 const id = 'ag_0123456789abcdef0123456789abcdef'
 const origin = 'https://ag-0123456789abcdef0123456789abcdef.agents.example.test'
@@ -25,16 +26,7 @@ async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'succe
     const target = JSON.stringify(new URL(page.url()).origin)
     if (realBootstrap && new URL(r.request().url()).pathname === '/.treer/embed') {
       // Execute the actual Core bootstrap, not a second implementation of it.
-      const source = readFileSync('../crates/treer-proxy/src/api/network/embed.rs', 'utf8')
-      const template = source.match(/r#"(<!doctype html>[\s\S]*?)"#/i)![1]
-      const v2 = typeof realBootstrap === 'string'
-      const probe = source.match(/let v2_probe = if reuse \{\s*r#"([\s\S]*?)"#/)?.[1] ?? ''
-      const announcement = source.match(/let announce = if reuse \{\s*r#"([\s\S]*?)"#\s*\} else \{\s*r#"([\s\S]*?)"#/)
-      if (v2) { expect(probe).not.toBe(''); expect(announcement).not.toBeNull() }
-      const body = template.replaceAll('{console_js}', target).replaceAll('{script_nonce}', 'synthetic-nonce')
-        .replaceAll('{v2_probe}', v2 ? probe : '')
-        .replaceAll('{announce}', announcement?.[v2 ? 1 : 2] ?? '')
-        .replaceAll('{{', '{').replaceAll('}}', '}')
+      const body = renderCoreEmbedBootstrap(new URL(page.url()).origin, typeof realBootstrap === 'string')
       return r.fulfill({ contentType: 'text/html', body })
     }
     if (new URL(r.request().url()).pathname !== '/.treer/embed') return r.fulfill({ contentType: 'text/html', body: `<h1>Isolated interface</h1><textarea aria-label="Draft"></textarea><script>
