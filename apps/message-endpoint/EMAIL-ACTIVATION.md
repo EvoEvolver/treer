@@ -174,7 +174,6 @@ Before enabling real sends, use this conservative persisted outcome model:
 | --- | --- |
 | `prepared` | Frozen payload/key; no dispatch started. Local validation, token mint or fence refusal with no POST is definite no-send. Hold/refuse or retry only after the local condition is resolved. |
 | `dispatching` | Reserve uncertainty capacity and persist this state **before** POST. A crash/restart in this state becomes `uncertain`, even if the network operation might not have started. Never recover it by another POST. |
-| `retry_wait` | Only a recognized first-attempt rate admission rejection with a proven no-provider-call contract and no prior ambiguity may back off under bounded attempts using the frozen bytes/key. HTTP 429 alone is insufficient evidence. |
 | `uncertain` | First `email_in_progress`, network timeout/error after dispatch, 5xx, `email_delivery_failed`, `email_storage_failed`, malformed/truncated/oversized success, unknown post-dispatch result or recovered `dispatching`. Persist and reconcile; **no automatic POST**, with either the same or a new key. |
 | `provider_accepted` | Valid `sent` response/cached prior success. Provider acceptance only; never delivered/read. Persist completion before retiring work. |
 | `rejected` | Definite pre-dispatch admission refusal, with no previous ambiguous attempt; fixed reason only. A later refusal cannot override an earlier uncertain result. |
@@ -263,7 +262,8 @@ after any inconclusive decision.
 
 1. Run the existing hermetic email queue/member/Proxy tests as a baseline. Add
    fake-transport assembly cases before a real worker branch: duplicate key and
-   payload conflict, bounded 429 retry, sender disabled, pause during token mint,
+   payload conflict, 429 becoming sticky uncertainty with zero further POSTs
+   for the frozen intent, sender disabled, pause during token mint,
    membership withdrawal, changed generation, timeout/ambiguous outcome, crash
    around acceptance and restart with the same key. No actual emails.
 2. Implement the reviewed operator transport/outcome model and shared UI/API
@@ -271,6 +271,10 @@ after any inconclusive decision.
    current membership and Core pins outside the hub mutex, then check current
    lease/contact/generation/pause immediately before dispatch. No network under
    the hub mutex. Keep actual actor notices/audit and Agent API behavior from #159.
+   Implement a journal-specific positive pre-POST fence: the legacy
+   `Queue::dispatchable` deliberately rejects every journal row and must not be
+   reused for this purpose. Bind the fence to the correct Store/Hub and all the
+   current checks above; the opaque attempt alone is not runtime authorization.
 3. Finish recovery/retention requirements before sustained use: bounded uncertain
    queue, explicit operator reconciliation, byte/count limits and private outbox
    reconciliation; specify purge/TTL semantics without deleting pending work.
