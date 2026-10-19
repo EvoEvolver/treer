@@ -200,9 +200,9 @@ review before deployment; exporting the Rust module advertises no live capabilit
   binding and durable handoff, not the receipt. The actual sender is read from
   the outer Core envelope; it must equal the pinned endpoint. Parse only after
   that Core envelope has passed existing mailbox sender routing.
-- Parsing does not create a mapping or change acknowledgement state. Future
-  storage must make exact replay a no-op and changed final ID a conflict before
-  ack, preserve binding/generation boundaries and enforce retention/quotas.
+- Parsing does not create a mapping or change acknowledgement state. Storage makes exact replay a no-op and changed final ID a conflict, preserving
+  binding/generation boundaries. Runtime must atomically commit handoff completion
+  with the mapping before ack; capacity is not a reason to hold delivery.
 - Resolving a reply never grants context visibility. Core must still reject a
   parent unreadable by the sending relay. For pre-cutover/unknown native replies,
   use an explicit history-unavailable failure; do not silently drop the context.
@@ -228,10 +228,30 @@ refetch, migration importer, live capability or running worker uses it yet.
   for another native message is a conflict. The old row stays intact. Only a
   saturating aggregate conflict counter is committed; no body or ID is audited.
   Future dispatch must hold the handoff unacknowledged on conflict.
-- Capacity is 1000 rows per endpoint generation and 10000 total. At capacity new
-  mappings are refused; existing replay and lookup still work. Retention lasts
-  until the reviewed binding-retirement procedure. There is no automatic expiry,
-  eviction, deletion API or silent replacement of an old reply context.
+- Retain a ring of 1000 rows per **stable endpoint across all generations**,
+  not 1000 per historical generation. Generation churn cannot grow one endpoint
+  beyond its reservation. At most 20 retained endpoint slots bound the aggregate
+  to 20000 rows. Eviction removes that endpoint's oldest row only (creation time,
+  then insertion order), counts evictions and makes old replies unavailable.
+- A new 21st endpoint cannot evict another endpoint's history; it returns the
+  explicit `NotRetained` result, never `Full`. Runtime must explicitly retire an
+  obsolete endpoint slot through the reviewed retirement procedure before
+  replacing it. This bounds endpoint-ID churn as well as generation churn; slot
+  reuse/retirement is not automatically inferred by this local module. A stale
+  retained slot may degrade a newly added endpoint's reply history until retired,
+  but must not block its primary messages or alter another endpoint's mappings.
+- The caller supplies durable handoff state. A terminal handoff returns
+  `IgnoredTerminal` without recreating history, even if its mapping was evicted
+  and the new assertion changes the final ID. Runtime must derive this state from
+  authoritative completion/dedup and atomically commit completion with mapping;
+  this local helper alone cannot make the combined crash guarantee. Never derive
+  replay admission from absence in the ring.
+- Retention exhaustion is non-blocking for primary delivery. Mapping conflicts
+  remain a separate bounded, operator-visible recovery hold; actual SQLite or
+  private-storage failure follows the hub's storage health boundary. Do not
+  collapse capacity degradation, conflicts and storage failure into one indefinite
+  retry. Even when primary messages continue, an unresolved native reply remains
+  explicit history-unavailable/hold, never silently converted to a top-level send.
 - Lookup requires the complete valid scope; unknown/pre-cutover/cross-binding
   references return unavailable. A returned ID is still only an App assertion.
   A compromised relay can assert any syntactically valid ID, including an
@@ -243,8 +263,8 @@ refetch, migration importer, live capability or running worker uses it yet.
 
 Local SQLite tests cover replay, conflicting final ID and job reuse, aggregate
 counter persistence, reopen under private-store checks, cross-scope/unknown
-lookup refusal, no-topic normalization, per-binding/global capacity and existing
-receipt preservation at capacity. Native send/ack ordering, actual Core negative
+lookup refusal, no-topic normalization, ring eviction/newest retention, unrelated endpoint preservation, generation
+churn, terminal replay after eviction and explicit slot exhaustion without Full. Native send/ack ordering, actual Core negative
 contexts, peer negotiation and drain/straggler rehearsals remain runtime work.
 
 ### Security gates still required before a production decision

@@ -7,17 +7,32 @@ use crate::{
 };
 use rusqlite::{params, OptionalExtension};
 
-const PER_BINDING_ROWS: i64 = 1000;
-const GLOBAL_ROWS: i64 = 10_000;
+const PER_ENDPOINT_ROWS: i64 = 1000;
+const MAX_ENDPOINTS: i64 = 20;
+const GLOBAL_ROWS: i64 = MAX_ENDPOINTS * PER_ENDPOINT_ROWS;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Recorded {
     Inserted,
     Replay,
+    /// The durable handoff already completed. Never recreate evicted history.
+    IgnoredTerminal,
+    /// Reserved history slots are full; primary delivery must continue.
+    NotRetained,
 }
 
-/// No automatic expiry: retain mappings until reviewed binding retirement.
-/// At capacity, refuse new mappings instead of erasing an old reply context.
+/// Derived from the durable handoff, not a receipt, caller header or body.
+/// Runtime must commit mapping + handoff completion atomically before ack.
+#[derive(Clone, Copy)]
+pub enum HandoffState {
+    AwaitingReceipt,
+    Terminal,
+}
+
+/// Ring of 1000 rows per stable endpoint, shared across ALL its generations.
+/// Up to 20 endpoint slots; retirement releases a slot through the separately
+/// reviewed retirement procedure. No receipt caller can evict another endpoint.
+/// These helpers never decide whether to acknowledge a Core delivery.
 pub struct Mappings<'a> {
     store: &'a mut Store,
 }
@@ -33,9 +48,17 @@ impl<'a> Mappings<'a> {
                 UNIQUE(endpoint,generation,job));
              CREATE TABLE IF NOT EXISTS telegram_reply_counters(
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                conflicts INTEGER NOT NULL DEFAULT 0);
+                conflicts INTEGER NOT NULL DEFAULT 0,evictions INTEGER NOT NULL DEFAULT 0);
              INSERT OR IGNORE INTO telegram_reply_counters(singleton) VALUES(1);",
         )?;
+        let columns = store
+            .db
+            .prepare("PRAGMA table_info(telegram_reply_counters)")?
+            .query_map([], |r| r.get::<_, String>(1))?
+            .collect::<Result<Vec<_>, _>>()?;
+        if !columns.iter().any(|name| name == "evictions") {
+            store.db.execute_batch("ALTER TABLE telegram_reply_counters ADD COLUMN evictions INTEGER NOT NULL DEFAULT 0;")?;
+        }
         Ok(Self { store })
     }
 
@@ -46,6 +69,7 @@ impl<'a> Mappings<'a> {
         wire: &[u8],
         outer_core_sender: &str,
         expected: Expected<'_>,
+        handoff: HandoffState,
         now: i64,
     ) -> Result<Recorded, Error> {
         if now < 0 {
@@ -53,6 +77,9 @@ impl<'a> Mappings<'a> {
         }
         let r =
             Receipt::parse_for(wire, outer_core_sender, expected).map_err(|_| Error::Invalid)?;
+        if matches!(handoff, HandoffState::Terminal) {
+            return Ok(Recorded::IgnoredTerminal);
+        }
         let s = &r.scope;
         let tx = self.store.db.transaction()?;
         let prior: Option<(String, String, String)> = tx
@@ -85,18 +112,42 @@ impl<'a> Mappings<'a> {
                 |row| row.get(0),
             )?;
             if !reused {
+                let binding: i64 = tx.query_row(
+                    "SELECT count(*) FROM telegram_reply_mappings WHERE endpoint=?1",
+                    [&s.endpoint_id],
+                    |row| row.get(0),
+                )?;
+                let endpoints: i64 = tx.query_row(
+                    "SELECT count(DISTINCT endpoint) FROM telegram_reply_mappings",
+                    [],
+                    |row| row.get(0),
+                )?;
                 let total: i64 =
                     tx.query_row("SELECT count(*) FROM telegram_reply_mappings", [], |row| {
                         row.get(0)
                     })?;
-                let binding: i64 = tx.query_row(
-                    "SELECT count(*) FROM telegram_reply_mappings
-                     WHERE endpoint=?1 AND generation=?2",
-                    params![s.endpoint_id, s.generation],
-                    |row| row.get(0),
-                )?;
-                if total >= GLOBAL_ROWS || binding >= PER_BINDING_ROWS {
-                    return Err(Error::Full);
+                // Do not let new/stale endpoint churn evict another endpoint's
+                // reserved history. Runtime retires old slots explicitly.
+                if (binding == 0 && endpoints >= MAX_ENDPOINTS)
+                    || binding > PER_ENDPOINT_ROWS
+                    || total > GLOBAL_ROWS
+                    || (total >= GLOBAL_ROWS && binding < PER_ENDPOINT_ROWS)
+                {
+                    return Ok(Recorded::NotRetained);
+                }
+                if binding == PER_ENDPOINT_ROWS {
+                    let removed = tx.execute(
+                        "DELETE FROM telegram_reply_mappings WHERE rowid IN
+                         (SELECT rowid FROM telegram_reply_mappings WHERE endpoint=?1
+                          ORDER BY created_at,rowid LIMIT 1)",
+                        [&s.endpoint_id],
+                    )?;
+                    tx.execute(
+                        "UPDATE telegram_reply_counters SET evictions=CASE
+                         WHEN evictions<9223372036854775807 THEN evictions+?1 ELSE evictions END
+                         WHERE singleton=1",
+                        [removed as i64],
+                    )?;
                 }
                 tx.execute(
                     "INSERT INTO telegram_reply_mappings
@@ -146,6 +197,14 @@ impl<'a> Mappings<'a> {
             )
             .optional()?
             .ok_or(Error::Unavailable)
+    }
+
+    pub fn eviction_count(&self) -> Result<i64, Error> {
+        Ok(self.store.db.query_row(
+            "SELECT evictions FROM telegram_reply_counters WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn conflict_count(&self) -> Result<i64, Error> {
@@ -206,6 +265,7 @@ mod tests {
                 payload_digest: &digest,
                 native_message_id: native,
             },
+            HandoffState::AwaitingReceipt,
             42,
         )
     }
@@ -270,33 +330,92 @@ mod tests {
         assert!(matches!(m.context(&bad, 11), Err(Error::Invalid)));
     }
     #[test]
-    fn quota_refuses_without_evicting_existing_mapping_or_replay() {
+    fn ring_keeps_newest_and_other_endpoint_history_and_bounds_generation_churn() {
         let mut store = Store::memory(Limits::default()).unwrap();
         let mut m = Mappings::new(&mut store).unwrap();
-        record(&mut m, &scope(), 11, "job_one", "msg_first").unwrap();
-        m.store.db.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<999)
-            INSERT INTO telegram_reply_mappings SELECT 'synthetic',-123,0,'ag_relay',1,'ag_recipient',i+100,'msg_filler','filler_'||i,'synthetic',42 FROM n;").unwrap();
-        assert!(matches!(
-            record(&mut m, &scope(), 12, "job_two", "msg_second"),
-            Err(Error::Full)
-        ));
-        assert_eq!(
-            record(&mut m, &scope(), 11, "job_one", "msg_first").unwrap(),
-            Recorded::Replay
-        );
-        assert_eq!(m.context(&scope(), 11).unwrap(), "msg_first");
-        assert_eq!(m.conflict_count().unwrap(), 0);
+        let mut other = scope();
+        other.endpoint_id = "ag_other".into();
+        record(&mut m, &other, 1, "other_job", "msg_other").unwrap();
+        for generation in 1..=1001 {
+            let mut s = scope();
+            s.generation = generation;
+            record(&mut m, &s, 11, &format!("job_{generation}"), "msg_first").unwrap();
+        }
+        assert!(matches!(m.context(&scope(), 11), Err(Error::Unavailable)));
+        let mut newest = scope();
+        newest.generation = 1001;
+        assert_eq!(m.context(&newest, 11).unwrap(), "msg_first");
+        assert_eq!(m.context(&other, 1).unwrap(), "msg_other");
+        assert_eq!(m.eviction_count().unwrap(), 1);
+        let rows: i64 = m
+            .store
+            .db
+            .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 1001);
     }
     #[test]
-    fn global_quota_applies_even_to_a_fresh_binding() {
+    fn terminal_replay_after_eviction_cannot_recreate_or_retarget_history() {
         let mut store = Store::memory(Limits::default()).unwrap();
         let mut m = Mappings::new(&mut store).unwrap();
-        m.store.db.execute_batch("WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i+1 FROM n WHERE i<10000)
-            INSERT INTO telegram_reply_mappings SELECT 'synthetic',-123,0,'ag_'||(i/1000),1,'ag_recipient',i,'msg_filler','filler_'||i,'synthetic',42 FROM n;").unwrap();
-        assert!(matches!(
-            record(&mut m, &scope(), 11, "job_one", "msg_first"),
-            Err(Error::Full)
-        ));
+        for i in 1..=1000 {
+            record(&mut m, &scope(), i, &format!("job_{i}"), "msg_first").unwrap();
+        }
+        assert_eq!(
+            record(&mut m, &scope(), 1000, "job_1000", "msg_first").unwrap(),
+            Recorded::Replay
+        );
+        assert_eq!(m.eviction_count().unwrap(), 0);
+        record(&mut m, &scope(), 1001, "job_1001", "msg_first").unwrap();
+        assert!(matches!(m.context(&scope(), 1), Err(Error::Unavailable)));
+        let digest = "a".repeat(64);
+        let wire = serde_json::to_vec(&json!({"protocol":CAPABILITY,"verification":"app_asserted",
+            "scope":scope(),"job_id":"job_1","payload_digest":digest,"native_message_id":1,
+            "final_core_message_id":"msg_changed"}))
+        .unwrap();
+        let result = m
+            .record(
+                &wire,
+                "ag_relay",
+                Expected {
+                    scope: &scope(),
+                    job_id: "job_1",
+                    payload_digest: &digest,
+                    native_message_id: 1,
+                },
+                HandoffState::Terminal,
+                42,
+            )
+            .unwrap();
+        assert_eq!(result, Recorded::IgnoredTerminal);
+        assert!(matches!(m.context(&scope(), 1), Err(Error::Unavailable)));
+        assert_eq!(m.eviction_count().unwrap(), 1);
+    }
+    #[test]
+    fn endpoint_slot_exhaustion_does_not_evict_other_history_or_return_full() {
+        let mut store = Store::memory(Limits::default()).unwrap();
+        let mut m = Mappings::new(&mut store).unwrap();
+        for i in 1..=20 {
+            let mut s = scope();
+            s.endpoint_id = format!("ag_{i}");
+            record(&mut m, &s, 1, "job_one", "msg_first").unwrap();
+        }
+        assert_eq!(
+            record(&mut m, &scope(), 11, "job_new", "msg_new").unwrap(),
+            Recorded::NotRetained
+        );
+        let mut old = scope();
+        old.endpoint_id = "ag_1".into();
+        assert_eq!(m.context(&old, 1).unwrap(), "msg_first");
+        // Existing endpoint's generation churn has a reserved slot.
+        old.generation = 999;
+        assert_eq!(
+            record(&mut m, &old, 2, "job_two", "msg_second").unwrap(),
+            Recorded::Inserted
+        );
+        assert_eq!(m.eviction_count().unwrap(), 0);
     }
     #[cfg(unix)]
     #[test]
