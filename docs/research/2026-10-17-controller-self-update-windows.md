@@ -274,6 +274,22 @@ ownership. Replaying an older pair together with its old head is precisely the
 case this layer cannot detect. Storage ownership, crash reconciliation after
 head advance and before pair publication, and its protected authorization remain
 unimplemented and require separate review before W4.
+The next inert `check_forward_successor` composes the exact predecessor/revision
+and immutable-field guard with layout checks before and after one forward edge.
+Its explicit graph is Prepared -> Activating, then Controller Original ->
+MoveOldIntent -> OldMoved -> PublishIntent -> Published; only then may a new
+health claim enter CoreHealthy. CLI follows the same five steps while the
+Controller remains Published, and only then may the final health claim enter
+Complete. Each publication step and each phase/health change is a separate
+revision; unchanged state, skipped/reversed edges and any exit from Complete
+refuse. All rollback edges deliberately refuse in this forward-only guard.
+An independent 12-state trace tests every ordered state pair, all eight health
+flag combinations at each legitimate edge, and Unknown/Unreadable in every
+slot of either image before and after each edge. The observations remain
+synthetic and health fields remain bare claims: passing this graph establishes
+only model consistency, not authenticated health, head freshness, durable
+publication, completion or mutation/recovery authority. Recovery/rollback graph
+edges, evidence ownership and integration with the publisher remain open.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 

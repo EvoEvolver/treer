@@ -59,7 +59,7 @@ pub(crate) struct Image {
     pub(crate) slots: [Object; 3],
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Transaction {
     Prepared,
     Activating,

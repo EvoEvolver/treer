@@ -35,7 +35,7 @@ enum TransactionWire {
     RolledBack,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClaimedState {
     #[serde(with = "TransactionWire")]
@@ -298,6 +298,59 @@ fn check_successor_fields(
         return Err("transaction_fields_changed");
     }
     Ok(next)
+}
+
+// Forward-only graph. Explicit rollback edges and authenticated health evidence
+// are separate increments. Matching this graph never authorizes publication.
+fn next_forward_claim(old: &ClaimedState) -> Option<ClaimedState> {
+    use layout::{Step::*, Transaction::*};
+    let advance = |step| match step {
+        Original => Some(MoveOldIntent),
+        MoveOldIntent => Some(OldMoved),
+        OldMoved => Some(PublishIntent),
+        PublishIntent => Some(Published),
+        Published | MoveNewAsideIntent | NewAside | RestoreOldIntent | Restored => None,
+    };
+    let mut next = old.clone();
+    match old.transaction {
+        Prepared => next.transaction = Activating,
+        Activating if old.controller_step == Published => {
+            next.transaction = CoreHealthy;
+            next.new_health_recorded = true;
+        }
+        Activating => next.controller_step = advance(old.controller_step)?,
+        CoreHealthy if old.cli_step == Published => {
+            next.transaction = Complete;
+            next.final_health_recorded = true;
+        }
+        CoreHealthy => next.cli_step = advance(old.cli_step)?,
+        Complete | RollbackCli | RollbackController | RolledBack => return None,
+    }
+    Some(next)
+}
+
+fn check_forward_successor(
+    previous: (&[u8], &[u8]),
+    candidate: (&[u8], &[u8]),
+    head: &ExpectedHead,
+    previous_slots: [[layout::Object; 3]; 2],
+    candidate_slots: [[layout::Object; 3]; 2],
+) -> Result<(), Refusal> {
+    let next = check_successor_fields(previous, candidate, head)?;
+    let old = parse_pair(previous.0, previous.1, &head.binding)?;
+    if inspect_claim(&old.state, previous_slots[0], previous_slots[1])
+        != layout::PairInspection::Consistent
+        || inspect_claim(&next.state, candidate_slots[0], candidate_slots[1])
+            != layout::PairInspection::Consistent
+    {
+        return Err("transition_layout_conflict");
+    }
+    if next_forward_claim(&old.state).as_ref() != Some(&next.state) {
+        return Err("invalid_forward_transition");
+    }
+    // Only a synthetic graph check: bare health claims are not authenticated,
+    // and the ExpectedHead still has no durable/independent implementation.
+    Ok(())
 }
 
 fn fixture() -> DraftFields {
@@ -897,5 +950,155 @@ fn successor_fields_refuse_valid_but_retargeted_provenance_or_image_records() {
             check_successor_fields((&old_receipt, &old_marker), (&receipt, &marker), &head)
                 .is_err()
         );
+    }
+}
+
+fn forward_fixture_trace() -> Vec<(ClaimedState, [[layout::Object; 3]; 2])> {
+    use layout::{Object::*, Step::*, Transaction::*};
+    let original = [Old, New, Absent];
+    let published = [New, Absent, Old];
+    let mut trace = vec![(fixture().state, [original, original])];
+    // Explicit expected trace, independent of next_forward_claim.
+    for transaction in [Activating, CoreHealthy] {
+        for (step, slots) in [
+            (Original, original),
+            (MoveOldIntent, original),
+            (OldMoved, [Absent, New, Old]),
+            (PublishIntent, [Absent, New, Old]),
+            (Published, published),
+        ] {
+            let core_healthy = transaction == CoreHealthy;
+            trace.push((
+                ClaimedState {
+                    transaction,
+                    controller_step: if core_healthy { Published } else { step },
+                    cli_step: if core_healthy { step } else { Original },
+                    new_health_recorded: core_healthy,
+                    final_health_recorded: false,
+                    old_health_recorded: false,
+                },
+                if core_healthy {
+                    [published, slots]
+                } else {
+                    [slots, original]
+                },
+            ));
+        }
+    }
+    trace.push((
+        ClaimedState {
+            transaction: Complete,
+            controller_step: Published,
+            cli_step: Published,
+            new_health_recorded: true,
+            final_health_recorded: true,
+            old_health_recorded: false,
+        },
+        [published, published],
+    ));
+    trace
+}
+
+fn forward_fixture_check(
+    old: &ClaimedState,
+    next: &ClaimedState,
+    old_slots: [[layout::Object; 3]; 2],
+    next_slots: [[layout::Object; 3]; 2],
+) -> Result<(), Refusal> {
+    let mut prior = fixture();
+    prior.state = old.clone();
+    let (old_receipt, old_marker) = envelopes(&serde_json::to_vec(&prior).unwrap(), &prior.binding);
+    let head = ExpectedHead {
+        binding: prior.binding.clone(),
+        receipt_sha256: digest(&old_receipt),
+    };
+    let mut candidate = prior;
+    candidate.binding.revision += 1;
+    candidate.state = next.clone();
+    let (receipt, marker) = envelopes(&serde_json::to_vec(&candidate).unwrap(), &candidate.binding);
+    check_forward_successor(
+        (&old_receipt, &old_marker),
+        (&receipt, &marker),
+        &head,
+        old_slots,
+        next_slots,
+    )
+}
+
+#[test]
+fn forward_graph_accepts_only_adjacent_claims_not_noops_skips_or_reversals() {
+    let trace = forward_fixture_trace();
+    assert_eq!(trace.len(), 12);
+    for (old_index, (old, old_slots)) in trace.iter().enumerate() {
+        for (next_index, (next, next_slots)) in trace.iter().enumerate() {
+            // Every state is independently well-formed and layout-consistent.
+            assert_eq!(
+                inspect_claim(old, old_slots[0], old_slots[1]),
+                layout::PairInspection::Consistent
+            );
+            assert_eq!(
+                inspect_claim(next, next_slots[0], next_slots[1]),
+                layout::PairInspection::Consistent
+            );
+            let result = forward_fixture_check(old, next, *old_slots, *next_slots);
+            assert_eq!(
+                result.is_ok(),
+                next_index == old_index + 1,
+                "{old_index}->{next_index}: {result:?}"
+            );
+        }
+    }
+    // A valid rollback layout/claim is outside this forward-only graph.
+    let mut rollback = trace[0].0.clone();
+    rollback.transaction = layout::Transaction::RollbackController;
+    assert_eq!(
+        inspect_claim(&rollback, trace[0].1[0], trace[0].1[1]),
+        layout::PairInspection::Consistent
+    );
+    assert_eq!(
+        forward_fixture_check(&trace[0].0, &rollback, trace[0].1, trace[0].1),
+        Err("invalid_forward_transition")
+    );
+    assert_eq!(
+        forward_fixture_check(&rollback, &trace[0].0, trace[0].1, trace[0].1),
+        Err("invalid_forward_transition")
+    );
+}
+
+#[test]
+fn forward_graph_checks_both_layouts_and_health_changes_at_each_edge() {
+    use layout::Object::{Unknown, Unreadable};
+    let trace = forward_fixture_trace();
+    for edge in trace.windows(2) {
+        let (old, old_slots) = &edge[0];
+        let (next, next_slots) = &edge[1];
+        for image in 0..2 {
+            for slot in 0..3 {
+                for uncertain in [Unknown, Unreadable] {
+                    let mut bad_old = *old_slots;
+                    bad_old[image][slot] = uncertain;
+                    assert_eq!(
+                        forward_fixture_check(old, next, bad_old, *next_slots),
+                        Err("transition_layout_conflict")
+                    );
+                    let mut bad_next = *next_slots;
+                    bad_next[image][slot] = uncertain;
+                    assert_eq!(
+                        forward_fixture_check(old, next, *old_slots, bad_next),
+                        Err("transition_layout_conflict")
+                    );
+                }
+            }
+        }
+        for flags in 0..8 {
+            let mut altered = next.clone();
+            altered.new_health_recorded = flags & 1 != 0;
+            altered.final_health_recorded = flags & 2 != 0;
+            altered.old_health_recorded = flags & 4 != 0;
+            assert_eq!(
+                forward_fixture_check(old, &altered, *old_slots, *next_slots).is_ok(),
+                altered == *next
+            );
+        }
     }
 }
