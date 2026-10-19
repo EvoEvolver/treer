@@ -60,15 +60,16 @@ async function measure(temperature, pair, context, version, engine) {
       void window.__treerEmbedTiming(stage, performance.timeOrigin + time).catch(() => {})
     }
     if (isConsole) {
-      new MutationObserver((mutations) => {
+      const observer = new MutationObserver((mutations) => {
         for (const m of mutations) for (const node of m.addedNodes) {
           if (!(node instanceof Element)) continue
           const frames = node.matches('iframe') ? [node] : node.querySelectorAll('iframe')
           for (const frame of frames) {
-            try { if (new URL(frame.src).origin === agentOrigin) mark('frame-created') } catch { /* unrelated frame */ }
+            try { if (new URL(frame.src).origin === agentOrigin) { mark('frame-created'); observer.disconnect(); return } } catch { /* unrelated frame */ }
           }
         }
-      }).observe(document, { childList: true, subtree: true })
+      })
+      observer.observe(document, { childList: true, subtree: true })
       window.addEventListener('message', (event) => {
         if (event.origin === agentOrigin && event.data?.treer_embed === 'ready') mark('ready-received')
       })
@@ -92,17 +93,17 @@ async function measure(temperature, pair, context, version, engine) {
   page.on('request', (request) => { const name = endpoint(request); if (name) requests.set(request, name) })
   const record = (request, status) => {
     if (!requests.has(request)) return
-      const timing = request.timing()
-      // Record response headers arrival even when a browser omits the finished
-      // event for a bodyless 204; unavailable responseEnd remains -1.
-      const value = { endpoint: requests.get(request), status,
-        start_epoch_ms: timing.startTime, dns_start_ms: timing.domainLookupStart,
-        dns_end_ms: timing.domainLookupEnd, connect_start_ms: timing.connectStart,
-        tls_start_ms: timing.secureConnectionStart, connect_end_ms: timing.connectEnd,
-        request_start_ms: timing.requestStart, response_start_ms: timing.responseStart,
-        response_end_ms: timing.responseEnd }
-      if (entries.has(request)) Object.assign(entries.get(request), value)
-      else { entries.set(request, value); network.push(value) }
+    const timing = request.timing()
+    // Record response headers arrival even when a browser omits the finished
+    // event for a bodyless 204; unavailable responseEnd remains -1.
+    const value = { endpoint: requests.get(request), status,
+      start_epoch_ms: timing.startTime, dns_start_ms: timing.domainLookupStart,
+      dns_end_ms: timing.domainLookupEnd, connect_start_ms: timing.connectStart,
+      tls_start_ms: timing.secureConnectionStart, connect_end_ms: timing.connectEnd,
+      request_start_ms: timing.requestStart, response_start_ms: timing.responseStart,
+      response_end_ms: timing.responseEnd }
+    if (entries.has(request)) Object.assign(entries.get(request), value)
+    else { entries.set(request, value); network.push(value) }
   }
   page.on('response', (response) => record(response.request(), response.status()))
   page.on('requestfinished', (request) => {
