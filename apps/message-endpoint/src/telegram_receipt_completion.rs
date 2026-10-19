@@ -18,7 +18,7 @@ impl<M: Mailbox + Directory> Hub<M> {
     /// from receipt JSON. This method commits before returning permission to ack.
     /// Conflict is an error AFTER committing a bounded operator-visible pause;
     /// the original queue row remains pending and the Core delivery unacked.
-    /// Do not also call legacy complete_telegram_forward in receipt mode.
+    /// A persisted receipt-mode pin is required; legacy completion rejects it.
     pub fn complete_telegram_receipt(
         &mut self,
         delivery: &Delivery,
@@ -66,6 +66,16 @@ impl<M: Mailbox + Directory> Hub<M> {
                 lease:r.get(4)?,core_id:r.get(5)?,source:r.get(6)?,account:r.get(7)?,chat:r.get(8)?,topic:r.get(9)?,
             }),
         ).optional()?.ok_or(Error::Binding)?;
+        let mode: Option<String> = tx
+            .query_row(
+                "SELECT mode FROM telegram_handoff_modes WHERE job=?1",
+                [intent.job],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if mode.as_deref() != Some(crate::telegram::CompletionMode::Receipt.as_str()) {
+            return Err(Error::Binding);
+        }
         if row.lease.as_deref() != Some(&intent.token) || (!row.pending && row.core_id.is_none()) {
             return Err(Error::Binding);
         }

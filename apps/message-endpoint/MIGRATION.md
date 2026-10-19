@@ -279,7 +279,14 @@ contexts, peer negotiation and drain/straggler rehearsals remain runtime work.
 `src/telegram_receipt_completion.rs` adds `Hub::complete_telegram_receipt` for
 future negotiated receipt mode. Core workers do **not** call it yet. Existing
 basic transport still uses its legacy fragment-handoff completion; that path
-must not be combined with receipt mode. No live capability or activation is
+is now durably exclusive with receipt mode. A bounded per-inbound-job mode row
+is pinned before the lease/frame preparation; the mode never changes on retry.
+Missing historical mode rows count as legacy at completion, and a previously
+leased job without a pin cannot be upgraded to receipt mode. Both completion
+paths reject the other mode even after terminal completion or store reopening.
+The mode row is removed with its inbound job, never retained as unbounded history.
+Only internal development preparation can select receipt mode until runtime
+negotiation is wired and reviewed. No live capability or activation is
 advertised by this increment.
 
 The completion transaction takes SQLite's immediate write reservation and reads

@@ -89,6 +89,21 @@ pub struct CoreIntent {
     pub(crate) token: String,
     pub parts: Vec<(String, String)>,
 }
+/// Durable per-job choice, not a transport capability advertisement. Runtime
+/// workers still select Legacy until receipt negotiation is wired and reviewed.
+#[derive(Clone, Copy)]
+pub(crate) enum CompletionMode {
+    Legacy,
+    Receipt,
+}
+impl CompletionMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Legacy => "legacy",
+            Self::Receipt => "receipt",
+        }
+    }
+}
 pub struct ChunkIntent {
     activation_at: i64,
     endpoint: String,
@@ -164,6 +179,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS telegram_accounts(account TEXT PRIMARY KEY,offset INTEGER NOT NULL,ignored INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS telegram_targets(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),account TEXT NOT NULL REFERENCES telegram_accounts(account),chat INTEGER NOT NULL,topic INTEGER NOT NULL,definition TEXT NOT NULL,UNIQUE(account,chat,topic));
         CREATE TABLE IF NOT EXISTS telegram_sources(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,external_id TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(endpoint,generation,external_id));
+        CREATE TABLE IF NOT EXISTS telegram_handoff_modes(job INTEGER PRIMARY KEY REFERENCES inbound(id) ON DELETE CASCADE,mode TEXT NOT NULL CHECK(mode IN ('legacy','receipt')));
         CREATE TABLE IF NOT EXISTS telegram_chunks(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,part INTEGER NOT NULL,digest BLOB NOT NULL,message_id INTEGER,attempts INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER,next_attempt INTEGER NOT NULL DEFAULT 0,failure_class INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(endpoint,generation,transfer,part));")?;
         let columns = self
             .store
@@ -308,10 +324,52 @@ impl<M: Mailbox + Directory> Hub<M> {
         now: i64,
         lease_token: &str,
     ) -> Result<Option<CoreIntent>, Error> {
+        self.prepare_telegram_forward_mode(endpoint, now, lease_token, CompletionMode::Legacy)
+    }
+    pub(crate) fn prepare_telegram_forward_mode(
+        &mut self,
+        endpoint: &str,
+        now: i64,
+        lease_token: &str,
+        mode: CompletionMode,
+    ) -> Result<Option<CoreIntent>, Error> {
+        if !lease_token_valid(lease_token) || now.checked_add(60).is_none() {
+            return Err(Error::Invalid);
+        }
         if self.blocked()? {
             return Err(HubError::FailureBudget.into());
         }
         let view = self.active(endpoint, now)?;
+        // Pin the choice before leasing or exposing any frames. A preexisting
+        // lease without a mode is historical legacy work, never an upgrade.
+        // A crash between this commit and lease simply retains the same mode.
+        let selected = self.store.db.query_row(
+            "SELECT id,lease_token IS NOT NULL FROM inbound WHERE endpoint=?1 AND generation=?2 AND pending=1 ORDER BY id LIMIT 1",
+            params![endpoint,view.binding.generation],
+            |r| Ok((r.get::<_,i64>(0)?,r.get::<_,bool>(1)?)),
+        ).optional()?;
+        let Some((job_id, previously_leased)) = selected else {
+            return Ok(None);
+        };
+        self.store.db.execute(
+            "INSERT OR IGNORE INTO telegram_handoff_modes(job,mode) VALUES(?1,?2)",
+            params![
+                job_id,
+                if previously_leased {
+                    CompletionMode::Legacy.as_str()
+                } else {
+                    mode.as_str()
+                }
+            ],
+        )?;
+        let pinned: String = self.store.db.query_row(
+            "SELECT mode FROM telegram_handoff_modes WHERE job=?1",
+            [job_id],
+            |r| r.get(0),
+        )?;
+        if pinned != mode.as_str() {
+            return Err(Error::Conflict);
+        }
         let Some(job) = self
             .store
             .lease(endpoint, view.binding.generation, now, lease_token)?
@@ -403,6 +461,13 @@ impl<M: Mailbox + Directory> Hub<M> {
         intent: &CoreIntent,
         last_core_id: &str,
     ) -> Result<(), Error> {
+        let mode:String = self.store.db.query_row(
+            "SELECT COALESCE((SELECT mode FROM telegram_handoff_modes WHERE job=i.id),'legacy') FROM inbound i WHERE id=?1 AND endpoint=?2 AND generation=?3",
+            params![intent.job,intent.endpoint,intent.generation],|r|r.get(0),
+        )?;
+        if mode != CompletionMode::Legacy.as_str() {
+            return Err(Error::Conflict);
+        }
         let pending: bool = self.store.db.query_row(
             "SELECT pending FROM inbound WHERE id=?1 AND endpoint=?2 AND generation=?3",
             params![intent.job, intent.endpoint, intent.generation],
@@ -901,9 +966,140 @@ mod tests {
     }
     fn receipt_job(h: &mut Hub<Fake>) -> CoreIntent {
         h.admit_telegram("bot_test", vec![update(1)], NOW).unwrap();
-        h.prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
+        h.prepare_telegram_forward_mode(
+            "ag_endpoint",
+            NOW,
+            &"a".repeat(64),
+            CompletionMode::Receipt,
+        )
+        .unwrap()
+        .unwrap()
+    }
+    #[test]
+    fn completion_modes_reject_the_other_path_before_and_after_terminal() {
+        for receipt_mode in [false, true] {
+            let (mut h, _) = fixture(Limits::default());
+            h.admit_telegram("bot_test", vec![update(1)], NOW).unwrap();
+            let mode = if receipt_mode {
+                CompletionMode::Receipt
+            } else {
+                CompletionMode::Legacy
+            };
+            let intent = h
+                .prepare_telegram_forward_mode("ag_endpoint", NOW, &"a".repeat(64), mode)
+                .unwrap()
+                .unwrap();
+            let delivery = receipt_delivery(&intent, "msg_final");
+            if receipt_mode {
+                assert!(h.complete_telegram_forward(&intent, "msg_wrong").is_err());
+                h.complete_telegram_receipt(&delivery, &intent, NOW)
+                    .unwrap();
+                assert!(h.complete_telegram_forward(&intent, "msg_wrong").is_err());
+            } else {
+                assert!(h
+                    .complete_telegram_receipt(&delivery, &intent, NOW)
+                    .is_err());
+                h.complete_telegram_forward(&intent, "msg_final").unwrap();
+                assert!(h
+                    .complete_telegram_receipt(&delivery, &intent, NOW)
+                    .is_err());
+            }
+            assert_eq!(
+                h.store
+                    .db
+                    .query_row("SELECT core_id FROM inbound", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "msg_final"
+            );
+        }
+    }
+    #[test]
+    fn historical_leased_job_cannot_be_upgraded_to_receipt_mode() {
+        let (mut h, _) = fixture(Limits::default());
+        h.admit_telegram("bot_test", vec![update(1)], NOW).unwrap();
+        let intent = h
+            .prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
             .unwrap()
-            .unwrap()
+            .unwrap();
+        // Model a pre-migration leased row with no stored completion mode.
+        h.store
+            .db
+            .execute("DELETE FROM telegram_handoff_modes", [])
+            .unwrap();
+        assert!(h
+            .prepare_telegram_forward_mode(
+                "ag_endpoint",
+                NOW + 61,
+                &"b".repeat(64),
+                CompletionMode::Receipt
+            )
+            .is_err());
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT lease_token FROM inbound", [], |r| r
+                    .get::<_, String>(0))
+                .unwrap(),
+            intent.token
+        );
+        assert!(h
+            .complete_telegram_receipt(&receipt_delivery(&intent, "msg_wrong"), &intent, NOW)
+            .is_err());
+        h.complete_telegram_forward(&intent, "msg_final").unwrap();
+    }
+    #[test]
+    fn completion_modes_are_durable_and_refuse_both_restart_switches() {
+        use std::os::unix::fs::PermissionsExt;
+        for receipt_mode in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().canonicalize().unwrap().join("state");
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let intent = {
+                let (mut h, _) = fixture_store(Store::open(&path, Limits::default()).unwrap());
+                if receipt_mode {
+                    receipt_job(&mut h)
+                } else {
+                    h.admit_telegram("bot_test", vec![update(1)], NOW).unwrap();
+                    h.prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
+                        .unwrap()
+                        .unwrap()
+                }
+            };
+            let mut h = Hub::new(
+                Store::open(&path, Limits::default()).unwrap(),
+                Fake::default(),
+                "app_hub",
+                "ws",
+            )
+            .unwrap();
+            let other = if receipt_mode {
+                CompletionMode::Legacy
+            } else {
+                CompletionMode::Receipt
+            };
+            assert!(h
+                .prepare_telegram_forward_mode("ag_endpoint", NOW + 61, &"b".repeat(64), other)
+                .is_err());
+            let delivery = receipt_delivery(&intent, "msg_final");
+            if receipt_mode {
+                assert!(h.complete_telegram_forward(&intent, "msg_wrong").is_err());
+                h.complete_telegram_receipt(&delivery, &intent, NOW)
+                    .unwrap();
+            } else {
+                assert!(h
+                    .complete_telegram_receipt(&delivery, &intent, NOW)
+                    .is_err());
+                h.complete_telegram_forward(&intent, "msg_final").unwrap();
+            }
+            assert_eq!(
+                h.store
+                    .db
+                    .query_row("SELECT core_id FROM inbound", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "msg_final"
+            );
+        }
     }
     #[test]
     fn atomic_receipt_completion_rolls_back_eviction_and_queue_then_replays_without_ack() {
