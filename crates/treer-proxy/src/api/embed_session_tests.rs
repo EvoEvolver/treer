@@ -131,9 +131,11 @@ async fn check(
     host: &str,
     cookie: Option<&str>,
 ) -> StatusCode {
+    // The bootstrap's own fetch is same-origin; the check requires it (5580).
     let mut request = Request::builder()
         .uri("/.treer/embed/check")
-        .header(header::HOST, host);
+        .header(header::HOST, host)
+        .header("sec-fetch-site", "same-origin");
     if let Some(cookie) = cookie {
         request = request.header(header::COOKIE, cookie);
     }
@@ -1059,6 +1061,38 @@ async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_ha
         refused
     );
     assert_eq!(error_of(check_with(allow(), None).await).await, refused);
+    // The cookie counts only in the same-origin context the UI request
+    // requires (security 5580): every other Fetch Metadata shape, including a
+    // duplicated header, is the same 401 even with a live session.
+    for sites in [
+        vec!["cross-site"],
+        vec!["same-site"],
+        vec!["none"],
+        vec![],
+        vec!["same-origin", "same-origin"],
+    ] {
+        let mut request = Request::builder()
+            .uri("/.treer/embed/check")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, cookie.clone());
+        for site in &sites {
+            request = request.header("sec-fetch-site", *site);
+        }
+        assert_eq!(
+            error_of(
+                send(
+                    &fixture,
+                    allow(),
+                    &config,
+                    request.body(Body::empty()).unwrap()
+                )
+                .await
+            )
+            .await,
+            refused,
+            "{sites:?}"
+        );
+    }
     // One cause at a time, each on its own session: Policy deny (above),
     // expiry, server-side logout, membership removal.
     let expired = establish_embed_session(&fixture, &config, "owner").await;

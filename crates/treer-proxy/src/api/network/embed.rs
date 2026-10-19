@@ -379,15 +379,23 @@ async fn check_embed_session(
     if !matches!(*method, Method::GET | Method::HEAD) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
-    let user = match cookie_value(headers, config.embed_cookie_name()) {
-        Some(token) => auth.authenticate_embed_session(hostname, &token).await?,
-        None => None,
-    };
     let no_session = || {
         ApiFailure::unauthorized(
             "ingress_authentication_required",
             "no embed session for this origin",
         )
+    };
+    // The same cookie-context rule as the UI request (security 5580): the
+    // embed cookie counts only for a request that provably comes from the
+    // framed document itself (exactly one `Sec-Fetch-Site: same-origin`).
+    // The bootstrap's own fetch is same-origin; any other context gets the
+    // same 401 as "no session", so a 204 is never an oracle for a foreign page.
+    if !super::ingress::embed_cookie_context(headers, false, config, hostname)? {
+        return Err(no_session());
+    }
+    let user = match cookie_value(headers, config.embed_cookie_name()) {
+        Some(token) => auth.authenticate_embed_session(hostname, &token).await?,
+        None => None,
     };
     let Some(user_id) = user else {
         return Err(no_session());

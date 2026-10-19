@@ -1325,7 +1325,10 @@ answers `204` only under the full request-path gate: session live for this
 host and kind, current membership, and the interface Policy pair for this
 Agent evaluated without recording a decision; every other state is the same
 `401` as "no session" with no reason, so the check reveals nothing the UI
-request would not, and no party caches a positive answer. Reuse changes no
+request would not, and no party caches a positive answer. The check honours
+the embed cookie only under the same request-context rule as the UI request
+(exactly one `Sec-Fetch-Site: same-origin`), so a foreign context holding the
+cookie gets the same `401` and the check is no authorization oracle. Reuse changes no
 binding, expiry or revocation: the same cookie is presented, logout and
 membership removal end it, and the UI request and the socket re-check apply
 the gate again. Handshake and UI responses carry no `Server-Timing`; load-time
