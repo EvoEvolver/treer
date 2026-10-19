@@ -489,7 +489,7 @@ with exactly these fields; duplicate, missing and unknown fields are refused:
 
 | Field | Draft constraint |
 | --- | --- |
-| `kind` | Exactly `new_controller_unhealthy`, `deadline_exceeded` or `human_abort` |
+| `kind` | Exactly one of the six kinds in the entry table below |
 | `entry_revision` | Integer greater than one and no greater than the enclosing revision |
 | `predecessor_receipt_sha256` | Lowercase 64-hex digest of the exact receipt envelope preceding entry |
 | `evidence_sha256` | Lowercase 64-hex reference to independently verified reason evidence |
@@ -503,6 +503,26 @@ destructure must explicitly classify this field: the partial successor guard
 may allow only null-to-object or exact preservation; the entry and continuation
 graphs must respectively enforce creation and preservation, so the partial
 guard alone never accepts an entry. Forward edges require null throughout.
+
+The entry guard must also enforce this closed kind/phase/step table against the
+verified predecessor claim. All rows remain subject to the independent layout,
+ownership and evidence gates; a matching label alone proves no failure.
+
+| Kind | Allowed predecessor phase and moving step | Required evidence meaning |
+| --- | --- | --- |
+| `controller_activation_failed` | Activating, Controller MoveOldIntent/OldMoved/PublishIntent/Published | Controller activation operation or verification failed; not necessarily a process-health failure |
+| `new_controller_unhealthy` | Activating, Controller Published | The started new Controller failed its authenticated health check |
+| `cli_activation_failed` | CoreHealthy, CLI MoveOldIntent/OldMoved/PublishIntent/Published | CLI activation/publish or CLI verification failed; must not be mislabeled as Controller health |
+| `final_health_failed` | CoreHealthy, CLI Published | Final post-activation health failed before Complete |
+| `deadline_exceeded` | Prepared, Activating or CoreHealthy, any classifier-consistent step | Independent monitor established expiration for the bound job/revision/time context |
+| `human_abort` | Prepared, Activating or CoreHealthy, any classifier-consistent step | Protected human channel authorized this bound abort |
+
+No kind is accepted from Complete or any rollback phase. Prepared only permits
+Original steps and has not attempted image activation, so activation/health
+failure kinds are refused there; only deadline or human abort can enter from
+Prepared. A CLI at Original likewise cannot claim that a CLI activation
+operation already failed. The Controller failure kinds are distinct so that
+rename/verification failures need not be falsely labeled process illness.
 
 The serialized object is an untrusted claim, not a verifier-constructed reason.
 Neither digest reference is an authentication mechanism. A future verifier
@@ -519,7 +539,9 @@ design review; this table creates none of them and adds no public format.
 The eventual inert format slice must test required-null versus missing,
 all strict-object refusals, entry revision/head binding, each reason-field
 mutation independently, and reason preservation across every rollback branch
-through RolledBack. It must also demonstrate that valid JSON/digest references
+through RolledBack. For every kind, exercise a matching entry and mismatched
+phase/step cases, including Prepared/Original, pre-final CLI steps, Complete
+and existing rollback phases. It must also demonstrate that valid JSON/digest references
 alone cannot construct a verified reason. Existing draft fixtures lack the
 field; the inert format change must update them explicitly rather than add a
 permissive default or claim backward compatibility with an installed format.
