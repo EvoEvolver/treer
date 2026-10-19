@@ -1963,7 +1963,13 @@ async fn concurrent_rotation_and_exchange_take_the_pair_lock_in_one_order() {
                     .await
                     .unwrap();
             }
-            Err(failure) => assert_ne!(failure.error.code, "database_error", "{failure:?}"),
+            // The documented eviction outcome, and nothing else: a broken
+            // deadlock would surface as database_error here.
+            Err(failure) => assert_eq!(
+                (failure.status, failure.error.code.as_str()),
+                (StatusCode::UNAUTHORIZED, "invalid_ingress_authorization"),
+                "{failure:?}"
+            ),
         }
         match exchange {
             Ok(response) => assert_eq!(response.status(), StatusCode::NO_CONTENT),
