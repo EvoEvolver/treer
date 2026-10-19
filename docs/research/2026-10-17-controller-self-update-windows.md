@@ -365,6 +365,28 @@ is a design classification, not a new serialized phase or an implemented human
 recovery channel. The rollback graph must prove these branches and interruption
 points before being wired; this table alone provides no recovery capability.
 
+The rollback actor is not implemented. Before any exit can execute, its design
+must name a separate executable with pinned object identity and hash, rather
+than depend on the image being rolled back. It must establish exclusive
+installation ownership and verified quiescence, including how it stops a live
+new Controller and proves that a crashed Controller no longer owns the work.
+Neither a crash nor a receipt grants that ownership. Until that actor and its
+ownership proof exist, every row above remains coverage only.
+
+The inert rollback slice must mechanically enumerate every combination of
+transaction phase, Controller step, CLI step and observed layouts accepted by
+the shared classifier, including its health-claim combinations. Each consistent
+case must select exactly one proposed exit or diagnose-and-stop; overlapping
+exits and missing cases must fail the test. This checks coverage, not the
+authenticity of observations or the authority to execute an exit.
+
+For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
+all new update jobs, including after restart. Clearing that latch requires a
+protected human-authorization channel, which does not exist yet. No manual
+rename sequence is supported; preserved records are diagnostic evidence, not
+recovery input. Recovery remains disabled. Neither the latch nor an operator
+clearing mechanism is implemented by the current inert model.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
