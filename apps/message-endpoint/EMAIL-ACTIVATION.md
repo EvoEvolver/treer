@@ -122,6 +122,43 @@ provide enough outcome classification, first retain uncertain work for manual
 reconciliation and disclose the limitation. A provider-specific idempotency
 capability would be separate Core-owned work, not guessed by this App.
 
+### Human-owner reconciliation aid (proposed, not implemented)
+
+Include a fixed-format opaque reference in the notification's fixed body, such
+as `Reference: <16 lowercase hex characters>`. Derive it from a domain-separated
+SHA-256 of the frozen idempotency key (`treer-email-marker-v1` domain), never from
+message content; expose neither the key nor an underlying provider credential.
+Freeze the reference with the exact serialized payload/key before first POST
+and retain it in the uncertain row. It is a correlation aid, **not** a Core or
+provider receipt, permission token or proof that a particular attempt arrived.
+Collisions or multiple attempts sharing a reference cannot establish uniqueness
+or authorize a resend. The body still contains no author-controlled summary,
+markup or URL beyond its configured thread link.
+
+Reconciliation is a separately reviewed **human-owner-only** operation, outside
+the any-Agent binding-management grant. Its decision must distinguish:
+
+| Evidence/outcome | Allowed interpretation |
+| --- | --- |
+| Owner positively observes the matching reference in the fixed mailbox | Record `owner_observed_receipt`, explicitly owner-asserted, not Core-verified. This is not proof of exactly one delivery, provider identity or which attempt succeeded. Do not resend. |
+| Independently verified non-send evidence | Record `externally_verified_non_send` with a reviewed evidence class; mailbox absence and elapsed time do not qualify. No current Core/provider query capability is assumed. A later retry requires its own reviewed authorization path. |
+| Reference absent, conflicting, non-unique, or evidence otherwise inconclusive | Remain `uncertain`; retain durable ambiguity and its reserved capacity, and do not POST. Delayed delivery is still possible. |
+
+Audit only verified owner actor, time, opaque reference, decision and bounded
+nonsecret evidence-class code. No mail body, screenshots, provider response,
+credential or free-text secret is copied to audit. A decision must refer to the
+exact frozen row/revision, preserve original uncertainty history and reject a
+concurrent/stale decision; no bulk "clear and retry" action. A missing reference
+never clears uncertainty or releases capacity. If a future operator action
+permits a resend while still unknown, it needs a separately explicit and audited
+duplicate-risk decision and code review; it is **not part of this first real-send
+increment**. Default containment remains hold/pause, not operator guesswork.
+
+Tests for the eventual implementation cover stable references across restart,
+key/payload freezing, missing/colliding/duplicate references, observed receipt
+versus absence, stale/concurrent owner decisions, Agent denial, redacted audit
+and zero additional external sends after any inconclusive decision.
+
 ## Implementation and acceptance sequence
 
 1. Run the existing hermetic email queue/member/Proxy tests as a baseline. Add
