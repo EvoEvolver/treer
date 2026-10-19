@@ -274,6 +274,49 @@ lookup refusal, no-topic normalization, ring eviction/newest retention, unrelate
 churn, terminal replay after eviction and explicit slot exhaustion without Full. Native send/ack ordering, actual Core negative
 contexts, peer negotiation and drain/straggler rehearsals remain runtime work.
 
+### Stage 2C: atomic authoritative queue completion (not dispatched)
+
+`src/telegram_receipt_completion.rs` adds `Hub::complete_telegram_receipt` for
+future negotiated receipt mode. Core workers do **not** call it yet. Existing
+basic transport still uses its legacy fragment-handoff completion; that path
+must not be combined with receipt mode. No live capability or activation is
+advertised by this increment.
+
+The completion transaction takes SQLite's immediate write reservation and reads
+the actual inbound job, current endpoint generation/recipient, non-deleted
+binding, current Telegram routing and persisted source metadata. It checks the
+private lease against the trusted local `CoreIntent`, reconstructs the expected
+job/digest/native scope from durable data (not receipt JSON), validates the outer
+Agent sender and recipient against the pinned endpoint/hub, then strictly parses
+the receipt. The store's pinned workspace must match this Hub's workspace. The
+Core delivery comes from this hub's authenticated workspace mailbox; the current
+Core projection does not contain an independent workspace field, so this helper
+must never be called with a client-deserialized or foreign-mailbox delivery.
+
+Mapping insertion/eviction or `NotRetained`, terminal queue completion with the
+App-asserted final Core ID, and handoff-health reset commit together. Success
+returns **after commit**; the eventual Core worker acknowledges only afterwards.
+A terminal replay reads durable completion, so removal of its ring history does
+not recreate it. Pause after dispatch may not erase an accepted result, while a
+changed generation, lease, route or recipient is refused. A conflict commits
+only the aggregate counter and a `receipt_conflict` pause/reason; the original
+bounded queue row remains pending. It returns an error, leaving Core unacked.
+No second body/receipt queue is created. The reason is visible through the
+existing binding view; explicit conflict inspection/recovery before resume is
+still required before runtime activation.
+
+Development tests cover SQL failure **after eviction but before completion**
+(rollback of both history and queue), two concurrent callbacks through the Hub
+actor, stale generation/lease/routing and wrong outer-principal/workspace
+rejections, capacity degradation without blocking completion, bounded conflict
+pause and stable revision, private-store close/reopen after commit without ack,
+and terminal replay after history removal plus reopen. The failure injection is
+a database abort, not a killed-process/WAL crash or a live Core ack failure.
+Those stronger runtime cases, receipt production/capability negotiation,
+authoritative restart correlation, unknown/unreadable native replies, explicit
+conflict recovery and legacy mailbox drain remain acceptance work. A returned
+Core ID is still an App assertion, never independent delivery/read verification.
+
 ### Security gates still required before a production decision
 
 - **Token rotation (leader 5796/5798):** required now because the old production

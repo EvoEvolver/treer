@@ -206,6 +206,7 @@ fn failure_code(code: u64) -> Option<&'static str> {
         8 => Some("revision"),
         9 => Some("refetch_rate_limited"),
         10 => Some("cli_integrity_failed"),
+        11 => Some("receipt_conflict"),
         _ => None,
     }
 }
@@ -218,6 +219,7 @@ fn hub_failure(error: crate::hub::Error) -> u64 {
         crate::hub::Error::FailureBudget => 5,
         crate::hub::Error::Revision => 8,
         crate::hub::Error::RefetchRateLimited => 9,
+        crate::hub::Error::ReceiptConflict => 11,
     }
 }
 fn record_inbox_result(c: &Counters, good: bool) -> Duration {

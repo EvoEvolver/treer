@@ -796,14 +796,11 @@ mod tests {
         }
     }
     fn fixture(limits: Limits) -> (Hub<Fake>, Fake) {
+        fixture_store(Store::memory(limits).unwrap())
+    }
+    fn fixture_store(store: Store) -> (Hub<Fake>, Fake) {
         let fake = Fake::default();
-        let mut hub = Hub::new(
-            Store::memory(limits).unwrap(),
-            fake.clone(),
-            "app_hub",
-            "ws",
-        )
-        .unwrap();
+        let mut hub = Hub::new(store, fake.clone(), "app_hub", "ws").unwrap();
         hub.add_binding(Binding {
             endpoint_id: "ag_endpoint".into(),
             generation: 1,
@@ -876,6 +873,422 @@ mod tests {
         }
         hub.receive_once(NOW).unwrap();
     }
+    fn receipt_delivery(intent: &CoreIntent, core: &str) -> Delivery {
+        let frame = crate::protocol::Fragment::parse(&intent.parts[0].1).unwrap();
+        let value = serde_json::json!({
+            "protocol":crate::telegram_receipts::CAPABILITY,"verification":"app_asserted",
+            "scope":{"account_id":"bot_test","chat_id":-100,"topic_id":7,
+                "endpoint_id":"ag_endpoint","generation":1,"recipient_id":"ag_recipient"},
+            "job_id":format!("ep-in-{}",crate::protocol::digest_id("inbound-delivery","ag_endpoint",1,"tg-update-1")),
+            "payload_digest":frame.payload_digest,"native_message_id":2,"final_core_message_id":core,
+        });
+        Delivery {
+            delivery_id: "del_receipt".into(),
+            recipient: Principal {
+                kind: SenderKind::Agent,
+                id: "app_hub".into(),
+            },
+            message: Message {
+                message_id: "msg_receipt".into(),
+                sender: Principal {
+                    kind: SenderKind::Agent,
+                    id: "ag_endpoint".into(),
+                },
+                body: serde_json::to_string(&value).unwrap(),
+                context_ids: vec![],
+            },
+        }
+    }
+    fn receipt_job(h: &mut Hub<Fake>) -> CoreIntent {
+        h.admit_telegram("bot_test", vec![update(1)], NOW).unwrap();
+        h.prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
+            .unwrap()
+            .unwrap()
+    }
+    #[test]
+    fn atomic_receipt_completion_rolls_back_eviction_and_queue_then_replays_without_ack() {
+        use crate::telegram_reply_store::Recorded;
+        let (mut h, fake) = fixture(Limits::default());
+        let intent = receipt_job(&mut h);
+        let d = receipt_delivery(&intent, "msg_final");
+        for n in 100..1100 {
+            h.store.db.execute("INSERT INTO telegram_reply_mappings VALUES('bot_test',-100,7,'ag_endpoint',1,'ag_recipient',?1,'msg_old',?2,'digest',1)",params![n,format!("old_{n}")]).unwrap();
+        }
+        h.store
+            .db
+            .execute_batch(
+                "CREATE TEMP TRIGGER abort_queue_complete BEFORE UPDATE OF pending ON inbound
+            BEGIN SELECT RAISE(ABORT,'synthetic completion crash'); END;",
+            )
+            .unwrap();
+        assert!(h.complete_telegram_receipt(&d, &intent, NOW).is_err());
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT pending FROM inbound", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM telegram_reply_mappings WHERE native_id=100",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT evictions FROM telegram_reply_counters", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            0
+        );
+        h.store
+            .db
+            .execute_batch("DROP TRIGGER abort_queue_complete")
+            .unwrap();
+        assert_eq!(
+            h.complete_telegram_receipt(&d, &intent, NOW).unwrap(),
+            Recorded::Inserted
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT core_id FROM inbound", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "msg_final"
+        );
+        assert_eq!(
+            h.complete_telegram_receipt(&d, &intent, NOW).unwrap(),
+            Recorded::IgnoredTerminal
+        );
+        assert!(fake.sent.borrow().is_empty()); // This boundary never sends or acknowledges Core.
+        h.store
+            .db
+            .execute("DELETE FROM telegram_reply_mappings", [])
+            .unwrap();
+        let changed = receipt_delivery(&intent, "msg_changed");
+        assert_eq!(
+            h.complete_telegram_receipt(&changed, &intent, NOW).unwrap(),
+            Recorded::IgnoredTerminal
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn atomic_receipt_rechecks_generation_lease_routing_and_outer_principals() {
+        let (mut h, _) = fixture(Limits::default());
+        let intent = receipt_job(&mut h);
+        for i in 0..7 {
+            let mut d = receipt_delivery(&intent, "msg_final");
+            match i {
+                0 => d.message.sender.kind = SenderKind::Human,
+                1 => d.message.sender.id = "ag_other".into(),
+                2 => d.recipient.kind = SenderKind::Service,
+                3 => d.recipient.id = "app_other".into(),
+                4 => {
+                    h.store
+                        .db
+                        .execute("UPDATE endpoints SET generation=2", [])
+                        .unwrap();
+                }
+                5 => {
+                    h.store
+                        .db
+                        .execute("UPDATE inbound SET lease_token='changed'", [])
+                        .unwrap();
+                }
+                _ => {
+                    h.store
+                        .db
+                        .execute("UPDATE telegram_targets SET chat=-999", [])
+                        .unwrap();
+                }
+            }
+            assert!(h.complete_telegram_receipt(&d, &intent, NOW).is_err());
+            h.store
+                .db
+                .execute("UPDATE endpoints SET generation=1", [])
+                .unwrap();
+            h.store
+                .db
+                .execute("UPDATE inbound SET lease_token=?1", [&intent.token])
+                .unwrap();
+            h.store
+                .db
+                .execute("UPDATE telegram_targets SET chat=-100", [])
+                .unwrap();
+        }
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT pending FROM inbound", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        // Workspace is pinned by the authenticated mailbox/store, not receipt JSON.
+        h.store
+            .db
+            .execute("UPDATE hub_identity SET workspace='foreign'", [])
+            .unwrap();
+        assert!(h
+            .complete_telegram_receipt(&receipt_delivery(&intent, "msg_final"), &intent, NOW)
+            .is_err());
+    }
+    #[test]
+    fn atomic_receipt_capacity_degradation_completes_but_conflict_holds_job_and_pauses() {
+        use crate::telegram_reply_store::Recorded;
+        let (mut h, _) = fixture(Limits::default());
+        let intent = receipt_job(&mut h);
+        let d = receipt_delivery(&intent, "msg_final");
+        for n in 1..=20 {
+            h.store.db.execute("INSERT INTO telegram_reply_mappings VALUES('other',1,0,?1,1,'ag_recipient',1,'msg_old','job','digest',1)",[format!("ag_other_{n}")]).unwrap();
+        }
+        assert_eq!(
+            h.complete_telegram_receipt(&d, &intent, NOW).unwrap(),
+            Recorded::NotRetained
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT pending FROM inbound", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        let (mut h, _) = fixture(Limits::default());
+        let intent = receipt_job(&mut h);
+        let d = receipt_delivery(&intent, "msg_final");
+        h.store.db.execute("INSERT INTO telegram_reply_mappings VALUES('bot_test',-100,7,'ag_endpoint',1,'ag_recipient',2,'msg_existing','another_job','digest',1)",[]).unwrap();
+        assert!(matches!(
+            h.complete_telegram_receipt(&d, &intent, NOW),
+            Err(HubError::ReceiptConflict)
+        ));
+        let v = h.view("ag_endpoint").unwrap();
+        assert!(v.paused);
+        assert_eq!(v.reason, "receipt_conflict");
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT pending FROM inbound", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT core_id FROM telegram_reply_mappings", [], |r| {
+                    r.get::<_, String>(0)
+                })
+                .unwrap(),
+            "msg_existing"
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT conflicts FROM telegram_reply_counters", [], |r| r
+                    .get::<_, i64>(
+                    0
+                ))
+                .unwrap(),
+            1
+        );
+        assert!(h.complete_telegram_receipt(&d, &intent, NOW).is_err());
+        assert_eq!(h.view("ag_endpoint").unwrap().revision, v.revision);
+    }
+
+    #[test]
+    fn atomic_receipt_completion_survives_restart_before_ack_and_evicted_terminal_history() {
+        use crate::telegram_reply_store::Recorded;
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("state");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let intent;
+        {
+            let (mut h, _) = fixture_store(Store::open(&path, Limits::default()).unwrap());
+            intent = receipt_job(&mut h);
+            assert_eq!(
+                h.complete_telegram_receipt(&receipt_delivery(&intent, "msg_final"), &intent, NOW)
+                    .unwrap(),
+                Recorded::Inserted
+            );
+            // No ack was issued before the process/store closes.
+        }
+        {
+            let mut h = Hub::new(
+                Store::open(&path, Limits::default()).unwrap(),
+                Fake::default(),
+                "app_hub",
+                "ws",
+            )
+            .unwrap();
+            assert_eq!(
+                h.complete_telegram_receipt(
+                    &receipt_delivery(&intent, "msg_final"),
+                    &intent,
+                    NOW + 1
+                )
+                .unwrap(),
+                Recorded::IgnoredTerminal
+            );
+            assert_eq!(
+                h.store
+                    .db
+                    .query_row("SELECT core_id FROM inbound", [], |r| r.get::<_, String>(0))
+                    .unwrap(),
+                "msg_final"
+            );
+            h.store
+                .db
+                .execute("DELETE FROM telegram_reply_mappings", [])
+                .unwrap();
+        }
+        let mut h = Hub::new(
+            Store::open(&path, Limits::default()).unwrap(),
+            Fake::default(),
+            "app_hub",
+            "ws",
+        )
+        .unwrap();
+        assert_eq!(
+            h.complete_telegram_receipt(
+                &receipt_delivery(&intent, "msg_changed"),
+                &intent,
+                NOW + 2
+            )
+            .unwrap(),
+            Recorded::IgnoredTerminal
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT core_id FROM inbound", [], |r| r.get::<_, String>(0))
+                .unwrap(),
+            "msg_final"
+        );
+    }
+    #[test]
+    fn atomic_receipt_concurrent_callbacks_complete_one_authoritative_job_once() {
+        use crate::telegram_reply_store::Recorded;
+        use std::sync::{Arc, Barrier, Mutex};
+        // A Send-only fake for exercising the same shared Hub actor boundary as
+        // runtime. Network methods must never be reached by receipt completion.
+        struct Local;
+        impl Directory for Local {
+            fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error> {
+                Fake::default().metadata(id)
+            }
+        }
+        impl Mailbox for Local {
+            fn receive(&self, _: u32) -> Result<Vec<Delivery>, crate::core::Error> {
+                panic!("no receive")
+            }
+            fn ack(&self, _: &str) -> Result<(), crate::core::Error> {
+                panic!("no ack")
+            }
+            fn send(
+                &self,
+                _: &str,
+                _: &str,
+                _: &str,
+                _: &[String],
+                _: Option<serde_json::Value>,
+            ) -> Result<String, crate::core::Error> {
+                panic!("no send")
+            }
+        }
+        let (mut h, _) = fixture(Limits::default());
+        let intent = receipt_job(&mut h);
+        let shared = Arc::new(Mutex::new(Hub {
+            store: h.store,
+            mailbox: Local,
+            own_id: h.own_id,
+            workspace: h.workspace,
+        }));
+        let barrier = Arc::new(Barrier::new(2));
+        let mut joins = vec![];
+        for _ in 0..2 {
+            let h = shared.clone();
+            let b = barrier.clone();
+            let i = CoreIntent {
+                endpoint: intent.endpoint.clone(),
+                generation: intent.generation,
+                job: intent.job,
+                token: intent.token.clone(),
+                parts: intent.parts.clone(),
+            };
+            joins.push(std::thread::spawn(move || {
+                let d = receipt_delivery(&i, "msg_final");
+                b.wait();
+                h.lock()
+                    .unwrap()
+                    .complete_telegram_receipt(&d, &i, NOW)
+                    .unwrap()
+            }));
+        }
+        let results = joins
+            .into_iter()
+            .map(|j| j.join().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results.iter().filter(|r| **r == Recorded::Inserted).count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|r| **r == Recorded::IgnoredTerminal)
+                .count(),
+            1
+        );
+        let h = shared.lock().unwrap();
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT pending FROM inbound", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn sender_chat_topic_admission_precedes_enqueue_and_offset_is_durable() {
         let (mut hub, _) = fixture(Limits::default());

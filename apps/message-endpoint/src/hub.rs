@@ -32,6 +32,8 @@ pub enum Error {
     FailureBudget,
     #[error("hub_refetch_rate_limited")]
     RefetchRateLimited,
+    #[error("hub_receipt_conflict")]
+    ReceiptConflict,
 }
 impl From<rusqlite::Error> for Error {
     fn from(error: rusqlite::Error) -> Self {

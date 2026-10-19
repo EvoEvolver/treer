@@ -5,7 +5,6 @@ use crate::{
     store::{Error, Store},
     telegram_receipts::{Expected, Receipt, Scope},
 };
-#[cfg(all(unix, feature = "hub"))]
 use rusqlite::Transaction;
 use rusqlite::{params, OptionalExtension};
 
@@ -21,6 +20,8 @@ pub enum Recorded {
     IgnoredTerminal,
     /// Reserved history slots are full; primary delivery must continue.
     NotRetained,
+    /// Transactional caller must retain the job and expose a recovery hold.
+    ConflictHeld,
 }
 
 /// Derived from the durable handoff, not a receipt, caller header or body.
@@ -83,109 +84,14 @@ impl<'a> Mappings<'a> {
         }
         let r =
             Receipt::parse_for(wire, outer_core_sender, expected).map_err(|_| Error::Invalid)?;
-        let s = &r.scope;
         let tx = self.store.db.transaction()?;
-        let prior: Option<(String, String, String)> = tx
-            .query_row(
-                "SELECT core_id,job,digest FROM telegram_reply_mappings
-             WHERE account=?1 AND chat=?2 AND topic=?3 AND endpoint=?4
-             AND generation=?5 AND recipient=?6 AND native_id=?7",
-                params![
-                    s.account_id,
-                    s.chat_id,
-                    s.topic_id.unwrap_or(0),
-                    s.endpoint_id,
-                    s.generation,
-                    s.recipient_id,
-                    r.native_message_id
-                ],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()?;
-        if matches!(handoff, HandoffState::Terminal) {
-            if prior.as_ref().is_some_and(|(core, job, digest)| {
-                core != &r.final_core_message_id || job != &r.job_id || digest != &r.payload_digest
-            }) {
-                tx.execute(
-                    "UPDATE telegram_reply_counters SET terminal_mismatch=CASE
-                    WHEN terminal_mismatch<9223372036854775807 THEN terminal_mismatch+1
-                    ELSE terminal_mismatch END WHERE singleton=1",
-                    [],
-                )?;
-            }
-            tx.commit()?;
-            return Ok(Recorded::IgnoredTerminal);
-        }
-        if let Some((core, job, digest)) = prior {
-            if core == r.final_core_message_id && job == r.job_id && digest == r.payload_digest {
-                tx.commit()?;
-                return Ok(Recorded::Replay);
-            }
-        } else {
-            let reused: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM telegram_reply_mappings
-                 WHERE endpoint=?1 AND generation=?2 AND job=?3)",
-                params![s.endpoint_id, s.generation, r.job_id],
-                |row| row.get(0),
-            )?;
-            if !reused {
-                let binding: i64 = tx.query_row(
-                    "SELECT count(*) FROM telegram_reply_mappings WHERE endpoint=?1",
-                    [&s.endpoint_id],
-                    |row| row.get(0),
-                )?;
-                let endpoints: i64 = tx.query_row(
-                    "SELECT count(DISTINCT endpoint) FROM telegram_reply_mappings",
-                    [],
-                    |row| row.get(0),
-                )?;
-                let total: i64 =
-                    tx.query_row("SELECT count(*) FROM telegram_reply_mappings", [], |row| {
-                        row.get(0)
-                    })?;
-                // Do not let new/stale endpoint churn evict another endpoint's
-                // reserved history. Runtime retires old slots explicitly.
-                if (binding == 0 && endpoints >= MAX_ENDPOINTS)
-                    || binding > PER_ENDPOINT_ROWS
-                    || total > GLOBAL_ROWS
-                    || (total >= GLOBAL_ROWS && binding < PER_ENDPOINT_ROWS)
-                {
-                    return Ok(Recorded::NotRetained);
-                }
-                if binding == PER_ENDPOINT_ROWS {
-                    let removed = tx.execute(
-                        "DELETE FROM telegram_reply_mappings WHERE rowid IN
-                         (SELECT rowid FROM telegram_reply_mappings WHERE endpoint=?1
-                          ORDER BY created_at,rowid LIMIT 1)",
-                        [&s.endpoint_id],
-                    )?;
-                    tx.execute(
-                        "UPDATE telegram_reply_counters SET evictions=CASE
-                         WHEN evictions<9223372036854775807 THEN evictions+?1 ELSE evictions END
-                         WHERE singleton=1",
-                        [removed as i64],
-                    )?;
-                }
-                tx.execute(
-                    "INSERT INTO telegram_reply_mappings
-                     (account,chat,topic,endpoint,generation,recipient,native_id,core_id,job,digest,created_at)
-                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
-                    params![s.account_id,s.chat_id,s.topic_id.unwrap_or(0),s.endpoint_id,
-                        s.generation,s.recipient_id,r.native_message_id,r.final_core_message_id,
-                        r.job_id,r.payload_digest,now],
-                )?;
-                tx.commit()?;
-                return Ok(Recorded::Inserted);
-            }
-        }
-        tx.execute(
-            "UPDATE telegram_reply_counters SET conflicts=CASE
-             WHEN conflicts<9223372036854775807 THEN conflicts+1 ELSE conflicts END
-             WHERE singleton=1",
-            [],
-        )?;
+        let result = record_in_transaction(&tx, &r, handoff, now)?;
         tx.commit()?;
-        Err(Error::Conflict)
+        if result == Recorded::ConflictHeld {
+            Err(Error::Conflict)
+        } else {
+            Ok(result)
+        }
     }
 
     /// The returned ID is not proof of readability or delivery. Any subsequent
@@ -239,6 +145,114 @@ impl<'a> Mappings<'a> {
             |row| row.get(0),
         )?)
     }
+}
+
+/// Caller owns the transaction: current queue/generation checks, mapping and
+/// queue completion must commit together. Conflicts commit only with a hold.
+pub(crate) fn record_in_transaction(
+    tx: &Transaction<'_>,
+    r: &Receipt,
+    handoff: HandoffState,
+    now: i64,
+) -> Result<Recorded, Error> {
+    let s = &r.scope;
+    let prior: Option<(String, String, String)> = tx
+        .query_row(
+            "SELECT core_id,job,digest FROM telegram_reply_mappings
+             WHERE account=?1 AND chat=?2 AND topic=?3 AND endpoint=?4
+             AND generation=?5 AND recipient=?6 AND native_id=?7",
+            params![
+                s.account_id,
+                s.chat_id,
+                s.topic_id.unwrap_or(0),
+                s.endpoint_id,
+                s.generation,
+                s.recipient_id,
+                r.native_message_id
+            ],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    if matches!(handoff, HandoffState::Terminal) {
+        if prior.as_ref().is_some_and(|(core, job, digest)| {
+            core != &r.final_core_message_id || job != &r.job_id || digest != &r.payload_digest
+        }) {
+            tx.execute(
+                "UPDATE telegram_reply_counters SET terminal_mismatch=CASE
+                    WHEN terminal_mismatch<9223372036854775807 THEN terminal_mismatch+1
+                    ELSE terminal_mismatch END WHERE singleton=1",
+                [],
+            )?;
+        }
+        return Ok(Recorded::IgnoredTerminal);
+    }
+    if let Some((core, job, digest)) = prior {
+        if core == r.final_core_message_id && job == r.job_id && digest == r.payload_digest {
+            return Ok(Recorded::Replay);
+        }
+    } else {
+        let reused: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM telegram_reply_mappings
+                 WHERE endpoint=?1 AND generation=?2 AND job=?3)",
+            params![s.endpoint_id, s.generation, r.job_id],
+            |row| row.get(0),
+        )?;
+        if !reused {
+            let binding: i64 = tx.query_row(
+                "SELECT count(*) FROM telegram_reply_mappings WHERE endpoint=?1",
+                [&s.endpoint_id],
+                |row| row.get(0),
+            )?;
+            let endpoints: i64 = tx.query_row(
+                "SELECT count(DISTINCT endpoint) FROM telegram_reply_mappings",
+                [],
+                |row| row.get(0),
+            )?;
+            let total: i64 =
+                tx.query_row("SELECT count(*) FROM telegram_reply_mappings", [], |row| {
+                    row.get(0)
+                })?;
+            // Do not let new/stale endpoint churn evict another endpoint's
+            // reserved history. Runtime retires old slots explicitly.
+            if (binding == 0 && endpoints >= MAX_ENDPOINTS)
+                || binding > PER_ENDPOINT_ROWS
+                || total > GLOBAL_ROWS
+                || (total >= GLOBAL_ROWS && binding < PER_ENDPOINT_ROWS)
+            {
+                return Ok(Recorded::NotRetained);
+            }
+            if binding == PER_ENDPOINT_ROWS {
+                let removed = tx.execute(
+                    "DELETE FROM telegram_reply_mappings WHERE rowid IN
+                         (SELECT rowid FROM telegram_reply_mappings WHERE endpoint=?1
+                          ORDER BY created_at,rowid LIMIT 1)",
+                    [&s.endpoint_id],
+                )?;
+                tx.execute(
+                    "UPDATE telegram_reply_counters SET evictions=CASE
+                         WHEN evictions<9223372036854775807 THEN evictions+?1 ELSE evictions END
+                         WHERE singleton=1",
+                    [removed as i64],
+                )?;
+            }
+            tx.execute(
+                    "INSERT INTO telegram_reply_mappings
+                     (account,chat,topic,endpoint,generation,recipient,native_id,core_id,job,digest,created_at)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11)",
+                    params![s.account_id,s.chat_id,s.topic_id.unwrap_or(0),s.endpoint_id,
+                        s.generation,s.recipient_id,r.native_message_id,r.final_core_message_id,
+                        r.job_id,r.payload_digest,now],
+                )?;
+            return Ok(Recorded::Inserted);
+        }
+    }
+    tx.execute(
+        "UPDATE telegram_reply_counters SET conflicts=CASE
+             WHEN conflicts<9223372036854775807 THEN conflicts+1 ELSE conflicts END
+             WHERE singleton=1",
+        [],
+    )?;
+    Ok(Recorded::ConflictHeld)
 }
 
 /// Only called inside the existing audited, paused-and-drained binding deletion
