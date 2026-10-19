@@ -3,7 +3,7 @@
 //! Core deliveries are obtained from this hub's authenticated workspace mailbox;
 //! no HTTP body or client-supplied principal may construct this authority.
 use crate::{
-    core::Delivery,
+    core::AuthenticatedDelivery,
     hub::{Directory, Error, Hub},
     protocol::{Channel, Envelope, ExternalSource, Fragment, SenderKind},
     relay::Mailbox,
@@ -14,6 +14,17 @@ use crate::{
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
 impl<M: Mailbox + Directory> Hub<M> {
+    #[cfg(test)]
+    pub(crate) fn complete_test_telegram_receipt(
+        &mut self,
+        delivery: crate::core::Delivery,
+        intent: &CoreIntent,
+        now: i64,
+    ) -> Result<Recorded, Error> {
+        let authenticated = AuthenticatedDelivery::fixture(delivery, &self.workspace);
+        self.complete_telegram_receipt(&authenticated, intent, now)
+    }
+
     /// The local correlation/lease comes from prepare_telegram_forward, never
     /// from receipt JSON. This method commits before returning permission to ack.
     /// Conflict is an error AFTER committing a bounded operator-visible pause;
@@ -21,11 +32,13 @@ impl<M: Mailbox + Directory> Hub<M> {
     /// A persisted receipt-mode pin is required; legacy completion rejects it.
     pub fn complete_telegram_receipt(
         &mut self,
-        delivery: &Delivery,
+        authenticated: &AuthenticatedDelivery,
         intent: &CoreIntent,
         now: i64,
     ) -> Result<Recorded, Error> {
-        if now < crate::transfers::TOMBSTONE_TTL
+        let delivery = authenticated.delivery();
+        if authenticated.workspace() != self.workspace
+            || now < crate::transfers::TOMBSTONE_TTL
             || delivery.recipient.kind != SenderKind::Agent
             || delivery.recipient.id != self.own_id
             || delivery.message.sender.kind != SenderKind::Agent

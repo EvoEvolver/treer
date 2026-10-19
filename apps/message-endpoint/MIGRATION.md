@@ -482,3 +482,25 @@ Recovery backups are held only by the owner/release operator in private storage.
 After retirement acceptance, remove retired config/token backups under the
 operator retention policy. The mandatory cutover rotation already invalidates
 the old bridge credential; rotate again only if a valid copy remains exposed. Retain the credential-free cutover journal as needed.
+
+
+### Sealed receipt mailbox provenance (local increment)
+
+Receipt completion accepts an opaque `core::AuthenticatedDelivery`, not a
+`Delivery` deserialized from a request. Only `Core::receive_authenticated` can
+construct it in production: fresh self metadata from the integrity-pinned CLI
+must match the durable hub workspace before receiving its own mailbox, and the
+existing receive projection validates every delivery's recipient. Completion
+checks the sealed workspace again, then retains the outer Agent sender/recipient,
+current durable identity, mode, lease, generation and scoped receipt checks.
+There is no mutable accessor, deserializer or production constructor for the
+wrapper; synthetic constructors exist only in unit tests. This is a source-level
+provenance boundary, not protection against malicious code running as the same
+OS user, a compromised configured CLI, or an independent verification of the
+endpoint's claimed final Core ID.
+
+This helper does not acknowledge deliveries or enable negotiated dispatch.
+Production remains on the legacy completion path until the mixed-mode dispatcher,
+capability negotiation, bounded conflict recovery and killed-process
+commit-before-ack tests are reviewed. The dispatcher must receive sealed values
+through this Core path rather than re-wrap generic `Mailbox::receive` data.

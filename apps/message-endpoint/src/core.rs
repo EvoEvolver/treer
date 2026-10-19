@@ -51,6 +51,34 @@ pub struct Delivery {
     pub recipient: Principal,
     pub message: Message,
 }
+/// Delivery provenance from this process's pinned CLI and own Core mailbox.
+/// Not deserializable or constructible from HTTP/receipt JSON. This establishes
+/// mailbox provenance, not independent verification of an App-asserted receipt.
+///
+/// ```compile_fail
+/// use treer_message_endpoint::core::AuthenticatedDelivery;
+/// let _: AuthenticatedDelivery = serde_json::from_str("{}").unwrap();
+/// ```
+pub struct AuthenticatedDelivery {
+    delivery: Delivery,
+    workspace: String,
+}
+impl AuthenticatedDelivery {
+    pub fn delivery(&self) -> &Delivery {
+        &self.delivery
+    }
+    pub(crate) fn workspace(&self) -> &str {
+        &self.workspace
+    }
+    #[cfg(test)]
+    pub(crate) fn fixture(delivery: Delivery, workspace: &str) -> Self {
+        Self {
+            delivery,
+            workspace: workspace.into(),
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct Message {
     pub message_id: String,
@@ -185,6 +213,31 @@ impl Core {
 
     pub fn receive(&self, wait_ms: u32) -> Result<Vec<Delivery>, Error> {
         Ok(self.receive_batch(wait_ms)?.deliveries)
+    }
+
+    /// Receive only through the integrity-pinned CLI under our workload identity.
+    /// The expected workspace comes from durable hub identity, never request
+    /// JSON. Fresh self metadata must agree before fetching the own mailbox.
+    /// This does not acknowledge, parse receipts, or verify their final IDs.
+    pub fn receive_authenticated(
+        &self,
+        workspace: &str,
+        wait_ms: u32,
+    ) -> Result<Vec<AuthenticatedDelivery>, Error> {
+        if !valid_id(workspace) || wait_ms > 1000 {
+            return Err(Error::Invalid);
+        }
+        if self.agent_metadata(&self.own_id)?.workspace_id != workspace {
+            return Err(Error::Invalid);
+        }
+        Ok(self
+            .receive(wait_ms)?
+            .into_iter()
+            .map(|delivery| AuthenticatedDelivery {
+                delivery,
+                workspace: workspace.into(),
+            })
+            .collect())
     }
 
     /// Exact backlog metadata from Core; the scheduler can drain a bounded number
@@ -582,6 +635,44 @@ print(json.dumps(result))
             Some("/team/endpoint")
         );
         assert!(core.agent_metadata("/team/endpoint").is_err());
+    }
+    #[test]
+    fn authenticated_mailbox_checks_fresh_workspace_and_recipient_without_ack() {
+        for (workspace, recipient, expected) in [
+            ("ws_test", "app_own", true),
+            ("ws_foreign", "app_own", false),
+            ("ws_test", "app_other", false),
+        ] {
+            let code = format!(
+                r#"
+import json,sys
+from pathlib import Path
+args=sys.argv[1:]
+if args==['agent','show','--','app_own']:
+ print(json.dumps({{'agent_id':'app_own','workspace_id':{workspace:?},'server_id':'machine_test','kind':'shell','cwd':'/fixture','status':'running'}}))
+elif args==['message','receive','--wait=0','--limit=10']:
+ Path(__file__).with_suffix('.received').touch()
+ assert {workspace:?}=='ws_test', 'foreign self workspace must fail before receive'
+ print(json.dumps({{'remaining_unacknowledged':0,'deliveries':[{{'delivery_id':'del_receipt','recipient':{{'kind':'agent','id':{recipient:?}}},'message':{{'message_id':'msg_receipt','sender':{{'kind':'agent','id':'ag_endpoint'}},'body':'synthetic receipt','context_ids':[]}}}}]}}))
+else:
+ raise AssertionError('unexpected operation (including ack)')
+"#
+            );
+            let (_temp, executable) = fake(&code);
+            let core = Core::new(&executable, "app_own").unwrap();
+            let result = core.receive_authenticated("ws_test", 0);
+            assert_eq!(result.is_ok(), expected);
+            assert_eq!(
+                executable.with_extension("received").exists(),
+                workspace == "ws_test"
+            );
+            if let Ok(batch) = result {
+                assert_eq!(batch.len(), 1);
+                assert_eq!(batch[0].workspace(), "ws_test");
+                assert_eq!(batch[0].delivery().recipient.id, "app_own");
+                assert_eq!(batch[0].delivery().message.sender.id, "ag_endpoint");
+            }
+        }
     }
     #[test]
     fn bounded_process_kills_and_reaps_timeout_and_output_flood() {
