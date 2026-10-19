@@ -671,3 +671,19 @@ Once ledger rows exist, rollback to a pre-ledger binary is unsupported: its old
 retention statement can hit the restrictive foreign key and abort cleanup for
 all bindings. Contain with the ledger-aware binary and preserve the private store;
 do not disable foreign keys or delete unacked children to enable downgrade.
+
+The next inert helper, `telegram_disposition_identity::Identity`, derives the
+delivery key from sealed Core mailbox provenance plus expected durable hub and
+workspace identity. It reruns strict receipt parsing against caller-supplied
+durable expectations; an unchecked deserialized `Receipt` cannot be passed in.
+The separate receipt digest length-frames the outer Core message ID, declared
+durable job ID and canonical typed receipt bytes, including every scope and
+assertion field. Input JSON whitespace/object order does not change identity.
+Only two fixed-width hashes and the exact parent tuple are projected for future
+storage; the type is not serializable or Debug and no raw bytes are logged.
+The helper does not load or validate the durable parent/current generation,
+decide terminal mismatch, write a ledger/counter/hold, or authorize ACK. The
+future transaction must compare the entire job/endpoint/generation/recipient
+tuple before replay or ack marking. Tests cover scoped/domain-framed keys,
+per-field assertion changes, outer message/parent changes, canonical formatting
+and rejection of wrong workspace, recipient, sender and expected receipt scope.
