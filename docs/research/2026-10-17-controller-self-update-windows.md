@@ -290,6 +290,81 @@ synthetic and health fields remain bare claims: passing this graph establishes
 only model consistency, not authenticated health, head freshness, durable
 publication, completion or mutation/recovery authority. Recovery/rollback graph
 edges, evidence ownership and integration with the publisher remain open.
+
+#### Forward-edge observation contract (design gate)
+
+The current graph accepts two synthetic snapshots; that does not establish when
+an adapter may obtain or use them. A future adapter must apply the following
+timing contract under the same verified installation ownership and pinned
+objects. `O/N/-` means active old, candidate new, backup absent; `-/N/O` is the
+active-name gap; `N/-/O` is the published new image. The table applies first to
+Controller in Activating, then to CLI in CoreHealthy. The other image must also
+be independently checked in its required unchanged layout at every edge.
+
+| Receipt edge | Snapshot used to validate old and candidate claims | Operation ordering |
+| --- | --- | --- |
+| Prepared -> Activating | Same fresh current snapshot; both images `O/N/-` | Record phase before any image move |
+| Original -> MoveOldIntent | Same fresh current `O/N/-` for both claims | Publish/read back intent before moving old aside |
+| MoveOldIntent -> OldMoved | Fresh post-move `-/N/O` for both claims; old intent permits this result | Verify the move before recording its result |
+| OldMoved -> PublishIntent | Same fresh current `-/N/O` for both claims | Publish/read back intent before moving candidate into active |
+| PublishIntent -> Published | Fresh post-move `N/-/O` for both claims; old intent permits this result | Verify the move before recording its result |
+| Activating -> CoreHealthy | Same fresh current snapshot; Controller `N/-/O`, CLI `O/N/-` | Verify new Controller health before recording evidence and unlocking CLI |
+| CoreHealthy -> Complete | Same fresh current snapshot; both images `N/-/O` | Verify final health before recording final evidence |
+
+Do not manufacture candidate snapshots or combine a stale pre-operation snapshot
+with an imagined result. A result edge uses an actual post-operation observation;
+an intent edge uses the current pre-operation observation and must not perform
+the rename until its record publication/readback contract succeeds. Interrupted
+intent records may classify either physical layout during diagnosis; that is
+not permission to publish a new intent after its operation has already occurred.
+The current inert graph does not enforce this timing or persist observations.
+
+The production health-edge signature must accept verifier-constructed evidence
+types, not caller-supplied booleans or deserialized receipts as evidence. Only
+the health verifier may construct those values after checking the authenticated
+process observation, image identity/hash, job/revision and channel ownership.
+Serialization must not provide a constructor that bypasses verification. New
+Controller health and final health require their respective evidence types;
+the verifier/channel design remains unimplemented and needs separate review.
+
+#### Exit coverage from forward states (proposed, not executable)
+
+The following is coverage for a future rollback graph, not accepted recovery
+commands or implemented state transitions. All exits require trusted head,
+verified objects, exclusive/quiescent ownership and appropriate health evidence.
+`C` and `L` denote Controller and CLI; `RC` and `RL` denote the proposed
+RollbackController and RollbackCli phases. A restored image still needs old
+Controller health before RolledBack can be recorded.
+
+| Forward phase and durable step | Current moving-image layout | Proposed exit |
+| --- | --- | --- |
+| Prepared (both Original) | `O/N/-` on both | RC with C Original; no move; verify old health |
+| Activating, C Original | `O/N/-` | RC with C Original; no move; verify old health |
+| Activating, C MoveOldIntent | `O/N/-` | RC with C Original; old move did not occur |
+| Activating, C MoveOldIntent | `-/N/O` | RC with C RestoreOldIntent; restore old directly |
+| Activating, C OldMoved | `-/N/O` | RC with C RestoreOldIntent; restore old directly |
+| Activating, C PublishIntent | `-/N/O` | RC with C RestoreOldIntent; new publication did not occur |
+| Activating, C PublishIntent | `N/-/O` | RC with C MoveNewAsideIntent; move new aside, then restore old |
+| Activating, C Published | `N/-/O` | RC with C MoveNewAsideIntent; move new aside, then restore old |
+| CoreHealthy, L Original | `O/N/-` | RL with L Original; no CLI move, then RC reverses C |
+| CoreHealthy, L MoveOldIntent | `O/N/-` | RL with L Original; old CLI move did not occur, then RC |
+| CoreHealthy, L MoveOldIntent | `-/N/O` | RL with L RestoreOldIntent; restore CLI directly, then RC |
+| CoreHealthy, L OldMoved | `-/N/O` | RL with L RestoreOldIntent; restore CLI directly, then RC |
+| CoreHealthy, L PublishIntent | `-/N/O` | RL with L RestoreOldIntent; new CLI publication did not occur, then RC |
+| CoreHealthy, L PublishIntent | `N/-/O` | RL with L MoveNewAsideIntent; move new aside, restore CLI, then RC |
+| CoreHealthy, L Published | `N/-/O` | RL with L MoveNewAsideIntent; move new aside, restore CLI, then RC |
+| Complete, both Published | `N/-/O` on both | Terminal evidence-preserving stop; no revision or rollback in this completed transaction |
+
+When RL finishes, RC first records MoveNewAsideIntent for the still-published
+Controller, then NewAside, RestoreOldIntent and Restored. A direct restoration
+from a gap never pretends the new image was published. Any unknown/unreadable
+object, layout conflict, missing evidence, uncertain publication or untrusted
+head instead reaches an explicit diagnose-and-stop outcome: preserve all records
+and objects, do not rename/delete/archive or retry automatically. That outcome
+is a design classification, not a new serialized phase or an implemented human
+recovery channel. The rollback graph must prove these branches and interruption
+points before being wired; this table alone provides no recovery capability.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
