@@ -10,6 +10,7 @@ import { testRuntimeControlsUi } from "./browser-controls-ui.mjs";
 import { testImagesUi } from "./browser-images-ui.mjs";
 import { testFilesDownloadUi } from "./browser-files-download-ui.mjs";
 import { testMobileComposer } from "./browser-mobile-composer.mjs";
+import { testHistoryPages } from "./browser-history-pages.mjs";
 import { fakePrivateState } from "./fake-private-state.mjs";
 import { backend, createSteps, spawnLauncher, supports } from "./launcher-backend.mjs";
 
@@ -177,6 +178,16 @@ try {
 
   }, recover);
   await step('paging older messages', async () => {
+  if (backend === "rust") {
+    const before=await page.locator(".chat .msg.user").first().textContent();
+    await page.getByRole("button",{name:"Load earlier messages",exact:true}).click();
+    await expect(page.getByText("Viewing an earlier page",{exact:true})).toBeVisible();
+    assert.ok(await page.locator(".chat .msg.user").count()<=50);
+    assert.notEqual(await page.locator(".chat .msg.user").first().textContent(),before);
+    await page.getByRole("button",{name:"Back to latest messages",exact:true}).click();
+    await expect(page.getByText("Viewing an earlier page",{exact:true})).toHaveCount(0);
+    return;
+  }
   // Paging: 80 older turns exist; "Load earlier messages" keeps the reader's place and the window grows.
   await expect(page.locator(".older .btn")).toBeVisible();
   const before = await page.locator(".chat .msg.user").count();
@@ -689,6 +700,7 @@ try {
   assert.deepEqual(errors.filter((message) => !/inline event handler|status of 500/.test(message)), []); // the 500 is the injected preview failure
   }, recover);
   await step("runtime controls (mocked API)", () => testRuntimeControlsUi(browser, screenshots, page_), recover);
+  await step("bounded history pages (mocked API)", () => testHistoryPages(browser, base, screenshots, page_), recover);
   await step("image attachments", async () => { imageBase ??= await startServer("images", { FAKE_CODEX_IMAGES: "1" }); await testImagesUi(browser, imageBase, screenshots, page_); }, recover);
   await step("file download", async () => { imageBase ??= await startServer("images", { FAKE_CODEX_IMAGES: "1" }); await testFilesDownloadUi(browser, imageBase, screenshots, page_); }, recover);
   await step("mobile composer", async () => { imageBase ??= await startServer("images", { FAKE_CODEX_IMAGES: "1" }); await testMobileComposer(browser, imageBase, screenshots, page_); }, recover);

@@ -67,7 +67,8 @@ code,pre,.cwd,.tree,.preview,.task pre,.diff{font-family:var(--font-mono)}
 .blocked-image{color:var(--fg3)}
 .markdown pre{max-height:420px}
 .markdown :not(pre)>code{white-space:pre-wrap}
-.older{display:flex;justify-content:center}
+.older{display:flex;justify-content:center;align-items:center;flex-wrap:wrap;gap:8px}
+.older .btn{min-height:44px;min-width:44px}
 .tbtn{white-space:nowrap;flex:none}
 .nav-btn{align-items:center;justify-content:center;width:34px;height:34px;flex:none;border:1px solid var(--b-pill,var(--line-strong));border-radius:var(--nav-r,var(--rs));background:var(--panel);color:var(--fg2)}
 .nav-btn:hover,.nav-btn[aria-expanded=true]{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}

@@ -69,6 +69,8 @@ export const zh: Partial<Record<MessageKey, string>> = {
   "thread.label": "对话",
   "thread.older": "加载更早的消息",
   "thread.loadingOlder": "加载中…",
+  "thread.latestPage": "返回最新消息",
+  "thread.olderPage": "正在查看较早的一页",
   "thread.working": "工作中",
   "jump.latest": "跳到最新",
   "activity.title": "活动",

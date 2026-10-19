@@ -82,6 +82,10 @@ struct Runtime {
     models: Value,
     ready: bool,
     turns: Transcript,
+    history_start: usize,
+    history_total: usize,
+    history_nonce: String,
+    last_history_page: Option<std::time::Instant>,
     // Sticky stop for history admission OR private journal failure.
     history_failed: bool,
     state_failed: bool,
@@ -149,6 +153,10 @@ pub fn spawn(config: Config) -> Result<Handle> {
         models: json!([]),
         ready: false,
         turns: Transcript::default(),
+        history_start: 0,
+        history_total: 0,
+        history_nonce: uuid::Uuid::new_v4().simple().to_string(),
+        last_history_page: None,
         history_failed: false,
         state_failed: false,
         last_disk_snapshot: None,
@@ -312,8 +320,11 @@ pub fn spawn(config: Config) -> Result<Handle> {
 
 impl Runtime {
     async fn provider_request(&mut self, method: &str, params: Value) -> Result<Value> {
+        self.provider_selected(method,params,None).await
+    }
+    async fn provider_selected(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
         // This outer deadline is polled even during an event's reply write.
-        let result = match timeout(Duration::from_secs(60), self.wait_provider_response(method, params)).await {
+        let result = match timeout(Duration::from_secs(60), self.wait_provider_response(method, params, selection)).await {
             Ok(result) => result,
             Err(_) => { self.rpc.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
         };
@@ -323,10 +334,10 @@ impl Runtime {
         }
         result
     }
-    async fn wait_provider_response(&mut self, method: &str, params: Value) -> Result<Value> {
+    async fn wait_provider_response(&mut self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
         self.rpc_completed_turns.clear();
         let rpc = self.rpc.clone();
-        let response = rpc.request(method, params);
+        let response = rpc.request_selected(method, params, selection);
         tokio::pin!(response);
         loop {
             tokio::select! {
@@ -340,8 +351,10 @@ impl Runtime {
                         .then(|| event["params"]["turn"]["id"].as_str().map(str::to_owned)).flatten();
                     self.event(event).await?;
                     if self.history_failed { bail!("runtime_blocked"); }
-                    // Validated transcript admission bounds these unique IDs.
+                    // Completion-before-response correlation never outlives
+                    // the retained window, even during a rolling long RPC.
                     if let Some(id) = completed { self.rpc_completed_turns.insert(id); }
+                    self.rpc_completed_turns.retain(|id|self.turns.iter().any(|t|t["id"]==id.as_str()));
                 }
             }
         }
@@ -394,6 +407,8 @@ impl Runtime {
             .as_deref()
             .or_else(|| saved.as_ref().and_then(|s| s["threadId"].as_str()));
         let result = self.provider_request(if session.is_some() {"thread/resume"} else {"thread/start"}, json!({"threadId":session,"cwd":config.cwd,"approvalPolicy":"never","sandbox":"danger-full-access","experimentalRawEvents":false,"persistExtendedHistory":true})).await?;
+        self.history_start=result["treerHistory"]["start"].as_u64().unwrap_or(0) as usize;
+        self.history_total=result["treerHistory"]["total"].as_u64().unwrap_or(0) as usize;
         let id = result["thread"]["id"]
             .as_str()
             .ok_or_else(|| anyhow!("missing thread"))?;
@@ -404,6 +419,12 @@ impl Runtime {
         for turn in result["thread"]["turns"].as_array().into_iter().flatten() {
             self.turns.insert(model::turn(turn))?;
         }
+        // Project accepted user items once, then admit every subsequent update
+        // through the same byte budget. Snapshot reads never replay the journal.
+        let dropped=self.turns.dropped;
+        let mut projected=self.history()?;
+        projected.dropped+=dropped;
+        self.turns=projected;
         if let Some(active) = self
             .turns
             .iter()
@@ -476,26 +497,34 @@ impl Runtime {
     }
     fn publish(&self) {
         let mut thread = self.thread.clone();
-        thread["turns"] = Value::Array(self.history());
+        thread["turns"] = json!(&*self.turns);
         let queue: Vec<_> = self.records.iter().filter(|r|r.submission["state"] == "queued").enumerate().map(|(n,r)|json!({"id":r.submission["id"],"text":r.text,"createdAt":r.submission["created_at"],"sender":r.submission["sender"],"position":n+1})).collect();
         let mut snapshot = json!({"ready":self.ready,"runtime":{"state":if self.dispatch_blocked {"blocked"} else if !self.ready {"starting"} else if thread["status"] == "running" {"working"} else if thread["status"] == "error" {"blocked"} else {"idle"},"error":thread["lastError"],"cleanup":{"providerExit":self.provider_exit,"processGroup":if self.provider_exit == "not_requested" {"not_requested"} else {"termination_requested_unverified"},"detachedDescendants":"not_guaranteed"}},"harness":{"id":"codex","name":"Codex","capabilities":{"images":self.attachments.is_some(),"steer":true,"backgroundTasks":false,"goal":if self.goals_supported {json!({"pause":true,"budget":true})} else {Value::Null},"sessionTransfer":null}},"thread":null,"modelOptions":self.models,"backgroundTasks":[],"queue":queue,"goal":self.goals.goal,"goalDelivery":self.goals.delivery(),"history":{"limit":50},"attachmentsAvailable":self.attachments.is_some(),"attachmentStorageStatus":if self.attachments.is_some() {"available"} else {"agent_private_state_unavailable"}});
         snapshot["thread"] = thread;
+        let start=(self.history_start+self.turns.dropped).min(self.history_total);
+        snapshot["thread"]["hasOlderItems"]=json!(start>0);
+        snapshot["history"]=json!({"limit":50,"totalTurns":self.history_total,"cursor":if start>0 {Some(format!("{}:{start:x}",self.history_nonce))}else{None}});
         snapshot["runtime"]["provider"] = self.rpc.diagnostics();
         snapshot["runtime"]["journalHistory"] = json!({"state":self.disk_history_status,"diskLimitBytes":crate::disk_history::DISK_LIMIT,"sampleIntervalSeconds":300});
         self.changed.send_replace(Arc::new(snapshot));
     }
-    fn history(&self) -> Vec<Value> {
+    fn history(&self) -> Result<Transcript> {
+        self.projected(self.turns.to_vec(),self.history_start==0 && self.turns.dropped==0)
+    }
+    fn projected(&self, mut turns: Vec<Value>, synthesize: bool) -> Result<Transcript> {
         // Provider snapshots may omit locally submitted user items. The journal
         // already owns their durable text and attested metadata; project it
         // without changing dispatch state or trusting provider-supplied senders.
-        let mut turns = self.turns.to_vec();
         let mut matched = std::collections::HashSet::new();
-        for record in &self.records {
+        for (number,record) in self.records.iter().enumerate() {
             if record.node_fingerprint.is_some() && record.text.is_empty() { continue; }
             let Some(id) = record.submission["turn_id"].as_str() else {
                 continue;
             };
             if !turns.iter().any(|t| t["id"] == id) {
+                // Receipts remain durable, but evicted completed turns must not
+                // be synthesized back into every snapshot from that journal.
+                if !synthesize || number<self.records.len().saturating_sub(50) {continue;}
                 turns.push(json!({"id":id,"status":if record.submission["state"] == "running" {"inProgress"} else {"completed"},"startedAt":record.submission["created_at"],"error":null,"items":[]}));
             }
             let Some(submission_id) = record.submission["id"].as_str() else {
@@ -530,7 +559,9 @@ impl Runtime {
                 matched.insert((id.to_string(), json!(item_id).to_string()));
             }
         }
-        turns
+        let mut bounded=Transcript::default();
+        for turn in turns {bounded.insert(turn)?;}
+        Ok(bounded)
     }
     async fn command(&mut self, method: &str, body: Value) -> Result<Value> {
         if self.history_failed && !matches!(method, "queue" | "submission") {
@@ -541,6 +572,31 @@ impl Runtime {
             bail!("private_state_write_failed");
         }
         match method {
+            "history_page" => {
+                let cursor=body["cursor"].as_str().ok_or_else(||anyhow!("history_cursor_invalid"))?;
+                if cursor.len()>48 {bail!("history_cursor_invalid");}
+                let suffix=cursor.strip_prefix(&format!("{}:",self.history_nonce)).ok_or_else(||anyhow!("history_cursor_invalid"))?;
+                let end=usize::from_str_radix(suffix,16).map_err(|_|anyhow!("history_cursor_invalid"))?;
+                if end==0 || end>self.history_total || suffix!=format!("{end:x}") {bail!("history_cursor_invalid");}
+                if self.last_history_page.is_some_and(|at|at.elapsed()<Duration::from_secs(2)) {bail!("history_page_busy");}
+                self.last_history_page=Some(std::time::Instant::now());
+                let result=self.provider_selected("thread/read",json!({"threadId":self.thread["id"],"includeTurns":true}),Some((end.saturating_sub(50),end))).await?;
+                if result["thread"]["id"]!=self.thread["id"] {bail!("history_page_unavailable");}
+                let turns=result["thread"]["turns"].as_array().ok_or_else(||anyhow!("history_page_unavailable"))?;
+                if turns.is_empty() {bail!("history_page_unavailable");}
+                let start=result["treerHistory"]["start"].as_u64().ok_or_else(||anyhow!("history_page_unavailable"))? as usize;
+                if start>=end || turns.len()>50 || result["treerHistory"]["total"].as_u64().unwrap_or(0)<end as u64 {bail!("history_page_unavailable");}
+                let mut mapped=Transcript::default();
+                for turn in turns {mapped.insert(model::turn(turn)).map_err(|_|anyhow!("history_page_unavailable"))?;}
+                // Mapping may expand a provider value. Never silently return a
+                // shortened page with the original cursor and lose the gap.
+                if mapped.dropped!=0 {bail!("history_page_unavailable");}
+                let mut snapshot=(**self.changed.borrow()).clone();
+                snapshot["thread"]["turns"]=json!(&*mapped);
+                snapshot["thread"]["hasOlderItems"]=json!(start>0);
+                snapshot["history"]=json!({"limit":50,"page":true,"totalTurns":self.history_total,"cursor":if start>0 {Some(format!("{}:{start:x}",self.history_nonce))}else{None}});
+                Ok(snapshot)
+            },
             "goal" => self.goal_edit(body).await,
             "goal_reconcile" | "goal_retry" => {
                 if method == "goal_retry"
@@ -995,6 +1051,11 @@ impl Runtime {
                         self.stop_for_history_limit()?;
                         return Err(error);
                     }
+                } else if let Some(existing)=self.turns.iter().find(|t|t["id"]==turn).cloned() {
+                    if let Err(error)=self.upsert_turn(existing) {
+                        self.stop_for_history_limit()?;
+                        return Err(error);
+                    }
                 }
                 // The cooperative RPC wait can consume start/delta/completion
                 // BEFORE the response identifies this accepted submission.
@@ -1039,7 +1100,12 @@ impl Runtime {
         self.thread["lastError"] = self.records[index].submission["error"].clone();
     }
     fn upsert_turn(&mut self, turn: Value) -> Result<()> {
-        self.turns.insert(turn)
+        let fresh=!self.turns.iter().any(|t|t["id"]==turn["id"]);
+        let projected=self.projected(vec![turn],false)?;
+        let turn=projected.first().ok_or(HistoryLimit)?.clone();
+        self.turns.insert(turn)?;
+        if fresh {self.history_total+=1;}
+        Ok(())
     }
     fn record_provider_stop(
         &mut self,

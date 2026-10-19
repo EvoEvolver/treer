@@ -69,6 +69,8 @@ export const en = {
   "thread.label": "Conversation",
   "thread.older": "Load earlier messages",
   "thread.loadingOlder": "Loading...",
+  "thread.latestPage": "Back to latest messages",
+  "thread.olderPage": "Viewing an earlier page",
   "thread.working": "Working",
   "jump.latest": "Jump to latest",
   "activity.title": "Activity",

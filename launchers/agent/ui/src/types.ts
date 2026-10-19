@@ -116,7 +116,7 @@ export interface Snapshot {
   queue: QueuedPrompt[];
   goal: Goal | null;
   goalDelivery?: GoalDelivery | null;
-  history: { limit: number };
+  history: { limit: number; cursor?: string | null; page?: boolean; totalTurns?: number };
   submission?: { downgraded?: boolean };
 }
 

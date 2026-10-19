@@ -36,8 +36,8 @@ async function heapSample(pid) {
 const controllerSegment = id => id.replace(/[^a-z0-9]/gi, c => '%'+c.charCodeAt(0).toString(16).toUpperCase());
 assert.ok(binary || useNode, 'RUST_SPIKE_BIN or COMPARE_NODE required');
 
-async function until(read, predicate) {
-  const end = Date.now() + 12000;
+async function until(read, predicate, waitMs=12000) {
+  const end = Date.now() + waitMs;
   while (Date.now() < end) { try {const value=await read();if(predicate(value))return value;}catch{} await new Promise(r=>setTimeout(r,20)); }
   throw Error('contract fixture deadline');
 }
@@ -153,66 +153,40 @@ test('Rust canonicalizes a configured cwd alias and reports root failures withou
   }
 });
 
-test('many-turn history limit stops provider, preserves receipts and remains readable',{skip:useNode,timeout:process.env.RUST_SPIKE_HEAP_PROFILE==='1'?150000:60000},async t=>{
-  const s=await fixture(t,{
-    CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),
-    // The fixture root is unknown until launch; the private root is explicit.
-    HISTORY_PID_FILE:'provider.pid',
-  });
-  const providerPid=Number(await readFile(join(s.root,'cwd/provider.pid'),'utf8'));
-  const baseline=await rssKiB(s.child.pid);let peak=baseline;
-  const heaps=process.env.RUST_SPIKE_HEAP_PROFILE==='1'?[{phase:'baseline',...await heapSample(s.child.pid)}]:[];
-  let rejected;
-  const admitted=[];
-  for(let n=0;n<40;n++) {
-    const response=await s.post({text:`bounded history ${n}`,operation_id:`history-${n}`});
-    assert.equal(response.status,202);
+test('many-turn recent window evicts finished history without losing receipts or blocking dispatch',{skip:useNode,timeout:60000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
+  const baseline=await rssKiB(s.child.pid);let peak=baseline;const admitted=[];
+  for(let n=0;n<60;n++) {
+    const response=await s.post({text:`bounded history ${n}`,operation_id:`history-${n}`});assert.equal(response.status,202);
     const receipt=await response.json();admitted.push(receipt.submission.id);
-    const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>!state.ready||state.thread.status==='idle');
+    await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
+    if(n===0) {
+      const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+      const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+      saved.records[0].source_messages=[{messageId:'fixture_unacked_message',deliveryId:'fixture_unacked_delivery',ackPending:true}];
+      await writeFile(join(s.state,'rust-spike.json'),JSON.stringify(saved),{mode:0o600});
+      const next=await s.launch({});s.child=next.child;s.base=next.base;
+      s.post=body=>fetch(s.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify(body)});
+    }
     peak=Math.max(peak,await rssKiB(s.child.pid));
-    if(heaps.length&&n===15)heaps.push({phase:'16-turns',...await heapSample(s.child.pid)});
-    if(!state.ready){rejected=receipt.submission.id;break;}
   }
-  assert.ok(rejected,'default history budget was reached');
   const state=await fetch(s.base+'/api/state').then(r=>r.json());
-  assert.equal(state.runtime.state,'blocked');
-  assert.match(state.runtime.error,/history limit/);
-  assert.ok(Buffer.byteLength(JSON.stringify(state.thread.turns))<17*1024*1024);
-  await until(async()=>{try{process.kill(providerPid,0);return false;}catch(e){if(e.code==='ESRCH')return true;throw e;}},Boolean);
-  const cleanup=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),state=>state.runtime.cleanup.providerExit==='confirmed');
-  assert.equal(cleanup.runtime.cleanup.processGroup,'termination_requested_unverified');
-  assert.equal(cleanup.runtime.cleanup.detachedDescendants,'not_guaranteed');
-  assert.match(cleanup.runtime.error,/detached-descendant cleanup not guaranteed/);
-  const receipt=await fetch(s.base+'/v1/submissions/'+rejected,{headers:s.headers}).then(r=>r.json());
-  assert.equal(receipt.submission.state,'running','oversized completion must not invent success');
+  assert.equal(state.ready,true);assert.equal(state.runtime.state,'idle');assert.equal(state.thread.hasOlderItems,true);
+  assert.ok(state.thread.turns.length<=50);assert.ok(Buffer.byteLength(JSON.stringify(state.thread.turns))<17*1024*1024);
   const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
-  assert.equal(journal.dispatchBlocked,true);
-  assert.equal(journal.records.length,admitted.length);
-  assert.ok((await s.post({text:'no automatic replay',operation_id:'after-limit'})).status>=400);
-  const before=JSON.stringify(state.thread.turns);
-  await new Promise(r=>setTimeout(r,250));
-  assert.equal(JSON.stringify((await fetch(s.base+'/api/state').then(r=>r.json())).thread.turns),before);
-  const stopped=await rssKiB(s.child.pid);
-  // RSS is allocator/platform dependent; this is a regression ceiling for the
-  // synthetic 16 MiB history, not a general process quota or a heap measurement.
-  assert.ok(peak<384*1024,`synthetic history RSS ${peak} KiB exceeds ceiling`);
-  assert.ok(stopped<384*1024);
-  if(heaps.length) {
-    heaps.push({phase:'blocked',...await heapSample(s.child.pid)});
-    for(let n=0;n<3;n++)await fetch(s.base+'/api/state').then(r=>r.arrayBuffer());
-    heaps.push({phase:'after-reads',...await heapSample(s.child.pid)});
-    assert.ok(heaps.every(sample=>sample.bytes<128*1024*1024),'live native heap regression ceiling for synthetic 16 MiB history');
-    assert.ok(heaps.at(-1).bytes-heaps.at(-2).bytes<16*1024*1024,'read-only snapshots must not accumulate retained histories');
-    t.diagnostic(JSON.stringify({nativeHeap:heaps}));
-  }
-  t.diagnostic(JSON.stringify({turns:admitted.length,baselineRssKiB:baseline,peakSampledRssKiB:peak,stoppedRssKiB:stopped}));
-  const exited=once(s.child,'exit');s.child.kill('SIGTERM');await exited;
-  const restarted=await s.launch({});
-  const recovered=await fetch(restarted.base+'/api/state').then(r=>r.json());
-  assert.equal(recovered.runtime.state,'blocked');
-  const saved=await fetch(restarted.base+'/v1/submissions/'+rejected,{headers:s.headers}).then(r=>r.json());
-  assert.equal(saved.submission.state,'failed');
-  assert.match(saved.submission.error,/uncertain/);
+  assert.equal(journal.dispatchBlocked,false);assert.equal(journal.records.length,admitted.length);
+  assert.ok(journal.records.every(r=>r.submission.state==='done'));
+  assert.equal(journal.records[0].source_messages[0].ackPending,true,'history eviction must not discard an unacknowledged Core message');
+  assert.ok(!journal.turns,'older turns are not copied into the journal');
+  assert.ok(peak<256*1024,`recent-window RSS ${peak} KiB exceeds256 MiB`);
+  const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
+  const restarted=await s.launch({HISTORY_LARGE_RESUME:'1',HISTORY_LARGE_ACTIVE:'1'},false);
+  const resumed=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.ready,45000);
+  assert.ok(resumed.thread.turns.some(t=>t.id==='old-0'&&t.status==='inProgress'),'an active turn outside the newest suffix must survive');
+  assert.ok(resumed.thread.turns.length<=50);
+  const recovered=await fetch(restarted.base+'/v1/submissions/'+admitted[0],{headers:s.headers}).then(r=>r.json());
+  assert.equal(recovered.submission.state,'done');
+  t.diagnostic(JSON.stringify({baselineRssKiB:baseline,peakRssKiB:peak,retainedTurns:state.thread.turns.length,receipts:admitted.length}));
 });
 
 test('streaming deltas stop at admission limit without replacing accepted text',{skip:useNode,timeout:30000},async t=>{
@@ -250,17 +224,36 @@ test('invalid provider turn identity blocks dispatch without echoing provider co
   assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
 });
 
-test('large resumed thread over 4 MiB preserves 530 turns and accepts the next turn',{skip:useNode,timeout:30000},async t=>{
+test('streamed 50 MiB resume retains a recent window, fetches older pages on demand and completes the next turn',{skip:useNode,timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
-  const restarted=await s.launch({HISTORY_LARGE_RESUME:'1'});
+  let peak=0,pid=null,busy=false;
+  const sample=setInterval(async()=>{if(!pid||busy)return;busy=true;try{peak=Math.max(peak,await rssKiB(pid));}catch{}finally{busy=false;}},25);
+  t.after(()=>clearInterval(sample));
+  // s.launch records children before readiness; watch only our sealed child.
+  const launch=s.launch({HISTORY_LARGE_RESUME:'1'},false);
+  const restarted=await launch;pid=restarted.child.pid;
+  await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.ready===true,45000);
   const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-  assert.ok(frames.some(x=>x.method==='thread/resume'&&x.bytes>4*1024*1024&&x.bytes<16*1024*1024));
+  assert.ok(frames.some(x=>x.method==='thread/resume'&&x.bytes>30*1024*1024&&x.bytes<60*1024*1024));
+  assert.equal(frames.filter(x=>x.method==='thread/read').length,0,'no preload');
   const state=await fetch(restarted.base+'/api/state').then(r=>r.json());
   assert.equal(state.thread.id,'synthetic-history');
   assert.equal(state.runtime.provider.transport,'open');
   const history=await fetch(restarted.base+'/v1/transcript?page=0&limit=1').then(r=>r.json());
-  assert.equal(history.page_count,530);
+  assert.equal(history.page_count,50);
+  assert.equal(state.thread.turns[0].id,'old-480');
+  const cursor=state.history.cursor;assert.equal(typeof cursor,'string');
+  assert.equal((await fetch(restarted.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor:'bad-cursor'})})).status,400);
+  const older=fetch(restarted.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor})});
+  const concurrent=await fetch(restarted.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor})});
+  assert.equal(concurrent.status,429);
+  const page=await (await older).json();
+  assert.equal(page.thread.turns[0].id,'old-430');assert.equal(page.thread.turns.length,50);
+  assert.equal(page.history.page,true);
+  assert.ok(page.history.cursor!==cursor);
+  assert.ok(peak<256*1024,`launcher peak ${peak} KiB must stay below256 MiB`);
+  t.diagnostic(JSON.stringify({peakLauncherRssKiB:peak,frameBytes:frames.find(x=>x.method==='thread/resume').bytes}));
   const receipt=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'after large resume',operation_id:'after-large-resume'})});
   assert.equal(receipt.status,202);
   const accepted=await receipt.json();
@@ -268,35 +261,37 @@ test('large resumed thread over 4 MiB preserves 530 turns and accepts the next t
   assert.equal(restarted.child.exitCode,null);
 });
 
-test('provider frame over 64 MiB fails with explicit diagnostic and preserves the journal',{skip:useNode,timeout:30000},async t=>{
+for(const extra of [0,1])test('streaming frame256 MiB boundary +'+extra,{skip:useNode,timeout:120000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const original=await readFile(join(s.state,'rust-spike.json'),'utf8');
-  const restarted=await s.launch({HISTORY_FRAME_OVER_LIMIT:'1',HISTORY_FRAME_LOG:'over-limit-frames.jsonl'},false);
-  const state=await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime?.cleanup?.providerExit==='confirmed');
+  const restarted=await s.launch({HISTORY_FRAME_BYTES:String(256*1024*1024+extra),HISTORY_FRAME_LOG:'over-limit-frames.jsonl'},false);
+  const deadline=Date.now()+90000;let state;
+  while(Date.now()<deadline){state=await fetch(restarted.base+'/api/state').then(r=>r.json());if(state.ready||state.runtime?.cleanup?.providerExit==='confirmed')break;await new Promise(r=>setTimeout(r,100));}
+  if(!extra){assert.equal(state.ready,true);assert.equal(state.runtime.provider.transport,'open');return;}
   assert.equal(state.ready,false);
   assert.equal(state.runtime.provider.transport,'line_too_large');
   assert.match(state.runtime.error,/Codex startup failed/);
   const frames=(await readFile(join(s.root,'cwd/over-limit-frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
-  assert.ok(frames.some(x=>x.method==='thread/resume'&&x.bytes>64*1024*1024));
+  assert.ok(frames.some(x=>x.method==='thread/resume'&&x.bytes===256*1024*1024+1));
   assert.ok(!frames.some(x=>x.method==='thread/start'),'no fresh-thread fallback');
   assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),original);
 });
 
-test('oversized resumed history fails visibly without rewriting the durable journal',{skip:useNode,timeout:10000},async t=>{
+for(const malformed of [false,true])test((malformed?'malformed discarded old turn':'oversized resumed history')+' fails visibly without rewriting the durable journal',{skip:useNode,timeout:10000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid'});
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   const original=await readFile(join(s.state,'rust-spike.json'),'utf8');
   const portFile=join(s.root,'oversized-port');
-  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'oversized.pid',HISTORY_OVERSIZED:'1',AGENT_UI_PORT_FILE:portFile});
+  const env=hermeticEnv({HOME:s.root,CODEX_HOME:join(s.root,'codex'),AGENT_UI_CWD:join(s.root,'cwd'),TREER_RUST_SPIKE_STATE_DIR:s.state,AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'),CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'oversized.pid',...(malformed?{HISTORY_MALFORMED_OLD:'1'}:{HISTORY_OVERSIZED:'1'}),AGENT_UI_PORT_FILE:portFile});
   const child=spawn(binary,[],{cwd:join(s.root,'cwd'),env,stdio:'ignore'});
   s.trackChild(child);
   const base=await until(async()=>`http://127.0.0.1:${Number(await readFile(portFile,'utf8'))}`,x=>!x.endsWith('NaN'));
   const state=await until(()=>fetch(base+'/api/state').then(r=>r.json()),state=>state.runtime?.cleanup?.providerExit==='confirmed');
   assert.equal(state.ready,false);
   assert.equal(state.runtime.state,'blocked');
-  assert.match(state.runtime.error,/thread exceeds launcher history limit/);
-  assert.match(state.runtime.error,/no fresh-thread fallback/);
+  assert.match(state.runtime.error,/Codex startup failed/);
+  assert.equal(state.runtime.provider.transport,malformed?'invalid_json':'provider_value_too_large');
   assert.match(state.runtime.error,/detached-descendant cleanup not guaranteed/);
   assert.equal(await readFile(join(s.state,'rust-spike.json'),'utf8'),original);
   const pid=Number(await readFile(join(s.root,'cwd/oversized.pid'),'utf8'));

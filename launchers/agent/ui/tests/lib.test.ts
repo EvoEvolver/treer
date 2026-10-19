@@ -81,6 +81,26 @@ test("a late HTTP snapshot never shrinks a history window the reader widened", (
   assert.equal(reducer(start, { type: "snapshot", snapshot: snapshot([turn("1", "a")], 50), source: "ws" }).snapshot?.history.limit, 50);
 });
 
+test("streamed older pages replace the window, keep live status, and return to latest without a growing cache", () => {
+  const start: State = { snapshot: snapshot([turn("latest", "now")], 150), connected: true, error: null, notice: null, submitting: false, loadingOlder: false, settingsBusy: false, goalBusy: false, notices: [] };
+  const older = snapshot([turn("old", "before")]);
+  older.history = { limit: 50, page: true, cursor: "opaque:32", totalTurns: 530 };
+  let state = reducer(start, { type: "snapshot", snapshot: older, source: "http" });
+  const live = snapshot([turn("latest", "changed"), turn("new", "new")]);
+  live.runtime.state = "working";
+  state = reducer(state, { type: "snapshot", snapshot: live, source: "ws" });
+  assert.deepEqual(state.snapshot?.thread?.turns.map(t => t.id), ["old"]);
+  assert.equal(state.snapshot?.runtime.state, "working");
+  assert.equal(state.snapshot?.history.cursor, "opaque:32");
+  const earlier = snapshot([turn("earlier", "earlier")]);
+  earlier.history = { limit: 50, page: true, cursor: null, totalTurns: 530 };
+  state = reducer(state, { type: "snapshot", snapshot: earlier, source: "http" });
+  assert.deepEqual(state.snapshot?.thread?.turns.map(t => t.id), ["earlier"]);
+  state = reducer(state, { type: "snapshot", snapshot: live, source: "http" });
+  assert.deepEqual(state.snapshot?.thread?.turns.map(t => t.id), ["latest", "new"]);
+  assert.equal(state.snapshot?.history.page, undefined);
+});
+
 test("the Markdown export covers messages, activity, diffs and plans with safe fences", () => {
   const turns: TurnDto[] = [{ id: "1", startedAt: null, status: "completed", error: "stopped", items: [
     item("u", "userMessage", { text: "[来自 /team/a，排队于 2026-10-15T00:00:00Z]\nhello" }),

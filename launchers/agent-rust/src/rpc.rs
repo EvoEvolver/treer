@@ -1,5 +1,4 @@
 use anyhow::{anyhow, bail, Result};
-use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::{
     collections::{HashMap, VecDeque},
@@ -15,11 +14,7 @@ use tokio::{
     sync::{mpsc, oneshot, Mutex},
     time::{timeout, Duration},
 };
-use tokio_util::codec::{FramedRead, LinesCodec, LinesCodecError};
-
-// Long-lived Codex threads arrive as one thread/resume JSON-RPC line.
-// This is a frame bound, separate from the 16 MiB retained-history budget.
-const PROVIDER_LINE_BYTES: usize = 64 * 1024 * 1024;
+use crate::provider_stream::{Reader, Selections};
 
 pub struct ProviderChild {
     child: Child,
@@ -70,6 +65,7 @@ pub struct Rpc {
     pending: Arc<Mutex<HashMap<u64, Reply>>>,
     next: Arc<AtomicU64>,
     diagnostics: Arc<std::sync::Mutex<Value>>,
+    selections: Selections,
 }
 
 impl Rpc {
@@ -93,6 +89,7 @@ impl Rpc {
             pending: Arc::default(),
             next: Arc::new(AtomicU64::new(1)),
             diagnostics: Arc::new(std::sync::Mutex::new(json!({"transport":"open","beforeCleanup":null,"stderrCapture":if capture_stderr {"pending"} else {"disabled"}}))),
+            selections: Arc::default(),
         };
         let (events, receiver) = mpsc::channel(8);
         let stdout = child.stdout.take().unwrap();
@@ -114,19 +111,18 @@ impl Rpc {
         });
         let reader_rpc = rpc.clone();
         let stdout_reader = tokio::spawn(async move {
-            let mut lines =
-                FramedRead::new(stdout, LinesCodec::new_with_max_length(PROVIDER_LINE_BYTES));
+            let mut lines = Reader::new(stdout, reader_rpc.selections.clone());
             let reason = loop {
                 let line = match lines.next().await {
-                    Some(Ok(line)) => line,
-                    Some(Err(LinesCodecError::MaxLineLengthExceeded)) => break "line_too_large",
-                    Some(Err(_)) => break "line_error",
-                    None => break "stdout_eof",
+                    Ok(Some(message)) => message,
+                    Err(reason) => break reason,
+                    Ok(None) => break "stdout_eof",
                 };
-                let Ok(mut message) = serde_json::from_str::<Value>(&line) else {
-                    break "invalid_json";
-                };
-                drop(line);
+                let mut message = line;
+                let history=&message["result"]["treerHistory"];
+                if history.is_object() {
+                    reader_rpc.diagnostics.lock().unwrap()["historyScan"]=json!({"frameBytes":history["frameBytes"],"turnCount":history["total"],"nodeCount":history["nodeCount"],"elapsedMs":history["elapsedMs"]});
+                }
                 if message.get("method").is_some() {
                     // Runtime pumps this bounded queue while awaiting its RPCs.
                     // Full means lossless backpressure, never transport failure.
@@ -186,7 +182,11 @@ impl Rpc {
     }
 
     pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
+        self.request_selected(method, params, None).await
+    }
+    pub async fn request_selected(&self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
+        if let Some(selection)=selection {self.selections.lock().unwrap().insert(id,selection);}
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
         let result = async {
@@ -199,6 +199,7 @@ impl Rpc {
             Err(_) => { self.fail("rpc_timeout"); Err(anyhow!("provider_rpc_timeout")) },
         };
         self.pending.lock().await.remove(&id);
+        self.selections.lock().unwrap().remove(&id);
         result
     }
 }

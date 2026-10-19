@@ -88,6 +88,7 @@ export function Thread() {
             <div className="v-loading" role="status" aria-label={t("loading.label")}><div className="sk sk-user" /><div className="sk sk-l1" /><div className="sk sk-l2" /><div className="sk sk-l3" /><div className="sk sk-row" /></div>
           )}
           <div className="chat">
+            {snapshot?.history.page && <div className="older"><span role="status">{t("thread.olderPage")}</span><button type="button" className="btn" onClick={() => void actions.loadLatest().then(() => ref.current?.focus())}>{t("thread.latestPage")}</button></div>}
             {snapshot?.thread?.hasOlderItems && (
               <div className="older"><button type="button" className="btn" disabled={state.loadingOlder} onClick={() => void older()}>{state.loadingOlder ? t("thread.loadingOlder") : t("thread.older")}</button></div>
             )}

@@ -3,6 +3,7 @@ use treer_agent_rust_spike::bounded_json;
 mod files;
 mod goals;
 mod disk_history;
+mod provider_stream;
 mod http;
 mod image_format;
 mod model;
@@ -55,6 +56,7 @@ struct App {
     files: files::Files,
     attachments: Option<Arc<tokio::sync::Mutex<attachments::Attachments>>>,
     image_slots: Arc<tokio::sync::Semaphore>,
+    history_slot: Arc<tokio::sync::Semaphore>,
 }
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|s| !s.is_empty())
@@ -173,6 +175,7 @@ async fn main() -> Result<()> {
         files,
         attachments,
         image_slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        history_slot: Arc::new(tokio::sync::Semaphore::new(1)),
     };
     let files_idle = app.files.idle;
     let router = Router::new().fallback(any(route)).with_state(app);
@@ -307,24 +310,9 @@ fn failure(status: StatusCode, code: &str) -> Response {
 }
 fn limited(snapshot: &Value, limit: usize) -> Value {
     let mut value = snapshot.clone();
-    if let Some(turns) = value["thread"]["turns"].as_array_mut() {
-        let mut left = limit;
-        let mut hidden = false;
-        for turn in turns.iter_mut().rev() {
-            if let Some(items) = turn["items"].as_array_mut() {
-                if items.len() > left {
-                    items.drain(..items.len() - left);
-                    hidden = true;
-                }
-                left = left.saturating_sub(items.len());
-            }
-        }
-        turns.retain(|t| {
-            t["items"].as_array().is_some_and(|a| !a.is_empty()) || t["status"] == "inProgress"
-        });
-        value["thread"]["hasOlderItems"] = json!(hidden);
-    }
-    value["history"] = json!({"limit":limit});
+    // Rust pages are already bounded by turns, bytes and shape nodes. Trimming
+    // items here would skip part of this page when following its older cursor.
+    value["history"]["limit"] = json!(limit);
     value
 }
 async fn route(State(app): State<App>, request: Request<Body>) -> Response {
@@ -413,7 +401,13 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             "/v1/status" => {
                 json!({"agent_id":app.agent,"interface_instance_id":app.instance,"status":snapshot["runtime"]["state"],"busy":snapshot["runtime"]["state"]=="working","queue_length":snapshot["queue"].as_array().map_or(0,Vec::len),"error":snapshot["runtime"]["error"]})
             }
-            "/v1/transcript" => transcript(&app, &snapshot, request.uri().query().unwrap_or("")),
+            "/v1/transcript" => {
+                let query=request.uri().query().unwrap_or("");
+                if let Some(cursor)=query.split('&').find_map(|part|part.strip_prefix("cursor=")).filter(|s|!s.bytes().all(|b|b.is_ascii_digit())) {
+                    return history_page(&app,json!({"cursor":cursor}),true).await;
+                }
+                transcript(&app, &snapshot, query)
+            },
             "/v1/queue" => return call(&app, "queue", Value::Null, StatusCode::OK).await,
             p if p.starts_with("/v1/submissions/") => {
                 let Some(id) = submission_segment(p.trim_start_matches("/v1/submissions/")) else {
@@ -530,13 +524,10 @@ async fn route(State(app): State<App>, request: Request<Body>) -> Response {
             let limit = history_limit(&body);
             ui_call(&app, "settings", body, limit).await
         }
-        "/api/history/older" => json_response(
-            StatusCode::OK,
-            limited(
-                &snapshot,
-                (body["limit"].as_u64().unwrap_or(50) as usize + 50).min(10000),
-            ),
-        ),
+        "/api/history/older" => {
+            let cursor=body.get("cursor").cloned().unwrap_or_else(||snapshot["history"]["cursor"].clone());
+            history_page(&app,json!({"cursor":cursor}),false).await
+        },
         _ => failure(StatusCode::NOT_IMPLEMENTED, "outside_rust_experiment_scope"),
     }
 }
@@ -712,7 +703,19 @@ fn transcript(app: &App, snapshot: &Value, query: &str) -> Value {
     } else {
         None
     };
-    json!({"agent_id":app.agent,"interface_instance_id":app.instance,"page":page,"page_count":turns.len(),"next_page":next,"cursor":page.to_string(),"next_cursor":next.map(|n|n.to_string()),"entries":entries})
+    json!({"agent_id":app.agent,"interface_instance_id":app.instance,"page":page,"page_count":turns.len(),"next_page":next,"cursor":page.to_string(),"next_cursor":next.map(|n|json!(n.to_string())).unwrap_or_else(||snapshot["history"]["cursor"].clone()),"older_cursor":snapshot["history"]["cursor"],"entries":entries})
+}
+async fn history_page(app: &App, body: Value, ais: bool) -> Response {
+    let Ok(permit)=app.history_slot.clone().try_acquire_owned() else {return failure(StatusCode::TOO_MANY_REQUESTS,"history_page_busy");};
+    match app.runtime.call("history_page",body).await {
+        Ok(snapshot)=>{
+            let value=if ais {transcript(app,&snapshot,"limit=50")}else{snapshot};
+            let bytes=match serde_json::to_vec(&value) {Ok(bytes)=>bytes,Err(_)=>return failure(StatusCode::SERVICE_UNAVAILABLE,"history_page_unavailable")};
+            let stream=futures_util::stream::once(async move {let _permit=permit;Ok::<_,std::io::Error>(bytes)});
+            (StatusCode::OK,[("content-type","application/json"),("cache-control","no-store")],Body::from_stream(stream)).into_response()
+        },
+        Err(error)=>{let (status,code)=match error.to_string().as_str() {"history_cursor_invalid"=>(StatusCode::BAD_REQUEST,"history_cursor_invalid"),"history_page_busy"=>(StatusCode::TOO_MANY_REQUESTS,"history_page_busy"),_=>(StatusCode::SERVICE_UNAVAILABLE,"history_page_unavailable")};failure(status,code)}
+    }
 }
 async fn static_file(app: &App, path: &str) -> Response {
     if path.split('/').any(|p| p == "..") || path.contains('%') || path.contains('\\') {

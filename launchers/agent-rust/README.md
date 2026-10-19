@@ -33,13 +33,18 @@ No automatic provider retry is performed. Fixed transport reasons (`open`,
 `stdin_write_timeout`, `rpc_timeout`) and independently
 observed child status/signal before cleanup appear in AIS diagnostics and the
 shutdown line. Stream closure alone is never called spontaneous provider exit.
-Provider JSON-RPC lines are capped at 64 MiB, so long-lived thread/resume replies
-above the former 4 MiB cap can be read. Over-cap frames fail closed with
-`line_too_large`; other framing/I/O errors retain `line_error`. The eight-entry
-event queue and 16 MiB retained-history cap remain separate bounds. Frame parsing
-can transiently allocate more than the retained-history budget; this is not a
-64 MiB total RSS promise. Synthetic regression resumes 530 turns in one >4 MiB
-reply and submits the next turn; a >64 MiB reply preserves the journal and stops.
+Provider JSON-RPC frames are streamed through an 8 KiB read buffer with a
+256 MiB wire-byte ceiling and a 60-second frame deadline after the first byte.
+`result.thread.turns` is validated one turn at a time, including discarded old
+turns; the complete frame is never buffered. Limits are depth 32, 100,000 scanned
+turns, 500,000 nodes per turn/retained window, 50,000 non-history nodes, 16 MiB
+per history turn and 4 MiB for other decoded values. Duplicate keys and malformed
+discarded values are refused. Over-cap frames poison the transport with
+`line_too_large`; shape/value/deadline errors have distinct fixed reasons.
+Content-free `historyScan` diagnostics contain only bytes, turns, nodes and time.
+The eight-entry event queue remains separate. A 530-turn, roughly 50 MiB fixture
+checks recent history, on-demand older reads and the next turn under a 256 MiB
+launcher RSS regression ceiling; exactly 256 MiB passes and +1 byte is refused.
 Outbound operations include mutex acquisition, writing and flushing within a
 five-second deadline; the event-pumping RPC wait has an absolute 60-second
 deadline. A write timeout can mean partial delivery. It poisons the transport,
@@ -94,21 +99,18 @@ the descriptor opener; a component swapped to a symlink after canonicalization
 is refused rather than canonicalized again. Resolution/open/type failures use
 the fixed startup error `workspace_file_root_unavailable`, without path details.
 
-M2 transcript admission retains at most 10,000 provider turns and 16 MiB of
+Transcript admission retains at most 50 provider turns and 16 MiB of
 serialized turn content (excluding the outer array separators). Each turn
 replacement is counted without allocating a second serialized history and is
-admitted atomically. Exceeding either limit preserves the previous transcript,
+admitted atomically. Oldest finished turns are evicted until the window fits;
+active turns, durable receipts/acks, goals and retry identity are not evicted.
+An individual turn that cannot fit preserves the previous transcript,
 persists the dispatch fence, stops the directly owned provider/process group,
 rejects further mutations, and leaves state and receipt reads available.
 It never settles an oversized completion as success or replays a running intent
-on restart. The synthetic many-turn regression samples only its own launcher's
-RSS with a 384 MiB regression ceiling. On macOS, setting
-`RUST_SPIKE_HEAP_PROFILE=1` also samples aggregate live allocations with
-`heap -s --noContent` at baseline, after 16 turns, at the admission limit and
-after repeated snapshot reads. The sampled fixture has a 128 MiB live-heap
-ceiling and permits less than 16 MiB of retained growth across those reads.
-The profiling variant has a separate 150-second deadline for four heap probes;
-the normal regression retains its 60-second deadline. These are finite-workload
+on restart. The synthetic 60-turn regression samples only its own launcher's
+RSS with a 256 MiB ceiling and checks receipt recovery after window eviction.
+These are finite-workload
 regressions, not an OS quota or proof against leaks over an unbounded lifetime.
 Provider frames/channels, the durable journal and HTTP snapshots have
 separate bounds, so the 16 MiB content budget is not a total RSS promise.
@@ -141,11 +143,24 @@ a terminal result or replay them. This covers graceful launcher stop (including
 a Controller stop delivered as these signals), not SIGKILL, abrupt machine loss,
 or a guarantee about deliberately detached descendants. Agent deletion and
 private-state lifecycle remain Controller-owned; the launcher deletes no state.
-Resuming an already oversized thread fails with an owner-visible history-limit
-reason and no fresh-thread fallback. The durable journal remains byte-for-byte
-unchanged; this implementation does not silently select a partial history.
-An operator must use a launcher supporting that thread's history; there is no
-automatic state deletion, migration or fresh-session recovery.
+Resuming a long thread selects the deterministic newest suffix within the
+50-turn/16 MiB/node budgets, preserving an active turn if present. The journal
+contains receipts and accepted user intents, not a transcript or discarded old
+provider turns. Node import still makes its byte-for-byte backup; it does not
+import the entire provider history into Rust state. A malformed or over-limit
+frame leaves the durable journal unchanged and never starts a fresh thread.
+
+The browser shows “Load earlier messages” when older turns exist. Each older
+request replaces the visible window, with “Back to latest” to restore the live
+window; WebSocket status/queue updates continue without appending page caches.
+Opaque per-runtime cursors select at most 50 turns. Requests are serialized,
+rate-limited to one per two seconds, and use the same origin/identity guard as
+other transcript reads. No client path or provider thread ID is accepted.
+Provider pagination is not assumed: `thread/read` may return the entire thread,
+so the same streaming validator selects the requested range under the wire/time
+limits. Invalid, oversized or compacted-away pages return a bounded error rather
+than a silently shortened page. Old pages are not persisted. AIS callers can
+follow `older_cursor` (also `next_cursor` after the current window's last page).
 
 M1 compatibility increments preserve the separate browser and AIS contracts:
 `/api/prompt`, `/api/settings` and `/api/interrupt` return the full browser state
@@ -358,8 +373,7 @@ and directory sync. History is plaintext and is never loaded, decoded, replayed
 or exposed as an alternate recovery source. Any future history reader needs its
 own bounded decoder/review. The bounded copy is synchronous after publication;
 it may briefly occupy the actor but never delays or rolls back live publication.
-Browser history keeps its existing
-bounded provider pagination. A segment interrupted before publication remains
+Browser history uses the bounded streaming selection described above. A segment interrupted before publication remains
 disk-only history and counts toward retention on restart.
 
 The history byte budget reserves the full live checkpoint, its 32 MiB publication
@@ -477,11 +491,11 @@ The port fixture file is created exclusively as 0600 and never follows a link.
 
 One current-thread Tokio executor, bounded command/event channels and watch
 snapshots avoid an unbounded WebSocket backlog. HTTP bodies: 128 KiB/10 seconds;
-WS input: 16 KiB, writes: 5 seconds; Codex JSON lines: 4 MiB; message CLI stdout:
-1 MiB/40 seconds. The current history budget is 16 MiB/10,000 turns; exceeding
-it stops prompt admission and interrupts the active turn rather than silently
-discarding transcript. Initial thread/resume is subject to the 4 MiB RPC line
-limit. These bounds are experiment limits, not production parity.
+WS input: 16 KiB, writes: 5 seconds; streamed Codex frames: 256 MiB/60 seconds;
+message CLI stdout: 1 MiB/40 seconds. The recent history window is 50 turns /
+16 MiB / 500,000 shape nodes. An oversized individual active turn stops admission
+instead of dropping accepted active content. These are experiment limits, not
+an OS memory quota or production parity claim.
 
 Operation IDs are durable before 202. A conflicting retry is refused. Running
 submissions after restart become explicit uncertain failures and are not
