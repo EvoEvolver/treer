@@ -307,7 +307,13 @@ Missing/replaced paths fail closed and latch that store unavailable.
 Configuration writes return the fixed storage-unavailable response; the
 independent request-audit store uses
 the same checks; request admission also checks its pinned identity synchronously
-without taking the hub mutex or opening a database descriptor. Restoring a
+without taking the hub mutex or opening a database descriptor. A safe SQLite
+commit hook checks the same identity before every persistent transaction commit,
+including worker/autocommit writes that bypass HTTP checks. Drift refuses commit
+and rolls the transaction back, so Telegram offsets cannot advance into an
+orphan through the interval between periodic checks. The hook does no SQL or
+network I/O. A replacement racing after the final filesystem check remains
+outside the same-UID guarantees described below. Restoring a
 pathname does not clear the latch: stop the App, restore a consistent complete
 private backup if needed, and reopen it under operator control. No live restore
 or automatic file recreation is a recovery procedure. Restart pins the current

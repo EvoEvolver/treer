@@ -796,14 +796,11 @@ mod tests {
         }
     }
     fn fixture(limits: Limits) -> (Hub<Fake>, Fake) {
+        fixture_store(Store::memory(limits).unwrap())
+    }
+    fn fixture_store(store: Store) -> (Hub<Fake>, Fake) {
         let fake = Fake::default();
-        let mut hub = Hub::new(
-            Store::memory(limits).unwrap(),
-            fake.clone(),
-            "app_hub",
-            "ws",
-        )
-        .unwrap();
+        let mut hub = Hub::new(store, fake.clone(), "app_hub", "ws").unwrap();
         hub.add_binding(Binding {
             endpoint_id: "ag_endpoint".into(),
             generation: 1,
@@ -826,6 +823,43 @@ mod tests {
         .unwrap();
         hub.resume("ag_endpoint", 2, NOW).unwrap();
         (hub, fake)
+    }
+    #[test]
+    fn drifted_persistent_store_refuses_worker_offset_without_api_recheck() {
+        use std::os::unix::fs::PermissionsExt;
+        for replacement in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().canonicalize().unwrap().join("state");
+            let (mut hub, fake) = fixture_store(Store::open(&path, Limits::default()).unwrap());
+            let database = path.join("hub.sqlite3");
+            std::fs::rename(&database, path.join("original.sqlite3")).unwrap();
+            if replacement {
+                std::fs::write(&database, b"replacement").unwrap();
+                std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+            // An ignored update reaches the actual worker offset autocommit
+            // without active()/API/recheck calls; the central hook must refuse.
+            assert!(hub
+                .admit_telegram(
+                    "bot_test",
+                    vec![Update {
+                        update_id: 1,
+                        message: None
+                    }],
+                    NOW
+                )
+                .is_err());
+            assert_eq!(hub.telegram_offset("bot_test").unwrap(), 0);
+            assert_eq!(
+                hub.store
+                    .db
+                    .query_row("SELECT count(*) FROM inbound", [], |r| r.get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            assert!(fake.sent.borrow().is_empty());
+        }
     }
     fn update(id: i64) -> Update {
         Update {

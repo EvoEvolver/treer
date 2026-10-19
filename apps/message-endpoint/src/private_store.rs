@@ -163,6 +163,11 @@ pub(crate) fn open(path: &Path) -> Result<(Connection, PrivateFiles), Error> {
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NOFOLLOW,
     ))?;
     recheck(&files)?;
+    let identity = admission_identity(&files)?;
+    // Safe hook: no SQL or transient database descriptors. Returning true
+    // rolls back any transaction whose configured pathname has drifted,
+    // including worker writes that do not pass through HTTP admission.
+    db.commit_hook(Some(move || identity.check().is_err()));
     // Retain directory and lock descriptors. Hostile same-UID code can replace
     // either paths or locks; preventing that requires a separate OS account.
     Ok((db, files))
@@ -183,15 +188,13 @@ pub(crate) fn enable_wal(db: &Connection, path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
-/// Admission checks share only a directory descriptor and immutable identity;
-/// they never duplicate or close the pinned database descriptor.
-#[cfg(feature = "hub")]
+/// Admission and commit checks share only a directory descriptor and immutable
+/// identity; they never duplicate or close the pinned database descriptor.
 pub(crate) struct AdmissionIdentity {
     directory: OwnedFd,
     expected: fs::Stat,
     failed: Arc<AtomicBool>,
 }
-#[cfg(feature = "hub")]
 impl AdmissionIdentity {
     pub(crate) fn check(&self) -> Result<(), Error> {
         if self.failed.load(Ordering::Relaxed) {
@@ -216,7 +219,6 @@ impl AdmissionIdentity {
         result
     }
 }
-#[cfg(feature = "hub")]
 pub(crate) fn admission_identity(files: &PrivateFiles) -> Result<AdmissionIdentity, Error> {
     recheck(files)?;
     Ok(AdmissionIdentity {
@@ -457,6 +459,56 @@ mod tests {
         symlink(&target, &shm).unwrap();
         assert!(store.recheck_private_storage().is_err());
         assert_eq!(stdfs::read(target).unwrap(), b"not SQLite");
+    }
+
+    #[test]
+    fn worker_commit_hook_refuses_drift_and_rolls_back_telegram_offset() {
+        for replacement in [false, true] {
+            for explicit_transaction in [false, true] {
+                let (_temporary, path) = fixture();
+                let store = Store::open(&path, Limits::default()).unwrap();
+                store.db.execute_batch("CREATE TABLE telegram_accounts(account TEXT PRIMARY KEY,offset INTEGER NOT NULL); INSERT INTO telegram_accounts VALUES('synthetic',17);").unwrap();
+                // Deliberately bypass all API and worker recheck call sites.
+                // In the explicit case, drift happens after SQL writes but
+                // before commit; the hook must roll back the entire transaction.
+                if explicit_transaction {
+                    store
+                        .db
+                        .execute_batch("BEGIN IMMEDIATE; UPDATE telegram_accounts SET offset=18;")
+                        .unwrap();
+                }
+                let database = path.join("hub.sqlite3");
+                stdfs::rename(&database, path.join("original.sqlite3")).unwrap();
+                if replacement {
+                    stdfs::write(&database, b"replacement").unwrap();
+                    stdfs::set_permissions(&database, stdfs::Permissions::from_mode(0o600))
+                        .unwrap();
+                }
+                let result = if explicit_transaction {
+                    store.db.execute_batch("COMMIT;")
+                } else {
+                    store
+                        .db
+                        .execute_batch("UPDATE telegram_accounts SET offset=18;")
+                };
+                assert!(result.is_err());
+                assert!(store.db.is_autocommit());
+                assert_eq!(
+                    store
+                        .db
+                        .query_row("SELECT offset FROM telegram_accounts", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    17
+                );
+                assert!(store.recheck_private_storage().is_err());
+                if replacement {
+                    assert_eq!(stdfs::read(database).unwrap(), b"replacement");
+                } else {
+                    assert!(!database.exists());
+                }
+            }
+        }
     }
 
     #[test]
