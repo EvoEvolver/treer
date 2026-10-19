@@ -503,10 +503,24 @@ mod tests {
                 );
                 assert!(store.recheck_private_storage().is_err());
                 if replacement {
-                    assert_eq!(stdfs::read(database).unwrap(), b"replacement");
+                    assert_eq!(stdfs::read(&database).unwrap(), b"replacement");
+                    stdfs::remove_file(&database).unwrap();
                 } else {
                     assert!(!database.exists());
                 }
+                stdfs::rename(path.join("original.sqlite3"), &database).unwrap();
+                assert!(store
+                    .db
+                    .execute_batch("UPDATE telegram_accounts SET offset=19;")
+                    .is_err());
+                assert_eq!(
+                    store
+                        .db
+                        .query_row("SELECT offset FROM telegram_accounts", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    17
+                );
             }
         }
     }

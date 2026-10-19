@@ -312,8 +312,11 @@ commit hook checks the same identity before every persistent transaction commit,
 including worker/autocommit writes that bypass HTTP checks. Drift refuses commit
 and rolls the transaction back, so Telegram offsets cannot advance into an
 orphan through the interval between periodic checks. The hook does no SQL or
-network I/O. A replacement racing after the final filesystem check remains
-outside the same-UID guarantees described below. Restoring a
+network I/O. Rollback cannot undo an external send or Core acknowledgement
+already issued: workers must still propagate commit failure, acknowledge only
+after durable completion, and preserve ambiguous transport outcomes. A replacement
+racing after the final filesystem check remains outside the same-UID guarantees
+described below. Restoring a
 pathname does not clear the latch: stop the App, restore a consistent complete
 private backup if needed, and reopen it under operator control. No live restore
 or automatic file recreation is a recovery procedure. Restart pins the current
