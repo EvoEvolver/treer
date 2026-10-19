@@ -241,7 +241,7 @@ export function WorkloadTree({ pins, workspaceId, agents, apps, machines, select
   // opens on hover and keyboard focus, and never takes pointer events, so it cannot cover the row's "⋯" button.
   function rowLink(agent: Agent, status: TreeStatus | null) {
     const path = agentPath(agent, tree)
-    const link = <a draggable={false} data-tree-primary="" data-tree-key={agent.agent_id} className="flex min-w-0 flex-1 items-center rounded px-2 py-0.5 pr-10 text-left max-md:pr-14 [@media(pointer:coarse)]:pr-14" {...workloadLinkProps(workloadHref(agent.agent_id), () => onOpen(agent.agent_id))}><span className="flex min-w-0 items-center gap-1.5 text-xs font-medium"><WorkloadIcon kind={workloadKind(agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{agent.name}</span>{status && <StatusDot status={status} />}</span></a>
+    const link = <a data-tree-primary="" data-tree-key={agent.agent_id} className="flex min-w-0 flex-1 items-center rounded px-2 py-0.5 pr-10 text-left max-md:pr-14 [@media(pointer:coarse)]:pr-14" {...workloadLinkProps(workloadHref(agent.agent_id), () => onOpen(agent.agent_id))}><span className="flex min-w-0 items-center gap-1.5 text-xs font-medium"><WorkloadIcon kind={workloadKind(agent)} className="size-3.5 shrink-0 text-muted-foreground" /><span className="truncate">{agent.name}</span>{status && <StatusDot status={status} />}</span></a>
     if (!canHover() || (!status && path === `/${agent.name}`)) return link
     return <Tooltip><TooltipTrigger asChild>{link}</TooltipTrigger><TooltipContent side="bottom" align="start" className="pointer-events-none max-w-xs break-all">{path}{status && <span className="block text-[10px] opacity-80">{statusLabel(status.key)}</span>}</TooltipContent></Tooltip>
   }
