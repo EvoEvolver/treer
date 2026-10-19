@@ -137,15 +137,18 @@ test('browser enforces the configured frame-src bound, including CSP wildcard se
   const nested = 'https://x.ag-0123456789abcdef0123456789abcdef.agents.example.test'
   const sibling = 'https://ag-0123456789abcdef0123456789abcdef.other.example.test'
   for (const ingress of [undefined, 'https://agents.example.test/']) {
-    await page.route('https://**/*', r => r.fulfill({ contentType: 'text/html', body: '<h1>Frame loaded</h1>' }))
+    const loaded = new Set<string>()
+    await page.route('https://**/*', r => { loaded.add(new URL(r.request().url()).origin); return r.fulfill({ contentType: 'text/html', body: '<h1>Frame loaded</h1>' }) })
     const headers = Object.fromEntries(securityHeaders('https://proxy.example.test/', nonce, ingress))
-    await page.route(host+'/', r => r.fulfill({ contentType: 'text/html', headers, body: `<iframe title="allowed" src="${allowed}"></iframe><iframe title="nested" src="${nested}"></iframe><iframe title="sibling" src="${sibling}"></iframe>` }))
-    await page.goto(host+'/')
-    await expect(page.frameLocator('[title="allowed"]').getByRole('heading')).toHaveCount(ingress ? 1 : 0)
+    await page.route(host+'/', r => r.fulfill({ contentType: 'text/html', headers, body: `<script nonce="${nonce}">window.frameViolations=[];addEventListener("securitypolicyviolation",e=>window.frameViolations.push(e.blockedURI))</script><iframe title="allowed" src="${allowed}"></iframe><iframe title="nested" src="${nested}"></iframe><iframe title="sibling" src="${sibling}"></iframe>` }))
+    await page.goto(host+'/', { waitUntil: 'domcontentloaded' })
+    await expect.poll(() => loaded.has(allowed)).toBe(Boolean(ingress))
     // CSP wildcards allow multiple labels. Exact Agent-ID validation remains
     // essential before React creates a frame; the CSP is only an outer bound.
-    await expect(page.frameLocator('[title="nested"]').getByRole('heading')).toHaveCount(ingress ? 1 : 0)
-    await expect(page.frameLocator('[title="sibling"]').getByRole('heading')).toHaveCount(0)
-    await page.unrouteAll({ behavior: 'wait' })
+    await expect.poll(() => loaded.has(nested)).toBe(Boolean(ingress))
+    const blocked = ingress ? [sibling] : [allowed, nested, sibling]
+    await expect.poll(() => page.evaluate(() => (window as Window & { frameViolations: string[] }).frameViolations)).toEqual(expect.arrayContaining(blocked))
+    expect(loaded.has(sibling)).toBe(false)
+    await page.unrouteAll({ behavior: 'ignoreErrors' })
   }
 })
