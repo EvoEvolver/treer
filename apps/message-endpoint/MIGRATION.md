@@ -125,11 +125,12 @@ contract or production activation. Its source review establishes these blockers:
   bodies; there is no count-only mailbox probe. A zero count is a momentary
   observation, never a fence against later sends or another poller.
 
-### First-cutover contract (security review #203 event 5775)
+### First-cutover contract (security 5775, leader decision 5777)
 
 These gaps do not require new Core APIs for a first, explicitly bounded cutover.
-The following is the security-reviewed direction; it is still a proposed
-implementation contract, not permission to activate or accept historical loss.
+Leader selected the new-context cutoff below as the implementation direction.
+The final release authorization must repeat the historical loss; this decision
+is not production activation permission.
 
 1. **App-asserted receipts.** Keep the pinned relay's final-message receipt as
    `verification: app_asserted`, with the UI saying “not independently verified”.
@@ -146,9 +147,8 @@ implementation contract, not permission to activate or accept historical loss.
    reply continuity and must name that loss in the owner's release authorization.
    Preserve old IDs/authors and old read-only history; an old native reply must
    return a fixed actionable history-unavailable result, not silently become a
-   top-level message. The alternative is an owner-created, revocable, audited
-   continuity grant for exact parent messages/new relay, designed by Core if the
-   user requests it. No App-created grant, impersonation or body copying.
+   top-level message. Leader explicitly excluded a continuity grant from this task. Any later
+   request for one would be separately designed by Core. No App-created grant, impersonation or body copying.
 3. **Existing-identity drain report.** No new status route is needed solely for
    this migration. After owner/release disables old admission and fences senders
    (redirect them or restrict their Policy access to the old bridge), run a
@@ -165,8 +165,9 @@ The implementation must distinguish **missing independent Core verification**
 from **missing operator acceptance**. The inventory remains report-only and
 `ready_for_cutover:false`; it cannot accept App-asserted receipt risk, authorize a
 history cutoff, run the old identity's mailbox check, or prove senders fenced.
-Current planner capability-gap codes describe those unavailable independent
-checks; they are not a demand to implement three new Core APIs. A future reviewed
+The planner emits the decided first-cutover contract and unresolved operator
+requirements, rather than treating unavailable independent checks as a demand
+to implement three new Core APIs. A future reviewed
 cutover validator must require the explicit owner decision and operator evidence,
 not silently mark those codes resolved because queues are terminal.
 
@@ -175,6 +176,31 @@ unknown historical replies, report-only drain samples and stragglers, followed b
 the native reply/receipt implementation in a separate frozen change. No automatic
 post-traffic rollback is available; keep containment and manual reconciliation
 explicit until a reverse journal is implemented and reviewed.
+
+### Security gates still required before a production decision
+
+- **Token rotation:** security requires rotation at cutover; the current
+  checklist's “recommended” wording is not approval to omit it. Owner must
+  explicitly resolve this before activation. Rotation invalidates the old
+  credential, so pre-traffic rollback requires another fresh token installed by
+  the human owner into the old bridge before it can poll. A later second
+  rotation is redundant unless another credential may have been exposed.
+- **Bound inputs:** the private cutover journal binds SHA-256 of the closed
+  snapshot and explicit mapping document, the exact old process verified stopped,
+  exclusive destination hub state lock, and source fingerprint recheck at commit.
+  Public inventory hashes alone are not a substitute for input file hashes.
+- **First-day watcher:** release authorization names a human/operator watcher and
+  observation schedule for the first 24 hours. Stop admission and pause the
+  affected binding on competing-poller conflict, bot-pin mismatch, identity drift,
+  unauthorized routing, unresolved ambiguous send, unexpected stragglers or a
+  failed health observation. Do not auto-start the old poller. Until the watcher
+  and escalation recipient are named, production activation is blocked.
+- **Production management residual risk:** current #159 policy permits any
+  verified workspace Agent to create/bind/resume any binding, including widening
+  an allowed-sender list; Agents can pause too. Production endpoints are not
+  protected by a special human-owner-only management class. Owner must explicitly
+  accept this risk in the release authorization or decide and review a protected
+  endpoint boundary before rollout. No unimplemented protection is claimed here.
 
 ### Sandbox credential and backup retirement
 

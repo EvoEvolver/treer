@@ -56,11 +56,18 @@ class MigrationPlan(unittest.TestCase):
         report = plan.inventory(self.path)
         self.assertFalse(report['ready_for_cutover'])
         for blocker in ['core_mailbox_drain_not_verified',
-                        'core_final_receipt_validation_unavailable',
-                        'core_historical_context_continuity_unavailable',
-                        'core_body_free_mailbox_status_unavailable']:
+                        'app_asserted_receipt_risk_acceptance_required',
+                        'historical_reply_cutoff_authorization_required',
+                        'old_identity_drain_reports_required',
+                        'sender_fence_and_straggler_check_required']:
             self.assertIn(blocker, report['blockers'])
         self.assertEqual(report['historical_mapping_count'], 0)
+        self.assertFalse(report['cutover_contract']['new_core_api_required'])
+        self.assertFalse(report['cutover_contract']['continuity_grant'])
+        self.assertFalse(report['cutover_contract']['drain_can_ack_or_forward'])
+        self.assertEqual(report['cutover_contract']['drain_zero_samples_before_stop'], 2)
+        self.assertEqual(report['cutover_contract']['receipt_verification'],
+                         'app_asserted_not_independently_verified')
 
     def test_offset_boundaries_convert_without_reset_or_overflow(self):
         for old, new in [('-1', 0), ('0', 1), (str(plan.MAX_ID), plan.MAX_ID+1)]:
