@@ -1331,10 +1331,24 @@ partition key is the site, not the origin), or that ignores `Partitioned`,
 sends the embed cookie on standalone visits too. The same rule stops a page on
 one Agent origin, framed by the Console, from spending the embed cookie on a
 sibling Agent origin: that request is same-site, so the cookie is ignored.
-A tunnelled WebSocket, standalone or embedded, is authenticated once at the
-upgrade: an open socket outlives Console logout, workspace membership removal
-and the 12-hour session expiry until either side closes it (follow-up #194
-adds periodic re-validation and server-side closing). Responses to
+A tunnelled WebSocket, standalone or embedded, is authenticated at the upgrade
+and then re-checked by the Proxy every 30 seconds (plus up to 5 seconds of
+per-socket jitter) with the same lookups as the HTTP path: the ingress or
+embed session by hostname, token and kind, current workspace membership, and
+the Agent interface gate evaluated without recording a Policy decision. A gone,
+expired or foreign session closes the socket with code 4401, lost membership or
+a Policy denial with 4403, so Console logout, membership removal, the 12-hour
+expiry and a Policy change end an open socket within about 36 seconds. The same
+re-check covers Console-session sockets on the Proxy-origin interface tunnel
+and ingress-session sockets on workspace App hosts; public and Bearer upgrades
+are not re-checked. The checks run beside the relay, each bounded to 5 seconds,
+so a slow lookup never pauses the socket. Database errors, Policy-store errors
+and timed-out checks keep the socket (nothing new is granted) and are retried;
+after three consecutive failures, about 120 seconds worst case, the socket
+closes with 1011. Any other lookup answer than a matching live session ends the
+socket at once with 4401. The close code is best effort because the
+relay is byte-level; closure within that window, including the Agent-side
+half, is the guarantee. Responses to
 requests carrying the embed cookie get `frame-ancestors` replaced with the
 Console origin and `X-Frame-Options` removed; standalone sessions keep the
 Agent's CSP untouched. Membership is re-checked on every request and Console
