@@ -10,6 +10,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[path = "email_delivery.rs"]
+pub mod delivery;
 #[path = "email_proxy.rs"]
 pub mod proxy;
 
@@ -170,11 +172,11 @@ fn capacity(
     bytes: usize,
 ) -> Result<(), Error> {
     let (count, size): (i64, i64) = tx.query_row(
-        "SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM (SELECT body FROM email_messages UNION ALL SELECT body FROM email_replies)",
+        "SELECT count(*),coalesce(sum(length(CAST(body AS BLOB))),0) FROM (SELECT body FROM email_messages UNION ALL SELECT body FROM email_replies UNION ALL SELECT payload AS body FROM email_dispatch)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    let (local,local_size):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(length(CAST(m.body AS BLOB))),0) FROM (SELECT thread,body FROM email_messages UNION ALL SELECT thread,body FROM email_replies) m JOIN email_threads t ON t.id=m.thread WHERE t.endpoint=?1",[endpoint],|r|Ok((r.get(0)?,r.get(1)?)))?;
+    let (local,local_size):(i64,i64)=tx.query_row("SELECT count(*),coalesce(sum(length(CAST(m.body AS BLOB))),0) FROM (SELECT thread,body FROM email_messages UNION ALL SELECT thread,body FROM email_replies UNION ALL SELECT i.thread,d.payload AS body FROM email_dispatch d JOIN email_intents i ON i.id=d.id) m JOIN email_threads t ON t.id=m.thread WHERE t.endpoint=?1",[endpoint],|r|Ok((r.get(0)?,r.get(1)?)))?;
     if count >= limits.global_count.min(MAX_MESSAGES)
         || size.saturating_add(bytes as i64) > limits.global_bytes.min(MAX_BYTES)
         || local >= limits.endpoint_count.min(1000)
@@ -334,6 +336,7 @@ impl<'a> Queue<'a> {
         CREATE TABLE IF NOT EXISTS email_intents(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,state INTEGER NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,next_try INTEGER NOT NULL DEFAULT 0,nonce TEXT,lease_until INTEGER,mode TEXT);
         CREATE TABLE IF NOT EXISTS email_replies(id TEXT PRIMARY KEY,thread TEXT NOT NULL REFERENCES email_threads(id),endpoint TEXT NOT NULL,generation INTEGER NOT NULL,member TEXT NOT NULL,body TEXT NOT NULL,digest TEXT NOT NULL,job INTEGER NOT NULL REFERENCES inbound(id),at INTEGER NOT NULL,context TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS email_attempts(id INTEGER PRIMARY KEY,endpoint TEXT NOT NULL,at INTEGER NOT NULL);")?;
+        delivery::schema(&store.db)?;
         Ok(Self { store })
     }
     /// Owner executor must check current membership and atomically audit binding
@@ -620,6 +623,27 @@ impl<'a> Queue<'a> {
         now: i64,
         lease_nonce: &str,
     ) -> Result<Option<Intent>, Error> {
+        self.claim_for(endpoint, generation, now, lease_nonce, Mode::Outbox)
+    }
+    /// Future Proxy worker only. Prepared journal rows may be reclaimed with
+    /// the same frozen bytes; ordinary outbox claims cannot see them.
+    pub fn claim_proxy(
+        &mut self,
+        endpoint: &str,
+        generation: i64,
+        now: i64,
+        lease_nonce: &str,
+    ) -> Result<Option<Intent>, Error> {
+        self.claim_for(endpoint, generation, now, lease_nonce, Mode::Proxy)
+    }
+    fn claim_for(
+        &mut self,
+        endpoint: &str,
+        generation: i64,
+        now: i64,
+        lease_nonce: &str,
+        mode: Mode,
+    ) -> Result<Option<Intent>, Error> {
         if !valid_time(now) || !nonce(lease_nonce) {
             return Err(Error::Invalid);
         }
@@ -629,8 +653,8 @@ impl<'a> Queue<'a> {
             "DELETE FROM email_attempts WHERE at<?1",
             [now.saturating_sub(172800)],
         )?;
-        tx.execute("UPDATE email_intents SET state=2,nonce=NULL,lease_until=NULL WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts>=8 AND (lease_until IS NULL OR lease_until<=?3)",params![endpoint,generation,now])?;
-        let candidate:Option<(String,String)>=tx.query_row("SELECT id,thread FROM email_intents WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts<8 AND next_try<=?3 AND (lease_until IS NULL OR lease_until<=?3) ORDER BY rowid LIMIT 1",params![endpoint,generation,now],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
+        tx.execute("UPDATE email_intents SET state=2,nonce=NULL,lease_until=NULL WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts>=8 AND (lease_until IS NULL OR lease_until<=?3) AND NOT EXISTS(SELECT 1 FROM email_dispatch d WHERE d.id=email_intents.id AND (?4=0 OR d.state!='prepared'))",params![endpoint,generation,now,mode==Mode::Proxy])?;
+        let candidate:Option<(String,String)>=tx.query_row("SELECT id,thread FROM email_intents WHERE endpoint=?1 AND generation=?2 AND state=0 AND attempts<8 AND next_try<=?3 AND (lease_until IS NULL OR lease_until<=?3) AND NOT EXISTS(SELECT 1 FROM email_dispatch d WHERE d.id=email_intents.id AND (?4=0 OR d.state!='prepared')) ORDER BY rowid LIMIT 1",params![endpoint,generation,now,mode==Mode::Proxy],|r|Ok((r.get(0)?,r.get(1)?))).optional()?;
         let Some((id, thread)) = candidate else {
             tx.commit()?;
             return Ok(None);
@@ -663,12 +687,15 @@ impl<'a> Queue<'a> {
     /// Fence against pause/revoke immediately before dispatch. Current directory
     /// membership and Hub Core readback are separate caller checks, never cached.
     pub fn dispatchable(&self, intent: &Intent, now: i64) -> Result<bool, Error> {
-        let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_intents i JOIN endpoints e ON e.id=i.endpoint AND e.generation=i.generation JOIN email_targets t ON t.endpoint=e.id AND t.generation=e.generation WHERE i.id=?1 AND i.nonce=?2 AND i.state=0 AND i.lease_until>?3 AND e.paused=0 AND t.revoked=0 AND t.address=?4)",params![intent.id,intent.nonce,now,intent.address],|r|r.get(0))?;
+        let current:bool=self.store.db.query_row("SELECT EXISTS(SELECT 1 FROM email_intents i JOIN endpoints e ON e.id=i.endpoint AND e.generation=i.generation JOIN email_targets t ON t.endpoint=e.id AND t.generation=e.generation WHERE i.id=?1 AND i.nonce=?2 AND i.state=0 AND i.lease_until>?3 AND e.paused=0 AND t.revoked=0 AND t.address=?4 AND NOT EXISTS(SELECT 1 FROM email_dispatch d WHERE d.id=i.id))",params![intent.id,intent.nonce,now,intent.address],|r|r.get(0))?;
         Ok(current)
     }
     /// Persist acceptance even if owner paused after the send. Never turn a
     /// possible external success into a retry merely because pause raced it.
     pub fn complete(&mut self, intent: &Intent, mode: Mode) -> Result<(), Error> {
+        if delivery::exists(&self.store.db, &intent.id)? {
+            return Err(Error::Denied);
+        }
         if mode == Mode::Proxy && intent.address != REAL_RECIPIENT {
             return Err(Error::Denied);
         }
@@ -679,6 +706,9 @@ impl<'a> Queue<'a> {
         Ok(())
     }
     pub fn failed(&mut self, intent: &Intent, now: i64, permanent: bool) -> Result<(), Error> {
+        if delivery::reserved(&self.store.db, &intent.id)? {
+            return Err(Error::Denied);
+        }
         if !valid_time(now) {
             return Err(Error::Invalid);
         }

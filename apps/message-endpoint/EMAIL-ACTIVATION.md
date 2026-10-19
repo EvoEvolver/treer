@@ -27,6 +27,54 @@ OAuth establishes a current Treer member, not mailbox ownership: the address to
 member association remains explicitly administrator/manager asserted. No public
 access, nonmember reply, mailbox account system, inbound SMTP or magic link.
 
+## Offline journal primitives (not runtime activation)
+
+`email_delivery.rs` now supplies local queue operations for freezing an exact
+JSON notification/key, reserving dispatch, persisting an outcome and containing
+interrupted attempts. `Queue::new` creates the additive journal schema but does
+not change any historical row to real-send mode, recover attempts, start a
+worker or call the network. Existing outbox behavior is unchanged for rows that
+have never entered this journal.
+
+- `prepare_proxy_delivery` requires a current active leased intent with no
+  completed mode. It persists exact bytes (maximum 4096), including the fixed
+  recipient, summary, configured URL, key and opaque reference. Re-preparation
+  with changed bytes conflicts. Frozen rows count against the existing shared
+  email message/reply byte and count limits.
+- `begin_proxy_delivery` rechecks the active lease and expected payload under an
+  IMMEDIATE transaction. A URL/configuration change conflicts before reservation;
+  it never replaces the frozen bytes. It reserves one of 32 per stable binding /
+  640 globally before returning an opaque attempt containing the stored bytes.
+  Those bytes, rather than `Sender::send`'s existing template regeneration, must
+  be used by the future reviewed transport wiring. A failed commit returns no
+  attempt. At capacity it returns a fixed error with no state change or POST;
+  the future runtime must add the required binding pause/status containment.
+- `finish_proxy_delivery` consumes the attempt. Valid provider acceptance and
+  queue completion commit together, releasing its reservation. Uncertainty
+  persists without completing the queue or releasing capacity. A failed outcome
+  commit grants no acknowledgement permission. Neither ordinary queue completion
+  nor the legacy failure path can bypass a recorded ambiguous attempt.
+- `recover_interrupted_proxy_deliveries` is for startup with dispatch workers
+  stopped: every `dispatching` row becomes `uncertain`, including a crash before
+  the POST actually started. It never reissues requests or concludes non-send.
+  Ordinary outbox claims/fences exclude every journal row. The separate future
+  Proxy claim path may reclaim only `prepared` rows; dispatching/uncertain/accepted
+  rows remain excluded even after lease expiry, restart or the Core reservation's
+  60-second window.
+
+These are storage primitives, not an authenticated management/reconciliation
+API or a persistent worker assembly. There is no owner resolution/delete/retry
+operation yet, and no production caller creates journal attempts. There is no
+automatic uncertain-row expiry, slot clearing or implicit resume. Fresh Core
+pins/member checks, the strict live allowlist, activation fencing, HTTP transport
+using frozen bytes, truthful UI, audited owner reconciliation, process-kill and
+ack-frame ordering tests still precede real sending. Rolling back to an older
+binary that does not understand this journal is not a reviewed recovery method
+after any real attempt; keep containment and retained private state instead.
+The local tests cover stored-byte/URL conflicts, completed-outbox refusal,
+restart containment, sticky ambiguity, local/global capacity and commit failures;
+they do not constitute the future end-to-end send/ack crash rehearsal.
+
 ## Proposed transport boundary for review
 
 Keep email absent as disabled and existing `email.outbox_directory` configurations
@@ -82,7 +130,7 @@ network failures and malformed success. `Retry` is limited to a local fence
 refusal before POST. Token acquisition failure is also pre-POST. These local
 results cannot override a previously uncertain attempt. Valid `sent` is provider
 acceptance only. This classifier is not wired into the outbox worker and does
-not yet supply the persistent outcome journal described below. The current code
+not by itself wire the offline outcome journal into runtime dispatch. The current code
 does **not** guarantee exactly-once external email.
 
 Before enabling real sends, use this conservative persisted outcome model:
