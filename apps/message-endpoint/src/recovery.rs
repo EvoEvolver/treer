@@ -103,6 +103,7 @@ impl<M: Mailbox + Directory> Hub<M> {
         Ok((count >= AUDIT_LIMIT, emergency))
     }
     pub(crate) fn recovery_schema(&self) -> Result<(), Error> {
+        self.store.recheck_private_storage()?;
         self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_owner_audit(id INTEGER PRIMARY KEY AUTOINCREMENT,actor TEXT NOT NULL,action TEXT NOT NULL,endpoint TEXT NOT NULL,transfer TEXT NOT NULL,revision INTEGER NOT NULL,at INTEGER NOT NULL); CREATE TABLE IF NOT EXISTS hub_emergency_pauses(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),actor TEXT NOT NULL,revision INTEGER NOT NULL,at INTEGER NOT NULL,count INTEGER NOT NULL);")?;
         Ok(())
     }
@@ -226,6 +227,7 @@ pub(crate) mod tests {
         telegram::{Error as TransportError, Target},
     };
     const NOW: i64 = 1_800_000_000;
+    #[derive(Clone)]
     pub(crate) struct NoIo;
     impl Directory for NoIo {
         fn metadata(&self, _: &str) -> Result<AgentMetadata, crate::core::Error> {

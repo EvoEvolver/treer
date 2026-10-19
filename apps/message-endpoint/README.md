@@ -9,6 +9,19 @@ User direction3479 supersedes the socket design and research's routing details.
 Core3485 confirms Managed App runtime Agents can send/receive/ack; security3483
 accepts the new boundary with the controls below. No Core change is requested.
 
+## Agent binding management
+
+Workspace Agents now use the settings UI's own JSON API with their verified
+Treer identity; see [the binding API contract](AGENT-API.md). Any verified
+workspace Agent may manage all bindings, including another recipient's bindings.
+This explicit owner-selected trust model does not imply per-binding isolation.
+Changes record the real caller and atomically queue a recipient Core notice;
+identifiers are masked, denied calls audited and caller/verification quotas apply.
+New bindings stay paused and activation remains operator-gated. Transport secrets,
+OAuth, recovery and metadata purge remain human-owner-only. No new credential or
+approval system is introduced. This code has not changed the running sandbox. The API contract above supersedes
+owner-only binding statements in the historical increment notes below.
+
 ## Programs
 
 Independent Rust package under `apps/message-endpoint`, not the Core workspace:
@@ -94,7 +107,7 @@ Initial cap20 endpoints, 1000 pending items/16 MiB per endpoint; 10,000 items/
 128 MiB globally (includes incomplete fragments). Pending accepted work never
 silently evicted. Reject before admission at capacity; terminal failure retains
 visible nonsecret reason/ID. Completed dedup tombstones30 days; warn that older
-replay can duplicate. Bounded audit5000 changes plus separate rejection ring;
+replay can duplicate. Bounded audit10000 changes plus separate rejection ring;
 not tamper-proof. Disk failure pauses, never reports delivery success.
 
 Profiles use absolute immutable hub/relay/CLI paths, fixed argv and private HOME.
@@ -172,8 +185,9 @@ leader-approved Core work, not this task.
 Workspace-auth ingress only. `/` negotiated HTML/Markdown, `/health`, relative
 React assets and `/v1/` JSON; no SPA fallback for unknown API paths. All settings
 routes require per-request App token verification (own audience/workspace) and
-current human workspace-owner directory membership. Invalid supplied token cannot fall back;
-Agents denied. No-header direct access uses OAuth+PKCE, single-use expiring state
+current workspace directory membership (human owner or verified Agent for binding management). Invalid supplied token cannot fall back;
+Agent binding access is described above; secret/purge/recovery access remains
+human-owner-only. No-header direct access uses OAuth+PKCE, single-use expiring state
 bound to HttpOnly browser nonce, validated local returns. No forwarded token
 persisted. Exact Origin/custom header/Sec-Fetch-Site same-origin on unsafe browser
 requests, no CORS, strict CSP/no eval/inline/CDN, nosniff/no-store. Credentials are
@@ -277,6 +291,40 @@ lock and SQLite sidecar files are exclusively created at 0600; existing files
 must be regular, single-link, 0600 and owned by the effective UID. A lifetime
 nonblocking lock excludes another cooperating hub writer. SQLite opens the
 database with NOFOLLOW, uses WAL/FULL synchronization and checks sidecar permissions.
+After SQLite opens, permission checks use no-follow metadata queries rather than
+opening and closing database/sidecar descriptors: closing an unrelated descriptor
+can release SQLite's process-wide POSIX record locks and invalidate live WAL
+coordination. Regression checks preserve those locks and verify committed audit
+rows after external fixture connections close and a fresh process reopens state.
+This does not authorize live manual edits or live file-copy backups; use the
+stopped-App backup procedure below.
+
+The private store also retains a validated database descriptor before SQLite
+opens the same path, checks its device/inode against directory-relative
+no-follow metadata after opening and before configuration writes, and closes the
+pin only after SQLite closes and before releasing the cooperating-writer lock.
+Missing/replaced paths fail closed and latch that store unavailable.
+Configuration writes return the fixed storage-unavailable response; the
+independent request-audit store uses
+the same checks; request admission also checks its pinned identity synchronously
+without taking the hub mutex or opening a database descriptor. A safe SQLite
+commit hook checks the same identity before every persistent transaction commit,
+including worker/autocommit writes that bypass HTTP checks. Drift refuses commit
+and rolls the transaction back, so Telegram offsets cannot advance into an
+orphan through the interval between periodic checks. The hook does no SQL or
+network I/O. Rollback cannot undo an external send or Core acknowledgement
+already issued: workers must still propagate commit failure, acknowledge only
+after durable completion, and preserve ambiguous transport outcomes. A replacement
+racing after the final filesystem check remains outside the same-UID guarantees
+described below. Restoring a
+pathname does not clear the latch: stop the App, restore a consistent complete
+private backup if needed, and reopen it under operator control. No live restore
+or automatic file recreation is a recovery procedure. Restart pins the current
+file afresh; it never adopts or migrates rows from an orphan inode automatically.
+Any recovery of orphan data is an explicit offline operator decision. These checks detect drift;
+they do not provide an atomic filesystem boundary against another same-UID
+process racing metadata checks and writes.
+
 Closing the store explicitly unlocks after SQLite closes, so a forked CLI child's
 inherited descriptor cannot keep the writer lock alive until exec/exit. A
 regression holds that shared descriptor in a private child while reopening;
@@ -363,7 +411,7 @@ limitations visible alongside those states.
 
 `hub::Hub` now owns the bounded durable Core fragment inbox and per-ID metadata
 checks. It is not yet an HTTP server or complete hub program. Only a future
-owner-authenticated service may call its binding/resume/pause methods; this Rust
+authenticated binding-management service may call its binding/resume/pause methods; this Rust
 API does not perform browser authentication. New bindings start paused. Resume
 requires an exact revision and fresh per-stable-ID `agent show -- ID`, matching
 workspace, command kind, canonical path, cwd and machine. It never enumerates the
@@ -1000,8 +1048,16 @@ Supported command objects (writes require `confirm:true`):
   mutation. The UI displays the preview before confirmation and invalidates it
   when an input changes.
   The hub queries both stable IDs through its own Core identity outside the state
-  mutex, requires command Agents in its workspace and a placed endpoint, and
+  mutex, requires both Agents in its workspace and a placed command endpoint, and
   derives expected path/cwd/machine from Core. Creation is paused at revision 1.
+  A recipient may be a shell, command or other Agent runtime kind: Core Message
+  delivery does not require a command process. The endpoint must remain a command
+  Agent running the fixed relay profile, also checked during readback/resume.
+  Preview/create metadata failures return fixed 400 error codes:
+  `invalid_binding_identity`, `endpoint_identity_mismatch`,
+  `recipient_identity_mismatch`, `endpoint_workspace_mismatch`,
+  `recipient_workspace_mismatch`, `endpoint_kind_unsupported`, or
+  `endpoint_unplaced`; responses never echo raw metadata or input values.
 - `{"action":"pause","endpoint_id":"ag_endpoint","revision":1,"confirm":true}`.
 - `{"action":"bind_telegram","endpoint_id":"ag_endpoint","revision":2,"target":{"account_id":"bot_team","chat_id":123,"topic_id":null,"allowed_senders":[456]},"confirm":true}`.
   The binding must be paused. This pins target metadata only, never accepts a bot

@@ -133,6 +133,10 @@ impl CoreWorkers {
                                 } else {
                                     increment(&c.failures);
                                 }
+                                #[cfg(feature = "hub")]
+                                if crate::management::dispatch_one(&s, unix_now()).is_err() {
+                                    increment(&c.failures);
+                                }
                                 wait(&c, MAINTENANCE_INTERVAL);
                             }
                         })?,

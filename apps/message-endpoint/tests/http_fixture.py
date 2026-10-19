@@ -18,6 +18,9 @@ import time
 
 TOKEN = 'fixture.owner.token'
 MEMBER = 'fixture.member.token'
+AGENT = 'fixture.agent.token'
+APP_AGENT = 'fixture.app.token'
+ABSENT_AGENT = 'fixture.absent.token'
 THREAD = 'e'*64
 PREFIX = '/api/workspaces/ws_test/apps/svc_hub/ui/'
 LONG_PATH = '/team/' + 'Long same-named Agent ' * 7 + '<img src=x onerror=alert(1)>'
@@ -38,16 +41,21 @@ class Proxy(Quiet):
         size = int(self.headers.get('Content-Length', '0'))
         if size > 16384:
             return self.reply(400, {})
+        self.server.verify_requests = getattr(self.server,'verify_requests',0)+1
         body = json.loads(self.rfile.read(size))
         token=body.get('token')
-        accepted={MEMBER,TOKEN,TOKEN+'_member',TOKEN+'_agent',TOKEN+'_expired',TOKEN+'_workspace',TOKEN+'_audience'}
+        accepted={AGENT,APP_AGENT,ABSENT_AGENT,MEMBER,TOKEN,TOKEN+'_member',TOKEN+'_agent',TOKEN+'_expired',TOKEN+'_workspace',TOKEN+'_audience'}
         if self.path != '/.treer/apps/identity/verify' or body.get('audience')!='svc_hub' or token not in accepted:
             return self.reply(401, {'active': False})
+        if token in (AGENT,APP_AGENT,ABSENT_AGENT):
+            return self.reply(200,{'active':True,'claims':{'sub':'ag_app_runtime' if token==APP_AGENT else 'ag_manager','principal_kind':'agent','workspace_id':'ws_test','service_id':'svc_hub','machine_id':'machine_fixture','exp':int(time.time())+300}})
         self.reply(200, {'active': True, 'claims': {'sub': 'user_member' if token==MEMBER else 'user_owner', 'principal_kind': 'agent' if token.endswith('_agent') else 'human', 'workspace_id': 'ws_other' if token.endswith('_workspace') else 'ws_test', 'service_id': 'svc_other' if token.endswith('_audience') else 'svc_hub', 'exp': int(time.time()) + (-1 if token.endswith('_expired') else 300)}})
     def do_GET(self):
         authorization=self.headers.get('Authorization')
-        if self.path != '/api/apps/svc_hub/directory' or authorization not in ('Bearer '+TOKEN,'Bearer '+TOKEN+'_member','Bearer '+MEMBER,'Bearer synthetic.app.signature'):
+        if self.path != '/api/apps/svc_hub/directory' or authorization not in ('Bearer '+AGENT,'Bearer '+APP_AGENT,'Bearer '+ABSENT_AGENT,'Bearer '+TOKEN,'Bearer '+TOKEN+'_member','Bearer '+MEMBER,'Bearer synthetic.app.signature'):
             return self.reply(403, {})
+        if authorization in ('Bearer '+AGENT,'Bearer '+APP_AGENT,'Bearer '+ABSENT_AGENT):
+            return self.reply(200,{'principals':[] if authorization=='Bearer '+ABSENT_AGENT else [{'id':'ag_app_runtime' if authorization=='Bearer '+APP_AGENT else 'ag_manager','kind':'agent','path':None}]})
         self.reply(200, {'principals': [{'id': 'user_owner', 'kind': 'human', 'role': 'member' if authorization.endswith('_member') else 'owner'},{'id':'user_member','kind':'human','role':'member'}]})
 
 @contextlib.contextmanager
@@ -64,13 +72,16 @@ def server(handler):
         thread.join(timeout=3)
 
 @contextlib.contextmanager
-def fixture(binary, editable=False, activation=False, tokens=False, email=False):
+def fixture(binary, editable=False, activation=False, tokens=False, email=False, seed=True):
     with tempfile.TemporaryDirectory(prefix='endpoint-http-fixture-') as temp, server(Proxy) as proxy:
         root = Path(temp).resolve()
         root.chmod(0o700)
         cli = root / 'fixture-cli'
         # Fixed argv, no environment credential access and no network calls.
-        cli.write_text('#!/usr/bin/python3\nimport json,sys\nif sys.argv[1:3]==["message","receive"]: print(json.dumps({"deliveries":[],"remaining_unacknowledged":0}))\nelif sys.argv[1:4]==["token","create","svc_hub"]: print(json.dumps({"access_token":"synthetic.app.signature","token_type":"Bearer","audience":"svc_hub","expires_in":300}))\nelif sys.argv[1:4]==["agent","show","--"] and sys.argv[4] in ("ag_demo","ag_new","ag_recipient","ag_wrong_workspace","ag_unplaced"): print(json.dumps({"agent_id":sys.argv[4],"workspace_id":"ws_other" if sys.argv[4]=="ag_wrong_workspace" else "ws_test","server_id":"machine_fixture","kind":"command","cwd":"/private/fixture","status":"running","path":None if sys.argv[4]=="ag_unplaced" else "/team/"+sys.argv[4]}))\nelse: sys.exit(1)\n')
+        cli.write_text('#!/usr/bin/python3\nimport json,sys\nif sys.argv[1:3]==["message","receive"]: print(json.dumps({"deliveries":[],"remaining_unacknowledged":0}))\nelif sys.argv[1:4]==["token","create","svc_hub"]: print(json.dumps({"access_token":"synthetic.app.signature","token_type":"Bearer","audience":"svc_hub","expires_in":300}))\nelif sys.argv[1:4]==["agent","show","--"] and sys.argv[4] in ("ag_demo","ag_new","ag_recipient","ag_wrong_workspace","ag_unplaced"): print(json.dumps({"agent_id":sys.argv[4],"workspace_id":"ws_other" if sys.argv[4]=="ag_wrong_workspace" else "ws_test","server_id":"machine_fixture","kind":"shell" if sys.argv[4]=="ag_recipient" else "command","cwd":"/private/fixture","status":"running","path":None if sys.argv[4]=="ag_unplaced" else "/team/"+sys.argv[4]}))\nelse: sys.exit(1)\n')
+        # Native management notices use the hub's own identity, never a recipient's.
+        text=cli.read_text().replace('else: sys.exit(1)', 'elif sys.argv[1:3]==["message","send"]:\n import os\n envelope=json.load(sys.stdin)\n target=next(x[5:] for x in sys.argv if x.startswith("--to="))\n log=__file__+".notices"\n with open(log,"a") as f: f.write(json.dumps({"target":target,"body":envelope["body"]})+"\\n")\n os.chmod(log,0o600)\n print(json.dumps({"message":{"message_id":"msg_notice","sender":{"kind":"agent","id":"app_hub"},"body":envelope["body"]}}))\nelse: sys.exit(1)')
+        cli.write_text(text)
         cli.chmod(0o700)
         with socket.socket() as reservation:
             reservation.bind(('127.0.0.1', 0))
@@ -81,6 +92,11 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False)
         environment = {'HOME':str(root),'TMPDIR':str(root),'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','TREER_AGENT_ID':'app_hub','TREER_WORKSPACE_ID':'ws_test'}
         captured_stderr = []
         process = subprocess.Popen([str(binary),'--config',str(config)],env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        def stop():
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:process.wait(timeout=20)
+                except subprocess.TimeoutExpired:process.kill();process.wait(timeout=3)
         def request(path, headers=None, method='GET', body=None):
             connection = http.client.HTTPConnection('127.0.0.1',port,timeout=3)
             try:
@@ -100,16 +116,17 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False)
                     time.sleep(.05)
             else:
                 raise AssertionError('fixture hub did not listen')
-            db=sqlite3.connect(root/'state/hub.sqlite3')
-            binding={'endpoint_id':'ag_demo','generation':1,'recipient':'ag_recipient','expected_path':'/team/ag_demo' if email else LONG_PATH,'expected_cwd':'/private/fixture','expected_server_id':'machine_fixture'}
-            db.execute('INSERT INTO endpoints(id,generation,recipient,paused) VALUES(?,?,?,1)',('ag_demo',1,'ag_recipient'))
-            db.execute('INSERT INTO hub_bindings(endpoint,definition) VALUES(?,?)',('ag_demo',json.dumps(binding)))
-            if email:
-                db.execute("UPDATE endpoints SET paused=0 WHERE id='ag_demo'")
-                db.execute("INSERT INTO email_targets(endpoint,generation,address,member) VALUES('ag_demo',1,'person@example.test','user_member')")
-                db.execute("INSERT INTO email_threads VALUES(?,'ag_demo',1,'ag_recipient','person@example.test','user_member')",(THREAD,))
-                db.execute("INSERT INTO email_messages VALUES(?,'msg_browser','<script>window.PWNED=1</script> & confidential text','fixture_digest',?)",(THREAD,int(time.time())))
-            db.commit();db.close()
+            if seed:
+                db=sqlite3.connect(root/'state/hub.sqlite3')
+                binding={'endpoint_id':'ag_demo','generation':1,'recipient':'ag_recipient','expected_path':'/team/ag_demo' if email else LONG_PATH,'expected_cwd':'/private/fixture','expected_server_id':'machine_fixture'}
+                db.execute('INSERT INTO endpoints(id,generation,recipient,paused) VALUES(?,?,?,1)',('ag_demo',1,'ag_recipient'))
+                db.execute('INSERT INTO hub_bindings(endpoint,definition) VALUES(?,?)',('ag_demo',json.dumps(binding)))
+                if email:
+                    db.execute("UPDATE endpoints SET paused=0 WHERE id='ag_demo'")
+                    db.execute("INSERT INTO email_targets(endpoint,generation,address,member) VALUES('ag_demo',1,'person@example.test','user_member')")
+                    db.execute("INSERT INTO email_threads VALUES(?,'ag_demo',1,'ag_recipient','person@example.test','user_member')",(THREAD,))
+                    db.execute("INSERT INTO email_messages VALUES(?,'msg_browser','<script>window.PWNED=1</script> & confidential text','fixture_digest',?)",(THREAD,int(time.time())))
+                db.commit();db.close()
             def forward_handler(embedded):
                 class Forward(Quiet):
                     def do_GET(self):
@@ -134,12 +151,9 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False)
                         self.end_headers();self.wfile.write(body)
                 return Forward
             with server(forward_handler(False)) as wildcard, server(forward_handler(True)) as embedded:
-                yield {'url':f'http://127.0.0.1:{port}/','wildcard':f'http://127.0.0.1:{wildcard.server_port}/','embedded':f'http://127.0.0.1:{embedded.server_port}/console','prefix':PREFIX,'request':request,'pid':process.pid,'state':root/'state','root':root,'stderr':captured_stderr}
+                yield {'url':f'http://127.0.0.1:{port}/','wildcard':f'http://127.0.0.1:{wildcard.server_port}/','embedded':f'http://127.0.0.1:{embedded.server_port}/console','prefix':PREFIX,'request':request,'pid':process.pid,'stop':stop,'state':root/'state','root':root,'stderr':captured_stderr,'proxy':proxy,'auditdb':root/'state/management-audit/hub.sqlite3'}
         finally:
-            if process.poll() is None:
-                process.send_signal(signal.SIGINT)
-                try:process.wait(timeout=20)
-                except subprocess.TimeoutExpired:process.kill();process.wait(timeout=3)
+            stop()
             if process.stderr:
                 captured_stderr.append(process.stderr.read())
                 process.stderr.close()

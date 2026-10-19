@@ -1,9 +1,9 @@
-//! Owner-only configuration commands. No transport token, caller identity, or
+//! Verified owner/Agent binding configuration commands. No transport token, caller identity, or
 //! claimed Core metadata is accepted from JSON. New endpoints remain paused.
 use crate::{
     core::Core,
     hub::{Binding, Directory},
-    owner_auth::Owner,
+    owner_auth::BindingManager,
     relay::Mailbox,
     scheduler::SharedHub,
     telegram::Target,
@@ -24,11 +24,18 @@ pub enum Command {
         recipient: String,
     },
     Create {
+        #[serde(default)]
+        idempotency_key: Option<String>,
         endpoint_id: String,
         generation: i64,
         recipient: String,
         confirm: bool,
         expected: Preview,
+    },
+    Delete {
+        endpoint_id: String,
+        revision: i64,
+        confirm: bool,
     },
     Pause {
         endpoint_id: String,
@@ -119,6 +126,9 @@ pub enum Outcome {
         archive: crate::archive::Export,
     },
     MetadataCleared,
+    Deleted {
+        endpoint_id: String,
+    },
     RecoveryStatus {
         endpoint_id: String,
         revision: i64,
@@ -143,7 +153,7 @@ fn preview<D: Directory>(
         || !crate::store::valid_id(endpoint_id)
         || !crate::store::valid_id(recipient)
     {
-        return Err(Failure::Invalid);
+        return Err(Failure::InvalidPreview("invalid_binding_identity"));
     }
     let endpoint = directory
         .metadata(endpoint_id)
@@ -151,16 +161,27 @@ fn preview<D: Directory>(
     let recipient_meta = directory
         .metadata(recipient)
         .map_err(|_| Failure::Unavailable)?;
-    if endpoint.agent_id != endpoint_id
-        || recipient_meta.agent_id != recipient
-        || endpoint.workspace_id != workspace
-        || recipient_meta.workspace_id != workspace
-        || endpoint.kind != "command"
-        || recipient_meta.kind != "command"
-    {
-        return Err(Failure::Invalid);
+    if endpoint.agent_id != endpoint_id {
+        return Err(Failure::InvalidPreview("endpoint_identity_mismatch"));
     }
-    let path = endpoint.path.ok_or(Failure::Invalid)?;
+    if recipient_meta.agent_id != recipient {
+        return Err(Failure::InvalidPreview("recipient_identity_mismatch"));
+    }
+    if endpoint.workspace_id != workspace {
+        return Err(Failure::InvalidPreview("endpoint_workspace_mismatch"));
+    }
+    if recipient_meta.workspace_id != workspace {
+        return Err(Failure::InvalidPreview("recipient_workspace_mismatch"));
+    }
+    // The endpoint runs the fixed relay command; its kind is also checked by
+    // Hub readback/resume. Recipients only need a Core mailbox, so shell and
+    // other Agent runtime kinds are valid recipients.
+    if endpoint.kind != "command" {
+        return Err(Failure::InvalidPreview("endpoint_kind_unsupported"));
+    }
+    let path = endpoint
+        .path
+        .ok_or(Failure::InvalidPreview("endpoint_unplaced"))?;
     let preview = Preview {
         endpoint_id: endpoint_id.into(),
         generation,
@@ -217,9 +238,11 @@ fn recovery_status<M: Mailbox + Directory>(
 #[derive(Clone, Copy, Debug)]
 pub enum Failure {
     Invalid,
+    InvalidPreview(&'static str),
     Conflict,
     Unavailable,
     Expired,
+    Forbidden,
 }
 fn current_time() -> Result<i64, Failure> {
     SystemTime::now()
@@ -236,21 +259,21 @@ fn map_hub(error: crate::hub::Error) -> Failure {
         _ => Failure::Unavailable,
     }
 }
-fn check_owner(owner: &Owner) -> Result<i64, Failure> {
+fn check_owner(owner: &BindingManager) -> Result<i64, Failure> {
     let now = current_time()?;
     if now >= owner.expires_at() {
         return Err(Failure::Expired);
     }
     Ok(now)
 }
-/// Only the HTTP boundary can supply Owner, after current Proxy verification.
+/// Only the HTTP boundary can supply BindingManager after current Proxy verification.
 /// Directory calls run before taking the hub mutex; failures never install
 /// caller-supplied paths or partially create an endpoint.
 pub fn execute<M: Mailbox + Directory, D: Directory>(
     shared: &SharedHub<M>,
     directory: &D,
     workspace: &str,
-    owner: &Owner,
+    owner: &BindingManager,
     command: Command,
 ) -> Result<Outcome, Failure> {
     execute_with_activation(
@@ -266,11 +289,36 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
     shared: &SharedHub<M>,
     directory: &D,
     workspace: &str,
-    owner: &Owner,
+    owner: &BindingManager,
     command: Command,
     activation: &Activation,
 ) -> Result<Outcome, Failure> {
     check_owner(owner)?;
+    {
+        let h = shared.lock().map_err(|_| Failure::Unavailable)?;
+        h.store
+            .recheck_private_storage()
+            .map_err(|_| Failure::Unavailable)?;
+        if owner.kind() == "agent" {
+            crate::management::register(&h.store.db, owner.id())
+                .map_err(|_| Failure::Unavailable)?;
+        }
+    }
+    if owner.kind() == "agent"
+        && !matches!(
+            &command,
+            Command::Delete { .. }
+                | Command::PreviewCreate { .. }
+                | Command::Create { .. }
+                | Command::Pause { .. }
+                | Command::PreviewResume { .. }
+                | Command::Resume { .. }
+                | Command::BindEmail { .. }
+                | Command::BindTelegram { .. }
+        )
+    {
+        return Err(Failure::Forbidden);
+    }
     match command {
         Command::PreviewResume { endpoint_id } => activation::preview_resume(
             shared,
@@ -308,6 +356,7 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             Ok(Outcome::Preview { preview })
         }
         Command::Create {
+            idempotency_key,
             endpoint_id,
             generation,
             recipient,
@@ -317,6 +366,40 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             if !confirm {
                 return Err(Failure::Invalid);
             }
+            if owner.kind() == "agent" && idempotency_key.is_none() {
+                return Err(Failure::Invalid);
+            }
+            if idempotency_key
+                .as_deref()
+                .is_some_and(|k| k.len() > 128 || !crate::store::valid_id(k))
+            {
+                return Err(Failure::Invalid);
+            }
+            let fingerprint=format!("{:x}",Sha256::digest(serde_json::to_vec(&serde_json::json!({"endpoint":endpoint_id,"generation":generation,"recipient":recipient,"expected":expected})).map_err(|_|Failure::Invalid)?));
+            if let Some(key) = &idempotency_key {
+                use rusqlite::OptionalExtension;
+                let h = shared.lock().map_err(|_| Failure::Unavailable)?;
+                let old: Option<String> = h
+                    .store
+                    .db
+                    .query_row(
+                        "SELECT fingerprint FROM hub_create_requests WHERE actor=?1 AND key=?2",
+                        rusqlite::params![owner.id(), key],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|_| Failure::Unavailable)?;
+                if let Some(old) = old {
+                    return if old == fingerprint {
+                        Ok(Outcome::Saved {
+                            revision: 1,
+                            paused: true,
+                        })
+                    } else {
+                        Err(Failure::Conflict)
+                    };
+                }
+            }
             let (current, binding) =
                 preview(directory, workspace, &endpoint_id, generation, &recipient)?;
             if expected != current {
@@ -324,9 +407,51 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             }
             let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
             let now = check_owner(owner)?;
-            hub.add_binding_audited(binding, owner.id(), now)
-                .map_err(map_hub)?;
+            if let Some(key) = idempotency_key.as_deref() {
+                // A concurrent identical request may have committed while the
+                // Core metadata preview ran outside the hub mutex.
+                use rusqlite::OptionalExtension;
+                let committed: Option<String> = hub
+                    .store
+                    .db
+                    .query_row(
+                        "SELECT fingerprint FROM hub_create_requests WHERE actor=?1 AND key=?2",
+                        rusqlite::params![owner.id(), key],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|_| Failure::Unavailable)?;
+                if let Some(committed) = committed {
+                    return if committed == fingerprint {
+                        Ok(Outcome::Saved {
+                            revision: 1,
+                            paused: true,
+                        })
+                    } else {
+                        Err(Failure::Conflict)
+                    };
+                }
+                hub.add_binding_idempotent(binding, owner.id(), now, key, &fingerprint)
+                    .map_err(map_hub)?;
+            } else {
+                hub.add_binding_audited(binding, owner.id(), now)
+                    .map_err(map_hub)?;
+            }
             saved(&hub, &endpoint_id)
+        }
+        Command::Delete {
+            endpoint_id,
+            revision,
+            confirm,
+        } => {
+            if !confirm || revision < 1 {
+                return Err(Failure::Invalid);
+            }
+            let mut h = shared.lock().map_err(|_| Failure::Unavailable)?;
+            let now = check_owner(owner)?;
+            h.delete_binding_audited(&endpoint_id, revision, owner.id(), now)
+                .map_err(map_hub)?;
+            Ok(Outcome::Deleted { endpoint_id })
         }
         Command::Pause {
             endpoint_id,
@@ -446,8 +571,80 @@ pub(crate) fn core_executor(
     core: Core,
     workspace: String,
     activation: Activation,
-) -> impl Fn(&Owner, Command) -> Result<Outcome, Failure> + Send + Sync {
+) -> impl Fn(&BindingManager, Command) -> Result<Outcome, Failure> + Send + Sync {
     move |owner, command| {
         execute_with_activation(&shared, &core, &workspace, owner, command, &activation)
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::core::AgentMetadata;
+
+    struct Metadata {
+        endpoint: AgentMetadata,
+        recipient: AgentMetadata,
+    }
+    impl Directory for Metadata {
+        fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error> {
+            Ok(if id == "ag_endpoint" {
+                self.endpoint.clone()
+            } else {
+                self.recipient.clone()
+            })
+        }
+    }
+    fn fixture() -> Metadata {
+        let mut endpoint = crate::recovery::tests::metadata();
+        endpoint.agent_id = "ag_endpoint".into();
+        let mut recipient = endpoint.clone();
+        recipient.agent_id = "ag_recipient".into();
+        Metadata {
+            endpoint,
+            recipient,
+        }
+    }
+    #[test]
+    fn recipients_with_shell_or_other_runtime_kinds_have_core_mailboxes() {
+        let mut d = fixture();
+        for kind in ["shell", "command", "app", "future_runtime"] {
+            d.recipient.kind = kind.into();
+            assert!(preview(
+                &d,
+                &d.endpoint.workspace_id,
+                "ag_endpoint",
+                1,
+                "ag_recipient"
+            )
+            .is_ok());
+        }
+    }
+    #[test]
+    fn preview_errors_are_specific_and_keep_identity_workspace_and_relay_checks() {
+        for (field, code) in [
+            ("endpoint_id", "endpoint_identity_mismatch"),
+            ("recipient_id", "recipient_identity_mismatch"),
+            ("endpoint_workspace", "endpoint_workspace_mismatch"),
+            ("recipient_workspace", "recipient_workspace_mismatch"),
+            ("endpoint_kind", "endpoint_kind_unsupported"),
+            ("endpoint_path", "endpoint_unplaced"),
+        ] {
+            let mut d = fixture();
+            let workspace = d.endpoint.workspace_id.clone();
+            match field {
+                "endpoint_id" => d.endpoint.agent_id = "ag_wrong".into(),
+                "recipient_id" => d.recipient.agent_id = "ag_wrong".into(),
+                "endpoint_workspace" => d.endpoint.workspace_id = "ws_other".into(),
+                "recipient_workspace" => d.recipient.workspace_id = "ws_other".into(),
+                "endpoint_kind" => d.endpoint.kind = "shell".into(),
+                "endpoint_path" => d.endpoint.path = None,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                preview(&d, &workspace, "ag_endpoint", 1, "ag_recipient"),
+                Err(Failure::InvalidPreview(actual)) if actual == code
+            ));
+        }
     }
 }

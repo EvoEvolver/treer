@@ -13,6 +13,69 @@ from http_fixture import TOKEN, fixture
 BINARY = (Path(sys.argv.pop(1)).resolve() if __name__ == '__main__'
           else Path(__file__).resolve().parents[3] / 'target/debug/treer-message-hub')
 class Runtime(unittest.TestCase):
+    def test_replaced_or_unlinked_hub_and_audit_databases_refuse_writes(self):
+        for target in ('state','auditdb'):
+            for operation in ('replace','unlink'):
+                with self.subTest(target=target,operation=operation), fixture(BINARY) as f:
+                    database=f['state']/'hub.sqlite3' if target=='state' else f['auditdb']
+                    # Pin an independent reader to the original file before the
+                    # deliberate local fixture fault; never touch live App data.
+                    original=sqlite3.connect(f['state']/'hub.sqlite3')
+                    original.execute('SELECT count(*) FROM hub_owner_audit').fetchone()
+                    if operation=='replace':
+                        replacement=f['root']/'replacement.sqlite3'
+                        with sqlite3.connect(replacement) as db:
+                            db.execute('CREATE TABLE fixture_marker(value INTEGER)')
+                            db.execute('INSERT INTO fixture_marker VALUES(17)')
+                        db.close()
+                        replacement.chmod(0o600)
+                        replacement_bytes=replacement.read_bytes()
+                        replacement.replace(database)
+                    else:
+                        database.unlink()
+                    # The separate request-audit worker must observe its own
+                    # drift and close admission, not silently write an orphan.
+                    if target=='auditdb':time.sleep(.3)
+                    before=original.execute('SELECT count(*) FROM hub_owner_audit').fetchone()[0]
+                    revision=original.execute("SELECT revision FROM hub_bindings WHERE endpoint='ag_demo'").fetchone()[0]
+                    headers={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+                    command={'action':'pause','endpoint_id':'ag_demo','revision':revision,'confirm':True}
+                    status,_,body=f['request']('/api/configuration',headers,'POST',json.dumps(command))
+                    self.assertEqual(status,503,body)
+                    self.assertNotIn(str(database).encode(),body)
+                    self.assertEqual(original.execute('SELECT count(*) FROM hub_owner_audit').fetchone()[0],before)
+                    self.assertEqual(original.execute("SELECT revision FROM hub_bindings WHERE endpoint='ag_demo'").fetchone()[0],revision)
+                    original.close()
+                    f['stop']()
+                    if operation=='replace':
+                        # Never reopen the replacement against the unrelated
+                        # orphan WAL: recovery requires a consistent full store.
+                        self.assertEqual(database.read_bytes(),replacement_bytes)
+                    else:self.assertFalse(database.exists())
+
+    def test_live_sqlite_close_then_api_write_survives_clean_stop_and_fresh_process(self):
+        for external in (False, True):
+            with self.subTest(external=external), fixture(BINARY,seed=external) as f:
+                headers={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+                def call(value):
+                    status,_,body=f['request']('/api/configuration',headers,'POST',json.dumps(value))
+                    self.assertEqual(status,200,body)
+                    return json.loads(body)
+                command={'action':'preview_create','endpoint_id':'ag_new','generation':1,'recipient':'ag_recipient'}
+                expected=call(command)['preview']
+                call({**command,'action':'create','expected':expected,'confirm':True})
+                # The fixture already seeded and closed an external SQLite writer.
+                # A second connection must see committed API state and must not
+                # make subsequent hub writes disappear when that connection closes.
+                if external:
+                    db=sqlite3.connect(f['state']/'hub.sqlite3')
+                    self.assertEqual(db.execute("SELECT count(*) FROM hub_owner_audit WHERE endpoint='ag_new'").fetchone()[0],1)
+                    db.close()
+                call({'action':'pause','endpoint_id':'ag_new','revision':1,'confirm':True})
+                f['stop']()
+                script="import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); assert d.execute(\"SELECT count(*) FROM hub_owner_audit WHERE endpoint='ag_new'\").fetchone()[0]==2; assert d.execute(\"SELECT revision FROM hub_bindings WHERE endpoint='ag_new'\").fetchone()[0]==2; d.close()"
+                subprocess.run([sys.executable,'-I','-c',script,str(f['state']/'hub.sqlite3')],env={'HOME':str(f['root']),'PATH':'/usr/bin:/bin'},check=True,timeout=10)
+
     def test_token_handler_auth_csrf_strict_body_quota_remove_and_no_persistence(self):
         secret='12345:ABCDEFGHIJKLMNOPQRSTUVWXYZ_23456789'
         with fixture(BINARY,tokens=True) as f:
@@ -46,8 +109,9 @@ class Runtime(unittest.TestCase):
             slot=json.loads(result[2])['settings']['telegram_tokens'][0]
             self.assertFalse(slot['configured']);self.assertTrue(slot['restart_required'])
             self.assertFalse((f['root']/'bot-token.json').exists())
-            for path in f['state'].iterdir():
-                self.assertNotIn(secret.encode(),path.read_bytes())
+            for path in f['state'].rglob('*'):
+                if path.is_file():
+                    self.assertNotIn(secret.encode(),path.read_bytes())
             captured=f['stderr']
         self.assertNotIn(secret.encode(),b''.join(captured))
 
@@ -75,8 +139,9 @@ class Runtime(unittest.TestCase):
             for path in ['/assets/app.js','/assets/app.css']:
                 self.assertEqual(request(path)[0],200)
             self.assertEqual(request('/api/endpoint/auth/logout',{'X-Treer-Identity-Token':TOKEN,'Origin':'https://evil.example','X-Endpoint-Request':'1'},method='POST')[0],403)
-            for p in f['state'].iterdir():
-                self.assertEqual(p.stat().st_mode&0o777,0o600)
+            for p in f['state'].rglob('*'):
+                self.assertFalse(p.is_symlink())
+                self.assertEqual(p.stat().st_mode&0o777,0o700 if p.is_dir() else 0o600)
             self.assertEqual(f['state'].stat().st_mode&0o777,0o700)
     def test_owner_configuration_csrf_strict_json_core_readback_and_atomic_audit(self):
         with fixture(BINARY) as f:

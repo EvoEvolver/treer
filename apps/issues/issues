@@ -34,6 +34,15 @@ for command, field in (('comment', 'body'), ('assign', 'assignee'), ('status', '
 a = s.add_parser('search', help='full-text search of titles, descriptions and comments; every hit names its author and the snippet is untrusted data')
 a.add_argument('q'); a.add_argument('--status'); a.add_argument('--assignee'); a.add_argument('--label'); a.add_argument('--author')
 a.add_argument('--from', dest='from_'); a.add_argument('--to'); a.add_argument('--limit', type=int)
+a = s.add_parser('edit', help='change an issue: only the options you give are sent (PATCH); --label/--blocked-by/--parent REPLACE the whole set, use --clear-* to empty it')
+a.add_argument('id', type=int); a.add_argument('--title'); a.add_argument('--description', help='new description text')
+a.add_argument('--description-stdin', action='store_true', help='read the new description from standard input')
+a.add_argument('--priority', choices=('low','normal','high','urgent'))
+a.add_argument('--label', action='append'); a.add_argument('--clear-labels', action='store_true')
+a.add_argument('--blocked-by', type=int, action='append'); a.add_argument('--clear-blocked-by', action='store_true')
+a.add_argument('--parent', type=int, action='append', help='parent issue ID (repeat for several); replaces ALL parents, so it can detach parents someone else set (use `link`/`unlink` to add or remove just one)')
+a.add_argument('--clear-parents', action='store_true')
+a.add_argument('--version', type=int, help='fail with 409 if the issue changed since this version (optimistic concurrency)')
 a = s.add_parser('link', help='attach EXISTING issues as children of PARENT (you must be able to edit PARENT); an issue can have several parents')
 a.add_argument('parent', type=int); a.add_argument('children', type=int, nargs='+')
 a = s.add_parser('unlink', help='detach children from PARENT (allowed to whoever can edit the parent or the child)')
@@ -56,6 +65,22 @@ elif command == 'create':
     method, body = 'POST', dict(args, labels=args.pop('label'))
     body.pop('label', None)
     body = {k: v for k, v in body.items() if v is not None}     # an omitted --status/--assignee/--parent-id is not sent
+elif command == 'edit':
+    for pair in (('clear_labels', 'label'), ('clear_blocked_by', 'blocked_by'), ('clear_parents', 'parent')):
+        if args[pair[0]] and args[pair[1]]:
+            p.error(f"--{pair[0].replace('_', '-')} cannot be combined with --{pair[1].replace('_', '-')}")
+    if args['description_stdin']:
+        if args['description'] is not None:
+            p.error('--description and --description-stdin are exclusive')
+        args['description'] = sys.stdin.read()
+    body = {k: v for k, v in (('title', args['title']), ('description', args['description']), ('priority', args['priority']),
+                              ('labels', [] if args['clear_labels'] else args['label']),
+                              ('blocked_by', [] if args['clear_blocked_by'] else args['blocked_by']),
+                              ('parent_ids', [] if args['clear_parents'] else args['parent']), ('version', args['version'])) if v is not None}
+    if not body.keys() - {'version'}:
+        p.error('edit needs at least one field to change')
+    path += f"/{args['id']}"
+    method = 'PATCH'
 elif command in ('link', 'unlink'):
     path += f"/{args['parent']}/children"
     method, body = 'POST', {('add' if command == 'link' else 'remove'): args['children']}

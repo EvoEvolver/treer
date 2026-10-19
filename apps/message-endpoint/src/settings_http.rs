@@ -5,7 +5,7 @@
 pub mod email_threads;
 use crate::{
     oauth::OAuthVault,
-    owner_auth::{Error, Owner, OwnerAuth},
+    owner_auth::{BindingManager, Error, OwnerAuth},
 };
 use axum::{
     body::{to_bytes, Body},
@@ -26,10 +26,11 @@ use tokio::sync::Semaphore;
 
 const SESSION: &str = "__Host-treer-endpoint-session";
 const BROWSER: &str = "__Host-treer-endpoint-login";
-const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings and endpoint status. Browsers receive the human interface.\n\n## Inspect\n\n`GET /health` reports process health. `GET /api/settings` requires a current verified workspace human owner and returns bounded endpoint metadata.\n\n## Authentication\n\nTreer-injected App identity takes precedence; an invalid supplied identity is rejected. Without an identity, open this App in a browser and use Treer OAuth. Opaque sessions remain HttpOnly; never paste tokens into URLs. This settings service does not accept Agent administration credentials.\n\nPOST /api/configuration accepts confirmed owner create, pause, bind_telegram, recovery and metadata commands. Owner resume requires a separate default-off operator gate, fresh Core metadata, ready Telegram identity and explicit owner declarations about profile and isolation. These declarations are not attestation by the App. State contains sensitive metadata: keep this Managed App workspace-only, use a dedicated OS user or container, and protect backups.\n";
+const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings and endpoint status. Browsers receive the human interface.\n\n## Inspect\n\n`GET /health` reports process health. `GET /api/settings` requires a current verified workspace Agent or human owner and returns bounded endpoint metadata.\n\n## Authentication\n\nTreer-injected App identity takes precedence; an invalid supplied identity is rejected. Without an identity, open this App in a browser and use Treer OAuth. Opaque sessions remain HttpOnly; never paste tokens into URLs. Workspace Agents can manage bindings with their own verified Treer identity. Token editing, OAuth and metadata purge remain human-owner-only. See AGENT-API.md for the shared JSON API.\n\nPOST /api/configuration accepts confirmed binding create, pause, delete and target changes from workspace Agents or the human owner; recovery and metadata commands require the human owner. Owner resume requires a separate default-off operator gate, fresh Core metadata, ready Telegram identity and explicit owner declarations about profile and isolation. These declarations are not attestation by the App. State contains sensitive metadata: keep this Managed App workspace-only, use a dedicated OS user or container, and protect backups.\n";
 #[derive(Default, Serialize)]
 pub struct SettingsSnapshot {
     pub endpoints: Vec<EndpointSnapshot>,
+    pub management_notices: crate::management::NoticeStatus,
     pub email: Option<crate::email_workers::Snapshot>,
     pub activation_enabled: bool,
     pub workers: crate::scheduler::WorkerStatus,
@@ -89,6 +90,11 @@ impl From<crate::hub::View> for EndpointSnapshot {
         }
     }
 }
+fn agent_snapshot(id: &str, snapshot: &SettingsSnapshot) -> Value {
+    let endpoints:Vec<_>=snapshot.endpoints.iter().map(|e|json!({"binding":{"endpoint_id":e.binding.endpoint_id,"generation":e.binding.generation,"recipient":e.binding.recipient,"expected_path":e.binding.expected_path,"expected_server_id":e.binding.expected_server_id},"revision":e.revision,"paused":e.paused,"reason":e.reason,"isolation":e.isolation})).collect();
+    let accounts:Vec<_>=snapshot.telegram_accounts.iter().map(|a|json!({"account_id":a.account_id,"state":a.state,"bot_identity_validated":a.bot_identity_validated})).collect();
+    json!({"actor_id":id,"principal_kind":"agent","owner_id":null,"settings":{"endpoints":endpoints,"telegram_accounts":accounts,"activation_enabled":snapshot.activation_enabled,"management_notices":snapshot.management_notices,"audit_full":snapshot.audit_full}})
+}
 fn snapshot_value(owner: &str, snapshot: SettingsSnapshot) -> Result<Value, ()> {
     if snapshot.endpoints.len() > 20
         || snapshot.telegram_accounts.len() > 20
@@ -127,11 +133,12 @@ impl WriteGate {
     }
 }
 type Mutation = dyn Fn(
-        &Owner,
+        &BindingManager,
         crate::configuration::Command,
     ) -> Result<crate::configuration::Outcome, crate::configuration::Failure>
     + Send
     + Sync;
+type ManagementAudit = dyn Fn(&str, Option<&str>, u16) -> Result<(), ()> + Send + Sync;
 type Snapshot = dyn Fn() -> Result<SettingsSnapshot, ()> + Send + Sync;
 /// The snapshot closure must only read bounded App state, never perform network
 /// calls or return message bodies/secrets. Authentication happens before it.
@@ -140,10 +147,12 @@ pub struct Settings {
     vault: OAuthVault,
     snapshot: Arc<Snapshot>,
     mutation: Option<Arc<Mutation>>,
+    management_audit: Option<Arc<ManagementAudit>>,
     token_mutation: Option<Arc<crate::telegram_tokens::Mutation>>,
     email: Option<Arc<crate::email_threads::Service>>,
     slots: Arc<Semaphore>,
     writes: WriteGate,
+    request_admission: crate::verification_gate::AuditGate,
     exports: WriteGate,
     token_attempts: WriteGate,
     html: &'static str,
@@ -180,10 +189,12 @@ impl Settings {
             vault: OAuthVault::default(),
             snapshot,
             mutation: None,
+            management_audit: None,
             token_mutation: None,
             email: None,
             slots: Arc::new(Semaphore::new(16)),
             writes: WriteGate::default(),
+            request_admission: Default::default(),
             exports: WriteGate::default(),
             token_attempts: WriteGate::default(),
             html,
@@ -219,6 +230,10 @@ impl Settings {
     }
     pub fn with_configuration(mut self, mutation: Arc<Mutation>) -> Self {
         self.mutation = Some(mutation);
+        self
+    }
+    pub fn with_management_audit(mut self, audit: Arc<ManagementAudit>) -> Self {
+        self.management_audit = Some(audit);
         self
     }
     pub fn with_tokens(mut self, mutation: Arc<crate::telegram_tokens::Mutation>) -> Self {
@@ -375,6 +390,50 @@ async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
 ) -> Response {
+    if request.method() != Method::GET || request.uri().path() != "/api/settings" {
+        return handle_inner(State(app.clone()), ConnectInfo(peer), request).await;
+    }
+    let mut nonce = [0u8; 16];
+    if getrandom::fill(&mut nonce).is_err() {
+        return secure(error(Error::Proxy));
+    }
+    let id: String = nonce.iter().map(|v| format!("{v:02x}")).collect();
+    // Cheap in-memory admission precedes the bounded nonblocking audit queue.
+    match app.request_admission.admit(peer.ip()) {
+        Ok(()) => (),
+        Err(e) => {
+            if let Some(audit) = &app.management_audit {
+                let _ = audit(&id, None, 429);
+            }
+            return secure(error(e));
+        }
+    };
+
+    if let Some(audit) = &app.management_audit {
+        if audit(&id, None, 102).is_err() {
+            return secure(error(Error::Proxy));
+        }
+    }
+    let mut response = handle_inner(State(app.clone()), ConnectInfo(peer), request).await;
+    if let Some(audit) = &app.management_audit {
+        // No body/header identity is logged. A refused read has no authenticated
+        // mutation actor; mutations record their verified principal separately.
+        if audit(&id, None, response.status().as_u16()).is_err() {
+            response = secure(error(Error::Proxy));
+        }
+    }
+    if let Ok(value) = HeaderValue::from_str(&id) {
+        response
+            .headers_mut()
+            .insert("x-endpoint-request-id", value);
+    }
+    response
+}
+async fn handle_inner(
+    State(app): State<Arc<Settings>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+) -> Response {
     let (parts, body) = request.into_parts();
     if parts.headers.len() > 128
         || parts
@@ -473,7 +532,9 @@ fn owner_for_mutation(
     headers: &HeaderMap,
     peer: SocketAddr,
     now: i64,
-) -> Result<Owner, Error> {
+    token_only: bool,
+    audit_actor: &Mutex<Option<String>>,
+) -> Result<BindingManager, Error> {
     let mut hosts = headers.get_all("host").iter();
     if !hosts
         .next()
@@ -488,21 +549,92 @@ fn owner_for_mutation(
         .map(|(k, v)| v.to_str().map(|v| (k.as_str(), v)))
         .collect();
     let values = values.map_err(|_| Error::InvalidIdentity)?;
-    app.auth.check_mutation(&values)?;
     let (session, _) = cookies(headers)?;
     let token = session
         .as_deref()
         .map(|s| app.vault.session_token(s, now))
         .transpose()?
         .flatten();
-    app.auth
-        .authenticate_from(&values, token.as_deref(), now, peer.ip())
+    let browser_context = values.iter().any(|(key, _)| {
+        key.eq_ignore_ascii_case("cookie")
+            || key.eq_ignore_ascii_case("origin")
+            || key.to_ascii_lowercase().starts_with("sec-fetch-")
+    });
+    let explicit_identity = values.iter().any(|(key, _)| {
+        key.eq_ignore_ascii_case("x-treer-identity-token")
+            || key.eq_ignore_ascii_case("authorization")
+    });
+    // Reject browser CSRF and unauthenticated unsafe requests cheaply, before
+    // Proxy verification. Cookie-free explicit Agents retain their API path.
+    if browser_context || (!explicit_identity && token.is_none()) {
+        app.auth.check_mutation(&values)?;
+    }
+    if token_only {
+        app.auth.check_mutation(&values)?;
+        return app
+            .auth
+            .authenticate_from(&values, token.as_deref(), now, peer.ip())
+            .map(BindingManager::HumanOwner);
+    }
+    let manager = app
+        .auth
+        .authenticate_manager_from(&values, token.as_deref(), now, peer.ip())?;
+    if manager.kind() == "agent" {
+        if let Ok(mut actor) = audit_actor.lock() {
+            *actor = Some(manager.id().to_owned());
+        }
+    }
+    app.auth.check_manager_mutation(&manager, &values)?;
+    Ok(manager)
 }
 async fn configuration_request(
     app: Arc<Settings>,
     peer: SocketAddr,
     parts: axum::http::request::Parts,
     body: Body,
+) -> Response {
+    let mut nonce = [0u8; 16];
+    if getrandom::fill(&mut nonce).is_err() {
+        return secure(error(Error::Proxy));
+    }
+    let request_id: String = nonce.iter().map(|v| format!("{v:02x}")).collect();
+    // Cheap in-memory admission precedes the bounded nonblocking audit queue.
+    match app.request_admission.admit(peer.ip()) {
+        Ok(()) => (),
+        Err(e) => {
+            if let Some(audit) = &app.management_audit {
+                let _ = audit(&request_id, None, 429);
+            }
+            return secure(error(e));
+        }
+    };
+
+    // Record admission before Proxy work; cancelled/unfinished calls stay 102.
+    if let Some(audit) = &app.management_audit {
+        if audit(&request_id, None, 102).is_err() {
+            return secure(error(Error::Proxy));
+        }
+    }
+    let actor = Arc::new(Mutex::new(None));
+    let mut response =
+        configuration_request_inner(app.clone(), peer, parts, body, actor.clone()).await;
+    let actor = actor.lock().ok().and_then(|a| a.clone());
+    if let Some(audit) = &app.management_audit {
+        if audit(&request_id, actor.as_deref(), response.status().as_u16()).is_err() {
+            response = secure(error(Error::Proxy));
+        }
+    }
+    if let Ok(v) = HeaderValue::from_str(&request_id) {
+        response.headers_mut().insert("x-endpoint-request-id", v);
+    }
+    response
+}
+async fn configuration_request_inner(
+    app: Arc<Settings>,
+    peer: SocketAddr,
+    parts: axum::http::request::Parts,
+    body: Body,
+    audit_actor: Arc<Mutex<Option<String>>>,
 ) -> Response {
     let token_request = parts.uri.path() == "/api/telegram/token";
     if parts.uri.query().is_some()
@@ -535,6 +667,7 @@ async fn configuration_request(
         Err(_) => return secure(error(Error::RateLimited)),
     };
     let auth_app = app.clone();
+    let auth_actor = audit_actor.clone();
     // The blocking verification owns the slot even if this HTTP future is dropped.
     let verified = tokio::task::spawn_blocking(move || {
         let now = SystemTime::now()
@@ -542,7 +675,16 @@ async fn configuration_request(
             .ok()
             .and_then(|t| i64::try_from(t.as_secs()).ok())
             .ok_or(Error::Proxy);
-        let result = now.and_then(|now| owner_for_mutation(&auth_app, &parts.headers, peer, now));
+        let result = now.and_then(|now| {
+            owner_for_mutation(
+                &auth_app,
+                &parts.headers,
+                peer,
+                now,
+                token_request,
+                &auth_actor,
+            )
+        });
         (result, permit)
     })
     .await;
@@ -551,6 +693,11 @@ async fn configuration_request(
         Ok((Err(e), _)) => return secure(error(e)),
         Err(_) => return secure(error(Error::Proxy)),
     };
+    if owner.kind() == "agent" {
+        if let Ok(mut actor) = audit_actor.lock() {
+            *actor = Some(owner.id().to_owned());
+        }
+    }
     // Authenticate before reading JSON. The same slot remains held during the
     // three-second bounded read and all subsequent Core/configuration work.
     let bytes = match tokio::time::timeout(std::time::Duration::from_secs(3), to_bytes(body, 16384))
@@ -579,7 +726,13 @@ async fn configuration_request(
                 Ok(c) => c,
                 Err(_) => return fixed(StatusCode::BAD_REQUEST, "telegram_token_invalid"),
             };
-            match app.token_mutation.as_ref().expect("checked token service")(&owner, command) {
+            match app.token_mutation.as_ref().expect("checked token service")(
+                match owner.owner() {
+                    Ok(o) => o,
+                    Err(e) => return error(e),
+                },
+                command,
+            ) {
                 Ok(slot) => response(
                     StatusCode::OK,
                     json!({"status":"telegram_token_saved","account":slot}),
@@ -628,6 +781,9 @@ async fn configuration_request(
             Err(crate::configuration::Failure::Invalid) => {
                 fixed(StatusCode::BAD_REQUEST, "invalid_configuration")
             }
+            Err(crate::configuration::Failure::InvalidPreview(code)) => {
+                fixed(StatusCode::BAD_REQUEST, code)
+            }
             Err(crate::configuration::Failure::Conflict) => {
                 fixed(StatusCode::CONFLICT, "configuration_conflict")
             }
@@ -635,6 +791,7 @@ async fn configuration_request(
                 fixed(StatusCode::SERVICE_UNAVAILABLE, "configuration_unavailable")
             }
             Err(crate::configuration::Failure::Expired) => error(Error::InvalidIdentity),
+            Err(crate::configuration::Failure::Forbidden) => error(Error::OwnerRequired),
         }
     })
     .await
@@ -791,14 +948,31 @@ fn dispatch(
     }
     let owner = match app
         .auth
-        .authenticate_from(&values, token.as_deref(), now, peer.ip())
+        .authenticate_manager_from(&values, token.as_deref(), now, peer.ip())
     {
         Ok(o) => o,
         Err(e) => return error(e),
     };
     match (app.snapshot)() {
+        Ok(snapshot) if owner.kind() == "agent" => {
+            if snapshot.endpoints.len() > 20 || snapshot.telegram_accounts.len() > 20 {
+                return fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable");
+            }
+            let value = agent_snapshot(owner.id(), &snapshot);
+            if value.to_string().len() > 512 * 1024 {
+                return fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable");
+            }
+            response(StatusCode::OK, value)
+        }
         Ok(snapshot) => match snapshot_value(owner.id(), snapshot) {
-            Ok(value) => response(StatusCode::OK, value),
+            Ok(mut value) => {
+                value["principal_kind"] = json!(owner.kind());
+                value["actor_id"] = json!(owner.id());
+                if owner.kind() == "agent" {
+                    value["owner_id"] = Value::Null;
+                }
+                response(StatusCode::OK, value)
+            }
             Err(()) => fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable"),
         },
         Err(_) => fixed(StatusCode::SERVICE_UNAVAILABLE, "settings_unavailable"),
@@ -906,6 +1080,74 @@ mod tests {
         ]
     }
     #[test]
+    fn rejected_flood_is_bounded_without_taking_busy_hub_mutex() {
+        let (hub, _) = crate::recovery::tests::fixture(
+            crate::store::Store::memory(Default::default()).unwrap(),
+        );
+        let shared = Arc::new(Mutex::new(hub));
+        let snapshot_hub = shared.clone();
+        let mut settings = app("https://proxy.example/");
+        settings.snapshot = Arc::new(move || {
+            let _guard = snapshot_hub.try_lock().expect("rejected flood reached hub");
+            Ok(SettingsSnapshot::default())
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let audit = Arc::new(
+            crate::request_audit::RequestAudit::start(
+                &temp.path().canonicalize().unwrap().join("audit"),
+            )
+            .unwrap(),
+        );
+        let queue = audit.clone();
+        settings = settings.with_management_audit(Arc::new(move |id, actor, status| {
+            queue.record(id, actor, status)
+        }));
+        let peer: SocketAddr = "127.0.0.1:1234".parse().unwrap();
+        for _ in 0..crate::verification_gate::AUDIT_REQUESTS {
+            settings.request_admission.admit(peer.ip()).unwrap();
+        }
+        let settings = Arc::new(settings);
+        let _busy = shared.lock().unwrap();
+        let started = Instant::now();
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                for n in 0..100 {
+                    let request = axum::http::Request::builder()
+                        .uri(if n % 2 == 0 {
+                            "/api/settings"
+                        } else {
+                            "/api/configuration"
+                        })
+                        .method(if n % 2 == 0 {
+                            Method::GET
+                        } else {
+                            Method::POST
+                        })
+                        .body(Body::empty())
+                        .unwrap();
+                    assert_eq!(
+                        handle(State(settings.clone()), ConnectInfo(peer), request)
+                            .await
+                            .status(),
+                        StatusCode::TOO_MANY_REQUESTS
+                    );
+                }
+            });
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
+    #[test]
+    fn agent_snapshot_allowlist_omits_external_and_future_fields() {
+        let snapshot = SettingsSnapshot::default();
+        let value = agent_snapshot("ag_manager", &snapshot);
+        assert!(value["settings"].get("email").is_none());
+        assert!(value["settings"].get("telegram_tokens").is_none());
+        assert_eq!(value["principal_kind"], "agent");
+        assert!(value["owner_id"].is_null());
+    }
+    #[test]
     fn export_read_quota_is_independent_per_owner_and_resets_after_one_minute() {
         let exports = WriteGate::default();
         let writes = WriteGate::default();
@@ -984,6 +1226,7 @@ mod tests {
         let value = snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                management_notices: Default::default(),
                 email: None,
                 endpoints: (0..20).map(|_| endpoint(4096)).collect(),
                 workers: Default::default(),
@@ -1001,6 +1244,7 @@ mod tests {
         assert!(snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                management_notices: Default::default(),
                 email: None,
                 endpoints: (0..21).map(|_| endpoint(1)).collect(),
                 workers: Default::default(),
@@ -1015,6 +1259,7 @@ mod tests {
         assert!(snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                management_notices: Default::default(),
                 email: None,
                 endpoints: vec![endpoint(512 * 1024)],
                 workers: Default::default(),

@@ -258,6 +258,7 @@ fn run_assembled(
         status.last_handoff_failure = hub.last_core_handoff_failure().map_err(|_| ())?;
         let (audit_full, emergency_pause_bindings) = hub.owner_audit_capacity().map_err(|_| ())?;
         Ok(SettingsSnapshot {
+            management_notices: crate::management::notice_status(&hub.store.db).map_err(|_| ())?,
             email: if email_configured {
                 Some(crate::email_workers::Snapshot::read(
                     &hub.store,
@@ -296,10 +297,18 @@ fn run_assembled(
     let token_mutation = Arc::new(move |owner: &crate::owner_auth::Owner, command| {
         token_service.execute(&token_hub, &token_workers, owner, command)
     });
+    let request_audit = Arc::new(
+        crate::request_audit::RequestAudit::start(&config.state_directory.join("management-audit"))
+            .map_err(|_| Error::Storage)?,
+    );
+    let management_audit = Arc::new(move |request: &str, actor: Option<&str>, status: u16| {
+        request_audit.record(request, actor, status)
+    });
     let serve = || -> Result<(), Error> {
         let settings = Settings::new(auth, snapshot, include_str!("../dist/index.html"))
             .map_err(|_| Error::Configuration)?
             .with_configuration(mutation)
+            .with_management_audit(management_audit)
             .with_tokens(token_mutation)
             .with_loopback_listener(config.listen)
             .map_err(|_| Error::Configuration)?
