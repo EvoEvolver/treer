@@ -665,6 +665,33 @@ intent-state predecessor uses its own revision, while a subsequent result-state
 predecessor refers back one revision to that intent. Merely substituting the
 latest result revision cannot relabel it as the original operation intent.
 
+The inert health-failure vocabulary uses this explicit requirement table:
+
+| Failed predicate | `new_controller_unhealthy` | `final_health_failed` |
+| --- | --- | --- |
+| Intended Controller build, Proxy connection, unchanged Host, live Agent tuples | Required | Required |
+| Installed CLI image hash | Not required; refuse this reason | Required after CLI publication |
+
+The latter predicate refers to the CLI new-image record already bound in the
+complete image set; the failed evaluation still binds the same live Controller
+handle/start/hash. The future native health source must actually evaluate the
+required predicate, rather than accept a caller label as failure evidence.
+These are synthetic failure observations, not implemented native health checks.
+
+Consumption must occur before any durable entry publication. A publication
+failure after consumption keeps the attempt consumed and ends in
+diagnose-and-stop: preserve the old head and evidence, with no retry, replacement
+reason or reconstructed attempt. The synthetic regression injects that failure
+after entry acceptance and proves that both an already verified second value
+and a new verification still refuse. This establishes latch ordering only; no
+native publication or durable restart latch is exercised.
+
+A native source must enforce the 8 KiB limit while reading the private handle
+bound to the attempt, reading at most limit plus one and refusing before larger
+allocation. Hash comparison, schema decoding and binding must use those same
+single-read bytes. The synthetic source accepts an already allocated vector;
+it proves neither native allocation bounds nor handle custody.
+
 For the future private evidence store, the proposed readers are the owning OS
 user and SYSTEM only. Keep referenced evidence read-only through terminal state
 and for at least seven days afterwards, then require an explicit reviewed

@@ -58,6 +58,18 @@ enum HealthPredicate {
     ProxyConnected,
     HostUnchanged,
     LiveAgentTuples,
+    CliImageHash,
+}
+
+fn required_predicate(kind: ReasonKind, predicate: HealthPredicate) -> bool {
+    use HealthPredicate::*;
+    matches!(
+        (kind, predicate),
+        (
+            ReasonKind::NewControllerUnhealthy | ReasonKind::FinalHealthFailed,
+            IntendedBuild | ProxyConnected | HostUnchanged | LiveAgentTuples
+        ) | (ReasonKind::FinalHealthFailed, CliImageHash)
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -194,12 +206,13 @@ fn verify<'a>(
         ) => operation(context.prior.cli_step, *stage, *intent_revision),
         (
             ReasonKind::NewControllerUnhealthy | ReasonKind::FinalHealthFailed,
-            Event::HealthFailed { process, .. },
+            Event::HealthFailed { process, predicate },
         ) => {
             process == &context.process
                 && process.handle_identity != 0
                 && process.start_instance != 0
                 && process.image_sha256 == context.images.controller.new.sha256
+                && required_predicate(observation.kind, *predicate)
         }
         (
             ReasonKind::DeadlineExceeded,
@@ -404,6 +417,14 @@ fn independent_reason_is_required_and_consumed_once_without_head_mutation() {
                 &head,
             )
             .unwrap();
+        // Model a failed publication immediately after consumption. The head
+        // is deliberately not advanced; a caller must preserve this latch,
+        // diagnose and stop instead of retrying with another verified value.
+        let publication = || -> Result<(), Refusal> {
+            assert!(live.entered.get());
+            Err("injected_publication_failure")
+        };
+        assert_eq!(publication(), Err("injected_publication_failure"));
         assert!(second
             .accept_entry(
                 &context,
@@ -706,6 +727,45 @@ fn independent_reason_operation_results_keep_the_original_intent_revision() {
                 claimed_revision == intent_revision,
                 "{step:?}"
             );
+        }
+    }
+}
+
+#[test]
+fn independent_reason_accepts_only_predicates_required_for_its_health_phase() {
+    for kind in [
+        ReasonKind::NewControllerUnhealthy,
+        ReasonKind::FinalHealthFailed,
+    ] {
+        let live = live_attempt();
+        let (context, _, _) = entry_fixture(&live, kind);
+        for (predicate, allowed) in [
+            (HealthPredicate::IntendedBuild, true),
+            (HealthPredicate::ProxyConnected, true),
+            (HealthPredicate::HostUnchanged, true),
+            (HealthPredicate::LiveAgentTuples, true),
+            // The CLI has not been activated at initial Controller health.
+            (
+                HealthPredicate::CliImageHash,
+                kind == ReasonKind::FinalHealthFailed,
+            ),
+        ] {
+            let event = Event::HealthFailed {
+                process: context.process.clone(),
+                predicate,
+            };
+            let (reference, mut source) = evidence(
+                &context,
+                kind,
+                serde_json::to_vec(&observation(&context, kind, event)).unwrap(),
+            );
+            assert_eq!(
+                verify(&context, &reference, &mut source).is_ok(),
+                allowed,
+                "{kind:?}/{predicate:?}"
+            );
+            assert_eq!(source.reads, 1);
+            assert!(!live.entered.get());
         }
     }
 }
