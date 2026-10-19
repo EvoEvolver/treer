@@ -7,6 +7,7 @@ use windows_sys::Win32::System::WindowsProgramming::FS_PERSISTENT_ACLS;
 
 mod evidence_file;
 mod operation_outcome;
+mod ownership;
 mod record_file;
 pub(super) use record_file::RecordFault;
 

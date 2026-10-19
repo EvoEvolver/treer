@@ -1245,6 +1245,28 @@ need separate review and hosted evidence. Durable consume-plus-head publication,
 crash ordering, real supervisor-owned installation locking and W2/W3 transaction
 assembly remain open. W4 and recovery remain disabled.
 
+The first lock-only implementation adds a private `checked_files::ownership`
+fixture. It exclusively creates or opens the fixed `fixture.lock` with zero
+sharing and a non-inheritable handle in the retained attempt directory. It
+checks the protected owner/SYSTEM ACL, single-link regular-file attributes,
+full volume/128-bit identity and final-path binding against the pinned
+directory. Tests require actual sharing violation 32 from both a competing
+same-process opener and a bounded ten-second child test process, repeated
+validation while held, denied deletion, and successful reacquisition of the
+same object after close. The child performs only a competing open, never
+reconstructs ownership from a pathname or head record, and cannot inherit the
+lock handle. This is not a restart-authority test: no head capability exists yet.
+
+The slice has no head writer, codec or operation integration. Those subsequent
+slices must repeat lock validation around publication/acquisition/consumption,
+prove cooperating publication without custody refuses, and test directory/head
+substitution. A before-and-after hash/identity comparison alone cannot detect an
+in-place rewrite followed by restoration between checks. The later head pin must
+either prevent that write for the whole relevant interval or use an independently
+durable revision mechanism; no detection of invisible intervening writes is
+claimed here. Native same/child-process exclusion and release still require
+exact-commit hosted 2022/2025 execution; cross-target lint is compilation only.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
