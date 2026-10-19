@@ -891,3 +891,39 @@ inventory takes precedence over automatic terminal display. Once inventory
 arrives, the linked workload remains selected, but the Tree stays open until
 the user explicitly opens a workload. A delayed-inventory browser test covers
 this startup ordering.
+### Local embed timing diagnostic
+
+`node web/scripts/measure-embed.mjs` measures the existing isolated-interface
+handshake against the disposable canary launcher fixture. It injects local
+fixed-label Performance marks through Playwright; it does not change deployed
+code, replace responses, relax headers, or send telemetry. Use only the fixture,
+never a user's Agent. The fixture operator supplies a temporary mode-0600
+storage-state file through `EMBED_STORAGE_STATE` and removes it afterwards.
+Never put credentials in command arguments, reports, traces, or HAR files.
+
+Required environment variables are `EMBED_PLAYWRIGHT_FROM` (the installed
+Playwright checkout's `web/package.json`), `EMBED_CONSOLE_URL`,
+`EMBED_PROXY_URL`, `EMBED_AGENT_URL` (the Console fixture deep link),
+`EMBED_AGENT_ORIGIN`, `EMBED_DEPLOYED_SHA`, `EMBED_STORAGE_STATE`, and
+`EMBED_REPORT_FILE` (an untracked local output). `EMBED_ENGINES` defaults to
+`chromium,firefox,webkit`; `EMBED_PAIRS` defaults to 3, bounded to 1–5. Run this
+small diagnostic outside a full gate and coordinate with the fixture operator
+to avoid overlapping mint bursts.
+
+Each pair launches a fresh browser and opens the fixture twice in one context.
+“Cold” means browser-process/context cold, not flushed OS DNS or upstream
+caches; “warm” retains that context's cookie jar and connection pool. Timing
+zero is the bootstrap navigation request. Request timing exposes bootstrap,
+mint, session exchange, cookie check and UI document stages, including DNS,
+connection and TLS fields. A value of -1 means unavailable or a reused phase,
+not a measured zero. Browser paint entries are reported when available;
+fixture composer visibility is a separately labelled readiness measurement,
+not a substitute for missing paint entries. Marks also cover bootstrap script
+start/load, ready reception and code reception. Millisecond precision and
+injection overhead limit interpretation of sub-millisecond differences.
+
+The report has fixed endpoint/stage labels, engine/version, run/temperature,
+status codes and numeric offsets/durations only. It omits URLs, request bodies,
+headers, cookies, codes, nonce/hash values and workspace/user/Agent IDs. No
+session reuse or hover prewarming is enabled by this diagnostic. Real-browser
+acceptance remains required before shipping subsequent handshake changes.

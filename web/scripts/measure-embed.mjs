@@ -1,0 +1,137 @@
+// Local, opt-in diagnostic for #198. No application telemetry or response mocking.
+// Configuration and session files are supplied by the canary fixture operator.
+import { createRequire } from 'node:module'
+import { writeFileSync } from 'node:fs'
+
+const need = (key) => process.env[key] || (() => { throw new Error(`Missing ${key}`) })()
+const { chromium, firefox, webkit } = createRequire(need('EMBED_PLAYWRIGHT_FROM'))('playwright')
+const consoleOrigin = new URL(need('EMBED_CONSOLE_URL')).origin
+const proxyOrigin = new URL(need('EMBED_PROXY_URL')).origin
+const agentUrl = new URL(need('EMBED_AGENT_URL'))
+const agentOrigin = new URL(need('EMBED_AGENT_ORIGIN')).origin
+if (agentUrl.origin !== consoleOrigin || !agentOrigin.startsWith('https://')) throw new Error('Invalid fixture origins')
+const engines = (process.env.EMBED_ENGINES || 'chromium,firefox,webkit').split(',')
+const pairs = Number(process.env.EMBED_PAIRS || 3)
+if (!Number.isInteger(pairs) || pairs < 1 || pairs > 5) throw new Error('EMBED_PAIRS must be 1..5')
+const stages = new Set(['frame-created', 'bootstrap-script', 'bootstrap-loaded', 'ready-received', 'code-received', 'ui-first-paint', 'ui-first-contentful-paint'])
+const report = {
+  schema: 1, deployed_sha: need('EMBED_DEPLOYED_SHA'),
+  caveats: ['Cold means a fresh browser process/context; OS DNS and upstream caches are not flushed.',
+    'Warm reload reuses the same context, cookie jar and connection pool.',
+    'Injected fixed-label marks are local measurement only; paint entries may be unavailable in an engine.',
+    'UI-visible is the fixture Message textbox visibility, not a substitute for an unavailable paint entry.'],
+  runs: [],
+}
+
+function endpoint(request) {
+  const u = new URL(request.url())
+  if (u.origin === agentOrigin) {
+    if (u.pathname === '/.treer/embed') return 'bootstrap'
+    if (u.pathname === '/.treer/embed/session') return 'session'
+    if (u.pathname === '/.treer/embed/check') return 'check'
+    if (u.pathname === '/' && request.isNavigationRequest()) return 'ui-document'
+  }
+  if (u.origin === proxyOrigin && request.method() === 'POST' && /\/interface\/embed-authorization$/.test(u.pathname)) return 'mint'
+  return null
+}
+
+async function measure(temperature, pair, context, version, engine) {
+  const page = await context.newPage()
+  const marks = [], network = [], pending = [], requests = new Map()
+  await page.exposeBinding('__treerEmbedTiming', ({ frame }, stage, epoch) => {
+    if (!stages.has(stage) || !Number.isFinite(epoch)) return
+    const expected = stage === 'frame-created' || stage === 'ready-received' ? consoleOrigin : agentOrigin
+    try { if (new URL(frame.url()).origin !== expected) return } catch { return }
+    marks.push({ stage, epoch_ms: epoch })
+  })
+  await page.addInitScript(({ consoleOrigin, agentOrigin }) => {
+    const isConsole = location.origin === consoleOrigin
+    const isAgent = location.origin === agentOrigin
+    if (!isConsole && !isAgent) return
+    const mark = (stage, time = performance.now()) => {
+      performance.mark(`treer-embed:${stage}`, { startTime: time })
+      void window.__treerEmbedTiming(stage, performance.timeOrigin + time).catch(() => {})
+    }
+    if (isConsole) {
+      new MutationObserver((mutations) => {
+        for (const m of mutations) for (const node of m.addedNodes) {
+          if (!(node instanceof Element)) continue
+          const frames = node.matches('iframe') ? [node] : node.querySelectorAll('iframe')
+          for (const frame of frames) {
+            try { if (new URL(frame.src).origin === agentOrigin) mark('frame-created') } catch { /* unrelated frame */ }
+          }
+        }
+      }).observe(document, { childList: true, subtree: true })
+      window.addEventListener('message', (event) => {
+        if (event.origin === agentOrigin && event.data?.treer_embed === 'ready') mark('ready-received')
+      })
+    } else if (location.pathname === '/.treer/embed') {
+      mark('bootstrap-script')
+      document.addEventListener('DOMContentLoaded', () => mark('bootstrap-loaded'), { once: true })
+      window.addEventListener('message', (event) => {
+        if (event.origin === consoleOrigin && event.source === parent && event.data?.treer_embed === 'code') mark('code-received')
+      })
+    } else if (location.pathname === '/') {
+      try {
+        new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            if (entry.name === 'first-paint') mark('ui-first-paint', entry.startTime)
+            if (entry.name === 'first-contentful-paint') mark('ui-first-contentful-paint', entry.startTime)
+          }
+        }).observe({ type: 'paint', buffered: true })
+      } catch { /* report missing marks honestly */ }
+    }
+  }, { consoleOrigin, agentOrigin })
+  page.on('request', (request) => { const name = endpoint(request); if (name) requests.set(request, name) })
+  page.on('requestfinished', (request) => {
+    if (!requests.has(request)) return
+    pending.push((async () => {
+      const timing = request.timing(), response = await request.response()
+      // Deliberately omit URL, headers, bodies, cookies, codes, nonces and errors.
+      network.push({ endpoint: requests.get(request), status: response?.status() ?? null,
+        start_epoch_ms: timing.startTime, dns_start_ms: timing.domainLookupStart,
+        dns_end_ms: timing.domainLookupEnd, connect_start_ms: timing.connectStart,
+        tls_start_ms: timing.secureConnectionStart, connect_end_ms: timing.connectEnd,
+        request_start_ms: timing.requestStart, response_start_ms: timing.responseStart,
+        response_end_ms: timing.responseEnd })
+    })())
+  })
+  const run = { engine, version, pair, temperature, marks, network, success: false }
+  report.runs.push(run)
+  try {
+    await page.goto(agentUrl.href, { waitUntil: 'domcontentloaded', timeout: 60000 })
+    const frame = page.frameLocator('iframe[title$=" interface"]')
+    await frame.getByRole('textbox', { name: /Message/ }).waitFor({ state: 'visible', timeout: 45000 })
+    run.ui_visible_epoch_ms = await page.evaluate(() => performance.timeOrigin + performance.now())
+    const actual = page.frames().find((f) => { try { return new URL(f.url()).origin === agentOrigin && new URL(f.url()).pathname === '/' } catch { return false } })
+    if (!actual) throw new Error('fixture-not-isolated')
+    await actual.locator('header.top').waitFor({ state: 'visible', timeout: 10000 })
+    run.success = true
+  } catch { run.failure = 'fixture-did-not-reach-isolated-ui' }
+  await Promise.allSettled(pending)
+  const start = network.find((n) => n.endpoint === 'bootstrap')?.start_epoch_ms
+  if (Number.isFinite(start)) {
+    run.marks = marks.map(({ stage, epoch_ms }) => ({ stage, ms: Math.round((epoch_ms - start) * 10) / 10 }))
+    run.ui_visible_ms = Math.round((run.ui_visible_epoch_ms - start) * 10) / 10
+    run.network = network.map(({ start_epoch_ms, ...rest }) => ({ ...rest, start_ms: Math.round((start_epoch_ms - start) * 10) / 10 }))
+  } else { run.marks = []; run.network = []; run.failure = 'bootstrap-not-observed'; run.success = false }
+  delete run.ui_visible_epoch_ms
+  await page.close()
+}
+
+for (const engine of engines) {
+  const type = { chromium, firefox, webkit }[engine]
+  if (!type) throw new Error('Unsupported engine')
+  for (let pair = 1; pair <= pairs; pair++) {
+    const browser = await type.launch()
+    try {
+      const context = await browser.newContext({ storageState: need('EMBED_STORAGE_STATE'), locale: 'en-US', viewport: { width: 1360, height: 900 } })
+      await measure('cold-browser', pair, context, browser.version(), engine)
+      await measure('warm-context', pair, context, browser.version(), engine)
+      await context.close()
+    } finally { await browser.close() }
+  }
+}
+writeFileSync(need('EMBED_REPORT_FILE'), JSON.stringify(report, null, 2) + '\n', { mode: 0o600 })
+console.log(JSON.stringify({ runs: report.runs.length, passed: report.runs.filter((r) => r.success).length }))
+if (report.runs.some((r) => !r.success)) process.exitCode = 1
