@@ -866,7 +866,8 @@ activity. Fixed category totals include Other; if one category exceeds 70%,
 compact previews of non-zero categories show the full interval before the combined
 chart (zero categories remain listed with totals), with
 a warning against comparing heights across independent scales. The combined
-chart starts at the newest buckets and supports scrolling and Home/End navigation. Eight categorical chart tokens (not status colors) pass 3:1 against the card in
+chart starts at the newest buckets and supports scrolling and Home/End navigation.
+Eight categorical chart tokens (not status colors) pass 3:1 against the card in
 both themes; the contrast script checks them. Patterned legend swatches, distinct
 notable/anomaly markers, visible bucket totals, text counts, exact data
 tables, UTC labels and keyboard-operable bucket buttons supplement color.
@@ -883,3 +884,10 @@ complete newest-100 list; anomaly explanations use server baseline/threshold
 values and explicitly identify insufficient data. This remains an operational,
 incomplete audit view, not a tamper-proof ledger. Shipping requires the #191/#192
 Core API plus UI review and real-browser acceptance against deployed headers.
+
+
+On phones, opening the Tree while a deep link is still waiting for workspace
+inventory takes precedence over automatic terminal display. Once inventory
+arrives, the linked workload remains selected, but the Tree stays open until
+the user explicitly opens a workload. A delayed-inventory browser test covers
+this startup ordering.
