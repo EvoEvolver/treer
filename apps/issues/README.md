@@ -352,7 +352,9 @@ later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) 
   authority as assigning), the setter and time are recorded (`waiting_by`, `waiting_at`) and shown, and the target must
   be an Agent in the directory (checked again when reminding: a deleted Agent is replaced by the leader as an ownerless
   issue if `agent ls` can be read). Unassigned unresolved issues, and only those, are reminded to the leader
-  (`with no owner: …`); an issue assigned to a human has a clear owner and is not reminded. Each recipient gets at
+  (`with no owner: …`); an issue assigned to a human has a clear owner (intentionally: the leader is not nagged about it) and is
+  not reminded to anyone. If `waiting_on` is `leader`/`user` but this App was started without a leader Agent (for
+  example the saved command was changed), nobody is reminded: the Stale view then shows `responsible: none`. Each recipient gets at
   most 4 reminder Messages per hour; whatever is still due merges into a later one.
 - **Reset (#185).** Only **progress** restarts the sequence, counted from when it happened: the responsible party
   commenting on or editing the issue, or the responsibility passing to a party that was *not* responsible in the last
