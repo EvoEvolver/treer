@@ -1104,6 +1104,145 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn receipt_ack_requires_committed_completion_and_replays_only_ack() {
+        use std::{
+            os::unix::fs::PermissionsExt,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc, Mutex,
+            },
+        };
+        for scenario in [
+            "accepted",
+            "commit_refused",
+            "pathname_drift",
+            "ack_failed",
+            "wrong_identity",
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().canonicalize().unwrap().join("state");
+            let database = path.join("hub.sqlite3");
+            let store = if scenario == "commit_refused" {
+                Store::memory(Limits::default()).unwrap()
+            } else {
+                Store::open(&path, Limits::default()).unwrap()
+            };
+            let (mut h, fake) = fixture_store(store);
+            let intent = receipt_job(&mut h);
+            let receipt = crate::core::AuthenticatedDelivery::fixture(
+                receipt_delivery(&intent, "msg_final"),
+                "ws",
+            );
+            let executable = temp.path().join("fake-treer");
+            let calls = executable.with_extension("calls");
+            let source = format!(
+                r#"#!/usr/bin/python3
+import json,sqlite3,sys
+from pathlib import Path
+calls=Path(__file__).with_suffix('.calls')
+n=int(calls.read_text())+1 if calls.exists() else 1
+calls.write_text(str(n))
+args=sys.argv[1:]
+assert len(args)==5 and args[:2]==['message','ack'] and args[2].startswith('--operation-id=ep-ack-') and args[-2:]==['--','del_receipt']
+db=sqlite3.connect('file:'+{database:?}+'?mode=ro',uri=True)
+assert db.execute('SELECT pending,core_id FROM inbound').fetchall()==[(0,'msg_final')]
+assert db.execute('SELECT count(*) FROM telegram_reply_mappings').fetchone()==(1,)
+db.close()
+if {scenario:?}=='ack_failed' and n==1: sys.exit(1)
+print(json.dumps({{'acknowledged_delivery_ids':['del_receipt'],'already_acknowledged_delivery_ids':[]}}))
+"#
+            );
+            std::fs::write(&executable, source).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let core = crate::core::Core::new(
+                &executable,
+                if scenario == "wrong_identity" {
+                    "app_other"
+                } else {
+                    "app_hub"
+                },
+            )
+            .unwrap();
+            let drifted = Arc::new(AtomicBool::new(false));
+            let original = path.join("original.sqlite3");
+            if scenario == "commit_refused" {
+                // Synthetic in-memory fault; never replace the private-store hook.
+                h.store.db.commit_hook(Some(|| true));
+            } else if scenario == "pathname_drift" {
+                // Drift during the completion transaction, after its entry
+                // recheck. The real #217 COMMIT hook remains installed.
+                let database = database.clone();
+                let original = original.clone();
+                let drifted = drifted.clone();
+                h.store.db.update_hook(Some(
+                    move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+                        if table == "telegram_reply_mappings"
+                            && !drifted.swap(true, Ordering::SeqCst)
+                        {
+                            std::fs::rename(&database, &original).unwrap();
+                        }
+                    },
+                ));
+            }
+            let hub = Mutex::new(h);
+            let result = crate::telegram_receipt_completion::commit_and_ack(
+                &hub, &core, &receipt, &intent, NOW,
+            );
+            let refused = matches!(
+                scenario,
+                "commit_refused" | "pathname_drift" | "wrong_identity"
+            );
+            if refused {
+                assert!(result.is_err());
+                assert!(
+                    !calls.exists(),
+                    "no CLI call, including ack, after refused completion"
+                );
+                let h = hub.lock().unwrap();
+                assert!(h
+                    .store
+                    .db
+                    .query_row("SELECT pending FROM inbound", [], |r| r.get::<_, bool>(0))
+                    .unwrap());
+                assert_eq!(
+                    h.store
+                        .db
+                        .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+                if scenario == "pathname_drift" {
+                    assert!(drifted.load(Ordering::SeqCst));
+                    std::fs::rename(&original, &database).unwrap();
+                    assert!(
+                        h.store.recheck_private_storage().is_err(),
+                        "restoring path must not clear the latch"
+                    );
+                }
+            } else {
+                assert_eq!(result.is_err(), scenario == "ack_failed");
+                assert_eq!(std::fs::read_to_string(&calls).unwrap(), "1");
+                // Redelivery reuses durable completion and only retries ack.
+                crate::telegram_receipt_completion::commit_and_ack(
+                    &hub, &core, &receipt, &intent, NOW,
+                )
+                .unwrap();
+                assert_eq!(std::fs::read_to_string(&calls).unwrap(), "2");
+                let h = hub.lock().unwrap();
+                assert_eq!(
+                    h.store
+                        .db
+                        .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+            }
+            assert!(fake.sent.borrow().is_empty());
+        }
+    }
+    #[test]
     fn completion_modes_reject_the_other_path_before_and_after_terminal() {
         for receipt_mode in [false, true] {
             let (mut h, _) = fixture(Limits::default());

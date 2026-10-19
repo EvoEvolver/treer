@@ -486,6 +486,25 @@ the old bridge credential; rotate again only if a valid copy remains exposed. Re
 
 ### Sealed receipt mailbox provenance (local increment)
 
+The currently unused `telegram_receipt_completion::commit_and_ack` supplies the
+completion stage for a future negotiated dispatcher. It requires sealed mailbox
+authority, verifies that the ack Core client is this Hub's identity, completes
+the transaction under the Hub mutex, releases that mutex, then calls Core ack.
+Any completion error skips ack. An ack error preserves the committed result;
+redelivery validates the same receipt and retries its idempotent ack without
+another external send. It does not receive generic mailbox values, select FIFO
+work or negotiate peers; current workers do not call it.
+
+Synthetic regression cases cover accepted completion visible to a separate fake
+CLI before ack, ack failure/redelivery, a wrong ack identity, in-memory COMMIT
+refusal and actual private-store pathname drift during the completion transaction.
+The drift fixture renames its temporary database from a test-only SQLite update
+hook, leaving the real #217 COMMIT hook installed: mapping/queue changes roll
+back, no ack CLI call occurs and restoring the name cannot clear the latch.
+These are local fault injections, not a killed-process rehearsal or production
+rollout evidence. Mixed-mode FIFO, importer legacy pins, conflict recovery and
+process-death checks remain blockers before activating receipt-mode dispatch.
+
 Receipt completion accepts an opaque `core::AuthenticatedDelivery`, not a
 `Delivery` deserialized from a request. Only `Core::receive_authenticated` can
 construct it in production: fresh self metadata from the integrity-pinned CLI

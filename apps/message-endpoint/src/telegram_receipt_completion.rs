@@ -13,6 +13,29 @@ use crate::{
 };
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 
+/// Completion stage for a future negotiated dispatcher; not called by current
+/// workers. Its input must come from Core::receive_authenticated, never JSON or
+/// generic Mailbox values. No CLI work runs while the hub mutex is held.
+pub fn commit_and_ack<M: Mailbox + Directory>(
+    hub: &std::sync::Mutex<Hub<M>>,
+    core: &crate::core::Core,
+    authenticated: &AuthenticatedDelivery,
+    intent: &CoreIntent,
+    now: i64,
+) -> Result<Recorded, Error> {
+    let recorded = {
+        let mut hub = hub.lock().map_err(|_| Error::Binding)?;
+        if !core.is_identity(&hub.own_id) {
+            return Err(Error::Binding);
+        }
+        hub.complete_telegram_receipt(authenticated, intent, now)?
+    }; // Commit returned Ok and the mutex is released before Core/CLI ack.
+       // Ack failure keeps the committed result. Redelivery revalidates the exact
+       // receipt and retries only its idempotent ack, never external delivery.
+    core.ack(&authenticated.delivery().delivery_id)?;
+    Ok(recorded)
+}
+
 impl<M: Mailbox + Directory> Hub<M> {
     #[cfg(test)]
     pub(crate) fn complete_test_telegram_receipt(
