@@ -231,6 +231,28 @@ downloads, but cannot be fed into this publication classifier or authorize moves
 Proposed local operator recovery interface, not shipped CLI syntax:
 `self-update --recover JOB_ID --action classify|archive --ack-quiescent`.
 It accepts no paths or executable arguments and is never invoked automatically.
+The acknowledgement is a statement of fact, not authentication. Neither the
+flag, a same-account credential nor the absence of Agent environment variables
+proves that a human authorized recovery. Both actions write transaction state
+and must remain unavailable until a trusted local human-authorization mechanism
+is specified, implemented and tested. They are absent from Proxy and managed
+Controller command surfaces; direct invocation of the installed executable must
+also enforce this restriction, not merely hide help or check argv/environment.
+
+At minimum, the future entry must refuse callers inside any Job (including the
+Host and Agent PTY Jobs), noninteractive logon sessions and callers without a
+local interactive console. These are necessary filters, not sufficient proof of
+a human: a same-account process may obtain an interactive console or escape a
+Job. An ordinary console confirmation code is not trusted merely because it
+was printed there. Before enabling either action, review how the confirmation
+is bound to this job, expected revision, exact action and one use, and how its
+delivery/acceptance channel excludes managed Agents. No such protected channel
+is claimed here. Until that boundary is resolved, interrupted attempts remain
+blocked and require separately authorized local maintenance; the updater does
+not provide an archive bypass. Native negative fixtures must invoke both actions
+from an Agent Job, the Host Job and a noninteractive process and observe refusal
+without receipt/marker writes, archiving or process mutation.
+
 Each invocation acquires the installation lock, validates job/enrollment and
 receipt/marker binding, freshly observes both image layouts and requires the
 operator attestation above. `classify` appends one inspection event; it cannot
@@ -252,6 +274,8 @@ are `inspection_recorded`, `evidence_archived`, `recovery_conflict`,
 events in the receipt and retain the archived receipt unchanged thereafter;
 record archive disposition separately in the marker. If a refusal prevents a
 safe receipt write, return its fixed code without overwriting the evidence.
+Public status exposes only these fixed result codes, never operator text or
+confirmation material. No confirmation material is stored in the public receipt.
 
 The Windows storage adapter must exclusively create private attempt storage,
 bound receipt reads to 64 KiB, and compare the entire expected prior record and
@@ -262,7 +286,15 @@ Any uncertain result stops further mutations and preserves available evidence;
 no power-loss durability claim follows merely from a successful API return.
 Additionally keep a separate protected installation marker outside the attempt
 and its archive, bound to the enrollment/job and highest reserved revision plus
-exact next-record digest. Before replacing a receipt, durably replace and read
+exact next-record digest. Reserve the fixed installation-private location
+`self-update/installation-marker.json` under the selected enrollment state root,
+as a sibling of `attempts/` and `archives/`. The enrollment installer must create
+its private parent and initial marker with a protected owner/SYSTEM-only DACL;
+the updater validates their owner, ACL and non-reparse binding, refuses a missing
+or unexpected marker and never deletes or recreates it as recovery. Existing
+enrollments need a separately reviewed explicit provisioning step before this
+updater is enabled; production parent ACL provisioning remains unresolved.
+Before replacing a receipt, durably replace and read
 back that marker with the next revision/digest; only then publish the exact
 receipt bytes. A crash between these two publications leaves a mismatch and
 requires operator inspection; it never accepts the older receipt as current.
