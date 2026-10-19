@@ -1,5 +1,22 @@
 # Console embed acceptance (real browser, real launcher-backed agent)
 
+> **Not part of the launcher payload.** Nothing in this directory is bundled into the launcher or its native artifacts; these are
+> test and release tooling that run from a checkout against a canary. Both scripts write a report file (default
+> `./console-embed-acceptance-report.json` and `./console-tasks-acceptance-report.json` in the working directory); those names
+> are git-ignored because a report can name canary hosts, workspace paths and agent ids. Keep reports under `.treer/` or set
+> `ACCEPT_REPORT_FILE` to a path outside the repository.
+
+### Pinned scripts
+
+| Script | sha256 (as pinned by release) |
+| --- | --- |
+| `console-embed-acceptance.mjs` | `6b19f4a30e7c10cc246a2fda138e61337cba302a67782985ae4783ffa9d3ba40` |
+| `console-tasks-acceptance.mjs` | `640f310bdd09041a5bd221753cfd0f6de3129eb0adfd1f703304986d159ee75c` |
+
+An acceptance record names the hash the run printed. Editing either script changes its hash: the new hash needs a review and a
+new pin before it may be used as acceptance evidence (the release runner refuses any other hash). The self-tests and `standin.mjs`
+are not pinned; they exist to prove the scripts' mechanics and may change without a re-pin as long as the two blobs above do not.
+
 Team rule (#98, 2026-10-19): any change to a Console, browser or embedding path must pass a **real-browser acceptance on
 canary against a real launcher-backed agent** before it ships. `console-embed-acceptance.mjs` is the launcher/UI side of that
 check. Release owns where it runs (canary-a, one disposable fake-harness agent, no real credentials) and the member session.
