@@ -468,6 +468,26 @@ class ShippedReminderTest(ReminderBase):
         self.release(issue, '[release] canary_passed ' + 'b' * 40)       # a different commit is a new signal
         self.assertEqual(len(self.pending()), 1)
 
+    def test_pinned_and_epic_issues_never_get_the_shipped_reminder(self):
+        """The pinned release queue is meant to stay open: release's own canary_passed title on it must not nag its assignee."""
+        pinned = self.issue(assignee='ag_a', labels=['pinned'])
+        epic = self.issue(assignee='ag_a', labels=['Epic'])
+        plain = self.issue(assignee='ag_a')
+        for issue in (pinned, epic, plain):
+            self.release(issue, '[release] canary_passed ' + SHA)
+        treer = FakeTreer({'ag_a': 'idle'})
+        r = self.reminders(treer)
+        r.tick()
+        shipped = [c[c.index('--body') + 1] for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]]
+        self.assertEqual(len(shipped), 1)
+        self.assertIn(f'#{plain} ', shipped[0]); self.assertNotIn(f'#{pinned} ', shipped[0]); self.assertNotIn(f'#{epic} ', shipped[0])
+        self.assertEqual(self.store.shipped_pending(('epic', 'pinned')), [], 'the skipped signals were settled, not kept')
+        relabelled = self.issue(assignee='ag_a')
+        self.release(relabelled, '[release] canary_passed ' + SHA)
+        self.act(relabelled, 'update', {'labels': ['pinned']}, A)                 # pinned AFTER the signal: still skipped at delivery
+        self.advance(2 * MIN); r.tick()
+        self.assertEqual(len([c for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]]), 1)
+
     def test_a_busy_assignee_is_told_later_and_a_closed_issue_is_settled_silently(self):
         issue = self.issue(assignee='ag_a'); other = self.issue(assignee='ag_a')
         self.release(issue, '[release] canary_passed ' + SHA); self.release(other, '[release] canary_passed ' + SHA)
@@ -584,7 +604,7 @@ class AggregationAndDeliveryTest(ReminderBase):
             self.assertNotIn(forbidden, body)
 
     def test_skip_labels_default_and_configuration(self):
-        self.assertEqual(skip_labels({}), ('epic',))
+        self.assertEqual(skip_labels({}), ('epic', 'pinned'))
         self.assertEqual(skip_labels({'ISSUES_REMINDER_SKIP_LABELS': ' epic, wip ,,epic'}), ('epic', 'wip'))
         self.assertEqual(skip_labels({'ISSUES_REMINDER_SKIP_LABELS': ''}), ())
         self.issue(assignee='ag_a', labels=['wip'])

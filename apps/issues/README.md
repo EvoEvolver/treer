@@ -168,7 +168,7 @@ this way after #51.
 | `ISSUES_URL` | `http://issues.treer/` | Client-side root override for the `issues` CLI |
 | `ISSUES_NOTIFY_HOURLY_LIMIT` | `20` | Immediate Messages per recipient per hour before updates fold into one digest |
 | `ISSUES_NOTIFY` | `on` | `0`/`off`/`false`/`no` disables issue-change notifications and digests |
-| `ISSUES_REMINDER_SKIP_LABELS` | `epic` | Comma-separated labels (case-insensitive) whose issues are never counted by reminders; empty = none |
+| `ISSUES_REMINDER_SKIP_LABELS` | `epic,pinned` | Comma-separated labels (case-insensitive) whose issues are never counted by reminders; empty = none |
 | `ISSUES_REMINDERS` | `on` | `0`/`off`/`false`/`no` disables the reminder poller |
 | `ISSUES_REMINDER_FIRST` | `10m` | First reminder this long after an issue starts needing one (1m–24h) |
 | `ISSUES_REMINDER_FACTOR` | `2` | Each later interval = previous × factor (1–10) |
@@ -337,7 +337,7 @@ live in the SQLite `notify_windows`/`notify_budget` tables and survive restarts.
 
 An issue **needs a reminder** while it is not `done`/`closed`, its assignee is an Agent
 (stable ID `ag_…`; humans are never messaged) and it carries none of the labels in
-`ISSUES_REMINDER_SKIP_LABELS` (default `epic`). For each such (assignee, issue) the App keeps
+`ISSUES_REMINDER_SKIP_LABELS` (default `epic,pinned`). For each such (assignee, issue) the App keeps
 a backoff in SQLite (`reminder_backoff`, so restarts keep it): the first reminder is due
 `ISSUES_REMINDER_FIRST` (default `10m`) after the issue started needing one, and every
 later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) capped at
@@ -360,7 +360,7 @@ later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) 
   commenting on or editing the issue, or the responsibility passing to a party that was *not* responsible in the last
   24 hours (so flipping `blocked`/`in_progress` or bouncing between the same two parties resets nothing). Other
   people's comments, edits and lease changes do not. A change of recipient without progress keeps the schedule. An
-  issue that stops needing reminders (resolved, labelled `epic`, assigned to a human) loses its state and starts
+  issue that stops needing reminders (resolved, labelled `epic` or `pinned`, assigned to a human) loses its state and starts
   fresh if it returns.
 - **Only when idle.** At the due time the App runs `treer agent show ID`; only when the
   Agent's `status` is `idle` and it is not busy does it send. A busy, unknown or
@@ -397,8 +397,9 @@ the word `canary_passed` and names a commit as 8–40 lowercase hex digits recor
 hex digits). The signal is stored in SQLite (`shipped_signals`, so a restart neither loses nor repeats it) and is
 delivered once, by the reminder worker, to the issue's *current* Agent assignee when it is idle and under the hourly
 cap: `Issues reminder: these look shipped (canary_passed commit); close them if done: #12 (95ab3c1a).` plus the fixed
-`issues list …` command. Nothing else from the title reaches the Message. Issues that are `done`/`closed` or have no
-Agent assignee by then are settled without a Message. The deployed App needs `--release-agent` as a fixed argument of
+`issues list …` command. Nothing else from the title reaches the Message. Issues that are `done`/`closed`, have no
+Agent assignee by then or carry a skip label (`epic`, `pinned` by default: tickets such as the pinned release queue are meant to stay
+open) are settled without a Message. The deployed App needs `--release-agent` as a fixed argument of
 its saved command, like `--leader-agent`.
 
 ## Search (#186)

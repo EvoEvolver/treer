@@ -784,17 +784,19 @@ class Store:
                 db.execute('INSERT OR REPLACE INTO reminder_backoff(issue_id,assignee,version,interval,next_due,count) VALUES(?,?,?,?,?,0)',
                            (issue_id, recipient, version, first, max(now, start + first)))
 
-    def shipped_pending(self):
+    def shipped_pending(self, skip_labels=()):
         """(issue ID, sha8, assignee) of recorded 'looks shipped' signals not yet delivered. Signals for issues that were
         resolved or lost their Agent assignee in the meantime are settled without a message."""
         with self.connect() as db:
             rows = db.execute('SELECT issue_id,sha8 FROM shipped_signals WHERE sent_at IS NULL ORDER BY created_at,issue_id').fetchall()
             items = self.all(db)
+        skip = {label.lower() for label in skip_labels}
         out = []
         for row in rows:
             issue = items.get(row['issue_id'])
             assignee = issue['assignee'] if issue else None
-            out.append((row['issue_id'], row['sha8'], assignee if issue and issue['status'] not in RESOLVED and (assignee or '').startswith('ag_') else None))
+            kept = issue and issue['status'] not in RESOLVED and (assignee or '').startswith('ag_') and not skip & {l.lower() for l in issue['labels']}
+            out.append((row['issue_id'], row['sha8'], assignee if kept else None))
         return out
 
     def shipped_done(self, pairs, now):

@@ -68,11 +68,11 @@ def enabled(environ=None):
 
 
 def skip_labels(environ=None):
-    """ISSUES_REMINDER_SKIP_LABELS: comma-separated labels whose issues never trigger reminders. Default `epic`; matching is
+    """ISSUES_REMINDER_SKIP_LABELS: comma-separated labels whose issues never trigger reminders. Default `epic` and `pinned` (long-lived tickets that are meant to stay open); matching is
     case-insensitive. Set it to an empty value to remind about everything."""
     raw = (os.environ if environ is None else environ).get('ISSUES_REMINDER_SKIP_LABELS')
     if raw is None:
-        return ('epic',)
+        return ('epic', 'pinned')
     return tuple(dict.fromkeys(label.strip() for label in raw.split(',') if label.strip()))
 
 
@@ -226,7 +226,7 @@ class Reminders:
     def shipped_tick(self, now):
         """One-off 'looks shipped' reminders raised by the release Agent's canary_passed comment (see Store.shipped_pending):
         fixed words, integer issue IDs and the 8 hex digits of the commit only; delivered once per (issue, commit)."""
-        pending = self.store.shipped_pending()
+        pending = self.store.shipped_pending(skip_labels() if self.skip is None else self.skip)
         self.store.shipped_done([(i, sha) for i, sha, assignee in pending if assignee is None], now)   # nobody left to tell
         by_agent = {}
         for issue_id, sha8, assignee in pending:
