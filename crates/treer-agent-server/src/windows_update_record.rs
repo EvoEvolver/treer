@@ -7,6 +7,8 @@ use uuid::Uuid;
 use crate::windows_update_envelope::{decode, Kind};
 use crate::windows_update_layout_model as layout;
 
+mod reason;
+
 // Remote derives keep one classifier and its original portable regressions.
 // These spellings are a draft format, never trusted evidence by themselves.
 #[derive(Clone, Serialize, Deserialize)]

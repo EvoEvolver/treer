@@ -640,6 +640,40 @@ ownership, and that a reference preserved to RolledBack is not automatically
 reverified as a new rollback entry. Those tests would establish synthetic
 composition only, without a production verifier constructor or real I/O.
 
+The private `cfg(test)` child module `windows_update_record::reason` now
+exercises that synthetic composition. Its evidence source has one fixed slot,
+an 8 KiB limit, exact declared-length reads, strict typed events and no path or
+free-text diagnostic field. A verified value borrows its exact live context,
+has no Clone/serde/Default implementation, and is moved into the inert entry
+check. Entry consumption latches the attempt so that another value verified
+before consumption cannot enter again. Lost liveness or a replacement context
+refuses even when all serialized fields and predecessor bytes are identical.
+The latch represents in-memory consumption only, not durable publication or
+restart protection. Synthetic numeric process/ownership/monitor identities
+are not OS handles or authenticated ownership proof.
+
+Health-failure observations compare handle identity, start instance and the
+running-image hash against the separately supplied context and intended new
+Controller hash. Failure stages and health predicates use fixed vocabularies;
+argv, environment, tokens, credentials and file contents are not diagnostic
+fields. A future native source must acquire these identities and completed
+failure observations independently; the synthetic constructor authenticates
+nothing. Human abort remains refused. Deadline observations use the original
+context budget without renewal, and source failures never select a fallback.
+Operation failures compare the independently supplied intent revision: an
+intent-state predecessor uses its own revision, while a subsequent result-state
+predecessor refers back one revision to that intent. Merely substituting the
+latest result revision cannot relabel it as the original operation intent.
+
+For the future private evidence store, the proposed readers are the owning OS
+user and SYSTEM only. Keep referenced evidence read-only through terminal state
+and for at least seven days afterwards, then require an explicit reviewed
+cleanup policy; uncertain/nonterminal attempts must retain it. Exhausted
+retention quota refuses new attempts rather than evicting required evidence.
+This is a retention proposal, not an implemented timer, quota, deletion or new
+cleanup authority. Checked storage, sync/readback, authenticated acquisition,
+durable single-use publication and production wiring remain separate gates.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual
