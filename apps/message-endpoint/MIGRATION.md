@@ -106,23 +106,52 @@ decisions, even after a green code review.
   contains statuses, counts, field names, release hashes and masked identifiers
   only. A file permission check does not isolate other same-UID Agents.
 
-### Core questions to settle before the receipt/import implementation
+### Core contract findings and proposed next boundary
 
-1. Which existing Core read operation can validate a final relay-authored message
-   ID, its author and delivery to the fixed recipient under the hub's identity?
-   The hub must not rely on the fragment handoff ID or broaden its permission to
-   read arbitrary mailbox content. If no sufficiently narrow operation exists,
-   identify the minimal Core contract; do not invent a new one inside the App.
-2. Can a new relay attach a readable legacy message as a context for its fixed
-   recipient using the existing send contract, while preserving old authorship?
-   Define the failure for an inaccessible/deleted context; no impersonation or
-   silent context dropping is acceptable.
-3. What evidence establishes the old bridge's Core mailbox drained, including
-   leased/unacknowledged deliveries, without reading message bodies or consuming
-   deliveries as an inventory probe? SQLite terminal states alone are insufficient.
+Core review #203 event 5774 accepted the staged plan, not a new receipt/import
+contract or production activation. Its source review establishes these blockers:
 
-These are review questions, not findings that Core is broken or confirmation
-that a Core change is necessary. The initial implementation remains App-owned.
+- `treer message get` returns bodies and requires the caller to be an original
+  sender or recipient, in addition to Policy. The hub cannot independently
+  verify an otherwise invisible relay-to-recipient message. Broader
+  `message.read` Policy alone does not remove this store-level check. A relay
+  receipt or digest remains an App assertion, not Core verification.
+- A new relay can attach a historical context only if **that relay** can read
+  the parent and Policy permits it. The fixed recipient's access does not grant
+  the relay access. A context edge does not grant its recipient access to the
+  parent either. Importing SQLite IDs cannot transfer historical participation.
+- Core receive has no consumer lease: it selects unacknowledged, unexpired
+  deliveries. App worker leases are separate. Existing list/receive returns
+  bodies; there is no count-only mailbox probe. A zero count is a momentary
+  observation, never a fence against later sends or another poller.
+
+Proposed smallest separate Core work, for owner/Core/security decision before
+implementation (no new endpoints are assumed available):
+
+| Contract | Required scope | Response and refusal |
+| --- | --- | --- |
+| Final receipt check | Explicitly authorized hub/relay/fixed-recipient relationship, same workspace, exact message ID | Body-free acceptance metadata only; verify actual sender and recipient. Out-of-scope IDs have indistinguishable refusal; never mailbox enumeration, acknowledgement or read receipt |
+| Self-mailbox status | Authenticated caller's own mailbox; any operator delegation separately approved | Counts only, explicit unacknowledged/unexpired semantics and sample time; never receive/ack, body or another identity's credential |
+| Historical context continuity | Owner-approved exact old sender/new relay/fixed-recipient relationship and bounded historical parent IDs | Preserve original IDs/authors; no generic mailbox membership or workspace-wide history grant. Missing, deleted or out-of-scope parents remain errors |
+
+The third item is a new authorization boundary, not an App-only migration trick.
+Core owns its design, capability negotiation, revocation and tests. If it is not
+approved, a lossless migration to a **new** relay identity is blocked. Reusing an
+already-authorized identity or accepting an explicit new-context cutoff are
+alternative owner decisions, not defaults; neither is authorized here. Do not
+add the hub as a message co-recipient just to obtain visibility, impersonate the
+old bridge, copy bodies to manufacture history, or silently drop reply context.
+
+Rehearsal can proceed with synthetic snapshots and refused-capability fixtures.
+The planner must continue reporting missing receipt validation, historical
+context continuity and count-only drain evidence even when all local queues are
+terminal. Full cutover stays blocked until Core/security freeze a concrete
+contract, both runtimes advertise it, and owner/release authorizes the operation.
+For the drain, fence old admission/sends and stop polling under the reviewed
+procedure; reconcile App leases, outboxes and ambiguous sends separately, then
+sample the old identity's mailbox through its authorized operator. Neither an
+empty SQLite queue nor a self-mailbox count grants a new hub authority to inspect
+the old mailbox.
 
 ### Sandbox credential and backup retirement
 

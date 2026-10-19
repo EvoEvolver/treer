@@ -47,6 +47,31 @@ class MigrationPlan(unittest.TestCase):
         self.assertNotIn('legacy_outbound_not_drained',report['blockers'])
         self.assertEqual(before,self.path.read_bytes())
         self.assertEqual(report,plan.inventory(self.path))
+    def test_terminal_queues_do_not_imply_core_continuity_or_cutover_authority(self):
+        # Even an empty local store cannot prove another mailbox drained or
+        # make a fresh relay an original participant in historical contexts.
+        for table in ['outbound_deliveries', 'outbound_chunks', 'processed_updates']:
+            self.db.execute('DELETE FROM '+table)
+        self.db.commit()
+        report = plan.inventory(self.path)
+        self.assertFalse(report['ready_for_cutover'])
+        for blocker in ['core_mailbox_drain_not_verified',
+                        'core_final_receipt_validation_unavailable',
+                        'core_historical_context_continuity_unavailable',
+                        'core_body_free_mailbox_status_unavailable']:
+            self.assertIn(blocker, report['blockers'])
+        self.assertEqual(report['historical_mapping_count'], 0)
+
+    def test_offset_boundaries_convert_without_reset_or_overflow(self):
+        for old, new in [('-1', 0), ('0', 1), (str(plan.MAX_ID), plan.MAX_ID+1)]:
+            self.db.execute("UPDATE metadata SET value=? WHERE key='last_update_id'", (old,))
+            self.db.commit()
+            self.assertEqual(plan.inventory(self.path)['proposed_next_offset'], new)
+        self.db.execute("UPDATE metadata SET value=? WHERE key='last_update_id'", (str(plan.MAX_ID+1),))
+        self.db.commit()
+        with self.assertRaises(plan.Invalid):
+            plan.inventory(self.path)
+
     def test_ambiguous_chunks_and_sent_but_unacked_are_not_drained(self):
         self.db.execute("INSERT INTO outbound_deliveries VALUES('sent','synthetic')")
         self.db.execute("INSERT INTO outbound_chunks VALUES('sending','synthetic')")

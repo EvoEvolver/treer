@@ -94,7 +94,7 @@ def inventory(path):
         chunks = counts('outbound_chunks', ['pending','sending','error','sent'])
         processed = counts('processed_updates', ['completed'])
         mappings = integer(db.execute('SELECT count(*) FROM message_mappings').fetchone()[0])
-        report = {'schema':'treer.telegram-migration-plan/v1','ready_for_cutover':False,'bot_id':int(bot),'legacy_last_update_id':last,'proposed_next_offset':last+1,'bindings':bindings,'senders':senders,'outbound_deliveries':outbound,'outbound_chunks':chunks,'processed_updates':processed,'historical_mapping_count':mappings,'blockers':['operator_evidence_not_verified','endpoint_mapping_required','offline_import_and_reverse_journal_not_implemented','core_mailbox_drain_not_verified']}
+        report = {'schema':'treer.telegram-migration-plan/v1','ready_for_cutover':False,'bot_id':int(bot),'legacy_last_update_id':last,'proposed_next_offset':last+1,'bindings':bindings,'senders':senders,'outbound_deliveries':outbound,'outbound_chunks':chunks,'processed_updates':processed,'historical_mapping_count':mappings,'blockers':['operator_evidence_not_verified','endpoint_mapping_required','offline_import_and_reverse_journal_not_implemented','core_mailbox_drain_not_verified','core_final_receipt_validation_unavailable','core_historical_context_continuity_unavailable','core_body_free_mailbox_status_unavailable']}
         if outbound['pending'] or outbound['sending'] or outbound['error'] or outbound['sent'] or chunks['pending'] or chunks['sending'] or chunks['error']:
             report['blockers'].append('legacy_outbound_not_drained')
         if outbound['sending'] or chunks['sending']:
