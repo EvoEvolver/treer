@@ -555,6 +555,9 @@ fn console_frame_src_is_the_proxy_origin_plus_one_https_wildcard_under_the_apps_
         "apps.treer.example/evil",
         "apps.treer.example:443",
         "a b",
+        "apps.treer.example; script-src *",
+        "apps.treer.example,evil.example",
+        "apps.treer.example'",
     ] {
         assert_eq!(
             console_frame_src("https://proxy.treer.example/", Some(bad)),
@@ -580,4 +583,21 @@ fn console_frame_src_is_the_proxy_origin_plus_one_https_wildcard_under_the_apps_
         "frame-src 'self' https://proxy.treer.example https://*.apps.treer.example; \
          frame-ancestors 'none'; object-src 'none'; base-uri 'none'"
     );
+}
+
+#[test]
+fn an_unrepresentable_console_csp_falls_back_to_the_closed_policy() {
+    // A header value cannot hold control characters; the generated string is
+    // from parsed URL parts so this should never happen, but a security header
+    // must not go missing if it does.
+    let mut response = Response::new(Body::empty());
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static("text/html"));
+    let response = super::app_dist::with_headers_for_test(response, "frame-src 'self'\u{7f}");
+    assert_eq!(
+        response.headers()[header::CONTENT_SECURITY_POLICY],
+        "frame-ancestors 'none'; object-src 'none'; base-uri 'none'"
+    );
+    assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
 }
