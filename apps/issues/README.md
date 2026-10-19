@@ -465,6 +465,14 @@ parent (a summary epic can itself be a note). Conversion in either direction is 
 the activity (who and when); there are no extra rules. Create one with `issues create --status note`, filter with
 `issues list --status note` or the web status filter.
 
+## Agent client: `issues edit`
+
+`issues edit ID [--title T] [--description TEXT | --description-stdin] [--priority P] [--label L ...] [--blocked-by N ...] [--parent N ...]
+[--clear-labels] [--clear-blocked-by] [--clear-parents] [--version V]` is `PATCH /v1/issues/ID` with only the options you give. List options
+(`--label`, `--blocked-by`, `--parent`) replace the whole set; `--clear-*` empties it; `--version` is optimistic concurrency (409 if the issue
+changed). Status, assignee and `waiting_on` keep their own commands (`status`, `assign`, `wait`). Permissions are the API's: the creator,
+assignee, lease holder or a human owner/admin.
+
 ## Stale view (#185)
 
 `GET /v1/stale?hours=4&limit=50&offset=0` (hours 1..720) lists unresolved issues (not `done`/`closed`, no skip label)

@@ -229,13 +229,36 @@ class IssuesTest(unittest.TestCase):
                 query=urllib.parse.urlsplit(self.path).query
                 body=self.rfile.read(int(self.headers.get('Content-Length',0)))
                 request=urllib.request.Request(target+path.lstrip('/')+('?' + query if query else ''),data=body if body else None,method=self.command,headers={'X-Treer-Identity-Token':'agent-a','Content-Type':'application/json'})
-                with urllib.request.urlopen(request) as r: content=r.read();self.send_response(r.status);self.end_headers();self.wfile.write(content)
+                try:
+                    with urllib.request.urlopen(request) as r: content=r.read();self.send_response(r.status);self.end_headers();self.wfile.write(content)
+                except urllib.error.HTTPError as error:
+                    content=error.read();self.send_response(error.code);self.end_headers();self.wfile.write(content)       # relay errors like a proxy
         proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Inject);threading.Thread(target=proxy.serve_forever,daemon=True).start()
         try:
             env=hermetic_env({'http_proxy':f'http://127.0.0.1:{proxy.server_port}'})
             for command in (['list','--label',label],['list','--assignee','me','--unresolved','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli'],['create','CLI note','--status','note'],['wait',str(id),'ag_b'],['wait',str(id),'none'],['stale','--hours','4'],['policy'],['search','pelican','--limit','3']):
                 r=subprocess.run([sys.executable,str(ROOT/'issues'),*command],env=env,capture_output=True,text=True,timeout=10)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIsInstance(json.loads(r.stdout),dict)
+            cli=lambda *a,stdin=None:subprocess.run([sys.executable,str(ROOT/'issues'),*a],env=env,input=stdin,capture_output=True,text=True,timeout=10)
+            dep=self.create();epic=self.create()
+            r=cli('edit',str(id),'--title','Edited by CLI','--priority','high','--label','x','--label','y','--blocked-by',str(dep),'--parent',str(epic))
+            self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+            issue=self.req(f'v1/issues/{id}')[1]['issue']
+            self.assertEqual((issue['title'],issue['priority'],issue['labels'],issue['blocked_by'],issue['parent_ids']),('Edited by CLI','high',['x','y'],[dep],[epic]))
+            untouched=(issue['status'],issue['assignee'],issue['description'])
+            r=cli('edit',str(id),'--description-stdin',stdin='Line one\nLine two with "quotes" and \u4e2d\u6587')
+            self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+            after=self.req(f'v1/issues/{id}')[1]['issue']
+            self.assertEqual(after['description'],'Line one\nLine two with "quotes" and \u4e2d\u6587')
+            self.assertEqual((after['title'],after['priority'],after['labels'],after['blocked_by'],after['parent_ids']),('Edited by CLI','high',['x','y'],[dep],[epic]),'only the options given are sent')
+            r=cli('edit',str(id),'--clear-labels','--clear-blocked-by','--clear-parents')
+            self.assertEqual(r.returncode,0,r.stdout+r.stderr)
+            cleared=self.req(f'v1/issues/{id}')[1]['issue'];self.assertEqual((cleared['labels'],cleared['blocked_by'],cleared['parent_ids']),([],[],[]))
+            for bad in (['edit',str(id)],['edit',str(id),'--label','a','--clear-labels'],['edit',str(id),'--description','x','--description-stdin'],['edit',str(id),'--version','1'],['edit','abc','--title','x']):
+                self.assertNotEqual(cli(*bad).returncode,0,bad)
+            self.assertNotEqual(cli('edit',str(id),'--title','stale write','--version','1').returncode,0,'optimistic concurrency conflict (409) is reported')
+            self.assertEqual(self.req(f'v1/issues/{id}')[1]['issue']['title'],'Edited by CLI')
+            r=cli('edit',str(id),'--title','x'*400);self.assertNotEqual(r.returncode,0);self.assertIn('invalid_field',r.stdout)
         finally:proxy.shutdown();proxy.server_close()
     def test_forwarded_human_identity_and_browser_mutation_security(self):
         token=self.req('test/human-token',base=self.proxy)[1]['access_token']
