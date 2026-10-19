@@ -1262,14 +1262,30 @@ print(json.dumps({{'acknowledged_delivery_ids':['del_receipt'],'already_acknowle
             .unwrap(),
         )
         .unwrap();
+        let stage = std::fs::read_to_string(root.join("stage")).unwrap();
+        assert!(matches!(stage.as_str(), "before_commit" | "after_commit"));
+        if stage == "before_commit" {
+            let root = root.clone();
+            // Pause inside SQLite's mapping INSERT. Keep the actual private-store
+            // COMMIT hook installed. Timeout exits without committing the write.
+            h.store.db.update_hook(Some(
+                move |_: rusqlite::hooks::Action, _: &str, table: &str, _: i64| {
+                    if table == "telegram_reply_mappings" {
+                        std::fs::write(root.join("ready"), "inside uncommitted INSERT").unwrap();
+                        std::thread::sleep(std::time::Duration::from_secs(10));
+                        std::process::exit(91);
+                    }
+                },
+            ));
+        }
         let receipt = crate::core::AuthenticatedDelivery::fixture(
             receipt_delivery(&intent, "msg_final"),
             "ws",
         );
         let core = crate::core::Core::new(&root.join("fake-treer"), "app_hub").unwrap();
         assert!(fake.sent.borrow().is_empty());
-        // The fake CLI blocks before acknowledging. The parent SIGKILLs this
-        // test process only after the CLI independently observes durable COMMIT.
+        // The parent SIGKILLs this process either inside the completion write
+        // transaction or in the fake ack CLI after independently observed COMMIT.
         let _ = crate::telegram_receipt_completion::commit_and_ack(
             &std::sync::Mutex::new(h),
             &core,
@@ -1281,7 +1297,7 @@ print(json.dumps({{'acknowledged_delivery_ids':['del_receipt'],'already_acknowle
     }
 
     #[test]
-    fn receipt_process_death_after_commit_replays_same_ack_without_send() {
+    fn receipt_process_death_before_or_after_commit_replays_without_send() {
         use std::{
             os::unix::{fs::PermissionsExt, process::ExitStatusExt},
             process::{Command, Stdio},
@@ -1295,10 +1311,12 @@ print(json.dumps({{'acknowledged_delivery_ids':['del_receipt'],'already_acknowle
                 let _ = self.0.wait();
             }
         }
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
-        let executable = root.join("fake-treer");
-        std::fs::write(&executable, r#"#!/usr/bin/python3
+        for stage in ["before_commit", "after_commit"] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            std::fs::write(root.join("stage"), stage).unwrap();
+            let executable = root.join("fake-treer");
+            std::fs::write(&executable, r#"#!/usr/bin/python3
 import json, os, sqlite3, sys, time
 from pathlib import Path
 root=Path(__file__).parent
@@ -1311,7 +1329,7 @@ assert db.execute('PRAGMA integrity_check').fetchone()==('ok',)
 db.close()
 with (root/'acks.jsonl').open('a') as f:
     f.write(json.dumps(args)+'\n')
-if not (root/'ready').exists():
+if (root/'stage').read_text()=='after_commit' and not (root/'ready').exists():
     parent=os.getppid()
     (root/'ready').write_text('committed; ack not applied')
     deadline=time.monotonic()+10
@@ -1321,92 +1339,144 @@ if not (root/'ready').exists():
     sys.exit(1)
 print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowledged_delivery_ids':[]}))
 "#).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let log = std::fs::File::create(root.join("child.log")).unwrap();
-        let mut child = ChildGuard(
-            Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "telegram::tests::receipt_crash_child",
-                    "--nocapture",
-                ])
-                .env_clear()
-                .env("HOME", &root)
-                .env("TMPDIR", &root)
-                .env("PATH", "/usr/bin:/bin")
-                .env("TREER_RECEIPT_CRASH_FIXTURE", &root)
-                .stdin(Stdio::null())
-                .stdout(log.try_clone().unwrap())
-                .stderr(log)
-                .spawn()
-                .unwrap(),
-        );
-        let deadline = Instant::now() + Duration::from_secs(15);
-        while !root.join("ready").exists() {
-            assert!(
-                child.0.try_wait().unwrap().is_none(),
-                "fixture exited before COMMIT"
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let log = std::fs::File::create(root.join("child.log")).unwrap();
+            let mut child = ChildGuard(
+                Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "telegram::tests::receipt_crash_child",
+                        "--nocapture",
+                    ])
+                    .env_clear()
+                    .env("HOME", &root)
+                    .env("TMPDIR", &root)
+                    .env("PATH", "/usr/bin:/bin")
+                    .env("TREER_RECEIPT_CRASH_FIXTURE", &root)
+                    .stdin(Stdio::null())
+                    .stdout(log.try_clone().unwrap())
+                    .stderr(log)
+                    .spawn()
+                    .unwrap(),
             );
-            assert!(
-                Instant::now() < deadline,
-                "timed out waiting for committed fixture"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        child.0.kill().unwrap();
-        assert_eq!(child.0.wait().unwrap().signal(), Some(9));
-        let deadline = Instant::now() + Duration::from_secs(12);
-        while !root.join("cli-stopped").exists() {
-            assert!(
-                Instant::now() < deadline,
-                "fake CLI must stop without applying ack"
-            );
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        let value: serde_json::Value =
-            serde_json::from_slice(&std::fs::read(root.join("intent.json")).unwrap()).unwrap();
-        let intent = CoreIntent {
-            endpoint: "ag_endpoint".into(),
-            generation: 1,
-            job: value["job"].as_i64().unwrap(),
-            token: "a".repeat(64),
-            parts: serde_json::from_value(value["parts"].clone()).unwrap(),
-        };
-        let fake = Fake::default();
-        let h = Hub::new(
-            Store::open(&root.join("state"), Limits::default()).unwrap(),
-            fake.clone(),
-            "app_hub",
-            "ws",
-        )
-        .unwrap();
-        let receipt = crate::core::AuthenticatedDelivery::fixture(
-            receipt_delivery(&intent, "msg_final"),
-            "ws",
-        );
-        let core = crate::core::Core::new(&executable, "app_hub").unwrap();
-        let hub = Mutex::new(h);
-        for _ in 0..2 {
-            assert_eq!(
-                crate::telegram_receipt_completion::commit_and_ack(
-                    &hub, &core, &receipt, &intent, NOW,
+            let deadline = Instant::now() + Duration::from_secs(15);
+            while !root.join("ready").exists() {
+                assert!(
+                    child.0.try_wait().unwrap().is_none(),
+                    "fixture exited before COMMIT"
+                );
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for committed fixture"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            if stage == "before_commit" {
+                assert!(!root.join("acks.jsonl").exists(), "no ack before COMMIT");
+                let db = rusqlite::Connection::open_with_flags(
+                    root.join("state/hub.sqlite3"),
+                    rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
                 )
-                .unwrap(),
-                crate::telegram_reply_store::Recorded::IgnoredTerminal
+                .unwrap();
+                assert_eq!(
+                    db.query_row("SELECT pending FROM inbound", [], |r| r.get::<_, i64>(0))
+                        .unwrap(),
+                    1
+                );
+                assert_eq!(
+                    db.query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                        .get::<_, i64>(0))
+                        .unwrap(),
+                    0
+                );
+            }
+            child.0.kill().unwrap();
+            assert_eq!(child.0.wait().unwrap().signal(), Some(9));
+            if stage == "after_commit" {
+                let deadline = Instant::now() + Duration::from_secs(12);
+                while !root.join("cli-stopped").exists() {
+                    assert!(
+                        Instant::now() < deadline,
+                        "fake CLI must stop without applying ack"
+                    );
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+            }
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(root.join("intent.json")).unwrap()).unwrap();
+            let intent = CoreIntent {
+                endpoint: "ag_endpoint".into(),
+                generation: 1,
+                job: value["job"].as_i64().unwrap(),
+                token: "a".repeat(64),
+                parts: serde_json::from_value(value["parts"].clone()).unwrap(),
+            };
+            let fake = Fake::default();
+            let h = Hub::new(
+                Store::open(&root.join("state"), Limits::default()).unwrap(),
+                fake.clone(),
+                "app_hub",
+                "ws",
+            )
+            .unwrap();
+            assert_eq!(
+                h.store
+                    .db
+                    .query_row("SELECT pending FROM inbound", [], |r| r.get::<_, bool>(0))
+                    .unwrap(),
+                stage == "before_commit"
+            );
+            assert_eq!(
+                h.store
+                    .db
+                    .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                if stage == "before_commit" { 0 } else { 1 }
+            );
+            if stage == "before_commit" {
+                assert!(!root.join("acks.jsonl").exists());
+            }
+            let receipt = crate::core::AuthenticatedDelivery::fixture(
+                receipt_delivery(&intent, "msg_final"),
+                "ws",
+            );
+            let core = crate::core::Core::new(&executable, "app_hub").unwrap();
+            let hub = Mutex::new(h);
+            for _ in 0..if stage == "before_commit" { 1 } else { 2 } {
+                assert_eq!(
+                    crate::telegram_receipt_completion::commit_and_ack(
+                        &hub, &core, &receipt, &intent, NOW,
+                    )
+                    .unwrap(),
+                    if stage == "before_commit" {
+                        crate::telegram_reply_store::Recorded::Inserted
+                    } else {
+                        crate::telegram_reply_store::Recorded::IgnoredTerminal
+                    }
+                );
+            }
+            let calls: Vec<Vec<String>> = std::fs::read_to_string(root.join("acks.jsonl"))
+                .unwrap()
+                .lines()
+                .map(|s| serde_json::from_str(s).unwrap())
+                .collect();
+            if stage == "before_commit" {
+                assert_eq!(
+                    calls.len(),
+                    1,
+                    "one replay commits and acknowledges exactly once"
+                );
+            } else {
+                assert_eq!(calls.len(), 3);
+                assert_eq!(calls[0], calls[1]);
+                assert_eq!(calls[1], calls[2]);
+            }
+            assert!(
+                fake.sent.borrow().is_empty(),
+                "replay must not send another frame"
             );
         }
-        let calls: Vec<Vec<String>> = std::fs::read_to_string(root.join("acks.jsonl"))
-            .unwrap()
-            .lines()
-            .map(|s| serde_json::from_str(s).unwrap())
-            .collect();
-        assert_eq!(calls.len(), 3);
-        assert_eq!(calls[0], calls[1]);
-        assert_eq!(calls[1], calls[2]);
-        assert!(
-            fake.sent.borrow().is_empty(),
-            "replay must not send another frame"
-        );
     }
 
     #[test]

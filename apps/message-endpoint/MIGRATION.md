@@ -512,6 +512,15 @@ receipt twice. All three ack attempts use identical argv and operation IDs;
 replays return `IgnoredTerminal`, leave the single existing mapping unchanged,
 and invoke no additional mailbox send.
 
+The same child fixture also pauses from the mapping INSERT update hook, before
+COMMIT, while leaving the real private-store commit hook installed. Before the
+parent kills it, an independent reader still sees pending work and no mapping;
+no ack CLI invocation exists. After SIGKILL and reopening, the same assertions
+hold. A single receipt replay then inserts exactly one mapping, commits the
+completed job and invokes exactly one ack; no mailbox send occurs. The test-only
+hook has a bounded timeout that exits the child without committing if the parent
+fails to kill it. It does not alter production hooks or worker behavior.
+
 This covers death after local COMMIT but before acknowledgement takes effect,
 including an ack CLI call already in progress. It does not prove actual Core-side
 ack idempotence, negotiate a peer, kill an assembled worker, or exercise external
