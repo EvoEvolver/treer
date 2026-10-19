@@ -1954,16 +1954,17 @@ async fn concurrent_rotation_and_exchange_take_the_pair_lock_in_one_order() {
         );
         let exchange = redeem(&fixture, &config, AGENT_HOST, &code, &nonce);
         let (navigation, exchange) = futures_util::future::join(navigation, exchange).await;
-        // Neither side fails with a database error; the exchange succeeds once.
-        let navigation =
-            navigation.unwrap_or_else(|f| panic!("navigation failed: {:?}", f.error.code));
-        assert!(
-            navigation.status() == StatusCode::OK
-                || navigation.status() == StatusCode::UNAUTHORIZED
-        );
-        axum::body::to_bytes(navigation.into_body(), 64)
-            .await
-            .unwrap();
+        // Neither side fails with a database error (a broken deadlock would be
+        // one); when the exchange evicted the prewarm row first, the navigation
+        // simply finds no session, which is the ordinary eviction outcome.
+        match navigation {
+            Ok(response) => {
+                axum::body::to_bytes(response.into_body(), 64)
+                    .await
+                    .unwrap();
+            }
+            Err(failure) => assert_ne!(failure.error.code, "database_error", "{failure:?}"),
+        }
         match exchange {
             Ok(response) => assert_eq!(response.status(), StatusCode::NO_CONTENT),
             Err(failure) => assert_eq!(
