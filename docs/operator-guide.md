@@ -1052,20 +1052,21 @@ Proxy-owned bootstrap page on the Agent origin redeems it for a partitioned
 sends it back before loading the Agent UI. Browsers without partitioned-cookie
 support (older Safari, strict third-party-cookie settings) fail that check and
 the Console falls back to the Proxy-origin tunnel, which the user sees.
-A Console that supports session reuse loads the bootstrap with `?reuse=1`: the
-page first asks `GET /.treer/embed/check` whether a live embed session for this
-Agent origin is already in the browser's partition and, on `204`, loads the
-Agent UI at once and tells the Console `{treer_embed: "reused", nonce_hash}`
-instead of `ready`, so no code is minted; on anything else the normal handoff
+A Console that supports session reuse loads the bootstrap with `?reuse=1`, a
+non-secret capability hint. The page then announces a version-2 `ready`
+(`{treer_embed: "ready", version: 2, nonce_hash}`), the Console answers with a
+probe carrying the same hash, and the page asks `GET /.treer/embed/check` on
+its own origin whether a live embed session for this Agent is already in the
+browser's partition: on `204` it loads the Agent UI at once and tells the
+Console `{treer_embed: "reused", version: 2, nonce_hash}`, so no code is
+minted; otherwise it posts `mint` with the same hash and the normal handoff
 runs. The check answers `204` only when the session is live for this host and
 kind, the user is still a workspace member and the interface Policy pair still
-allows the user for this Agent (evaluated without recording a decision), so a
-reused session never loads a UI the request path would refuse. For load-time
-measurement the mint, bootstrap, session, check and the embedded UI's first
-response carry `Server-Timing` headers with per-step durations in milliseconds
-and no identifiers; a development Console may add `?timing=1` to the bootstrap
-URL to receive the page's own Performance marks (`timing` key) in its
-messages. Both flags are stripped before the Agent UI is loaded.
+allows the user for this Agent (evaluated without recording a decision), and
+`401` with no reason otherwise, so a reused session never loads a UI the
+request path would refuse. Without the hint the page sends the two-field
+`ready` and an old Console mints as before; the hint is stripped before the
+Agent UI is loaded. Handshake responses carry no timing headers.
 `TREER_AGENT_EMBED_FALLBACK=refuse` (`--agent-embed-fallback refuse`) closes
 that fallback: the tunnel answers `503 embedded_ui_requires_isolated_origin`
 and the Console offers "open in new tab" only. Every Console host (Proxy `app_dist`, Worker, nginx) must send the same

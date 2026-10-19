@@ -45,7 +45,6 @@ pub(in crate::api) async fn mint_agent_interface_embed(
             "browser_nonce_hash must be a 64-character lowercase hex digest",
         ));
     }
-    let mut timing = ServerTiming::start();
     // A signed-in non-member gets the same answer as an unknown id (#164 a).
     auth.require_workspace_member(&workspace_id, &session.user_id)
         .await
@@ -57,7 +56,6 @@ pub(in crate::api) async fn mint_agent_interface_embed(
                 ApiFailure { status, error }
             }
         })?;
-    timing.mark("membership");
     let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
     require_agent_interface_access(
         &policy,
@@ -68,7 +66,6 @@ pub(in crate::api) async fn mint_agent_interface_embed(
         &agent,
     )
     .await?;
-    timing.mark("policy");
     if agent
         .interface
         .as_ref()
@@ -109,7 +106,6 @@ pub(in crate::api) async fn mint_agent_interface_embed(
     let ingress = auth
         .ensure_agent_interface_ingress(&workspace_id, &agent.agent_id, &session.user_id, base)
         .await?;
-    timing.mark("ingress");
     let code = auth
         .create_embed_auth_code(
             &ingress,
@@ -118,7 +114,6 @@ pub(in crate::api) async fn mint_agent_interface_embed(
             &request.browser_nonce_hash,
         )
         .await?;
-    timing.mark("code");
     let mut response = Json(json!({
         "code": code,
         "origin": origin.trim_end_matches('/'),
@@ -128,53 +123,7 @@ pub(in crate::api) async fn mint_agent_interface_embed(
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    timing.apply(response.headers_mut());
     Ok(response)
-}
-
-/// `Server-Timing` for the embed handshake (#198 step 1): server-side
-/// durations per step, milliseconds only, never an identifier. The Console
-/// reads the mint's header through Resource Timing; the bootstrap reads its
-/// own origin's headers when the Console asked for `?timing=1`.
-pub(in crate::api) struct ServerTiming {
-    started: std::time::Instant,
-    last: std::time::Instant,
-    entries: Vec<(&'static str, std::time::Duration)>,
-}
-
-impl ServerTiming {
-    pub(in crate::api) fn start() -> Self {
-        let now = std::time::Instant::now();
-        Self {
-            started: now,
-            last: now,
-            entries: Vec::new(),
-        }
-    }
-
-    /// Records the time since the previous mark under `name`.
-    pub(in crate::api) fn mark(&mut self, name: &'static str) {
-        let now = std::time::Instant::now();
-        self.entries.push((name, now.duration_since(self.last)));
-        self.last = now;
-    }
-
-    pub(in crate::api) fn apply(&self, headers: &mut HeaderMap) {
-        let mut value = String::new();
-        for (name, duration) in &self.entries {
-            value.push_str(&format!(
-                "{name};dur={:.1}, ",
-                duration.as_secs_f64() * 1000.0
-            ));
-        }
-        value.push_str(&format!(
-            "total;dur={:.1}",
-            self.started.elapsed().as_secs_f64() * 1000.0
-        ));
-        if let Ok(value) = HeaderValue::from_str(&value) {
-            headers.insert(axum::http::HeaderName::from_static("server-timing"), value);
-        }
-    }
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -230,10 +179,10 @@ pub(in crate::api) async fn serve_agent_embed_route(
     None
 }
 
-/// Bootstrap flags the Console may set on the frame URL (#198): `reuse=1`
-/// asks the page to try an existing embed session before announcing `ready`;
-/// `timing=1` (development builds) asks it to include its own Performance
-/// marks in the messages. Both are stripped before the Agent UI is loaded.
+/// `reuse=1` on the bootstrap URL (#198): a non-secret capability hint that
+/// the Console speaks the version-2 handshake (ready, probe, mint or reused).
+/// It changes no authorization decision and is stripped before the Agent UI
+/// is loaded. Exactly `reuse=1`; any other value is the version-1 flow.
 fn bootstrap_flag(request: &Request<Body>, name: &str) -> bool {
     request
         .uri()
@@ -272,39 +221,42 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     let script_nonce = Uuid::new_v4().simple().to_string();
     let console_js = serde_json::to_string(&console)
         .map_err(|error| ApiFailure::internal("encode_error", &error.to_string()))?;
+    // The version-2 handshake is rendered only for a Console that asked for
+    // it (security 5554 condition 2): an old Console's page carries no probe
+    // handling and no v2 message at all.
     let reuse = bootstrap_flag(request, "reuse");
-    let timing = bootstrap_flag(request, "timing");
-    let mut server_timing = ServerTiming::start();
+    let v2_probe = if reuse {
+        r#"      // Version 2 (#198): the Console answers ready with a probe; this page
+      // decides once, on its own origin, whether a live embed session exists
+      // (the Proxy applies the full request gate) and reports reused or mint.
+      if (!probed && data.treer_embed === "probe" && data.version === 2 && data.nonce_hash === hash && Object.keys(data).length === 3) {
+        probed = true;
+        checkSession().then(function (r) {
+          if (done) return;
+          if (r.status === 204) { clearTimeout(timer); post({ treer_embed: "reused", version: 2, nonce_hash: hash }); navigate(); }
+          else post({ treer_embed: "mint", version: 2, nonce_hash: hash });
+        }).catch(function () { if (!done) post({ treer_embed: "mint", version: 2, nonce_hash: hash }); });
+      }"#
+    } else {
+        ""
+    };
+    let announce = if reuse {
+        r#"var probed = false; post({ treer_embed: "ready", version: 2, nonce_hash: hash });"#
+    } else {
+        r#"post({ treer_embed: "ready", nonce_hash: hash });"#
+    };
     let html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Treer</title></head><body>
 <script nonce="{script_nonce}">
 (function () {{
   var CONSOLE = {console_js};
-  var REUSE = {reuse};
-  var TIMING = {timing};
   var parentWindow = window.parent;
   var done = false;
   var hash = null;
   var params = new URLSearchParams(window.location.search);
-  params.delete("reuse"); params.delete("timing");
+  params.delete("reuse");
   var next = "/" + (params.toString() ? "?" + params.toString() : "");
-  var t0 = performance.now();
-  var marks = {{}};
-  function mark(name) {{ if (TIMING) marks[name] = Math.round(performance.now() - t0); }}
-  // Development-only timing (#198 step 1): durations from this document's own
-  // Performance entries, never identifiers; present only when the Console
-  // asked with timing=1.
-  function timing() {{
-    if (!TIMING) return null;
-    var out = {{ marks: marks }};
-    var nav = performance.getEntriesByType("navigation")[0];
-    if (nav) out.navigation = {{ dns_ms: Math.round(nav.domainLookupEnd - nav.domainLookupStart), connect_ms: Math.round(nav.connectEnd - nav.connectStart), tls_ms: nav.secureConnectionStart ? Math.round(nav.connectEnd - nav.secureConnectionStart) : 0, ttfb_ms: Math.round(nav.responseStart - nav.requestStart), response_ms: Math.round(nav.responseEnd - nav.responseStart) }};
-    return out;
-  }}
-  function post(message) {{
-    var tm = timing(); if (tm) message.timing = tm;
-    try {{ parentWindow.postMessage(message, CONSOLE); }} catch (e) {{}}
-  }}
+  function post(message) {{ try {{ parentWindow.postMessage(message, CONSOLE); }} catch (e) {{}} }}
   // A failure report carries the nonce hash once it exists: the Agent
   // document that later replaces this page shares window and origin but never
   // learned the hash, so the Console accepts a post-ready failure only with it.
@@ -314,6 +266,7 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     if (hash) message.nonce_hash = hash;
     post(message);
   }}
+  function fromConsole(event) {{ return !done && event.origin === CONSOLE && event.source === parentWindow && event.data && typeof event.data === "object"; }}
   function navigate() {{ done = true; window.location.replace(next); }}
   function checkSession() {{ return fetch("/.treer/embed/check", {{ credentials: "include", redirect: "manual", cache: "no-store" }}); }}
   if (window.top === window || !window.crypto || !window.crypto.subtle) {{ report("cookies_blocked"); return; }}
@@ -321,36 +274,26 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
   var nonce = Array.prototype.map.call(bytes, function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
   window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(nonce)).then(function (digest) {{
     hash = Array.prototype.map.call(new Uint8Array(digest), function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
-    mark("hash");
     var timer = setTimeout(function () {{ report("cookies_blocked"); }}, 15000);
     window.addEventListener("message", function (event) {{
-      if (done || event.origin !== CONSOLE || event.source !== parentWindow) return;
+      if (!fromConsole(event)) return;
       var data = event.data;
-      if (!data || data.treer_embed !== "code" || typeof data.code !== "string") return;
-      clearTimeout(timer);
-      mark("code");
-      fetch("/.treer/embed/session", {{ method: "POST", credentials: "include", redirect: "manual",
-        headers: {{ "content-type": "application/json" }}, body: JSON.stringify({{ code: data.code, nonce: nonce }}) }})
-      .then(function (r) {{ if (r.status !== 204) throw new Error("session"); mark("session"); return checkSession(); }})
-      .then(function (r) {{ if (r.status !== 204) throw new Error("check"); mark("check"); navigate(); }})
-      .catch(function () {{ report("cookies_blocked"); }});
+      if (data.treer_embed === "code" && typeof data.code === "string") {{
+        clearTimeout(timer);
+        fetch("/.treer/embed/session", {{ method: "POST", credentials: "include", redirect: "manual",
+          headers: {{ "content-type": "application/json" }}, body: JSON.stringify({{ code: data.code, nonce: nonce }}) }})
+        .then(function (r) {{ if (r.status !== 204) throw new Error("session"); return checkSession(); }})
+        .then(function (r) {{ if (r.status !== 204) throw new Error("check"); navigate(); }})
+        .catch(function () {{ report("cookies_blocked"); }});
+        return;
+      }}
+{v2_probe}
     }});
-    function announce() {{ mark("ready"); post({{ treer_embed: "ready", nonce_hash: hash }}); }}
-    if (REUSE) {{
-      // Reuse (#198 step 2): a live embed session for this origin, in this
-      // partition, skips the mint; the Console learns it from "reused" and
-      // the UI request itself re-checks authority as always.
-      checkSession().then(function (r) {{
-        mark("reuse_check");
-        if (r.status === 204) {{ clearTimeout(timer); post({{ treer_embed: "reused", nonce_hash: hash }}); navigate(); }}
-        else announce();
-      }}).catch(announce);
-    }} else announce();
+    {announce}
   }}).catch(function () {{ report("cookies_blocked"); }});
 }})();
 </script></body></html>"#
     );
-    server_timing.mark("render");
     let mut response = Response::new(Body::from(html));
     let headers = response.headers_mut();
     headers.insert(
@@ -366,7 +309,6 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
         .map_err(|error| ApiFailure::internal("csp_error", &error.to_string()))?,
     );
     no_store(&mut response);
-    server_timing.apply(response.headers_mut());
     Ok(response)
 }
 
@@ -387,7 +329,6 @@ async fn open_embed_session(
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
     enforce_ingress_fetch_metadata(request, hostname, false)?;
-    let mut timing = ServerTiming::start();
     let body = axum::body::to_bytes(
         std::mem::replace(request.body_mut(), Body::empty()),
         EMBED_BODY_LIMIT,
@@ -402,7 +343,6 @@ async fn open_embed_session(
     let token = auth
         .consume_embed_auth_code(hostname, agent_id, &parsed.code, &parsed.nonce)
         .await?;
-    timing.mark("consume");
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
     response.headers_mut().insert(
@@ -415,7 +355,6 @@ async fn open_embed_session(
         .map_err(|error| ApiFailure::internal("cookie_error", &error.to_string()))?,
     );
     no_store(&mut response);
-    timing.apply(response.headers_mut());
     Ok(response)
 }
 
@@ -440,12 +379,10 @@ async fn check_embed_session(
     if !matches!(*method, Method::GET | Method::HEAD) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
-    let mut timing = ServerTiming::start();
     let user = match cookie_value(headers, config.embed_cookie_name()) {
         Some(token) => auth.authenticate_embed_session(hostname, &token).await?,
         None => None,
     };
-    timing.mark("session");
     let no_session = || {
         ApiFailure::unauthorized(
             "ingress_authentication_required",
@@ -466,11 +403,9 @@ async fn check_embed_session(
     if !interface_gate_allows(policy, &workspace_id, &user_id, &agent).await? {
         return Err(no_session());
     }
-    timing.mark("policy");
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
     no_store(&mut response);
-    timing.apply(response.headers_mut());
     Ok(response)
 }
 
