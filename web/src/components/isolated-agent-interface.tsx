@@ -102,13 +102,13 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
 
   const waiting = pending || phase === 'bootstrap' || phase === 'checking-fallback'
   const error = !pending && (phase === 'unavailable' || phase === 'refused' || phase === 'timed-out')
-  const notice = pending || phase === 'bootstrap' ? 'surface.embed_checking' : phase === 'checking-fallback' ? 'surface.embed_fallback_checking' : phase === 'compatibility' || phase === 'offer-compatibility' ? 'surface.embed_compatibility' : phase === 'refused' ? 'surface.embed_refused' : phase === 'timed-out' ? 'surface.embed_timeout' : !origin ? 'surface.embed_unknown' : 'surface.embed_unavailable'
+  const notice = pending || phase === 'bootstrap' ? 'surface.embed_checking' : phase === 'checking-fallback' ? 'surface.embed_fallback_checking' : phase === 'offer-compatibility' ? 'surface.embed_offer' : phase === 'compatibility' ? 'surface.embed_compatibility' : phase === 'refused' ? 'surface.embed_refused' : phase === 'timed-out' ? 'surface.embed_timeout' : !origin ? 'surface.embed_unknown' : 'surface.embed_unavailable'
   const src = phase === 'compatibility' ? fallbackUrl : bootstrap
   return <div className="flex size-full min-h-0 min-w-0 flex-col overflow-hidden">
     {(waiting || error || phase === 'compatibility' || phase === 'offer-compatibility') && <div ref={noticeRegion} tabIndex={-1} role={error || phase === 'compatibility' || phase === 'offer-compatibility' ? 'alert' : 'status'} className="flex shrink-0 flex-wrap items-center justify-between outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring gap-x-4 gap-y-1 border-b bg-sidebar px-3 py-2 text-xs leading-5 text-foreground">
       <p className="w-full min-w-0 sm:w-auto sm:flex-1">{t(notice)}</p>
-      {phase === 'offer-compatibility' && <button type="button" onClick={() => setPhase('compatibility')} className="inline-flex min-h-11 items-center rounded-sm px-2 underline outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('surface.embed_load_compatibility')}</button>}
-      {!pending && origin && <a href={origin} target="_blank" rel="noopener noreferrer" className="inline-flex min-h-11 items-center rounded-sm underline outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('app.open_in_new_tab')}</a>}
+      {!pending && origin && <a href={origin} target="_blank" rel="noopener noreferrer" className="font-medium inline-flex min-h-11 items-center rounded-sm underline outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('app.open_in_new_tab')}</a>}
+      {phase === 'offer-compatibility' && <button type="button" onClick={() => setPhase('compatibility')} className="-ml-2 inline-flex min-h-11 items-center rounded-sm px-2 underline outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('surface.embed_load_compatibility')}</button>}
     </div>}
     {!pending && !error && phase !== 'checking-fallback' && phase !== 'offer-compatibility' && src && <iframe ref={frame} src={src} title={title} className="block min-h-0 w-full flex-1 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onLoad={() => { postEmbedTheme(frame.current, theme, readEmbedAppearance()); loaded.current() }} />}
   </div>

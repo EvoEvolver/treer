@@ -86,11 +86,12 @@ for (const strict of [false, true]) test(`cookie failure requires explicit choic
   if (strict) {
     await expect(page.getByRole('alert')).toContainText('requires opening'); await expect(choice).toHaveCount(0)
   } else {
-    await expect(choice).toBeVisible(); await expect(page.getByRole('alert')).toContainText('shares the control-plane origin')
+    await expect(choice).toBeVisible(); await expect(page.getByRole('alert')).toContainText('would run this interface on the control-plane origin shared with the Console')
     await expect(page.locator('iframe')).toHaveCount(0); expect(s.probes()).toBe(1)
     await choice.focus(); await page.keyboard.press('Enter')
     await expect(page.frameLocator('iframe').getByRole('heading')).toHaveText('Compatibility interface'); expect(s.probes()).toBe(2)
     await expect(page.getByRole('alert')).toBeFocused()
+    await expect(page.getByRole('alert')).toContainText('Compatibility view: this interface shares the control-plane origin')
   }
   await expect(page.getByRole('link', { name: 'Open in new browser tab' })).toHaveAttribute('href', origin+'/')
   await expect(page.getByRole('link', { name: 'Open in new browser tab' })).toHaveAttribute('rel', 'noopener noreferrer')
@@ -179,7 +180,7 @@ test('compatibility choice fits desktop and touch, English/Chinese and light/dar
       themeModule.persistTheme(theme); i18nModule.setLocale(lang)
     }, { theme, lang })
     const alert = page.getByRole('alert')
-    await expect(alert).toContainText(lang === 'zh' ? '共享来源' : 'shares the control-plane origin')
+    await expect(alert).toContainText(lang === 'zh' ? '兼容视图会使此界面与 Console 共享来源' : 'Compatibility view would run this interface on the control-plane origin shared with the Console')
     expect(await alert.evaluate(el => el.scrollWidth <= el.clientWidth)).toBe(true)
     const button = alert.getByRole('button'), link = alert.getByRole('link')
     expect((await button.boundingBox())!.height).toBeGreaterThanOrEqual(44)
@@ -187,6 +188,8 @@ test('compatibility choice fits desktop and touch, English/Chinese and light/dar
     await button.focus(); await expect(button).toBeFocused()
     await page.screenshot({ path: `/tmp/treer-embed156-${browserName}-${width}-${theme}-${lang}.png` })
   }
+  await page.getByRole('alert').getByRole('button').click()
+  await expect(page.getByRole('alert')).toContainText('兼容视图：此界面与控制面共享来源')
 })
 
 test('the assigned WindowProxy at a different origin cannot mint or request fallback', async ({ page }) => {

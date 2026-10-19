@@ -445,6 +445,7 @@ export const en = {
   "surface.app_shared_origin": "This App interface shares the control-plane origin.",
   "surface.embed_unknown": "Cannot check interface isolation. Reload this Console page to retry.",
   "surface.embed_timeout": "The isolated interface did not load in time. Reload this tab to retry, or open it in a new browser tab.",
+  "surface.embed_offer": "Isolation is unavailable here. Compatibility view would run this interface on the control-plane origin shared with the Console. Open a new tab for isolation.",
   "surface.embed_checking": "Checking interface isolation…",
   "surface.embed_fallback_checking": "Isolation is unavailable. Checking whether compatibility view is allowed…",
   "surface.embed_compatibility": "Compatibility view: this interface shares the control-plane origin. Open it in a separate tab for isolation.",
