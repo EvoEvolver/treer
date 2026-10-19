@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { test, expect, type Page } from '@playwright/test'
+import { securityHeaders } from '../worker/security-headers'
 import { fixture, gotoWorkspace, open, switchTab } from './fixtures/workspace-tabs'
 const id = 'ag_0123456789abcdef0123456789abcdef'
 const origin = 'https://ag-0123456789abcdef0123456789abcdef.agents.example.test'
 const hash = 'a'.repeat(64), code = 'iec_v1_' + 'b'.repeat(64)
-async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'success', strict = false, realBootstrap = false, mintWait?: Promise<void>) {
+async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'success', strict = false, realBootstrap = false, mintWait?: Promise<void>, enforceHeaders = false, navigationWait?: Promise<void>) {
   const live = await fixture(page, { 'tab-1': origin+'/' }, { 'tab-1': id })
   await page.route('**/api/auth/config', r => r.fulfill({ json: { capabilities: ['agent.interface-origin.v1', 'agent.interface-embed.v1'] } }))
   let mints = 0, probes = 0, delivered = 0, mintedHash = ''
@@ -19,7 +20,8 @@ async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'succe
     probes++
     return strict ? r.fulfill({ status: 503, json: { error: { code: 'embedded_ui_requires_isolated_origin' } } }) : r.fulfill({ contentType: 'text/html', body: '<h1>Compatibility interface</h1>' })
   })
-  await page.route(origin+'/**', r => {
+  await page.route(origin+'/**', async r => {
+    if (navigationWait && new URL(r.request().url()).pathname === '/.treer/embed') await navigationWait
     const target = JSON.stringify(new URL(page.url()).origin)
     if (realBootstrap && new URL(r.request().url()).pathname === '/.treer/embed') {
       // Execute the actual Core bootstrap, not a second implementation of it.
@@ -52,6 +54,20 @@ async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'succe
       return r.fulfill({ status: 204 })
     })
     await page.route(origin+'/.treer/embed/check', r => r.fulfill({ status: mode === 'blocked' ? 401 : 204 }))
+  }
+  if (enforceHeaders) {
+    await page.route('**/config.json', r => r.fulfill({ json: { proxy_url: 'http://127.0.0.1:' + (process.env.PW_PORT ?? '4173') } }))
+    const nonce = 'embed-header-regression'
+    const headers = Object.fromEntries(securityHeaders('http://127.0.0.1:' + (process.env.PW_PORT ?? '4173'), nonce, 'https://agents.example.test/'))
+    // Built single-file shell with the exact production header generator and
+    // nonce rewriting, rather than Vite's header-free development document.
+    const body = await page.evaluate(({ html, nonce }) => {
+      const doc = new DOMParser().parseFromString(html, 'text/html')
+      for (const script of doc.scripts) script.setAttribute('nonce', nonce)
+      return '<!doctype html>' + doc.documentElement.outerHTML
+    }, { html: readFileSync('dist/index.html', 'utf8'), nonce })
+    await page.route('**/*', r => r.request().isNavigationRequest() && r.request().frame() === page.mainFrame()
+      ? r.fulfill({ contentType: 'text/html', headers, body }) : r.fallback())
   }
   await gotoWorkspace(page); await open(page, 'Alpha')
   await expect(page.locator('iframe[title="/Alpha interface"]')).toHaveAttribute('src', /\.treer\/embed/)
@@ -216,4 +232,59 @@ test('the actual bootstrap 15 s timeout can offer compatibility before the Conso
   await expect(page.getByRole('button', { name: 'Load compatibility view (shared origin)' })).toBeVisible()
   release()
   expect(s.probes()).toBe(1)
+})
+
+for (const strict of [false, true]) test(`built Console under production CSP loads isolated Agent; strict=${strict}`, async ({ page }) => {
+  const violations: string[] = []
+  page.on('console', m => { if (m.type() === 'error' && m.text().includes('Content Security Policy')) violations.push(m.text()) })
+  const s = await setup(page, strict ? 'blocked' : 'success', strict, true, undefined, true)
+  if (strict) await expect(page.getByRole('alert')).toContainText('requires opening')
+  else await expect(page.frameLocator('iframe[title="/Alpha interface"]').getByRole('heading')).toHaveText('Isolated interface')
+  expect(s.mints()).toBe(1); expect(s.delivered()).toBe(1)
+  expect(violations).toEqual([])
+})
+
+for (const badOrigin of [
+  origin.replace('https:', 'http:'),
+  origin.replace('https://', 'https://x.'),
+  origin.replace('0123456789abcdef0123456789abcdef', 'ffffffffffffffffffffffffffffffff'),
+]) test(`invalid authenticated Agent origin never creates an embed frame: ${badOrigin}`, async ({ page }) => {
+  await fixture(page, { 'tab-1': badOrigin + '/' }, { 'tab-1': id })
+  await page.route('**/api/auth/config', r => r.fulfill({ json: { capabilities: ['agent.interface-origin.v1', 'agent.interface-embed.v1'] } }))
+  await gotoWorkspace(page); await open(page, 'Alpha')
+  await expect(page.getByRole('alert')).toContainText('Cannot')
+  await expect(page.locator('iframe')).toHaveCount(0)
+})
+
+
+test('theme messages wait for iframe navigation and still follow later theme changes', async ({ page }) => {
+  const errors: string[] = []
+  page.on('console', message => { if (message.type() === 'error' || /postMessage|target origin/i.test(message.text())) errors.push(message.text()) })
+  page.on('pageerror', error => errors.push(error.message))
+  let release!: () => void
+  const navigation = new Promise<void>(resolve => { release = resolve })
+  try {
+    await setup(page, 'manual', false, false, undefined, false, navigation)
+    // Keep the iframe at its initial Console-origin about:blank through effects
+    // and a theme change. Neither may post to the future Agent origin yet.
+    const setTheme = async (value: 'dark' | 'light') => page.evaluate(async theme => {
+      const module = await import('/src/lib/theme.ts')
+      module.persistTheme(theme)
+    }, value)
+    await setTheme('dark')
+    await page.waitForTimeout(200)
+    expect(errors).toEqual([])
+    release()
+    await expect.poll(() => page.frames().some(frame => frame.url().startsWith(origin))).toBe(true)
+    const child = page.frames().find(frame => frame.url().startsWith(origin))!
+    await child.evaluate(() => {
+      document.body.innerHTML = '<output></output>'
+      addEventListener('message', event => {
+        if (event.data?.type === 'treer:embed-theme') document.querySelector('output')!.textContent = event.data.theme
+      })
+    })
+    await setTheme('light')
+    await expect(child.locator('output')).toHaveText('light')
+    expect(errors).toEqual([])
+  } finally { release() }
 })

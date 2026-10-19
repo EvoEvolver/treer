@@ -341,7 +341,14 @@ ignored `test-results/` directory for visual inspection.
 
 The Cloudflare Worker runs before every static/SPA response. It adds a fresh
 script nonce and CSP, denies framing, disables MIME sniffing and referrer
-transmission, and marks HTML/config/health as `no-store`. Do not cache rewritten
+transmission, and marks HTML/config/health as `no-store`. For isolated Agent
+frames, configure `TREER_INGRESS_PUBLIC_URL` to the Proxy's HTTPS ingress base
+URL (canary: `https://canary.apps.treer.ai/`). Worker `frame-src` then adds only
+`https://*.<configured base host>`; an unset value preserves the Proxy-only
+frame policy, and an invalid configured URL fails closed with HTTP 503. This
+wildcard includes nested hosts, so it is only a coarse hosting bound: the
+Console still validates the exact Agent-ID origin before creating a frame.
+Do not relax script, connection, frame-ancestor or sandbox rules to enable it. Do not cache rewritten
 HTML at an upstream edge: its script nonce must match its CSP. Nginx adds the
 anti-framing, MIME and referrer headers, but its static shell does not have the
 Worker's nonce-based script restriction. These changes require a normal release;
@@ -836,3 +843,7 @@ lowercase hex characters (Core currently generates 64). A rejected begin handle
 that still matches the Controller's bounded identifier syntax gets a scoped
 best-effort abort; unsafe strings are never used as request paths.
 See the operator guide for temporary-file visibility, expiry and server quotas.
+
+Iframe appearance hints are included in the initial URL. Exact-origin theme
+messages start after that iframe loads, and continue on later theme changes;
+new iframe instances wait for their own load event.

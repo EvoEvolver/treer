@@ -995,7 +995,10 @@ support (older Safari, strict third-party-cookie settings) fail that check and
 the Console falls back to the Proxy-origin tunnel, which the user sees.
 `TREER_AGENT_EMBED_FALLBACK=refuse` (`--agent-embed-fallback refuse`) closes
 that fallback: the tunnel answers `503 embedded_ui_requires_isolated_origin`
-and the Console offers "open in new tab" only. Give the Console and the apps
+and the Console offers "open in new tab" only. Every Console host (Proxy `app_dist`, Worker, nginx) must send the same
+`frame-src 'self' <Proxy origin> https://*.<apps domain>` so the browser lets
+the Console frame the Agent origin; without it the frame is blocked silently
+and the Console times out (incident on 0c5c40ae). Give the Console and the apps
 domain separate registrable domains where possible; see
 [the security model](security.md#embed-sessions) for why. Supported browsers
 for the embedded path: Chrome and Edge 114+, Firefox 141+, Safari 26.2.
@@ -1007,8 +1010,12 @@ build itself, for the single-container deployment. Requests whose Host is the
 App public URL receive files from that directory with `index.html` as the SPA
 fallback, `GET /config.json` with the Proxy URL and `GET /health`, all with the
 same headers as the standalone nginx image (`X-Frame-Options: DENY`,
-`Content-Security-Policy: frame-ancestors 'none'; object-src 'none'; base-uri
-'none'`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
+`Content-Security-Policy: frame-src 'self' <Proxy origin> [https://*.<apps
+domain>]; frame-ancestors 'none'; object-src 'none'; base-uri 'none'`, where the
+wildcard source is present only when `TREER_INGRESS_PUBLIC_URL` configures an
+apps domain and lets the Console frame the isolated Agent origins there, the
+same `frame-src` the Worker and nginx hosts generate from the same inputs;
+`X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`,
 `Cache-Control: no-cache`, `no-store` for `/config.json` and `/health`), and
 HTML documents (the page and every SPA fallback) additionally carry
 `Cross-Origin-Opener-Policy: same-origin`; JSON, assets, Core APIs, tunnels

@@ -38,8 +38,25 @@ pub(crate) async fn login(
     Ok(session_response(&auth, &session, &headers))
 }
 
-pub(crate) async fn oauth_config(Extension(auth): Extension<AuthStore>) -> Json<Value> {
-    Json(auth.oauth_public_config())
+pub(crate) async fn oauth_config(
+    Extension(auth): Extension<AuthStore>,
+    ingress: Option<Extension<crate::api::IngressConfig>>,
+) -> Json<Value> {
+    let mut config = auth.oauth_public_config();
+    // Embed sessions (#156) exist only on an HTTPS deployment with a wildcard
+    // ingress domain; advertising the capability elsewhere made the Console
+    // refuse the legacy frame without an isolated one to offer (incident 4890).
+    if ingress
+        .as_ref()
+        .is_some_and(|config| config.embed_available())
+    {
+        if let Some(capabilities) = config.get_mut("capabilities").and_then(Value::as_array_mut) {
+            capabilities.push(Value::String(
+                treer_protocol::CAPABILITY_AGENT_INTERFACE_EMBED.to_string(),
+            ));
+        }
+    }
+    Json(config)
 }
 pub(crate) async fn register(
     Extension(auth): Extension<AuthStore>,

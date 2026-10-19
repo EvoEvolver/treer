@@ -122,3 +122,33 @@ test('built treemap works inside the unchanged single-file Worker CSP', async ({
   await expect(page.getByRole('link', { name: /^Open \/Product\/reviewer · agent · build-node · offline$/ })).toBeVisible()
   expect(await page.evaluate(() => (window as Window & { cspViolations: string[] }).cspViolations)).toEqual([])
 })
+
+
+test('frame-src adds only the configured HTTPS ingress domain and rejects malformed configuration', () => {
+  const frames = (ingress?: string) => securityHeaders('https://proxy.example.test/', 'n', ingress).get('content-security-policy')!.split('; ').find(s => s.startsWith('frame-src'))
+  expect(frames()).toBe("frame-src 'self' https://proxy.example.test")
+  expect(frames('https://canary.apps.treer.ai/')).toBe("frame-src 'self' https://proxy.example.test https://*.canary.apps.treer.ai")
+  for (const url of ['http://apps.example.test', 'https://user:password@apps.example.test', 'https://apps.example.test:444', 'https://apps.example.test/path', 'https://apps.example.test/?query', 'https://apps.example.test/#hash', 'https://127.0.0.1', 'https://localhost', 'https://*.apps.example.test']) expect(() => frames(url)).toThrow()
+})
+
+test('browser enforces the configured frame-src bound, including CSP wildcard semantics', async ({ page }) => {
+  const nonce = 'frame-bound-test', host = 'http://127.0.0.1:4200'
+  const allowed = 'https://ag-0123456789abcdef0123456789abcdef.agents.example.test'
+  const nested = 'https://x.ag-0123456789abcdef0123456789abcdef.agents.example.test'
+  const sibling = 'https://ag-0123456789abcdef0123456789abcdef.other.example.test'
+  for (const ingress of [undefined, 'https://agents.example.test/']) {
+    const loaded = new Set<string>()
+    await page.route('https://**/*', r => { loaded.add(new URL(r.request().url()).origin); return r.fulfill({ contentType: 'text/html', body: '<h1>Frame loaded</h1>' }) })
+    const headers = Object.fromEntries(securityHeaders('https://proxy.example.test/', nonce, ingress))
+    await page.route(host+'/', r => r.fulfill({ contentType: 'text/html', headers, body: `<script nonce="${nonce}">window.frameViolations=[];addEventListener("securitypolicyviolation",e=>window.frameViolations.push(e.blockedURI))</script><iframe title="allowed" src="${allowed}"></iframe><iframe title="nested" src="${nested}"></iframe><iframe title="sibling" src="${sibling}"></iframe>` }))
+    await page.goto(host+'/', { waitUntil: 'domcontentloaded' })
+    await expect.poll(() => loaded.has(allowed)).toBe(Boolean(ingress))
+    // CSP wildcards allow multiple labels. Exact Agent-ID validation remains
+    // essential before React creates a frame; the CSP is only an outer bound.
+    await expect.poll(() => loaded.has(nested)).toBe(Boolean(ingress))
+    const blocked = ingress ? [sibling] : [allowed, nested, sibling]
+    await expect.poll(() => page.evaluate(() => (window as Window & { frameViolations: string[] }).frameViolations)).toEqual(expect.arrayContaining(blocked))
+    expect(loaded.has(sibling)).toBe(false)
+    await page.unrouteAll({ behavior: 'ignoreErrors' })
+  }
+})
