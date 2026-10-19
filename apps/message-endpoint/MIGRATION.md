@@ -687,3 +687,11 @@ future transaction must compare the entire job/endpoint/generation/recipient
 tuple before replay or ack marking. Tests cover scoped/domain-framed keys,
 per-field assertion changes, outer message/parent changes, canonical formatting
 and rejection of wrong workspace, recipient, sender and expected receipt scope.
+
+An independently calculated synthetic golden vector pins both exact v1 hashes.
+The canonical encoding includes typed Receipt/Scope field ordering: adding even
+an optional field, changing serde serialization or changing a domain tag requires
+deliberate encoding versioning and ledger migration, not silent rehashing of old
+deliveries. Delivery-key stability across Core versions assumes redelivery keeps
+the original opaque delivery ID. A changed delivery ID is a new ledger key and
+may count again; the at-least-once accounting limitation also covers that case.

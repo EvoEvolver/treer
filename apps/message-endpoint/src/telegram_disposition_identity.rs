@@ -57,6 +57,8 @@ impl Identity {
             expected,
         )
         .map_err(|_| Error::Invalid)?;
+        // This v1 persisted encoding is pinned by an independent golden vector.
+        // Receipt/Scope field or serde/domain changes require a ledger migration.
         // Serialization of this fixed typed model is canonical for our fields:
         // input whitespace/object order disappear, all validated fields remain.
         // Only the fixed digest is retained; these transient bytes are not logged.
@@ -169,6 +171,22 @@ mod tests {
             },
         )
         .unwrap()
+    }
+
+    #[test]
+    fn v1_storage_hashes_match_independent_golden_vector() {
+        // Calculated independently with Python hashlib + 8-byte big-endian
+        // length framing + compact ordered JSON, not this module's hash helper.
+        let identity = identity(&wire(), "ws_one", "ag_hub", "del_one", "msg_receipt", 1);
+        let hex = |bytes: &[u8]| bytes.iter().map(|b| format!("{b:02x}")).collect::<String>();
+        assert_eq!(
+            hex(&identity.delivery_key),
+            "5f6eabf919fc0fea30b3972cca57cdd6de73e634e8a7c32122eacaf2ba6cb0d4"
+        );
+        assert_eq!(
+            hex(&identity.receipt_digest),
+            "3886c1666a3d814c2d1ff41ada01a620705e799cab3a59cf0f534a0e884c91bf"
+        );
     }
 
     #[test]
