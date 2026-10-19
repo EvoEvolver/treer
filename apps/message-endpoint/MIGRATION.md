@@ -180,12 +180,17 @@ explicit until a reverse journal is implemented and reviewed.
 
 ### Security gates still required before a production decision
 
-- **Token rotation:** security requires rotation at cutover; the current
-  checklist's “recommended” wording is not approval to omit it. Owner must
-  explicitly resolve this before activation. Rotation invalidates the old
-  credential, so pre-traffic rollback requires another fresh token installed by
-  the human owner into the old bridge before it can poll. A later second
-  rotation is redundant unless another credential may have been exposed.
+- **Token rotation (leader 5796/5798):** required now because the old production
+  token appeared in the leader's conversation, and again at cutover. The human
+  user regenerates it in BotFather and uses the existing write-only settings page;
+  bridge owner confirms polling/health and replacement using status only. As of
+  baseline 5800, token replacement/revocation is not confirmed. Do not read the
+  transcript or token. Check old config backups by metadata/path only and record
+  the rotation date/result on #203. The subsequent cutover installs a second
+  fresh token through the hub's human-only path. If rolling back then, the owner
+  provisions that new valid token into the old bridge; never reuse a revoked
+  token. A further retirement rotation is only needed if another valid credential
+  copy may remain exposed.
 - **Bound inputs:** the private cutover journal binds SHA-256 of the closed
   snapshot and explicit mapping document, the exact old process verified stopped,
   exclusive destination hub state lock, and source fingerprint recheck at commit.
@@ -196,12 +201,13 @@ explicit until a reverse journal is implemented and reviewed.
   unauthorized routing, unresolved ambiguous send, unexpected stragglers or a
   failed health observation. Do not auto-start the old poller. Until the watcher
   and escalation recipient are named, production activation is blocked.
-- **Production management residual risk:** current #159 policy permits any
-  verified workspace Agent to create/bind/resume any binding, including widening
-  an allowed-sender list; Agents can pause too. Production endpoints are not
-  protected by a special human-owner-only management class. Owner must explicitly
-  accept this risk in the release authorization or decide and review a protected
-  endpoint boundary before rollout. No unimplemented protection is claimed here.
+- **Production management residual risk (accepted, leader 5796):** any verified
+  workspace Agent may create/bind/resume any binding and widen its sender list,
+  including production bindings. Recipient notices, caps and masked audit are
+  the controls; there is no human-owner-only production management class. Repeat
+  this accepted risk in the final release authorization, not an unimplemented
+  protection claim. Agents retain pause. This acceptance does not authorize
+  deployment, token access or production polling.
 
 ### Sandbox credential and backup retirement
 
@@ -271,8 +277,8 @@ request cannot be reconstructed from local status alone.
    integrity checks and the final bot/offset/registry snapshot. Token material
    stays out of reports, argv and logs. Old threads/URLs and author identities
    remain valid; retain the old read-only service if historical URLs require it.
-4. Owner decides whether to rotate the production bot token (recommended), and
-   installs it through the new hub's write-only token page without putting it in
+4. Owner rotates the production bot token again at cutover (required by leader
+   5796/5798), and installs it through the new hub's write-only token page without putting it in
    argv, links or reports. **Owner/release stops the old poller and verifies its
    exact process identity has stopped.** A database
    row, a stale PID or a config flag does not prove absence of another poller.
@@ -319,6 +325,6 @@ rollback is therefore unavailable. The safe fallback is containment (paused,
 no poller) and a manual reviewed reconciliation, with the outage disclosed.
 
 Recovery backups are held only by the owner/release operator in private storage.
-After retirement acceptance, rotate the bot token again to retire the old
-bridge credential, and remove retired config/token backups under the operator
-retention policy. Retain the credential-free cutover journal as needed.
+After retirement acceptance, remove retired config/token backups under the
+operator retention policy. The mandatory cutover rotation already invalidates
+the old bridge credential; rotate again only if a valid copy remains exposed. Retain the credential-free cutover journal as needed.
