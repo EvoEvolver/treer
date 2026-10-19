@@ -142,11 +142,26 @@ compare the entire received body with the frozen payload, exercise acceptance,
 connection loss/truncation/503, and show no second POST or claim. They are not
 process-kill tests or evidence of real provider delivery.
 
-Before wiring these primitives into workers, the remaining storage lifecycle
+The existing outbox worker startup now acquires per-Hub email worker ownership
+under the state mutex and commits interrupted-attempt recovery before spawning
+its supervisor. A duplicate start is refused before touching journal rows.
+Recovery/storage failure returns an error without worker ownership or spawning;
+there is no fallback that skips containment. Failed thread spawning releases the
+startup guard. Normal shutdown releases it only after the supervisor has joined
+its endpoint threads. If joining the supervisor fails, ownership stays latched:
+detached endpoint work cannot safely be assumed stopped. Recover by stopping the
+process and reopening its private store, not by starting a second supervisor.
+This process-local gate complements private-store process exclusion; it is not
+distributed ownership or real-send activation. Local tests use an I/O-panicking
+fake Core to verify committed recovery, duplicate-start refusal, failed COMMIT
+with unchanged journal/ownership, and conservative stop-failure latching. They
+do not yet exercise assembled real-transport worker threads or a process crash.
+
+Before wiring real-send primitives into workers, the remaining storage lifecycle
 requirements from review 5999 must also be implemented and tested:
 
-- Run interrupted-attempt recovery in the single startup path before starting
-  any worker. Convention alone does not enforce this ordering today.
+- Keep real-send worker spawning behind this same startup gate; do not introduce
+  a second worker factory that bypasses recovery or resets active ownership.
 - Give the owner an audited abandonment path for **prepared only** rows after
   configuration changes or revocation. Do not extend it to dispatching,
   uncertain or accepted rows. Coordinate payload removal with the intent foreign

@@ -345,7 +345,7 @@ impl Queue<'_> {
     }
     /// Startup containment only, while dispatch workers are stopped. This does
     /// not resend, release slots, infer non-send or acknowledge anything.
-    pub fn recover_interrupted_proxy_deliveries(&mut self) -> Result<usize, Error> {
+    pub(crate) fn recover_interrupted_proxy_deliveries(&mut self) -> Result<usize, Error> {
         Ok(self.store.db.execute(
             "UPDATE email_dispatch SET state='uncertain' WHERE state='dispatching'",
             [],

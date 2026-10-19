@@ -1674,6 +1674,12 @@ There is **no production Proxy mail switch** in runtime configuration: unknown
 fields, including `email.mode`, fail closed. The Proxy sender remains an unused
 library helper until a later reviewed real-send increment.
 
+Email workers commit interrupted journal containment before spawning, and reject
+a second email supervisor on the same Hub. Failure to recover prevents startup.
+Normal shutdown releases ownership only after workers join; a supervisor panic
+keeps ownership latched until the process is stopped and its private store is
+reopened. Recovery retains uncertain reservations and never resends mail.
+
 On the dedicated owner settings page, create the ordinary paused endpoint
 binding, then bind an exact address and current workspace human stable ID under
 Configure endpoint. Email and Telegram targets are mutually exclusive and cannot

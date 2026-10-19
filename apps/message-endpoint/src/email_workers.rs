@@ -89,6 +89,41 @@ impl Snapshot {
 pub struct Workers {
     state: Arc<State>,
     join: Option<JoinHandle<()>>,
+    startup: Option<StartupLease<Core>>,
+}
+
+/// Per-Hub worker ownership. Private-store process exclusion is separate.
+/// Acquire/recover under the state mutex before any worker thread is spawned.
+struct StartupLease<M> {
+    hub: SharedHub<M>,
+    release_on_drop: bool,
+}
+impl<M> StartupLease<M> {
+    fn acquire(hub: &SharedHub<M>) -> Result<Self, ()> {
+        let mut h = hub.lock().map_err(|_| ())?;
+        if h.email_workers_active {
+            return Err(());
+        }
+        h.store.recheck_private_storage().map_err(|_| ())?;
+        Queue::new(&mut h.store)
+            .map_err(|_| ())?
+            .recover_interrupted_proxy_deliveries()
+            .map_err(|_| ())?;
+        h.email_workers_active = true;
+        Ok(Self {
+            hub: hub.clone(),
+            release_on_drop: true,
+        })
+    }
+}
+impl<M> Drop for StartupLease<M> {
+    fn drop(&mut self) {
+        if self.release_on_drop {
+            if let Ok(mut h) = self.hub.lock() {
+                h.email_workers_active = false;
+            }
+        }
+    }
 }
 fn clock() -> Result<i64, ()> {
     SystemTime::now()
@@ -126,6 +161,8 @@ impl Workers {
         config
             .validate()
             .map_err(|_| std::io::Error::other("email_private_outbox_unavailable"))?;
+        let startup = StartupLease::acquire(&hub)
+            .map_err(|_| std::io::Error::other("email_startup_recovery_unavailable"))?;
         let state = Arc::new(State::default());
         let shared = state.clone();
         let join = thread::Builder::new()
@@ -199,6 +236,7 @@ impl Workers {
         Ok(Self {
             state,
             join: Some(join),
+            startup: Some(startup),
         })
     }
     pub fn status(&self) -> Status {
@@ -215,10 +253,17 @@ impl Workers {
     }
     pub fn stop(&mut self) {
         self.request_stop();
+        let mut joined = true;
         if let Some(j) = self.join.take() {
             if j.join().is_err() {
                 increment(&self.state.failures);
+                joined = false;
             }
+        }
+        if let Some(mut startup) = self.startup.take() {
+            // A panicked supervisor may have detached endpoint threads. Never
+            // recover their in-flight reservations as if they had been joined.
+            startup.release_on_drop = joined;
         }
     }
 }
@@ -421,4 +466,152 @@ fn step<M: Mailbox + Directory>(
         increment(&state.replied);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        core::{AgentMetadata, Delivery},
+        hub::Hub,
+        protocol::{Envelope, Sender as Principal, SenderKind},
+        store::{Limits, Store},
+    };
+    use std::sync::Mutex;
+
+    struct NoIo;
+    impl Directory for NoIo {
+        fn metadata(&self, _: &str) -> Result<AgentMetadata, crate::core::Error> {
+            panic!("startup containment must not call Core");
+        }
+    }
+    impl Mailbox for NoIo {
+        fn receive(&self, _: u32) -> Result<Vec<Delivery>, crate::core::Error> {
+            panic!("startup containment must not receive");
+        }
+        fn send(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &[String],
+            _: Option<serde_json::Value>,
+        ) -> Result<String, crate::core::Error> {
+            panic!("startup containment must not send");
+        }
+        fn ack(&self, _: &str) -> Result<(), crate::core::Error> {
+            panic!("startup containment must not acknowledge");
+        }
+    }
+    fn fixture() -> SharedHub<NoIo> {
+        let mut h = Hub::new(
+            Store::memory(Limits::default()).unwrap(),
+            NoIo,
+            "ag_hub",
+            "ws_test",
+        )
+        .unwrap();
+        h.store
+            .register_paused("ag_email", 1, "ag_internal")
+            .unwrap();
+        Queue::new(&mut h.store)
+            .unwrap()
+            .bind_paused(
+                "ag_email",
+                1,
+                Contact {
+                    address: email::REAL_RECIPIENT.into(),
+                    member_id: "user_alice".into(),
+                },
+            )
+            .unwrap();
+        h.store
+            .db
+            .execute("UPDATE endpoints SET paused=0", [])
+            .unwrap();
+        let mut q = Queue::new(&mut h.store).unwrap();
+        let now = clock().unwrap();
+        q.admit(
+            "ag_email",
+            1,
+            &Envelope::Outbound {
+                delivery_id: "del_test".into(),
+                message_id: "msg_test".into(),
+                original_sender: Principal {
+                    kind: SenderKind::Agent,
+                    id: "ag_internal".into(),
+                },
+                body: "synthetic summary".into(),
+                context_ids: vec![],
+            },
+            now,
+        )
+        .unwrap();
+        let intent = q
+            .claim_proxy("ag_email", 1, now, &"a".repeat(64))
+            .unwrap()
+            .unwrap();
+        q.prepare_proxy_delivery(&intent, "https://hub.example/", now)
+            .unwrap();
+        let _abandoned = q
+            .begin_proxy_delivery_now(&intent, "https://hub.example/")
+            .unwrap();
+        Arc::new(Mutex::new(h))
+    }
+    fn state(hub: &SharedHub<NoIo>) -> String {
+        hub.lock()
+            .unwrap()
+            .store
+            .db
+            .query_row("SELECT state FROM email_dispatch", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn startup_recovers_before_ownership_and_duplicate_start_cannot_recover_live_work() {
+        let hub = fixture();
+        assert_eq!(state(&hub), "dispatching");
+        let lease = StartupLease::acquire(&hub).unwrap();
+        assert_eq!(state(&hub), "uncertain");
+        assert!(hub.lock().unwrap().email_workers_active);
+        // Simulate a later in-flight attempt while this supervisor owns workers.
+        hub.lock()
+            .unwrap()
+            .store
+            .db
+            .execute("UPDATE email_dispatch SET state='dispatching'", [])
+            .unwrap();
+        assert!(StartupLease::acquire(&hub).is_err());
+        assert_eq!(state(&hub), "dispatching");
+        drop(lease); // same release used only after workers are joined
+        assert!(!hub.lock().unwrap().email_workers_active);
+        let _restarted = StartupLease::acquire(&hub).unwrap();
+        assert_eq!(state(&hub), "uncertain");
+    }
+
+    #[test]
+    fn failed_startup_commit_never_grants_worker_ownership() {
+        let hub = fixture();
+        hub.lock().unwrap().store.db.commit_hook(Some(|| true));
+        assert!(StartupLease::acquire(&hub).is_err());
+        assert!(!hub.lock().unwrap().email_workers_active);
+        assert_eq!(state(&hub), "dispatching");
+        hub.lock()
+            .unwrap()
+            .store
+            .db
+            .commit_hook(None::<fn() -> bool>);
+        let _lease = StartupLease::acquire(&hub).unwrap();
+        assert_eq!(state(&hub), "uncertain");
+    }
+
+    #[test]
+    fn unconfirmed_worker_stop_latches_ownership_instead_of_recovering() {
+        let hub = fixture();
+        let mut lease = StartupLease::acquire(&hub).unwrap();
+        lease.release_on_drop = false; // supervisor join returned Err
+        drop(lease);
+        assert!(hub.lock().unwrap().email_workers_active);
+        assert!(StartupLease::acquire(&hub).is_err());
+    }
 }
