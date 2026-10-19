@@ -436,7 +436,13 @@ Complete and RolledBack are terminal. The continuation test enumerates all seven
 phases, both nine-step sets, all three physical layouts per image and eight
 health-claim combinations. Each classifier-consistent tuple must match at most
 one independent continuation-table row or an explicit diagnostic stop; every
-row must be exercised. An intent still awaiting its result has a structural
+row must be exercised. The stop inventory is independently closed: final/old
+health already set, non-rollback phases, terminal Complete/RolledBack, RL
+Published, and RC MoveOldIntent/OldMoved/PublishIntent/Published. The test
+requires row absence to equal membership in that explicit inventory, and every
+stop class must occur. A missing edge cannot hide as an unclassified stop even
+if both the implementation and the edge table omit it.
+An intent still awaiting its result has a structural
 next claim but cannot record it until a real post-operation observation also
 satisfies the successor claim. A separate nine-state RL/RC/terminal trace checks
 all ordered pairs, health changes and uncertain slots against the record guard.

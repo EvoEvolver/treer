@@ -1405,7 +1405,7 @@ fn rollback_continuation_classifies_every_consistent_tuple() {
     ];
     let layouts = [[Old, New, Absent], [Absent, New, Old], [New, Absent, Old]];
     let mut hits = [0; 10];
-    let mut stopped = 0;
+    let mut observed_stops = std::collections::BTreeSet::new();
     for phase in [
         Prepared,
         Activating,
@@ -1453,9 +1453,42 @@ fn rollback_continuation_classifies_every_consistent_tuple() {
                                 }
                                 next
                             });
-                            if expected.is_none() {
-                                stopped += 1;
+                            // Independent, closed stop inventory: never let
+                            // absence from BOTH graph and table invent a stop.
+                            let mut reasons = Vec::new();
+                            if flags & 2 != 0 {
+                                reasons.push("final_health");
                             }
+                            if flags & 4 != 0 {
+                                reasons.push("old_health");
+                            }
+                            match (phase, moving) {
+                                (Prepared | Activating | CoreHealthy, _) => {
+                                    reasons.push("non_rollback")
+                                }
+                                (Complete, _) => reasons.push("terminal_complete"),
+                                (RolledBack, _) => reasons.push("terminal_rolled_back"),
+                                (RollbackCli, Published) => reasons.push("cli_published"),
+                                (RollbackController, MoveOldIntent) => {
+                                    reasons.push("controller_move_old_intent")
+                                }
+                                (RollbackController, OldMoved) => {
+                                    reasons.push("controller_old_moved")
+                                }
+                                (RollbackController, PublishIntent) => {
+                                    reasons.push("controller_publish_intent")
+                                }
+                                (RollbackController, Published) => {
+                                    reasons.push("controller_published")
+                                }
+                                _ => {}
+                            }
+                            assert_eq!(
+                                expected.is_none(),
+                                !reasons.is_empty(),
+                                "missing edge or unexpected stop: {old:?}"
+                            );
+                            observed_stops.extend(reasons);
                             assert_eq!(
                                 next_rollback_claim(&old),
                                 expected,
@@ -1468,7 +1501,21 @@ fn rollback_continuation_classifies_every_consistent_tuple() {
         }
     }
     assert!(hits.into_iter().all(|count| count > 0));
-    assert!(stopped > 0);
+    assert_eq!(
+        observed_stops,
+        std::collections::BTreeSet::from([
+            "final_health",
+            "old_health",
+            "non_rollback",
+            "terminal_complete",
+            "terminal_rolled_back",
+            "cli_published",
+            "controller_move_old_intent",
+            "controller_old_moved",
+            "controller_publish_intent",
+            "controller_published",
+        ])
+    );
 }
 
 #[test]
