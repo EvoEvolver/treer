@@ -487,6 +487,38 @@ identify boot configuration entries; `{current}` identifies the running loader
 entry, not a documented fresh identifier for every kernel boot. Neither a BCD
 entry nor wall-clock boot-time arithmetic is an approved fallback.
 
+For this proposed clock model, a new epoch means a full kernel-session restart,
+not every user-visible startup. Hibernate resume and Fast Startup may continue
+the existing kernel session; their elapsed time must still consume the original
+five-second window. This is a proposed source contract, not validated native
+behavior. Before accepting any candidate, a dedicated-machine experiment must
+show different epoch values across two real full restarts, report equality only,
+and separately establish the intended Fast Startup and hibernate behavior.
+An identifier that remains constant across full restarts is rejected, even if
+boot-before and boot-after always match. Agreement by two fixture processes
+establishes consistency only, not authenticity or restart freshness.
+
+A documented alternative to evaluate is a verifier-generated random epoch in a
+volatile registry key. Microsoft's
+[RegCreateKeyExW contract](https://learn.microsoft.com/en-us/windows/win32/api/winreg/nf-winreg-regcreatekeyexw)
+ties volatile-key loss to hive unload, specifies full shutdown for HKLM, and
+notes that user-selected shutdown normally uses Fast Startup. It also says the
+volatile option is ignored for an existing key, and key creation initially
+creates no values. Therefore this API alone does not establish a trustworthy,
+initialized epoch. Do not treat opening an existing key as proof of volatility
+or silently repair a missing/malformed value by generating a replacement.
+
+Before selecting that alternative, review a fixed registry view and trusted
+parent/key ownership and DACL, refusal of unexpected existing objects, the
+single initializer and concurrent-reader protocol, and crash-before-value-write
+behavior. A protected HKLM key would require an authority-bearing provisioning
+step; no such write or permission change is authorized by this docs checkpoint.
+An administrator able to replace that state is outside the proposed trust
+boundary. VM snapshot restore can restore both registry state and the tick
+counter: rejecting observed regression does not detect every replay, and no
+snapshot-safe freshness claim follows. These gaps keep this an unselected
+alternative, not an implemented fallback.
+
 The proposed next deliverable is a private, test-only capability experiment,
 after review of its exact API/ABI and failure behavior. It must acquire each
 sample locally as boot-before, Win32 tick, boot-after; require matching nonzero
@@ -497,6 +529,11 @@ must agree during the observed session. Output should report only fixed result
 codes and equality/elapsed observations, not a persistent machine identifier.
 No registration publication, process authority, installer, installed-state read
 or production caller belongs in that experiment.
+If the experiment uses the internal query, resolve it from the already-loaded
+`ntdll` module without DLL search-path loading; refuse unsupported information
+classes and any result length other than the reviewed exact ABI. Keep it behind
+the test-only boundary and verify its absence from release binaries. API
+availability alone cannot pass the restart-freshness experiment above.
 
 Hosted Server 2022/2025 runs can establish availability and ordinary
 cross-process agreement on their exact builds. They cannot approve reboot,
