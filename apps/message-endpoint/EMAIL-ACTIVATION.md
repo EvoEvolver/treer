@@ -144,6 +144,15 @@ the any-Agent binding-management grant. Its decision must distinguish:
 | Independently verified non-send evidence | Record `externally_verified_non_send` with a reviewed evidence class; mailbox absence and elapsed time do not qualify. No current Core/provider query capability is assumed. A later retry requires its own reviewed authorization path. |
 | Reference absent, conflicting, non-unique, or evidence otherwise inconclusive | Remain `uncertain`; retain durable ambiguity and its reserved capacity, and do not POST. Delayed delivery is still possible. |
 
+An accepted `owner_observed_receipt` or `externally_verified_non_send` decision
+resolves that exact row and releases its uncertainty reservation in the same
+transaction as the outcome and audit record; retained history is not deleted.
+An inconclusive decision retains both the unresolved row and its reservation.
+Resolution never resumes a paused binding or enables sending automatically,
+including after an owner-asserted receipt. Resume is a separate audited action
+behind the operator activation gate, and any retry still needs the reviewed
+authorization described above.
+
 Audit only verified owner actor, time, opaque reference, decision and bounded
 nonsecret evidence-class code. No mail body, screenshots, provider response,
 credential or free-text secret is copied to audit. A decision must refer to the
@@ -156,8 +165,10 @@ increment**. Default containment remains hold/pause, not operator guesswork.
 
 Tests for the eventual implementation cover stable references across restart,
 key/payload freezing, missing/colliding/duplicate references, observed receipt
-versus absence, stale/concurrent owner decisions, Agent denial, redacted audit
-and zero additional external sends after any inconclusive decision.
+versus absence, stale/concurrent owner decisions, Agent denial, redacted audit,
+atomic reservation release only for resolved outcomes, reservation retention for
+inconclusive outcomes, no implicit resume, and zero additional external sends
+after any inconclusive decision.
 
 ## Implementation and acceptance sequence
 
