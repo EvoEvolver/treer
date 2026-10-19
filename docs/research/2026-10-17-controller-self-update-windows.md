@@ -7,7 +7,90 @@ verification, receipts, rollback and acceptance. Windows does not depend on the
 Unix socketpair/SCM_RIGHTS/pidfd work. Darwin remains unavailable for Rust
 authority-bearing self-update; its existing updater is unchanged.
 
-## Bounded breakaway probe
+## Current scope: PowerShell updater parity (leader5134, 2026-10-19)
+
+This decision supersedes the boot-epoch acquisition experiment and the proposed
+native registration/permit prerequisites below. Do not implement an HKLM epoch,
+privileged initializer, registry provisioning or reboot/hibernate/Fast Startup
+experiment for this work. The inert registration models remain test history,
+not requirements for the first Windows updater. They grant no production
+authority. The goal is the transaction already implemented by
+`scripts/update-machine.ps1`, expressed in Rust, with the previously selected
+supervisor inside the stable Host Job. This plan does not authorize a live update.
+
+The smallest complete transaction is:
+
+1. Validate the local detached installation, exact workspace/server identity,
+   loopback endpoint and binary paths. Refuse an unexpected shared installation
+   unless explicitly acknowledged. The Controller daemon starts a copy of the
+   installed Rust image as supervisor in the Host Job, outside the Agent PTY Job;
+   no breakaway, Host restart, service or scheduled task is involved.
+2. The supervisor takes the installation's exclusive, non-inherited file lock
+   before mutations and keeps it until a terminal result. Use a new private
+   per-attempt directory and refuse existing terminal or ambiguous attempts;
+   never automatically resume an interrupted transaction. The initiating
+   Controller returning or exiting does not release this supervisor-owned lock.
+3. Fetch the explicitly pinned SHA256SUMS and verify its out-of-band SHA-256
+   before interpreting it. Download Controller and CLI only, verify their hashes
+   and reported versions, and refuse redirects, URL credentials and ambient
+   proxies. Preserve the PowerShell bounds (8 KiB manifest, 256 MiB per artifact)
+   or document a deliberate stricter refusal; the current shared Rust downloader
+   has a 128 MiB artifact bound and needs an explicit compatibility decision.
+4. Snapshot readiness, Controller epoch/build, Host build and Agent
+   ID/PID/generation tuples. Back up Controller, CLI and configured startup store
+   into private storage, check backup hashes, and retain the Host binary only as
+   evidence without changing it. Write the activating receipt before swapping.
+5. Copy and verify the staged Controller beside its installed destination; move
+   the running image to a unique `.prev-*` name, then move the verified copy into
+   place. If the second move fails, restore the first immediately. Keep the old
+   running image; two moves are not an atomic multi-file transaction. Invoke the
+   fixed Rust `service ... restart-controller` command, never a shell.
+6. Bound health waiting and require the selected workspace/server, new
+   Controller epoch, intended build, Proxy connection, required capabilities,
+   unchanged Host build and exact Agent tuples. Only then replace the CLI with
+   the same checked rename sequence and verify final installed hashes/Agent
+   tuples. Persist `complete` only after all checks succeed.
+7. On failure, restore changed binaries in reverse order from checked backups;
+   if activation occurred, restart the restored Controller and verify its old
+   build and Agent tuples. Persist `rolled_back` only after verified recovery;
+   otherwise persist `rollback_failed` or leave interrupted evidence for an
+   operator. Startup state is backed up but this parity transaction does not
+   change it. Launcher installation and signed-channel anti-rollback are later
+   increments, not hidden conditions for this first parity run.
+
+Known limits are explicit: the hash pin is integrity pinning, not publisher
+authentication or release freshness. There is no OS boot-epoch proof,
+cross-reboot replay proof or exactly-once recovery claim. An exclusive lock
+serializes cooperating live workers; it does not defeat a same-account actor,
+snapshot replay or all stale/duplicated requests. Refuse an ambiguous receipt
+and require operator inspection rather than redispatch. Host/OS death kills the
+supervisor and can interrupt rollback; do not report that as successful recovery.
+The existing script's Host-build comparison is not proof of Host-process identity.
+
+Implementation increments toward the first `win_native` run:
+
+- W1: checked Windows file copy/backup/rename and private receipt primitives;
+  disposable NTFS tests cover sharing denial, failed second rename and reverse
+  rollback. Reuse download/checksum code without porting Unix-only mechanics.
+- W2: minimal supervisor launch from the daemon, supervisor-owned file lock and
+  fixed local restart/health path. Test Controller replacement inside a disposable
+  Host Job; simultaneous submissions and supervisor death must not report success.
+- W3: wire the pinned manual transaction and status receipt end to end; hosted
+  Server 2022/2025 cover successful update, forced health failure/rollback and
+  interrupted-state refusal with disposable installations. Freeze the exact SHA,
+  native artifact hashes, gates and recovery procedure for review.
+- W4: request leader-coordinated first `win_native` execution using only approved
+  Treer paths and the existing Host, preserving a verified old executable and a
+  local-terminal recovery command. No reboot or privilege experiment. Actual
+  Controller restart and update wait for that explicit operational authorization.
+
+Initial estimate: 3-5 development days for W1-W3, excluding review/CI queue and
+machine scheduling; W4 is one supervised maintenance session if hosted results
+are green. The Windows production path is not wired today, so this is an estimate,
+not a claim that the inert hosted tests already implement the updater. Release
+owns script/coordinator cutover and script removal after native acceptance.
+
+## Historical bounded breakaway probe
 
 First deliver a standalone native Rust diagnostic helper, separate from updater
 dispatch. It does not parse update inputs, access enrollment credentials, acquire
