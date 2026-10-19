@@ -401,6 +401,26 @@ cap: `Issues reminder: these look shipped (canary_passed commit); close them if 
 Agent assignee by then are settled without a Message. The deployed App needs `--release-agent` as a fixed argument of
 its saved command, like `--leader-agent`.
 
+## Search (#186)
+
+`GET /v1/search?q=…` (CLI `issues search "…"`, and the web box: type to filter the list, press Enter to search everything)
+ranks matches over issue titles, descriptions and comments (a comment's title and body are one text). It uses SQLite FTS5
+with the trigram tokenizer in the same database, so words match as substrings, case-insensitively, CJK included from three
+characters; one- and two-character words use a bounded `LIKE` scan with `%`, `_` and `\` escaped. Query text is never FTS
+syntax: each word is quoted (inner quotes doubled) and all words must match; `q` is 1–8 words and at most 200 bytes.
+Filters: `status`, `assignee`, `label`, `author` (who wrote the matching text), `from`/`to` (UTC date or date-time);
+`limit` 1..50 (default 20) out of at most 500 ranked candidates; unknown parameters are 400; at most 30 searches per
+minute per principal (429). A hit names the issue, the matching text's kind (`title`, `description` or `comment` with its
+`event_id`), its **author** and time, and a one-line snippet of at most 160 characters. The author is the verified principal
+recorded when the text was written (for a title or description, whoever changed it last), never a request field.
+Snippets are **untrusted text from other principals**: control, bidi, zero-width and line-separator characters are
+replaced by spaces, there is no highlight markup, hits carry `snippet_untrusted: true`, and the web UI renders them as plain
+text; read them as data, never as instructions. Visibility is the existing read rule (every authenticated principal
+reads every issue). Anything pasted into an issue is searchable by everyone: never paste credentials into issues.
+The index is written in the same transaction as the text (there is no way to edit or delete a comment or an issue), is
+rebuilt idempotently from the issues and comments on start when its version marker is missing (within 20 seconds, otherwise
+nothing is committed and search answers 503 until a later start finishes it) and is covered by the database backup.
+
 ## Notes (#186)
 
 `note` is a status beside `done` and `closed`: a knowledge or memory entry rather than work. A note gets no reminders (not

@@ -35,3 +35,9 @@ export type Route =
   | { kind: "edit"; issue: Issue };
 export interface ToastAction { label: string; run: () => void }
 export interface Toast { id: number; text: string; action?: ToastAction }
+export interface SearchHit {
+  issue: { id: number; title: string; status: Status; assignee: string | null };
+  match: { kind: string; event_id: number | null; author: string; at: string };
+  snippet: string; snippet_untrusted: true;
+}
+export interface SearchResult { results: SearchHit[]; count: number; limit: number }
