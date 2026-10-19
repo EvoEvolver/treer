@@ -369,6 +369,20 @@ class WaitingOnTest(ReminderBase):
         r.tick()
         self.assertGreater(len(treer.sends()), 0)
 
+    def test_notes_get_no_reminders_and_are_never_stale(self):
+        note = self.issue(assignee='ag_a', status='note')
+        work = self.issue(assignee='ag_a')
+        orphan_note = self.issue(status='note')
+        treer = FakeTreer({'ag_a': 'idle', 'ag_c': 'idle'})
+        r = self.reminders(treer)
+        r.tick(); self.advance(FIRST); r.tick()
+        self.assertIn('#%d' % work, treer.body()); self.assertNotIn('#%d' % note, treer.body())
+        self.assertEqual(treer.recipients(), ['ag_a'], 'not even the ownerless note is raised with the leader')
+        self.advance(10 * HOUR)
+        self.assertEqual([i['id'] for i in self.store.stale(4, 50, 0)['issues']], [work])
+        self.act(work, 'update', {'status': 'note'}, A)
+        self.assertEqual(self.store.stale(4, 50, 0)['issues'], [], 'converting to a note takes it out of the stale view')
+
     def test_stale_view(self):
         old = self.issue(assignee='ag_a')
         self.advance(5 * HOUR)

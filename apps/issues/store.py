@@ -12,8 +12,8 @@ from auth import Error
 from notify import (ASK_PER_AUTHOR, HOURLY, HOURLY_ISSUES, HOURLY_WINDOW, POLICY_MODES, WINDOW, notice_for, parse_intent,
                     recipients_for, resolve_mentions, unresolved_mentions)
 
-STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed')
-RESOLVED = ('done', 'closed')
+STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed', 'note')
+RESOLVED = ('done', 'closed', 'note')      # nothing left to do: no reminders, not stale, not unresolved, not a pending dependency
 SHIPPED = re.compile(r'\[(?:release|deployed)\].*\bcanary_passed\b')
 HEX = re.compile(r'(?<![0-9A-Za-z])([0-9a-f]{8,40})(?![0-9A-Za-z])')
 PRIORITIES = ('low', 'normal', 'high', 'urgent')
@@ -158,10 +158,11 @@ class Store:
             children = [i for i in items.values() if i['parent_id'] == parent]
             descendants.extend(children)
             pending.extend(i['id'] for i in children)
-        result['progress'] = {'total': len(descendants),
-            'completed': sum(i['status'] in ('done', 'closed') for i in descendants),
-            'by_status': {s: sum(i['status'] == s for i in descendants) for s in STATUSES}}
-        result['unresolved_dependencies'] = [i for i in issue['blocked_by'] if items[i]['status'] not in ('done', 'closed')]
+        counted = [i for i in descendants if i['status'] != 'note']      # notes are memory, not work: they do not count in rollups
+        result['progress'] = {'total': len(counted),
+            'completed': sum(i['status'] in ('done', 'closed') for i in counted),
+            'by_status': {s: sum(i['status'] == s for i in counted) for s in STATUSES}}
+        result['unresolved_dependencies'] = [i for i in issue['blocked_by'] if items[i]['status'] not in RESOLVED]
         return result
 
     def list(self, filters):
@@ -184,7 +185,7 @@ class Store:
                 if value not in ('1', 'true', '0', 'false'):
                     fail('invalid_field', 'unresolved must be 1 or 0')
                 if value in ('1', 'true'):
-                    result = [i for i in result if i['status'] not in ('done', 'closed')]
+                    result = [i for i in result if i['status'] not in RESOLVED]
             elif key == 'label':
                 result = [i for i in result if value in i['labels']]
             elif key == 'parent_id':
@@ -375,9 +376,9 @@ class Store:
                     if operation in ('renew', 'release') and (not claim or claim['holder'] != actor['id']):
                         fail('claim_missing', 'No active lease owned by caller', 409)
                     if operation != 'release':
-                        if issue['status'] in ('done', 'closed') or issue['assignee'] not in (None, actor['id']):
+                        if issue['status'] in RESOLVED or issue['assignee'] not in (None, actor['id']):
                             fail('not_claimable', 'Issue must be active and unassigned or assigned to caller', 409)
-                        if any(items[d]['status'] not in ('done', 'closed') for d in issue['blocked_by']):
+                        if any(items[d]['status'] not in RESOLVED for d in issue['blocked_by']):
                             fail('dependencies_unresolved', 'Resolve blocking issues before claiming', 409)
                         issue['claim'] = {'holder': actor['id'], 'expires_at': stamp(now+seconds)}
                     else:
@@ -395,9 +396,9 @@ class Store:
                 mention_text = earlier = ''
             mentions = sorted(resolve_mentions(mention_text, directory, paths) - resolve_mentions(earlier, directory, paths) - {actor['id']})
             if action in ('create', 'update') and issue['status'] in ('in_progress', 'done'):
-                if any(items[d]['status'] not in ('done', 'closed') for d in issue['blocked_by']):
+                if any(items[d]['status'] not in RESOLVED for d in issue['blocked_by']):
                     fail('dependencies_unresolved', 'Resolve blocking issues before starting or completing', 409)
-            if issue['status'] in ('done', 'closed'):
+            if issue['status'] in RESOLVED:
                 issue['claim'] = None
             if issue.get('waiting_on') != before.get('waiting_on'):
                 issue['waiting_by'] = actor['id'] if issue.get('waiting_on') else None
@@ -580,7 +581,7 @@ class Store:
         return 'hourly'
 
     def unresolved_by_assignee(self, prefix='ag_', skip_labels=()):
-        """Unresolved (not done/closed) issue IDs per assignee whose stable ID starts with prefix. Issues carrying
+        """Unresolved (not done/closed/note) issue IDs per assignee whose stable ID starts with prefix. Issues carrying
         any of skip_labels (e.g. long-lived epics) are not counted."""
         skip = {label.lower() for label in skip_labels}
         with self.connect() as db:
@@ -588,7 +589,7 @@ class Store:
         result = {}
         for issue in sorted(items.values(), key=lambda i: i['id']):
             assignee = issue['assignee']
-            if assignee and assignee.startswith(prefix) and issue['status'] not in ('done', 'closed') and not skip & {label.lower() for label in issue['labels']}:
+            if assignee and assignee.startswith(prefix) and issue['status'] not in RESOLVED and not skip & {label.lower() for label in issue['labels']}:
                 result.setdefault(assignee, []).append(issue['id'])
         return result
 
@@ -602,7 +603,7 @@ class Store:
             items = self.all(db)
         result = []
         for i in sorted(items.values(), key=lambda i: i['id']):
-            if i['status'] in ('done', 'closed') or skip & {label.lower() for label in i['labels']}:
+            if i['status'] in RESOLVED or skip & {label.lower() for label in i['labels']}:
                 continue
             party, kind = self.responsible(i)
             if party is None and i['assignee'] is None and not i.get('waiting_on') and self.leader_agent:
@@ -679,7 +680,7 @@ class Store:
             items = self.all(db)
         rows = []
         for i in items.values():
-            if i['status'] in ('done', 'closed') or skip & {label.lower() for label in i['labels']}:
+            if i['status'] in RESOLVED or skip & {label.lower() for label in i['labels']}:
                 continue
             progress = datetime.fromisoformat(i['progress_at'].replace('Z', '+00:00')).timestamp()
             if now - progress <= hours * 3600:

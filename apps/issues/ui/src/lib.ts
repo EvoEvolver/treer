@@ -1,9 +1,9 @@
 import type { Issue, Principal, Priority, Status } from "./types";
 
-export const STATUSES: Status[] = ["open", "in_progress", "blocked", "done", "closed"];
+export const STATUSES: Status[] = ["open", "in_progress", "blocked", "done", "closed", "note"];
 export const PRIORITIES: Priority[] = ["low", "normal", "high", "urgent"];
 export const PRIORITY_GLYPH: Record<Priority, string> = { low: "▂", normal: "▃", high: "▅", urgent: "!" };
-export const COLLAPSED_BY_DEFAULT: Status[] = ["done", "closed"];
+export const COLLAPSED_BY_DEFAULT: Status[] = ["done", "closed", "note"];
 export const NOT_ALLOWED = "Only the creator, assignee, lease holder or an admin can change this issue";
 
 export const words = (value: string) => value.replaceAll("_", " ");

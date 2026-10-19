@@ -101,6 +101,27 @@ class IssuesTest(unittest.TestCase):
         for query in ('hours=0','hours=721','hours=x','limit=0','limit=101','offset=-1','bogus=1'):
             self.assertEqual(self.req('v1/stale?'+query)[0],400,query)
         self.assertEqual(self.req('v1/stale',token=None)[0],401)
+    def test_note_status_is_memory_not_work(self):
+        status,result=self.req('v1/issues','POST',{'title':'Decision record','status':'note'});self.assertEqual(status,201,result)
+        note=result['issue']['id'];self.assertEqual(result['issue']['status'],'note')
+        task=self.create();parent=self.create()
+        self.assertEqual(self.req(f'v1/issues/{task}','PATCH',{'parent_id':parent})[0],200)
+        self.assertEqual(self.req(f'v1/issues/{note}','PATCH',{'parent_id':parent})[0],200)
+        progress=self.req(f'v1/issues/{parent}')[1]['issue']['progress']
+        self.assertEqual((progress['total'],progress['completed']),(1,0),'a note does not count in the rollup')
+        self.assertEqual(progress['by_status']['note'],0)
+        listed=lambda q:[i['id'] for i in self.req('v1/issues?'+q)[1]['issues']]
+        self.assertIn(note,listed('status=note'));self.assertNotIn(note,listed('unresolved=1'));self.assertIn(task,listed('unresolved=1'))
+        blocked=self.create(blocked_by=[note])
+        self.assertEqual(self.req(f'v1/issues/{blocked}','PATCH',{'status':'in_progress'})[0],200,'a note is never an unresolved dependency')
+        self.assertEqual(self.req(f'v1/issues/{note}/claim','POST',{'action':'acquire'})[0],409,'nothing to claim on a note')
+        for to in ('open','note','in_progress','note','closed','note'):          # any status <-> note, no extra rules
+            self.assertEqual(self.req(f'v1/issues/{task}','PATCH',{'status':to})[0],200,to)
+        changes=[e['changes'] for e in self.req(f'v1/issues/{task}')[1]['activity'] if e['kind']=='update']
+        self.assertIn({'status':'note'},changes,'every conversion is an activity entry (who, when)')
+    def test_status_filter_and_cli_accept_note(self):
+        id=self.create(status='note');self.assertEqual(self.req(f'v1/issues/{id}')[1]['issue']['status'],'note')
+        self.assertEqual([i['id'] for i in self.req('v1/issues?status=note')[1]['issues'] if i['id']==id],[id])
     def test_directory_reports_paths_without_guessing_missing_ones(self):
         status,result=self.req('v1/directory');self.assertEqual(status,200)
         self.assertEqual(result['paths'],'supported');self.assertEqual(result['capabilities'],['app.directory-paths.v1'])
@@ -204,7 +225,7 @@ class IssuesTest(unittest.TestCase):
         proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Inject);threading.Thread(target=proxy.serve_forever,daemon=True).start()
         try:
             env=hermetic_env({'http_proxy':f'http://127.0.0.1:{proxy.server_port}'})
-            for command in (['list','--label',label],['list','--assignee','me','--unresolved','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli'],['wait',str(id),'ag_b'],['wait',str(id),'none'],['stale','--hours','4'],['policy']):
+            for command in (['list','--label',label],['list','--assignee','me','--unresolved','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli'],['create','CLI note','--status','note'],['wait',str(id),'ag_b'],['wait',str(id),'none'],['stale','--hours','4'],['policy']):
                 r=subprocess.run([sys.executable,str(ROOT/'issues'),*command],env=env,capture_output=True,text=True,timeout=10)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIsInstance(json.loads(r.stdout),dict)
         finally:proxy.shutdown();proxy.server_close()

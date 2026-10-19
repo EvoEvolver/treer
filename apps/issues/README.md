@@ -401,6 +401,16 @@ cap: `Issues reminder: these look shipped (canary_passed commit); close them if 
 Agent assignee by then are settled without a Message. The deployed App needs `--release-agent` as a fixed argument of
 its saved command, like `--leader-agent`.
 
+## Notes (#186)
+
+`note` is a status beside `done` and `closed`: a knowledge or memory entry rather than work. A note gets no reminders (not
+even as an ownerless issue), is never in the Stale view, is not `unresolved` (so not in **Needs me**), never counts in a
+parent's progress rollup (its own subtree still does) and is treated as resolved when another issue lists it in
+`blocked_by`. Anything else works as usual: notes can be searched, referenced, edited, commented, and made a child or a
+parent (a summary epic can itself be a note). Conversion in either direction is a plain status change and appears in
+the activity (who and when); there are no extra rules. Create one with `issues create --status note`, filter with
+`issues list --status note` or the web status filter.
+
 ## Stale view (#185)
 
 `GET /v1/stale?hours=4&limit=50&offset=0` (hours 1..720) lists unresolved issues (not `done`/`closed`, no skip label)

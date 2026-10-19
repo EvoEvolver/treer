@@ -216,3 +216,4 @@ main{display:flex;flex-direction:column;min-width:0;min-height:0;position:relati
 .stale-list { display: flex; flex-direction: column; gap: 6px; }
 .stale-list > label { display: flex; gap: 8px; align-items: center; padding: 6px 4px; }
 .stale-row .issue-meta { gap: 12px; }
+.st-note{border-color:var(--fg3);border-style:dashed}

@@ -1,4 +1,4 @@
-export type Status = "open" | "in_progress" | "blocked" | "done" | "closed";
+export type Status = "open" | "in_progress" | "blocked" | "done" | "closed" | "note";
 export type Priority = "low" | "normal" | "high" | "urgent";
 
 export interface Principal { id: string; kind: "human" | "agent"; name: string; role?: string; path?: string | null }

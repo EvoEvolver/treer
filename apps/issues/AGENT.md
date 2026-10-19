@@ -37,6 +37,7 @@ chmod +x /tmp/issues
 /tmp/issues assign 1 ag_STABLE_ID_FROM_DIRECTORY
 /tmp/issues status 1 in_progress
 /tmp/issues comment 1 'Reproduced; investigating compiler output.' --title 'Reproduced on main'
+/tmp/issues create 'Decision: use SQLite' --status note   # a knowledge entry: no reminders, not stale, not counted as work
 /tmp/issues stale --hours 4          # unresolved issues nobody is moving, oldest first; pick one up when you are idle
 /tmp/issues wait 1 ag_STABLE_ID       # blocked on that Agent (or leader / user); reminders then go to them; `wait 1 none` blocks with nobody in particular
 /tmp/issues show 1 --titles          # comments as title (or a 160-char excerpt when untitled) + body_bytes
