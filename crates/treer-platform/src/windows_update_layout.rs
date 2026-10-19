@@ -95,9 +95,8 @@ fn inspect_pair(
             !old_health_recorded
                 && (!final_health_recorded || matches!(transaction, Transaction::Complete))
         }
-        Transaction::RollbackCli | Transaction::RollbackController | Transaction::RolledBack => {
-            !final_health_recorded
-        }
+        Transaction::RollbackCli => !final_health_recorded && !old_health_recorded,
+        Transaction::RollbackController | Transaction::RolledBack => !final_health_recorded,
     };
     if !evidence_belongs {
         return PairInspection::Conflict;
@@ -140,7 +139,9 @@ fn inspect_pair(
         }
         // Controller rollback may start from a failed forward rename, or from
         // a fully published image. The CLI must already be untouched/restored.
-        Transaction::RollbackController => restored(cli),
+        Transaction::RollbackController => {
+            restored(cli) && (!old_health_recorded || restored(controller))
+        }
         Transaction::RolledBack => restored(controller) && restored(cli) && old_health_recorded,
     };
     if consistent {
@@ -174,7 +175,7 @@ fn stray_health_records_cannot_hide_a_reordered_receipt_write() {
         (Activating, published, original, &[0][..]),
         (CoreHealthy, published, original, &[1][..]),
         (Complete, published, published, &[3][..]),
-        (RollbackCli, published, restored, &[0, 1, 4, 5][..]),
+        (RollbackCli, published, restored, &[0, 1][..]),
         (RollbackController, restored, restored, &[0, 1, 4, 5][..]),
         (RolledBack, restored, restored, &[4, 5][..]),
     ] {
@@ -216,6 +217,12 @@ fn cross_image_order_and_health_evidence_are_independent_of_matching_files() {
         step: Step::PublishIntent,
         slots: [Absent, New, Old],
     };
+    for controller in [published, gap] {
+        assert_eq!(
+            inspect_pair(RollbackController, controller, restored, true, false, true),
+            Conflict
+        );
+    }
     for (tx, c, l, new_health, final_health, old_health) in [
         (Prepared, original, original, false, false, false),
         (Activating, gap, original, false, false, false),
