@@ -34,8 +34,12 @@ The smallest complete transaction is:
    before interpreting it. Download Controller and CLI only, verify their hashes
    and reported versions, and refuse redirects, URL credentials and ambient
    proxies. Preserve the PowerShell bounds (8 KiB manifest, 256 MiB per artifact)
-   or document a deliberate stricter refusal; the current shared Rust downloader
-   has a 128 MiB artifact bound and needs an explicit compatibility decision.
+   or document a deliberate stricter refusal. Select the existing Rust 128 MiB
+   bound, checked before allocation and during streaming. Local retained Windows
+   artifacts at `169259f` measure 20,885,504 bytes (Controller) and 5,185,024 bytes
+   (CLI); these are historical size evidence, not the next candidate. W3 must
+   record sizes of its exact frozen artifacts and refuse an oversized candidate.
+   Keep normal TLS certificate validation; no custom trust or HTTP downgrade.
 4. Snapshot readiness, Controller epoch/build, Host build and Agent
    ID/PID/generation tuples. Back up Controller, CLI and configured startup store
    into private storage, check backup hashes, and retain the Host binary only as
@@ -47,12 +51,15 @@ The smallest complete transaction is:
    fixed Rust `service ... restart-controller` command, never a shell.
 6. Bound health waiting and require the selected workspace/server, new
    Controller epoch, intended build, Proxy connection, required capabilities,
-   unchanged Host build and exact Agent tuples. Only then replace the CLI with
-   the same checked rename sequence and verify final installed hashes/Agent
-   tuples. Persist `complete` only after all checks succeed.
+   unchanged Host build and the PID/generation of every previously live Agent.
+   Match the current script's inventory semantics (`09b14458`): Exited records
+   not relisted and newly appeared Agents are reported, not treated as live-Agent
+   loss. Only then replace the CLI with the same checked rename sequence and
+   verify final installed hashes/live-Agent tuples. Persist `complete` only
+   after all checks succeed.
 7. On failure, restore changed binaries in reverse order from checked backups;
    if activation occurred, restart the restored Controller and verify its old
-   build and Agent tuples. Persist `rolled_back` only after verified recovery;
+   build and live-Agent tuples. Persist `rolled_back` only after verified recovery;
    otherwise persist `rollback_failed` or leave interrupted evidence for an
    operator. Startup state is backed up but this parity transaction does not
    change it. Launcher installation and signed-channel anti-rollback are later
@@ -66,6 +73,15 @@ snapshot replay or all stale/duplicated requests. Refuse an ambiguous receipt
 and require operator inspection rather than redispatch. Host/OS death kills the
 supervisor and can interrupt rollback; do not report that as successful recovery.
 The existing script's Host-build comparison is not proof of Host-process identity.
+The PowerShell script validates target SHA/version equality but has no ordering
+or downgrade check. Git SHA lexical order cannot provide one. For the Rust
+manual-pin path, W3 must require an explicit downgrade/unordered-pin acknowledgement
+when ordering against the running build cannot be established; this is not
+signed-channel rollback protection. Refuse a new attempt while an unfinished
+receipt exists until an explicit operator recovery action classifies it.
+Retain private backups and failed copies until an operator reviews the receipt
+and explicitly selects exact files for cleanup; there is no silent rotation.
+Status/logs never disclose startup content, credentials, artifact URLs or argv.
 
 Implementation increments toward the first `win_native` run:
 
@@ -89,6 +105,28 @@ machine scheduling; W4 is one supervised maintenance session if hosted results
 are green. The Windows production path is not wired today, so this is an estimate,
 not a claim that the inert hosted tests already implement the updater. Release
 owns script/coordinator cutover and script removal after native acceptance.
+
+### W1a: private directory and checked-copy fixture
+
+`windows_update_bootstrap/checked_files.rs` is private under `cfg(windows, test)`.
+It retains non-delete-sharing local-directory ancestors, requires a fixed local
+NTFS volume with persistent ACLs and a parent with no foreign writers, creates a
+new attempt directory with a protected current-user/SYSTEM DACL at creation,
+and refuses an existing attempt. Its fixed candidate file is CREATE_NEW with
+the same DACL and a non-inherited handle. A separately reopened pinned source
+is bounded to 128 MiB before copying and during a 64 KiB-buffer stream. The
+copied bytes are hashed, synced and read back through the same destination
+handle; the returned handle disallows other writers/deletion. Failed evidence
+is preserved and cannot be overwritten by retrying with a corrected digest.
+
+Native fixture tests cover an independent source offset, copy checksum failure,
+existing directory/file refusal, oversized source refusal before candidate
+creation, unsafe names, foreign parent writers, non-inherited handles and
+write/rename sharing denial. This is not publication, a complete W1 transaction,
+production ACL authorization or a real installed Controller update. Same-account
+attackers remain outside the boundary. Hosted Windows execution is required;
+cross-target clippy only establishes compilation. The next W1 slice must add
+checked rename/backup/reverse-rollback behavior and receipt-state handling.
 
 ## Historical bounded breakaway probe
 

@@ -40,6 +40,7 @@ const IMAGE_LIMIT: u64 = 128 * 1024 * 1024;
 const CONNECT_BUDGET: Duration = Duration::from_secs(5);
 const CLEANUP_MS: u32 = 5_000;
 
+mod checked_files;
 mod parent_proof;
 mod tick_deadline;
 
@@ -854,6 +855,90 @@ mod tests {
             let _ = std::fs::remove_file(&self.path);
             let _ = std::fs::remove_dir(&self.directory);
         }
+    }
+
+    #[test]
+    fn native_checked_copy_is_private_bounded_and_retains_its_handle() {
+        let fixture = PrivateImage::new();
+        let name = "attempt-00000000000000000000000000000001";
+        let path = fixture.directory.join(name);
+        let attempt = checked_files::Attempt::create(&fixture.directory, name).unwrap();
+        assert!(checked_files::Attempt::create(&fixture.directory, name).is_err());
+        let source = open_pinned(&fixture.path, false).unwrap();
+        let expected = digest(&source).unwrap();
+        // digest advanced the caller's offset; the checked copy reopens an
+        // independent source handle and must still copy the complete image.
+        let copied = attempt.copy(&source, expected).unwrap();
+        assert_eq!(
+            copied.metadata().unwrap().len(),
+            source.metadata().unwrap().len()
+        );
+        let owner = crate::windows::current_user_sid().unwrap();
+        private_owner_dacl(&copied, &owner).unwrap();
+        let mut flags = 0;
+        check(unsafe { GetHandleInformation(copied.as_raw_handle(), &mut flags) }).unwrap();
+        assert_eq!(flags & HANDLE_FLAG_INHERIT, 0);
+        assert!(std::io::Write::write_all(&mut &copied, b"must not change verified copy").is_err());
+        assert!(OpenOptions::new()
+            .write(true)
+            .open(path.join("candidate.exe"))
+            .is_err());
+        assert!(std::fs::rename(path.join("candidate.exe"), path.join("moved.exe")).is_err());
+        assert!(attempt.copy(&source, expected).is_err());
+        drop(copied);
+        drop(attempt);
+        std::fs::remove_file(path.join("candidate.exe")).unwrap();
+        std::fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn native_checked_copy_preserves_failed_evidence_and_refuses_oversize() {
+        let fixture = PrivateImage::new();
+        let name = "attempt-00000000000000000000000000000002";
+        let path = fixture.directory.join(name);
+        let attempt = checked_files::Attempt::create(&fixture.directory, name).unwrap();
+        let source = open_pinned(&fixture.path, false).unwrap();
+        let expected = digest(&source).unwrap();
+        let mut wrong = expected;
+        wrong[0] ^= 1;
+        assert!(attempt.copy(&source, wrong).is_err());
+        assert!(path.join("candidate.exe").exists());
+        // Correcting the expected digest cannot overwrite failed evidence.
+        assert!(attempt.copy(&source, expected).is_err());
+        drop(source);
+        drop(attempt);
+        std::fs::remove_file(path.join("candidate.exe")).unwrap();
+        std::fs::remove_dir(&path).unwrap();
+        OpenOptions::new()
+            .write(true)
+            .open(&fixture.path)
+            .unwrap()
+            .set_len(IMAGE_LIMIT + 1)
+            .unwrap();
+        let attempt = checked_files::Attempt::create(&fixture.directory, name).unwrap();
+        let source = open_pinned(&fixture.path, false).unwrap();
+        assert!(attempt.copy(&source, expected).is_err());
+        assert!(!path.join("candidate.exe").exists());
+        drop(source);
+        drop(attempt);
+        std::fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn native_attempt_refuses_unsafe_names_and_foreign_parent_writers() {
+        let fixture = PrivateImage::new();
+        for name in [
+            "..",
+            "attempt-../escape",
+            "attempt-0000000000000000000000000000000:",
+        ] {
+            assert!(checked_files::Attempt::create(&fixture.directory, name).is_err());
+        }
+        set_fixture_security(&fixture.directory, "(A;;GW;;;WD)");
+        let name = "attempt-00000000000000000000000000000003";
+        assert!(checked_files::Attempt::create(&fixture.directory, name).is_err());
+        assert!(!fixture.directory.join(name).exists());
+        set_fixture_security(&fixture.directory, "");
     }
 
     #[tokio::test]

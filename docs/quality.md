@@ -1,8 +1,24 @@
 # Quality And Maintenance
 
+### Windows updater parity file fixture
+
+The private Windows-only `windows_update_bootstrap::checked_files` fixture
+creates new current-user/SYSTEM-only attempt directories and candidate files
+with their DACLs at creation. It pins local NTFS directory ancestors and source
+identity, streams at most 128 MiB through a 64 KiB buffer, hashes the copied
+bytes and syncs/read-back checks the same destination handle. Native tests cover
+checksum failure with retained evidence, existing-object and oversize refusal,
+unsafe names/foreign parent writers, independent source offsets, handle
+inheritance and write/rename sharing denial. Cross-compilation does not execute
+these Windows behaviors; hosted Windows results must be recorded separately.
+No installed-state read, publication, service restart or updater command is
+wired by this fixture. Rename/backup/rollback and receipts remain subsequent work.
+
 ### Windows self-update registration model
 
-The private `cfg(test)` platform module `update_registration` exercises a
+This historical model is not a prerequisite for the Windows PowerShell-parity
+scope selected in issue #111 comment 5134; that scope makes no boot-freshness
+claim and forbids registry/reboot experiments. The private `cfg(test)` platform module `update_registration` exercises a
 synthetic, fixed-size registration format before native record publication is
 implemented. Focused tests reject malformed headers, truncation/trailing bytes,
 pipe-frame confusion, altered attempt/intent/process/boot identities and invalid
