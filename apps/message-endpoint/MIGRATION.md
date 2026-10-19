@@ -1,8 +1,139 @@
 # Telegram bridge migration
 
 This is a cutover plan, not permission to touch an existing bot or process.
-The disposable-bot roundtrip is still a prerequisite. No production migration
-or offline offset/context importer is implemented by this increment.
+The disposable-bot roundtrip passed in #159 (user-confirmed on 2026-10-19).
+The test binding was subsequently paused at revision 4. That validates the
+sandbox text path, not production migration, native reply continuity, isolation,
+or recovery after an ambiguous external send. No production migration or
+offline offset/context importer is implemented yet.
+
+## Implementation plan (#203, for Core and security review)
+
+This plan does not authorize a production inventory, credential read, process
+change, token rotation, polling probe or send. Tests use synthetic SQLite state,
+fake Core/Telegram transports and private temporary directories. Production
+snapshot creation and cutover stay with the owner/release operator after a
+separate authorization. Keep the old bridge working until that decision.
+
+### Current gaps confirmed in source
+
+| Boundary | Legacy bridge | Current hub/relay | Required before a continuity-preserving cutover |
+| --- | --- | --- | --- |
+| Poll position | `metadata.last_update_id`, last completed update | `telegram_accounts.offset`, next requested update | Checked monotonic `last + 1` import, no reset |
+| Native inbound replies | `reply_to_message.message_id` resolves through `message_mappings` to a Core context | `telegram::Incoming` has no reply ID; `prepare_telegram_forward` constructs empty contexts | Parse and resolve a reply within the same account/chat/topic/endpoint generation |
+| Native outbound replies | `first_mapping_for_contexts` selects a mapped native message | Outbound envelope carries contexts, but `prepare_telegram_chunk` ignores them and `Transport::send` has no reply argument | Pin a validated reply target in durable send intent; retry with the same target |
+| Actual internal delivery ID | Legacy inbound sender directly receives Core's accepted message ID | Hub's `inbound.core_id` is the fragment handoff to the relay, not its eventual message to the fixed recipient; `relay_forwarded` does not retain that final ID | Durable relay delivery receipt and a separately validated final Core ID; never mistake a fragment ID for it |
+| History | `message_mappings` preserves stable Core/native IDs | `telegram_sources` describes a source but is pruned with inbound retention | Explicit historical mapping store/retention, without copying bodies or impersonating old authors |
+| Rollback after new traffic | Old offset and mappings alone describe only old traffic | New traffic has new relay authors and new native receipts | Reverse journal plus reconciliation; restoring an old database alone is unsafe |
+
+The planner currently reports these as blockers; a drained local queue is not
+proof that the old Core mailbox is drained or an external send did not happen.
+An empty new hub is not a lossless replacement for historical mappings.
+
+### Stages and acceptance
+
+1. **Contract and rehearsal fixtures.** Review this plan and define the mapping
+   and receipt contract before implementing the trust boundary. Record old/new
+   IDs, offset semantics and failure states in synthetic fixtures. The original
+   Core message author and ID remain unchanged: importing history never sends a
+   replacement message or makes the new relay its author. Disabled legacy
+   bindings become paused candidates; runtime registry rows, not config seeds,
+   are authoritative.
+2. **Native reply continuity.** Implement the inbound/outbound reply mapping and
+   durable final-recipient receipt, with an explicit capability check between
+   the upgraded hub and relay. Older or mismatched runtimes fail closed for
+   migration/receipt-dependent activation; basic #159 transport success does
+   not establish the capability. Persist receipt intent and result before
+   acknowledgement. Duplicate receipts are idempotent; a conflicting ID/digest,
+   wrong Core sender, recipient, endpoint generation or workspace is rejected.
+   A receipt is App-asserted until independently checked against Core, never a
+   user read receipt or an isolation attestation.
+3. **Stopped-state forward importer.** Extend the reviewed hub executable with
+   an offline operator mode, not a third daemon or a browser SQL endpoint.
+   Accept a closed, private immutable legacy snapshot and explicit private
+   mapping document into an existing fresh, paused hub state. Reuse the hub's
+   actual schema and exclusive state lock. Refuse live/WAL sources, symlinks,
+   hardlinks, broad permissions, unsupported schema, foreign identities,
+   duplicate/conflicting mappings, unknown delivery states, unfinished work,
+   oversized inventories and changed source fingerprints. A missing mapping,
+   Core validation result or final offset is a blocker, not a default.
+4. **Reverse plan and interruption rehearsal.** Produce a private reversible
+   journal with source/destination release and snapshot fingerprints, imported
+   key ranges, pre/post offsets, stable IDs, native receipts and transaction
+   outcome. Do not export message bodies, tokens, sessions or claimed human
+   identities. Rehearse interruption before/during/after commit, repeat import,
+   stale/corrupt journals and conflicting native receipts. Automatic rollback
+   after new traffic remains disabled until the reverse path is separately
+   implemented and reviewed. Containment is a valid result, with outage stated.
+5. **Operator cutover.** Only after the preceding tests/reviews, obtain one
+   concrete release authorization naming the production bot, exact old/new
+   process identities, versions, snapshots, allowed chat scope and rollback
+   boundary. Execute the cutover checklist below. The old consumer must be
+   proved stopped before the new consumer starts. Reject competing pollers;
+   never use `getUpdates` as an inventory tool or rotate a pin to bypass errors.
+
+Each stage is a separately frozen small change. Stage 1 is documentation and
+synthetic rehearsal only; stages 2–4 need Core/security review of their concrete
+contract and code. Production activation and retirement require their own
+decisions, even after a green code review.
+
+### Proposed import and mapping invariants
+
+- Bind every row to the verified bot/account, exact chat/topic, newly created
+  relay stable ID and generation, and fixed internal recipient. No alias or
+  path is authority. No history is visible across another binding or generation.
+- Preserve old Core IDs, native IDs and direction; never manufacture accepted
+  receipts, rewrite authors, replay completed deliveries or translate an old
+  delivery ID into a new mailbox delivery. Unknown/ambiguous sends require an
+  explicit private reconciliation entry before either consumer resumes.
+- Import the next offset monotonically. Reject an import that would regress an
+  existing account offset or move past unfinished legacy work. Never set offset
+  to the largest row merely because a database contains it. Aged updates and
+  the hub's ten-minute stale cutoff need an explicit backlog decision.
+- Import only terminal historical mappings and bounded metadata, not bodies,
+  credential files, OAuth state, executable paths, active leases or activation
+  flags. Bindings remain paused; token provisioning remains human-owner-only.
+- A transaction writes history, offset and its journal marker together. Repeating
+  the same operation against the same fingerprint is a no-op; changed source,
+  bindings or output state fails rather than overwriting. An unfinished journal
+  cannot be treated as a successful import.
+- Historical references resolve only to Core messages that the current fixed
+  recipient may access. Do not grant access by trusting a SQLite `core_message_id`
+  or a relay claim alone. Missing or unauthorized history must not silently turn
+  a requested reply into a new top-level message; return a fixed actionable
+  failure and keep it for reviewed recovery.
+- All private artifacts remain 0700/0600 outside a checkout. Ticket evidence
+  contains statuses, counts, field names, release hashes and masked identifiers
+  only. A file permission check does not isolate other same-UID Agents.
+
+### Core questions to settle before the receipt/import implementation
+
+1. Which existing Core read operation can validate a final relay-authored message
+   ID, its author and delivery to the fixed recipient under the hub's identity?
+   The hub must not rely on the fragment handoff ID or broaden its permission to
+   read arbitrary mailbox content. If no sufficiently narrow operation exists,
+   identify the minimal Core contract; do not invent a new one inside the App.
+2. Can a new relay attach a readable legacy message as a context for its fixed
+   recipient using the existing send contract, while preserving old authorship?
+   Define the failure for an inaccessible/deleted context; no impersonation or
+   silent context dropping is acceptable.
+3. What evidence establishes the old bridge's Core mailbox drained, including
+   leased/unacknowledged deliveries, without reading message bodies or consuming
+   deliveries as an inventory probe? SQLite terminal states alone are insufficient.
+
+These are review questions, not findings that Core is broken or confirmation
+that a Core change is necessary. The initial implementation remains App-owned.
+
+### Sandbox credential and backup retirement
+
+Per #159 decision 5744, keep its two private rollback backups until the next
+planned hub update; record explicit retirement in #203 before deleting
+superseded copies. They contain credential/state/mask-key material. Do not copy
+them to a ticket, repository or shared location. After the user deletes the
+disposable test bot, the human owner removes its token slot through settings and
+records the outcome in #203. Deletion/revocation and slot removal are not yet
+confirmed. This does not block the completed sandbox ticket or authorize an
+Agent to use the human-only token-management path.
 
 ## Inventory without credentials
 
