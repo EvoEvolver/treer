@@ -1,4 +1,6 @@
 import { test, expect, type Page } from '@playwright/test'
+import { createHash } from 'node:crypto'
+import { renderCoreEmbedBootstrap } from './fixtures/embed-bootstrap'
 import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fixture } from './fixtures/workspace-tabs'
@@ -6,7 +8,7 @@ import { fixture } from './fixtures/workspace-tabs'
 const ids = Array.from({ length: 11 }, (_, i) => `ag_${(i + 1).toString(16).padStart(32, '0')}`)
 const origins = ids.map(id => `https://ag-${id.slice(3)}.agents.example.test`)
 const hash = 'a'.repeat(64), code = 'iec_v1_' + 'b'.repeat(64)
-async function setup(page: Page, options: { capability?: boolean; quiet?: boolean; denied?: boolean; holdMint?: Promise<void>; many?: boolean } = {}) {
+async function setup(page: Page, options: { capability?: boolean; quiet?: boolean; denied?: boolean; holdMint?: Promise<void>; many?: boolean; actual?: 'cold' | 'warm' | 'blocked' } = {}) {
   await page.clock.install()
   const live = await fixture(page, Object.fromEntries(origins.slice(0, 6).map((origin, i) => [`tab-${i + 1}`, origin])), Object.fromEntries(ids.slice(0, 6).map((id, i) => [`tab-${i + 1}`, id])))
   for (const [offset, name] of ['Eta', ...(options.many ? ['Theta', 'Iota', 'Kappa', 'Lambda'] : [])].entries()) {
@@ -15,19 +17,36 @@ async function setup(page: Page, options: { capability?: boolean; quiet?: boolea
   }
   await page.route('**/api/auth/config', r => r.fulfill({ json: { capabilities: ['agent.interface-origin.v1', 'agent.interface-embed.v1', ...(options.capability === false ? [] : ['agent.interface-embed-prewarm.v1'])] } }))
   const minted: string[] = [], foreground: string[] = [], ui: string[] = [], bootstraps: string[] = [], warmed = new Set<string>()
+  const nonceHashes = new Map<string, string>()
+  let exchanges = 0, checks = 0
+  if (options.actual === 'warm') warmed.add(ids[0])
   await page.route('**/interface/embed-authorization', async r => {
     const data = r.request().postDataJSON(), id = new URL(r.request().url()).pathname.split('/').at(-3)!
     if (data.purpose === 'prewarm') minted.push(id); else foreground.push(id)
-    expect(data.browser_nonce_hash).toBe(hash)
+    if (options.actual) expect(data.browser_nonce_hash).toMatch(/^[0-9a-f]{64}$/)
+    else expect(data.browser_nonce_hash).toBe(hash)
+    nonceHashes.set(id, data.browser_nonce_hash)
     if (options.holdMint) await options.holdMint
     return options.denied ? r.fulfill({ status: 429, json: {} }).catch(() => {}) : r.fulfill({ json: { code, origin: origins[ids.indexOf(id)], expires_in: 30 } }).catch(() => {})
   })
   await page.route('https://ag-*.agents.example.test/**', async r => {
     const url = new URL(r.request().url()), index = origins.indexOf(url.origin), id = ids[index]
+    if (options.actual && url.pathname === '/.treer/embed/check') {
+      checks++
+      return r.fulfill({ status: warmed.has(id) && options.actual !== 'blocked' ? 204 : 401 })
+    }
+    if (options.actual && url.pathname === '/.treer/embed/session') {
+      const data = r.request().postDataJSON()
+      expect(data.code).toBe(code)
+      expect(createHash('sha256').update(data.nonce).digest('hex')).toBe(nonceHashes.get(id))
+      exchanges++; warmed.add(id)
+      return r.fulfill({ status: 204 })
+    }
     if (url.pathname === '/session') { warmed.add(id); return r.fulfill({ status: 204 }) }
     if (url.pathname !== '/.treer/embed') { ui.push(id); return r.fulfill({ contentType: 'text/html', body: '<h1>Agent interface</h1><textarea aria-label="Draft"></textarea>' }) }
     const prewarm = url.searchParams.get('prewarm') === '1'
     bootstraps.push(id)
+    if (options.actual) return r.fulfill({ contentType: 'text/html', body: renderCoreEmbedBootstrap(new URL(page.url()).origin, true, prewarm) })
     const target = JSON.stringify(new URL(page.url()).origin)
     return r.fulfill({ contentType: 'text/html', body: `<script>
       const target=${target}, hash=${JSON.stringify(hash)}, prewarm=${prewarm};
@@ -47,7 +66,7 @@ async function setup(page: Page, options: { capability?: boolean; quiet?: boolea
   await page.goto('/')
   await expect(page.locator('[data-agent-id="tab-0"]')).toBeAttached()
   await page.clock.pauseAt(new Date(Date.now() + 1000))
-  return { live, minted, foreground, ui, bootstraps }
+  return { live, minted, foreground, ui, bootstraps, warmed, exchanges: () => exchanges, checks: () => checks }
 }
 const row = (page: Page, name: string) => page.getByRole('treeitem', { name, exact: true })
 async function hover(page: Page, name: string) { await row(page, name).hover(); await page.clock.runFor(401) }
@@ -69,6 +88,46 @@ test('prewarm waits for dwell, stays hidden, never opens Agent HTML; click reuse
   await row(page, 'Alpha').getByRole('link').click()
   await expect(page.frameLocator('iframe[title="/Alpha interface"]').getByRole('heading')).toHaveText('Agent interface')
   expect(s.foreground).toHaveLength(0); expect(s.minted).toHaveLength(1); expect(s.ui).toEqual([ids[0]])
+})
+
+for (const actual of ['cold', 'warm'] as const) {
+  test(`actual Core prewarm bootstrap ${actual}: no Agent HTML until click, then reuse without another mint`, async ({ page }) => {
+    const s = await setup(page, { actual })
+    await hover(page, 'Alpha')
+    await expect.poll(s.checks).toBe(actual === 'cold' ? 2 : 1)
+    await expect(page.locator('iframe[aria-hidden="true"]')).toHaveCount(0)
+    expect(s.minted).toHaveLength(actual === 'cold' ? 1 : 0)
+    expect(s.exchanges()).toBe(actual === 'cold' ? 1 : 0)
+    expect(s.ui).toHaveLength(0)
+    await row(page, 'Alpha').getByRole('link').click()
+    await expect(page.frameLocator('iframe[title="/Alpha interface"]').getByRole('heading')).toHaveText('Agent interface')
+    expect(s.foreground).toHaveLength(0); expect(s.ui).toEqual([ids[0]])
+    expect(s.checks()).toBe(actual === 'cold' ? 3 : 2)
+  })
+}
+
+test('actual Core prewarm bootstrap with an unusable session ends quietly without Agent HTML', async ({ page }) => {
+  const s = await setup(page, { actual: 'blocked' })
+  await hover(page, 'Alpha')
+  await expect.poll(s.checks).toBe(2)
+  await expect(page.locator('iframe[aria-hidden="true"]')).toHaveCount(0)
+  expect(s.minted).toHaveLength(1); expect(s.exchanges()).toBe(1); expect(s.ui).toHaveLength(0)
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  await expect(page.getByRole('button', { name: 'Use compatibility view' })).toHaveCount(0)
+})
+
+test('actual Core bootstrap rechecks a session lost after warming and performs a fresh click handoff', async ({ page }) => {
+  const s = await setup(page, { actual: 'cold' })
+  await hover(page, 'Alpha')
+  await expect.poll(s.checks).toBe(2)
+  await expect(page.locator('iframe[aria-hidden="true"]')).toHaveCount(0)
+  // Supporting browser control test: server expiry/revocation itself is verified
+  // by Core PostgreSQL tests and release acceptance, not this mocked check.
+  s.warmed.delete(ids[0])
+  await row(page, 'Alpha').getByRole('link').click()
+  await expect(page.frameLocator('iframe[title="/Alpha interface"]').getByRole('heading')).toHaveText('Agent interface')
+  expect(s.foreground).toHaveLength(1); expect(s.exchanges()).toBe(2)
+  expect(s.minted).toHaveLength(1); expect(s.ui).toEqual([ids[0]])
 })
 
 test('prewarm is absent on an old Proxy', async ({ page }) => {
