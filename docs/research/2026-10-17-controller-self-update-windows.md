@@ -1143,6 +1143,38 @@ rename sequence is supported; preserved records are diagnostic evidence, not
 recovery input. Recovery remains disabled. Neither the latch nor an operator
 clearing mechanism is implemented by the current inert model.
 
+### Next inert fixture: distinguish read failure from positioning refusal
+
+The remaining read-error gap concerns the retained evidence pin, not rename
+status acquisition. The existing post-read hook cannot establish that the OS
+refused a file read. Reducing the pin to metadata-only access is also insufficient
+by itself: the current reader seeks before reading, and that positioning call
+may fail first. A failed overall consume must not be labelled a `ReadFile`
+failure without observing which native operation actually failed.
+
+Keep the next fixture private under the Windows test module. Preserve the
+original pin until a reduced-rights duplicate exists; establish that both handles
+refer to the same full volume/file identity. Retain directory custody, ACL and
+metadata validation. The negative case must capture the read operation's actual
+error immediately, separately from any seek error, and prove that the read was
+attempted. A deterministic implementation may use a bounded explicit-offset
+native read to avoid requiring an earlier positioning operation; it must retain
+the existing length-plus-one bound, exact-length/hash comparison and post-read
+identity checks. Do not bypass those checks merely to reach the injected fault.
+
+For both operation roles, create genuine collision evidence first, then exercise
+the reduced-rights pin through the same verifier read path. Require zero sink
+acceptances, a spent consumption latch, and refusal of a second consume even if
+the original readable handle is restored. Include a normal readable-pin control
+using the same reader. Diagnostic output may contain only fixed stage names and
+numeric native errors, never evidence bytes or private paths. Hosted 2022 and
+2025 execution must show the read-stage failure and successful control on the
+exact commit; a seek/ACL/identity refusal does not satisfy this experiment.
+
+This is an implementation contract, not new coverage. No reader changes or new
+native tests are included here. Actual read-failure coverage, production
+committed-head binding and durable consume/CAS remain open; W4 stays disabled.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
