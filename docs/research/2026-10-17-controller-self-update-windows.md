@@ -133,6 +133,33 @@ The model checks the marker header before inspecting receipt content. These
 typed fields are not yet a serialized schema; the existing Unix version-1
 reader is unchanged. The subsequent schema increment must exercise the actual
 Unix reader refusing Windows bytes, including a Windows marker presented alone.
+The next test-only Controller module `windows_update_envelope` fixes a draft
+binary envelope before the inner receipt schema is implemented:
+
+| Offset | Width | Meaning |
+| --- | --- | --- |
+| 0 | 8 | ASCII magic `TRUPDWIN` |
+| 8 | 2 | Little-endian schema version, exactly 2 |
+| 10 | 2 | Little-endian layout, exactly 1 (Windows two-rename) |
+| 12 | 2 | Little-endian kind: 1 receipt, 2 marker; must match expected kind |
+| 14 | 2 | Reserved, exactly zero |
+| 16 | 4 | Little-endian total byte length, including the 20-byte header |
+| 20 | Remaining | Nonempty opaque payload, not yet parsed |
+
+The supplied buffer is capped at 65,536 total bytes before header access; the
+declared total must exactly match, so truncation, trailing bytes and concatenated
+records are refused. Decode borrows the payload with no allocation or inner
+parser; encode checks the payload bound before allocating. A future file reader
+must also read and validate the fixed header and total cap before allocating a
+payload buffer; a slice-based test does not establish that I/O behavior.
+Portable tests cover every truncated length, mutation of every header byte,
+wrong kind/endianness, overflowing declared length and the exact total cap.
+On Unix, a disposable real `Journal` is given a Windows receipt with a sibling
+Windows marker, then the Windows marker alone in the receipt slot. Both read
+and reopen must refuse with existing bytes and directory entries unchanged.
+The legacy Unix parser cannot treat the binary magic as JSON; no migration or
+Windows payload parsing is added to it. These tests establish rejection, not
+Windows inner-field/schema validation, native storage or production support.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 

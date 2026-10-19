@@ -587,6 +587,52 @@ mod tests {
     }
 
     #[test]
+    fn real_unix_journal_refuses_windows_receipt_and_marker_without_writes() {
+        use crate::windows_update_envelope::{decode, encode, Kind};
+
+        let (fixture, root) = Fixture::new();
+        let original = receipt();
+        let selector = original.job_id.to_string();
+        let journal = Journal::create(&root, &original).unwrap();
+        let path = fixture.0.join(&selector).join("receipt.json");
+        // A deliberately non-JSON payload demonstrates that only the Windows
+        // envelope is recognized here, with no inner schema parser involved.
+        let windows_receipt = encode(b"opaque receipt, not JSON", Kind::Receipt).unwrap();
+        let windows_marker = encode(b"opaque marker, not JSON", Kind::Marker).unwrap();
+        assert!(decode(&windows_receipt, Kind::Receipt).is_ok());
+        assert!(decode(&windows_marker, Kind::Marker).is_ok());
+        let mut marker_file = root.create_file("installation-marker.json").unwrap();
+        marker_file.write_all(&windows_marker).unwrap();
+        drop(marker_file);
+
+        fn names(path: &std::path::Path) -> Vec<std::ffi::OsString> {
+            let mut names: Vec<_> = std::fs::read_dir(path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect();
+            names.sort();
+            names
+        }
+        for bytes in [&windows_receipt, &windows_marker] {
+            std::fs::write(&path, bytes).unwrap();
+            let root_names = names(&fixture.0);
+            let job_names = names(path.parent().unwrap());
+            assert_eq!(
+                journal.read().unwrap_err().to_string(),
+                "invalid_update_receipt"
+            );
+            assert!(Journal::open(&root, &selector).is_err());
+            assert_eq!(names(&fixture.0), root_names);
+            assert_eq!(names(path.parent().unwrap()), job_names);
+            assert_eq!(std::fs::read(&path).unwrap(), *bytes);
+            assert_eq!(
+                std::fs::read(fixture.0.join("installation-marker.json")).unwrap(),
+                windows_marker
+            );
+        }
+    }
+
+    #[test]
     fn unsigned_mode_requires_ack_and_null_signed_sequence_is_not_zero() {
         let mut r = receipt();
         if let Source::Pin { allow_pinned, .. } = &mut r.source {
