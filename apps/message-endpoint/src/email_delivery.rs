@@ -64,6 +64,16 @@ pub enum Outcome {
     ProviderAccepted,
     Uncertain,
 }
+/// Internal masked status for a future authenticated management surface. Counts
+/// include all generations of this stable binding; no bodies, addresses or keys.
+#[derive(serde::Serialize)]
+pub struct DispatchStatus {
+    pub prepared: i64,
+    pub dispatching: i64,
+    pub uncertain: i64,
+    pub provider_accepted: i64,
+    pub at_capacity: bool,
+}
 fn frozen_payload(intent: &Intent, url: &str) -> Result<Vec<u8>, Error> {
     let mut notification = intent.notification(url, Mode::Proxy)?;
     let marker = Sha256::digest(
@@ -87,6 +97,78 @@ fn frozen_payload(intent: &Intent, url: &str) -> Result<Vec<u8>, Error> {
     Ok(payload)
 }
 impl Queue<'_> {
+    /// Positive local journal fence for the post-token-mint callback. This is
+    /// not Core/member/allowlist/activation authorization and must use the
+    /// caller's correct Hub Store. No CLI or network while this transaction is
+    /// open; no atomicity with a later external request is claimed.
+    pub fn proxy_dispatchable(
+        &mut self,
+        intent: &Intent,
+        url: &str,
+        now: i64,
+    ) -> Result<bool, Error> {
+        if !valid_time(now) {
+            return Err(Error::Invalid);
+        }
+        let expected = frozen_payload(intent, url)?;
+        self.store
+            .recheck_private_storage()
+            .map_err(|_| Error::PrivateStorage)?;
+        let tx = self
+            .store
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let valid = match current(&tx, intent, now) {
+            Ok(()) => tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM email_dispatch WHERE id=?1 AND endpoint=?2 AND generation=?3 AND state='dispatching' AND payload=?4)",
+                params![intent.id,intent.endpoint,intent.generation,expected], |r| r.get(0))?,
+            Err(Error::Lease) => false,
+            Err(error) => return Err(error),
+        };
+        tx.commit()?;
+        // A read-only transaction may not invoke SQLite's COMMIT hook.
+        self.store
+            .recheck_private_storage()
+            .map_err(|_| Error::PrivateStorage)?;
+        Ok(valid)
+    }
+    /// No public API is added here. HTTP callers still need the existing
+    /// management authentication; global pressure is exposed as a bool only.
+    pub fn proxy_delivery_status(&self, endpoint: &str) -> Result<DispatchStatus, Error> {
+        if !crate::store::valid_id(endpoint) {
+            return Err(Error::Invalid);
+        }
+        self.store
+            .recheck_private_storage()
+            .map_err(|_| Error::PrivateStorage)?;
+        let tx = Transaction::new_unchecked(&self.store.db, TransactionBehavior::Deferred)?;
+        let exists: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM endpoints WHERE id=?1)",
+            [endpoint],
+            |r| r.get(0),
+        )?;
+        if !exists {
+            return Err(Error::Denied);
+        }
+        let (prepared,dispatching,uncertain,provider_accepted): (i64,i64,i64,i64) = tx.query_row(
+            "SELECT coalesce(sum(state='prepared'),0),coalesce(sum(state='dispatching'),0),coalesce(sum(state='uncertain'),0),coalesce(sum(state='provider_accepted'),0) FROM email_dispatch WHERE endpoint=?1", [endpoint], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        let global: i64 = tx.query_row(
+            "SELECT count(*) FROM email_dispatch WHERE state IN ('dispatching','uncertain')",
+            [],
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        self.store
+            .recheck_private_storage()
+            .map_err(|_| Error::PrivateStorage)?;
+        Ok(DispatchStatus {
+            prepared,
+            dispatching,
+            uncertain,
+            provider_accepted,
+            at_capacity: dispatching + uncertain >= PER_BINDING || global >= GLOBAL,
+        })
+    }
     /// Caller still needs fresh membership, Core pins, allowlist and activation
     /// checks. This storage operation neither authorizes nor performs a send.
     pub fn prepare_proxy_delivery(
@@ -268,6 +350,109 @@ mod tests {
             payload: a.payload.clone(),
         }
     }
+    #[test]
+    fn journal_positive_fence_rechecks_current_scope_bytes_and_lifecycle() {
+        for change in [
+            "pause",
+            "revoke",
+            "generation",
+            "nonce",
+            "address",
+            "thread",
+            "url",
+            "payload",
+            "expire",
+            "accepted",
+            "uncertain",
+            "restart",
+        ] {
+            let mut store = Store::memory(Limits::default()).unwrap();
+            setup(&mut store);
+            let mut q = Queue::new(&mut store).unwrap();
+            let mut i = intent(&mut q, 1);
+            q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+            assert!(!q.proxy_dispatchable(&i, URL, 61).unwrap());
+            let a = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+            assert!(q.proxy_dispatchable(&i, URL, 61).unwrap());
+            assert!(!q.dispatchable(&i, 61).unwrap());
+            let mut url = URL;
+            let mut now = 61;
+            match change {
+                "pause" => {
+                    q.store
+                        .db
+                        .execute("UPDATE endpoints SET paused=1", [])
+                        .unwrap();
+                }
+                "revoke" => {
+                    q.store
+                        .db
+                        .execute("UPDATE email_targets SET revoked=1", [])
+                        .unwrap();
+                }
+                "generation" => {
+                    q.store
+                        .db
+                        .execute("UPDATE endpoints SET generation=2", [])
+                        .unwrap();
+                }
+                "nonce" => i.nonce = "f".repeat(64),
+                "address" => {
+                    q.store
+                        .db
+                        .execute(
+                            "UPDATE email_targets SET address='different@example.test'",
+                            [],
+                        )
+                        .unwrap();
+                }
+                "thread" => i.thread = "f".repeat(64),
+                "url" => url = "https://changed.example/",
+                "payload" => {
+                    q.store
+                        .db
+                        .execute("UPDATE email_dispatch SET payload=X'7b7d'", [])
+                        .unwrap();
+                }
+                "expire" => now = 122,
+                "accepted" => q
+                    .finish_proxy_delivery(a, Outcome::ProviderAccepted)
+                    .unwrap(),
+                "uncertain" => q.finish_proxy_delivery(a, Outcome::Uncertain).unwrap(),
+                "restart" => {
+                    q.recover_interrupted_proxy_deliveries().unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(!q.proxy_dispatchable(&i, url, now).unwrap(), "{change}");
+        }
+    }
+    #[test]
+    fn journal_fence_and_masked_status_refuse_private_path_drift() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("state");
+        let mut store = Store::open(&path, Limits::default()).unwrap();
+        setup(&mut store);
+        let mut q = Queue::new(&mut store).unwrap();
+        let i = intent(&mut q, 1);
+        q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+        let _attempt = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+        assert!(q.proxy_dispatchable(&i, URL, 61).unwrap());
+        let status = serde_json::to_value(q.proxy_delivery_status("ag_email").unwrap()).unwrap();
+        assert_eq!(
+            status,
+            serde_json::json!({"prepared":0,"dispatching":1,"uncertain":0,"provider_accepted":0,"at_capacity":false})
+        );
+        assert!(q.proxy_delivery_status("ag_missing").is_err());
+        let database = path.join("hub.sqlite3");
+        let original = path.join("original.sqlite3");
+        std::fs::rename(&database, &original).unwrap();
+        assert!(q.proxy_dispatchable(&i, URL, 61).is_err());
+        assert!(q.proxy_delivery_status("ag_email").is_err());
+        std::fs::rename(original, database).unwrap();
+        assert!(q.proxy_dispatchable(&i, URL, 61).is_err());
+        assert!(q.proxy_delivery_status("ag_email").is_err());
+    }
     #[cfg(feature = "hub")]
     fn fake_core(path: &std::path::Path, succeeds: bool) -> crate::core::Core {
         use std::os::unix::fs::PermissionsExt;
@@ -400,6 +585,53 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
                 std::io::ErrorKind::WouldBlock
             );
         }
+    }
+    #[cfg(feature = "hub")]
+    #[test]
+    fn post_mint_journal_fence_observes_pause_during_fake_cli() {
+        use crate::{core::Core, email::proxy::Sender};
+        use std::{net::TcpListener, os::unix::fs::PermissionsExt};
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().canonicalize().unwrap().join("state");
+        let mut store = Store::open(&path, Limits::default()).unwrap();
+        setup(&mut store);
+        let mut q = Queue::new(&mut store).unwrap();
+        let i = intent(&mut q, 1);
+        q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+        let a = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+        assert!(q.proxy_dispatchable(&i, URL, 61).unwrap());
+        let database = path.join("hub.sqlite3");
+        let exe = temp.path().join("fake-treer");
+        std::fs::write(&exe, format!(r#"#!/usr/bin/python3
+import json,sqlite3,sys
+assert sys.argv[1:]==['token','create','svc_hub','--json']
+db=sqlite3.connect({database:?},timeout=1)
+db.execute('UPDATE endpoints SET paused=1')
+db.commit()
+db.close()
+print(json.dumps({{'access_token':'synthetic.app.signature','token_type':'Bearer','audience':'svc_hub','expires_in':300}}))
+"#)).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let core = Core::new(&exe, "app_own").unwrap();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let sender = Sender::new(
+            &format!("http://{}/", listener.local_addr().unwrap()),
+            "svc_hub",
+        )
+        .unwrap();
+        sender
+            .send_committed(&core, a, || {
+                q.proxy_dispatchable(&i, URL, 61).unwrap_or(false)
+            })
+            .commit(&mut q)
+            .unwrap();
+        assert_eq!(state(&q, &i.id), "uncertain");
+        assert_eq!(q.proxy_delivery_status("ag_email").unwrap().uncertain, 1);
+        listener.set_nonblocking(true).unwrap();
+        assert_eq!(
+            listener.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
     }
     #[cfg(feature = "hub")]
     #[test]
@@ -638,6 +870,10 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
             )
             .unwrap();
         assert_eq!(count, 32);
+        let status = q.proxy_delivery_status("ag_email").unwrap();
+        assert_eq!(status.prepared, 1);
+        assert_eq!(status.uncertain, 32);
+        assert!(status.at_capacity);
     }
     #[test]
     fn global_reservations_apply_when_this_binding_has_no_reservations() {
@@ -669,6 +905,9 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
             )
             .unwrap();
         assert_eq!(count, 640);
+        let status = q.proxy_delivery_status("ag_email").unwrap();
+        assert_eq!(status.uncertain, 0);
+        assert!(status.at_capacity); // Global pressure, without other bindings' counts.
     }
     #[test]
     fn frozen_payload_counts_towards_existing_byte_and_count_limits() {

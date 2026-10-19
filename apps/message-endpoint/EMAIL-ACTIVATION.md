@@ -75,6 +75,21 @@ The local tests cover stored-byte/URL conflicts, completed-outbox refusal,
 restart containment, sticky ambiguity, local/global capacity and commit failures;
 they do not constitute the future end-to-end send/ack crash rehearsal.
 
+The unused `Queue::proxy_dispatchable` provides the journal-specific local
+positive fence. It repeats live lease/nonce, contact/address/thread, generation,
+pause/revocation, dispatching state and exact frozen bytes/URL checks in a short
+IMMEDIATE transaction; private-storage identity is rechecked around that read.
+Use it after token mint, bound to the correct Hub Store, in addition to fresh
+Core/member/allowlist/operator activation checks. It cannot make a later POST
+atomic with a subsequent pause. The old outbox `dispatchable` remains negative
+for all journal work.
+
+`Queue::proxy_delivery_status` provides only prepared/dispatching/uncertain/
+accepted counts across a stable binding's generations and a local/global
+capacity flag. It returns no payload, address, URL, idempotency key or reference,
+and fails on private-storage drift. This is an internal storage query, not a new
+authenticated HTTP route or rendered settings status; those remain to be wired.
+
 `Sender::send_committed` is a separate, currently unused assembly primitive. It
 consumes the opaque committed attempt, mints this App's service token, rechecks
 the caller-supplied current fence after minting and POSTs the stored JSON bytes
