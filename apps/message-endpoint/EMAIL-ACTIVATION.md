@@ -155,7 +155,21 @@ This process-local gate complements private-store process exclusion; it is not
 distributed ownership or real-send activation. Local tests use an I/O-panicking
 fake Core to verify committed recovery, duplicate-start refusal, failed COMMIT
 with unchanged journal/ownership, and conservative stop-failure latching. They
-do not yet exercise assembled real-transport worker threads or a process crash.
+also verify that repeated clean restarts preserve prepared, provider-accepted
+and uncertain journal states, frozen payloads and intent completion. They do not
+yet exercise assembled real-transport worker threads or a process crash.
+
+Shutdown currently uses unbounded `JoinHandle::join`; there is no demonstrated
+35-second end-to-end stop deadline. The 15-second CLI and 20-second HTTP limits
+bound those individual operations, not scheduling, lock waits or all worker work.
+A future real-send worker must allow an already obtained provider-accepted
+Completion to commit through `finish_proxy_delivery` despite a stop request. A
+stop flag never proves non-send and must not relabel genuine acceptance. If the
+outcome/completion is lost, retain dispatching until startup contains it as
+uncertain, with no second POST. Before activation, an assembled fake-POST test
+must request stop during an in-flight request, exercise both accepted completion
+and deliberately lost completion, and verify their different recovery outcomes.
+Never release worker ownership on an elapsed timeout while a worker may live.
 
 Before wiring real-send primitives into workers, the remaining storage lifecycle
 requirements from review 5999 must also be implemented and tested:

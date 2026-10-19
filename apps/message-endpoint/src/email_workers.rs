@@ -504,6 +504,9 @@ mod tests {
         }
     }
     fn fixture() -> SharedHub<NoIo> {
+        fixture_state("dispatching")
+    }
+    fn fixture_state(initial: &str) -> SharedHub<NoIo> {
         let mut h = Hub::new(
             Store::memory(Limits::default()).unwrap(),
             NoIo,
@@ -553,9 +556,24 @@ mod tests {
             .unwrap();
         q.prepare_proxy_delivery(&intent, "https://hub.example/", now)
             .unwrap();
-        let _abandoned = q
-            .begin_proxy_delivery_now(&intent, "https://hub.example/")
-            .unwrap();
+        if initial != "prepared" {
+            let attempt = q
+                .begin_proxy_delivery_now(&intent, "https://hub.example/")
+                .unwrap();
+            match initial {
+                "dispatching" => drop(attempt),
+                "provider_accepted" => q
+                    .finish_proxy_delivery(
+                        attempt,
+                        crate::email::delivery::Outcome::ProviderAccepted,
+                    )
+                    .unwrap(),
+                "uncertain" => q
+                    .finish_proxy_delivery(attempt, crate::email::delivery::Outcome::Uncertain)
+                    .unwrap(),
+                _ => panic!("unknown fixture state"),
+            }
+        }
         Arc::new(Mutex::new(h))
     }
     fn state(hub: &SharedHub<NoIo>) -> String {
@@ -587,6 +605,27 @@ mod tests {
         assert!(!hub.lock().unwrap().email_workers_active);
         let _restarted = StartupLease::acquire(&hub).unwrap();
         assert_eq!(state(&hub), "uncertain");
+    }
+
+    #[test]
+    fn clean_restart_preserves_prepared_accepted_and_uncertain_rows() {
+        for initial in ["prepared", "provider_accepted", "uncertain"] {
+            let hub = fixture_state(initial);
+            let before: (Vec<u8>, i64) = {
+                let h = hub.lock().unwrap();
+                h.store.db.query_row("SELECT d.payload,i.state FROM email_dispatch d JOIN email_intents i ON i.id=d.id", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap()
+            };
+            for _ in 0..2 {
+                let lease = StartupLease::acquire(&hub).unwrap();
+                assert_eq!(state(&hub), initial);
+                let after: (Vec<u8>, i64) = {
+                    let h = hub.lock().unwrap();
+                    h.store.db.query_row("SELECT d.payload,i.state FROM email_dispatch d JOIN email_intents i ON i.id=d.id", [], |r| Ok((r.get(0)?,r.get(1)?))).unwrap()
+                };
+                assert_eq!(after, before);
+                drop(lease); // confirmed clean stop between worker generations
+            }
+        }
     }
 
     #[test]
