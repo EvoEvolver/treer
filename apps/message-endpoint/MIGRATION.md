@@ -501,9 +501,24 @@ refusal and actual private-store pathname drift during the completion transactio
 The drift fixture renames its temporary database from a test-only SQLite update
 hook, leaving the real #217 COMMIT hook installed: mapping/queue changes roll
 back, no ack CLI call occurs and restoring the name cannot clear the latch.
-These are local fault injections, not a killed-process rehearsal or production
-rollout evidence. Mixed-mode FIFO, importer legacy pins, conflict recovery and
-process-death checks remain blockers before activating receipt-mode dispatch.
+These are local fault injections, not production rollout evidence. A separate
+completion-stage process-death regression now runs the real `commit_and_ack` in
+a child test process with a private persistent store and a pinned fake CLI. The
+CLI first checks the committed queue, reply mapping and SQLite integrity from a
+separate connection, then signals readiness and waits without applying the ack.
+The parent SIGKILLs only its own child, observes that the fake CLI stops without
+applying that first ack, reopens the same store, and replays the same sealed test
+receipt twice. All three ack attempts use identical argv and operation IDs;
+replays return `IgnoredTerminal`, leave the single existing mapping unchanged,
+and invoke no additional mailbox send.
+
+This covers death after local COMMIT but before acknowledgement takes effect,
+including an ack CLI call already in progress. It does not prove actual Core-side
+ack idempotence, negotiate a peer, kill an assembled worker, or exercise external
+Telegram transport. The sealed receipt is synthetic in this test; production
+must still receive through `receive_authenticated`. Mixed-mode FIFO, importer
+legacy pins, bounded conflict recovery and an assembled dispatcher crash rehearsal
+remain blockers before activating receipt-mode dispatch.
 
 Receipt completion accepts an opaque `core::AuthenticatedDelivery`, not a
 `Delivery` deserialized from a request. Only `Core::receive_authenticated` can
@@ -518,8 +533,9 @@ provenance boundary, not protection against malicious code running as the same
 OS user, a compromised configured CLI, or an independent verification of the
 endpoint's claimed final Core ID.
 
-This helper does not acknowledge deliveries or enable negotiated dispatch.
+`receive_authenticated` does not acknowledge deliveries or enable negotiated
+dispatch.
 Production remains on the legacy completion path until the mixed-mode dispatcher,
-capability negotiation, bounded conflict recovery and killed-process
-commit-before-ack tests are reviewed. The dispatcher must receive sealed values
-through this Core path rather than re-wrap generic `Mailbox::receive` data.
+capability negotiation, bounded conflict recovery and assembled-worker
+commit-before-ack crash tests are reviewed. The dispatcher must receive sealed
+values through this Core path rather than re-wrap generic `Mailbox::receive` data.

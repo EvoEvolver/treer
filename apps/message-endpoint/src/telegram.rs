@@ -1242,6 +1242,173 @@ print(json.dumps({{'acknowledged_delivery_ids':['del_receipt'],'already_acknowle
             assert!(fake.sent.borrow().is_empty());
         }
     }
+    // The child fixture only runs when explicitly selected by the parent test.
+    // It invokes the real completion/ack helper with a synthetic private store
+    // and pinned fake CLI; there is no installed CLI or external transport.
+    #[test]
+    fn receipt_crash_child() {
+        let Some(root) = std::env::var_os("TREER_RECEIPT_CRASH_FIXTURE") else {
+            return;
+        };
+        let root = std::path::PathBuf::from(root);
+        let (mut h, fake) =
+            fixture_store(Store::open(&root.join("state"), Limits::default()).unwrap());
+        let intent = receipt_job(&mut h);
+        std::fs::write(
+            root.join("intent.json"),
+            serde_json::to_vec(&serde_json::json!({
+                "job":intent.job,"parts":intent.parts,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let receipt = crate::core::AuthenticatedDelivery::fixture(
+            receipt_delivery(&intent, "msg_final"),
+            "ws",
+        );
+        let core = crate::core::Core::new(&root.join("fake-treer"), "app_hub").unwrap();
+        assert!(fake.sent.borrow().is_empty());
+        // The fake CLI blocks before acknowledging. The parent SIGKILLs this
+        // test process only after the CLI independently observes durable COMMIT.
+        let _ = crate::telegram_receipt_completion::commit_and_ack(
+            &std::sync::Mutex::new(h),
+            &core,
+            &receipt,
+            &intent,
+            NOW,
+        );
+        panic!("child must be killed before the first ack returns");
+    }
+
+    #[test]
+    fn receipt_process_death_after_commit_replays_same_ack_without_send() {
+        use std::{
+            os::unix::{fs::PermissionsExt, process::ExitStatusExt},
+            process::{Command, Stdio},
+            sync::Mutex,
+            time::{Duration, Instant},
+        };
+        struct ChildGuard(std::process::Child);
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                let _ = self.0.wait();
+            }
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let executable = root.join("fake-treer");
+        std::fs::write(&executable, r#"#!/usr/bin/python3
+import json, os, sqlite3, sys, time
+from pathlib import Path
+root=Path(__file__).parent
+args=sys.argv[1:]
+assert len(args)==5 and args[:2]==['message','ack'] and args[2].startswith('--operation-id=ep-ack-') and args[-2:]==['--','del_receipt']
+db=sqlite3.connect('file:'+str(root/'state'/'hub.sqlite3')+'?mode=ro',uri=True)
+assert db.execute('SELECT pending,core_id FROM inbound').fetchall()==[(0,'msg_final')]
+assert db.execute('SELECT count(*) FROM telegram_reply_mappings').fetchone()==(1,)
+assert db.execute('PRAGMA integrity_check').fetchone()==('ok',)
+db.close()
+with (root/'acks.jsonl').open('a') as f:
+    f.write(json.dumps(args)+'\n')
+if not (root/'ready').exists():
+    parent=os.getppid()
+    (root/'ready').write_text('committed; ack not applied')
+    deadline=time.monotonic()+10
+    while os.getppid()==parent and time.monotonic()<deadline:
+        time.sleep(.02)
+    (root/'cli-stopped').write_text('first ack not applied')
+    sys.exit(1)
+print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowledged_delivery_ids':[]}))
+"#).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let log = std::fs::File::create(root.join("child.log")).unwrap();
+        let mut child = ChildGuard(
+            Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "telegram::tests::receipt_crash_child",
+                    "--nocapture",
+                ])
+                .env_clear()
+                .env("HOME", &root)
+                .env("TMPDIR", &root)
+                .env("PATH", "/usr/bin:/bin")
+                .env("TREER_RECEIPT_CRASH_FIXTURE", &root)
+                .stdin(Stdio::null())
+                .stdout(log.try_clone().unwrap())
+                .stderr(log)
+                .spawn()
+                .unwrap(),
+        );
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !root.join("ready").exists() {
+            assert!(
+                child.0.try_wait().unwrap().is_none(),
+                "fixture exited before COMMIT"
+            );
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for committed fixture"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        child.0.kill().unwrap();
+        assert_eq!(child.0.wait().unwrap().signal(), Some(9));
+        let deadline = Instant::now() + Duration::from_secs(12);
+        while !root.join("cli-stopped").exists() {
+            assert!(
+                Instant::now() < deadline,
+                "fake CLI must stop without applying ack"
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(root.join("intent.json")).unwrap()).unwrap();
+        let intent = CoreIntent {
+            endpoint: "ag_endpoint".into(),
+            generation: 1,
+            job: value["job"].as_i64().unwrap(),
+            token: "a".repeat(64),
+            parts: serde_json::from_value(value["parts"].clone()).unwrap(),
+        };
+        let fake = Fake::default();
+        let h = Hub::new(
+            Store::open(&root.join("state"), Limits::default()).unwrap(),
+            fake.clone(),
+            "app_hub",
+            "ws",
+        )
+        .unwrap();
+        let receipt = crate::core::AuthenticatedDelivery::fixture(
+            receipt_delivery(&intent, "msg_final"),
+            "ws",
+        );
+        let core = crate::core::Core::new(&executable, "app_hub").unwrap();
+        let hub = Mutex::new(h);
+        for _ in 0..2 {
+            assert_eq!(
+                crate::telegram_receipt_completion::commit_and_ack(
+                    &hub, &core, &receipt, &intent, NOW,
+                )
+                .unwrap(),
+                crate::telegram_reply_store::Recorded::IgnoredTerminal
+            );
+        }
+        let calls: Vec<Vec<String>> = std::fs::read_to_string(root.join("acks.jsonl"))
+            .unwrap()
+            .lines()
+            .map(|s| serde_json::from_str(s).unwrap())
+            .collect();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[0], calls[1]);
+        assert_eq!(calls[1], calls[2]);
+        assert!(
+            fake.sent.borrow().is_empty(),
+            "replay must not send another frame"
+        );
+    }
+
     #[test]
     fn completion_modes_reject_the_other_path_before_and_after_terminal() {
         for receipt_mode in [false, true] {
