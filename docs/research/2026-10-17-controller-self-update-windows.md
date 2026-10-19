@@ -907,6 +907,74 @@ case injects creation-stage storage failure, retains the empty evidence slot
 and proves neither storage nor acquisition can retry. Exact-SHA hosted Windows
 execution is still required; cross-target lint is not runtime acceptance.
 
+Hosted run 39320282022 verified exact
+`dcdfe5e49808ce9160f86d7e1f050cfe846e4bb4` on Server 2022 build 20348 and
+Server 2025 build 26100. Each image passed all three `native_operation_` tests
+with zero failures/ignored tests; the actual occupied-target calls reported
+nonzero status 183. Ordinary platform tests reported 61 passed and four ignored;
+the separate outside-runner-Job owner round trip and running-image rename each
+passed with exit zero. Core independently read the retained raw log (ticket
+5873), and security accepted this fixture slice. This does not close W1-W3 or
+establish a Controller reason source.
+
+#### Proposed composition slice: independent context plus native custody
+
+The next design boundary joins two still separate fixtures: the native
+`operation_outcome::Stored` borrows a real failed rename and evidence pin, while
+the Controller `windows_update_record::reason` verifier accepts only synthetic
+JSON observations and numeric ownership/monitor stand-ins. Neither can simply
+be cast into the other. The five-byte native encoding has no job, predecessor,
+image-role or intent-revision binding; the synthetic JSON has no native custody.
+No digest, diagnostic line, caller error code or successfully parsed record may
+bridge that authority gap.
+
+Keep the next implementation private and test-only. First exercise composition
+inside the native fixture, without exporting its handles/types or constructing
+the Controller's `VerifiedReason`. Supply a separately created immutable fixture
+context before acquisition: attempt identity, image role, operation-intent
+revision and expected source/destination object identities, sizes and digests.
+Synthetic job/predecessor labels, if included, remain explicitly synthetic and
+must be independently supplied rather than reconstructed from evidence bytes.
+The context is not an installation lock, durable head or production owner proof.
+
+Acquisition must check that independent image expectation against its retained
+objects before consuming the operation, derive the stage from selected slots,
+and retain the context and both image handles through capture, storage and
+verification. Do not learn the expected destination digest from whichever file
+is found there and then call the comparison an independent role binding. The
+existing deterministic occupied destination remains a negative fixture only;
+it does not prove the production classifier permits a rollback from that layout.
+
+The first consumer should parse the existing exact five-byte format strictly:
+only stage tags 1/2, exactly four little-endian status bytes and nonzero status;
+reject truncation, trailing data, unknown tags and zero. Compare the decoded
+stage/status with the retained actual failure and the independently selected
+context. Read only through the existing fixed-slot evidence pin, rechecking
+the attempt and image custody before and after the read. A malformed, replaced,
+unreadable or mismatching record yields no accepted fixture value. This parser
+is not the eventual Controller observation schema; adding native status to that
+schema and defining a production adapter require a separate reviewed change.
+
+Any accepted composition value must borrow this exact context, acquisition and
+pin, have no public/byte/path constructor or Clone/serde implementation, and be
+consumed once by a private fixture sink. Consume the verification invocation
+before reading evidence; a read/refusal/sink failure spends it without retry or
+reopening. The sink only records test acceptance in memory: it cannot publish a
+head, rename an image, execute rollback or reconstruct authority after restart.
+The original acquisition and evidence-store latches remain independent; a new
+consumer must not renew either of them.
+
+Acceptance must include independently changed expected identity/hash/size,
+wrong role/stage/revision/context, distinct old/new fixture bytes, and an
+identical-content replacement with a different identity; each refuses without
+minting a value. Cover malformed five-byte inputs using a pure parser test,
+but never use that parser's success alone as native provenance. Native tests
+must cover context mismatch before any operation, retained-handle interference
+after storage, the single read/consume path, failure without retry and no
+cross-attempt substitution. Run exact-SHA Server 2022/2025 with all prior native
+regressions. No installed paths, production schema migration, health evidence,
+durable once-only publication, recovery channel or W4 action is included.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual
