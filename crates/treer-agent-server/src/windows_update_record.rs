@@ -265,8 +265,7 @@ fn reason_kind_matches_entry(
     if inspect_claim(prior, slots[0], slots[1]) != layout::PairInspection::Consistent {
         return false;
     }
-    let operation_started =
-        |step| matches!(step, MoveOldIntent | OldMoved | PublishIntent | Published);
+    let operation_started = |step| matches!(step, MoveOldIntent | PublishIntent);
     match kind {
         ReasonKind::ControllerActivationFailed => {
             prior.transaction == Activating && operation_started(prior.controller_step)
@@ -1891,8 +1890,10 @@ fn reason_reference_survives_forward_entry_through_terminal_rollback() {
             &mut prior.state.controller_step
         };
         *moving = match first.1[usize::from(cli)] {
-            [Old, New, Absent] => Original,
-            [Absent, New, Old] => OldMoved,
+            // Operation-failure reasons originate only at an intent. The
+            // physical rollback suffix is unchanged by the stricter label.
+            [Old, New, Absent] => MoveOldIntent,
+            [Absent, New, Old] => PublishIntent,
             [New, Absent, Old] => Published,
             _ => unreachable!(),
         };
@@ -2170,9 +2171,9 @@ fn rollback_entry_binds_reason_kind_revision_and_exact_predecessor() {
                 evidence_sha256: "b".repeat(64),
             });
             let permitted = match kind {
-                ControllerActivationFailed => (2..=5).contains(&index),
+                ControllerActivationFailed => matches!(index, 2 | 4),
                 NewControllerUnhealthy => index == 5,
-                CliActivationFailed => (7..=10).contains(&index),
+                CliActivationFailed => matches!(index, 7 | 9),
                 FinalHealthFailed => index == 10,
                 DeadlineExceeded | HumanAbort => true,
             };
@@ -2213,22 +2214,14 @@ fn reason_kind_table_requires_matching_forward_phase_step_and_layout() {
             MoveOldIntent,
             ReasonKind::ControllerActivationFailed,
         ),
-        (Activating, OldMoved, ReasonKind::ControllerActivationFailed),
         (
             Activating,
             PublishIntent,
             ReasonKind::ControllerActivationFailed,
         ),
-        (
-            Activating,
-            Published,
-            ReasonKind::ControllerActivationFailed,
-        ),
         (Activating, Published, ReasonKind::NewControllerUnhealthy),
         (CoreHealthy, MoveOldIntent, ReasonKind::CliActivationFailed),
-        (CoreHealthy, OldMoved, ReasonKind::CliActivationFailed),
         (CoreHealthy, PublishIntent, ReasonKind::CliActivationFailed),
-        (CoreHealthy, Published, ReasonKind::CliActivationFailed),
         (CoreHealthy, Published, ReasonKind::FinalHealthFailed),
     ];
     let kinds = [

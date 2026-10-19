@@ -779,18 +779,17 @@ fn independent_reason_post_move_uncertainty_never_authorizes_rollback() {
                 };
                 let mut value = serde_json::to_value(observation(&context, kind, event)).unwrap();
                 value["event"]["stage"] = serde_json::json!(stage);
+                if stage == "verify_image" {
+                    assert!(serde_json::from_value::<Observation>(value.clone()).is_err());
+                }
                 let (reference, mut source) =
                     evidence(&context, kind, serde_json::to_vec(&value).unwrap());
                 assert_eq!(
                     verify(&context, &reference, &mut source).err(),
-                    Some(if stage == "verify_image" {
-                        "reason_evidence_schema"
-                    } else {
-                        "reason_semantics_mismatch"
-                    }),
+                    Some("reason_context_mismatch"),
                     "{kind:?}/{step:?}/{stage}"
                 );
-                assert_eq!(source.reads, 1);
+                assert_eq!(source.reads, 0);
                 assert!(!live.entered.get());
             }
         }

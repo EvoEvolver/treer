@@ -535,9 +535,9 @@ Successful label compatibility is not a verified reason capability.
 
 | Kind | Allowed predecessor phase and moving step | Required evidence meaning |
 | --- | --- | --- |
-| `controller_activation_failed` | Activating, Controller MoveOldIntent/OldMoved/PublishIntent/Published | Controller activation operation or verification failed; not necessarily a process-health failure |
+| `controller_activation_failed` | Activating, Controller MoveOldIntent/PublishIntent | Checked Controller rename failed with unchanged layout; post-move uncertainty diagnoses and stops |
 | `new_controller_unhealthy` | Activating, Controller Published | The started new Controller failed its authenticated health check |
-| `cli_activation_failed` | CoreHealthy, CLI MoveOldIntent/OldMoved/PublishIntent/Published | CLI activation/publish or CLI verification failed; must not be mislabeled as Controller health |
+| `cli_activation_failed` | CoreHealthy, CLI MoveOldIntent/PublishIntent | Checked CLI rename failed with unchanged layout; post-move uncertainty diagnoses and stops |
 | `final_health_failed` | CoreHealthy, CLI Published | Final post-activation health failed before Complete |
 | `deadline_exceeded` | Prepared, Activating or CoreHealthy, any classifier-consistent step | Independent monitor established expiration for the bound job/revision/time context |
 | `human_abort` | Prepared, Activating or CoreHealthy, any classifier-consistent step | Protected human channel authorized this bound abort |
