@@ -193,6 +193,32 @@ and totals at each sample. 64 MiB per journal/log, 128 MiB combined Rust journal
 rotated history, stderr and temps. Error/fence/unexpected growth or nonsettling
 RSS halts further rollout. Retained JSON is not total RSS; no steady-use/soak claim.
 
+### Retention interpretation (operator addendum; #158 security 5832)
+
+The frozen v1 execution supplement remains unchanged. This documentation addendum
+does not authorize another switch or change the reviewed commands/artifact.
+History is disk-only, with at most 64 files and a 67,092,480-byte history budget
+(128 MiB minus two 32 MiB live/publication budgets and two 8 KiB stderr budgets).
+Before copying a checkpoint, validated oldest sequence files are removed until
+both the new file count and byte total fit. Thus an initial MB/hour slope must
+not be extrapolated to unbounded growth or a time-to-128-MiB failure.
+
+Apps-dev's 3h41m observation was 21 snapshots / 8,868,647 bytes, not a plateau
+test. At the observed 5–6 snapshots/hour and similar sizes, the count bound would
+be reached around 11–13 hours; larger snapshots can hit the byte bound first.
+For the next leader-run sample around 12–14 hours, record count, total bytes,
+oldest/newest sequence names and the same PID identity; compare with earlier
+names to verify oldest-first removal. Do not claim a plateau before observing
+it. Validated publication temporaries also count toward retention limits.
+
+History is never recovery input or loaded as a full payload into memory. Live
+receipts/checkpoints, Node migration backups and images are not pruned by this
+rotation. Copies contain private plaintext: the bounds limit retention but do
+not eliminate the cost of retaining many full copies. Follow-up #215 evaluates
+fewer snapshots/write amplification; no retention setting or runtime change is
+part of this addendum. See the README's disk-history operator note for limits
+and existing rotation/crash test evidence.
+
 On failure stop Rust and verify exact launcher AND provider exit. Before import,
 or failed import with NO published rust-spike.json: original Node files remain
 authoritative; preserve failed backup/history/lock/audit, reinstall original Node

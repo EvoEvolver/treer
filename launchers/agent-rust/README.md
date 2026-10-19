@@ -447,6 +447,22 @@ provider/worktree data. This is not a machine-wide disk quota. A live-checkpoint
 full-disk error stops the runtime; history-only failures do not. Retention lasts until oldest-first rotation or Agent
 private-root deletion; conversation text remains plaintext for that duration.
 
+Operator sampling note (#158 security 5832): history's byte budget is exactly
+67,092,480 bytes and its count limit is 64 files, with validated oldest sequences
+removed before a new copy would exceed either bound. Early growth is filling
+that bounded retention window; do not extrapolate its MB/hour rate indefinitely.
+The apps-dev 3h41m sample (21 files, 8,868,647 bytes) had not reached a plateau.
+A later leader-run sample should compare file count, total bytes and oldest/newest
+sequence names against an earlier sample, along with the same process identity.
+At its observed 5–6 snapshots/hour, inspect around 12–14 hours; different file
+sizes or sampling activity change when either bound is reached. Do not claim
+observed rotation from a projection alone. Existing frozen-gate tests cover
+oldest-first byte rotation, the production 128 MiB budget and crash/restart
+phases; these tests are distinct from a live plateau observation. Follow-up
+#215 tracks reducing redundant full snapshots/write amplification without
+weakening live checkpoint durability. It is not a rollout prerequisite or a
+change to the frozen artifact.
+
 The main state file is
 `rust-spike.json`, atomically replaced with mode 0600 in a pre-existing 0700
 directory. Journal reads recheck placement, open without following the final
