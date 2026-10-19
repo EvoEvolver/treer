@@ -984,6 +984,24 @@ cross-attempt substitution. Run exact-SHA Server 2022/2025 with all prior native
 regressions. No installed paths, production schema migration, health evidence,
 durable once-only publication, recovery channel or W4 action is included.
 
+The private native fixture now implements this composition in
+`operation_outcome/composition.rs`. Its disposable images have distinct fixed
+bytes; their expected hashes and lengths come from those fixture inputs, and
+their expected identities are retained when the checked copies are created,
+before acquisition. Context and intent equality, attempt identity and both
+image expectations are checked before constructing the acquisition. Verification
+borrows that exact composition and stored failure, reads only its evidence pin,
+and checks custody again after reading. A latch on the stored evidence also
+prevents a newly constructed verifier from accepting it twice. The accepted
+value can only be moved into a private in-memory counter sink; refusal does not
+restore any latch. Three new native tests cover expectation mutations, both
+operation roles, distinct bytes, cross-attempt substitution, identical bytes
+with a different identity, post-read interference, and spent verification or
+sink failures. Windows target lint is compile evidence only: exact-SHA hosted
+2022/2025 execution remains required before calling this increment accepted.
+This is still not a Controller reason adapter, durable consumption or W2/W4
+authorization. Synthetic job/head/owner evidence has not been added.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual

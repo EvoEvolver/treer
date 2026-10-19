@@ -2,6 +2,8 @@
 use super::*;
 use std::cell::Cell;
 
+mod composition;
+
 pub(super) enum RenameError {
     Before(io::Error),
     Native(u32),
@@ -155,6 +157,7 @@ impl<'a> Acquisition<'a> {
 struct Stored<'a> {
     failure: &'a Failure<'a>,
     pin: evidence_file::EvidencePin<'a>,
+    verification_used: Cell<bool>,
 }
 impl Failure<'_> {
     // Fixed bounded fixture encoding, not the Controller observation schema.
@@ -181,7 +184,11 @@ impl Failure<'_> {
                 }
             },
         )?;
-        Ok(Stored { failure: self, pin })
+        Ok(Stored {
+            failure: self,
+            pin,
+            verification_used: Cell::new(false),
+        })
     }
 }
 impl Stored<'_> {
