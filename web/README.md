@@ -952,3 +952,33 @@ refusal. After UI load all handshake controls are ignored. Tab visibility and
 appearance updates do not run the handshake again; scope/interface changes
 replace the frame and cancel its pending requests as before.
 After a successful `reused` outcome every later control is ignored immediately.
+
+### Bounded Agent interface prewarm
+
+Only a Proxy advertising `agent.interface-embed-prewarm.v1` can receive a hidden
+prewarm bootstrap. Existing embed capability alone does not enable it: older
+Proxies would ignore the prewarm hint and load Agent HTML in the background.
+A 400 ms mouse hover or deliberate Tab focus on an accessible, online Tree
+Agent may start the bootstrap; arrow navigation, touch hover emulation, hidden
+documents, Save-Data, Apps, and workloads already open in a tab are excluded.
+There are at most two concurrent attempts per workspace, a 60 s per-Agent
+cooldown, and six background mint attempts per minute per authenticated account
+in the current Console document. The Proxy must also enforce the purpose-specific six/minute limit per user
+across tabs and devices, alongside its unchanged global 30/minute and
+eight-outstanding limits; the local budget is a courtesy, not enforcement.
+
+Each inert, hidden frame has a separate source/origin/hash-bound v2 state machine.
+It loads `/.treer/embed?reuse=1&prewarm=1`, sends a purpose-bound prewarm mint only
+after its own ready/probe/mint sequence, and stops at the terminal `warmed`
+message. It never loads Agent HTML. Failures, denials and timeouts are silent
+and do not retry or offer compatibility. Leaving/blurring the row, starting a
+foreground click, logout, workspace/interface generation changes, visibility or
+Save-Data changes remove the frame/listener and abort its request. Cancellation
+after exchange can leave only the Core's short-lived unused session.
+
+The click always uses the normal fresh session check; there is no positive
+authorization cache. Core must implement the purpose-bound 10-minute session,
+document-only one-time rotation, bounded session rows, and prewarm audit label
+before advertising the capability. New tabs already start their foreground
+handshake; they do not mint an additional background session. Real-browser
+acceptance of the final Core/Web union remains required.
