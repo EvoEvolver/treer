@@ -801,7 +801,17 @@ configuration, prompt/message bodies and unknown payload keys are not returned
 by this endpoint. Stable actor/resource IDs and event types remain metadata; this
 does not make the underlying database or existing organization audit view secret
 free. No unattributed history is reconstructed. Reading audit is not itself
-audited. Tree and enrollment audit writes share their mutation transaction;
+audited. The audit summary (`workspace.audit-summary.v1`) is the same sensitive
+read with the same authorization, scoping and no-store rules; it exposes only
+counts over the feed's rows, exact actor and resource IDs the feed already
+shows, current agent/machine/App display names trimmed to 128 characters, and
+action names. Chart categories are presentation, not authorization: the
+server-side table maps action names to eight categories, unknown actions fall
+into `other` and are logged, and the mapping never widens what a caller may
+read. Summaries are rate- and concurrency-limited per Proxy and fail closed
+(503) rather than return partial counts. The typed-instant backfill run by the
+maintenance worker writes only that derived column of existing rows, newest
+first, and marks unparsable instants instead of guessing them. Tree and enrollment audit writes share their mutation transaction;
 networking and accepted prompt audit writes are best-effort after success.
 The latter contain only authenticated actor/target IDs and event kinds, with no
 body or configuration. New events retain immutable workspace attribution after

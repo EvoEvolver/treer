@@ -824,6 +824,10 @@ response is `{events, next_cursor}` in descending sequence order. Use
 Optional exact-match filters are `actor_id`, `action` and `resource_kind`.
 `since` includes the RFC3339 instant and `until` excludes it; paired bounds may
 span at most 366 days. Limits clamp to 1..100. Unknown parameters are errors.
+On `workspace.audit-summary.v1` Proxies the feed also accepts `actor_kind`
+(`user|agent|machine|service|system`), `resource_id`, `outcome`
+(`succeeded|failed`), `category` (a chart category, below), `notable=true` and
+`sequence` (exactly one event), and the page carries `category_table_version`.
 
 Current workspace owners, including organization owners/admins, can read by
 default. An enforced deny can restrict them. To grant another workspace member
@@ -855,6 +859,50 @@ capability before using the new query against old Proxies. Statistics require
 the same authorization as audit reads and can fail rather than run longer than
 their two-second database statement budget. An opted-in statistics failure fails
 that request; retry without `include_statistics` to read the ordinary feed.
+
+### Workspace audit summary
+
+On Proxies advertising `workspace.audit-summary.v1`, the Console's audit charts
+read `GET /api/workspaces/WORKSPACE_ID/audit-summary` (Agents and machines use
+the `/agent/workspaces/ID/` variant) under exactly the same authorization,
+scoping and no-store rules as the event feed. The response is one JSON document
+of counts derived from the same rows the feed shows: `totals`, eight fixed
+`categories` (`agent_lifecycle`, `messages`, `tree`, `policy`, `apps_ingress`,
+`machines_files`, `access_admin`, `other`), a `series` of time buckets with
+`by_category`, top-20 `actors` and per-kind `resources` (agent, machine, app)
+with `distinct` and `omitted_events`, the newest 100 `notable` events capped
+at 20 per action (`notable_total`, `notable_capped`), rule-based `anomalies`
+(`volume_spike` above max(10, 3 × median of the other non-empty buckets);
+`failure_burst` above max(5, 3 × median of failed counts); a rule is evaluated
+only with at least three other non-empty buckets), plus `maintenance` and
+`coverage`. Every id is exact; `drillable: false` marks ids the feed cannot
+filter by (absent or over 128 bytes). Display names are the current agent,
+machine or App name, trimmed to 128 characters.
+
+Query: `range=24h|7d|30d` (ending now) or `since` and `until` (at most 180
+days), `bucket=hour|day|week` (default hour up to 4 days, day up to 90, else
+week; at most 744 buckets), `tz` as an IANA zone name for bucket boundaries
+(default UTC; unknown zones are 400), and the feed filters above
+(`actor_kind`, `actor_id`, `action`, `category`, `resource_kind`,
+`resource_id`, `outcome`, `notable`), which apply to every part of the
+response. Invalid parameters are 400 `invalid_audit_query`.
+
+Budgets: 30 summaries per caller per minute (429 `audit_summary_rate_limited`),
+4 computing at once per Proxy (503 `audit_summary_busy`), a two-second database
+statement limit and a six-second wall budget per summary; a summary that cannot
+complete is 503 `audit_summary_unavailable`, never a partial document. The
+category table is versioned in the protocol crate (`category_table_version`);
+actions the table does not know count as `other` and the Proxy logs
+`audit_action_uncategorized` so the table can be extended.
+
+Summaries read a typed `occurred_at_ts` column that a database trigger fills
+for new rows and that the audit maintenance worker backfills for existing rows,
+newest first, writing only that column. `coverage.backfill_complete` is false
+and `coverage.complete_since` names the oldest backfilled instant while older
+history is still being converted; a range reaching below it is partial. Rows
+whose stored instant cannot be parsed are marked and stay out of summaries
+(they remain in the event feed). `audit_backfill_failed` warnings mean the
+worker is retrying.
 
 Retention starts at 180 days for every organization audit kind, including
 security-sensitive events. Set Proxy `--audit-retention-days DAYS` or
