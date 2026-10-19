@@ -4,6 +4,7 @@ interface TreerAppEnv {
   ASSETS: Fetcher
   TREER_ENVIRONMENT: string
   TREER_PROXY_PUBLIC_URL: string
+  TREER_INGRESS_PUBLIC_URL?: string
   VERSION_METADATA: WorkerVersionMetadata
 }
 
@@ -12,7 +13,7 @@ export default {
   async fetch(request, env): Promise<Response> {
     const nonce = btoa(String.fromCharCode(...Array.from(crypto.getRandomValues(new Uint8Array(24)))))
     let headers: Headers
-    try { headers = securityHeaders(env.TREER_PROXY_PUBLIC_URL, nonce) }
+    try { headers = securityHeaders(env.TREER_PROXY_PUBLIC_URL, nonce, env.TREER_INGRESS_PUBLIC_URL) }
     catch { return new Response('Invalid control-plane configuration', { status: 503, headers: { 'cache-control': 'no-store' } }) }
     const { pathname } = new URL(request.url)
     let response: Response

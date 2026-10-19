@@ -20,7 +20,8 @@
   },
   "vars": {
     "TREER_ENVIRONMENT": "canary",
-    "TREER_PROXY_PUBLIC_URL": "https://proxy.canary.treer.ai/"
+    "TREER_PROXY_PUBLIC_URL": "https://proxy.canary.treer.ai/",
+    "TREER_INGRESS_PUBLIC_URL": "https://canary.apps.treer.ai/"
   },
   "env": {
     "canary": {
@@ -36,7 +37,8 @@
       ],
       "vars": {
         "TREER_ENVIRONMENT": "canary",
-        "TREER_PROXY_PUBLIC_URL": "https://proxy.canary.treer.ai/"
+        "TREER_PROXY_PUBLIC_URL": "https://proxy.canary.treer.ai/",
+        "TREER_INGRESS_PUBLIC_URL": "https://canary.apps.treer.ai/"
       }
     },
     "production": {
@@ -52,7 +54,8 @@
       ],
       "vars": {
         "TREER_ENVIRONMENT": "production",
-        "TREER_PROXY_PUBLIC_URL": "https://proxy.treer.ai/"
+        "TREER_PROXY_PUBLIC_URL": "https://proxy.treer.ai/",
+        "TREER_INGRESS_PUBLIC_URL": "https://apps.treer.ai/"
       }
     }
   }
