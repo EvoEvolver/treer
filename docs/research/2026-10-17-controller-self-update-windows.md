@@ -134,6 +134,11 @@ Private metadata records Controller and CLI independently: expected old/new
 hashes and byte lengths, verified object identities, fixed active/candidate/
 backup slot selectors, and the last durable step. Paths are derived from the
 validated installation and private attempt, never from public receipt fields.
+For each old/new object persist the NTFS volume serial and file ID, byte length,
+SHA-256, expected single link, and the validated owner/protected-DACL policy.
+Reopen and reverify every property and the non-reparse directory binding before
+classifying after a restart. A matching digest with a different file ID is an
+unknown object, including after reboot; a copied backup is not the original O.
 For each image, persist and read back each intent before the corresponding
 rename; verify all retained objects and the resulting layout before recording
 its completion:
@@ -175,6 +180,17 @@ recorded process identifiers after reboot as authority. Missing, corrupt,
 partially written or uncertain-sync receipts require inspection, not discovery
 of a plausible layout followed by automatic adoption.
 
+For this first parity implementation, quiescence after interruption is an
+explicit local operator attestation, not an automated process-death proof.
+The operator must establish that the old supervisor and any dispatched restart
+helper can no longer mutate the installation, using local process/service
+inspection and retained process handles where available. Record PID plus
+creation time as diagnostic evidence, never as sufficient recovery authority.
+After reboot, require a fresh operator assessment of current processes and
+installation state; historical PIDs, elapsed time and the file lock cannot
+substitute for it. If the operator cannot establish quiescence, preserve the
+blocked attempt. Automated quiescence proof is outside this slice.
+
 Transaction-level progress remains separate from per-image moves. Persist
 `activating` before the Controller's first rename and a restart intent before
 dispatching its fixed restart operation. Record `core_healthy` only after the
@@ -188,6 +204,55 @@ from the intent. A failed recovery while the supervisor is alive may record
 `rollback_failed`; worker death is interrupted evidence, not a fabricated
 terminal result. This parity path has no `launcher_installing` step.
 
+Cross-image validation applies after both candidates and their original-image
+records have been prepared. In the following table, original/restored refer to
+the corresponding durable step and verified O / N / - layout, published to
+N / - / O, and a moving state includes an intent observed on either side of its
+one rename. The per-image table must also accept each record independently.
+
+| Transaction state | Controller | CLI |
+| --- | --- | --- |
+| `prepared` | Original | Original |
+| `activating`, before durable new-health success | Original, forward moving or published | Original |
+| `core_healthy`, CLI publication | Published with recorded new-health success | Original, forward moving or published |
+| `complete` | Published | Published, with final health/hash/inventory success recorded |
+| `rolling_back`, CLI restoration | Published | Original, published, reverse moving or restored |
+| `rolling_back`, Controller restoration | Original, published, forward gap, reverse moving or restored | Original or restored |
+| `rolled_back` | Original or restored | Original or restored, with old-health success recorded |
+
+Persist a rollback substep identifying which image is being restored. CLI must
+be verified original/restored before a Controller restoration intent; its
+remaining candidate is evidence, not an installed image. Any other combination
+is a conflict. `failed` is permitted only before installed-image mutation;
+`rollback_failed` preserves the last validated rollback substep and layouts,
+without asserting restored health. Preparing records may describe incomplete
+downloads, but cannot be fed into this publication classifier or authorize moves.
+
+Proposed local operator recovery interface, not shipped CLI syntax:
+`self-update --recover JOB_ID --action classify|archive --ack-quiescent`.
+It accepts no paths or executable arguments and is never invoked automatically.
+Each invocation acquires the installation lock, validates job/enrollment and
+receipt/marker binding, freshly observes both image layouts and requires the
+operator attestation above. `classify` appends one inspection event; it cannot
+rename images, restart processes or convert interrupted work to success.
+`archive` is a separate invocation requiring the expected classified revision;
+it recomputes the classification and refuses changes or conflicts. Only then
+may it move the exact attempt evidence into private archive storage and record
+that disposition in the installation marker. A replacement attempt additionally
+needs a verified healthy installed baseline; archiving an active-name gap does
+not make that installation eligible. Restoring images or restarting a Controller
+after interruption remains a separate explicitly authorized local repair, not
+an implicit recovery action. Cleanup is separate again.
+
+Recovery records contain the fixed action/result, job/enrollment binding,
+prior/next revision and record digest, classification, operator-attestation flag
+and timestamp; no arbitrary operator text, paths or process output. Fixed results
+are `inspection_recorded`, `evidence_archived`, `recovery_conflict`,
+`quiescence_required` and `recovery_required`. Persist successful inspection
+events in the receipt and retain the archived receipt unchanged thereafter;
+record archive disposition separately in the marker. If a refusal prevents a
+safe receipt write, return its fixed code without overwriting the evidence.
+
 The Windows storage adapter must exclusively create private attempt storage,
 bound receipt reads to 64 KiB, and compare the entire expected prior record and
 revision under the installation lock before writing. Write and sync a new
@@ -195,9 +260,26 @@ private temporary file, atomically replace the receipt without deleting the
 old file first, then revalidate owner/protected ACL and exact record readback.
 Any uncertain result stops further mutations and preserves available evidence;
 no power-loss durability claim follows merely from a successful API return.
+Additionally keep a separate protected installation marker outside the attempt
+and its archive, bound to the enrollment/job and highest reserved revision plus
+exact next-record digest. Before replacing a receipt, durably replace and read
+back that marker with the next revision/digest; only then publish the exact
+receipt bytes. A crash between these two publications leaves a mismatch and
+requires operator inspection; it never accepts the older receipt as current.
+Readers require exact marker/receipt revision and digest agreement, including
+terminal reads; a lower revision, same-revision changed digest, missing marker
+or uncertain marker write blocks further mutations. Recovery inspection uses
+this same protocol. Archive disposition is a separate marker field and cannot
+lower the high-water revision. Test failure at every marker/receipt boundary.
+This detects accidental restoration of an older receipt while the marker
+survives; it cannot detect a consistent rollback of both files or resist a
+same-account actor rewriting them. A hash chain alone would not detect removal
+of its latest links, so it is not a replacement for the independent marker.
 Native tests must exercise each pre/post-rename boundary, receipt replacement
 failure, equal-digest/different-object images, conflicting occupied slots and
-lost restart/health acknowledgements. They must prove that an interruption
+lost restart/health acknowledgements; also truncated/oversize/unknown-field,
+duplicate-image and wrong-binding records, and Unix-reader refusal of Windows
+records. They must prove that an interruption
 never produces success, automatic replay, cleanup or acceptance of a new job.
 Production parent ACL policy, the storage adapter and these fault tests remain
 unimplemented; the hosted running-image fixture does not establish them.
