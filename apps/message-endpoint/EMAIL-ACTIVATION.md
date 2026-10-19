@@ -83,12 +83,28 @@ Use it after token mint, bound to the correct Hub Store, in addition to fresh
 Core/member/allowlist/operator activation checks. It cannot make a later POST
 atomic with a subsequent pause. The old outbox `dispatchable` remains negative
 for all journal work.
+The named `Queue::proxy_dispatch_allowed` callback adapter maps every error to
+false without logging it or releasing capacity; future runtime callers must use
+this fail-closed conversion rather than assume an unavailable check permits POST.
 
 `Queue::proxy_delivery_status` provides only prepared/dispatching/uncertain/
 accepted counts across a stable binding's generations and a local/global
 capacity flag. It returns no payload, address, URL, idempotency key or reference,
 and fails on private-storage drift. This is an internal storage query, not a new
 authenticated HTTP route or rendered settings status; those remain to be wired.
+The global-pressure flag reveals one bit about other bindings. Keep this complete
+status owner/admin-only; a future member-visible view must omit that flag or use
+only binding-local pressure, with separate authentication and masking tests.
+
+Lease expiry during token mint is an explicitly accepted conservative cost:
+the fence refuses POST and the reservation stays uncertain. Current claims last
+60 seconds, the Core CLI call is capped at 15 seconds and the HTTP request at
+20 seconds. The future worker should require at least 45 seconds of remaining
+lease before reservation (those two budgets plus 10 seconds margin), check the
+current clock again after mint and hold without reserving if the budget is
+insufficient. That admission budget is not implemented by these primitives;
+the positive fence already rejects an expired lease. Acceptance after a request
+has started remains recordable after expiry, as the journal completion requires.
 
 `Sender::send_committed` is a separate, currently unused assembly primitive. It
 consumes the opaque committed attempt, mints this App's service token, rechecks

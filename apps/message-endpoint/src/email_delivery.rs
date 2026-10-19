@@ -97,6 +97,12 @@ fn frozen_payload(intent: &Intent, url: &str) -> Result<Vec<u8>, Error> {
     Ok(payload)
 }
 impl Queue<'_> {
+    /// Runtime callback adapter: every storage/configuration error refuses POST.
+    /// Preserve the journal reservation for containment, never log the error or
+    /// reinterpret it as a retry capability.
+    pub fn proxy_dispatch_allowed(&mut self, intent: &Intent, url: &str, now: i64) -> bool {
+        self.proxy_dispatchable(intent, url, now).unwrap_or(false)
+    }
     /// Positive local journal fence for the post-token-mint callback. This is
     /// not Core/member/allowlist/activation authorization and must use the
     /// caller's correct Hub Store. No CLI or network while this transaction is
@@ -438,6 +444,9 @@ mod tests {
         q.prepare_proxy_delivery(&i, URL, 61).unwrap();
         let _attempt = q.begin_proxy_delivery(&i, URL, 61).unwrap();
         assert!(q.proxy_dispatchable(&i, URL, 61).unwrap());
+        assert!(!q.proxy_dispatch_allowed(&i, URL, -1));
+        assert!(!q.proxy_dispatch_allowed(&i, "invalid-url", 61));
+        assert!(q.proxy_dispatch_allowed(&i, URL, 61));
         let status = serde_json::to_value(q.proxy_delivery_status("ag_email").unwrap()).unwrap();
         assert_eq!(
             status,
@@ -448,9 +457,11 @@ mod tests {
         let original = path.join("original.sqlite3");
         std::fs::rename(&database, &original).unwrap();
         assert!(q.proxy_dispatchable(&i, URL, 61).is_err());
+        assert!(!q.proxy_dispatch_allowed(&i, URL, 61));
         assert!(q.proxy_delivery_status("ag_email").is_err());
         std::fs::rename(original, database).unwrap();
         assert!(q.proxy_dispatchable(&i, URL, 61).is_err());
+        assert!(!q.proxy_dispatch_allowed(&i, URL, 61));
         assert!(q.proxy_delivery_status("ag_email").is_err());
     }
     #[cfg(feature = "hub")]
@@ -620,9 +631,7 @@ print(json.dumps({{'access_token':'synthetic.app.signature','token_type':'Bearer
         )
         .unwrap();
         sender
-            .send_committed(&core, a, || {
-                q.proxy_dispatchable(&i, URL, 61).unwrap_or(false)
-            })
+            .send_committed(&core, a, || q.proxy_dispatch_allowed(&i, URL, 61))
             .commit(&mut q)
             .unwrap();
         assert_eq!(state(&q, &i.id), "uncertain");
