@@ -469,7 +469,7 @@ the activity (who and when); there are no extra rules. Create one with `issues c
 
 `issues edit ID [--title T] [--description TEXT | --description-stdin] [--priority P] [--label L ...] [--blocked-by N ...] [--parent N ...]
 [--clear-labels] [--clear-blocked-by] [--clear-parents] [--version V]` is `PATCH /v1/issues/ID` with only the options you give. List options
-(`--label`, `--blocked-by`, `--parent`) replace the whole set; `--clear-*` empties it; `--version` is optimistic concurrency (409 if the issue
+(`--label`, `--blocked-by`, `--parent`) replace the whole set (`--parent` can therefore detach parents someone else set: use `link`/`unlink` to change just one); `--clear-*` empties it; `--version` is optimistic concurrency (409 if the issue
 changed). Status, assignee and `waiting_on` keep their own commands (`status`, `assign`, `wait`). Permissions are the API's: the creator,
 assignee, lease holder or a human owner/admin.
 

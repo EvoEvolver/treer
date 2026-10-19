@@ -40,7 +40,7 @@ a.add_argument('--description-stdin', action='store_true', help='read the new de
 a.add_argument('--priority', choices=('low','normal','high','urgent'))
 a.add_argument('--label', action='append'); a.add_argument('--clear-labels', action='store_true')
 a.add_argument('--blocked-by', type=int, action='append'); a.add_argument('--clear-blocked-by', action='store_true')
-a.add_argument('--parent', type=int, action='append', help='parent issue ID (repeat for several); replaces all parents')
+a.add_argument('--parent', type=int, action='append', help='parent issue ID (repeat for several); replaces ALL parents, so it can detach parents someone else set (use `link`/`unlink` to add or remove just one)')
 a.add_argument('--clear-parents', action='store_true')
 a.add_argument('--version', type=int, help='fail with 409 if the issue changed since this version (optimistic concurrency)')
 a = s.add_parser('link', help='attach EXISTING issues as children of PARENT (you must be able to edit PARENT); an issue can have several parents')
