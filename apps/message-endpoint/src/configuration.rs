@@ -1,9 +1,9 @@
-//! Owner-only configuration commands. No transport token, caller identity, or
+//! Verified owner/Agent binding configuration commands. No transport token, caller identity, or
 //! claimed Core metadata is accepted from JSON. New endpoints remain paused.
 use crate::{
     core::Core,
     hub::{Binding, Directory},
-    owner_auth::Owner,
+    owner_auth::BindingManager,
     relay::Mailbox,
     scheduler::SharedHub,
     telegram::Target,
@@ -24,11 +24,18 @@ pub enum Command {
         recipient: String,
     },
     Create {
+        #[serde(default)]
+        idempotency_key: Option<String>,
         endpoint_id: String,
         generation: i64,
         recipient: String,
         confirm: bool,
         expected: Preview,
+    },
+    Delete {
+        endpoint_id: String,
+        revision: i64,
+        confirm: bool,
     },
     Pause {
         endpoint_id: String,
@@ -119,6 +126,9 @@ pub enum Outcome {
         archive: crate::archive::Export,
     },
     MetadataCleared,
+    Deleted {
+        endpoint_id: String,
+    },
     RecoveryStatus {
         endpoint_id: String,
         revision: i64,
@@ -220,6 +230,7 @@ pub enum Failure {
     Conflict,
     Unavailable,
     Expired,
+    Forbidden,
 }
 fn current_time() -> Result<i64, Failure> {
     SystemTime::now()
@@ -236,21 +247,21 @@ fn map_hub(error: crate::hub::Error) -> Failure {
         _ => Failure::Unavailable,
     }
 }
-fn check_owner(owner: &Owner) -> Result<i64, Failure> {
+fn check_owner(owner: &BindingManager) -> Result<i64, Failure> {
     let now = current_time()?;
     if now >= owner.expires_at() {
         return Err(Failure::Expired);
     }
     Ok(now)
 }
-/// Only the HTTP boundary can supply Owner, after current Proxy verification.
+/// Only the HTTP boundary can supply BindingManager after current Proxy verification.
 /// Directory calls run before taking the hub mutex; failures never install
 /// caller-supplied paths or partially create an endpoint.
 pub fn execute<M: Mailbox + Directory, D: Directory>(
     shared: &SharedHub<M>,
     directory: &D,
     workspace: &str,
-    owner: &Owner,
+    owner: &BindingManager,
     command: Command,
 ) -> Result<Outcome, Failure> {
     execute_with_activation(
@@ -266,11 +277,30 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
     shared: &SharedHub<M>,
     directory: &D,
     workspace: &str,
-    owner: &Owner,
+    owner: &BindingManager,
     command: Command,
     activation: &Activation,
 ) -> Result<Outcome, Failure> {
     check_owner(owner)?;
+    if owner.kind() == "agent" {
+        let h = shared.lock().map_err(|_| Failure::Unavailable)?;
+        crate::management::register(&h.store.db, owner.id()).map_err(|_| Failure::Unavailable)?;
+    }
+    if owner.kind() == "agent"
+        && !matches!(
+            &command,
+            Command::Delete { .. }
+                | Command::PreviewCreate { .. }
+                | Command::Create { .. }
+                | Command::Pause { .. }
+                | Command::PreviewResume { .. }
+                | Command::Resume { .. }
+                | Command::BindEmail { .. }
+                | Command::BindTelegram { .. }
+        )
+    {
+        return Err(Failure::Forbidden);
+    }
     match command {
         Command::PreviewResume { endpoint_id } => activation::preview_resume(
             shared,
@@ -308,6 +338,7 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             Ok(Outcome::Preview { preview })
         }
         Command::Create {
+            idempotency_key,
             endpoint_id,
             generation,
             recipient,
@@ -317,6 +348,40 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             if !confirm {
                 return Err(Failure::Invalid);
             }
+            if owner.kind() == "agent" && idempotency_key.is_none() {
+                return Err(Failure::Invalid);
+            }
+            if idempotency_key
+                .as_deref()
+                .is_some_and(|k| k.len() > 128 || !crate::store::valid_id(k))
+            {
+                return Err(Failure::Invalid);
+            }
+            let fingerprint=format!("{:x}",Sha256::digest(serde_json::to_vec(&serde_json::json!({"endpoint":endpoint_id,"generation":generation,"recipient":recipient,"expected":expected})).map_err(|_|Failure::Invalid)?));
+            if let Some(key) = &idempotency_key {
+                use rusqlite::OptionalExtension;
+                let h = shared.lock().map_err(|_| Failure::Unavailable)?;
+                let old: Option<String> = h
+                    .store
+                    .db
+                    .query_row(
+                        "SELECT fingerprint FROM hub_create_requests WHERE actor=?1 AND key=?2",
+                        rusqlite::params![owner.id(), key],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|_| Failure::Unavailable)?;
+                if let Some(old) = old {
+                    return if old == fingerprint {
+                        Ok(Outcome::Saved {
+                            revision: 1,
+                            paused: true,
+                        })
+                    } else {
+                        Err(Failure::Conflict)
+                    };
+                }
+            }
             let (current, binding) =
                 preview(directory, workspace, &endpoint_id, generation, &recipient)?;
             if expected != current {
@@ -324,9 +389,51 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             }
             let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
             let now = check_owner(owner)?;
-            hub.add_binding_audited(binding, owner.id(), now)
-                .map_err(map_hub)?;
+            if let Some(key) = idempotency_key.as_deref() {
+                // A concurrent identical request may have committed while the
+                // Core metadata preview ran outside the hub mutex.
+                use rusqlite::OptionalExtension;
+                let committed: Option<String> = hub
+                    .store
+                    .db
+                    .query_row(
+                        "SELECT fingerprint FROM hub_create_requests WHERE actor=?1 AND key=?2",
+                        rusqlite::params![owner.id(), key],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                    .map_err(|_| Failure::Unavailable)?;
+                if let Some(committed) = committed {
+                    return if committed == fingerprint {
+                        Ok(Outcome::Saved {
+                            revision: 1,
+                            paused: true,
+                        })
+                    } else {
+                        Err(Failure::Conflict)
+                    };
+                }
+                hub.add_binding_idempotent(binding, owner.id(), now, key, &fingerprint)
+                    .map_err(map_hub)?;
+            } else {
+                hub.add_binding_audited(binding, owner.id(), now)
+                    .map_err(map_hub)?;
+            }
             saved(&hub, &endpoint_id)
+        }
+        Command::Delete {
+            endpoint_id,
+            revision,
+            confirm,
+        } => {
+            if !confirm || revision < 1 {
+                return Err(Failure::Invalid);
+            }
+            let mut h = shared.lock().map_err(|_| Failure::Unavailable)?;
+            let now = check_owner(owner)?;
+            h.delete_binding_audited(&endpoint_id, revision, owner.id(), now)
+                .map_err(map_hub)?;
+            Ok(Outcome::Deleted { endpoint_id })
         }
         Command::Pause {
             endpoint_id,
@@ -446,7 +553,7 @@ pub(crate) fn core_executor(
     core: Core,
     workspace: String,
     activation: Activation,
-) -> impl Fn(&Owner, Command) -> Result<Outcome, Failure> + Send + Sync {
+) -> impl Fn(&BindingManager, Command) -> Result<Outcome, Failure> + Send + Sync {
     move |owner, command| {
         execute_with_activation(&shared, &core, &workspace, owner, command, &activation)
     }

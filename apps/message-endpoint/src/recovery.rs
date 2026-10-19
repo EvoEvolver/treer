@@ -226,6 +226,7 @@ pub(crate) mod tests {
         telegram::{Error as TransportError, Target},
     };
     const NOW: i64 = 1_800_000_000;
+    #[derive(Clone)]
     pub(crate) struct NoIo;
     impl Directory for NoIo {
         fn metadata(&self, _: &str) -> Result<AgentMetadata, crate::core::Error> {

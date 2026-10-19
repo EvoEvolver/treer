@@ -69,6 +69,8 @@ pub struct ResumePreview {
     oldest_held_at: Option<i64>,
     held_snapshot: String,
     parked_transfers: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    confirmation_hash: Option<String>,
 }
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -211,7 +213,7 @@ fn observe<M: Mailbox + Directory, D: Directory>(
     shared: &SharedHub<M>,
     directory: &D,
     workspace: &str,
-    owner: &Owner,
+    owner: &BindingManager,
     id: &str,
 ) -> Result<(ResumePreview, Readback), Failure> {
     let (binding, revision, expected_target, expected_backlog) = {
@@ -261,6 +263,7 @@ fn observe<M: Mailbox + Directory, D: Directory>(
             oldest_held_at: expected_backlog.3,
             held_snapshot: expected_backlog.1,
             parked_transfers: expected_backlog.2,
+            confirmation_hash: None,
         },
         Readback {
             observed: Some(observed),
@@ -268,16 +271,38 @@ fn observe<M: Mailbox + Directory, D: Directory>(
         },
     ))
 }
+fn redacted_preview(preview: &ResumePreview) -> Result<ResumePreview, Failure> {
+    let bytes = serde_json::to_vec(preview).map_err(|_| Failure::Unavailable)?;
+    let mut copy: ResumePreview =
+        serde_json::from_slice(&bytes).map_err(|_| Failure::Unavailable)?;
+    copy.confirmation_hash = Some(format!("{:x}", Sha256::digest(&bytes)));
+    match &mut copy.target {
+        ResumeTarget::Telegram(t) => {
+            t.chat_id = 0;
+            t.topic_id = None;
+            t.allowed_senders.clear();
+        }
+        ResumeTarget::Email(t) => {
+            t.contact.address = "[redacted]".into();
+        }
+    }
+    Ok(copy)
+}
 pub(super) fn preview_resume<M: Mailbox + Directory, D: Directory>(
     shared: &SharedHub<M>,
     directory: &D,
     workspace: &str,
-    owner: &Owner,
+    owner: &BindingManager,
     id: &str,
     activation: &Activation,
 ) -> Result<Outcome, Failure> {
     let (preview, _) = observe(shared, directory, workspace, owner, id)?;
     let account_ready = activation.ready(&preview.target) && activation.member(&preview.target);
+    let preview = if owner.kind() == "agent" {
+        redacted_preview(&preview)?
+    } else {
+        preview
+    };
     Ok(Outcome::ResumePreview {
         preview,
         activation_enabled: activation.enabled,
@@ -288,7 +313,7 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
     shared: &SharedHub<M>,
     directory: &D,
     workspace: &str,
-    owner: &Owner,
+    owner: &BindingManager,
     request: ResumeRequest,
     activation: &Activation,
 ) -> Result<Outcome, Failure> {
@@ -305,7 +330,13 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
         return Err(conflict("activation_disabled"));
     }
     let (current, readback) = observe(shared, directory, workspace, owner, &endpoint_id)?;
-    if current != expected
+    let comparison = if owner.kind() == "agent" {
+        redacted_preview(&current)?
+    } else {
+        serde_json::from_slice(&serde_json::to_vec(&current).map_err(|_| Failure::Unavailable)?)
+            .map_err(|_| Failure::Unavailable)?
+    };
+    if comparison != expected
         || evidence.parked_count_ack != current.parked_transfers
         || !activation.member(&current.target)
     {
@@ -386,10 +417,22 @@ mod tests {
             Ok(m)
         }
     }
-    fn setup() -> (SharedHub<NoIo>, DirectoryFixture, Owner, Activation) {
+    fn setup() -> (
+        SharedHub<NoIo>,
+        DirectoryFixture,
+        BindingManager,
+        Activation,
+    ) {
         setup_store(Store::memory(Limits::default()).unwrap())
     }
-    fn setup_store(store: Store) -> (SharedHub<NoIo>, DirectoryFixture, Owner, Activation) {
+    fn setup_store(
+        store: Store,
+    ) -> (
+        SharedHub<NoIo>,
+        DirectoryFixture,
+        BindingManager,
+        Activation,
+    ) {
         let (hub, _) = fixture(store);
         hub.store
             .db
@@ -402,7 +445,7 @@ mod tests {
             drift: false.into(),
             unavailable: false.into(),
         };
-        let owner = Owner::synthetic("human_owner", current_time().unwrap() + 600);
+        let owner = BindingManager::synthetic("human_owner", current_time().unwrap() + 600);
         (
             state,
             directory,
@@ -417,7 +460,7 @@ mod tests {
     fn request(
         s: &SharedHub<NoIo>,
         d: &DirectoryFixture,
-        o: &Owner,
+        o: &BindingManager,
         a: &Activation,
     ) -> ResumeRequest {
         let Outcome::ResumePreview { preview, .. } =
@@ -438,6 +481,135 @@ mod tests {
                 parked_count_ack,
             },
         }
+    }
+    #[test]
+    fn agent_resume_all_recipients_requires_reference_masks_target_and_notifies_atomically() {
+        let (s, d, _, a) = setup();
+        let agent = BindingManager::synthetic_agent("ag_manager", current_time().unwrap() + 600);
+        crate::management::register(&s.lock().unwrap().store.db, agent.id()).unwrap();
+        let mut r = request(&s, &d, &agent, &a);
+        assert!(
+            matches!(&r.expected.target,ResumeTarget::Telegram(t) if t.chat_id==0 && t.allowed_senders.is_empty())
+        );
+        assert!(r.expected.confirmation_hash.is_some());
+        r.evidence.isolation = crate::recovery::IsolationChoice::UnverifiedAccepted;
+        r.evidence.reference.clear();
+        assert!(matches!(
+            resume(&s, &d, "ws_test", &agent, r, &a),
+            Err(Failure::Invalid)
+        ));
+        let mut r = request(&s, &d, &agent, &a);
+        r.evidence.isolation = crate::recovery::IsolationChoice::UnverifiedAccepted;
+        r.evidence.reference =
+            "functional smoke, sandbox folder, same user, isolation untested".into();
+        resume(&s, &d, "ws_test", &agent, r, &a).unwrap();
+        let h = s.lock().unwrap();
+        assert!(!h.view("ag_endpoint").unwrap().paused);
+        let (actor, detail): (String, String) = h
+            .store
+            .db
+            .query_row(
+                "SELECT actor,transfer FROM hub_owner_audit WHERE action='resume_binding'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(actor, "ag_manager");
+        let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert!(detail["target"]["chat_id"]
+            .as_str()
+            .unwrap()
+            .starts_with("masked:"));
+        assert_eq!(detail["isolation"], "unverified_accepted");
+        let notice: String = h
+            .store
+            .db
+            .query_row("SELECT recipient FROM hub_management_notices", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(notice, "ag_recipient");
+    }
+    #[test]
+    fn agent_binding_cap_and_notification_failure_roll_back_creation() {
+        let (s, _, _, _) = setup();
+        let mut h = s.lock().unwrap();
+        crate::management::register(&h.store.db, "ag_manager").unwrap();
+        let base = h.view("ag_endpoint").unwrap().binding;
+        for n in 0..5 {
+            let mut b = base.clone();
+            b.endpoint_id = format!("ag_cap_{n}");
+            h.add_binding_audited(b, "ag_manager", current_time().unwrap())
+                .unwrap();
+        }
+        let mut b = base.clone();
+        b.endpoint_id = "ag_too_many".into();
+        assert!(h
+            .add_binding_audited(b, "ag_manager", current_time().unwrap())
+            .is_err());
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM endpoints WHERE id='ag_too_many'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        crate::management::register(&h.store.db, "ag_other").unwrap();
+        h.store.db.execute_batch("CREATE TRIGGER reject_management_notice BEFORE INSERT ON hub_management_notices BEGIN SELECT RAISE(ABORT,'synthetic'); END;").unwrap();
+        let mut b = base;
+        b.endpoint_id = "ag_no_notice".into();
+        assert!(h
+            .add_binding_audited(b, "ag_other", current_time().unwrap())
+            .is_err());
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM endpoints WHERE id='ag_no_notice'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+    #[test]
+    fn delete_refuses_pending_or_held_work_and_preserves_replay_tombstone() {
+        let (s, _, _, _) = setup();
+        let mut h = s.lock().unwrap();
+        crate::management::register(&h.store.db, "ag_manager").unwrap();
+        let mut binding = h.view("ag_endpoint").unwrap().binding;
+        binding.endpoint_id = "ag_empty".into();
+        h.add_binding_audited(binding, "ag_manager", current_time().unwrap())
+            .unwrap();
+        let revision = h.view("ag_empty").unwrap().revision;
+        let generation = h.view("ag_empty").unwrap().binding.generation;
+        h.store.db.execute("INSERT INTO inbound(endpoint,generation,external_id,recipient,body,digest) VALUES('ag_empty',?1,'fixture','ag_recipient','synthetic',x'00')",[generation]).unwrap();
+        assert!(h
+            .delete_binding_audited("ag_empty", revision, "ag_manager", current_time().unwrap())
+            .is_err());
+        h.store
+            .db
+            .execute("UPDATE inbound SET pending=0", [])
+            .unwrap();
+        h.delete_binding_audited("ag_empty", revision, "ag_manager", current_time().unwrap())
+            .unwrap();
+        assert!(h.view("ag_empty").is_err());
+        assert!(!h.binding_ids().unwrap().contains(&"ag_empty".into()));
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT count(*) FROM inbound", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(h
+            .delete_binding_audited("ag_empty", revision, "ag_manager", current_time().unwrap())
+            .is_err());
     }
     #[test]
     fn explicit_isolation_choices_are_required_and_unknown_values_fail_closed() {
@@ -724,7 +896,7 @@ mod tests {
         ));
         d.unavailable.store(false, Ordering::Relaxed);
         let r = request(&s, &d, &o, &a);
-        let expired = Owner::synthetic("human_owner", 0);
+        let expired = BindingManager::synthetic("human_owner", 0);
         assert!(matches!(
             resume(&s, &d, "ws_test", &expired, r, &a),
             Err(Failure::Expired)

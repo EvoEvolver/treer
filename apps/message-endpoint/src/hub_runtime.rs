@@ -258,6 +258,7 @@ fn run_assembled(
         status.last_handoff_failure = hub.last_core_handoff_failure().map_err(|_| ())?;
         let (audit_full, emergency_pause_bindings) = hub.owner_audit_capacity().map_err(|_| ())?;
         Ok(SettingsSnapshot {
+            management_notices: crate::management::notice_status(&hub.store.db).map_err(|_| ())?,
             email: if email_configured {
                 Some(crate::email_workers::Snapshot::read(
                     &hub.store,
@@ -296,10 +297,28 @@ fn run_assembled(
     let token_mutation = Arc::new(move |owner: &crate::owner_auth::Owner, command| {
         token_service.execute(&token_hub, &token_workers, owner, command)
     });
+    let audit_hub = hub.clone();
+    let management_audit = Arc::new(move |request: &str, actor: Option<&str>, status: u16| {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| ())?
+            .as_secs();
+        let mut h = audit_hub.lock().map_err(|_| ())?;
+        h.store.recheck_private_storage().map_err(|_| ())?;
+        crate::management::record_request(
+            &mut h.store.db,
+            request,
+            actor,
+            status,
+            i64::try_from(now).map_err(|_| ())?,
+        )
+        .map_err(|_| ())
+    });
     let serve = || -> Result<(), Error> {
         let settings = Settings::new(auth, snapshot, include_str!("../dist/index.html"))
             .map_err(|_| Error::Configuration)?
             .with_configuration(mutation)
+            .with_management_audit(management_audit)
             .with_tokens(token_mutation)
             .with_loopback_listener(config.listen)
             .map_err(|_| Error::Configuration)?

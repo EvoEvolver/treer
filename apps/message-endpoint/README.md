@@ -9,6 +9,19 @@ User direction3479 supersedes the socket design and research's routing details.
 Core3485 confirms Managed App runtime Agents can send/receive/ack; security3483
 accepts the new boundary with the controls below. No Core change is requested.
 
+## Agent binding management
+
+Workspace Agents now use the settings UI's own JSON API with their verified
+Treer identity; see [the binding API contract](AGENT-API.md). Any verified
+workspace Agent may manage all bindings, including another recipient's bindings.
+This explicit owner-selected trust model does not imply per-binding isolation.
+Changes record the real caller and atomically queue a recipient Core notice;
+identifiers are masked, denied calls audited and caller/verification quotas apply.
+New bindings stay paused and activation remains operator-gated. Transport secrets,
+OAuth, recovery and metadata purge remain human-owner-only. No new credential or
+approval system is introduced. This code has not changed the running sandbox. The API contract above supersedes
+owner-only binding statements in the historical increment notes below.
+
 ## Programs
 
 Independent Rust package under `apps/message-endpoint`, not the Core workspace:
@@ -94,7 +107,7 @@ Initial cap20 endpoints, 1000 pending items/16 MiB per endpoint; 10,000 items/
 128 MiB globally (includes incomplete fragments). Pending accepted work never
 silently evicted. Reject before admission at capacity; terminal failure retains
 visible nonsecret reason/ID. Completed dedup tombstones30 days; warn that older
-replay can duplicate. Bounded audit5000 changes plus separate rejection ring;
+replay can duplicate. Bounded audit10000 changes plus separate rejection ring;
 not tamper-proof. Disk failure pauses, never reports delivery success.
 
 Profiles use absolute immutable hub/relay/CLI paths, fixed argv and private HOME.
@@ -172,8 +185,9 @@ leader-approved Core work, not this task.
 Workspace-auth ingress only. `/` negotiated HTML/Markdown, `/health`, relative
 React assets and `/v1/` JSON; no SPA fallback for unknown API paths. All settings
 routes require per-request App token verification (own audience/workspace) and
-current human workspace-owner directory membership. Invalid supplied token cannot fall back;
-Agents denied. No-header direct access uses OAuth+PKCE, single-use expiring state
+current workspace directory membership (human owner or verified Agent for binding management). Invalid supplied token cannot fall back;
+Agent binding access is described above; secret/purge/recovery access remains
+human-owner-only. No-header direct access uses OAuth+PKCE, single-use expiring state
 bound to HttpOnly browser nonce, validated local returns. No forwarded token
 persisted. Exact Origin/custom header/Sec-Fetch-Site same-origin on unsafe browser
 requests, no CORS, strict CSP/no eval/inline/CDN, nosniff/no-store. Credentials are
@@ -363,7 +377,7 @@ limitations visible alongside those states.
 
 `hub::Hub` now owns the bounded durable Core fragment inbox and per-ID metadata
 checks. It is not yet an HTTP server or complete hub program. Only a future
-owner-authenticated service may call its binding/resume/pause methods; this Rust
+authenticated binding-management service may call its binding/resume/pause methods; this Rust
 API does not perform browser authentication. New bindings start paused. Resume
 requires an exact revision and fresh per-stable-ID `agent show -- ID`, matching
 workspace, command kind, canonical path, cwd and machine. It never enumerates the
