@@ -479,6 +479,51 @@ at completion. It is terminal for that job ID. A later attempt requires a new
 job; the rolled-back job must never automatically retry the same candidate.
 The reason reference and health verifier remain unimplemented format/API gates.
 
+#### Proposed rollback-reason record contract (not implemented)
+
+Before adding a field to `DraftFields`, use the following draft lifecycle and
+immutability contract. The required `rollback_reason` key is explicitly null
+in Prepared, Activating, CoreHealthy and Complete; omission is not equivalent
+to null. RollbackCli, RollbackController and RolledBack require a strict object
+with exactly these fields; duplicate, missing and unknown fields are refused:
+
+| Field | Draft constraint |
+| --- | --- |
+| `kind` | Exactly `new_controller_unhealthy`, `deadline_exceeded` or `human_abort` |
+| `entry_revision` | Integer greater than one and no greater than the enclosing revision |
+| `predecessor_receipt_sha256` | Lowercase 64-hex digest of the exact receipt envelope preceding entry |
+| `evidence_sha256` | Lowercase 64-hex reference to independently verified reason evidence |
+
+On entry only, null may become an object, with `entry_revision` equal to the
+candidate revision and `predecessor_receipt_sha256` equal to the trusted prior
+head digest. On every continuation edge, including RolledBack, the entire
+object is immutable. Clearing it, replacing its kind/digests/revision or
+creating it during continuation is refused. The exhaustive `DraftFields`
+destructure must explicitly classify this field: the partial successor guard
+may allow only null-to-object or exact preservation; the entry and continuation
+graphs must respectively enforce creation and preservation, so the partial
+guard alone never accepts an entry. Forward edges require null throughout.
+
+The serialized object is an untrusted claim, not a verifier-constructed reason.
+Neither digest reference is an authentication mechanism. A future verifier
+must independently obtain and authenticate the referenced evidence, then bind
+its kind, workspace/server/job, entry revision, predecessor digest and pinned
+old/new objects before constructing a non-deserializable reason capability.
+An unhealthy-process reason also binds the observed process identity/start;
+a deadline reason binds the independent monitor and its time source/context;
+a human reason requires the protected channel that does not yet exist. Missing
+or unavailable evidence must stop the update, not fall back to trusting JSON.
+The evidence store, authentication scheme and capability API need separate
+design review; this table creates none of them and adds no public format.
+
+The eventual inert format slice must test required-null versus missing,
+all strict-object refusals, entry revision/head binding, each reason-field
+mutation independently, and reason preservation across every rollback branch
+through RolledBack. It must also demonstrate that valid JSON/digest references
+alone cannot construct a verified reason. Existing draft fixtures lack the
+field; the inert format change must update them explicitly rather than add a
+permissive default or claim backward compatibility with an installed format.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual
