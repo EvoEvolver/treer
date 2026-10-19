@@ -219,12 +219,15 @@ else a browser renders or enforces.
    branch (`git revert -m 1 <merge>` of that change on top of the candidate) and
    keep the previous `canary_passed` checkout, with its `dist/` and checkpoint,
    which hygiene never removes.
-2. To roll back, redeploy the previous `canary_passed` SHA with the canary
-   script from its own checkout (`scripts/canary-release.py <sha> --resume`):
-   it reuses the green gate, CI and native evidence for that SHA, redeploys the
-   Console Worker and the Proxy together, runs health, artifact byte checks and
-   the two-machine E2E, and the Policy default-install check follows. Keep the
-   first run's logs under another name.
+2. To roll back, redeploy the previous `canary_passed` SHA with
+   `scripts/canary-release.py <sha> --resume`, **started from the repository
+   root**, not from inside the SHA's checkout (started inside it, the script
+   builds a nested worktree, finds no checkpoint and re-runs the whole gate;
+   this cost ten minutes of a rollback on 2026-10-19). It reuses the green
+   gate, CI and native evidence for that SHA, redeploys the Console Worker and
+   the Proxy together, runs health, artifact byte checks and the two-machine
+   E2E, and the Policy default-install check follows. Keep the first run's logs
+   under another name.
 3. Verify: the Proxy `/api/auth/config` capability list no longer contains the
    new capability, the header probe and a real Chromium login and logout pass,
    and the fixture's standalone and embedded views work.
@@ -232,6 +235,36 @@ else a browser renders or enforces.
    and what was and was not verified. `main` keeps the bad merge until a
    fix-forward or the prepared revert is gated and shipped through the normal
    train.
+
+**Acceptance fixture procedure (release).** The fixture is code in the release
+support directory, not a standing service; each train brings it up from the
+SHA under test and takes it down.
+
+- *Agents.* A disposable `fixture-launcher` agent (launcher from the SHA, fake
+  Codex harness) and, for launcher UI that only the Claude harness shows, a
+  `fixture-claude` agent (fake Claude). Both live on canary-a only, run the
+  launcher archived from `git archive <sha> launchers/agent` with
+  `npm ci --omit=dev --ignore-scripts`, hold no credentials and are removed
+  when the run ends. A launcher-side change is accepted only on a fixture built
+  from the SHA being shipped, never from an older copy; the SHA is recorded in
+  the fixture state.
+- *Per Console train.* One command brings the second agent up, runs the
+  diagnostics, the header probes, the pinned three-engine script and the popup
+  probe, takes the agent down and writes the record under
+  `.treer/releases/<sha>/`. Add the train's own step (for example the audit
+  charts or the tasks panel) and, when a socket path changed, a hold of at
+  least 90 seconds with a logout close check.
+- *Pinned scripts.* Every acceptance script is run by a wrapper that refuses
+  any other sha256. A script change is a reviewed new hash: the record names the
+  hash, the old one is retired, and the script lives in the repository under
+  `launchers/agent/tests/acceptance` so its self-test is versioned with it.
+- *Session.* The canary-tester login is made fresh for each run, written to a
+  mode-0600 temporary file and deleted afterwards; logs hold statuses, header
+  names, counts and close codes only.
+- *Limits to state in every record.* What was not exercised live (for example a
+  non-owner identity, an older Proxy without the capability, phone widths, a
+  browser's default Tab order), and any failed earlier run, kept under its own
+  name.
 
 ## One full gate at a time on the shared machine
 
