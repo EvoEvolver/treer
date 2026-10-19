@@ -1,10 +1,77 @@
-//! Inert draft private-record fields. No file access, serialized state-machine
-//! acceptance, health validation, recovery or mutation authority exists here.
+//! Inert draft private-record fields and claimed state/layout consistency.
+//! No real observations, health validation, recovery or mutation authority.
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::windows_update_envelope::{decode, Kind};
+use crate::windows_update_layout_model as layout;
+
+// Remote derives keep one classifier and its original portable regressions.
+// These spellings are a draft format, never trusted evidence by themselves.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(remote = "layout::Step", rename_all = "snake_case")]
+enum StepWire {
+    Original,
+    MoveOldIntent,
+    OldMoved,
+    PublishIntent,
+    Published,
+    MoveNewAsideIntent,
+    NewAside,
+    RestoreOldIntent,
+    Restored,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(remote = "layout::Transaction", rename_all = "snake_case")]
+enum TransactionWire {
+    Prepared,
+    Activating,
+    CoreHealthy,
+    Complete,
+    RollbackCli,
+    RollbackController,
+    RolledBack,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaimedState {
+    #[serde(with = "TransactionWire")]
+    transaction: layout::Transaction,
+    #[serde(with = "StepWire")]
+    controller_step: layout::Step,
+    #[serde(with = "StepWire")]
+    cli_step: layout::Step,
+    new_health_recorded: bool,
+    final_health_recorded: bool,
+    old_health_recorded: bool,
+}
+
+// Called only AFTER parse_pair. Slots are separate synthetic observations;
+// never accept self-reported slot labels from the receipt. Consistency is not
+// proof of health, a permitted transition, completion or permission to mutate.
+fn inspect_claim(
+    state: &ClaimedState,
+    controller: [layout::Object; 3],
+    cli: [layout::Object; 3],
+) -> layout::PairInspection {
+    layout::inspect_pair(
+        state.transaction,
+        layout::Image {
+            step: state.controller_step,
+            slots: controller,
+        },
+        layout::Image {
+            step: state.cli_step,
+            slots: cli,
+        },
+        state.new_health_recorded,
+        state.final_health_recorded,
+        state.old_health_recorded,
+    )
+}
 
 type Refusal = &'static str;
 
@@ -125,6 +192,7 @@ struct DraftFields {
     binding: Binding,
     provenance: Provenance,
     images: Images,
+    state: ClaimedState,
 }
 
 impl DraftFields {
@@ -212,6 +280,14 @@ fn fixture() -> DraftFields {
                 new: object(4),
             },
         },
+        state: ClaimedState {
+            transaction: layout::Transaction::Prepared,
+            controller_step: layout::Step::Original,
+            cli_step: layout::Step::Original,
+            new_health_recorded: false,
+            final_health_recorded: false,
+            old_health_recorded: false,
+        },
     }
 }
 
@@ -267,6 +343,7 @@ fn draft_fields_reject_unknown_duplicate_missing_and_trailing_json() {
         "/images",
         "/images/controller",
         "/images/controller/new",
+        "/state",
     ] {
         let mut bad = value.clone();
         bad.pointer_mut(pointer).unwrap()["unknown"] = true.into();
@@ -479,4 +556,152 @@ fn draft_pair_rejects_uppercase_digest_spellings() {
         parse_pair(&receipt, &marker, &fields.binding).unwrap_err(),
         "invalid_receipt_fields"
     );
+}
+
+#[test]
+fn parsed_claims_require_independent_layouts_and_ordered_health_flags() {
+    use layout::{Object::*, PairInspection::*};
+    let original = [Old, New, Absent];
+    let published = [New, Absent, Old];
+    let gap = [Absent, New, Old];
+    for (phase, c_step, l_step, c_slots, l_slots, allowed_flags) in [
+        (
+            "prepared",
+            "original",
+            "original",
+            original,
+            original,
+            &[0][..],
+        ),
+        (
+            "activating",
+            "publish_intent",
+            "original",
+            gap,
+            original,
+            &[0][..],
+        ),
+        (
+            "core_healthy",
+            "published",
+            "publish_intent",
+            published,
+            gap,
+            &[1][..],
+        ),
+        (
+            "complete",
+            "published",
+            "published",
+            published,
+            published,
+            &[3][..],
+        ),
+        (
+            "rollback_cli",
+            "published",
+            "restored",
+            published,
+            original,
+            &[0, 1][..],
+        ),
+        (
+            "rollback_controller",
+            "restored",
+            "original",
+            original,
+            original,
+            &[0, 1, 4, 5][..],
+        ),
+        (
+            "rolled_back",
+            "restored",
+            "original",
+            original,
+            original,
+            &[4, 5][..],
+        ),
+        // Both names may look right but a CLI publish before Controller
+        // health, or old-health before Controller restore, must conflict.
+        (
+            "activating",
+            "published",
+            "published",
+            published,
+            published,
+            &[][..],
+        ),
+        (
+            "rollback_controller",
+            "publish_intent",
+            "original",
+            gap,
+            original,
+            &[0, 1][..],
+        ),
+    ] {
+        for flags in 0..8 {
+            let fields = fixture();
+            let mut value = serde_json::to_value(&fields).unwrap();
+            value["state"] = serde_json::json!({
+                "transaction": phase, "controller_step": c_step, "cli_step": l_step,
+                "new_health_recorded": flags & 1 != 0,
+                "final_health_recorded": flags & 2 != 0,
+                "old_health_recorded": flags & 4 != 0,
+            });
+            let (receipt, marker) =
+                envelopes(&serde_json::to_vec(&value).unwrap(), &fields.binding);
+            let parsed = parse_pair(&receipt, &marker, &fields.binding).unwrap();
+            assert_eq!(
+                inspect_claim(&parsed.state, c_slots, l_slots) == Consistent,
+                allowed_flags.contains(&flags)
+            );
+            // Unknown/unreadable observed files never become absence just
+            // because the claimed state and pair digest parse successfully.
+            for uncertain in [Unknown, Unreadable] {
+                assert_eq!(
+                    inspect_claim(&parsed.state, [uncertain, c_slots[1], c_slots[2]], l_slots),
+                    Conflict
+                );
+                assert_eq!(
+                    inspect_claim(&parsed.state, c_slots, [uncertain, l_slots[1], l_slots[2]]),
+                    Conflict
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn claimed_state_rejects_missing_unknown_duplicate_and_mistyped_fields() {
+    let fields = fixture();
+    let value = serde_json::to_value(&fields).unwrap();
+    let state = value["state"].as_object().unwrap();
+    for key in state.keys() {
+        let mut missing = value.clone();
+        missing["state"].as_object_mut().unwrap().remove(key);
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&missing).unwrap(), &fields.binding);
+        assert!(parse_pair(&receipt, &marker, &fields.binding).is_err());
+    }
+    for (key, bad) in [
+        ("transaction", serde_json::json!("recover")),
+        ("controller_step", serde_json::json!("atomic_replace")),
+        ("cli_step", serde_json::json!("Original")),
+        ("new_health_recorded", serde_json::json!(1)),
+        ("slots", serde_json::json!(["old", "new", "absent"])),
+    ] {
+        let mut bad_value = value.clone();
+        bad_value["state"][key] = bad;
+        let (receipt, marker) =
+            envelopes(&serde_json::to_vec(&bad_value).unwrap(), &fields.binding);
+        assert!(parse_pair(&receipt, &marker, &fields.binding).is_err());
+    }
+    let duplicate = serde_json::to_string(&fields).unwrap().replacen(
+        "\"transaction\":\"prepared\"",
+        "\"transaction\":\"prepared\",\"transaction\":\"prepared\"",
+        1,
+    );
+    assert!(serde_json::from_str::<serde_json::Value>(&duplicate).is_ok());
+    let (receipt, marker) = envelopes(duplicate.as_bytes(), &fields.binding);
+    assert!(parse_pair(&receipt, &marker, &fields.binding).is_err());
 }

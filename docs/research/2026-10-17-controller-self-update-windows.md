@@ -196,11 +196,12 @@ missing fields refused at every typed object level. Their fields are:
 | Payload | Required fields |
 | --- | --- |
 | Marker | `binding`, `receipt_sha256` (SHA-256 of the entire receipt envelope) |
-| Draft receipt fields | `binding`, `provenance`, `images` |
+| Draft receipt fields | `binding`, `provenance`, `images`, `state` |
 | Binding | `workspace_id`, `server_id`, canonical nonnil `job_id`, positive `revision` |
 | Provenance | Lowercase hex `release_sha`/`artifact_source_sha` (40), `sums_sha256` (64) |
 | Images | Exactly `controller` and `cli`, each with exactly `old` and `new` objects |
 | Object | `filesystem` (`ntfs` only), `volume_serial` (u32), `file_id` (u64), `bytes` (u64), `sha256`, `links`, `attributes`, `acl_policy` |
+| Claimed state | `transaction`, `controller_step`, `cli_step`, `new_health_recorded`, `final_health_recorded`, `old_health_recorded` |
 
 Parsing requires an independently supplied expected binding. It validates the
 marker envelope/fields/binding first, then the receipt envelope and whole-byte
@@ -223,11 +224,19 @@ diagnostics.
 These checks validate serialized field shapes and pair consistency only. They
 do not authenticate the expected binding, supply the external durable anchor,
 prove provenance or ACLs, reopen objects or compare them to real NTFS state.
-The draft fields deliberately have no phase, health, slot progression or archive
-disposition yet; they cannot accept a transaction state or establish a valid
-state transition. Those fields, transition validation and integration with the
-marker-first model require the next separate increment. No production reader,
-file I/O adapter or recovery command uses these parsed fields.
+The next increment adds strict claimed-state spellings for the existing seven
+transaction phases and nine image steps in the inert platform classifier.
+All three health-record flags are required booleans. Parsed claims are compared
+against separately supplied synthetic slot observations by the same classifier
+source, included only in Controller tests; observed slots are never accepted
+from receipt JSON. Tests parse and digest-bind claims before checking forward
+and rollback order, stray health flags, and unknown/unreadable observations.
+Parsing a claim alone deliberately does not mean it is consistent with disk.
+Neither parsing nor layout consistency authenticates the health flags, validates
+a prior-to-next state transition, proves completion or authorizes mutation.
+Actual health evidence, archive disposition, transition validation and integration
+with the marker-first model still require separate increments. No production
+reader, file I/O adapter or recovery command uses these parsed fields.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 

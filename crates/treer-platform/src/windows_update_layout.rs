@@ -13,7 +13,7 @@ pub(crate) enum Object {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
+pub(crate) enum Step {
     Original,
     MoveOldIntent,
     OldMoved,
@@ -54,13 +54,13 @@ fn inspect(step: Step, slots: [Object; 3]) -> Inspection {
 }
 
 #[derive(Clone, Copy)]
-struct Image {
-    step: Step,
-    slots: [Object; 3],
+pub(crate) struct Image {
+    pub(crate) step: Step,
+    pub(crate) slots: [Object; 3],
 }
 
-#[derive(Clone, Copy)]
-enum Transaction {
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum Transaction {
     Prepared,
     Activating,
     CoreHealthy,
@@ -71,7 +71,7 @@ enum Transaction {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-enum PairInspection {
+pub(crate) enum PairInspection {
     Consistent,
     Conflict,
 }
@@ -79,7 +79,7 @@ enum PairInspection {
 // These health flags stand for already validated durable evidence in a future
 // reader. This pure model verifies neither health nor the authenticity of input.
 // Consistent means layout consistency only, never completion or permission.
-fn inspect_pair(
+pub(crate) fn inspect_pair(
     transaction: Transaction,
     controller: Image,
     cli: Image,
