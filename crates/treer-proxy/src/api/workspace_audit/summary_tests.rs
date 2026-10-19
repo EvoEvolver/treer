@@ -40,10 +40,19 @@ fn hour(now: DateTime<Utc>, hours: i64) -> DateTime<Utc> {
     now - Duration::hours(hours)
 }
 
+/// PostgreSQL stores microseconds; `Utc::now()` carries nanoseconds on Linux
+/// (not on macOS), so every instant a test compares with a stored value is
+/// truncated first. Rounding on the way in is the database's business and is
+/// covered separately by [`audit_instant_trigger_and_backfill_touch_only_the_typed_column`].
+fn micros_now() -> DateTime<Utc> {
+    let now = Utc::now();
+    DateTime::from_timestamp_micros(now.timestamp_micros()).unwrap()
+}
+
 #[tokio::test]
 async fn audit_summary_counts_series_rankings_notable_anomalies_and_coverage() {
     let auth = fixture().await;
-    let now = Utc::now() - Duration::seconds(5);
+    let now = micros_now() - Duration::seconds(5);
     sqlx::query("INSERT INTO agent_names(agent_id,workspace_id,name,updated_at) VALUES('ag_1','a','Builder','t')")
         .execute(&auth.pool()).await.unwrap();
     sqlx::query("INSERT INTO machine_names(server_id,workspace_id,name,updated_at) VALUES('srv_1','a','Mac','t')")
@@ -433,7 +442,7 @@ async fn audit_summary_counts_series_rankings_notable_anomalies_and_coverage() {
 #[tokio::test]
 async fn audit_list_shares_the_summary_filters() {
     let auth = fixture().await;
-    let now = Utc::now() - Duration::seconds(5);
+    let now = micros_now() - Duration::seconds(5);
     at(
         &auth,
         "a",
@@ -656,7 +665,7 @@ async fn audit_category_sql_matches_the_rust_rule() {
 #[tokio::test]
 async fn audit_instant_trigger_and_backfill_touch_only_the_typed_column() {
     let auth = fixture().await;
-    let now = Utc::now();
+    let now = micros_now();
     // The trigger fills new rows and marks malformed text without failing.
     let good = at(
         &auth,
@@ -691,6 +700,28 @@ async fn audit_instant_trigger_and_backfill_touch_only_the_typed_column() {
     .unwrap();
     assert_eq!(ts, None);
     assert!(unparsable);
+    // Nanosecond text (what a Linux recorder writes) is rounded to the
+    // microsecond by the database, consistently with the text cast the feed's
+    // range filters use; the Rust side never compares such values exactly.
+    sqlx::query("INSERT INTO organization_audit_events(event_id, organization_id, workspace_id, occurred_at, actor_kind, source, action, outcome, resource_kind, resource_id) \
+                 VALUES('aud_nanos', 'org_a', 'a', '2026-10-19T03:34:00.162180369Z', 'system', 'test', 'agent.created', 'succeeded', 'agent', 'ag_1')")
+        .execute(&auth.pool()).await.unwrap();
+    let (nanos_ts, same_as_cast): (Option<i64>, bool) = sqlx::query_as(
+        "SELECT (extract(epoch FROM occurred_at_ts)*1000000)::BIGINT, occurred_at_ts = occurred_at::TIMESTAMPTZ \
+         FROM organization_audit_events WHERE event_id = 'aud_nanos'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        nanos_ts,
+        Some(
+            DateTime::parse_from_rfc3339("2026-10-19T03:34:00.162180Z")
+                .unwrap()
+                .timestamp_micros()
+        )
+    );
+    assert!(same_as_cast);
 
     // 300 legacy rows (no typed instant) plus one malformed legacy row.
     sqlx::query(
@@ -790,6 +821,36 @@ async fn audit_instant_trigger_and_backfill_touch_only_the_typed_column() {
         before, after,
         "backfill changed a column other than the typed instant"
     );
+
+    // Trigger-filled and backfilled rows with the same text get the same
+    // typed instant (same total parse function), including nanosecond text.
+    sqlx::query(
+        "INSERT INTO organization_audit_events(event_id, organization_id, workspace_id, occurred_at, actor_kind, source, action, outcome, resource_kind, resource_id) \
+         SELECT 'aud_nanos_legacy', 'org_a', 'a', occurred_at, 'system', 'test', 'agent.created', 'succeeded', 'agent', 'ag_1' \
+         FROM organization_audit_events WHERE event_id = 'aud_nanos'",
+    )
+    .execute(&auth.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE organization_audit_events SET occurred_at_ts = NULL WHERE event_id = 'aud_nanos_legacy'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::audit::maintenance::backfill_batch(&auth.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    let same: bool = sqlx::query_scalar(
+        "SELECT a.occurred_at_ts = b.occurred_at_ts AND a.occurred_at = b.occurred_at \
+         FROM organization_audit_events a, organization_audit_events b \
+         WHERE a.event_id = 'aud_nanos' AND b.event_id = 'aud_nanos_legacy'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert!(same, "trigger and backfill disagree on the same text");
 }
 
 /// The range scan can use the workspace/time index: with sequential scans
@@ -797,7 +858,7 @@ async fn audit_instant_trigger_and_backfill_touch_only_the_typed_column() {
 #[tokio::test]
 async fn audit_summary_scope_is_served_by_the_workspace_time_index() {
     let auth = fixture().await;
-    let now = Utc::now();
+    let now = micros_now();
     // A year of events, so a narrow range is selective enough for the planner
     // to prefer the time index over the workspace/sequence index.
     sqlx::query(
@@ -944,7 +1005,7 @@ fn dotted_literals(line: &str) -> Vec<String> {
 #[tokio::test]
 async fn audit_summary_refuses_more_action_groups_than_the_cap() {
     let auth = fixture().await;
-    let now = Utc::now();
+    let now = micros_now();
     sqlx::query(
         "INSERT INTO organization_audit_events(event_id, organization_id, workspace_id, occurred_at, actor_kind, actor_id, source, action, outcome, resource_kind, resource_id, workspace_origin_id) \
          SELECT 'aud_many_' || i, 'org_a', 'a', $1, 'user', 'owner', 'test', 'synthetic.action_' || i, 'succeeded', 'workspace', 'a', 'a' \
