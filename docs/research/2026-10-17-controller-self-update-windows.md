@@ -1002,6 +1002,67 @@ sink failures. Windows target lint is compile evidence only: exact-SHA hosted
 This is still not a Controller reason adapter, durable consumption or W2/W4
 authorization. Synthetic job/head/owner evidence has not been added.
 
+#### Next native slice: context-bearing evidence, without restart authority
+
+Hosted run 39328765493 exercised exact `6def7e8f` on Server 2022 and 2025:
+each reported seven native-operation tests passed, 65 ordinary library tests
+passed with four ignored, and the prior separate owner/running-image fixtures
+passed. Core read the retained raw log (5988); security accepted the inert slice
+(5989). This closes fixture composition only. Security5976 identifies three
+production gaps: pointer equality does not survive restart, `Cell` is not a
+durable consumption latch, and expectations must originate in a previously
+committed record rather than in the operation being checked.
+
+The next increment should address the first gap as a **private native test
+format**, leaving the existing five-byte fixture and the Unix record unchanged.
+It must not construct a Controller reason or claim to close the other two gaps.
+Use a separately versioned fixture record in its own disposable attempt and the
+existing fixed evidence slot, with a strict bounded encoder and decoder, not an
+optional extension of the old five bytes. The record binds:
+
+- A domain/version tag and exact total length, with no trailing bytes, alternate
+  representations or unsupported tags accepted.
+- An independently supplied attempt identifier and predecessor-record digest;
+  for the disposable test these are explicitly synthetic committed-record
+  inputs, fixed before acquisition. They are not generated from outcome bytes.
+- A component selector (`Controller` or `Cli`) independently of the image-version
+  role (`Old` or `New`), the selected native operation, and its nonzero committed
+  intent revision. The current fixture's Old/New role is not a component binding.
+- Expected source and destination volume/file identity, byte length and digest,
+  plus the actual immediately captured nonzero Win32 failure status. Expected
+  object records come from the independent context, never a fresh observation
+  relabelled as an expectation.
+
+Write those fields only from the retained acquisition and its independently
+validated context. Keep the real failure object, protected attempt directory,
+both image handles and read-back evidence pin alive through verification. Read
+the bounded fixed-slot record and check custody before and after the read.
+Decode into inert data, compare every binding with an independently supplied
+expected context, then compare operation/status with the actual retained native
+failure. A matching digest or successful parse alone must never mint acceptance.
+The byte-format binding is not a MAC, a secret, a file-lock proof or protection
+against a same-UID writer; its trust still depends on protected record custody
+and on an independently trusted predecessor. Arbitrary caller-provided context
+does not become trusted by being hashed or serialized.
+
+Acceptance should rebuild an equal expected context as a distinct allocation
+(no pointer equality for serialized binding comparisons), reject identical
+failure bytes from a different attempt, predecessor, component, revision or
+image identity, and exercise every field mutation, truncated/extra input,
+unsupported version, zero status and post-store interference. Keep the existing
+single-use in-memory verifier/store latches and test that failures cannot retry.
+Passing these tests proves live native custody plus explicit byte bindings, not
+that a reconstructed context or pin after process death is authoritative.
+
+Before any Controller adapter, a separate increment must obtain the predecessor
+from the validated committed receipt/head under the supervisor-owned lock,
+bind the actual attempt directory and intent to it, and implement durable
+consume-plus-CAS ordering. A crash after native failure, after evidence sync,
+after acceptance or before head publication must remain diagnose-and-stop until
+that ordering is implemented and tested. Never automatically reconstruct a
+failure capability from bytes on restart. Recovery stays disabled; this plan
+adds no health proof, rollback actor, installation mutation or W4 authority.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual
