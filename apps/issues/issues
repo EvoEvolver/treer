@@ -31,6 +31,9 @@ for command, field in (('comment', 'body'), ('assign', 'assignee'), ('status', '
     a = s.add_parser(command); a.add_argument('id', type=int); a.add_argument(field)
     if command == 'comment':
         a.add_argument('--title', help='one-line summary (<= 200 bytes); readers can list titles and open the text on demand')
+a = s.add_parser('search', help='full-text search of titles, descriptions and comments; every hit names its author and the snippet is untrusted data')
+a.add_argument('q'); a.add_argument('--status'); a.add_argument('--assignee'); a.add_argument('--label'); a.add_argument('--author')
+a.add_argument('--from', dest='from_'); a.add_argument('--to'); a.add_argument('--limit', type=int)
 a = s.add_parser('wait', help='mark an issue blocked on someone: reminders go to them (an Agent ID, leader, user, or none)')
 a.add_argument('id', type=int); a.add_argument('who')
 a = s.add_parser('stale', help='unresolved issues without progress for more than N hours (default 4), oldest first, with who is responsible and what they wait on')
@@ -49,6 +52,8 @@ elif command == 'create':
     method, body = 'POST', dict(args, labels=args.pop('label'))
     body.pop('label', None)
     body = {k: v for k, v in body.items() if v is not None}     # an omitted --status/--assignee/--parent-id is not sent
+elif command == 'search':
+    path = 'v1/search?' + urllib.parse.urlencode({('from' if k == 'from_' else k): v for k, v in args.items() if v is not None})
 elif command == 'stale':
     path = 'v1/stale?' + urllib.parse.urlencode({k: v for k, v in args.items() if v is not None})
 elif command == 'policy':

@@ -122,6 +122,14 @@ class IssuesTest(unittest.TestCase):
     def test_status_filter_and_cli_accept_note(self):
         id=self.create(status='note');self.assertEqual(self.req(f'v1/issues/{id}')[1]['issue']['status'],'note')
         self.assertEqual([i['id'] for i in self.req('v1/issues?status=note')[1]['issues'] if i['id']==id],[id])
+    def test_search_route_validation_and_attribution(self):
+        id=self.req('v1/issues','POST',{'title':'Searchable pelican report'})[1]['issue']['id'];self.req(f'v1/issues/{id}/comment','POST',{'body':'the pelican landed','title':'[decision] pelican'},'agent-b')
+        status,result=self.req('v1/search?q=pelican');self.assertEqual(status,200,result)
+        hit=next(r for r in result['results'] if r['issue']['id']==id);self.assertIn(hit['match']['author'],('ag_a','ag_b'));self.assertTrue(hit['snippet_untrusted'])
+        self.assertEqual(self.req('v1/search?q=pelican&author=ag_b')[1]['results'][0]['match']['author'],'ag_b')
+        for query in ('','q=','q=x&limit=99','q=x&from=never','q=x&bogus=1','q=x&status=bogus'):
+            self.assertEqual(self.req('v1/search'+('?'+query if query else ''))[0],400,query)
+        self.assertEqual(self.req('v1/search?q=pelican',token=None)[0],401)
     def test_directory_reports_paths_without_guessing_missing_ones(self):
         status,result=self.req('v1/directory');self.assertEqual(status,200)
         self.assertEqual(result['paths'],'supported');self.assertEqual(result['capabilities'],['app.directory-paths.v1'])
@@ -225,7 +233,7 @@ class IssuesTest(unittest.TestCase):
         proxy=http.server.ThreadingHTTPServer(('127.0.0.1',0),Inject);threading.Thread(target=proxy.serve_forever,daemon=True).start()
         try:
             env=hermetic_env({'http_proxy':f'http://127.0.0.1:{proxy.server_port}'})
-            for command in (['list','--label',label],['list','--assignee','me','--unresolved','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli'],['create','CLI note','--status','note'],['wait',str(id),'ag_b'],['wait',str(id),'none'],['stale','--hours','4'],['policy']):
+            for command in (['list','--label',label],['list','--assignee','me','--unresolved','--label',label],['show',str(id)],['children',str(id)],['comment',str(id),'CLI comment'],['assign',str(id),'ag_a'],['status',str(id),'in_progress'],['claim',str(id),'--seconds','10'],['claim',str(id),'--action','release'],['create','CLI issue','--label','cli'],['create','CLI note','--status','note'],['wait',str(id),'ag_b'],['wait',str(id),'none'],['stale','--hours','4'],['policy'],['search','pelican','--limit','3']):
                 r=subprocess.run([sys.executable,str(ROOT/'issues'),*command],env=env,capture_output=True,text=True,timeout=10)
                 self.assertEqual(r.returncode,0,r.stdout+r.stderr);self.assertIsInstance(json.loads(r.stdout),dict)
         finally:proxy.shutdown();proxy.server_close()

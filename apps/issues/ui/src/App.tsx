@@ -4,6 +4,7 @@ import { Help } from "./components/Help";
 import { IssueDetail } from "./components/IssueDetail";
 import { IssueForm } from "./components/IssueForm";
 import { IssueList, layout, type View } from "./components/IssueList";
+import { SearchResults } from "./components/SearchResults";
 import { StaleList } from "./components/StaleList";
 import { AssigneePicker } from "./components/Picker";
 import { Ctx, type AppContext } from "./context";
@@ -40,7 +41,7 @@ export function App() {
   const [items, setItems] = useState<Issue[]>([]), [hasMore, setHasMore] = useState(false);
   const [nav, setNav] = useState<NavId>("nav-all"), [view, setView] = useState<View>("list");
   const [filters, setFilters] = useState<Filters>({ status: "", assignee: "", label: "", unresolved: false });
-  const [labelDraft, setLabelDraft] = useState(""), [search, setSearch] = useState("");
+  const [labelDraft, setLabelDraft] = useState(""), [search, setSearch] = useState(""), [deep, setDeep] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<Set<(typeof STATUSES)[number]>>(new Set(COLLAPSED_BY_DEFAULT));
   const [route, setRoute] = useState<Route>(() => { const id = issueFromHash(); return id ? { kind: "issue", id } : { kind: "none" }; });
   const [detail, setDetail] = useState<IssueDetailResult | null>(null), [reloadKey, setReloadKey] = useState(0), [busy, setBusy] = useState(false);
@@ -174,6 +175,7 @@ export function App() {
     setFilters({ status: spec.status, assignee: spec.mine && me ? me.id : "", label: "", unresolved: spec.unresolved });
     setLabelDraft("");
     setView(spec.view);
+    setDeep(null);
   };
   const commitLabel = () => setFilters((f) => f.label === labelDraft.trim() ? f : { ...f, label: labelDraft.trim() });
   const toggleGroup = (status: (typeof STATUSES)[number]) => setCollapsed((prev) => { const next = new Set(prev); if (!next.delete(status)) next.add(status); return next; });
@@ -217,7 +219,8 @@ export function App() {
           <h1><span id="list-title">{NAV[nav].title}</span> <span id="total" className="count">{ready ? visible.length : ""}</span></h1>
           <label className="search-label">
             <input id="search" type="search" ref={searchRef} placeholder="Search" aria-label="Search issues" value={search}
-                onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => { if (e.key === "Escape") { setSearch(""); e.currentTarget.blur(); } }} />
+                onChange={(e) => setSearch(e.target.value)} title="Filters the list as you type; press Enter to search all titles, descriptions and comments"
+                onKeyDown={(e) => { if (e.key === "Enter" && search.trim()) setDeep(search.trim()); if (e.key === "Escape") { setSearch(""); setDeep(null); e.currentTarget.blur(); } }} />
             <kbd>/</kbd>
           </label>
           <button id="refresh" type="button" className="icon-button" aria-label="Refresh" title="Refresh" disabled={!ready} onClick={reload}>↻</button>
@@ -248,7 +251,7 @@ export function App() {
           </div>
           <div className="workspace">
             <section id="collection" aria-label="Issue list">
-              <div id="list">{view === "stale" ? <StaleList /> : <IssueList visible={visible} view={view} collapsed={collapsed} toggle={toggleGroup} filterStatus={filters.status} route={route} focusId={focusId} />}</div>
+              <div id="list">{deep !== null ? <SearchResults q={deep} clear={() => setDeep(null)} /> : view === "stale" ? <StaleList /> : <IssueList visible={visible} view={view} collapsed={collapsed} toggle={toggleGroup} filterStatus={filters.status} route={route} focusId={focusId} />}</div>
               <button id="more" type="button" hidden={!hasMore || view === "stale"} onClick={() => run(() => load(false))}>Load more</button>
             </section>
             <section id="detail" aria-label="Issue detail">{pane}</section>

@@ -47,6 +47,7 @@ class Application:
         self.store, self.auth = store, auth
         self.lock = threading.Lock()
         self.health_at, self.health_value = -1e9, None
+        self.search_hits = {}
 
     def identity_provider(self):
         with self.lock:
@@ -100,6 +101,21 @@ class Application:
                 if isinstance(entry, dict) and entry.get('kind') == 'agent' and isinstance(entry.get('id'), str):
                     resolved[path.lower()] = entry['id']
         return resolved
+
+    SEARCH_PER_MINUTE = 30
+
+    def search_allowed(self, principal, clock=time.monotonic):
+        """A per-principal sliding-window rate limit (searches can scan the index, so one caller cannot slow the App)."""
+        now = clock()
+        with self.lock:
+            hits = [t for t in self.search_hits.get(principal, []) if now - t < 60]
+            if len(hits) >= self.SEARCH_PER_MINUTE:
+                self.search_hits[principal] = hits
+                fail('rate_limited', f'At most {self.SEARCH_PER_MINUTE} searches per minute', 429)
+            hits.append(now)
+            self.search_hits[principal] = hits
+            if len(self.search_hits) > 1000:
+                self.search_hits = {k: v for k, v in self.search_hits.items() if v and now - v[-1] < 60}
 
     def set_policy(self, body, actor, directory):
         """PUT /v1/notify-policy {mode, agent?}. The verified caller may change their own policy; a human owner/admin may
@@ -371,6 +387,9 @@ class Handler(BaseHTTPRequestHandler):
                 capabilities = sorted(getattr(directory, 'capabilities', ()))
                 self.json(200, {'principals': directory, 'capabilities': capabilities,
                                 'paths': 'supported' if 'app.directory-paths.v1' in capabilities else 'unsupported'})
+            elif path == '/v1/search' and method == 'GET':
+                app.search_allowed(actor['id'])
+                self.json(200, app.store.search(query))
             elif path == '/v1/stale' and method == 'GET':
                 fields(query, ('hours', 'limit', 'offset'))
                 try:

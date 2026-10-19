@@ -22,8 +22,9 @@ export interface ActivityEvent {
   id: number; actor: string; kind: string; at: string; summary: string;
   changes?: Record<string, unknown>; body?: string; title?: string; body_bytes?: number; notification: Notification;
 }
+export interface Backlink { issue: { id: number; title: string; status: Status }; source: string; event_id: number | null; author: string; at: number }
 export interface IssueDetailResult {
-  issue: Issue; children: Issue[]; children_total: number; activity: ActivityEvent[]; next_activity_offset: number | null;
+  issue: Issue; referenced_by?: Backlink[]; children: Issue[]; children_total: number; activity: ActivityEvent[]; next_activity_offset: number | null;
 }
 export interface MutationResult extends IssueDetailResult { notification?: Notification }
 export interface IssuePage { issues: Issue[]; total: number; next_offset: number | null }
@@ -35,3 +36,9 @@ export type Route =
   | { kind: "edit"; issue: Issue };
 export interface ToastAction { label: string; run: () => void }
 export interface Toast { id: number; text: string; action?: ToastAction }
+export interface SearchHit {
+  issue: { id: number; title: string; status: Status; assignee: string | null };
+  match: { kind: string; event_id: number | null; author: string; at: string };
+  snippet: string; snippet_untrusted: true;
+}
+export interface SearchResult { results: SearchHit[]; count: number; limit: number }

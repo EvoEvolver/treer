@@ -1,6 +1,7 @@
 """Transactional issue state. All ownership checks run under BEGIN IMMEDIATE."""
 import json
 import os
+import sys
 import re
 import sqlite3
 import time
@@ -9,6 +10,8 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from auth import Error
+import refs
+import search as fulltext
 from notify import (ASK_PER_AUTHOR, HOURLY, HOURLY_ISSUES, HOURLY_WINDOW, POLICY_MODES, WINDOW, notice_for, parse_intent,
                     recipients_for, resolve_mentions, unresolved_mentions)
 
@@ -103,6 +106,15 @@ class Store:
                 db.execute('ALTER TABLE oauth ADD COLUMN browser TEXT')
                 db.execute('DELETE FROM oauth')
         os.chmod(self.path, 0o600)
+        self.search_ready = False
+        try:
+            with self.connect() as db:
+                fulltext.ensure(db)
+                refs.ensure(db)
+                refs.rebuild_if_needed(db, fulltext.stamp_epoch, fulltext.writers)
+                self.search_ready = fulltext.rebuild_if_needed(db)
+        except Error as exc:
+            print('Issues search index could not be built in time; search answers 503 until a later start finishes it', file=sys.stderr, flush=True)
 
     @contextmanager
     def connect(self):
@@ -228,10 +240,46 @@ class Store:
             issue = self.view(self.get(items, issue_id), items)
             rows = db.execute('SELECT id,data FROM activity WHERE issue_id=? ORDER BY id DESC LIMIT ? OFFSET ?',
                               (issue_id, limit+1, offset)).fetchall()
-        return {'issue': issue, 'children': [self.view(i, items) for i in items.values() if i['parent_id'] == issue_id][:100],
+            referenced = refs.referenced_by(db, issue_id, items)
+        return {'issue': issue, 'referenced_by': referenced, 'children': [self.view(i, items) for i in items.values() if i['parent_id'] == issue_id][:100],
                 'children_total': sum(i['parent_id'] == issue_id for i in items.values()),
                 'activity': [(self.titles_only if titles else (lambda e: e))(dict(json.loads(r['data']), id=r['id'])) for r in rows[:limit]],
                 'next_activity_offset': offset+limit if len(rows)>limit else None}
+
+    SEARCH_FIELDS = ('q', 'status', 'assignee', 'label', 'author', 'from', 'to', 'limit')
+
+    def search(self, params):
+        """GET /v1/search: validates every parameter, then ranks matches over titles, descriptions and comments. Results
+        name who wrote the matched text and carry a bounded plain-text snippet that is untrusted author data."""
+        fields(params, self.SEARCH_FIELDS)
+        if not self.search_ready:
+            fail('search_index_building', 'The search index is not ready', 503)
+        q = params.get('q')
+        if not isinstance(q, str) or not q.strip() or len(q.encode()) > fulltext.MAX_QUERY_BYTES or len(q.split()) > fulltext.MAX_TERMS:
+            fail('invalid_field', f'q is required: 1..{fulltext.MAX_TERMS} words, at most {fulltext.MAX_QUERY_BYTES} bytes')
+        try:
+            limit = int(params.get('limit', 20))
+        except (TypeError, ValueError):
+            fail('invalid_pagination', 'limit must be 1..50')
+        if not 1 <= limit <= 50:
+            fail('invalid_pagination', 'limit must be 1..50')
+        if params.get('status') is not None and params['status'] not in STATUSES:
+            fail('invalid_field', 'unknown status')
+        for key in ('assignee', 'label', 'author'):
+            if key in params and (not isinstance(params[key], str) or not 0 < len(params[key]) <= 100):
+                fail('invalid_field', f'{key} must be a short string')
+        clean = {k: params[k] for k in ('status', 'assignee', 'label', 'author') if k in params}
+        clean['q'] = q.strip()
+        clean['from'] = fulltext.parse_date(params['from']) if 'from' in params else None
+        clean['to'] = fulltext.parse_date(params['to'], end=True) if 'to' in params else None
+        if clean['from'] is not None and clean['to'] is not None and clean['from'] > clean['to']:
+            fail('invalid_field', 'from is after to')
+        if not any(len(t) >= 3 for t in clean['q'].split()) and len(clean['q'].split()) > fulltext.MAX_SHORT_ONLY_TERMS:
+            fail('invalid_field', f'a query of only one- and two-character words may have at most {fulltext.MAX_SHORT_ONLY_TERMS} of them')
+        with self.connect() as db:
+            items = self.all(db)
+            results, truncated = fulltext.search(db, items, clean, limit)
+        return {'results': results, 'count': len(results), 'limit': limit, 'candidate_cap': fulltext.CANDIDATES, 'truncated': truncated}
 
     def children(self, issue_id, offset=0, limit=50):
         if offset < 0 or not 1 <= limit <= 100:
@@ -428,6 +476,9 @@ class Store:
                 if sha8 and issue['status'] not in RESOLVED and (issue.get('assignee') or '').startswith('ag_'):
                     db.execute('INSERT OR IGNORE INTO shipped_signals(issue_id,sha8,created_at) VALUES(?,?,?)', (issue_id, sha8, now))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
+            fulltext.on_write(db, action, issue, before, event, event_id, actor, now)
+            known = {r[0] for r in db.execute('SELECT id FROM issues')}
+            refs.on_write(db, action, issue, before, event, event_id, actor, now, known.__contains__)
             names = {p['id']: p.get('name', p['id']) for p in directory}
             notice = notice_for(action, actor, before, issue, changed, mentions, names, body.get('title') if action == 'comment' else None)
             recipients = recipients_for(action, issue, old_assignee, changed, mentions, actor['id']) if notice else []
