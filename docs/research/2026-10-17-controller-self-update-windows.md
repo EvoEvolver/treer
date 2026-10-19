@@ -455,6 +455,13 @@ phases as diagnosis only; it is not the continuation selector. No executable
 adapter uses either model. Verified reason custody and typed old-health
 evidence remain separate gates; these synthetic record-pair tests do not prove
 a durable multi-revision publication sequence or authentic process health.
+A separate chain test serializes all six branches with increasing revisions
+and advances a synthetic in-memory exact-byte head only after each accepted
+edge. At every revision it rejects replayed predecessors, repeated/skipped
+revisions, a valid rewritten predecessor and a changed pinned old-image hash;
+the terminal head rejects another revision of RolledBack. This exercises
+cross-revision guard composition, not durable head storage, CAS, restart
+ownership, real publication or protection against rewriting the head itself.
 
 After restoration, starting and verifying the old Controller is an operation
 outside this record graph. A crash or restart between Restored and RolledBack

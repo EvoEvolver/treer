@@ -1518,8 +1518,7 @@ fn rollback_continuation_classifies_every_consistent_tuple() {
     );
 }
 
-#[test]
-fn rollback_record_edges_require_actual_results_and_exact_health_claims() {
+fn rollback_fixture_traces() -> [Vec<(ClaimedState, [[layout::Object; 3]; 2])>; 6] {
     use layout::{Object::*, Step::*, Transaction::*};
     let original = [Old, New, Absent];
     let gap = [Absent, New, Old];
@@ -1576,15 +1575,19 @@ fn rollback_record_edges_require_actual_results_and_exact_health_claims() {
     for (claim, _) in &mut cli_already_restored {
         claim.cli_step = Restored;
     }
-    let traces = [
+    [
         trace.clone(),
         untouched_cli,
         trace[2..].to_vec(), // Direct CLI gap restoration.
         trace[6..].to_vec(), // Direct Controller gap restoration.
         no_move_trace,
         cli_already_restored,
-    ];
-    for branch in traces {
+    ]
+}
+
+#[test]
+fn rollback_record_edges_require_actual_results_and_exact_health_claims() {
+    for branch in rollback_fixture_traces() {
         for historical_new_health in [false, true] {
             let mut branch = branch.clone();
             for (claim, slots) in &mut branch {
@@ -1595,6 +1598,89 @@ fn rollback_record_edges_require_actual_results_and_exact_health_claims() {
                 );
             }
             assert_rollback_record_trace(&branch);
+        }
+    }
+}
+
+#[test]
+fn rollback_chains_advance_exact_heads_and_refuse_replay_or_rewriting() {
+    for branch in rollback_fixture_traces() {
+        for historical_new_health in [false, true] {
+            let records: Vec<_> = branch
+                .iter()
+                .enumerate()
+                .map(|(index, (claim, _))| {
+                    let mut fields = fixture();
+                    fields.binding.revision = index as u64 + 1;
+                    fields.state = claim.clone();
+                    fields.state.new_health_recorded = historical_new_health;
+                    let pair = envelopes(&serde_json::to_vec(&fields).unwrap(), &fields.binding);
+                    (fields, pair)
+                })
+                .collect();
+            let mut head = ExpectedHead {
+                binding: records[0].0.binding.clone(),
+                receipt_sha256: digest(&records[0].1 .0),
+            };
+            for index in 1..records.len() {
+                let (old, (old_receipt, old_marker)) = &records[index - 1];
+                let (next, (receipt, marker)) = &records[index];
+                let slots = branch[index].1;
+                let check = |prior: (&[u8], &[u8]), candidate: (&[u8], &[u8])| {
+                    check_rollback_successor(prior, candidate, &head, slots)
+                };
+                assert_eq!(check((old_receipt, old_marker), (receipt, marker)), Ok(()));
+                // Earlier records remain syntactically valid but are no
+                // longer the predecessor, even with their matching marker.
+                if index > 1 {
+                    assert_eq!(
+                        check((&records[0].1 .0, &records[0].1 .1), (receipt, marker)),
+                        Err("predecessor_head_mismatch")
+                    );
+                }
+                assert!(check((old_receipt, old_marker), (old_receipt, old_marker)).is_err());
+                let mut skipped = next.clone();
+                skipped.binding.revision += 1;
+                let (r, m) = envelopes(&serde_json::to_vec(&skipped).unwrap(), &skipped.binding);
+                assert!(check((old_receipt, old_marker), (&r, &m)).is_err());
+                let mut replaced = old.clone();
+                replaced.provenance.release_sha = "e".repeat(40);
+                let (r, m) = envelopes(&serde_json::to_vec(&replaced).unwrap(), &replaced.binding);
+                assert!(parse_pair(&r, &m, &replaced.binding).is_ok());
+                assert_eq!(
+                    check((&r, &m), (receipt, marker)),
+                    Err("predecessor_head_mismatch")
+                );
+                let mut changed = next.clone();
+                changed.images.controller.old.sha256 = "e".repeat(64);
+                let (r, m) = envelopes(&serde_json::to_vec(&changed).unwrap(), &changed.binding);
+                assert!(parse_pair(&r, &m, &changed.binding).is_ok());
+                assert_eq!(
+                    check((old_receipt, old_marker), (&r, &m)),
+                    Err("transaction_fields_changed")
+                );
+                // Advance only this synthetic in-memory test head after the
+                // successful edge. This is not a durable CAS or restart test.
+                head = ExpectedHead {
+                    binding: next.binding.clone(),
+                    receipt_sha256: digest(receipt),
+                };
+            }
+            let (terminal, (receipt, marker)) = records.last().unwrap();
+            assert_eq!(head.binding, terminal.binding);
+            assert_eq!(head.receipt_sha256, digest(receipt));
+            let mut retry = terminal.clone();
+            retry.binding.revision += 1;
+            let (r, m) = envelopes(&serde_json::to_vec(&retry).unwrap(), &retry.binding);
+            assert_eq!(
+                check_rollback_successor(
+                    (receipt, marker),
+                    (&r, &m),
+                    &head,
+                    branch.last().unwrap().1
+                ),
+                Err("invalid_rollback_transition")
+            );
         }
     }
 }
