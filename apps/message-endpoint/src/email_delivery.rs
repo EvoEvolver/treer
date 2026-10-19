@@ -9,6 +9,14 @@ const GLOBAL: i64 = 640;
 // Core token mint (15s) + HTTP request (20s) + scheduling margin (10s).
 const MIN_RESERVATION_LEASE: i64 = 45;
 
+fn wall_time() -> Result<i64, Error> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|elapsed| i64::try_from(elapsed.as_secs()).ok())
+        .ok_or(Error::Invalid)
+}
+
 #[cfg(test)]
 #[test]
 fn reservation_budget_covers_actual_transport_timeouts_and_margin() {
@@ -108,6 +116,12 @@ fn frozen_payload(intent: &Intent, url: &str) -> Result<Vec<u8>, Error> {
     Ok(payload)
 }
 impl Queue<'_> {
+    /// Runtime fence: sample time after acquiring the write lock, independently
+    /// of reservation time. Call only after token mint; every error denies POST.
+    pub fn proxy_dispatch_allowed_now(&mut self, intent: &Intent, url: &str) -> bool {
+        self.proxy_dispatchable_with_clock(intent, url, wall_time)
+            .unwrap_or(false)
+    }
     /// Runtime callback adapter: every storage/configuration error refuses POST.
     /// Preserve the journal reservation for containment, never log the error or
     /// reinterpret it as a retry capability.
@@ -124,9 +138,15 @@ impl Queue<'_> {
         url: &str,
         now: i64,
     ) -> Result<bool, Error> {
-        if !valid_time(now) {
-            return Err(Error::Invalid);
-        }
+        self.proxy_dispatchable_with_clock(intent, url, || Ok(now))
+    }
+
+    fn proxy_dispatchable_with_clock(
+        &mut self,
+        intent: &Intent,
+        url: &str,
+        clock: impl FnOnce() -> Result<i64, Error>,
+    ) -> Result<bool, Error> {
         let expected = frozen_payload(intent, url)?;
         self.store
             .recheck_private_storage()
@@ -135,6 +155,10 @@ impl Queue<'_> {
             .store
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = clock()?;
+        if !valid_time(now) {
+            return Err(Error::Invalid);
+        }
         let valid = match current(&tx, intent, now) {
             Ok(()) => tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM email_dispatch WHERE id=?1 AND endpoint=?2 AND generation=?3 AND state='dispatching' AND payload=?4)",
@@ -233,14 +257,35 @@ impl Queue<'_> {
         url: &str,
         now: i64,
     ) -> Result<Attempt, Error> {
-        if !valid_time(now) {
-            return Err(Error::Invalid);
-        }
+        self.begin_proxy_delivery_with_clock(intent, url, || Ok(now))
+    }
+
+    /// Runtime reservation entry: clock sampling occurs after BEGIN IMMEDIATE,
+    /// so a write-lock wait cannot consume an unobserved part of the 45s budget.
+    /// This does not authorize a send or replace the independent post-mint fence.
+    pub fn begin_proxy_delivery_now(
+        &mut self,
+        intent: &Intent,
+        url: &str,
+    ) -> Result<Attempt, Error> {
+        self.begin_proxy_delivery_with_clock(intent, url, wall_time)
+    }
+
+    fn begin_proxy_delivery_with_clock(
+        &mut self,
+        intent: &Intent,
+        url: &str,
+        clock: impl FnOnce() -> Result<i64, Error>,
+    ) -> Result<Attempt, Error> {
         let expected = frozen_payload(intent, url)?;
         let tx = self
             .store
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let now = clock()?;
+        if !valid_time(now) {
+            return Err(Error::Invalid);
+        }
         current(&tx, intent, now)?;
         let lease_until: i64 = tx.query_row(
             "SELECT lease_until FROM email_intents WHERE id=?1",
@@ -368,6 +413,98 @@ mod tests {
                 r.get(0)
             })
             .unwrap()
+    }
+
+    #[test]
+    fn fresh_clock_errors_leave_prepared_or_dispatching_state_unchanged() {
+        let mut store = Store::memory(Limits::default()).unwrap();
+        setup(&mut store);
+        let mut q = Queue::new(&mut store).unwrap();
+        let i = intent(&mut q, 1);
+        q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+        assert!(matches!(
+            q.begin_proxy_delivery_with_clock(&i, URL, || Err(Error::Invalid)),
+            Err(Error::Invalid)
+        ));
+        assert_eq!(state(&q, &i.id), "prepared");
+        let _attempt = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+        assert!(matches!(
+            q.proxy_dispatchable_with_clock(&i, URL, || Err(Error::Invalid)),
+            Err(Error::Invalid)
+        ));
+        assert_eq!(state(&q, &i.id), "dispatching");
+    }
+
+    #[test]
+    fn runtime_clock_sampling_occurs_after_actual_write_lock_wait() {
+        use std::{
+            sync::{
+                atomic::{AtomicBool, AtomicI64, Ordering},
+                mpsc,
+            },
+            time::{Duration, Instant},
+        };
+        static BUSY: AtomicBool = AtomicBool::new(false);
+        static CLOCK: AtomicI64 = AtomicI64::new(61);
+        static ADVANCE: AtomicI64 = AtomicI64::new(77);
+        fn busy(tries: i32) -> bool {
+            CLOCK.store(ADVANCE.load(Ordering::SeqCst), Ordering::SeqCst);
+            BUSY.store(true, Ordering::SeqCst);
+            std::thread::sleep(Duration::from_millis(1));
+            tries < 5000
+        }
+        fn contended<T>(
+            q: &mut Queue<'_>,
+            path: &std::path::Path,
+            advance: i64,
+            run: impl FnOnce(&mut Queue<'_>) -> T,
+        ) -> T {
+            BUSY.store(false, Ordering::SeqCst);
+            CLOCK.store(61, Ordering::SeqCst);
+            ADVANCE.store(advance, Ordering::SeqCst);
+            let (ready_tx, ready_rx) = mpsc::channel();
+            let (done_tx, done_rx) = mpsc::channel();
+            let path = path.to_owned();
+            let blocker = std::thread::spawn(move || {
+                let db = Connection::open(path).unwrap();
+                db.execute_batch("BEGIN IMMEDIATE").unwrap();
+                ready_tx.send(()).unwrap();
+                let deadline = Instant::now() + Duration::from_secs(5);
+                while !BUSY.load(Ordering::SeqCst) && Instant::now() < deadline {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                db.execute_batch("COMMIT").unwrap();
+                let _ = done_rx.recv_timeout(Duration::from_secs(5));
+            });
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            q.store.db.busy_handler(Some(busy)).unwrap();
+            let result = run(q);
+            let _ = done_tx.send(());
+            blocker.join().unwrap();
+            q.store.db.busy_handler(None).unwrap();
+            assert!(BUSY.load(Ordering::SeqCst));
+            result
+        }
+        let temp = tempfile::tempdir().unwrap();
+        let directory = temp.path().canonicalize().unwrap().join("state");
+        let mut store = Store::open(&directory, Limits::default()).unwrap();
+        setup(&mut store);
+        let mut q = Queue::new(&mut store).unwrap();
+        let i = intent(&mut q, 1);
+        q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+        let database = directory.join("hub.sqlite3");
+        let refused = contended(&mut q, &database, 77, |q| {
+            q.begin_proxy_delivery_with_clock(&i, URL, || Ok(CLOCK.load(Ordering::SeqCst)))
+        });
+        assert!(matches!(refused, Err(Error::Lease)));
+        assert_eq!(state(&q, &i.id), "prepared");
+        let _attempt = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+        let allowed = contended(&mut q, &database, 122, |q| {
+            q.proxy_dispatchable_with_clock(&i, URL, || Ok(CLOCK.load(Ordering::SeqCst)))
+        })
+        .unwrap();
+        assert!(!allowed);
+        assert_eq!(state(&q, &i.id), "dispatching");
     }
     fn copy(a: &Attempt) -> Attempt {
         Attempt {

@@ -103,15 +103,26 @@ the fence refuses POST and the reservation stays uncertain. Current claims last
 lease inside its reservation transaction (those two budgets plus 10 seconds
 margin); 44 seconds is refused with the prepared row and claim unchanged, no
 attempt returned and no uncertainty slot reserved. An expired prepared claim can
-be reclaimed with its frozen bytes intact. These helpers still require a fresh
-caller-supplied time; they do not start a worker or sample the runtime clock.
+be reclaimed with its frozen bytes intact. The explicit-time storage primitives
+still require fresh caller-supplied time and do not themselves refresh it.
 The CLI and HTTP builders use named timeout constants. A regression compares
 their actual sum plus the ten-second margin with the reservation minimum, so
 raising either timeout requires keeping the admission budget sufficient.
 
-The future worker must reread its wall clock or use a monotonic elapsed-time
-budget after token mint and pass that fresh time into the positive fence. A
-synthetic mint-time clock-advance regression demonstrates this callback ordering:
+The future worker must use `begin_proxy_delivery_now` for reservation and
+`proxy_dispatch_allowed_now` from the callback after token mint. These new local
+entry points independently sample the wall clock after acquiring their SQLite
+IMMEDIATE write transaction, so time spent waiting for that lock is included.
+Clock conversion/storage failure refuses reservation or returns false from the
+post-mint fence. The explicit-time primitives remain available for deterministic
+fixtures; they do not refresh a time supplied before a lock wait. A two-connection
+contention regression advances a synthetic clock from the busy handler: budget
+lost while waiting refuses reservation without changing prepared state, and
+post-mint expiry while waiting refuses dispatch without releasing its reservation.
+The wall-clock helper does not claim protection against arbitrary system clock
+steps or atomicity with the subsequent external POST.
+
+A synthetic mint-time clock-advance regression demonstrates this callback ordering:
 the pre-mint lease passes, the callback observes expiry, no HTTP connection occurs
 and the committed reservation becomes uncertain. The separate mint-time pause
 regression also remains. The assembled worker and runtime clock wiring are not
