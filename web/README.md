@@ -578,8 +578,8 @@ The exact-input filters also offer keyboard-accessible menus: already-visible
 Agent tree paths and member names resolve to stable IDs; common action/kind
 codes and codes on the current validated page are suggestions, not a complete
 catalog. Each menu is capped at 200 valid suggestions; exact input supports
-unknown identities and newer action/kind codes. No additional directory or audit
-requests are made until Apply (apart from the existing explicit paging/refresh).
+unknown identities and newer action/kind codes. Suggestion menus issue no extra
+directory or event-list requests before Apply (apart from explicit paging/refresh).
 Changing filters resets pagination; switching workspaces or leaving the tab
 aborts pending requests and discards the displayed feed. There is no polling.
 
@@ -594,9 +594,9 @@ text only. Workspace rows explicitly show “by” the actor (Agent path, a name
 the already-loaded member directory, or the stable ID), a resource-type icon and
 a colored outcome badge. Secondary row text is at least 12px. On phones the
 filters are collapsed by default behind an accessible Filters button. No extra
-member-directory request is introduced for audit. The workspace reader validates
+member-directory request is introduced for audit. The event-list reader validates
 scope and projects display fields; credentials, arbitrary payloads, server-supplied
-display names and raw server error bodies are not shown.
+display names and raw server error bodies are not shown in event rows.
 Coverage is incomplete, missing historical attribution is not backfilled, and
 reads are not themselves audited. Workspace deletion can remove attribution.
 This is an operational log, not a complete or tamper-proof ledger; see the Core
@@ -847,3 +847,36 @@ See the operator guide for temporary-file visibility, expiry and server quotas.
 Iframe appearance hints are included in the initial URL. Exact-origin theme
 messages start after that iframe loads, and continue on later theme changes;
 new iframe instances wait for their own load event.
+
+### Aggregate activity charts
+
+When `workspace.audit-summary.v1` is advertised, Workspace settings → Audit also
+requests the authorized `/api/workspaces/{workspace_id}/audit-summary` endpoint.
+The charts consume bounded server aggregates, never a downloaded event feed:
+24h/7d/30d presets or a custom local-time interval of at most 180 days. Bucket
+labels use UTC. Existing applied From/Until list filters override preset bounds;
+custom chart bounds take precedence. Refresh is explicit; there is no polling.
+
+The view validates workspace, table version 1, echoed filters and range,
+contiguous clipped buckets, counts and totals before displaying them. Missing
+capability leaves the existing event list available; malformed or failed summary
+responses show an explicit error without partial aggregates or server error text.
+Incomplete coverage withholds KPI totals and warns that zeros do not prove no
+activity. Fixed category totals include Other; if one category exceeds 70%,
+eight compact previews show the full interval before the combined chart, with
+a warning against comparing heights across independent scales. The combined
+chart starts at the newest buckets and supports scrolling and Home/End navigation. Patterns, text counts, exact data
+tables, UTC labels and keyboard-operable bucket buttons supplement color.
+
+Selecting a category, bucket, actor, resource or notable event resets list paging
+and uses server-echoed inclusive/exclusive time bounds and exact filter IDs.
+The list heading receives focus and identifies the selected range. Clear chart
+selection restores the applied list filters; changing the chart range clears the
+selection. Rankings disclose distinct and omitted counts per resource kind.
+Non-drillable IDs remain visible in data tables. Display names are labelled as
+**current names**, not historical event-time names. No new directory calls are
+introduced. Notable activity labels its per-action caps instead of promising a
+complete newest-100 list; anomaly explanations use server baseline/threshold
+values and explicitly identify insufficient data. This remains an operational,
+incomplete audit view, not a tamper-proof ledger. Shipping requires the #191/#192
+Core API plus UI review and real-browser acceptance against deployed headers.
