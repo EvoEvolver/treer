@@ -2036,6 +2036,11 @@ activation-order, detachment and rollback checks.
 
 ### Windows split-step manual machine update
 
+The planned Rust self-update path remains inert and is limited to local NTFS
+volumes with persistent ACLs; ReFS/Dev Drive and other filesystems are unsupported.
+Its future admission path must refuse unsupported filesystems before mutation;
+the current manual procedure below is separate from that planned implementation.
+
 For a reviewed Canary set, use `scripts/update-machine.ps1` from a trusted local
 copy. This is separate from signed release-channel updates: same-origin
 `SHA256SUMS` is pinned to the file's SHA-256 copied from the independently

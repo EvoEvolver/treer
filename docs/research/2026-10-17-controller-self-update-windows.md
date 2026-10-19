@@ -149,9 +149,20 @@ binary envelope before the inner receipt schema is implemented:
 The supplied buffer is capped at 65,536 total bytes before header access; the
 declared total must exactly match, so truncation, trailing bytes and concatenated
 records are refused. Decode borrows the payload with no allocation or inner
-parser; encode checks the payload bound before allocating. A future file reader
-must also read and validate the fixed header and total cap before allocating a
-payload buffer; a slice-based test does not establish that I/O behavior.
+parser; encode checks the payload bound before allocating. The subsequent
+test-only `read_file` adapter requires an already-open regular file positioned
+at zero, checks its handle metadata length is 21..65,536 bytes, then reads the
+fixed 20-byte header on the stack. It validates every header field and agreement
+with the observed length before allocating the bounded buffer. It reads exactly
+the remaining bytes, probes at most one extra byte to refuse growth/trailing
+data, and rechecks the handle length. Tests cover a real disposable file, every
+truncated read, invalid headers refusing before body reads, oversized metadata
+refusing before any read, and I/O failures at every byte and at the EOF probe.
+This is a bounded byte transport, not a trusted file opener: NTFS/ACL/object
+identity checks, exclusive ownership and mutation fencing remain prerequisites
+for a future native caller. Same-size in-place changes are not detected by the
+length checks; the independent pair digest check is still mandatory. No I/O
+deadline or power-loss durability guarantee is provided by this adapter.
 Portable tests cover every truncated length, mutation of every header byte,
 wrong kind/endianness, overflowing declared length and the exact total cap.
 On Unix, a disposable real `Journal` is given a Windows receipt with a sibling
