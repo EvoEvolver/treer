@@ -1903,3 +1903,86 @@ async fn prewarm_rotation_succeeds_on_the_next_navigation_with_an_upstream() {
     assert!(old_rotated);
     assert_eq!(count, 2);
 }
+
+/// #198 (security 5630): a rotation and an exchange for the same (user, Agent)
+/// acquire the pair lock in the same order, so running them concurrently at
+/// the cap ends in one consistent state instead of a broken deadlock.
+#[tokio::test]
+async fn concurrent_rotation_and_exchange_take_the_pair_lock_in_one_order() {
+    let mut fixture = agent_fixture().await;
+    let config = config(None);
+    let (warm_pair, _) =
+        establish_embed_session_with_purpose(&fixture, &config, "member", Some("prewarm")).await;
+    for _ in 0..7 {
+        establish_embed_session_with_purpose(&fixture, &config, "member", None).await;
+        sqlx::query("UPDATE ingress_browser_auth_codes SET used_at = '2000-01-01T00:00:00Z' WHERE used_at IS NULL")
+            .execute(&fixture.auth.pool())
+            .await
+            .unwrap();
+    }
+    let (nonce, hash) = nonce_pair();
+    let minted = mint(&fixture, allow(), &config, Some("member"), AGENT_ID, &hash)
+        .await
+        .unwrap();
+    let body = axum::body::to_bytes(minted.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let code = serde_json::from_slice::<Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (_, _) = upstream(
+        fixture.state.clone(),
+        fixture.connection,
+        fixture.rx.take().unwrap(),
+        Upstream::Head("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n"),
+    );
+    for _round in 0..3 {
+        let navigation = send(
+            &fixture,
+            allow(),
+            &config,
+            Request::builder()
+                .uri("/")
+                .header(header::HOST, AGENT_HOST)
+                .header(header::COOKIE, warm_pair.clone())
+                .header("sec-fetch-site", "same-origin")
+                .header("sec-fetch-mode", "navigate")
+                .header("sec-fetch-dest", "iframe")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let exchange = redeem(&fixture, &config, AGENT_HOST, &code, &nonce);
+        let (navigation, exchange) = futures_util::future::join(navigation, exchange).await;
+        // Neither side fails with a database error; the exchange succeeds once.
+        let navigation =
+            navigation.unwrap_or_else(|f| panic!("navigation failed: {:?}", f.error.code));
+        assert!(
+            navigation.status() == StatusCode::OK
+                || navigation.status() == StatusCode::UNAUTHORIZED
+        );
+        axum::body::to_bytes(navigation.into_body(), 64)
+            .await
+            .unwrap();
+        match exchange {
+            Ok(response) => assert_eq!(response.status(), StatusCode::NO_CONTENT),
+            Err(failure) => assert_eq!(
+                failure.error.code, "invalid_ingress_authorization",
+                "code already consumed"
+            ),
+        }
+    }
+    let (live, rotated): (i64, i64) = sqlx::query_as(
+        "SELECT count(*) FILTER (WHERE NOT rotated), count(*) FILTER (WHERE rotated) FROM ingress_sessions \
+         WHERE user_id = 'member' AND embed = TRUE AND expires_at > $1",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .fetch_one(&fixture.auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(live, 8, "the cap holds");
+    assert!(
+        rotated <= 1,
+        "at most the one prewarm row rotated: {rotated}"
+    );
+}

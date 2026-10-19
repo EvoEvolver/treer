@@ -1553,11 +1553,7 @@ impl AuthStore {
         user_id: &str,
         prewarm: bool,
     ) -> Result<String, AuthFailure> {
-        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
-            .bind(format!("embed-sessions:{user_id}:{ingress_id}"))
-            .execute(&mut **tx)
-            .await
-            .map_err(AuthFailure::database)?;
+        Self::lock_embed_sessions(tx, user_id, ingress_id).await?;
         let now = Utc::now();
         let token = format!("ies_{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple());
         let expires_at = if prewarm {
@@ -1636,29 +1632,63 @@ impl AuthStore {
     ) -> Result<Option<String>, AuthFailure> {
         let now = Utc::now();
         // Mark and insert in one transaction (security 5618 item 3): a failed
-        // insert never leaves a rotated predecessor behind.
-        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
-        let row = sqlx::query(
-            "UPDATE ingress_sessions s SET rotated = TRUE \
-             FROM service_ingresses i \
-             WHERE s.token = $1 AND lower(i.hostname) = lower($2) AND i.ingress_id = s.ingress_id \
-             AND s.embed = TRUE AND s.prewarm = TRUE AND s.rotated = FALSE AND s.expires_at > $3 \
-             RETURNING s.ingress_id, s.user_id",
+        // insert never leaves a rotated predecessor behind. The pair lock is
+        // taken first (security 5630): the exchange path locks the pair and
+        // may then evict this very row, so both paths acquire in the same
+        // order and PostgreSQL never has to break a deadlock.
+        let Some((ingress_id, user_id)) = sqlx::query_as::<_, (String, String)>(
+            "SELECT s.ingress_id, s.user_id FROM ingress_sessions s \
+             JOIN service_ingresses i ON i.ingress_id = s.ingress_id \
+             WHERE s.token = $1 AND lower(i.hostname) = lower($2) \
+             AND s.embed = TRUE AND s.prewarm = TRUE AND s.rotated = FALSE AND s.expires_at > $3",
         )
         .bind(token)
         .bind(hostname)
         .bind(now.to_rfc3339())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(AuthFailure::database)?;
-        let Some(row) = row else {
+        .map_err(AuthFailure::database)?
+        else {
             return Ok(None);
         };
-        let ingress_id: String = row.get("ingress_id");
-        let user_id: String = row.get("user_id");
+        let mut tx = self.pool.begin().await.map_err(AuthFailure::database)?;
+        Self::lock_embed_sessions(&mut tx, &user_id, &ingress_id).await?;
+        // Re-checked under the lock: a concurrent exchange may have evicted the
+        // row, or a concurrent navigation rotated it already.
+        let marked = sqlx::query(
+            "UPDATE ingress_sessions s SET rotated = TRUE \
+             FROM service_ingresses i \
+             WHERE s.token = $1 AND lower(i.hostname) = lower($2) AND i.ingress_id = s.ingress_id \
+             AND s.embed = TRUE AND s.prewarm = TRUE AND s.rotated = FALSE AND s.expires_at > $3",
+        )
+        .bind(token)
+        .bind(hostname)
+        .bind(now.to_rfc3339())
+        .execute(&mut *tx)
+        .await
+        .map_err(AuthFailure::database)?
+        .rows_affected();
+        if marked == 0 {
+            return Ok(None);
+        }
         let successor = Self::insert_embed_session(&mut tx, &ingress_id, &user_id, false).await?;
         tx.commit().await.map_err(AuthFailure::database)?;
         Ok(Some(successor))
+    }
+
+    /// The per-(user, Agent origin) advisory lock every embed session insert,
+    /// eviction and rotation takes first, inside its transaction.
+    async fn lock_embed_sessions(
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+        user_id: &str,
+        ingress_id: &str,
+    ) -> Result<(), AuthFailure> {
+        sqlx::query("SELECT pg_advisory_xact_lock(hashtext($1))")
+            .bind(format!("embed-sessions:{user_id}:{ingress_id}"))
+            .execute(&mut **tx)
+            .await
+            .map_err(AuthFailure::database)?;
+        Ok(())
     }
 
     pub async fn authenticate_ingress_session(
