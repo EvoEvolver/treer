@@ -1,6 +1,7 @@
 //! Existing Proxy email route, as this Managed App's own workload principal.
 //! No provider secrets, redirects, caller URLs, ambient HTTP proxies or raw
 //! reqwest/upstream errors. Construction alone never sends or mints a token.
+use super::delivery::{Attempt, Outcome};
 use super::{Intent, Mode};
 use crate::core::Core;
 use reqwest::{blocking::Client, redirect::Policy, Url};
@@ -25,6 +26,20 @@ pub struct Sender {
     client: Client,
     url: Url,
     service: String,
+}
+/// A consumed dispatch capability and its conservative outcome. No accessor
+/// returns the Attempt, so the normal transport API cannot POST it twice.
+/// Dropping this value, or a failed commit, leaves startup recovery to contain
+/// the existing dispatching row. This is not permission to acknowledge work.
+#[must_use = "persist the completion; dropping it leaves an ambiguous dispatch"]
+pub struct Completion {
+    attempt: Attempt,
+    outcome: Outcome,
+}
+impl Completion {
+    pub fn commit(self, queue: &mut super::Queue<'_>) -> Result<(), super::Error> {
+        queue.finish_proxy_delivery(self.attempt, self.outcome)
+    }
 }
 impl Sender {
     /// All inputs come from reviewed startup configuration, never message JSON.
@@ -132,15 +147,46 @@ impl Sender {
         }
         self.post(&token, intent, public_url)
     }
+    /// Offline assembly primitive: consumes an already committed reservation
+    /// and posts its exact stored bytes once. Caller must establish fresh Core,
+    /// member, allowlist and activation checks; the post-mint fence must recheck
+    /// current pins/lease/pause, without holding a mutex across token mint/HTTP.
+    /// Even pre-POST refusal is conservatively uncertain after reservation; it
+    /// never returns the Attempt or a retry signal. No production caller yet.
+    pub fn send_committed(
+        &self,
+        core: &Core,
+        attempt: Attempt,
+        fence: impl FnOnce() -> bool,
+    ) -> Completion {
+        let accepted = core
+            .app_service_token(&self.service)
+            .ok()
+            .filter(|_| fence())
+            .is_some_and(|token| self.post_bytes(&token, attempt.payload()).is_ok());
+        Completion {
+            attempt,
+            outcome: if accepted {
+                Outcome::ProviderAccepted
+            } else {
+                Outcome::Uncertain
+            },
+        }
+    }
     fn post(&self, token: &str, intent: &Intent, public_url: &str) -> Result<(), Error> {
         let notification = intent
             .notification(public_url, Mode::Proxy)
             .map_err(|_| Error::Rejected)?;
+        let payload = serde_json::to_vec(&notification).map_err(|_| Error::Rejected)?;
+        self.post_bytes(token, &payload)
+    }
+    fn post_bytes(&self, token: &str, payload: &[u8]) -> Result<(), Error> {
         let response = self
             .client
             .post(self.url.clone())
             .bearer_auth(token)
-            .json(&notification)
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(payload.to_vec())
             .send()
             .map_err(|_| Error::Uncertain)?;
         let status = response.status();

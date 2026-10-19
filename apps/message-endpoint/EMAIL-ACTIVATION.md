@@ -75,6 +75,19 @@ The local tests cover stored-byte/URL conflicts, completed-outbox refusal,
 restart containment, sticky ambiguity, local/global capacity and commit failures;
 they do not constitute the future end-to-end send/ack crash rehearsal.
 
+`Sender::send_committed` is a separate, currently unused assembly primitive. It
+consumes the opaque committed attempt, mints this App's service token, rechecks
+the caller-supplied current fence after minting and POSTs the stored JSON bytes
+without regeneration. Its opaque completion can only be committed to the queue;
+it does not return an attempt for another send. Every failure, including a local
+token/fence refusal after reservation, conservatively retains uncertainty and
+capacity. Dropping a completion or failing its commit leaves the dispatching row
+for startup containment. This trades availability for avoiding a retry path; it
+does not establish the still-pending runtime authorization checks. Loopback tests
+compare the entire received body with the frozen payload, exercise acceptance,
+connection loss/truncation/503, and show no second POST or claim. They are not
+process-kill tests or evidence of real provider delivery.
+
 ## Proposed transport boundary for review
 
 Keep email absent as disabled and existing `email.outbox_directory` configurations

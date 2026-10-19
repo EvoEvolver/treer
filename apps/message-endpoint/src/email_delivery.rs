@@ -268,6 +268,123 @@ mod tests {
             payload: a.payload.clone(),
         }
     }
+    #[cfg(feature = "hub")]
+    fn fake_core(path: &std::path::Path, succeeds: bool) -> crate::core::Core {
+        use std::os::unix::fs::PermissionsExt;
+        let exe = path.join("fake-treer");
+        let source = if succeeds {
+            r#"#!/usr/bin/python3
+import json,sys
+assert sys.argv[1:]==['token','create','svc_hub','--json']
+print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer','audience':'svc_hub','expires_in':300}))
+"#
+        } else {
+            "#!/bin/sh\nexit 1\n"
+        };
+        std::fs::write(&exe, source).unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::core::Core::new(&exe, "app_own").unwrap()
+    }
+    #[cfg(feature = "hub")]
+    #[test]
+    fn committed_http_posts_frozen_bytes_and_never_retries_ambiguity() {
+        use crate::email::proxy::Sender;
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+            time::Duration,
+        };
+        for reply in [
+            "HTTP/1.1 200 OK\r\nContent-Length: 41\r\nConnection: close\r\n\r\n{\"status\":\"sent\",\"email_id\":\"email_test\"}",
+            "", // Connection lost after the whole payload was consumed.
+            "HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}",
+            "HTTP/1.1 503 Test\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let core = fake_core(dir.path(), true);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let sender = Sender::new(&format!("http://{}/", listener.local_addr().unwrap()), "svc_hub").unwrap();
+            let mut store = Store::memory(Limits::default()).unwrap();
+            setup(&mut store);
+            let mut q = Queue::new(&mut store).unwrap();
+            let i = intent(&mut q, 1);
+            q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+            let a = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+            let expected = a.payload().to_vec();
+            let join = thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+                let mut head = Vec::new();
+                let mut byte = [0];
+                while !head.ends_with(b"\r\n\r\n") {
+                    stream.read_exact(&mut byte).unwrap();
+                    head.extend(byte);
+                    assert!(head.len() < 16384);
+                }
+                let head = String::from_utf8(head).unwrap().to_ascii_lowercase();
+                assert!(head.starts_with("post /api/apps/svc_hub/email http/1.1\r\n"));
+                assert!(head.contains("content-type: application/json\r\n"));
+                assert!(head.contains("authorization: bearer synthetic.app.signature\r\n"));
+                let size = head.lines().find_map(|l| l.strip_prefix("content-length: ")).unwrap().parse::<usize>().unwrap();
+                assert_eq!(size, expected.len());
+                let mut actual = vec![0; size];
+                stream.read_exact(&mut actual).unwrap();
+                assert_eq!(actual, expected);
+                let _ = stream.write_all(reply.as_bytes());
+                listener
+            });
+            let completed = sender.send_committed(&core, a, || true);
+            // HTTP acceptance alone did not complete the durable intent.
+            assert_eq!(state(&q, &i.id), "dispatching");
+            completed.commit(&mut q).unwrap();
+            let accepted = reply.starts_with("HTTP/1.1 200 OK\r\nContent-Length: 41");
+            assert_eq!(state(&q, &i.id), if accepted { "provider_accepted" } else { "uncertain" });
+            assert!(q.begin_proxy_delivery(&i, URL, 100000).is_err());
+            assert!(q.claim_proxy("ag_email", 1, 100000, &"e".repeat(64)).unwrap().is_none());
+            let listener = join.join().unwrap();
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(listener.accept().unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        }
+    }
+    #[cfg(feature = "hub")]
+    #[test]
+    fn committed_dispatch_pre_post_refusal_stays_contained_and_sends_nothing() {
+        use crate::email::proxy::Sender;
+        use std::{cell::Cell, net::TcpListener};
+        for token_ok in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let core = fake_core(dir.path(), token_ok);
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let sender = Sender::new(
+                &format!("http://{}/", listener.local_addr().unwrap()),
+                "svc_hub",
+            )
+            .unwrap();
+            let mut store = Store::memory(Limits::default()).unwrap();
+            setup(&mut store);
+            let mut q = Queue::new(&mut store).unwrap();
+            let i = intent(&mut q, 1);
+            q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+            let a = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+            let fenced = Cell::new(false);
+            sender
+                .send_committed(&core, a, || {
+                    fenced.set(true);
+                    false
+                })
+                .commit(&mut q)
+                .unwrap();
+            assert_eq!(fenced.get(), token_ok);
+            assert_eq!(state(&q, &i.id), "uncertain");
+            assert!(reserved(&q.store.db, &i.id).unwrap());
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
+    }
     #[test]
     fn frozen_payload_conflicts_and_outbox_conversion_is_refused() {
         let mut store = Store::memory(Limits::default()).unwrap();
