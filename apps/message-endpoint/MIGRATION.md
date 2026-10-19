@@ -40,7 +40,7 @@ An empty new hub is not a lossless replacement for historical mappings.
    bindings become paused candidates; runtime registry rows, not config seeds,
    are authoritative.
 2. **Native reply continuity.** Implement the inbound/outbound reply mapping and
-   durable final-recipient receipt, with an explicit capability check between
+   durable App-asserted final-recipient receipt, with an explicit capability check between
    the upgraded hub and relay. Older or mismatched runtimes fail closed for
    migration/receipt-dependent activation; basic #159 transport success does
    not establish the capability. Persist receipt intent and result before
@@ -56,7 +56,7 @@ An empty new hub is not a lossless replacement for historical mappings.
    hardlinks, broad permissions, unsupported schema, foreign identities,
    duplicate/conflicting mappings, unknown delivery states, unfinished work,
    oversized inventories and changed source fingerprints. A missing mapping,
-   Core validation result or final offset is a blocker, not a default.
+   required operator acceptance/evidence or final offset is a blocker, not a default.
 4. **Reverse plan and interruption rehearsal.** Produce a private reversible
    journal with source/destination release and snapshot fingerprints, imported
    key ranges, pre/post offsets, stable IDs, native receipts and transaction
@@ -125,33 +125,56 @@ contract or production activation. Its source review establishes these blockers:
   bodies; there is no count-only mailbox probe. A zero count is a momentary
   observation, never a fence against later sends or another poller.
 
-Proposed smallest separate Core work, for owner/Core/security decision before
-implementation (no new endpoints are assumed available):
+### First-cutover contract (security review #203 event 5775)
 
-| Contract | Required scope | Response and refusal |
-| --- | --- | --- |
-| Final receipt check | Explicitly authorized hub/relay/fixed-recipient relationship, same workspace, exact message ID | Body-free acceptance metadata only; verify actual sender and recipient. Out-of-scope IDs have indistinguishable refusal; never mailbox enumeration, acknowledgement or read receipt |
-| Self-mailbox status | Authenticated caller's own mailbox; any operator delegation separately approved | Counts only, explicit unacknowledged/unexpired semantics and sample time; never receive/ack, body or another identity's credential |
-| Historical context continuity | Owner-approved exact old sender/new relay/fixed-recipient relationship and bounded historical parent IDs | Preserve original IDs/authors; no generic mailbox membership or workspace-wide history grant. Missing, deleted or out-of-scope parents remain errors |
+These gaps do not require new Core APIs for a first, explicitly bounded cutover.
+The following is the security-reviewed direction; it is still a proposed
+implementation contract, not permission to activate or accept historical loss.
 
-The third item is a new authorization boundary, not an App-only migration trick.
-Core owns its design, capability negotiation, revocation and tests. If it is not
-approved, a lossless migration to a **new** relay identity is blocked. Reusing an
-already-authorized identity or accepting an explicit new-context cutoff are
-alternative owner decisions, not defaults; neither is authorized here. Do not
-add the hub as a message co-recipient just to obtain visibility, impersonate the
-old bridge, copy bodies to manufacture history, or silently drop reply context.
+1. **App-asserted receipts.** Keep the pinned relay's final-message receipt as
+   `verification: app_asserted`, with the UI saying “not independently verified”.
+   It is neither a read receipt nor Core proof. Use it only for reply mapping in
+   the exact account/chat/topic/endpoint generation and fixed-recipient binding;
+   never as authorization, as a reason to widen visibility, or across bindings.
+   Do not add the hub as a co-recipient. A compromised relay can poison its own
+   mapping; record this accepted limitation explicitly in the release decision.
+   Future independent receipt checking is separate Core work, scoped to an
+   authorized exact relationship/message ID, body-free, rate limited and audited,
+   with no out-of-scope existence oracle.
+2. **Explicit history decision.** Security prefers an owner-approved
+   **new-context cutoff** for the first migration. This loses historical native
+   reply continuity and must name that loss in the owner's release authorization.
+   Preserve old IDs/authors and old read-only history; an old native reply must
+   return a fixed actionable history-unavailable result, not silently become a
+   top-level message. The alternative is an owner-created, revocable, audited
+   continuity grant for exact parent messages/new relay, designed by Core if the
+   user requests it. No App-created grant, impersonation or body copying.
+3. **Existing-identity drain report.** No new status route is needed solely for
+   this migration. After owner/release disables old admission and fences senders
+   (redirect them or restrict their Policy access to the old bridge), run a
+   report-only check using the old bridge's own authorized identity and mailbox.
+   Observe an empty receive result and `remaining_unacknowledged: 0` twice a few
+   seconds apart. Never print/persist bodies, acknowledge, forward, poll Telegram
+   or borrow that identity in the new hub. Record counts/times only. Core has no
+   consumer leases; reconcile legacy App worker leases/outboxes and ambiguous
+   sends separately. Stop the old poller before starting the new one. Repeat the
+   old-mailbox report after cutover for stragglers under the authorized operator's
+   control. Neither sample is a fence; nonzero/ambiguous evidence blocks progress.
 
-Rehearsal can proceed with synthetic snapshots and refused-capability fixtures.
-The planner must continue reporting missing receipt validation, historical
-context continuity and count-only drain evidence even when all local queues are
-terminal. Full cutover stays blocked until Core/security freeze a concrete
-contract, both runtimes advertise it, and owner/release authorizes the operation.
-For the drain, fence old admission/sends and stop polling under the reviewed
-procedure; reconcile App leases, outboxes and ambiguous sends separately, then
-sample the old identity's mailbox through its authorized operator. Neither an
-empty SQLite queue nor a self-mailbox count grants a new hub authority to inspect
-the old mailbox.
+The implementation must distinguish **missing independent Core verification**
+from **missing operator acceptance**. The inventory remains report-only and
+`ready_for_cutover:false`; it cannot accept App-asserted receipt risk, authorize a
+history cutoff, run the old identity's mailbox check, or prove senders fenced.
+Current planner capability-gap codes describe those unavailable independent
+checks; they are not a demand to implement three new Core APIs. A future reviewed
+cutover validator must require the explicit owner decision and operator evidence,
+not silently mark those codes resolved because queues are terminal.
+
+Next App-owned increment: synthetic fixtures for scoped App-asserted receipts,
+unknown historical replies, report-only drain samples and stragglers, followed by
+the native reply/receipt implementation in a separate frozen change. No automatic
+post-traffic rollback is available; keep containment and manual reconciliation
+explicit until a reverse journal is implemented and reviewed.
 
 ### Sandbox credential and backup retirement
 
@@ -213,8 +236,8 @@ request cannot be reconstructed from local status alone.
    changes. Keep only the old poller running while it drains. Drain old Core
    deliveries through **acked**, not just externally **sent**. Resolve pending,
    sending and error chunks; a sending/unknown result needs manual reconciliation
-   before replay. Read the actual old Core mailbox count as well: a SQLite report
-   cannot prove that mailbox empty. Keep a cutover journal of stable Core IDs,
+   before replay. Use the old identity’s report-only mailbox check described above; a SQLite
+   report cannot prove that mailbox empty. Keep a cutover journal of stable Core IDs,
    Telegram IDs, queue states and administrative actions in private storage.
 3. After the drain, take verified private SQLite online backups plus protected
    config/token/outbox backups under the operator's authority. Record checksums,
