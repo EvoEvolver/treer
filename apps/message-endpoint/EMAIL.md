@@ -173,3 +173,9 @@ The current directory client accepts at most 1,000 principals / 256 KiB per
 response. Larger workspaces fail closed for email binding, resume and dispatch rather than trusting partial membership. Directory
 pagination is not implemented. The owner settings overview shows at most 20
 email targets with an explicit truncation notice; other settings remain usable.
+
+## Activation follow-up
+
+[Email activation plan](EMAIL-ACTIVATION.md) records #204 source gaps, the
+uncertain-send limitation and the separate review/activation requirements.
+Existing runtime remains outbox-only; the plan does not enable real sending.
