@@ -220,7 +220,36 @@ class Reminders:
             self.store.reminder_budget_spend(agent, now)
             self.store.reminder_advance([r['issue_id'] for r in rows], now, self.schedule.factor, self.schedule.maximum)
             sent += 1
-        return {'sent': sent, 'skipped': skipped, 'due': len(due)}
+        shipped = self.shipped_tick(now)
+        return {'sent': sent + shipped, 'skipped': skipped, 'due': len(due)}
+
+    def shipped_tick(self, now):
+        """One-off 'looks shipped' reminders raised by the release Agent's canary_passed comment (see Store.shipped_pending):
+        fixed words, integer issue IDs and the 8 hex digits of the commit only; delivered once per (issue, commit)."""
+        pending = self.store.shipped_pending()
+        self.store.shipped_done([(i, sha) for i, sha, assignee in pending if assignee is None], now)   # nobody left to tell
+        by_agent = {}
+        for issue_id, sha8, assignee in pending:
+            if assignee:
+                by_agent.setdefault(assignee, []).append((issue_id, sha8))
+        sent = 0
+        for agent, pairs in by_agent.items():
+            if self.retry_after.get(agent, 0) > now or self.store.reminder_budget_left(agent, now, REMINDER_MESSAGES_PER_HOUR) <= 0 or not self.idle(agent):
+                self.retry_after[agent] = now + POLL
+                continue
+            shown = ', '.join(f'#{i} ({sha})' for i, sha in pairs[:MAX_LISTED]) + (f' (+{len(pairs) - MAX_LISTED} more)' if len(pairs) > MAX_LISTED else '')
+            key = 'issues-shipped-' + agent + '-' + hashlib.sha256(json.dumps(pairs[:MAX_LISTED]).encode()).hexdigest()[:20]
+            status, _ = self.runner(['message', 'send', '--to', agent, '--body',
+                                     f'Issues reminder: these look shipped (canary_passed commit); close them if done: {shown}.\n{self.REF}',
+                                     '--idempotency-key', key])
+            if status != 0:
+                self.retry_after[agent] = now + POLL
+                self.log(f'Issues shipped reminder not delivered to {agent} (treer exit {status})')
+                continue
+            self.store.reminder_budget_spend(agent, now)
+            self.store.shipped_done(pairs[:MAX_LISTED], now)
+            sent += 1
+        return sent
 
     def loop(self, wait=None):
         wait = wait or self.stop.wait

@@ -389,6 +389,18 @@ later interval is the previous one times `ISSUES_REMINDER_FACTOR` (default `2`) 
 The App's Policy must allow `agent show` and Messages to the assignee Agents; denials are
 skipped and logged by exit status only.
 
+## Shipped-but-open reminder (#185)
+
+With `--release-agent ag_…` (or `ISSUES_RELEASE_AGENT`; **off when unset**) a comment written by *that* Agent
+(identity from the verified principal, never from the title) whose title is `[release]` or `[deployed]`, contains
+the word `canary_passed` and names a commit as 8–40 lowercase hex digits records one signal per (issue, first 8
+hex digits). The signal is stored in SQLite (`shipped_signals`, so a restart neither loses nor repeats it) and is
+delivered once, by the reminder worker, to the issue's *current* Agent assignee when it is idle and under the hourly
+cap: `Issues reminder: these look shipped (canary_passed commit); close them if done: #12 (95ab3c1a).` plus the fixed
+`issues list …` command. Nothing else from the title reaches the Message. Issues that are `done`/`closed` or have no
+Agent assignee by then are settled without a Message. The deployed App needs `--release-agent` as a fixed argument of
+its saved command, like `--leader-agent`.
+
 ## Stale view (#185)
 
 `GET /v1/stale?hours=4&limit=50&offset=0` (hours 1..720) lists unresolved issues (not `done`/`closed`, no skip label)

@@ -392,6 +392,81 @@ class WaitingOnTest(ReminderBase):
             self.store.stale(4, 101, 0)
 
 
+R = {'id': 'ag_rel', 'kind': 'agent', 'name': 'release'}
+SHA = '95ab3c1a1d1ee43f890b3009c15279cd4f9322dd'
+
+
+class ShippedReminderTest(ReminderBase):
+    """#185 step 5: a release Agent's canary_passed comment reminds the assignee to close, once per (issue, commit)."""
+    def setUp(self):
+        super().setUp()
+        self.store = Store(self.path, clock=lambda: self.now, release_agent='ag_rel')
+
+    def release(self, issue, title, actor=R):
+        return self.act(issue, 'comment', {'body': 'details', 'title': title}, actor)
+
+    def pending(self):
+        return [p for p in self.store.shipped_pending()]
+
+    def test_only_the_release_agents_strictly_shaped_titles_count(self):
+        issue = self.issue(assignee='ag_a')
+        for actor, title in ((R, '[release] canary ' + SHA + ' canary_passed'), (R, '[deployed] #5 canary_passed ' + SHA[:8])):
+            self.release(issue, title, actor)
+        self.assertEqual({sha for _, sha, _ in self.pending()}, {'95ab3c1a', '95ab3c1a'})
+        forged = self.issue(assignee='ag_a')
+        for actor, title in ((A, '[release] ' + SHA + ' canary_passed'),                  # right words, wrong principal
+                             (B, '[release] ' + SHA + ' canary_passed'),
+                             (R, 'canary_passed ' + SHA),                                  # no [release] prefix
+                             (R, '[release] canary_passed deadbee'),                       # 7 hex digits
+                             (R, '[release] canary_passed ' + 'g' * 12),                   # not hex
+                             (R, '[release] canary_passed ' + 'a' * 41),                   # too long to be a commit
+                             (R, '[release] canary_passed 95AB3C1A'),                      # upper case is not a git SHA here
+                             (R, '[release] ci passed ' + SHA)):                           # no canary_passed
+            self.release(forged, title, actor)
+        self.assertEqual([p for p in self.pending() if p[0] == forged], [])
+
+    def test_off_without_a_release_agent_and_for_resolved_or_unassigned_issues(self):
+        plain = Store(Path(self.directory.name) / 'p.sqlite3', clock=lambda: self.now)
+        issue = plain.mutate(None, 'create', {'title': 't', 'assignee': 'ag_a'}, ACTOR, PEOPLE)[0]
+        plain.mutate(issue, 'comment', {'body': 'b', 'title': '[release] canary_passed ' + SHA}, R, PEOPLE)
+        self.assertEqual(plain.shipped_pending(), [], 'no --release-agent: the feature is off')
+        done = self.issue(assignee='ag_a'); self.act(done, 'update', {'status': 'done'}, A)
+        orphan = self.issue()
+        self.release(done, '[release] canary_passed ' + SHA); self.release(orphan, '[release] canary_passed ' + SHA)
+        self.assertEqual(self.pending(), [])
+
+    def test_delivered_once_per_issue_and_commit_and_across_restarts(self):
+        issue = self.issue(assignee='ag_a')
+        self.release(issue, '[release] canary_passed ' + SHA)
+        self.release(issue, '[release] canary_passed ' + SHA)           # the same commit again: still one signal
+        treer = FakeTreer({'ag_a': 'idle'})
+        r = self.reminders(treer)
+        self.assertEqual(len(self.pending()), 1)
+        r.tick()
+        shipped = [c for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]]
+        self.assertEqual(len(shipped), 1)
+        body = shipped[0][shipped[0].index('--body') + 1]
+        self.assertIn(f'#{issue} (95ab3c1a)', body); self.assertNotIn(SHA, body); self.assertNotIn('Secret', body)
+        reopened = Store(self.path, clock=lambda: self.now, release_agent='ag_rel')    # a restart
+        self.assertEqual(reopened.shipped_pending(), [])
+        r.tick(); self.advance(MIN); r.tick()
+        self.assertEqual(len([c for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]]), 1)
+        self.release(issue, '[release] canary_passed ' + 'b' * 40)       # a different commit is a new signal
+        self.assertEqual(len(self.pending()), 1)
+
+    def test_a_busy_assignee_is_told_later_and_a_closed_issue_is_settled_silently(self):
+        issue = self.issue(assignee='ag_a'); other = self.issue(assignee='ag_a')
+        self.release(issue, '[release] canary_passed ' + SHA); self.release(other, '[release] canary_passed ' + SHA)
+        treer = FakeTreer({'ag_a': 'working'})
+        r = self.reminders(treer)
+        r.tick()
+        self.assertEqual([c for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]], [])
+        self.act(other, 'update', {'status': 'closed'}, A)
+        treer.states['ag_a'] = 'idle'; self.advance(2 * MIN); r.tick()
+        shipped = [c[c.index('--body') + 1] for c in treer.sends() if 'look shipped' in c[c.index('--body') + 1]]
+        self.assertEqual(len(shipped), 1); self.assertIn(f'#{issue}', shipped[0]); self.assertNotIn(f'#{other}', shipped[0])
+
+
 class AggregationAndDeliveryTest(ReminderBase):
     def test_everything_due_for_one_agent_is_one_message_with_independent_state(self):
         a1 = self.issue(assignee='ag_a')

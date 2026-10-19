@@ -1,6 +1,7 @@
 """Transactional issue state. All ownership checks run under BEGIN IMMEDIATE."""
 import json
 import os
+import re
 import sqlite3
 import time
 import unicodedata
@@ -12,6 +13,9 @@ from notify import (ASK_PER_AUTHOR, HOURLY, HOURLY_ISSUES, HOURLY_WINDOW, POLICY
                     recipients_for, resolve_mentions, unresolved_mentions)
 
 STATUSES = ('open', 'in_progress', 'blocked', 'done', 'closed')
+RESOLVED = ('done', 'closed')
+SHIPPED = re.compile(r'\[(?:release|deployed)\].*\bcanary_passed\b')
+HEX = re.compile(r'(?<![0-9A-Za-z])([0-9a-f]{8,40})(?![0-9A-Za-z])')
 PRIORITIES = ('low', 'normal', 'high', 'urgent')
 
 
@@ -29,6 +33,15 @@ def fields(body, allowed):
 
 
 COMMENT_TITLE_BYTES = 200
+
+
+def shipped_sha(title):
+    """First 8 hex digits of the commit named in a `[release] … canary_passed … <8-40 hex>` comment title, else None.
+    Only the matched hex is used afterwards: no other author text reaches the reminder."""
+    if not isinstance(title, str) or not SHIPPED.match(title):
+        return None
+    found = HEX.search(title)
+    return found.group(1)[:8] if found else None
 EXCERPT_CHARS = 160
 
 
@@ -45,8 +58,9 @@ def ident(value):
 
 
 class Store:
-    def __init__(self, path, clock=time.time, leader_agent=None):
+    def __init__(self, path, clock=time.time, leader_agent=None, release_agent=None):
         self.path, self.clock = str(path), clock
+        self.release_agent = release_agent     # only THIS Agent's comments can raise a 'looks shipped' signal; unset: the feature is off
         self.leader_agent = leader_agent       # stable ID that `leader` and `user` in waiting_on resolve to (unset: those values are refused)
         os.umask(0o077)
         Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -74,6 +88,8 @@ class Store:
                     subject TEXT NOT NULL, old TEXT NOT NULL, new TEXT NOT NULL);
                 CREATE TABLE IF NOT EXISTS notify_ask_budget(recipient TEXT NOT NULL, author TEXT NOT NULL, hour INTEGER NOT NULL,
                     pushes INTEGER NOT NULL, PRIMARY KEY(recipient, author, hour));
+                CREATE TABLE IF NOT EXISTS shipped_signals(issue_id INTEGER NOT NULL, sha8 TEXT NOT NULL, created_at REAL NOT NULL,
+                    sent_at REAL, PRIMARY KEY(issue_id, sha8));
                 CREATE TABLE IF NOT EXISTS reminder_budget(recipient TEXT NOT NULL, hour INTEGER NOT NULL, messages INTEGER NOT NULL,
                     PRIMARY KEY(recipient, hour));
                 CREATE TABLE IF NOT EXISTS reminder_backoff(issue_id INTEGER PRIMARY KEY, assignee TEXT NOT NULL, version INTEGER NOT NULL,
@@ -406,6 +422,10 @@ class Store:
             if mentions:
                 event['mentions'] = mentions
             db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(issue), issue_id))
+            if action == 'comment' and self.release_agent and actor['id'] == self.release_agent:
+                sha8 = shipped_sha(body.get('title'))
+                if sha8 and issue['status'] not in RESOLVED and (issue.get('assignee') or '').startswith('ag_'):
+                    db.execute('INSERT OR IGNORE INTO shipped_signals(issue_id,sha8,created_at) VALUES(?,?,?)', (issue_id, sha8, now))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
             names = {p['id']: p.get('name', p['id']) for p in directory}
             notice = notice_for(action, actor, before, issue, changed, mentions, names, body.get('title') if action == 'comment' else None)
@@ -615,6 +635,24 @@ class Store:
                     continue
                 db.execute('INSERT OR REPLACE INTO reminder_backoff(issue_id,assignee,version,interval,next_due,count) VALUES(?,?,?,?,?,0)',
                            (issue_id, recipient, version, first, max(now, start + first)))
+
+    def shipped_pending(self):
+        """(issue ID, sha8, assignee) of recorded 'looks shipped' signals not yet delivered. Signals for issues that were
+        resolved or lost their Agent assignee in the meantime are settled without a message."""
+        with self.connect() as db:
+            rows = db.execute('SELECT issue_id,sha8 FROM shipped_signals WHERE sent_at IS NULL ORDER BY created_at,issue_id').fetchall()
+            items = self.all(db)
+        out = []
+        for row in rows:
+            issue = items.get(row['issue_id'])
+            assignee = issue['assignee'] if issue else None
+            out.append((row['issue_id'], row['sha8'], assignee if issue and issue['status'] not in RESOLVED and (assignee or '').startswith('ag_') else None))
+        return out
+
+    def shipped_done(self, pairs, now):
+        with self.connect() as db:
+            for issue_id, sha8 in pairs:
+                db.execute('UPDATE shipped_signals SET sent_at=? WHERE issue_id=? AND sha8=?', (now, issue_id, sha8))
 
     def reminder_budget_left(self, recipient, now, limit):
         """Messages a recipient may still get this hour (a cap on reminder volume however many issues point at them)."""

@@ -448,6 +448,8 @@ def parse_args(argv=None):
     # Managed Apps deployed with scripts/app-deploy cannot carry environment variables in their saved command; the
     # deployment's fixed arguments can carry this one. It overrides ISSUES_PROXY_URL.
     parser.add_argument('--proxy-url', help='trusted Treer Proxy public URL (default: $ISSUES_PROXY_URL)')
+    parser.add_argument('--release-agent', help='stable ID of the Agent whose `[release] … canary_passed <sha>` comments remind assignees to close shipped issues '
+                        '(default: $ISSUES_RELEASE_AGENT; unset: the feature is off)')
     parser.add_argument('--leader-agent', help='stable ID of the leader Agent that `leader`/`user` in waiting_on and ownerless issues '
                         'resolve to (default: $ISSUES_LEADER_AGENT; unset: those are refused / not reminded)')
     return parser.parse_args(argv)
@@ -468,7 +470,10 @@ def main(argv=None):
     leader = arguments.leader_agent or os.environ.get('ISSUES_LEADER_AGENT') or None
     if leader is not None and not re.fullmatch(r'ag_[0-9a-f]{32}', leader):
         raise ValueError('the leader Agent must be a stable Agent ID (ag_ plus 32 hex digits)')
-    application = Application(Store(os.environ.get('ISSUES_DB', '.treer/apps/issues/issues.sqlite3'), leader_agent=leader))
+    release = arguments.release_agent or os.environ.get('ISSUES_RELEASE_AGENT') or None
+    if release is not None and not re.fullmatch(r'ag_[0-9a-f]{32}', release):
+        raise ValueError('the release Agent must be a stable Agent ID (ag_ plus 32 hex digits)')
+    application = Application(Store(os.environ.get('ISSUES_DB', '.treer/apps/issues/issues.sqlite3'), leader_agent=leader, release_agent=release))
     server = Server((host, int(port)), application)
     print(f'Issues listening on {host}:{server.server_port}', flush=True)
     if notify_enabled():
