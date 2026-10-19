@@ -76,8 +76,14 @@ association is not proof of mailbox ownership.
 Core source `auth/email.rs` stores `sending` before the provider call and `sent`
 after success. Failed/stale attempts can be retried; a provider/network failure
 or crash between external acceptance and the `sent` update can be ambiguous.
-The existing App helper collapses several cases into `Retry`. Therefore the
-current code does **not** guarantee exactly-once external email.
+The App helper now returns `Uncertain` for every non-success or unreadable
+result after attempting POST, including redirects, 429, `email_in_progress`,
+network failures and malformed success. `Retry` is limited to a local fence
+refusal before POST. Token acquisition failure is also pre-POST. These local
+results cannot override a previously uncertain attempt. Valid `sent` is provider
+acceptance only. This classifier is not wired into the outbox worker and does
+not yet supply the persistent outcome journal described below. The current code
+does **not** guarantee exactly-once external email.
 
 Before enabling real sends, use this conservative persisted outcome model:
 
