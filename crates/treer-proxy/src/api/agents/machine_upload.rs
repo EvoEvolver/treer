@@ -659,6 +659,19 @@ struct LeaseGuard {
     armed: bool,
 }
 
+impl LeaseGuard {
+    /// Releases the lease before the response leaves: a client that retries
+    /// at once after a 408 or 409 must not meet the previous lease still
+    /// being released on a background task (CI race on d9e09813). `Drop`
+    /// stays as the fallback for panics and cancelled requests.
+    async fn release(&mut self) {
+        if self.armed {
+            self.armed = false;
+            let _ = self.store.release_lease(&self.upload_id).await;
+        }
+    }
+}
+
 impl Drop for LeaseGuard {
     fn drop(&mut self) {
         if self.armed {
@@ -793,11 +806,19 @@ pub(crate) async fn put_machine_upload_part(
     // Under the lease, the Controller's view is adopted before the offset
     // check, so a part the Controller already holds is never refused on the
     // Proxy's stale mirror.
-    let (row, reconciled) = reconcile(&state, &auth, &store, &caller, row).await?;
+    let (row, reconciled) = match reconcile(&state, &auth, &store, &caller, row).await {
+        Ok(reconciled) => reconciled,
+        Err(failure) => {
+            guard.release().await;
+            return Err(failure);
+        }
+    };
     if !reconciled {
+        guard.release().await;
         return Ok(unreconciled(&row));
     }
     if row.state != UploadState::Active {
+        guard.release().await;
         return Ok(closing(conflict(
             "upload_not_active",
             "the upload has ended",
@@ -809,6 +830,7 @@ pub(crate) async fn put_machine_upload_part(
             .parts
             .iter()
             .any(|p| p.offset == query.offset && p.length == length && p.sha256 == sha256);
+        guard.release().await;
         if known && end <= row.committed_offset {
             return Ok(Json(json!({"committed_offset": row.committed_offset, "size": row.size, "idempotent": true})).into_response());
         }
@@ -823,6 +845,7 @@ pub(crate) async fn put_machine_upload_part(
             "the committed offset moved; query status and resume from it",
         );
         failure.error.hint = Some(vec![format!("committed_offset={}", row.committed_offset)]);
+        guard.release().await;
         return Ok(closing(failure));
     }
     let outcome = stream_part(&state, &row, query.offset, length, &sha256, request).await;
@@ -839,7 +862,12 @@ pub(crate) async fn put_machine_upload_part(
                     .into_response(),
             )
         }
-        Err(error) => Ok(closing(error.into())),
+        Err(error) => {
+            // Release before answering: the next attempt (a retry after 408
+            // idle, a timeout or a transfer error) must find the lease free.
+            guard.release().await;
+            Ok(closing(error.into()))
+        }
     }
 }
 
