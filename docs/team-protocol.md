@@ -166,6 +166,73 @@ are not failures; new compile errors and new warnings in the changed code are.
 This rule is about catching platform breakage early. It does not replace the
 exact-SHA gate, CI, the five-platform native build or the Windows runner jobs.
 
+## Real-browser acceptance for Console, browser and embedding paths (v1.3)
+
+Three trains in two days passed every gate, reached `canary_passed` and were
+still broken in a real browser: the upload dialog (#166), CORS for the
+cross-origin Console (#173) and embedded Agent interface isolation (#156). In
+#156 the Console's own Content-Security-Policy `frame-src` allowed only the
+Proxy origin, so Chromium silently blocked the new `ag-` iframe (core-dev-2's
+diagnosis); the three-engine matrix passed because Playwright served the
+Console without the deployed Worker's headers, and the live check had been
+left to "the user's Console session". That is no longer an acceptable way to
+ship.
+
+**Scope.** Any change to a Console, browser or embedding path: iframe, sandbox,
+CSP or COOP, cookies, CORS, auth handoff, upload or download UI, or anything
+else a browser renders or enforces.
+
+**Rules.**
+
+1. Such a change passes a **real-browser acceptance on canary against a real
+   launcher-backed agent before it is pushed to `main` for the user**. "Live
+   browser acceptance unverified" is a release blocker, not a closure note, and
+   a ticket is not closed with checks left for the user's own Console session.
+   We verify; the user does not.
+2. Release keeps a **permanent acceptance fixture on canary-a**: the launcher
+   installed plus one disposable launcher agent with a fake harness, no real
+   credentials and no real provider account. On every Console train it
+   exercises the embedded view and the standalone view. Until the fixture
+   passes, no Console, browser or embedding change ships.
+3. The acceptance runs in real Chromium and, for embedding, also WebKit and
+   Firefox, against the **deployed headers** (the real Worker and Proxy
+   responses), never against routes that Playwright serves itself. It records
+   response header values, status codes and a pass or fail per step: mint,
+   bootstrap, cookie, the Agent UI inside the frame, a popup from the frame,
+   logout ending the embed session, the standalone view, and the **negative
+   checks** of the security rules (a cross-origin request with the embed cookie
+   refused, strict refusal and the compatibility choice), not only the happy
+   path.
+4. The fixture session comes from the canary-tester environment and is never
+   printed, stored in logs, traces, screenshots or HAR files. The fixture agent
+   lives on canary-a only and is disposable.
+5. A canary deploy that fails the acceptance, or a report from the leader,
+   security or the user that a Console path is broken, is **rolled back by
+   release at once, without waiting for a diagnosis**. A fix-forward that
+   touches a security rule (Fetch Metadata, `frame-ancestors`, CSP on embed
+   responses, origin or nonce checks, the sandbox) goes back to security before
+   it ships; nobody loosens a rule to make a frame load.
+
+**Rollback procedure (release).**
+
+1. Before pushing any Console, browser or embedding change, prepare a revert
+   branch (`git revert -m 1 <merge>` of that change on top of the candidate) and
+   keep the previous `canary_passed` checkout, with its `dist/` and checkpoint,
+   which hygiene never removes.
+2. To roll back, redeploy the previous `canary_passed` SHA with the canary
+   script from its own checkout (`scripts/canary-release.py <sha> --resume`):
+   it reuses the green gate, CI and native evidence for that SHA, redeploys the
+   Console Worker and the Proxy together, runs health, artifact byte checks and
+   the two-machine E2E, and the Policy default-install check follows. Keep the
+   first run's logs under another name.
+3. Verify: the Proxy `/api/auth/config` capability list no longer contains the
+   new capability, the header probe and a real Chromium login and logout pass,
+   and the fixture's standalone and embedded views work.
+4. Post the rollback on the ticket and on #98 with the SHA, Proxy deployment id
+   and what was and was not verified. `main` keeps the bad merge until a
+   fix-forward or the prepared revert is gated and shipped through the normal
+   train.
+
 ## One full gate at a time on the shared machine
 
 Up to five agents used to run full gates (Rust with PostgreSQL/NATS, Playwright
