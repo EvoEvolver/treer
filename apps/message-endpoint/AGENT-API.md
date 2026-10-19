@@ -134,8 +134,10 @@ recipient read the notice; exhausted sends require operator investigation.
 Limits: five non-retired bindings created per caller Agent, twenty active
 bindings total; ten non-pause configuration attempts per caller per60 seconds,
 including failed mutations. Pause is containment and exempt from this write
-quota. A separate cheap HTTP-admission bucket allows100 requests/socket source/10
-seconds with bounded concurrency before the in-memory audit queue. Verification
+quota. A separate rate-only HTTP-admission bucket allows1000 requests/socket source/1
+second before the in-memory audit queue. It holds no permit across the request
+and adds no concurrency restriction. The existing16 work slots and separate
+verification admission still apply. Verification
 admission precedes Proxy calls: at mostfour concurrent
 globally, two per socket source, twenty requests/source/10 seconds, bounded512
 source/negative entries. Forwarded clients may share the same source quota.

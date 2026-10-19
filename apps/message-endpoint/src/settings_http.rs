@@ -152,7 +152,7 @@ pub struct Settings {
     email: Option<Arc<crate::email_threads::Service>>,
     slots: Arc<Semaphore>,
     writes: WriteGate,
-    request_admission: crate::verification_gate::Gate,
+    request_admission: crate::verification_gate::AuditGate,
     exports: WriteGate,
     token_attempts: WriteGate,
     html: &'static str,
@@ -399,8 +399,8 @@ async fn handle(
     }
     let id: String = nonce.iter().map(|v| format!("{v:02x}")).collect();
     // Cheap in-memory admission precedes the bounded nonblocking audit queue.
-    let _admission = match app.request_admission.enter_audit(peer.ip()) {
-        Ok(permit) => permit,
+    match app.request_admission.admit(peer.ip()) {
+        Ok(()) => (),
         Err(e) => {
             if let Some(audit) = &app.management_audit {
                 let _ = audit(&id, None, 429);
@@ -599,8 +599,8 @@ async fn configuration_request(
     }
     let request_id: String = nonce.iter().map(|v| format!("{v:02x}")).collect();
     // Cheap in-memory admission precedes the bounded nonblocking audit queue.
-    let _admission = match app.request_admission.enter_audit(peer.ip()) {
-        Ok(permit) => permit,
+    match app.request_admission.admit(peer.ip()) {
+        Ok(()) => (),
         Err(e) => {
             if let Some(audit) = &app.management_audit {
                 let _ = audit(&request_id, None, 429);
@@ -1100,8 +1100,8 @@ mod tests {
             queue.record(id, actor, status)
         }));
         let peer: SocketAddr = "127.0.0.1:1234".parse().unwrap();
-        for _ in 0..100 {
-            drop(settings.request_admission.enter_audit(peer.ip()).unwrap());
+        for _ in 0..crate::verification_gate::AUDIT_REQUESTS {
+            settings.request_admission.admit(peer.ip()).unwrap();
         }
         let settings = Arc::new(settings);
         let _busy = shared.lock().unwrap();
