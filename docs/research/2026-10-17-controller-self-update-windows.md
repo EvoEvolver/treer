@@ -182,7 +182,7 @@ missing fields refused at every typed object level. Their fields are:
 | Binding | `workspace_id`, `server_id`, canonical nonnil `job_id`, positive `revision` |
 | Provenance | Lowercase hex `release_sha`/`artifact_source_sha` (40), `sums_sha256` (64) |
 | Images | Exactly `controller` and `cli`, each with exactly `old` and `new` objects |
-| Object | `volume_serial` (u32), `file_id` (u64), `bytes` (u64), `sha256`, `links`, `attributes`, `acl_policy` |
+| Object | `filesystem` (`ntfs` only), `volume_serial` (u32), `file_id` (u64), `bytes` (u64), `sha256`, `links`, `attributes`, `acl_policy` |
 
 Parsing requires an independently supplied expected binding. It validates the
 marker envelope/fields/binding first, then the receipt envelope and whole-byte
@@ -191,8 +191,16 @@ receipt JSON and a mismatched marker asserts the digest refusal happens first.
 The parsed binding must match that expectation again. All four recorded object
 identities must differ; equal hashes remain valid for different identities.
 Object lengths range from 1 byte through 256 MiB, with lowercase SHA-256, one link,
-non-directory/non-reparse attributes and the sole `owner_system_protected` policy
-label. There are no caller-supplied paths, SIDs or arbitrary diagnostics.
+and the sole `owner_system_protected` policy label. The attribute allowlist is
+exactly NORMAL alone, ARCHIVE alone, READONLY alone or ARCHIVE | READONLY;
+zero, all other bits and NORMAL combined with any other flag are refused.
+Uppercase digest spellings are refused in both the marker and receipt objects.
+The identity shape deliberately uses the native adapter's NTFS-only boundary:
+ReFS and every other filesystem are unsupported. The serialized `ntfs` label
+alone proves nothing; a future observer must independently verify NTFS on the
+pinned volume handle before using the BY_HANDLE volume/file identity, and
+refuse if it cannot do so. There are no caller-supplied paths, SIDs or arbitrary
+diagnostics.
 
 These checks validate serialized field shapes and pair consistency only. They
 do not authenticate the expected binding, supply the external durable anchor,

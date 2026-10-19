@@ -66,9 +66,19 @@ enum AclPolicy {
     OwnerSystemProtected,
 }
 
+// This draft deliberately matches the native adapter's NTFS-only boundary.
+// The label is not evidence: a future observer must verify the filesystem
+// through its pinned volume handle before trusting the BY_HANDLE identity.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum Filesystem {
+    Ntfs,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Object {
+    filesystem: Filesystem,
     volume_serial: u32,
     file_id: u64,
     bytes: u64,
@@ -84,7 +94,9 @@ impl Object {
             && self.bytes <= 256 * 1024 * 1024
             && hex(&self.sha256, 64)
             && self.links == 1
-            && self.attributes & (0x10 | 0x400) == 0 // directory / reparse point
+            // NORMAL alone, or ARCHIVE/READONLY (including their combination).
+            // Every other attribute, and NORMAL mixed with flags, is refused.
+            && matches!(self.attributes, 0x80 | 0x20 | 0x01 | 0x21)
     }
 
     fn identity(&self) -> (u32, u64) {
@@ -169,6 +181,7 @@ fn parse_pair(receipt: &[u8], marker: &[u8], expected: &Binding) -> Result<Draft
 
 fn fixture() -> DraftFields {
     let object = |file_id| Object {
+        filesystem: Filesystem::Ntfs,
         volume_serial: 7,
         file_id,
         bytes: 123,
@@ -390,4 +403,80 @@ fn draft_fields_reject_bad_provenance_objects_and_paths() {
             "{pointer}"
         );
     }
+}
+
+#[test]
+fn draft_objects_require_ntfs_and_only_plain_image_attributes() {
+    let fields = fixture();
+    let value = serde_json::to_value(&fields).unwrap();
+    for attributes in [0x80, 0x20, 0x01, 0x21] {
+        let mut good = value.clone();
+        good["images"]["controller"]["new"]["attributes"] = attributes.into();
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&good).unwrap(), &fields.binding);
+        assert!(parse_pair(&receipt, &marker, &fields.binding).is_ok());
+    }
+    // Each bit outside ARCHIVE/READONLY/NORMAL must refuse even with ARCHIVE.
+    // This includes unknown future bits, not just today's problematic flags.
+    for bit in 0..32 {
+        let flag = 1_u32 << bit;
+        if flag & (0x80 | 0x20 | 0x01) != 0 {
+            continue;
+        }
+        let mut bad = value.clone();
+        bad["images"]["controller"]["new"]["attributes"] = (0x20 | flag).into();
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&bad).unwrap(), &fields.binding);
+        assert!(parse_pair(&receipt, &marker, &fields.binding).is_err());
+    }
+    for attributes in [0, 0x81, 0xa0, 0xa1] {
+        let mut bad = value.clone();
+        bad["images"]["controller"]["new"]["attributes"] = attributes.into();
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&bad).unwrap(), &fields.binding);
+        assert!(parse_pair(&receipt, &marker, &fields.binding).is_err());
+    }
+    for filesystem in ["refs", "fat32", "NTFS", ""] {
+        let mut bad = value.clone();
+        bad["images"]["controller"]["new"]["filesystem"] = filesystem.into();
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&bad).unwrap(), &fields.binding);
+        assert!(parse_pair(&receipt, &marker, &fields.binding).is_err());
+    }
+    let mut missing = value;
+    missing["images"]["controller"]["new"]
+        .as_object_mut()
+        .unwrap()
+        .remove("filesystem");
+    let (receipt, marker) = envelopes(&serde_json::to_vec(&missing).unwrap(), &fields.binding);
+    assert!(parse_pair(&receipt, &marker, &fields.binding).is_err());
+}
+
+#[test]
+fn draft_pair_rejects_uppercase_digest_spellings() {
+    use crate::windows_update_envelope::encode;
+    let fields = fixture();
+    let (receipt, marker) = envelopes(&serde_json::to_vec(&fields).unwrap(), &fields.binding);
+    let mut upper_marker: Marker =
+        serde_json::from_slice(decode(&marker, Kind::Marker).unwrap()).unwrap();
+    upper_marker.receipt_sha256.make_ascii_uppercase();
+    assert_ne!(upper_marker.receipt_sha256, digest(&receipt));
+    let upper_marker = encode(&serde_json::to_vec(&upper_marker).unwrap(), Kind::Marker).unwrap();
+    assert_eq!(
+        parse_pair(&receipt, &upper_marker, &fields.binding).unwrap_err(),
+        "marker_binding_mismatch"
+    );
+    let mut upper_receipt = fields.clone();
+    upper_receipt
+        .images
+        .controller
+        .new
+        .sha256
+        .make_ascii_uppercase();
+    // Recompute the whole-envelope marker so refusal proves the inner digest
+    // spelling check, rather than a mismatched envelope digest.
+    let (receipt, marker) = envelopes(
+        &serde_json::to_vec(&upper_receipt).unwrap(),
+        &fields.binding,
+    );
+    assert_eq!(
+        parse_pair(&receipt, &marker, &fields.binding).unwrap_err(),
+        "invalid_receipt_fields"
+    );
 }
