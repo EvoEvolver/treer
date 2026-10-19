@@ -239,6 +239,37 @@ impl ReasonClaim {
     }
 }
 
+// Untrusted-label compatibility only, not evidence verification or permission.
+fn reason_kind_matches_entry(
+    kind: ReasonKind,
+    prior: &ClaimedState,
+    slots: [[layout::Object; 3]; 2],
+) -> bool {
+    use layout::{Step::*, Transaction::*};
+    if inspect_claim(prior, slots[0], slots[1]) != layout::PairInspection::Consistent {
+        return false;
+    }
+    let operation_started =
+        |step| matches!(step, MoveOldIntent | OldMoved | PublishIntent | Published);
+    match kind {
+        ReasonKind::ControllerActivationFailed => {
+            prior.transaction == Activating && operation_started(prior.controller_step)
+        }
+        ReasonKind::NewControllerUnhealthy => {
+            prior.transaction == Activating && prior.controller_step == Published
+        }
+        ReasonKind::CliActivationFailed => {
+            prior.transaction == CoreHealthy && operation_started(prior.cli_step)
+        }
+        ReasonKind::FinalHealthFailed => {
+            prior.transaction == CoreHealthy && prior.cli_step == Published
+        }
+        ReasonKind::DeadlineExceeded | ReasonKind::HumanAbort => {
+            matches!(prior.transaction, Prepared | Activating | CoreHealthy)
+        }
+    }
+}
+
 impl DraftFields {
     fn valid(&self) -> bool {
         let p = &self.provenance;
@@ -1861,6 +1892,122 @@ fn reason_schema_slice_preserves_reference_but_refuses_creation_or_replacement()
                 };
                 let changed = serde_json::from_value(changed).unwrap();
                 assert_eq!(check(&changed), Err("rollback_reason_changed"));
+            }
+        }
+    }
+}
+
+#[test]
+fn reason_kind_table_requires_matching_forward_phase_step_and_layout() {
+    use layout::{Object::*, Step::*, Transaction::*};
+    // Independent explicit row inventory, not the helper's range predicate.
+    let rows = [
+        (
+            Activating,
+            MoveOldIntent,
+            ReasonKind::ControllerActivationFailed,
+        ),
+        (Activating, OldMoved, ReasonKind::ControllerActivationFailed),
+        (
+            Activating,
+            PublishIntent,
+            ReasonKind::ControllerActivationFailed,
+        ),
+        (
+            Activating,
+            Published,
+            ReasonKind::ControllerActivationFailed,
+        ),
+        (Activating, Published, ReasonKind::NewControllerUnhealthy),
+        (CoreHealthy, MoveOldIntent, ReasonKind::CliActivationFailed),
+        (CoreHealthy, OldMoved, ReasonKind::CliActivationFailed),
+        (CoreHealthy, PublishIntent, ReasonKind::CliActivationFailed),
+        (CoreHealthy, Published, ReasonKind::CliActivationFailed),
+        (CoreHealthy, Published, ReasonKind::FinalHealthFailed),
+    ];
+    let kinds = [
+        ReasonKind::ControllerActivationFailed,
+        ReasonKind::NewControllerUnhealthy,
+        ReasonKind::CliActivationFailed,
+        ReasonKind::FinalHealthFailed,
+        ReasonKind::DeadlineExceeded,
+        ReasonKind::HumanAbort,
+    ];
+    let steps = [
+        Original,
+        MoveOldIntent,
+        OldMoved,
+        PublishIntent,
+        Published,
+        MoveNewAsideIntent,
+        NewAside,
+        RestoreOldIntent,
+        Restored,
+    ];
+    let layouts = [[Old, New, Absent], [Absent, New, Old], [New, Absent, Old]];
+    let mut accepted = [0; 6];
+    let mut refused = [0; 6];
+    for phase in [
+        Prepared,
+        Activating,
+        CoreHealthy,
+        Complete,
+        RollbackCli,
+        RollbackController,
+        RolledBack,
+    ] {
+        for c in steps {
+            for l in steps {
+                for cs in layouts {
+                    for ls in layouts {
+                        for flags in 0..8 {
+                            let state = ClaimedState {
+                                transaction: phase,
+                                controller_step: c,
+                                cli_step: l,
+                                new_health_recorded: flags & 1 != 0,
+                                final_health_recorded: flags & 2 != 0,
+                                old_health_recorded: flags & 4 != 0,
+                            };
+                            let consistent =
+                                inspect_claim(&state, cs, ls) == layout::PairInspection::Consistent;
+                            for (index, kind) in kinds.into_iter().enumerate() {
+                                let moving = if phase == CoreHealthy { l } else { c };
+                                let expected_label = if index >= 4 {
+                                    [Prepared, Activating, CoreHealthy].contains(&phase)
+                                } else {
+                                    rows.contains(&(phase, moving, kind))
+                                };
+                                let expected = consistent && expected_label;
+                                assert_eq!(
+                                    reason_kind_matches_entry(kind, &state, [cs, ls]),
+                                    expected,
+                                    "{kind:?}: {state:?} {cs:?}/{ls:?}"
+                                );
+                                if expected {
+                                    accepted[index] += 1;
+                                } else {
+                                    refused[index] += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(accepted.into_iter().all(|count| count > 0));
+    assert!(refused.into_iter().all(|count| count > 0));
+    for (state, slots) in forward_fixture_trace() {
+        for kind in kinds {
+            for image in 0..2 {
+                for slot in 0..3 {
+                    for uncertain in [Unknown, Unreadable] {
+                        let mut damaged = slots;
+                        damaged[image][slot] = uncertain;
+                        assert!(!reason_kind_matches_entry(kind, &state, damaged));
+                    }
+                }
             }
         }
     }

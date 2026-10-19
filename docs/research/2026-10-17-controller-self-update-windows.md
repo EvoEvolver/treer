@@ -517,6 +517,14 @@ guard alone never accepts an entry. Forward edges require null throughout.
 The entry guard must also enforce this closed kind/phase/step table against the
 verified predecessor claim. All rows remain subject to the independent layout,
 ownership and evidence gates; a matching label alone proves no failure.
+An independent private test-only compatibility helper now enforces the table
+against a classifier-consistent predecessor and both synthetic layouts. Its
+test crosses all seven phases, both nine-step sets, three layouts per image,
+all eight health claims and all six kinds against an explicit row inventory;
+each kind must have accepted and refused cases. Unknown/unreadable slots are
+also refused. This helper is not yet connected to record entry: predecessor
+digest/revision binding and reason creation remain unwired, and successful
+label compatibility is not a verified reason capability.
 
 | Kind | Allowed predecessor phase and moving step | Required evidence meaning |
 | --- | --- | --- |
