@@ -608,12 +608,15 @@ async fn proxy_agent_interface_origin(
 }
 
 /// Whether a request on an Agent origin may use the embed cookie at all
-/// (security 5125/5129): exactly one `Sec-Fetch-Site: same-origin`; or, for a
-/// WebSocket upgrade with no Fetch Metadata, exactly one `Origin` header whose
-/// serialization is byte-equal to this Agent origin. `none`, `same-site`,
-/// `cross-site`, a missing header on an ordinary request, duplicated headers
-/// and any other Origin all answer `false`: the cookie is then ignored, never
-/// an error.
+/// (security 5125/5129/5165). Ordinary requests: exactly one
+/// `Sec-Fetch-Site: same-origin`, nothing else. Upgrades: exactly one `Origin`
+/// header byte-equal to this Agent origin is required in every case, and
+/// `Sec-Fetch-Site`, when present, must be exactly one `same-origin`; the
+/// header may be absent only on a real WebSocket upgrade (`Upgrade: websocket`
+/// with a `Connection` header containing `upgrade`), because Chromium sends no
+/// Fetch Metadata on an iframe's same-origin handshake. `none`, `same-site`,
+/// `cross-site`, duplicated headers, any other Origin and any other Upgrade
+/// value all answer `false`: the cookie is then ignored, never an error.
 pub(super) fn embed_cookie_context(
     headers: &HeaderMap,
     upgraded: bool,
@@ -621,13 +624,13 @@ pub(super) fn embed_cookie_context(
     hostname: &str,
 ) -> Result<bool, ApiFailure> {
     let sites: Vec<&HeaderValue> = headers.get_all("sec-fetch-site").iter().collect();
-    match sites.as_slice() {
-        [site] => return Ok(*site == "same-origin"),
-        [] => {}
+    let same_origin_site = match sites.as_slice() {
+        [site] => Some(*site == "same-origin"),
+        [] => None,
         _ => return Ok(false),
-    }
+    };
     if !upgraded {
-        return Ok(false);
+        return Ok(same_origin_site == Some(true));
     }
     let origins: Vec<&HeaderValue> = headers.get_all(header::ORIGIN).iter().collect();
     let [origin] = origins.as_slice() else {
@@ -637,7 +640,31 @@ pub(super) fn embed_cookie_context(
         .url_for_hostname(hostname)?
         .origin()
         .ascii_serialization();
-    Ok(origin.as_bytes() == expected.as_bytes())
+    if origin.as_bytes() != expected.as_bytes() {
+        return Ok(false);
+    }
+    match same_origin_site {
+        Some(ok) => Ok(ok),
+        None => Ok(is_websocket_upgrade(headers)),
+    }
+}
+
+/// `Upgrade: websocket` (case-insensitive) with a `Connection` header whose
+/// comma-separated tokens include `upgrade`; any other upgrade (h2c, a bare
+/// `Upgrade` header) is not a WebSocket handshake.
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    let websocket = headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket"));
+    let connection_upgrade = headers.get_all(header::CONNECTION).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    });
+    websocket && connection_upgrade
 }
 
 /// Same-site sibling defence for every ingress host (#143 Phase 2 V4): a

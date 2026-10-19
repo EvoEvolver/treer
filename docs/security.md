@@ -1303,12 +1303,15 @@ answers `503 embedded_ui_requires_isolated_origin`). Mint errors and
 timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged. Embed
 sessions are separate rows from standalone sessions: the token of one never
 authenticates through the other cookie. The request context is decided before
-any credential is read: the embed cookie grants authority only when the request
-carries exactly one `Sec-Fetch-Site: same-origin` or, for a WebSocket upgrade
-with no Fetch Metadata (Chromium's same-origin handshake from an iframe), exactly
-one `Origin` header byte-equal to this Agent origin. In every other context
+any credential is read: for an ordinary request the embed cookie grants authority
+only with exactly one `Sec-Fetch-Site: same-origin`; for an upgrade it
+additionally requires exactly one `Origin` header byte-equal to this Agent
+origin in every case, and `Sec-Fetch-Site` may be absent only on a real WebSocket
+upgrade (`Upgrade: websocket` with `Connection: upgrade`), because Chromium sends
+no Fetch Metadata on an iframe's same-origin handshake. In every other context
 (`none`, `same-site`, `cross-site`, a missing header on an ordinary request,
-duplicated headers, any other `Origin`) the embed cookie is treated as absent
+duplicated headers, any other or missing `Origin` on an upgrade, any other
+`Upgrade` value) the embed cookie is treated as absent
 and the request takes the standalone path: the standalone cookie if the browser
 sent one, else the authorize redirect for a navigation or
 `401 invalid_ingress_authorization`. An unusable embed cookie therefore never

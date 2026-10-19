@@ -706,38 +706,111 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
             .await
             .unwrap();
     }
-    // WebSocket upgrades without Fetch Metadata: the Origin must be exactly
-    // this origin; anything else is refused by the ingress Origin rule or
-    // never reaches the embed cookie, and is never served as embedded.
-    for origin in [
-        "https://evil.example",
-        &*format!("https://x.{AGENT_HOST}"),
-        &*format!("http://{AGENT_HOST}"),
-        &*format!("https://user@{AGENT_HOST}/extra"),
-        &*format!("https://{AGENT_HOST}:8443"),
-    ] {
-        let (status, _) = error_of(
-            send(
+    // Upgrades (security 5165): exactly one Origin byte-equal to this origin
+    // is required in BOTH site modes (no Fetch Metadata, and same-origin);
+    // the missing-metadata exception is for real WebSocket upgrades only. A
+    // failing case is never served as embedded: it is refused by the gateway
+    // (403), or takes the standalone path (303 or 401).
+    let exact = format!("https://{AGENT_HOST}");
+    for site in [None, Some("same-origin")] {
+        for (label, origins, upgrade, connection) in [
+            ("missing", vec![], "websocket", "Upgrade"),
+            ("null", vec!["null"], "websocket", "Upgrade"),
+            (
+                "foreign",
+                vec!["https://evil.example"],
+                "websocket",
+                "Upgrade",
+            ),
+            (
+                "nested",
+                vec![&*format!("https://x.{AGENT_HOST}")],
+                "websocket",
+                "Upgrade",
+            ),
+            (
+                "http",
+                vec![&*format!("http://{AGENT_HOST}")],
+                "websocket",
+                "Upgrade",
+            ),
+            (
+                "userinfo",
+                vec![&*format!("https://user@{AGENT_HOST}/extra")],
+                "websocket",
+                "Upgrade",
+            ),
+            (
+                "port",
+                vec![&*format!("https://{AGENT_HOST}:8443")],
+                "websocket",
+                "Upgrade",
+            ),
+            (
+                "duplicate",
+                vec![exact.as_str(), exact.as_str()],
+                "websocket",
+                "Upgrade",
+            ),
+            (
+                "h2c",
+                vec![exact.as_str()],
+                "h2c",
+                "Upgrade, HTTP2-Settings",
+            ),
+            (
+                "no-connection-upgrade",
+                vec![exact.as_str()],
+                "websocket",
+                "keep-alive",
+            ),
+        ] {
+            // A same-origin site with an h2c or keep-alive upgrade still has the
+            // exact Origin and same-origin metadata, which the rule admits; the
+            // metadata-less exception is what these two variants test.
+            if site.is_some() && matches!(label, "h2c" | "no-connection-upgrade") {
+                continue;
+            }
+            let mut request = Request::builder()
+                .uri("/")
+                .header(header::HOST, AGENT_HOST)
+                .header(header::COOKIE, &embed)
+                .header(header::UPGRADE, upgrade)
+                .header(header::CONNECTION, connection);
+            if let Some(site) = site {
+                request = request.header("sec-fetch-site", site);
+            }
+            for origin in &origins {
+                request = request.header(header::ORIGIN, *origin);
+            }
+            let outcome = send(
                 &fixture,
                 allow(),
                 &config,
-                Request::builder()
-                    .uri("/")
-                    .header(header::HOST, AGENT_HOST)
-                    .header(header::COOKIE, &embed)
-                    .header(header::UPGRADE, "websocket")
-                    .header(header::CONNECTION, "Upgrade")
-                    .header(header::ORIGIN, origin)
-                    .body(Body::empty())
-                    .unwrap(),
+                request.body(Body::empty()).unwrap(),
             )
-            .await,
-        )
-        .await;
-        assert!(
-            status.is_client_error() || status.is_redirection(),
-            "{origin}: {status}"
-        );
+            .await;
+            match outcome {
+                Ok(response) => {
+                    let framed_by_console = response
+                        .headers()
+                        .get(header::CONTENT_SECURITY_POLICY)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|csp| csp.contains(CONSOLE));
+                    assert!(
+                        response.status().is_redirection() || response.status().is_client_error(),
+                        "{site:?} {label}: {}",
+                        response.status()
+                    );
+                    assert!(!framed_by_console, "{site:?} {label}: served as embedded");
+                }
+                Err(failure) => assert!(
+                    failure.status.is_client_error(),
+                    "{site:?} {label}: {}",
+                    failure.status
+                ),
+            }
+        }
     }
     // A top-level navigation ignores the embed cookie: alone it is an
     // unauthenticated standalone visit (authorize redirect, never 403), and
