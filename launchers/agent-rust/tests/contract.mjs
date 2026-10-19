@@ -264,16 +264,22 @@ for(const rich of [false,true])test('provider user echo is projected once'+(rich
 
 test('identical accepted steer text retains both receipt projections across native echoes',{skip:useNode},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_IDENTICAL_ECHO:'1'});
-  const first=await s.post({text:'same accepted text',operation_id:'identical-first'}).then(r=>r.json());
+  const sender1={kind:'user',agent_id:'ag_first',path:'/fixture/first',name:'First'};
+  const sender2={kind:'user',agent_id:'ag_second',path:'/fixture/second',name:'Second'};
+  const {attachment}=await fetch(s.base+'/api/attachments',{method:'POST',body:imageGif}).then(r=>r.json());
+  const first=await s.post({text:'same accepted text',operation_id:'identical-first',sender:sender1,attachment_ids:[attachment.id]}).then(r=>r.json());
   await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.thread.turns.some(t=>t.items.some(i=>i.submissionId===first.submission.id))&&x.thread.activeTurnId);
-  const second=await s.post({text:'same accepted text',operation_id:'identical-second',delivery:'steer'}).then(r=>r.json());
+  const second=await s.post({text:'same accepted text',operation_id:'identical-second',delivery:'steer',sender:sender2}).then(r=>r.json());
   assert.notEqual(first.submission.id,second.submission.id);
   let maxUsers=0;
   const state=await until(async()=>{const state=await fetch(s.base+'/api/state').then(r=>r.json());maxUsers=Math.max(maxUsers,state.thread.turns.flatMap(t=>t.items).filter(i=>i.kind==='userMessage').length);return state;},x=>x.thread.turns.some(t=>t.status==='completed'));
   const users=state.thread.turns.flatMap(t=>t.items).filter(i=>i.kind==='userMessage');
   assert.equal(users.length,2);assert.equal(maxUsers,2);
   assert.deepEqual(users.map(i=>i.submissionId).sort(),[first.submission.id,second.submission.id].sort());
-  const duplicate=await s.post({text:'same accepted text',operation_id:'identical-second',delivery:'steer'}).then(r=>r.json());assert.equal(duplicate.duplicate,true);
+  const firstItem=users.find(i=>i.submissionId===first.submission.id),secondItem=users.find(i=>i.submissionId===second.submission.id);
+  assert.deepEqual(firstItem.sender,sender1);assert.deepEqual(secondItem.sender,sender2);
+  assert.equal(firstItem.attachments[0].id,attachment.id);assert.deepEqual(secondItem.attachments,[]);
+  const duplicate=await s.post({text:'same accepted text',operation_id:'identical-second',delivery:'steer',sender:sender2}).then(r=>r.json());assert.equal(duplicate.duplicate,true);
   const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
   assert.equal(frames.filter(f=>f.method==='turn/start').length,1);assert.equal(frames.filter(f=>f.method==='turn/steer').length,1);
 });

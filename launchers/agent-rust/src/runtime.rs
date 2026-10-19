@@ -27,19 +27,19 @@ pub struct Handle {
     pub commands: mpsc::Sender<Request>,
     pub state: watch::Receiver<Arc<Value>>,
     shutdown: Arc<tokio::sync::Notify>,
-    stopped: watch::Receiver<bool>,
+    stopped: watch::Receiver<Option<bool>>,
 }
 impl Handle {
     pub async fn shutdown(&self) -> Result<()> {
         self.shutdown.notify_one();
         let mut stopped = self.stopped.clone();
         timeout(Duration::from_secs(7), async {
-            while !*stopped.borrow_and_update() {
+            while stopped.borrow_and_update().is_none() {
                 stopped.changed().await.map_err(|_| anyhow!("runtime_shutdown_unverified"))?;
             }
             Ok::<_, anyhow::Error>(())
         }).await.map_err(|_| anyhow!("runtime_shutdown_unverified"))??;
-        if self.state.borrow()["runtime"]["error"].as_str().is_some_and(|error|error.starts_with("private_state_write_failed")) {
+        if *stopped.borrow() == Some(false) {
             bail!("private_state_write_failed");
         }
         Ok(())
@@ -144,7 +144,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
     let (commands, mut requests) = mpsc::channel::<Request>(64);
     let shutdown = Arc::new(tokio::sync::Notify::new());
     let shutdown_requested = shutdown.clone();
-    let (stopped_tx, stopped) = watch::channel(false);
+    let (stopped_tx, stopped) = watch::channel(None);
     let (changed, state) = watch::channel(Arc::new(
         json!({"ready":false,"runtime":{"state":"starting","error":null},"thread":null,"queue":[],"modelOptions":[],"backgroundTasks":[],"goal":null}),
     ));
@@ -318,7 +318,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
         rt.publish();
         let diagnostic = rt.rpc.diagnostics();
         eprintln!("Rust spike: shutdown provider_exit={}; process_group=termination_requested_unverified; detached_descendants=not_guaranteed; transport={}; before_cleanup={}", rt.provider_exit, diagnostic["transport"].as_str().unwrap_or("unverified"), diagnostic["beforeCleanup"]);
-        stopped_tx.send_replace(true);
+        stopped_tx.send_replace(Some(!rt.state_failed));
     });
     Ok(Handle { commands, state, shutdown, stopped })
 }
@@ -555,6 +555,7 @@ impl Runtime {
             let existing = items.iter().position(|item| {
                 item["kind"] == "userMessage"
                     && item["text"] == record.text
+                    && (!item["submissionId"].is_string() || item["submissionId"] == record.submission["id"])
                     && !matched.contains(&(id.to_string(), item["id"].to_string()))
             });
             if let Some(index) = existing {

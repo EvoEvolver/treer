@@ -59,7 +59,9 @@ for await (const line of createInterface({ input: process.stdin })) {
     const second={id:'second-native',type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
     setTimeout(async()=>{
       console.log(JSON.stringify({method:'item/started',params:{threadId,turnId:echoTurn,item:second}}));
+      console.log(JSON.stringify({method:'item/started',params:{threadId,turnId:echoTurn,item:second}}));
       await new Promise(resolve=>setTimeout(resolve,100));
+      console.log(JSON.stringify({method:'item/completed',params:{threadId,turnId:echoTurn,item:echoUser}}));
       console.log(JSON.stringify({method:'turn/completed',params:{threadId,turn:{id:echoTurn,status:'completed',items:[echoUser,second]}}}));
     },30);
   }
