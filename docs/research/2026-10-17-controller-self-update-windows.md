@@ -112,6 +112,96 @@ are green. The Windows production path is not wired today, so this is an estimat
 not a claim that the inert hosted tests already implement the updater. Release
 owns script/coordinator cutover and script removal after native acceptance.
 
+### Next W1 slice: receipt and interruption classification contract
+
+This is a design checkpoint, not an implemented Windows journal, recovery
+command or permission to replay a mutation. The Unix journal in
+`treer-agent-server/src/self_update.rs` uses Unix private-directory mechanics;
+its `publication.rs` reconciles one atomically replaced destination. Windows
+must not reuse that reconciliation unchanged: moving the old image aside and
+publishing its replacement leave an observable interval without an active name.
+
+Keep the transaction identity, pinned artifact provenance, monotonic revision
+and bounded fixed diagnostics from the shared receipt design. Add an explicit
+Windows layout discriminator before accepting Windows records; an old Unix
+reader must refuse it rather than interpreting a Windows rename as atomic.
+Whether this becomes a new schema version or a tagged publication model must
+be settled when the common model is separated from the Unix storage adapter.
+Reject unknown fields, unsupported versions, invalid transitions, duplicate
+image records and a workspace/server/job binding mismatch before any mutation.
+
+Private metadata records Controller and CLI independently: expected old/new
+hashes and byte lengths, verified object identities, fixed active/candidate/
+backup slot selectors, and the last durable step. Paths are derived from the
+validated installation and private attempt, never from public receipt fields.
+For each image, persist and read back each intent before the corresponding
+rename; verify all retained objects and the resulting layout before recording
+its completion:
+
+`original -> move_old_intent -> old_moved -> publish_intent -> published`.
+
+Reverse restoration needs two separately recorded moves too:
+
+`published -> move_new_aside_intent -> new_aside -> restore_old_intent -> restored`.
+
+If publication never happened, `old_moved` or `publish_intent` may enter
+`restore_old_intent` directly after verifying the missing active slot and intact
+old backup. Moving the new image aside uses its now-vacant candidate slot and
+never overwrites an existing object. A hash match alone is insufficient: retain
+the checked object identity, size, private ACL, one-link/non-reparse checks and
+directory binding through each move. Same-version updates can have equal
+old/new hashes; distinguish their objects by identity, not by digest inequality.
+
+The table below classifies observations made under a newly acquired installation
+lock after the previous worker is proved quiescent. `O` and `N` mean the recorded
+old and new objects, with all identity/content checks satisfied; `-` means an
+explicitly verified absent slot. A read/sharing/ACL error is not absence.
+
+| Last durable step | Active / candidate / backup | File-layout classification |
+| --- | --- | --- |
+| `original`, `move_old_intent` | O / N / - | Original layout; no completed move observed |
+| `move_old_intent`, `old_moved`, `publish_intent` | - / N / O | Old moved; active-name gap |
+| `publish_intent`, `published`, `move_new_aside_intent` | N / - / O | New image published; health remains unproved |
+| `move_new_aside_intent`, `new_aside`, `restore_old_intent` | - / N / O | New image aside; old restoration pending |
+| `restore_old_intent`, `restored` | O / N / - | Old file layout restored; old health remains unproved |
+| Any other step/layout pairing, unknown object or unreadable slot | Any | Conflict; preserve evidence and require operator inspection |
+
+An intent can therefore match either side of its single rename. Observing the
+post-rename layout does not advance the durable record, repeat the operation,
+authorize rollback or prove which process executed it. These classifications
+are inspection results only; an interrupted attempt still blocks new attempts.
+Do not infer quiescence from a missing PID or an obtainable lock alone, or use
+recorded process identifiers after reboot as authority. Missing, corrupt,
+partially written or uncertain-sync receipts require inspection, not discovery
+of a plausible layout followed by automatic adoption.
+
+Transaction-level progress remains separate from per-image moves. Persist
+`activating` before the Controller's first rename and a restart intent before
+dispatching its fixed restart operation. Record `core_healthy` only after the
+new Controller passes the full baseline checks above; only then start CLI moves.
+Persist a rollback intent before reverse CLI/Controller restoration. Record
+`complete` only after both installed images and final health/inventory checks;
+record `rolled_back` only after both old images and independently checked old
+Controller health. If a restart response or health-record write is lost, file
+layout alone cannot resolve it: leave recovery required and never redispatch
+from the intent. A failed recovery while the supervisor is alive may record
+`rollback_failed`; worker death is interrupted evidence, not a fabricated
+terminal result. This parity path has no `launcher_installing` step.
+
+The Windows storage adapter must exclusively create private attempt storage,
+bound receipt reads to 64 KiB, and compare the entire expected prior record and
+revision under the installation lock before writing. Write and sync a new
+private temporary file, atomically replace the receipt without deleting the
+old file first, then revalidate owner/protected ACL and exact record readback.
+Any uncertain result stops further mutations and preserves available evidence;
+no power-loss durability claim follows merely from a successful API return.
+Native tests must exercise each pre/post-rename boundary, receipt replacement
+failure, equal-digest/different-object images, conflicting occupied slots and
+lost restart/health acknowledgements. They must prove that an interruption
+never produces success, automatic replay, cleanup or acceptance of a new job.
+Production parent ACL policy, the storage adapter and these fault tests remain
+unimplemented; the hosted running-image fixture does not establish them.
+
 ### W1a: private directory and checked-copy fixture
 
 `windows_update_bootstrap/checked_files.rs` is private under `cfg(windows, test)`.
