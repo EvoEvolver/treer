@@ -18,19 +18,27 @@ struct Row {
     at: i64,
 }
 pub(crate) struct RequestAudit {
+    identity: crate::private_store::AdmissionIdentity,
     ring: Arc<Mutex<VecDeque<Row>>>,
     healthy: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
 }
+fn audit_store(path: &Path) -> Result<Store, ()> {
+    let store = Store::open(path, Default::default()).map_err(|_| ())?;
+    store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_management_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,request_id TEXT NOT NULL UNIQUE,actor TEXT NOT NULL,status INTEGER NOT NULL,at INTEGER NOT NULL);").map_err(|_|())?;
+    store
+        .db
+        .busy_timeout(Duration::from_millis(25))
+        .map_err(|_| ())?;
+    Ok(store)
+}
 impl RequestAudit {
     pub(crate) fn start(path: &Path) -> Result<Self, ()> {
-        let mut store = Store::open(path, Default::default()).map_err(|_| ())?;
-        store.db.execute_batch("CREATE TABLE IF NOT EXISTS hub_management_requests(id INTEGER PRIMARY KEY AUTOINCREMENT,request_id TEXT NOT NULL UNIQUE,actor TEXT NOT NULL,status INTEGER NOT NULL,at INTEGER NOT NULL);").map_err(|_|())?;
-        store
-            .db
-            .busy_timeout(Duration::from_millis(25))
-            .map_err(|_| ())?;
+        let mut store = audit_store(path)?;
+        let identity =
+            crate::private_store::admission_identity(store._private_files.as_ref().ok_or(())?)
+                .map_err(|_| ())?;
         let ring = Arc::new(Mutex::new(VecDeque::<Row>::new()));
         let healthy = Arc::new(AtomicBool::new(true));
         let stop = Arc::new(AtomicBool::new(false));
@@ -60,6 +68,7 @@ impl RequestAudit {
             }
         }).map_err(|_|())?;
         Ok(Self {
+            identity,
             ring,
             healthy,
             stop,
@@ -67,7 +76,7 @@ impl RequestAudit {
         })
     }
     pub(crate) fn record(&self, id: &str, actor: Option<&str>, status: u16) -> Result<(), ()> {
-        if !self.healthy.load(Ordering::Relaxed) {
+        if self.identity.check().is_err() || !self.healthy.load(Ordering::Relaxed) {
             return Err(());
         }
         let at = i64::try_from(
@@ -95,6 +104,77 @@ impl Drop for RequestAudit {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+    #[test]
+    fn audit_connection_hook_rolls_back_batch_and_refuses_after_restore() {
+        for replacement in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().canonicalize().unwrap().join("audit");
+            // This is the same connection constructor used by the audit worker.
+            let store = audit_store(&path).unwrap();
+            store.db.execute_batch("BEGIN IMMEDIATE; INSERT INTO hub_management_requests(request_id,actor,status,at) VALUES('synthetic','unverified',200,1);").unwrap();
+            let database = path.join("hub.sqlite3");
+            let original = path.join("original.sqlite3");
+            std::fs::rename(&database, &original).unwrap();
+            if replacement {
+                std::fs::write(&database, b"replacement").unwrap();
+                std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+            assert!(store.db.execute_batch("COMMIT;").is_err());
+            assert!(store.db.is_autocommit());
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT count(*) FROM hub_management_requests", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+            if replacement {
+                std::fs::remove_file(&database).unwrap();
+            }
+            std::fs::rename(&original, &database).unwrap();
+            assert!(store.db.execute_batch("INSERT INTO hub_management_requests(request_id,actor,status,at) VALUES('second','unverified',200,2);").is_err());
+            assert_eq!(
+                store
+                    .db
+                    .query_row("SELECT count(*) FROM hub_management_requests", [], |r| r
+                        .get::<_, i64>(0))
+                    .unwrap(),
+                0
+            );
+        }
+    }
+    #[test]
+    fn admission_detects_drift_without_waiting_for_worker_and_latches() {
+        for replace in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().canonicalize().unwrap().join("audit");
+            let audit = RequestAudit::start(&path).unwrap();
+            let database = path.join("hub.sqlite3");
+            let original = path.join("original.sqlite3");
+            std::fs::rename(&database, &original).unwrap();
+            if replace {
+                std::fs::write(&database, b"replacement").unwrap();
+                std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+            // Synchronous direct admission check: no worker tick or sleep.
+            assert!(audit.record("req_one", None, 200).is_err());
+            if replace {
+                std::fs::remove_file(&database).unwrap();
+            }
+            std::fs::rename(&original, &database).unwrap();
+            assert!(audit.record("req_two", None, 200).is_err());
+            assert!(audit.ring.lock().unwrap().is_empty());
         }
     }
 }
