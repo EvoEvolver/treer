@@ -17,21 +17,21 @@ fn at<T>(stage: &'static str, result: io::Result<T>) -> io::Result<T> {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Stage {
+pub(super) enum Stage {
     Created,
     Synced,
     Closed,
 }
 
 // Private, non-Clone, non-serializable custody of one live disposable Attempt.
-struct EvidencePin<'a> {
+pub(super) struct EvidencePin<'a> {
     attempt: &'a Attempt,
     file: File,
     identity: (u32, u64, u32, u32),
     hash: [u8; 32],
 }
 
-fn directory(attempt: &Attempt, owner: &str) -> io::Result<PathBuf> {
+pub(super) fn directory(attempt: &Attempt, owner: &str) -> io::Result<PathBuf> {
     protected_private_acl(&attempt.directory, owner)?;
     let current = open_pinned(&attempt.path, true)?;
     if identity(&current)? != identity(&attempt.directory)? {
@@ -90,7 +90,7 @@ fn read(
 
 impl Attempt {
     // Hook is a test-only fault/inspection seam, never a production callback.
-    fn store_evidence(
+    pub(super) fn store_evidence(
         &self,
         bytes: &[u8],
         expected: [u8; 32],
@@ -174,7 +174,7 @@ impl Attempt {
 
 impl EvidencePin<'_> {
     // Only pins can read the slot; no reopen-by-path recovery/source API.
-    fn read(&self) -> io::Result<Vec<u8>> {
+    pub(super) fn read(&self) -> io::Result<Vec<u8>> {
         let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
         if final_path(&self.file)? != directory(self.attempt, &owner)?.join("reason.evidence") {
             return Err(denied());

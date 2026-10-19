@@ -881,6 +881,32 @@ regressions. Security review precedes implementation of this new outcome
 boundary. Durable consumption/CAS, actual operation-intent binding, health
 authentication, actor ownership and W4 authorization remain separate gates.
 
+The first implementation lives in the private Windows test-only
+`checked_files::operation_outcome` module. The shared checked-rename fixture
+now preserves a typed before-call/native-status/post-call distinction internally;
+its older `io::Result` interface remains a fixture convenience, not an evidence
+constructor. The acquisition borrows the attempt and two retained
+`copy_for_rename` handles and snapshots their identities, sizes and digests.
+It supports the deterministic occupied-target negative case only, deriving
+move-old/publish stage from Active-to-Backup/Candidate-to-Active selection.
+It does not implement an absent-destination failure acquisition or supply
+production intent/head bindings. Successful native rename and injected
+post-success refusal are tested directly at the internal capture boundary.
+
+An eligible collision outcome borrows its acquisition; its evidence is a fixed
+five-byte fixture encoding (one stage byte plus little-endian unsigned Win32
+status), not a Controller reason-schema payload. A stored composite borrows
+that outcome and retains its evidence pin; reading rechecks both image pins
+and evidence. No byte/path constructor or verified-reason conversion exists.
+Acquisition is consumed before revalidation/native I/O, and evidence storage
+uses the attempt's existing single-invocation latch. Tests inject a move using
+an already retained fixture DELETE handle between failure and re-observation:
+the changed destination slot must yield uncertainty and no evidence. This
+does not relax sharing or simulate an external opener bypassing it. A second
+case injects creation-stage storage failure, retains the empty evidence slot
+and proves neither storage nor acquisition can retry. Exact-SHA hosted Windows
+execution is still required; cross-target lint is not runtime acceptance.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual

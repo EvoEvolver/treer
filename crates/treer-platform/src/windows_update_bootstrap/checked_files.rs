@@ -6,6 +6,7 @@ use std::io::{Seek, SeekFrom, Write};
 use windows_sys::Win32::System::WindowsProgramming::FS_PERSISTENT_ACLS;
 
 mod evidence_file;
+mod operation_outcome;
 mod record_file;
 pub(super) use record_file::RecordFault;
 
@@ -402,6 +403,25 @@ impl Attempt {
         to: Slot,
         expected: [u8; 32],
     ) -> io::Result<()> {
+        self.rename_captured(file, from, to, expected, |_| Ok(()))
+            .map_err(|error| match error {
+                operation_outcome::RenameError::Before(error)
+                | operation_outcome::RenameError::Uncertain(error) => error,
+                operation_outcome::RenameError::Native(_) => {
+                    io::Error::new(io::ErrorKind::PermissionDenied, "rename_native_call")
+                }
+            })
+    }
+
+    fn rename_captured(
+        &self,
+        file: &File,
+        from: Slot,
+        to: Slot,
+        expected: [u8; 32],
+        mut after_call: impl FnMut(bool) -> io::Result<()>,
+    ) -> Result<(), operation_outcome::RenameError> {
+        use operation_outcome::RenameError;
         // Native fixture diagnostics are fixed stage codes, never paths, bytes
         // or OS error strings. This remains test-only, not a public status API.
         let refused = |stage: &'static str| io::Error::new(io::ErrorKind::PermissionDenied, stage);
@@ -416,7 +436,7 @@ impl Attempt {
             || before.2 != 1
             || before.3 & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
         {
-            return Err(refused("rename_source_slot_or_attributes"));
+            return Err(refused("rename_source_slot_or_attributes").into());
         }
         let mut reader = file;
         reader
@@ -427,7 +447,7 @@ impl Attempt {
             .seek(SeekFrom::Start(0))
             .map_err(|_| refused("rename_seek_after_hash"))?;
         if actual != expected {
-            return Err(refused("rename_digest_mismatch"));
+            return Err(refused("rename_digest_mismatch").into());
         }
         // Use the Win32 full-path form with a NULL RootDirectory. The relative
         // form was rejected with ERROR_INVALID_PARAMETER on hosted 2022/2025.
@@ -463,13 +483,17 @@ impl Attempt {
             // immediately, before any other API call overwrites last-error.
             let code = unsafe { GetLastError() };
             eprintln!("rename_fixture stage=set_file_information win32={code}");
-            return Err(refused("rename_native_call"));
+            after_call(false).map_err(RenameError::Uncertain)?;
+            return Err(RenameError::Native(code));
         }
-        if identity(file).map_err(|_| refused("rename_target_identity"))? != before
-            || final_path(file).map_err(|_| refused("rename_target_path"))?
+        after_call(true).map_err(RenameError::Uncertain)?;
+        if identity(file).map_err(|_| RenameError::Uncertain(refused("rename_target_identity")))?
+            != before
+            || final_path(file)
+                .map_err(|_| RenameError::Uncertain(refused("rename_target_path")))?
                 != directory.join(to.name())
         {
-            return Err(refused("rename_postcheck"));
+            return Err(RenameError::Uncertain(refused("rename_postcheck")));
         }
         Ok(())
     }
