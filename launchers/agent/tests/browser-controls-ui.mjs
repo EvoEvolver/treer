@@ -265,21 +265,48 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     await expect(confirm).toContainText("Remove 2 finished task records");
     await expect(confirm).toContainText("Running tasks and their saved output are not affected");
     for (const control of await confirm.getByRole("button").all()) { const box = await control.boundingBox(); assert.ok(box && box.height >= 44, "confirmation controls are at least 44px tall"); }
-    await confirm.getByRole("button", { name: "Keep" }).click();
+    // Keyboard flow: the destructive button takes focus; Tab reaches Keep; Enter on Keep returns focus to the trigger.
+    await expect(confirm.getByRole("button", { name: "Clear", exact: true })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(confirm.getByRole("button", { name: "Keep" })).toBeFocused();
+    await page.keyboard.press("Enter");
     await expect(confirm).toHaveCount(0);
+    await expect(clearButton).toBeFocused();
     assert.equal(clears.length, 0, "Keep sends nothing");
     await expect(page.locator(".task")).toHaveCount(3);
+    // Escape cancels the confirmation only (the panel stays open) and restores focus to the trigger.
+    await page.keyboard.press("Enter");
+    await expect(confirm).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(confirm).toHaveCount(0);
+    await expect(page.locator("#tasks")).toBeVisible();
+    await expect(clearButton).toBeFocused();
+    // A failure is announced as an alert, keeps the records and keeps the confirmation (focus stays on a control).
     failClear = true;
-    await clearButton.click();
-    await confirm.getByRole("button", { name: "Clear", exact: true }).click();
-    await expect(page.locator(".tasks-foot .field-error")).toContainText("Could not clear finished tasks");
+    await page.keyboard.press("Enter");
+    await page.keyboard.press("Enter");
+    const failure = page.locator(".tasks-foot .field-error");
+    await expect(failure).toContainText("Could not clear finished tasks");
+    await expect(failure).toHaveAttribute("role", "alert");
     await expect(page.locator(".task")).toHaveCount(3);
+    await expect(confirm.getByRole("button", { name: "Clear", exact: true })).toBeFocused();
     failClear = false;
-    await confirm.getByRole("button", { name: "Clear", exact: true }).click();
+    await page.keyboard.press("Enter");
+    // Success removes the footer under focus: focus moves to the panel's Close button, never to <body>.
     await expect(page.locator(".task")).toHaveCount(1);
     await expect(page.locator(".task-running")).toContainText("Still running");
     assert.deepEqual(clears, [2]);
     await expect(clearButton).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Close background tasks" })).toBeFocused();
+    // The last finished record aging out while the confirmation is focused behaves the same way.
+    setState({ backgroundTasks: [state.backgroundTasks[0], { id: "c2", kind: "shell", description: "Finished three", status: "completed", startedAt: at, endedAt: at, exitCode: 0, summary: null }] });
+    await expect(clearButton).toBeVisible();
+    await clearButton.focus();
+    await page.keyboard.press("Enter");
+    await expect(confirm).toBeVisible();
+    setState({ backgroundTasks: [state.backgroundTasks[0]] });
+    await expect(clearButton).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Close background tasks" })).toBeFocused();
     await page.screenshot({ path: join(screenshots, "controls-ui-tasks-cleared.png") });
     setState({ backgroundTasks: savedTasks });
     await page.getByRole("button", { name: "Close background tasks" }).click();
