@@ -105,6 +105,9 @@ margin); 44 seconds is refused with the prepared row and claim unchanged, no
 attempt returned and no uncertainty slot reserved. An expired prepared claim can
 be reclaimed with its frozen bytes intact. These helpers still require a fresh
 caller-supplied time; they do not start a worker or sample the runtime clock.
+The CLI and HTTP builders use named timeout constants. A regression compares
+their actual sum plus the ten-second margin with the reservation minimum, so
+raising either timeout requires keeping the admission budget sufficient.
 
 The future worker must reread its wall clock or use a monotonic elapsed-time
 budget after token mint and pass that fresh time into the positive fence. A

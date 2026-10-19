@@ -7,6 +7,7 @@ use crate::core::Core;
 use reqwest::{blocking::Client, redirect::Policy, Url};
 use serde_json::Value;
 use std::{io::Read, time::Duration};
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum Error {
     #[error("email_proxy_configuration_invalid")]
@@ -72,7 +73,7 @@ impl Sender {
             .no_proxy()
             .redirect(Policy::none())
             .connect_timeout(Duration::from_secs(3))
-            .timeout(Duration::from_secs(20))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|_| Error::Configuration)?;
         Ok(Self {

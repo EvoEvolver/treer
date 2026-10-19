@@ -9,6 +9,15 @@ const GLOBAL: i64 = 640;
 // Core token mint (15s) + HTTP request (20s) + scheduling margin (10s).
 const MIN_RESERVATION_LEASE: i64 = 45;
 
+#[cfg(test)]
+#[test]
+fn reservation_budget_covers_actual_transport_timeouts_and_margin() {
+    let required = crate::core::CLI_TIMEOUT
+        + super::proxy::REQUEST_TIMEOUT
+        + std::time::Duration::from_secs(10);
+    assert!(std::time::Duration::from_secs(MIN_RESERVATION_LEASE as u64) >= required);
+}
+
 pub(super) fn schema(db: &Connection) -> Result<(), Error> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS email_dispatch(
         id TEXT PRIMARY KEY REFERENCES email_intents(id),
