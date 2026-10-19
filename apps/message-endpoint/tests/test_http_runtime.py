@@ -13,6 +13,46 @@ from http_fixture import TOKEN, fixture
 BINARY = (Path(sys.argv.pop(1)).resolve() if __name__ == '__main__'
           else Path(__file__).resolve().parents[3] / 'target/debug/treer-message-hub')
 class Runtime(unittest.TestCase):
+    def test_replaced_or_unlinked_hub_and_audit_databases_refuse_writes(self):
+        for target in ('state','auditdb'):
+            for operation in ('replace','unlink'):
+                with self.subTest(target=target,operation=operation), fixture(BINARY) as f:
+                    database=f['state']/'hub.sqlite3' if target=='state' else f['auditdb']
+                    # Pin an independent reader to the original file before the
+                    # deliberate local fixture fault; never touch live App data.
+                    original=sqlite3.connect(f['state']/'hub.sqlite3')
+                    original.execute('SELECT count(*) FROM hub_owner_audit').fetchone()
+                    if operation=='replace':
+                        replacement=f['root']/'replacement.sqlite3'
+                        with sqlite3.connect(replacement) as db:
+                            db.execute('CREATE TABLE fixture_marker(value INTEGER)')
+                            db.execute('INSERT INTO fixture_marker VALUES(17)')
+                        db.close()
+                        replacement.chmod(0o600)
+                        replacement_bytes=replacement.read_bytes()
+                        replacement.replace(database)
+                    else:
+                        database.unlink()
+                    # The separate request-audit worker must observe its own
+                    # drift and close admission, not silently write an orphan.
+                    if target=='auditdb':time.sleep(.3)
+                    before=original.execute('SELECT count(*) FROM hub_owner_audit').fetchone()[0]
+                    revision=original.execute("SELECT revision FROM hub_bindings WHERE endpoint='ag_demo'").fetchone()[0]
+                    headers={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+                    command={'action':'pause','endpoint_id':'ag_demo','revision':revision,'confirm':True}
+                    status,_,body=f['request']('/api/configuration',headers,'POST',json.dumps(command))
+                    self.assertEqual(status,503,body)
+                    self.assertNotIn(str(database).encode(),body)
+                    self.assertEqual(original.execute('SELECT count(*) FROM hub_owner_audit').fetchone()[0],before)
+                    self.assertEqual(original.execute("SELECT revision FROM hub_bindings WHERE endpoint='ag_demo'").fetchone()[0],revision)
+                    original.close()
+                    f['stop']()
+                    if operation=='replace':
+                        # Never reopen the replacement against the unrelated
+                        # orphan WAL: recovery requires a consistent full store.
+                        self.assertEqual(database.read_bytes(),replacement_bytes)
+                    else:self.assertFalse(database.exists())
+
     def test_live_sqlite_close_then_api_write_survives_clean_stop_and_fresh_process(self):
         for external in (False, True):
             with self.subTest(external=external), fixture(BINARY,seed=external) as f:

@@ -298,6 +298,24 @@ coordination. Regression checks preserve those locks and verify committed audit
 rows after external fixture connections close and a fresh process reopens state.
 This does not authorize live manual edits or live file-copy backups; use the
 stopped-App backup procedure below.
+
+The private store also retains a validated database descriptor before SQLite
+opens the same path, checks its device/inode against directory-relative
+no-follow metadata after opening and before configuration writes, and closes the
+pin only after SQLite closes and before releasing the cooperating-writer lock.
+Missing/replaced paths fail closed and latch that store unavailable.
+Configuration writes return the fixed storage-unavailable response; the
+independent request-audit store uses
+the same checks; request admission also checks its pinned identity synchronously
+without taking the hub mutex or opening a database descriptor. Restoring a
+pathname does not clear the latch: stop the App, restore a consistent complete
+private backup if needed, and reopen it under operator control. No live restore
+or automatic file recreation is a recovery procedure. Restart pins the current
+file afresh; it never adopts or migrates rows from an orphan inode automatically.
+Any recovery of orphan data is an explicit offline operator decision. These checks detect drift;
+they do not provide an atomic filesystem boundary against another same-UID
+process racing metadata checks and writes.
+
 Closing the store explicitly unlocks after SQLite closes, so a forked CLI child's
 inherited descriptor cannot keep the writer lock alive until exec/exit. A
 regression holds that shared descriptor in a private child while reopening;

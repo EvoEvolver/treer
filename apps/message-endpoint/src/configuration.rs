@@ -294,9 +294,15 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
     activation: &Activation,
 ) -> Result<Outcome, Failure> {
     check_owner(owner)?;
-    if owner.kind() == "agent" {
+    {
         let h = shared.lock().map_err(|_| Failure::Unavailable)?;
-        crate::management::register(&h.store.db, owner.id()).map_err(|_| Failure::Unavailable)?;
+        h.store
+            .recheck_private_storage()
+            .map_err(|_| Failure::Unavailable)?;
+        if owner.kind() == "agent" {
+            crate::management::register(&h.store.db, owner.id())
+                .map_err(|_| Failure::Unavailable)?;
+        }
     }
     if owner.kind() == "agent"
         && !matches!(
