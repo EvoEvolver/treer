@@ -6,6 +6,7 @@ import {once} from 'node:events';
 
 const threadId = 'synthetic-history';
 let next = 0;
+let echoTurn,echoUser;
 writeFileSync(process.env.HISTORY_PID_FILE, String(process.pid));
 for await (const line of createInterface({ input: process.stdin })) {
   const request = JSON.parse(line);
@@ -54,9 +55,23 @@ for await (const line of createInterface({ input: process.stdin })) {
     }
     await write(suffix+'\n');continue;
   }
+  if(request.method==='turn/steer'&&process.env.HISTORY_IDENTICAL_ECHO==='1') {
+    const second={id:'second-native',type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
+    setTimeout(async()=>{
+      console.log(JSON.stringify({method:'item/started',params:{threadId,turnId:echoTurn,item:second}}));
+      await new Promise(resolve=>setTimeout(resolve,100));
+      console.log(JSON.stringify({method:'turn/completed',params:{threadId,turn:{id:echoTurn,status:'completed',items:[echoUser,second]}}}));
+    },30);
+  }
   if (request.method === 'turn/start') {
     const id = `history-${++next}`;
     result = { turn: { id } };
+    if(process.env.HISTORY_IDENTICAL_ECHO==='1') {
+      echoTurn=id;echoUser={id:'first-native',type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
+      setTimeout(()=>console.log(JSON.stringify({method:'turn/started',params:{threadId,turn:{id,status:'inProgress',items:[echoUser]}}})),30);
+      if(process.env.HISTORY_FRAME_LOG)appendFileSync(process.env.HISTORY_FRAME_LOG,JSON.stringify({method:request.method,bytes:Buffer.byteLength(JSON.stringify({id:request.id,result}))})+'\n');
+      console.log(JSON.stringify({id:request.id,result}));continue;
+    }
     if(process.env.HISTORY_LIVE_SHAPE || process.env.HISTORY_ECHO_USER==='1') {
       const user={id:`native-user-${id}`,type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
       const rich={id:`tool-${id}`,type:'dynamicToolCall',tool:'synthetic',output:process.env.HISTORY_LIVE_SHAPE?'x'.repeat(5*1024*1024):'',content:Array.from({length:Number(process.env.HISTORY_LIVE_SHAPE)||1},()=>({a:[0,1,2],b:true}))};
@@ -68,7 +83,7 @@ for await (const line of createInterface({ input: process.stdin })) {
           {method:'item/completed',params:{threadId,turnId:id,item:user}},
           {method:'turn/completed',params:{threadId,turn:{id,status:'completed',items:[user,rich,{id:`answer-${id}`,type:'agentMessage',text:'done'}]}}},
         ]){console.log(JSON.stringify(event));await new Promise(resolve=>setTimeout(resolve,100));}
-      },30);
+      },Number(process.env.HISTORY_LIVE_DELAY)||30);
       if(process.env.HISTORY_FRAME_LOG)appendFileSync(process.env.HISTORY_FRAME_LOG,JSON.stringify({method:request.method,bytes:Buffer.byteLength(JSON.stringify({id:request.id,result}))})+'\n');
       console.log(JSON.stringify({id:request.id,result}));continue;
     }

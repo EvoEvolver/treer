@@ -38,7 +38,11 @@ impl Handle {
                 stopped.changed().await.map_err(|_| anyhow!("runtime_shutdown_unverified"))?;
             }
             Ok::<_, anyhow::Error>(())
-        }).await.map_err(|_| anyhow!("runtime_shutdown_unverified"))?
+        }).await.map_err(|_| anyhow!("runtime_shutdown_unverified"))??;
+        if self.state.borrow()["runtime"]["error"].as_str().is_some_and(|error|error.starts_with("private_state_write_failed")) {
+            bail!("private_state_write_failed");
+        }
+        Ok(())
     }
     pub async fn call(&self, method: &str, body: Value) -> Result<Value> {
         let (tx, rx) = oneshot::channel();
@@ -469,6 +473,7 @@ impl Runtime {
         }
         if let Err(error) = self.store
             .save(&json!({"schema":1,"threadId":self.thread["id"],"dispatchBlocked":self.dispatch_blocked,"records":self.records,"goals":self.goals})) {
+            eprintln!("Rust spike: checkpoint_failure=1");
             if error.is::<crate::store::PublicationUncertain>() {
                 self.checkpoint = (self.records.clone(), self.goals.clone());
             }

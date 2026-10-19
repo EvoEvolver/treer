@@ -57,6 +57,9 @@ Accepted user projections merge with one native echo across item lifecycle
 events; matching identical text does not collapse distinct receipt IDs.
 Provider exit also persists the transport-failure fence before the runtime
 exits; accepted uncertain receipts remain durable and are not replayed on restart.
+If publication fails, the launcher emits the fixed `checkpoint_failure=1`
+diagnostic, remains not-ready/blocked for diagnostic reads, and returns a nonzero
+process status when stopped. It never claims that an unwritten fence is durable.
 Selected windows share `Arc<Value>` allocations; overlap does not deep-copy turns.
 The reader permits four registered selections plus the recent window: each holds
 at most 16 MiB serialized content / 500k nodes. Additional current-turn, active

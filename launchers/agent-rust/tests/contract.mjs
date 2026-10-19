@@ -262,6 +262,39 @@ for(const rich of [false,true])test('provider user echo is projected once'+(rich
   assert.equal((await fetch(s.base+'/v1/submissions/'+r.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'done');
 });
 
+test('identical accepted steer text retains both receipt projections across native echoes',{skip:useNode},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_IDENTICAL_ECHO:'1'});
+  const first=await s.post({text:'same accepted text',operation_id:'identical-first'}).then(r=>r.json());
+  await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.thread.turns.some(t=>t.items.some(i=>i.submissionId===first.submission.id))&&x.thread.activeTurnId);
+  const second=await s.post({text:'same accepted text',operation_id:'identical-second',delivery:'steer'}).then(r=>r.json());
+  assert.notEqual(first.submission.id,second.submission.id);
+  let maxUsers=0;
+  const state=await until(async()=>{const state=await fetch(s.base+'/api/state').then(r=>r.json());maxUsers=Math.max(maxUsers,state.thread.turns.flatMap(t=>t.items).filter(i=>i.kind==='userMessage').length);return state;},x=>x.thread.turns.some(t=>t.status==='completed'));
+  const users=state.thread.turns.flatMap(t=>t.items).filter(i=>i.kind==='userMessage');
+  assert.equal(users.length,2);assert.equal(maxUsers,2);
+  assert.deepEqual(users.map(i=>i.submissionId).sort(),[first.submission.id,second.submission.id].sort());
+  const duplicate=await s.post({text:'same accepted text',operation_id:'identical-second',delivery:'steer'}).then(r=>r.json());assert.equal(duplicate.duplicate,true);
+  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(frames.filter(f=>f.method==='turn/start').length,1);assert.equal(frames.filter(f=>f.method==='turn/steer').length,1);
+});
+
+test('live overflow with a read-only journal reports checkpoint failure and exits nonzero on shutdown',{skip:useNode,timeout:30000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_LIVE_SHAPE:'80000',HISTORY_LIVE_DELAY:'1500'});
+  const journal=join(s.state,'rust-spike.json');
+  const receipt=await s.post({text:'accepted before read-only fence',operation_id:'readonly-overflow'}).then(r=>r.json());
+  await until(()=>readFile(journal,'utf8').then(JSON.parse),x=>x.records.some(r=>r.submission.id===receipt.submission.id&&r.submission.state==='running'));
+  const before=await readFile(journal,'utf8');
+  try {
+    await chmod(journal,0o400);await chmod(s.state,0o500);
+    const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.cleanup.providerExit==='confirmed');
+    assert.equal(state.ready,false);assert.equal(state.runtime.state,'blocked');assert.match(state.runtime.error,/private_state_write_failed/);
+    assert.equal(state.runtime.provider.transport,'provider_json_limit');
+    assert.equal(await readFile(journal,'utf8'),before,'failed fence never replaces accepted durable intent');
+    assert.match(s.logs(),/checkpoint_failure=1/);
+    const exited=once(s.child,'exit');s.child.kill('SIGTERM');const [code]=await exited;assert.notEqual(code,0);
+  } finally {await chmod(s.state,0o700);await chmod(journal,0o600);}
+});
+
 test('live node overflow reports a fixed frame category and keeps uncertain work fenced',{skip:useNode,timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_LIVE_SHAPE:'80000',AGENT_UI_SESSION_ID:'synthetic-history'});
   const receipt=await s.post({text:'synthetic accepted input',operation_id:'shape-overflow'}).then(r=>r.json());

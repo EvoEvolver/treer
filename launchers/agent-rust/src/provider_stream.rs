@@ -535,7 +535,8 @@ mod tests {
         assert_eq!(reader.diagnostic()["limitKind"], "depth");
         assert!(!reader.diagnostic().to_string().contains("SYNTHETIC_SECRET"));
         for late in [false,true] {
-            let payload=serde_json::to_string(&vec![json!({"a":[0,1,2],"b":true});8_000]).unwrap();
+            // A nested allowlisted method never upgrades the root class.
+            let payload=serde_json::to_string(&json!({"method":"item/completed","entries":vec![json!({"a":[0,1,2],"b":true});8_000]})).unwrap();
             let bytes=if late {format!("{{\"params\":{payload},\"method\":\"secret-control\"}}")}
                 else {format!("{{\"method\":\"secret-control\",\"params\":{payload}}}")};
             let mut reader=Reader::new(bytes.as_bytes(),Selections::default());
