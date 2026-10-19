@@ -1670,6 +1670,10 @@ test("from a machine overview, clicking Terminal opens the agent terminal", asyn
 })
 
 test("terminal drains a burst of small output frames without stalling", async ({ page }) => {
+  // Setup sends 1,600 WebSocket messages over the browser driver and can exceed
+  // the default test budget on the shared machine. Keep the drain deadline below
+  // at two seconds so this remains a regression check for a stalled output queue.
+  test.setTimeout(60_000)
   const frameCount = 800
   let outputBytes = 0
   let acknowledgedBytes = 0
