@@ -76,6 +76,19 @@ class AgentBindings(unittest.TestCase):
             with sqlite3.connect(f['state']/'hub.sqlite3') as db:
                 self.assertEqual(db.execute('SELECT count(*) FROM hub_create_requests').fetchone()[0],1)
                 self.assertEqual(db.execute('SELECT count(*) FROM hub_management_notices').fetchone()[0],1)
+    def test_preview_metadata_errors_have_actionable_codes(self):
+        with fixture(BINARY) as f:
+            headers={'Authorization':'Bearer '+AGENT,'X-Endpoint-Request':'1','Content-Type':'application/json'}
+            for endpoint,recipient,code in [
+                ('ag_unplaced','ag_recipient','endpoint_unplaced'),
+                ('ag_wrong_workspace','ag_recipient','endpoint_workspace_mismatch'),
+                ('ag_new','ag_wrong_workspace','recipient_workspace_mismatch'),
+                ('ag_new','ag_new','invalid_binding_identity'),
+            ]:
+                status,_,body=f['request']('/api/configuration',headers,'POST',json.dumps({'action':'preview_create','endpoint_id':endpoint,'generation':1,'recipient':recipient}))
+                self.assertEqual(status,400)
+                self.assertEqual(json.loads(body)['error']['code'],code)
+
     def test_verification_rate_limit_precedes_proxy_calls(self):
         with fixture(BINARY) as f:
             headers={'Authorization':'Bearer '+AGENT}

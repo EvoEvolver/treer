@@ -153,7 +153,7 @@ fn preview<D: Directory>(
         || !crate::store::valid_id(endpoint_id)
         || !crate::store::valid_id(recipient)
     {
-        return Err(Failure::Invalid);
+        return Err(Failure::InvalidPreview("invalid_binding_identity"));
     }
     let endpoint = directory
         .metadata(endpoint_id)
@@ -161,16 +161,27 @@ fn preview<D: Directory>(
     let recipient_meta = directory
         .metadata(recipient)
         .map_err(|_| Failure::Unavailable)?;
-    if endpoint.agent_id != endpoint_id
-        || recipient_meta.agent_id != recipient
-        || endpoint.workspace_id != workspace
-        || recipient_meta.workspace_id != workspace
-        || endpoint.kind != "command"
-        || recipient_meta.kind != "command"
-    {
-        return Err(Failure::Invalid);
+    if endpoint.agent_id != endpoint_id {
+        return Err(Failure::InvalidPreview("endpoint_identity_mismatch"));
     }
-    let path = endpoint.path.ok_or(Failure::Invalid)?;
+    if recipient_meta.agent_id != recipient {
+        return Err(Failure::InvalidPreview("recipient_identity_mismatch"));
+    }
+    if endpoint.workspace_id != workspace {
+        return Err(Failure::InvalidPreview("endpoint_workspace_mismatch"));
+    }
+    if recipient_meta.workspace_id != workspace {
+        return Err(Failure::InvalidPreview("recipient_workspace_mismatch"));
+    }
+    // The endpoint runs the fixed relay command; its kind is also checked by
+    // Hub readback/resume. Recipients only need a Core mailbox, so shell and
+    // other Agent runtime kinds are valid recipients.
+    if endpoint.kind != "command" {
+        return Err(Failure::InvalidPreview("endpoint_kind_unsupported"));
+    }
+    let path = endpoint
+        .path
+        .ok_or(Failure::InvalidPreview("endpoint_unplaced"))?;
     let preview = Preview {
         endpoint_id: endpoint_id.into(),
         generation,
@@ -227,6 +238,7 @@ fn recovery_status<M: Mailbox + Directory>(
 #[derive(Clone, Copy, Debug)]
 pub enum Failure {
     Invalid,
+    InvalidPreview(&'static str),
     Conflict,
     Unavailable,
     Expired,
@@ -556,5 +568,77 @@ pub(crate) fn core_executor(
 ) -> impl Fn(&BindingManager, Command) -> Result<Outcome, Failure> + Send + Sync {
     move |owner, command| {
         execute_with_activation(&shared, &core, &workspace, owner, command, &activation)
+    }
+}
+
+#[cfg(test)]
+mod preview_tests {
+    use super::*;
+    use crate::core::AgentMetadata;
+
+    struct Metadata {
+        endpoint: AgentMetadata,
+        recipient: AgentMetadata,
+    }
+    impl Directory for Metadata {
+        fn metadata(&self, id: &str) -> Result<AgentMetadata, crate::core::Error> {
+            Ok(if id == "ag_endpoint" {
+                self.endpoint.clone()
+            } else {
+                self.recipient.clone()
+            })
+        }
+    }
+    fn fixture() -> Metadata {
+        let mut endpoint = crate::recovery::tests::metadata();
+        endpoint.agent_id = "ag_endpoint".into();
+        let mut recipient = endpoint.clone();
+        recipient.agent_id = "ag_recipient".into();
+        Metadata {
+            endpoint,
+            recipient,
+        }
+    }
+    #[test]
+    fn recipients_with_shell_or_other_runtime_kinds_have_core_mailboxes() {
+        let mut d = fixture();
+        for kind in ["shell", "command", "app", "future_runtime"] {
+            d.recipient.kind = kind.into();
+            assert!(preview(
+                &d,
+                &d.endpoint.workspace_id,
+                "ag_endpoint",
+                1,
+                "ag_recipient"
+            )
+            .is_ok());
+        }
+    }
+    #[test]
+    fn preview_errors_are_specific_and_keep_identity_workspace_and_relay_checks() {
+        for (field, code) in [
+            ("endpoint_id", "endpoint_identity_mismatch"),
+            ("recipient_id", "recipient_identity_mismatch"),
+            ("endpoint_workspace", "endpoint_workspace_mismatch"),
+            ("recipient_workspace", "recipient_workspace_mismatch"),
+            ("endpoint_kind", "endpoint_kind_unsupported"),
+            ("endpoint_path", "endpoint_unplaced"),
+        ] {
+            let mut d = fixture();
+            let workspace = d.endpoint.workspace_id.clone();
+            match field {
+                "endpoint_id" => d.endpoint.agent_id = "ag_wrong".into(),
+                "recipient_id" => d.recipient.agent_id = "ag_wrong".into(),
+                "endpoint_workspace" => d.endpoint.workspace_id = "ws_other".into(),
+                "recipient_workspace" => d.recipient.workspace_id = "ws_other".into(),
+                "endpoint_kind" => d.endpoint.kind = "shell".into(),
+                "endpoint_path" => d.endpoint.path = None,
+                _ => unreachable!(),
+            }
+            assert!(matches!(
+                preview(&d, &workspace, "ag_endpoint", 1, "ag_recipient"),
+                Err(Failure::InvalidPreview(actual)) if actual == code
+            ));
+        }
     }
 }

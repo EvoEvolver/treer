@@ -781,6 +781,9 @@ async fn configuration_request_inner(
             Err(crate::configuration::Failure::Invalid) => {
                 fixed(StatusCode::BAD_REQUEST, "invalid_configuration")
             }
+            Err(crate::configuration::Failure::InvalidPreview(code)) => {
+                fixed(StatusCode::BAD_REQUEST, code)
+            }
             Err(crate::configuration::Failure::Conflict) => {
                 fixed(StatusCode::CONFLICT, "configuration_conflict")
             }

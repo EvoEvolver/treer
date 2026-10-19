@@ -1014,8 +1014,16 @@ Supported command objects (writes require `confirm:true`):
   mutation. The UI displays the preview before confirmation and invalidates it
   when an input changes.
   The hub queries both stable IDs through its own Core identity outside the state
-  mutex, requires command Agents in its workspace and a placed endpoint, and
+  mutex, requires both Agents in its workspace and a placed command endpoint, and
   derives expected path/cwd/machine from Core. Creation is paused at revision 1.
+  A recipient may be a shell, command or other Agent runtime kind: Core Message
+  delivery does not require a command process. The endpoint must remain a command
+  Agent running the fixed relay profile, also checked during readback/resume.
+  Preview/create metadata failures return fixed 400 error codes:
+  `invalid_binding_identity`, `endpoint_identity_mismatch`,
+  `recipient_identity_mismatch`, `endpoint_workspace_mismatch`,
+  `recipient_workspace_mismatch`, `endpoint_kind_unsupported`, or
+  `endpoint_unplaced`; responses never echo raw metadata or input values.
 - `{"action":"pause","endpoint_id":"ag_endpoint","revision":1,"confirm":true}`.
 - `{"action":"bind_telegram","endpoint_id":"ag_endpoint","revision":2,"target":{"account_id":"bot_team","chat_id":123,"topic_id":null,"allowed_senders":[456]},"confirm":true}`.
   The binding must be paused. This pins target metadata only, never accepts a bot
