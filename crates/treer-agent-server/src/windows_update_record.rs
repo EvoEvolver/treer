@@ -353,6 +353,49 @@ fn check_forward_successor(
     Ok(())
 }
 
+// Inert entry classification only. Both claims use the SAME current snapshot;
+// no rename, actor, quiescence proof or authenticated health exists here.
+fn check_rollback_entry(
+    previous: (&[u8], &[u8]),
+    candidate: (&[u8], &[u8]),
+    head: &ExpectedHead,
+    slots: [[layout::Object; 3]; 2],
+) -> Result<(), Refusal> {
+    use layout::{Object::*, Step::*, Transaction::*};
+    let next = check_successor_fields(previous, candidate, head)?;
+    let old = parse_pair(previous.0, previous.1, &head.binding)?;
+    if inspect_claim(&old.state, slots[0], slots[1]) != layout::PairInspection::Consistent
+        || inspect_claim(&next.state, slots[0], slots[1]) != layout::PairInspection::Consistent
+    {
+        return Err("transition_layout_conflict");
+    }
+    let mut expected = old.state.clone();
+    let moving_step = match old.state.transaction {
+        Prepared | Activating => {
+            expected.transaction = RollbackController;
+            &mut expected.controller_step
+        }
+        CoreHealthy => {
+            expected.transaction = RollbackCli;
+            &mut expected.cli_step
+        }
+        Complete | RollbackCli | RollbackController | RolledBack => {
+            return Err("invalid_rollback_entry");
+        }
+    };
+    let moving_slots = slots[usize::from(old.state.transaction == CoreHealthy)];
+    *moving_step = match moving_slots {
+        [Old, New, Absent] => Original,
+        [Absent, New, Old] => RestoreOldIntent,
+        [New, Absent, Old] => MoveNewAsideIntent,
+        _ => return Err("transition_layout_conflict"),
+    };
+    if expected != next.state {
+        return Err("invalid_rollback_entry");
+    }
+    Ok(())
+}
+
 fn fixture() -> DraftFields {
     let object = |file_id| Object {
         filesystem: Filesystem::Ntfs,
@@ -1100,5 +1143,150 @@ fn forward_graph_checks_both_layouts_and_health_changes_at_each_edge() {
                 altered == *next
             );
         }
+    }
+}
+
+#[test]
+fn rollback_entry_uses_current_layout_and_preserves_other_image_and_health() {
+    use layout::{Object::*, Step::*, Transaction::*};
+    let trace = forward_fixture_trace();
+    let mut cases = Vec::new();
+    // Explicit expected exits for the 12 canonical forward trace states.
+    for (index, (state, slots)) in trace.iter().enumerate() {
+        let step = [
+            Original,
+            Original,
+            Original,
+            RestoreOldIntent,
+            RestoreOldIntent,
+            MoveNewAsideIntent,
+            Original,
+            Original,
+            RestoreOldIntent,
+            RestoreOldIntent,
+            MoveNewAsideIntent,
+            MoveNewAsideIntent,
+        ][index];
+        cases.push((state.clone(), *slots, step));
+        // Each intent also has an independently legal post-operation layout.
+        if matches!(index, 2 | 4 | 7 | 9) {
+            let mut post = *slots;
+            let image = usize::from(index >= 6);
+            post[image] = if matches!(index, 2 | 7) {
+                [Absent, New, Old]
+            } else {
+                [New, Absent, Old]
+            };
+            cases.push((
+                state.clone(),
+                post,
+                if matches!(index, 2 | 7) {
+                    RestoreOldIntent
+                } else {
+                    MoveNewAsideIntent
+                },
+            ));
+        }
+    }
+    assert_eq!(cases.len(), 16);
+    for (old_state, slots, expected_step) in cases {
+        let mut old = fixture();
+        old.state = old_state.clone();
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&old).unwrap(), &old.binding);
+        let head = ExpectedHead {
+            binding: old.binding.clone(),
+            receipt_sha256: digest(&receipt),
+        };
+        let mut candidate = old.clone();
+        candidate.binding.revision += 1;
+        let cli = old_state.transaction == CoreHealthy;
+        candidate.state.transaction = if cli { RollbackCli } else { RollbackController };
+        if cli {
+            candidate.state.cli_step = expected_step;
+        } else {
+            candidate.state.controller_step = expected_step;
+        }
+        let check = |fields: &DraftFields, observed| {
+            let (next_receipt, next_marker) =
+                envelopes(&serde_json::to_vec(fields).unwrap(), &fields.binding);
+            check_rollback_entry(
+                (&receipt, &marker),
+                (&next_receipt, &next_marker),
+                &head,
+                observed,
+            )
+        };
+        if old_state.transaction == Complete {
+            assert!(check(&candidate, slots).is_err());
+            continue;
+        }
+        assert_eq!(check(&candidate, slots), Ok(()));
+        for phase in [
+            Prepared,
+            Activating,
+            CoreHealthy,
+            Complete,
+            RollbackCli,
+            RollbackController,
+            RolledBack,
+        ] {
+            for step in [
+                Original,
+                MoveOldIntent,
+                OldMoved,
+                PublishIntent,
+                Published,
+                MoveNewAsideIntent,
+                NewAside,
+                RestoreOldIntent,
+                Restored,
+            ] {
+                let mut changed = candidate.clone();
+                changed.state.transaction = phase;
+                if cli {
+                    changed.state.cli_step = step;
+                } else {
+                    changed.state.controller_step = step;
+                }
+                assert_eq!(
+                    check(&changed, slots).is_ok(),
+                    changed.state == candidate.state
+                );
+            }
+        }
+        // No-op, forward continuation, premature health and damage to either
+        // image must not become entry authorization.
+        let mut noop = candidate.clone();
+        noop.state = old_state;
+        assert!(check(&noop, slots).is_err());
+        for flags in 0..8 {
+            let mut changed = candidate.clone();
+            changed.state.new_health_recorded = flags & 1 != 0;
+            changed.state.final_health_recorded = flags & 2 != 0;
+            changed.state.old_health_recorded = flags & 4 != 0;
+            assert_eq!(
+                check(&changed, slots).is_ok(),
+                changed.state == candidate.state
+            );
+        }
+        for image in 0..2 {
+            for slot in 0..3 {
+                for uncertain in [Unknown, Unreadable] {
+                    let mut changed = slots;
+                    changed[image][slot] = uncertain;
+                    assert_eq!(
+                        check(&candidate, changed),
+                        Err("transition_layout_conflict")
+                    );
+                }
+            }
+        }
+        let mut wrong_other = candidate.clone();
+        if cli {
+            wrong_other.state.controller_step = MoveNewAsideIntent;
+        } else {
+            wrong_other.state.cli_step = Restored;
+        }
+        assert!(check(&wrong_other, slots).is_err());
     }
 }

@@ -386,6 +386,17 @@ tuple must match exactly one of the 16 design rows; existing rollback-phase
 tuples explicitly select diagnosis only. This is a coverage test, not an exit
 executor or proof of rollback ordering.
 
+An additional private inert entry guard now checks the proposed first rollback
+record against the predecessor field guard and the same synthetic current
+snapshot for both records. Prepared/Activating enter RollbackController;
+CoreHealthy enters RollbackCli. Original layout selects Original, a gap selects
+RestoreOldIntent directly, and published layout selects MoveNewAsideIntent.
+The other image step and all health claims must remain unchanged. Complete
+and all rollback phases refuse entry. Tests exercise all 16 forward layout
+cases, candidate phase/step alternatives, health changes and uncertain slots.
+This is not rollback continuation, an executable exit or a substitute for the
+missing pinned actor, quiescence proof, authenticated health or trusted head.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual
