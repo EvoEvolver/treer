@@ -173,6 +173,20 @@ impl<M: Mailbox + Directory> Hub<M> {
             },
         )
         .map_err(|_| Error::Binding)?;
+        // Terminal storage outcomes alone never authorize ack. The bounded
+        // mapping ring may be evicted, but the completed job retains its final
+        // Core ID. A changed assertion must not be acknowledged or resurrect
+        // history, including after restart or mapping eviction.
+        if !row.pending && row.core_id.as_deref() != Some(&receipt.final_core_message_id) {
+            tx.execute(
+                "UPDATE telegram_reply_counters SET terminal_mismatch=CASE
+                 WHEN terminal_mismatch<9223372036854775807 THEN terminal_mismatch+1
+                 ELSE terminal_mismatch END WHERE singleton=1",
+                [],
+            )?;
+            tx.commit()?;
+            return Err(Error::Binding);
+        }
         let state = if row.pending {
             HandoffState::AwaitingReceipt
         } else {

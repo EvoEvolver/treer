@@ -1480,6 +1480,125 @@ print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowled
     }
 
     #[test]
+    fn terminal_receipt_ack_requires_durable_final_id_across_restart_and_eviction() {
+        use std::{os::unix::fs::PermissionsExt, sync::Mutex};
+        for evicted in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let state = root.join("state");
+            let executable = root.join("fake-treer");
+            std::fs::write(&executable, r#"#!/usr/bin/python3
+import json,sqlite3,sys
+from pathlib import Path
+root=Path(__file__).parent
+args=sys.argv[1:]
+assert len(args)==5 and args[:2]==['message','ack'] and args[2].startswith('--operation-id=ep-ack-') and args[-2:]==['--','del_receipt']
+db=sqlite3.connect('file:'+str(root/'state/hub.sqlite3')+'?mode=ro',uri=True)
+assert db.execute('SELECT pending,core_id FROM inbound').fetchall()==[(0,'msg_final')]
+db.close()
+with (root/'acks.jsonl').open('a') as f: f.write(json.dumps(args)+'\n')
+print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowledged_delivery_ids':[]}))
+"#).unwrap();
+            std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let core = crate::core::Core::new(&executable, "app_hub").unwrap();
+            let (mut h, fake) = fixture_store(Store::open(&state, Limits::default()).unwrap());
+            let intent = receipt_job(&mut h);
+            h.complete_test_telegram_receipt(receipt_delivery(&intent, "msg_final"), &intent, NOW)
+                .unwrap();
+            if evicted {
+                h.store
+                    .db
+                    .execute("DELETE FROM telegram_reply_mappings", [])
+                    .unwrap();
+            }
+            // Exercise the same process first, then a new Hub/connection twice.
+            // The last round also verifies counter saturation is persistent.
+            for round in 0..3 {
+                if round == 2 {
+                    h.store.db.execute("UPDATE telegram_reply_counters SET terminal_mismatch=9223372036854775807", []).unwrap();
+                }
+                let hub = Mutex::new(h);
+                let bad = crate::core::AuthenticatedDelivery::fixture(
+                    receipt_delivery(&intent, "msg_changed"),
+                    "ws",
+                );
+                assert!(matches!(
+                    crate::telegram_receipt_completion::commit_and_ack(
+                        &hub,
+                        &core,
+                        &bad,
+                        &intent,
+                        NOW + round,
+                    ),
+                    Err(HubError::Binding)
+                ));
+                let calls = root.join("acks.jsonl");
+                let before = std::fs::read_to_string(&calls).unwrap_or_default();
+                assert_eq!(
+                    before.lines().count(),
+                    round as usize,
+                    "changed receipt cannot ack"
+                );
+                let good = crate::core::AuthenticatedDelivery::fixture(
+                    receipt_delivery(&intent, "msg_final"),
+                    "ws",
+                );
+                assert_eq!(
+                    crate::telegram_receipt_completion::commit_and_ack(
+                        &hub,
+                        &core,
+                        &good,
+                        &intent,
+                        NOW + round,
+                    )
+                    .unwrap(),
+                    crate::telegram_reply_store::Recorded::IgnoredTerminal
+                );
+                assert_eq!(
+                    std::fs::read_to_string(&calls).unwrap().lines().count(),
+                    round as usize + 1
+                );
+                h = hub.into_inner().unwrap();
+                assert_eq!(
+                    h.store
+                        .db
+                        .query_row(
+                            "SELECT terminal_mismatch FROM telegram_reply_counters",
+                            [],
+                            |r| r.get::<_, i64>(0)
+                        )
+                        .unwrap(),
+                    if round == 2 { i64::MAX } else { round + 1 }
+                );
+                assert_eq!(
+                    h.store
+                        .db
+                        .query_row("SELECT core_id FROM inbound", [], |r| r.get::<_, String>(0))
+                        .unwrap(),
+                    "msg_final"
+                );
+                assert_eq!(
+                    h.store
+                        .db
+                        .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                            .get::<_, i64>(0))
+                        .unwrap(),
+                    if evicted { 0 } else { 1 }
+                );
+                assert!(fake.sent.borrow().is_empty());
+                drop(h);
+                h = Hub::new(
+                    Store::open(&state, Limits::default()).unwrap(),
+                    fake.clone(),
+                    "app_hub",
+                    "ws",
+                )
+                .unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn completion_modes_reject_the_other_path_before_and_after_terminal() {
         for receipt_mode in [false, true] {
             let (mut h, _) = fixture(Limits::default());
@@ -1833,11 +1952,9 @@ print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowled
             .execute("DELETE FROM telegram_reply_mappings", [])
             .unwrap();
         let changed = receipt_delivery(&intent, "msg_changed");
-        assert_eq!(
-            h.complete_test_telegram_receipt(copy_delivery(&changed), &intent, NOW)
-                .unwrap(),
-            Recorded::IgnoredTerminal
-        );
+        assert!(h
+            .complete_test_telegram_receipt(copy_delivery(&changed), &intent, NOW)
+            .is_err());
         assert_eq!(
             h.store
                 .db
@@ -2040,9 +2157,16 @@ print(json.dumps({'acknowledged_delivery_ids':['del_receipt'],'already_acknowled
             "ws",
         )
         .unwrap();
+        assert!(h
+            .complete_test_telegram_receipt(
+                receipt_delivery(&intent, "msg_changed"),
+                &intent,
+                NOW + 2
+            )
+            .is_err());
         assert_eq!(
             h.complete_test_telegram_receipt(
-                receipt_delivery(&intent, "msg_changed"),
+                receipt_delivery(&intent, "msg_final"),
                 &intent,
                 NOW + 2
             )

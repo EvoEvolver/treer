@@ -490,7 +490,17 @@ The currently unused `telegram_receipt_completion::commit_and_ack` supplies the
 completion stage for a future negotiated dispatcher. It requires sealed mailbox
 authority, verifies that the ack Core client is this Hub's identity, completes
 the transaction under the Hub mutex, releases that mutex, then calls Core ack.
-Any completion error skips ack. An ack error preserves the committed result;
+Any completion error skips ack. For terminal jobs, ack permission additionally
+requires the receipt's final Core ID to match authoritative durable
+`inbound.core_id`, even if its mapping was evicted. A changed final ID commits
+only a saturating mismatch counter and returns an error without ack, new history,
+queue changes or a new hold. Identical scoped terminal receipts remain ackable
+without resurrecting evicted history. The lower-level storage helper's
+`IgnoredTerminal` result alone does not authorize ack. Regression
+checks cover retained/evicted mappings, same-process and reopened stores, unchanged
+final IDs, zero ack on mismatch and counter saturation.
+
+An ack error preserves the committed result;
 redelivery validates the same receipt and retries its idempotent ack without
 another external send. It does not receive generic mailbox values, select FIFO
 work or negotiate peers; current workers do not call it.
