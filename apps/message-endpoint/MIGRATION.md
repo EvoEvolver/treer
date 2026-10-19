@@ -237,12 +237,19 @@ refetch, migration importer, live capability or running worker uses it yet.
   explicit `NotRetained` result, never `Full`. Runtime must explicitly retire an
   obsolete endpoint slot through the reviewed retirement procedure before
   replacing it. This bounds endpoint-ID churn as well as generation churn; slot
-  reuse/retirement is not automatically inferred by this local module. A stale
-  retained slot may degrade a newly added endpoint's reply history until retired,
+  retirement now runs inside the existing audited binding-deletion transaction:
+  paused/drained checks and the stable-ID tombstone precede removing all of that
+  endpoint's generations and incrementing the saturating `retired_rows` count.
+  Failure rolls back the entire deletion; no new purge route exists. Hub startup
+  migrates history counters before deletion is admitted. A stale retained slot
+  may degrade a newly added endpoint's reply history until explicitly deleted,
   but must not block its primary messages or alter another endpoint's mappings.
 - The caller supplies durable handoff state. A terminal handoff returns
   `IgnoredTerminal` without recreating history, even if its mapping was evicted
-  and the new assertion changes the final ID. Runtime must derive this state from
+  and the new assertion changes the final ID. If its row is still retained, a
+  changed valid assertion increments only the aggregate `terminal_mismatch`
+  count; malformed/wrong-sender receipts are rejected before this handling.
+  Runtime must derive this state from
   authoritative completion/dedup and atomically commit completion with mapping;
   this local helper alone cannot make the combined crash guarantee. Never derive
   replay admission from absence in the ring.

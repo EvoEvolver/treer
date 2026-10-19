@@ -262,6 +262,7 @@ impl<M: Mailbox + Directory> Hub<M> {
                 tx.execute(&format!("DELETE FROM {table} WHERE endpoint=?1"), [id])?;
             }
         }
+        crate::telegram_reply_store::retire_deleted_endpoint(&tx, id)?;
         tx.commit()?;
         Ok(())
     }

@@ -5,6 +5,8 @@ use crate::{
     store::{Error, Store},
     telegram_receipts::{Expected, Receipt, Scope},
 };
+#[cfg(all(unix, feature = "hub"))]
+use rusqlite::Transaction;
 use rusqlite::{params, OptionalExtension};
 
 const PER_ENDPOINT_ROWS: i64 = 1000;
@@ -48,7 +50,8 @@ impl<'a> Mappings<'a> {
                 UNIQUE(endpoint,generation,job));
              CREATE TABLE IF NOT EXISTS telegram_reply_counters(
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                conflicts INTEGER NOT NULL DEFAULT 0,evictions INTEGER NOT NULL DEFAULT 0);
+                conflicts INTEGER NOT NULL DEFAULT 0,evictions INTEGER NOT NULL DEFAULT 0,
+                terminal_mismatch INTEGER NOT NULL DEFAULT 0,retired_rows INTEGER NOT NULL DEFAULT 0);
              INSERT OR IGNORE INTO telegram_reply_counters(singleton) VALUES(1);",
         )?;
         let columns = store
@@ -56,8 +59,11 @@ impl<'a> Mappings<'a> {
             .prepare("PRAGMA table_info(telegram_reply_counters)")?
             .query_map([], |r| r.get::<_, String>(1))?
             .collect::<Result<Vec<_>, _>>()?;
-        if !columns.iter().any(|name| name == "evictions") {
-            store.db.execute_batch("ALTER TABLE telegram_reply_counters ADD COLUMN evictions INTEGER NOT NULL DEFAULT 0;")?;
+        for column in ["evictions", "terminal_mismatch", "retired_rows"] {
+            if !columns.iter().any(|name| name == column) {
+                // Fixed schema identifiers, never request data.
+                store.db.execute_batch(&format!("ALTER TABLE telegram_reply_counters ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0;"))?;
+            }
         }
         Ok(Self { store })
     }
@@ -77,9 +83,6 @@ impl<'a> Mappings<'a> {
         }
         let r =
             Receipt::parse_for(wire, outer_core_sender, expected).map_err(|_| Error::Invalid)?;
-        if matches!(handoff, HandoffState::Terminal) {
-            return Ok(Recorded::IgnoredTerminal);
-        }
         let s = &r.scope;
         let tx = self.store.db.transaction()?;
         let prior: Option<(String, String, String)> = tx
@@ -99,6 +102,20 @@ impl<'a> Mappings<'a> {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
+        if matches!(handoff, HandoffState::Terminal) {
+            if prior.as_ref().is_some_and(|(core, job, digest)| {
+                core != &r.final_core_message_id || job != &r.job_id || digest != &r.payload_digest
+            }) {
+                tx.execute(
+                    "UPDATE telegram_reply_counters SET terminal_mismatch=CASE
+                    WHEN terminal_mismatch<9223372036854775807 THEN terminal_mismatch+1
+                    ELSE terminal_mismatch END WHERE singleton=1",
+                    [],
+                )?;
+            }
+            tx.commit()?;
+            return Ok(Recorded::IgnoredTerminal);
+        }
         if let Some((core, job, digest)) = prior {
             if core == r.final_core_message_id && job == r.job_id && digest == r.payload_digest {
                 tx.commit()?;
@@ -199,6 +216,14 @@ impl<'a> Mappings<'a> {
             .ok_or(Error::Unavailable)
     }
 
+    pub fn terminal_mismatch_count(&self) -> Result<i64, Error> {
+        Ok(self.store.db.query_row(
+            "SELECT terminal_mismatch FROM telegram_reply_counters WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn eviction_count(&self) -> Result<i64, Error> {
         Ok(self.store.db.query_row(
             "SELECT evictions FROM telegram_reply_counters WHERE singleton=1",
@@ -214,6 +239,31 @@ impl<'a> Mappings<'a> {
             |row| row.get(0),
         )?)
     }
+}
+
+/// Only called inside the existing audited, paused-and-drained binding deletion
+/// transaction. No public purge API; all historical generations leave together.
+#[cfg(all(unix, feature = "hub"))]
+pub(crate) fn retire_deleted_endpoint(tx: &Transaction<'_>, endpoint: &str) -> Result<(), Error> {
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_reply_mappings')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(());
+    }
+    let removed = tx.execute(
+        "DELETE FROM telegram_reply_mappings WHERE endpoint=?1",
+        [endpoint],
+    )? as i64;
+    tx.execute(
+        "UPDATE telegram_reply_counters SET retired_rows=CASE
+        WHEN retired_rows<=9223372036854775807-?1 THEN retired_rows+?1
+        ELSE 9223372036854775807 END WHERE singleton=1",
+        [removed],
+    )?;
+    Ok(())
 }
 
 /// Normalize the transport/conversation sentinel once. Wire receipts themselves
@@ -417,6 +467,120 @@ mod tests {
         );
         assert_eq!(m.eviction_count().unwrap(), 0);
     }
+    #[test]
+    fn terminal_mismatch_is_aggregate_and_never_changes_or_recreates_history() {
+        let mut store = Store::memory(Limits::default()).unwrap();
+        let mut m = Mappings::new(&mut store).unwrap();
+        record(&mut m, &scope(), 11, "job_one", "msg_first").unwrap();
+        let digest = "a".repeat(64);
+        let wire = |id: &str| {
+            serde_json::to_vec(&json!({"protocol":CAPABILITY,
+            "verification":"app_asserted","scope":scope(),"job_id":"job_one",
+            "payload_digest":digest,"native_message_id":11,"final_core_message_id":id}))
+            .unwrap()
+        };
+        for (sender, id, count, valid) in [
+            ("ag_relay", "msg_first", 0, true),
+            ("ag_relay", "msg_changed", 1, true),
+            ("ag_forged", "msg_changed", 1, false),
+            ("ag_relay", "invalid", 1, false),
+        ] {
+            let result = m.record(
+                &wire(id),
+                sender,
+                Expected {
+                    scope: &scope(),
+                    job_id: "job_one",
+                    payload_digest: &digest,
+                    native_message_id: 11,
+                },
+                HandoffState::Terminal,
+                42,
+            );
+            if valid {
+                assert_eq!(result.unwrap(), Recorded::IgnoredTerminal);
+            } else {
+                assert!(matches!(result, Err(Error::Invalid)));
+            }
+            assert_eq!(m.terminal_mismatch_count().unwrap(), count);
+            assert_eq!(m.context(&scope(), 11).unwrap(), "msg_first");
+        }
+        assert_eq!(m.conflict_count().unwrap(), 0);
+    }
+
+    #[test]
+    fn prior_counter_schema_migrates_without_losing_counts() {
+        let mut store = Store::memory(Limits::default()).unwrap();
+        store
+            .db
+            .execute_batch(
+                "CREATE TABLE telegram_reply_counters(
+            singleton INTEGER PRIMARY KEY CHECK(singleton=1),conflicts INTEGER NOT NULL);
+            INSERT INTO telegram_reply_counters VALUES(1,7);",
+            )
+            .unwrap();
+        let m = Mappings::new(&mut store).unwrap();
+        assert_eq!(m.conflict_count().unwrap(), 7);
+        assert_eq!(m.eviction_count().unwrap(), 0);
+        assert_eq!(m.terminal_mismatch_count().unwrap(), 0);
+    }
+
+    #[cfg(all(unix, feature = "hub"))]
+    #[test]
+    fn audited_retirement_helper_releases_a_reserved_slot_transactionally() {
+        let mut store = Store::memory(Limits::default()).unwrap();
+        {
+            let mut m = Mappings::new(&mut store).unwrap();
+            for i in 1..=20 {
+                let mut s = scope();
+                s.endpoint_id = format!("ag_{i}");
+                record(&mut m, &s, 1, "job_one", "msg_first").unwrap();
+            }
+            assert_eq!(
+                record(&mut m, &scope(), 11, "job_new", "msg_new").unwrap(),
+                Recorded::NotRetained
+            );
+        }
+        // Caller rollback preserves its history and slot.
+        {
+            let tx = store.db.transaction().unwrap();
+            retire_deleted_endpoint(&tx, "ag_1").unwrap();
+            tx.rollback().unwrap();
+        }
+        assert_eq!(
+            store
+                .db
+                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            20
+        );
+        {
+            let tx = store.db.transaction().unwrap();
+            retire_deleted_endpoint(&tx, "ag_1").unwrap();
+            tx.commit().unwrap();
+        }
+        let mut m = Mappings::new(&mut store).unwrap();
+        assert_eq!(
+            record(&mut m, &scope(), 11, "job_new", "msg_new").unwrap(),
+            Recorded::Inserted
+        );
+        assert_eq!(
+            m.store
+                .db
+                .query_row(
+                    "SELECT retired_rows FROM telegram_reply_counters",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        let mut other = scope();
+        other.endpoint_id = "ag_2".into();
+        assert_eq!(m.context(&other, 1).unwrap(), "msg_first");
+    }
+
     #[cfg(unix)]
     #[test]
     fn reopen_preserves_immutable_receipt_and_conflict_counter() {

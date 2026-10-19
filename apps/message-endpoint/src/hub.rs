@@ -147,6 +147,8 @@ impl<M: Mailbox + Directory> Hub<M> {
         if relay {
             return Err(Error::Binding);
         }
+        // Initialize/migrate local history before any audited deletion can retire it.
+        crate::telegram_reply_store::Mappings::new(&mut store)?;
         let tx = store.db.transaction()?;
         tx.execute_batch("CREATE TABLE IF NOT EXISTS hub_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1), agent TEXT NOT NULL,workspace TEXT NOT NULL,blocked INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS hub_bindings(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id), definition TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,reason TEXT NOT NULL DEFAULT 'owner_paused',observed TEXT,checked_at INTEGER,diagnostic TEXT,diagnostic_at INTEGER);

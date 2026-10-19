@@ -67,11 +67,11 @@ pub use settings_http::email_threads;
 #[cfg(all(unix, feature = "hub"))]
 pub mod email_workers;
 
+#[cfg(all(unix, feature = "hub"))]
+mod management;
 // Stage-2 contract; no runtime dispatch or migration activation yet.
 pub mod telegram_receipts;
 pub mod telegram_reply_store;
-#[cfg(all(unix, feature = "hub"))]
-mod management;
 
 #[cfg(all(unix, feature = "hub"))]
 mod request_audit;

@@ -598,16 +598,113 @@ mod tests {
             .unwrap();
         let revision = h.view("ag_empty").unwrap().revision;
         let generation = h.view("ag_empty").unwrap().binding.generation;
+        // Synthetic history spans generations; deletion must retire only this endpoint.
+        h.store
+            .db
+            .execute_batch(
+                "INSERT INTO telegram_reply_mappings VALUES
+            ('fixture',1,0,'ag_empty',1,'ag_recipient',1,'msg_one','job_one','digest',1),
+            ('fixture',1,0,'ag_empty',2,'ag_recipient',2,'msg_two','job_two','digest',2),
+            ('fixture',1,0,'ag_other',1,'ag_recipient',1,'msg_other','job_other','digest',1);",
+            )
+            .unwrap();
         h.store.db.execute("INSERT INTO inbound(endpoint,generation,external_id,recipient,body,digest) VALUES('ag_empty',?1,'fixture','ag_recipient','synthetic',x'00')",[generation]).unwrap();
         assert!(h
             .delete_binding_audited("ag_empty", revision, "ag_manager", current_time().unwrap())
             .is_err());
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT retired_rows FROM telegram_reply_counters",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
         h.store
             .db
             .execute("UPDATE inbound SET pending=0", [])
             .unwrap();
+        // Failure after row deletion must roll back history, tombstone and revision.
+        h.store
+            .db
+            .execute_batch(
+                "CREATE TEMP TRIGGER reject_retirement BEFORE UPDATE OF retired_rows
+            ON telegram_reply_counters BEGIN SELECT RAISE(ABORT,'synthetic failure'); END;",
+            )
+            .unwrap();
+        assert!(h
+            .delete_binding_audited("ag_empty", revision, "ag_manager", current_time().unwrap())
+            .is_err());
+        assert_eq!(h.view("ag_empty").unwrap().revision, revision);
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT count(*) FROM telegram_reply_mappings", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM hub_retired_bindings WHERE endpoint='ag_empty'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        h.store
+            .db
+            .execute_batch("DROP TRIGGER reject_retirement")
+            .unwrap();
         h.delete_binding_audited("ag_empty", revision, "ag_manager", current_time().unwrap())
             .unwrap();
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM telegram_reply_mappings WHERE endpoint='ag_empty'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM telegram_reply_mappings WHERE endpoint='ag_other'",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT retired_rows FROM telegram_reply_counters",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            2
+        );
         assert!(h.view("ag_empty").is_err());
         assert!(!h.binding_ids().unwrap().contains(&"ag_empty".into()));
         assert_eq!(
