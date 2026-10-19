@@ -1019,14 +1019,17 @@ test('Rust stderr retention is opt-in and private write failure leaves stop unch
   assert.equal(stopped.runtime.provider.stderrCapture,'disabled');
   await assert.rejects(lstat(join(off.state,'rust-provider-stderr.log')),{code:'ENOENT'});
   const on=await fixture(t,{...faultEnv('diagnostic-invalid'),RUST_SPIKE_CAPTURE_STDERR:'1'});
-  await chmod(on.state,0o500);
+  // Fail only optional stderr publication, not the authoritative transport
+  // checkpoint. A read-only root now correctly makes that checkpoint fatal
+  // (covered separately by the read-only-journal overflow contract).
+  const stderr=join(on.state,'rust-provider-stderr.log');await mkdir(stderr);
   try {
     const failed=await until(()=>fetch(on.base+'/v1/state').then(r=>r.json()),x=>x.runtime?.provider?.stderrCapture==='failed');
     assert.equal(failed.runtime.cleanup.providerExit,'confirmed');
     assert.equal(failed.runtime.provider.transport,'invalid_json');
     assert.ok(!JSON.stringify(failed.runtime).includes('synthetic-private-tail'));
     const exit=once(on.child,'exit');on.child.kill('SIGTERM');assert.deepEqual(await exit,[0,null]);
-  } finally { await chmod(on.state,0o700); }
+  } finally { await rm(stderr,{recursive:true}); }
 });
 test('Rust stalled provider stdin fails closed while state reads remain responsive',{skip:useNode,timeout:20000},async t=>{
   const s=await fixture(t,faultEnv('stdin-stall'));
