@@ -366,13 +366,14 @@ class Store:
 
     LINKS_PER_MINUTE = 30
 
-    def rate_links(self, principal, now):
-        """Relation changes are limited per principal (a sliding minute) so no one can churn other people's hierarchies."""
+    def rate_links(self, principal, now, weight=1):
+        """Relation changes are limited per principal (a sliding minute), counted per link ADDED (removing links is free, so a
+        full set can always be cleared), so one request that adds 50 links costs 50 and no one can churn other people's hierarchies."""
         hits = [t for t in self.link_hits.get(principal, []) if now - t < 60]
-        if len(hits) >= self.LINKS_PER_MINUTE:
+        if len(hits) + weight > self.LINKS_PER_MINUTE:
             self.link_hits[principal] = hits
             fail('rate_limited', f'At most {self.LINKS_PER_MINUTE} parent/child changes per minute', 429)
-        hits.append(now)
+        hits.extend([now] * weight)
         self.link_hits[principal] = hits
         if len(self.link_hits) > 1000:
             self.link_hits = {k: v for k, v in self.link_hits.items() if v and now - v[-1] < 60}
@@ -425,7 +426,7 @@ class Store:
                     fail('claim_owned', 'Another principal holds the active lease', 409)
                 if not self.editable(parent, actor):
                     fail('forbidden', 'Only someone who may edit the parent can attach children to it', 403)
-            self.rate_links(actor['id'], now)
+            self.rate_links(actor['id'], now, len(lists['add']))
             for child_id in lists['add']:
                 child = self.get(items, child_id)
                 if parent_id in child['parent_ids']:
@@ -466,7 +467,7 @@ class Store:
                 self.validate(issue, items, directory)
                 if new_parents:
                     hierarchy.check_parents(None, new_parents, items, fail)
-                    self.rate_links(actor['id'], now)
+                    self.rate_links(actor['id'], now, len(new_parents))
                 issue_id = db.execute('INSERT INTO issues(data) VALUES(?)', ('{}',)).lastrowid
                 issue['id'] = issue_id
                 old_assignee = None
@@ -487,7 +488,7 @@ class Store:
                     issue.update({k: v for k, v in body.items() if k not in ('version', 'parent_id', 'parent_ids')})
                     if new_parents is not None and new_parents != issue['parent_ids']:
                         hierarchy.check_parents(issue_id, new_parents, items, fail)
-                        self.rate_links(actor['id'], now)
+                        self.rate_links(actor['id'], now, len(set(new_parents) - set(issue['parent_ids'])))
                     if issue['status'] != 'blocked' and 'waiting_on' not in body:
                         issue['waiting_on'] = None          # leaving blocked ends the wait; the assignee is responsible again
                     self.validate(issue, items, directory)

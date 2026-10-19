@@ -206,5 +206,24 @@ class GraphTest(Base):
         self.link(epic, [kids[-1]], A)                              # the window slides
 
 
+class WeightedRateTest(Base):
+    def test_one_request_changing_many_links_costs_that_many(self):
+        epic = self.issue(A)
+        kids = [self.issue(B) for _ in range(Store.LINKS_PER_MINUTE + 5)]
+        self.store.link_hits.clear()
+        self.link(epic, kids[:Store.LINKS_PER_MINUTE - 5], A)                      # 25 links in one request
+        self.assertEqual(self.code(self.link, epic, kids[25:31], A)[0], 429, '6 more would be 31 in the minute')
+        self.link(epic, kids[25:30], A)                                            # exactly the remaining 5
+        self.assertEqual(self.code(self.link, epic, [kids[30]], A)[0], 429)
+        self.now += 61
+        self.link(epic, [kids[30]], A)
+        spread = self.issue(A)
+        self.store.link_hits.clear()
+        self.edit(spread, {'parent_ids': [epic]}, A)
+        self.assertEqual(len(self.store.link_hits['ag_a']), 1, 'a PATCH counts the links it adds')
+        self.edit(spread, {'parent_ids': []}, A)
+        self.assertEqual(len(self.store.link_hits['ag_a']), 1, 'removing links is free: a full set can always be cleared')
+
+
 if __name__ == '__main__':
     unittest.main()

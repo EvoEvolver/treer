@@ -439,7 +439,7 @@ An issue can have **several parents** and a parent several children (a DAG), kep
 (child, parent, who linked it, when). `parent_ids` lists an issue's parents oldest link first and `parent_id` is
 the first of them: a read-only value derived from the relation for older clients, not a second source of truth (it is no
 longer stored in the issue). The first start after the upgrade moves every stored `parent_id` into the table in one transaction
-(idempotent; dangling or self parents are dropped). **Take the online SQLite backup before deploying** (`app-deploy` does).
+(idempotent; dangling or self parents are dropped). **Take the online SQLite backup before deploying** (`app-deploy` does) and name that file and its SHA-256 in the deployment record: after the migration the stored issues have no `parent_id`, so rolling the code back alone would show a flat list; a rollback restores the pre-deploy backup together with the old code. Rehearse the migration on a copy of the real database first and compare the number of issues that have a parent before and after.
 
 - Create or edit an issue with `parent_ids: [...]` (replaces its whole parent set) or the old `parent_id` (an ID, or null to
   clear): the child's editors choose its parents. Do not send both.
@@ -450,7 +450,7 @@ longer stored in the issue). The first start after the upgrade moves every store
   written to **both** issues' activity (who, when, the other issue). The call is idempotent.
 - No cycles through any path (a diamond is fine); at most 50 parents per issue and 50 children per issue; replacing the parent
   set of a child that already holds 50 parents is still allowed, so a full set cannot lock its owner out; at most 30 relation
-  changes per minute per principal (429); every walk of the graph stops at 10,000 nodes.
+  changes per minute per principal, counted per link **added** (removals are free so a full set can always be cleared) (429); every walk of the graph stops at 10,000 nodes.
 - A parent never changes how its children behave: reminders, leases, dependencies and permissions ignore the hierarchy.
 - Progress rollups count every descendant **once** however many paths lead to it, skip notes (not their subtrees) and say
   `truncated` if the node cap was hit. The tree view shows a child under its first parent; the detail page lists all parents.
