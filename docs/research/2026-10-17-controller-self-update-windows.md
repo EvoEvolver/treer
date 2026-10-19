@@ -1063,6 +1063,29 @@ that ordering is implemented and tested. Never automatically reconstruct a
 failure capability from bytes on restart. Recovery stays disabled; this plan
 adds no health proof, rollback actor, installation mutation or W4 authority.
 
+The first implementation increment is the private test-only
+`operation_outcome/context_record.rs` codec, **not native binding yet**. It uses
+225 bytes in fixed order: `TRCTX001`, u16 little-endian total length, 32-byte
+attempt identifier, `PREDE001`, 32-byte predecessor digest, one byte each for
+component/role/operation, u64 intent revision, source then target image records,
+and u32 status. Each image is u64 volume serial, all 16 file-id bytes, u64 length,
+and 32-byte digest. Integer fields use little endian; identifiers and digests
+are exact opaque byte arrays. Zero/all-ones volume or file identity is refused;
+attempt/predecessor sentinels, zero/oversized images, identical object identities,
+unsupported selectors, inconsistent role/operation, zero revision/status and
+non-exact framing are refused too. Byte equality is allocation-independent.
+Tests cover every-byte binding mutation, equal-width attempt/predecessor swaps,
+truncation/trailing bytes, invalid fields and mutual old/new decoder refusal.
+No old decoder or Unix bytes changed. The field values in these tests are
+synthetic, including status: this does **not** prove actual-error acquisition.
+The next native increment must obtain `FILE_ID_INFO` from retained handles
+(the existing 64-bit file-index tuple is insufficient), fix independent expected
+identities before acquisition, and implement the pinned store/read comparison
+against the actual captured failure. Cross-operation status substitution and
+post-store interference remain native test requirements, as do all custody and
+durable-publication conditions above. Hosted execution of this codec increment
+is pending; Windows cross-target lint alone is compilation evidence.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual

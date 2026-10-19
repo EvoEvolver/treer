@@ -3,6 +3,7 @@ use super::*;
 use std::cell::Cell;
 
 mod composition;
+mod context_record;
 
 pub(super) enum RenameError {
     Before(io::Error),
