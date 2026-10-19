@@ -172,17 +172,18 @@ to implement three new Core APIs. A future reviewed
 cutover validator must require the explicit owner decision and operator evidence,
 not silently mark those codes resolved because queues are terminal.
 
-Next App-owned increment: synthetic fixtures for scoped App-asserted receipts,
-unknown historical replies, report-only drain samples and stragglers, followed by
-the native reply/receipt implementation in a separate frozen change. No automatic
+Next runtime increment: scoped App-asserted receipt dispatch, native reply
+handling, unknown historical replies, report-only drain samples and stragglers,
+with the actual native reply/receipt integration separately frozen and reviewed. No automatic
 post-traffic rollback is available; keep containment and manual reconciliation
 explicit until a reverse journal is implemented and reviewed.
 
 ### Stage 2A: scoped receipt wire contract (not runtime-enabled)
 
 `src/telegram_receipts.rs` defines the first local contract slice. There is no
-runtime dispatcher, HTTP endpoint, sender, mapping table, capability negotiation
-or production activation wired to it yet. Runtime support must come back for
+runtime dispatcher, HTTP endpoint, sender, capability negotiation or production
+activation wired to it yet. The separate local storage slice below is not invoked
+by the hub runtime either. Runtime support must come back for
 review before deployment; exporting the Rust module advertises no live capability.
 
 - Capability/protocol string: `treer.telegram.app-asserted-receipts.v1`.
@@ -212,6 +213,39 @@ endpoint/generation/recipient and wrong-sender refusal, job/digest/native-ID
 conflicts, invalid Core ID, false verification upgrade, unknown protocol/fields,
 duplicate JSON and oversize rejection. These establish only parser boundaries,
 not native threading, durable delivery or a completed migration rehearsal.
+
+### Stage 2B: local receipt mapping storage (not runtime-enabled)
+
+`src/telegram_reply_store.rs` adds SQLite mapping helpers using the existing
+private `Store`. This is local storage only: no receipt acceptance route, Core
+refetch, migration importer, live capability or running worker uses it yet.
+
+- The key is account/chat/canonical-topic/endpoint/generation/recipient/native ID.
+  A no-topic transport sentinel of zero normalizes to `None`, stored as SQL zero;
+  receipt JSON with `topic_id:0` is invalid. Positive topics remain distinct.
+- Record re-parses the strict receipt against the trusted handoff. Exactly equal
+  ID/job/digest replay is a no-op; changed final ID/job/digest or reuse of a job
+  for another native message is a conflict. The old row stays intact. Only a
+  saturating aggregate conflict counter is committed; no body or ID is audited.
+  Future dispatch must hold the handoff unacknowledged on conflict.
+- Capacity is 1000 rows per endpoint generation and 10000 total. At capacity new
+  mappings are refused; existing replay and lookup still work. Retention lasts
+  until the reviewed binding-retirement procedure. There is no automatic expiry,
+  eviction, deletion API or silent replacement of an old reply context.
+- Lookup requires the complete valid scope; unknown/pre-cutover/cross-binding
+  references return unavailable. A returned ID is still only an App assertion.
+  A compromised relay can assert any syntactically valid ID, including an
+  unreadable one: Core's later send checks, not the parser/store, enforce parent
+  visibility. Preserve unreadable-context failure/hold; do not omit the context.
+- Future dispatch verifies outer Agent principal kind, workspace/mailbox and
+  pinned stable ID before invoking the parser/store, with expected values from
+  durable handoff/current binding. Neither local helper authenticates its caller.
+
+Local SQLite tests cover replay, conflicting final ID and job reuse, aggregate
+counter persistence, reopen under private-store checks, cross-scope/unknown
+lookup refusal, no-topic normalization, per-binding/global capacity and existing
+receipt preservation at capacity. Native send/ack ordering, actual Core negative
+contexts, peer negotiation and drain/straggler rehearsals remain runtime work.
 
 ### Security gates still required before a production decision
 

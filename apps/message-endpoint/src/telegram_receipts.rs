@@ -65,7 +65,7 @@ fn digest(value: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 impl Scope {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         identifier(&self.account_id, "")
             && self.chat_id != 0
             && self.topic_id.is_none_or(|id| id > 0)
