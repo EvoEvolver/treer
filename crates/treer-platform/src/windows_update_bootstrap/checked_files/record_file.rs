@@ -1,6 +1,9 @@
 //! Disposable native storage fixture. Opaque bounded bytes only: no receipt
 //! schema, marker protocol, enrollment state, recovery entry or public caller.
 use super::*;
+use windows_sys::Win32::System::WindowsProgramming::{
+    FILE_RENAME_FLAG_POSIX_SEMANTICS, FILE_RENAME_FLAG_REPLACE_IF_EXISTS,
+};
 
 const RECORD_LIMIT: usize = 64 * 1024;
 
@@ -105,7 +108,9 @@ impl Attempt {
             return Err(denied());
         }
         validate_previous()?;
-        // Same-directory native replacement, never delete the old name first.
+        // Extended rename supplies the documented open-reader replacement
+        // semantics. Ordinary FileRenameInfo failed with retained old readers
+        // on hosted Server 2022/2025. No delete-first or legacy fallback.
         // A retained old reader must allow delete sharing; otherwise refusal
         // preserves the original target and complete staged evidence.
         let name = wide(target.as_os_str());
@@ -113,7 +118,11 @@ impl Attempt {
         let mut storage = vec![0usize; length.div_ceil(mem::size_of::<usize>())];
         let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
         unsafe {
-            (*info).Anonymous.ReplaceIfExists = expected_previous.is_some();
+            (*info).Anonymous.Flags = if expected_previous.is_some() {
+                FILE_RENAME_FLAG_REPLACE_IF_EXISTS | FILE_RENAME_FLAG_POSIX_SEMANTICS
+            } else {
+                0
+            };
             (*info).RootDirectory = ptr::null_mut();
             (*info).FileNameLength = ((name.len() - 1) * 2) as u32;
             ptr::copy_nonoverlapping(
@@ -122,14 +131,19 @@ impl Attempt {
                 name.len(),
             );
         }
-        check(unsafe {
+        let renamed = unsafe {
             SetFileInformationByHandle(
                 staged.as_raw_handle(),
-                FileRenameInfo,
+                FileRenameInfoEx,
                 info.cast(),
                 length as u32,
             )
-        })?;
+        };
+        if renamed == 0 {
+            let code = unsafe { GetLastError() };
+            eprintln!("record_fixture stage=rename_ex win32={code}");
+            return Err(denied());
+        }
         if fault == RecordFault::AfterPublish {
             return Err(denied());
         }

@@ -396,6 +396,22 @@ do not establish schema validation, revision/marker ordering, child quiescence,
 production ACL provisioning or power-loss durability. No production journal or
 recovery command uses this primitive.
 
+Initial hosted code `170c8d9f` failed both new storage tests on Server 2022/2025
+(run 39222920553 and single-thread diagnostic 39223181983). Initial creation
+succeeded, but replacement with an old reader failed and the after-publication
+fault test still observed old bytes. The code used ordinary `FileRenameInfo`;
+the successor uses `FileRenameInfoEx` with replace/POSIX flags when a previous
+record is expected, and zero flags for initial creation. Microsoft's
+[rename contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
+documents that POSIX replacement preserves existing handles while new opens
+resolve to the replacement. This is the failure hypothesis, pending exact-SHA
+native confirmation; no runtime PASS is claimed. A failed native call now logs
+only the fixed `rename_ex` stage and numeric Win32 code. There is no ordinary
+rename, delete-first or sharing-check bypass fallback. The delete-sharing
+blocker assertion remains unchanged. A separate observed concurrent fixture
+directory collision is addressed by OS-random selectors instead of timestamps;
+existing directories are still refused, never adopted or removed on collision.
+
 ### W1a: private directory and checked-copy fixture
 
 `windows_update_bootstrap/checked_files.rs` is private under `cfg(windows, test)`.

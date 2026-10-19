@@ -1245,14 +1245,9 @@ mod tests {
     }
 
     fn selector() -> String {
-        // Test-only uniqueness; production uses the coordinator's job identity.
-        format!(
-            "{:032x}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        )
+        // Hosted Windows clock resolution let concurrent fixtures choose the
+        // same timestamp. Use OS randomness; existing paths still fail closed.
+        format!("{:032x}", u128::from_le_bytes(random_nonce().unwrap()))
     }
 
     #[tokio::test]
