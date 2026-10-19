@@ -8,6 +8,167 @@ use tokio::{
 
 const CHILD_TEST: &str = "windows_update_bootstrap::running_image::running_image_child";
 
+// ReOpenFile binds to the retained object rather than resolving a caller path.
+// A read-only pin remains alive throughout execution and both renames, denying
+// write sharing but permitting DELETE access on a separate operation handle.
+// The original write-open sharing record may outlive DuplicateHandle's access
+// reduction; CreateProcess refused that pin on hosted Server 2022/2025. This is
+// confined to the live-image fixture;
+// checked_files::copy/copy_for_rename retain their original sharing contract.
+fn reopen(image: &File, access: u32, sharing: u32, stage: &'static str) -> io::Result<File> {
+    let raw = unsafe {
+        ReOpenFile(
+            image.as_raw_handle(),
+            access,
+            sharing,
+            FILE_FLAG_OPEN_REPARSE_POINT,
+        )
+    };
+    if raw == INVALID_HANDLE_VALUE {
+        let code = unsafe { GetLastError() };
+        eprintln!("running_image_fixture stage={stage} access={access:#x} sharing={sharing:#x} win32={code}");
+        return Err(denied());
+    }
+    let reopened = unsafe { File::from_raw_handle(raw) };
+    check(unsafe { SetHandleInformation(raw, HANDLE_FLAG_INHERIT, 0) })?;
+    if identity(&reopened)? != identity(image)? {
+        return Err(denied());
+    }
+    Ok(reopened)
+}
+
+// Tighten ONLY this newly created private fixture image before closing the last
+// write-open file object. ReOpenFile cannot request a no-write-sharing read pin
+// while that write-open object exists. A verified protected RX/DELETE DACL
+// denies new write opens across that transition, including the current user.
+// Owner WRITE_DAC override / hostile same-user code is outside this fixture's
+// trust claim. This is not a policy for an existing installed executable.
+fn execution_pin(image: File, expected: [u8; 32]) -> io::Result<File> {
+    let metadata = reopen(
+        &image,
+        READ_CONTROL | WRITE_DAC | FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        "acl_pin",
+    )?;
+    let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
+    private_owner_dacl(&metadata, &owner)?;
+    let access = FILE_GENERIC_READ | FILE_GENERIC_EXECUTE | DELETE;
+    let text = wide(OsStr::new(&format!(
+        "D:P(A;;{access:#x};;;SY)(A;;{access:#x};;;{owner})"
+    )));
+    let mut descriptor = ptr::null_mut();
+    check(unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            text.as_ptr(),
+            1,
+            &mut descriptor,
+            ptr::null_mut(),
+        )
+    })?;
+    let _allocation = SecurityAllocation(descriptor);
+    let mut present = 0;
+    let mut defaulted = 0;
+    let mut acl = ptr::null_mut();
+    check(unsafe {
+        GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted)
+    })?;
+    if present == 0 || acl.is_null() {
+        return Err(denied());
+    }
+    if unsafe {
+        SetSecurityInfo(
+            metadata.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            acl,
+            ptr::null_mut(),
+        )
+    } != ERROR_SUCCESS
+    {
+        return Err(denied());
+    }
+    // Verify the exact installed ACL, not merely the owner/foreign-writer rule.
+    let mut actual_acl = ptr::null_mut();
+    let mut actual_descriptor = ptr::null_mut();
+    let result = unsafe {
+        GetSecurityInfo(
+            metadata.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut actual_acl,
+            ptr::null_mut(),
+            &mut actual_descriptor,
+        )
+    };
+    let _actual_allocation = SecurityAllocation(actual_descriptor);
+    if result != ERROR_SUCCESS || actual_acl.is_null() || unsafe { IsValidAcl(actual_acl) } == 0 {
+        return Err(denied());
+    }
+    let mut control = 0;
+    let mut revision = 0;
+    check(unsafe { GetSecurityDescriptorControl(actual_descriptor, &mut control, &mut revision) })?;
+    if control & SE_DACL_PROTECTED == 0 || unsafe { (*actual_acl).AceCount } != 2 {
+        return Err(denied());
+    }
+    for index in 0..2 {
+        let mut desired = ptr::null_mut();
+        let mut actual = ptr::null_mut();
+        check(unsafe { GetAce(acl, index, &mut desired) })?;
+        check(unsafe { GetAce(actual_acl, index, &mut actual) })?;
+        let desired_size = unsafe { (*desired.cast::<ACE_HEADER>()).AceSize } as usize;
+        let actual_size = unsafe { (*actual.cast::<ACE_HEADER>()).AceSize } as usize;
+        if desired_size != actual_size
+            || unsafe {
+                std::slice::from_raw_parts(desired.cast::<u8>(), desired_size)
+                    != std::slice::from_raw_parts(actual.cast::<u8>(), actual_size)
+            }
+        {
+            return Err(denied());
+        }
+    }
+    let path = final_path(&image)?;
+    drop(image);
+    // At this exact point only the metadata handle remains: it shares writes,
+    // so this assertion specifically proves the tightened ACL denies writing.
+    if OpenOptions::new().write(true).open(&path).is_ok() {
+        return Err(denied());
+    }
+    let pin = reopen(
+        &metadata,
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_DELETE,
+        "read_pin",
+    )?;
+    private_owner_dacl(&pin, &owner)?;
+    if digest(&pin)? != expected {
+        return Err(denied());
+    }
+    Ok(pin)
+}
+
+fn rename_running(
+    attempt: &checked_files::Attempt,
+    image: &File,
+    from: checked_files::Slot,
+    to: checked_files::Slot,
+    expected: [u8; 32],
+) -> io::Result<()> {
+    let operation = reopen(
+        image,
+        GENERIC_READ | DELETE,
+        FILE_SHARE_READ | FILE_SHARE_DELETE,
+        "rename_pin",
+    )?;
+    // The existing primitive still checks ACL, source slot, links, reparse
+    // status and digest and verifies identity plus destination after the move.
+    // The DELETE-access operation handle drops before the next liveness check.
+    attempt.rename_checked(&operation, from, to, expected)
+}
+
 // Only the actual CreateProcess handle is used for observation and cleanup.
 // The child runs one fixed test, creates no descendants, and also self-times out.
 struct Child {
@@ -79,8 +240,7 @@ impl Child {
             )
         })?;
         let observed_path = PathBuf::from(OsString::from_wide(&buffer[..length as usize]));
-        // This temporary read-only observer must share DELETE with the retained
-        // rename handle. That original handle still denies delete sharing.
+        // Same read-only/write-denying sharing contract as the execution pin.
         let observed = open_checked(&observed_path, false, FILE_SHARE_READ | FILE_SHARE_DELETE)?;
         if identity(&observed)? != identity(image)? || digest(&observed)? != expected {
             return Err(denied());
@@ -171,6 +331,7 @@ async fn native_running_image_rename() {
         .rename_checked(&image, Slot::Candidate, Slot::Active, expected)
         .unwrap();
     let before = identity(&image).unwrap();
+    let image = execution_pin(image, expected).unwrap();
     let mut endpoint = Endpoint::bind_random().unwrap();
     let mut child = Child::spawn(&image, expected, &endpoint).unwrap();
     tokio::time::timeout(CONNECT_BUDGET, async {
@@ -181,17 +342,13 @@ async fn native_running_image_rename() {
         assert_eq!(peer, child.pid);
         assert_eq!(endpoint.pipe.read_u8().await.unwrap(), 1);
         child.alive().unwrap();
-        attempt
-            .rename_checked(&image, Slot::Active, Slot::Backup, expected)
-            .unwrap();
+        rename_running(&attempt, &image, Slot::Active, Slot::Backup, expected).unwrap();
         assert_eq!(identity(&image).unwrap(), before);
         assert!(final_path(&image).unwrap().ends_with("controller.prev.exe"));
         endpoint.pipe.write_all(&[2]).await.unwrap();
         assert_eq!(endpoint.pipe.read_u8().await.unwrap(), 3);
         child.alive().unwrap();
-        attempt
-            .rename_checked(&image, Slot::Backup, Slot::Active, expected)
-            .unwrap();
+        rename_running(&attempt, &image, Slot::Backup, Slot::Active, expected).unwrap();
         assert_eq!(identity(&image).unwrap(), before);
         assert!(final_path(&image).unwrap().ends_with("controller.exe"));
         assert!(OpenOptions::new()

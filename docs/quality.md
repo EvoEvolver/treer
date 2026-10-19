@@ -30,8 +30,14 @@ without a live installed update or real `win_native` run. A separate ignored
 `native_running_image_rename` fixture now launches only a checked disposable test
 copy, confirms kernel PID/image identity and live replies across forward/reverse
 renames, and confirms cleanup using its actual process handle. Its hosted
-Server 2022/2025 execution outside the runner Job remains pending; compilation
-does not establish running-image rename support. Durable receipt/recovery states
+Server 2022/2025 run 39213059404 on `723f772d` failed before either live rename
+at CreateProcess, Win32 32 (sharing violation). The correction uses a narrowed,
+verified owner/SYSTEM RX/DELETE DACL on the newly created fixture image across
+the transition from the old write-open object to a separately reopened read-only
+execution pin, then derives checked read/DELETE handles only for each rename.
+It specifically tests that writing is refused during the transition. The new
+sharing/ACL boundary needs review and hosted execution; compilation does not
+establish running-image rename support. Durable receipt/recovery states
 and production installation remain subsequent work.
 
 ### Windows self-update registration model

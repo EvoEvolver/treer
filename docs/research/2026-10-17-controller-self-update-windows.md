@@ -217,6 +217,32 @@ and one fixed ignored child test. Before resuming the child it compares the
 kernel-reported process image with the retained file identity and digest. The
 owned process handle and creation time bind all subsequent liveness checks.
 
+The initial hosted run 39213059404 on `723f772d` failed on both Windows versions
+at `create_process`, Win32 32 (sharing violation); the running-image rename was
+never reached. The old rename tests, full platform library (41 passed, four
+ignored) and separate owner round trip passed on that SHA. Lowering the granted
+access through DuplicateHandle may leave the original write-open file object's
+sharing record alive (security5251); that is the correction's hypothesis, not
+proof of a successful execution pin.
+
+The successor fixture tightens only its freshly created private active image's
+DACL to protected owner/SYSTEM read/execute/delete before dropping the last
+write-open object. It derives a metadata handle through
+[ReOpenFile](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-reopenfile),
+verifies identical object identity, sets that narrower DACL and reads it back
+to require the exact two ACEs and protected flag. This metadata handle shares
+writes to coexist with the old write-open object, but has no data-write access.
+After closing the old object, an attempted write open must fail while only the
+metadata handle remains: this specifically tests the ACL across the transition.
+The new read-only execution pin is reopened from that same object, denies write
+sharing, permits delete sharing and is re-hashed. Each rename uses a separate
+read/DELETE operation handle derived from the pin, with the existing checked
+rename pre/postconditions. There is no close-and-reopen by pathname and no
+interval where ordinary write opens are permitted. Owner ACL override, hostile
+same-user code and privileged bypass remain outside this private fixture's
+claim. The W1a copy API and static rename fixtures are unchanged. This is not
+yet a reviewed ACL policy for existing installed files.
+
 The child connects to the existing current-user/SYSTEM-only local pipe; the
 parent checks its kernel PID and requires a ready byte. It renames the retained
 running image active-to-backup, gets a fresh child reply, reverses backup-to-active
@@ -226,7 +252,7 @@ reply until bounded cleanup of its actual process handle; its own ten-second
 deadline also bounds a lost parent. The parent confirms process termination
 before deleting only its exact test files. Failure leaves attempt evidence;
 there is no installed image, Controller/Host lifecycle operation or production
-entry. The child creates no descendants. This is a proposed test, not evidence
+entry. The child creates no descendants. This is a revised test, not evidence
 that a running-image rename has passed Windows execution. Hosted Server
 2022/2025 must invoke the ignored parent separately outside the runner Job.
 
