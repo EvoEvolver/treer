@@ -362,3 +362,92 @@ fn native_operation_bound_context_refuses_foreign_failure_and_status() {
     cleanup(first);
     cleanup(second);
 }
+
+#[test]
+fn native_operation_bound_context_distinguishes_actual_access_denied() {
+    for operation in [Operation::MoveOld, Operation::Publish] {
+        let mut denied_fixture = Fixture::new(operation);
+        // Reduce rights on the same object, without reopening by pathname or
+        // closing the original before the duplicate exists. Hash/identity/ACL
+        // observations still work, but a native rename needs DELETE access.
+        let mut raw = ptr::null_mut();
+        check(unsafe {
+            DuplicateHandle(
+                GetCurrentProcess(),
+                denied_fixture.source.as_raw_handle(),
+                GetCurrentProcess(),
+                &mut raw,
+                FILE_GENERIC_READ,
+                0,
+                0,
+            )
+        })
+        .unwrap();
+        let readonly = unsafe { File::from_raw_handle(raw) };
+        assert_eq!(
+            file_id(&readonly).unwrap(),
+            file_id(&denied_fixture.source).unwrap()
+        );
+        denied_fixture.source = readonly;
+        let binding = Binding::before_acquisition(&denied_fixture, 1).unwrap();
+        let context = denied_fixture.context();
+        let composition = Composition::new(
+            &context,
+            &denied_fixture.attempt,
+            &denied_fixture.source,
+            &denied_fixture.target,
+            context.intent,
+        )
+        .unwrap();
+        binding.check(&composition).unwrap();
+        let Captured::Failure(failure) = composition.acquisition.capture(|_| Ok(())) else {
+            panic!("actual native permission failure required");
+        };
+        assert_eq!(failure.status, ERROR_ACCESS_DENIED);
+        // Do not broaden the collision-only acceptance policy because the new
+        // status is genuine. It still cannot mint evidence accepted by it.
+        assert!(binding.with_failure(&failure).is_err());
+        assert!(BoundStored::store(&composition, &binding, &failure).is_err());
+        assert!(!denied_fixture.attempt.path.join("reason.evidence").exists());
+        assert!(matches!(
+            composition.acquisition.capture(|_| panic!("spent")),
+            Captured::Refused
+        ));
+
+        let collision_fixture = Fixture::new(operation);
+        let collision_binding = Binding::before_acquisition(&collision_fixture, 1).unwrap();
+        let collision_context = collision_fixture.context();
+        let collision = Composition::new(
+            &collision_context,
+            &collision_fixture.attempt,
+            &collision_fixture.source,
+            &collision_fixture.target,
+            collision_context.intent,
+        )
+        .unwrap();
+        collision_binding.check(&collision).unwrap();
+        let Captured::Failure(captured_collision) = collision.acquisition.capture(|_| Ok(()))
+        else {
+            panic!("actual native collision required");
+        };
+        let expected = collision_binding.with_failure(&captured_collision).unwrap();
+        assert_ne!(captured_collision.status, failure.status);
+        let mut substituted = expected.clone();
+        substituted.status = failure.status;
+        assert!(!context_record::matches_expected(
+            &substituted.encode().unwrap(),
+            &expected
+        ));
+        assert!(BoundStored::store(&collision, &collision_binding, &failure).is_err());
+        let stored =
+            BoundStored::store(&collision, &collision_binding, &captured_collision).unwrap();
+        let mut sink = Sink::default();
+        stored
+            .consume(&collision_binding.clone(), &mut sink, || Ok(()))
+            .unwrap();
+        assert_eq!(sink.accepted, 1);
+        drop(stored);
+        cleanup(denied_fixture);
+        cleanup(collision_fixture);
+    }
+}

@@ -1116,6 +1116,26 @@ reconstructed after process death; committed-head acquisition, durable
 consume/CAS, production health, rollback actor and W4 remain absent. Exact-SHA
 hosted 2022/2025 execution is required before accepting this native increment.
 
+Hosted run 39333496173 exercised exact `7ce17fb1` on both Server 2022/2025:
+native-operation filter 13 passed, ordinary platform library 71 passed with four
+ignored, previous regressions and separate CIM owner/running-image tests passed.
+Core read the raw log (6034); security accepted this inert fixture (6030).
+
+The next test adds a genuine distinct-error negative case without broadening
+acceptance. It duplicates the verified source handle with `FILE_GENERIC_READ`
+only, retaining the same full file id but removing DELETE rights before fixing
+the expected context and constructing acquisition. The native rename must then
+return `ERROR_ACCESS_DENIED` for both operation roles. A separate ordinary
+collision acquisition must return `ERROR_ALREADY_EXISTS`. Substitution of the
+actual permission-failure status or the foreign failure object into the
+collision evidence is refused; the collision itself still consumes once. The
+permission failure cannot pass the collision-only binding policy and creates no
+evidence slot, but its acquisition is spent. Exact-SHA hosted execution remains
+required to establish the native error ordering on both supported images; cross
+compilation alone is not proof. This closes no actual ReadFile failure coverage,
+production error classification, committed-head binding or durable consume/CAS
+gap, and does not add Controller/W4 authority.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual
