@@ -20,6 +20,22 @@ enum Operation {
     MoveOld,
     Publish,
 }
+
+// Decoding bytes grants no provenance: only the retained native outcome and
+// its evidence pin can supply the comparison below.
+fn decode(bytes: &[u8]) -> Option<(Operation, u32)> {
+    let [stage, a, b, c, d] = bytes else {
+        return None;
+    };
+    let operation = match stage {
+        1 => Operation::MoveOld,
+        2 => Operation::Publish,
+        _ => return None,
+    };
+    let status = u32::from_le_bytes([*a, *b, *c, *d]);
+    (status != 0).then_some((operation, status))
+}
+
 impl Operation {
     fn slots(self) -> (Slot, Slot) {
         match self {
@@ -172,10 +188,43 @@ impl Stored<'_> {
     fn read(&self) -> io::Result<Vec<u8>> {
         self.failure.acquisition.reobserve()?;
         let bytes = self.pin.read()?;
-        if bytes != self.failure.bytes() {
+        if decode(&bytes) != Some((self.failure.acquisition.operation, self.failure.status)) {
             return Err(denied());
         }
         Ok(bytes)
+    }
+}
+
+#[test]
+fn native_operation_record_decoder_rejects_malformed_bytes_without_authority() {
+    // Every stage byte is classified, including all unsupported tags. Status is
+    // unsigned little-endian; neither its magnitude nor parse success grants
+    // custody of the actual operation.
+    for stage in 0..=u8::MAX {
+        let bytes = [stage, 0x78, 0x56, 0x34, 0x12];
+        let result = decode(&bytes);
+        match stage {
+            1 => assert!(result == Some((Operation::MoveOld, 0x12345678))),
+            2 => assert!(result == Some((Operation::Publish, 0x12345678))),
+            _ => assert!(result.is_none()),
+        }
+    }
+    for operation in [Operation::MoveOld, Operation::Publish] {
+        let stage = match operation {
+            Operation::MoveOld => 1,
+            Operation::Publish => 2,
+        };
+        assert!(decode(&[stage, 0, 0, 0, 0]).is_none());
+        for status in [1u32, 183, u32::MAX] {
+            let mut bytes = vec![stage];
+            bytes.extend_from_slice(&status.to_le_bytes());
+            assert!(decode(&bytes) == Some((operation, status)));
+            for length in 0..bytes.len() {
+                assert!(decode(&bytes[..length]).is_none());
+            }
+            bytes.push(0);
+            assert!(decode(&bytes).is_none());
+        }
     }
 }
 

@@ -917,6 +917,15 @@ passed with exit zero. Core independently read the retained raw log (ticket
 5873), and security accepted this fixture slice. This does not close W1-W3 or
 establish a Controller reason source.
 
+The following decoder-only increment parses that existing fixture format with
+exact length, stage tags 1/2 and a nonzero unsigned little-endian status. The
+stored reader compares the decoded pair with its retained native failure;
+decoding alone creates no accepted evidence or authority. Its pure test covers
+all 256 stage bytes, zero and boundary statuses, every truncated length and an
+extra trailing byte. The test remains in the Windows-only fixture: compilation
+on another target does not execute it. Independent context composition and
+single-use consumption described below are not implemented by this decoder.
+
 #### Proposed composition slice: independent context plus native custody
 
 The next design boundary joins two still separate fixtures: the native
