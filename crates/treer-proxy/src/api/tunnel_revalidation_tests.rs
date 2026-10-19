@@ -9,7 +9,7 @@ use super::embed_session_tests::establish_embed_session;
 use super::ingress_protection_tests::{config, Fixture};
 use super::network::{
     set_tunnel_check_timeout_for_test, set_tunnel_revalidation_for_test, websocket_close_frame,
-    RevalidationOutcome, UpgradeRevalidation, TUNNEL_CLOSE_ACCESS_REVOKED,
+    AbortOnDrop, RevalidationOutcome, UpgradeRevalidation, TUNNEL_CLOSE_ACCESS_REVOKED,
     TUNNEL_CLOSE_SESSION_ENDED, TUNNEL_CLOSE_UNVERIFIED,
 };
 use super::*;
@@ -448,4 +448,19 @@ async fn stalled_lookups_keep_bytes_flowing_and_close_after_three_timeouts() {
         "three timed-out checks: {elapsed:?}"
     );
     drop(held);
+}
+
+/// Dropping the relay (cancellation, panic) stops the checker task and with
+/// it the held session token (security robustness item on e1a77ab0).
+#[tokio::test]
+async fn dropping_the_relay_aborts_the_checker_task() {
+    let checker = tokio::spawn(std::future::pending::<()>());
+    let guard = AbortOnDrop(checker.abort_handle());
+    tokio::task::yield_now().await;
+    assert!(!checker.is_finished());
+    drop(guard);
+    let outcome = tokio::time::timeout(DEADLINE, checker)
+        .await
+        .expect("checker ends once the guard is dropped");
+    assert!(outcome.unwrap_err().is_cancelled());
 }

@@ -1034,13 +1034,11 @@ async fn relay_with_revalidation<D, T>(
 {
     use tokio::io::AsyncWriteExt;
     let verdict = tokio::spawn(revalidation_verdict(revalidation));
-    let verdict_handle = verdict.abort_handle();
+    // Every exit of this future (copy ended, cancellation, panic) stops the
+    // checker, so the session token never outlives the socket.
+    let _stop_checker = AbortOnDrop(verdict.abort_handle());
     let (code, revalidation) = tokio::select! {
-        _ = tokio::io::copy_bidirectional(downstream, target) => {
-            // The socket ended on its own; the token goes with the checker.
-            verdict_handle.abort();
-            return;
-        }
+        _ = tokio::io::copy_bidirectional(downstream, target) => return,
         verdict = verdict => match verdict {
             Ok(verdict) => verdict,
             Err(_) => return,
@@ -1057,4 +1055,14 @@ async fn relay_with_revalidation<D, T>(
     let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, downstream.write_all(&frame)).await;
     let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, downstream.shutdown()).await;
     let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, target.shutdown()).await;
+}
+
+/// Aborts a spawned task when dropped; `AbortHandle` alone does nothing on
+/// drop, so this covers cancellation and panics of the owning future.
+pub(in crate::api) struct AbortOnDrop(pub(in crate::api) tokio::task::AbortHandle);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
