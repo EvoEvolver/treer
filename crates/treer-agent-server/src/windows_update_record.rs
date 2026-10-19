@@ -396,6 +396,65 @@ fn check_rollback_entry(
     Ok(())
 }
 
+// Structural proposal only. Intent results still require a real post-operation
+// observation, and the last edge needs authenticated health in a future API.
+fn next_rollback_claim(old: &ClaimedState) -> Option<ClaimedState> {
+    use layout::{Step::*, Transaction::*};
+    if old.old_health_recorded || old.final_health_recorded {
+        return None;
+    }
+    let mut next = old.clone();
+    let step = match old.transaction {
+        RollbackCli => old.cli_step,
+        RollbackController => old.controller_step,
+        Prepared | Activating | CoreHealthy | Complete | RolledBack => return None,
+    };
+    let result = match step {
+        MoveNewAsideIntent => NewAside,
+        NewAside => RestoreOldIntent,
+        RestoreOldIntent => Restored,
+        Original | Restored => {
+            if old.transaction == RollbackCli {
+                next.transaction = RollbackController;
+                next.controller_step = MoveNewAsideIntent;
+            } else {
+                next.transaction = RolledBack;
+                next.old_health_recorded = true;
+            }
+            return Some(next);
+        }
+        MoveOldIntent | OldMoved | PublishIntent | Published => return None,
+    };
+    if old.transaction == RollbackCli {
+        next.cli_step = result;
+    } else {
+        next.controller_step = result;
+    }
+    Some(next)
+}
+
+fn check_rollback_successor(
+    previous: (&[u8], &[u8]),
+    candidate: (&[u8], &[u8]),
+    head: &ExpectedHead,
+    current_slots: [[layout::Object; 3]; 2],
+) -> Result<(), Refusal> {
+    let next = check_successor_fields(previous, candidate, head)?;
+    let old = parse_pair(previous.0, previous.1, &head.binding)?;
+    if inspect_claim(&old.state, current_slots[0], current_slots[1])
+        != layout::PairInspection::Consistent
+        || inspect_claim(&next.state, current_slots[0], current_slots[1])
+            != layout::PairInspection::Consistent
+    {
+        return Err("transition_layout_conflict");
+    }
+    if next_rollback_claim(&old.state).as_ref() != Some(&next.state) {
+        return Err("invalid_rollback_transition");
+    }
+    // No actor, reason verifier, health verifier, head storage or mutation API.
+    Ok(())
+}
+
 fn fixture() -> DraftFields {
     let object = |file_id| Object {
         filesystem: Filesystem::Ntfs,
@@ -1288,5 +1347,211 @@ fn rollback_entry_uses_current_layout_and_preserves_other_image_and_health() {
             wrong_other.state.cli_step = Restored;
         }
         assert!(check(&wrong_other, slots).is_err());
+    }
+}
+
+#[test]
+fn rollback_continuation_classifies_every_consistent_tuple() {
+    use layout::{Object::*, Step::*, Transaction::*};
+    // Independent edge table: phase, moving step, next phase, next moving
+    // step. Handoff changes the Controller step rather than the CLI step.
+    let rows = [
+        (
+            RollbackCli,
+            Original,
+            RollbackController,
+            MoveNewAsideIntent,
+        ),
+        (
+            RollbackCli,
+            Restored,
+            RollbackController,
+            MoveNewAsideIntent,
+        ),
+        (RollbackCli, MoveNewAsideIntent, RollbackCli, NewAside),
+        (RollbackCli, NewAside, RollbackCli, RestoreOldIntent),
+        (RollbackCli, RestoreOldIntent, RollbackCli, Restored),
+        (RollbackController, Original, RolledBack, Original),
+        (RollbackController, Restored, RolledBack, Restored),
+        (
+            RollbackController,
+            MoveNewAsideIntent,
+            RollbackController,
+            NewAside,
+        ),
+        (
+            RollbackController,
+            NewAside,
+            RollbackController,
+            RestoreOldIntent,
+        ),
+        (
+            RollbackController,
+            RestoreOldIntent,
+            RollbackController,
+            Restored,
+        ),
+    ];
+    let steps = [
+        Original,
+        MoveOldIntent,
+        OldMoved,
+        PublishIntent,
+        Published,
+        MoveNewAsideIntent,
+        NewAside,
+        RestoreOldIntent,
+        Restored,
+    ];
+    let layouts = [[Old, New, Absent], [Absent, New, Old], [New, Absent, Old]];
+    let mut hits = [0; 10];
+    let mut stopped = 0;
+    for phase in [
+        Prepared,
+        Activating,
+        CoreHealthy,
+        Complete,
+        RollbackCli,
+        RollbackController,
+        RolledBack,
+    ] {
+        for c in steps {
+            for l in steps {
+                for cs in layouts {
+                    for ls in layouts {
+                        for flags in 0..8 {
+                            let old = ClaimedState {
+                                transaction: phase,
+                                controller_step: c,
+                                cli_step: l,
+                                new_health_recorded: flags & 1 != 0,
+                                final_health_recorded: flags & 2 != 0,
+                                old_health_recorded: flags & 4 != 0,
+                            };
+                            if inspect_claim(&old, cs, ls) != layout::PairInspection::Consistent {
+                                continue;
+                            }
+                            let moving = if phase == RollbackCli { l } else { c };
+                            let matching: Vec<_> = rows
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, row)| {
+                                    row.0 == phase && row.1 == moving && flags & 6 == 0
+                                })
+                                .collect();
+                            assert!(matching.len() <= 1);
+                            let expected = matching.first().map(|(index, row)| {
+                                hits[*index] += 1;
+                                let mut next = old.clone();
+                                next.transaction = row.2;
+                                if row.2 == RolledBack {
+                                    next.old_health_recorded = true;
+                                } else if row.2 == RollbackController {
+                                    next.controller_step = row.3;
+                                } else {
+                                    next.cli_step = row.3;
+                                }
+                                next
+                            });
+                            if expected.is_none() {
+                                stopped += 1;
+                            }
+                            assert_eq!(
+                                next_rollback_claim(&old),
+                                expected,
+                                "{old:?}, slots={cs:?}/{ls:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert!(hits.into_iter().all(|count| count > 0));
+    assert!(stopped > 0);
+}
+
+#[test]
+fn rollback_record_edges_require_actual_results_and_exact_health_claims() {
+    use layout::{Object::*, Step::*, Transaction::*};
+    let original = [Old, New, Absent];
+    let gap = [Absent, New, Old];
+    let published = [New, Absent, Old];
+    let mut trace = Vec::new();
+    for phase in [RollbackCli, RollbackController] {
+        for (step, slots) in [
+            (MoveNewAsideIntent, published),
+            (NewAside, gap),
+            (RestoreOldIntent, gap),
+            (Restored, original),
+        ] {
+            trace.push((
+                ClaimedState {
+                    transaction: phase,
+                    controller_step: if phase == RollbackCli {
+                        Published
+                    } else {
+                        step
+                    },
+                    cli_step: if phase == RollbackCli { step } else { Restored },
+                    new_health_recorded: true,
+                    final_health_recorded: false,
+                    old_health_recorded: false,
+                },
+                if phase == RollbackCli {
+                    [published, slots]
+                } else {
+                    [slots, original]
+                },
+            ));
+        }
+    }
+    let mut terminal = trace.last().unwrap().0.clone();
+    terminal.transaction = RolledBack;
+    terminal.old_health_recorded = true;
+    trace.push((terminal, [original, original]));
+    for (i, (old, _)) in trace.iter().enumerate() {
+        let mut fields = fixture();
+        fields.state = old.clone();
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&fields).unwrap(), &fields.binding);
+        let head = ExpectedHead {
+            binding: fields.binding.clone(),
+            receipt_sha256: digest(&receipt),
+        };
+        for (j, (next, slots)) in trace.iter().enumerate() {
+            let mut candidate = fields.clone();
+            candidate.binding.revision += 1;
+            candidate.state = next.clone();
+            let check = |claim: &DraftFields, observed| {
+                let (r, m) = envelopes(&serde_json::to_vec(claim).unwrap(), &claim.binding);
+                check_rollback_successor((&receipt, &marker), (&r, &m), &head, observed)
+            };
+            assert_eq!(check(&candidate, *slots).is_ok(), j == i + 1, "{i}->{j}");
+            if j != i + 1 {
+                continue;
+            }
+            for flags in 0..8 {
+                let mut changed = candidate.clone();
+                changed.state.new_health_recorded = flags & 1 != 0;
+                changed.state.final_health_recorded = flags & 2 != 0;
+                changed.state.old_health_recorded = flags & 4 != 0;
+                assert_eq!(
+                    check(&changed, *slots).is_ok(),
+                    changed.state == candidate.state
+                );
+            }
+            for image in 0..2 {
+                for slot in 0..3 {
+                    for uncertain in [Unknown, Unreadable] {
+                        let mut changed = *slots;
+                        changed[image][slot] = uncertain;
+                        assert_eq!(
+                            check(&candidate, changed),
+                            Err("transition_layout_conflict")
+                        );
+                    }
+                }
+            }
+        }
     }
 }

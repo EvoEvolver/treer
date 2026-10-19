@@ -412,8 +412,8 @@ Controller cannot reliably run its own deadline monitor. The constructed reason
 must bind the job, the relevant revision and the time source used. This names
 the required actor role, not an existing executable or implemented clock proof.
 
-The proposed continuation graph is below. It is not yet implemented; no row
-authorizes execution. Both claims must match the same fresh current observation
+The continuation graph below now has a private `cfg(test)` structural model;
+no row authorizes execution. Both claims must match the same fresh current observation
 for intent/handoff edges and the real post-operation observation for result
 edges. The other image remains checked in its required unchanged layout.
 
@@ -432,10 +432,19 @@ currently healthy. `final_health_recorded` stays false throughout rollback;
 fresh verified old-Controller health. The broad layout classifier can accept
 some RC claims with old health already set; the future graph must explicitly
 diagnose-and-stop on those claims rather than treating them as a shortcut.
-Complete and RolledBack are terminal. Every classifier-consistent rollback
-tuple must mechanically map to one graph edge or an explicit diagnostic stop;
-until that proof and graph exist, the existing coverage test continues to
-classify all rollback phases as diagnosis only.
+Complete and RolledBack are terminal. The continuation test enumerates all seven
+phases, both nine-step sets, all three physical layouts per image and eight
+health-claim combinations. Each classifier-consistent tuple must match at most
+one independent continuation-table row or an explicit diagnostic stop; every
+row must be exercised. An intent still awaiting its result has a structural
+next claim but cannot record it until a real post-operation observation also
+satisfies the successor claim. A separate nine-state RL/RC/terminal trace checks
+all ordered pairs, health changes and uncertain slots against the record guard.
+The older exit-inventory test remains conservative and classifies rollback
+phases as diagnosis only; it is not the continuation selector. No executable
+adapter uses either model. Original/no-move and historical-new-health=false
+branches are covered structurally; full record traces for those branches,
+verified reason custody and typed old-health evidence remain separate gates.
 
 After restoration, starting and verifying the old Controller is an operation
 outside this record graph. A crash or restart between Restored and RolledBack
