@@ -34,3 +34,20 @@ export async function saveTelegramToken(command:unknown) {
  if(!response.ok)throw new Error(typeof value?.error?.code==='string'?value.error.code:'telegram_token_unavailable');
  return value;
 }
+
+function emailPath(id:string) {
+ if(!/^[a-f0-9]{64}$/.test(id))throw new Error('email_thread_invalid');
+ return 'api/email/thread/'+id;
+}
+export async function readEmailThread(id:string) {
+ const r=await fetch(emailPath(id),{credentials:'same-origin',headers:{Accept:'application/json'}});
+ return {status:r.status,ok:r.ok,value:await r.json()};
+}
+export async function submitEmailReply(id:string,key:string,body:string) {
+ const r=await fetch(emailPath(id),{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','X-Endpoint-Request':'1'},body:JSON.stringify({key,body})});
+ if(!r.ok)throw new Error(r.status===403?'reply_unavailable':'email_reply_unavailable');
+}
+export async function endMemberSession() {
+ const r=await fetch('api/email/auth/logout',{method:'POST',credentials:'same-origin',headers:{'X-Endpoint-Request':'1'}});
+ if(!r.ok)throw new Error('logout_rejected');
+}

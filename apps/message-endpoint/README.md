@@ -1,9 +1,10 @@
 # Message endpoint (#159)
 
-**Telegram-only release candidate; not deployed or live-bot verified by the author.**
-This release candidate is the Telegram-only slice requested in #159/4286.
-Public HTTP lifecycle/RPC and email are not included; that unfinished work stays
-on the separate development branch. Default activation remains off.
+**Telegram candidate plus opt-in email outbox development slice.**
+This branch extends the reviewed Telegram slice with owner-bound email threads,
+member replies and an outbox worker. No real email transport is activated;
+public HTTP lifecycle/RPC stays on its separate development branch. Default
+activation remains off. No production migration/cutover is approved by this code.
 User direction3479 supersedes the socket design and research's routing details.
 Core3485 confirms Managed App runtime Agents can send/receive/ack; security3483
 accepts the new boundary with the controls below. No Core change is requested.
@@ -20,9 +21,10 @@ Independent Rust package under `apps/message-endpoint`, not the Core workspace:
   then binds its stable ID to one hub and one external target. No App-side Agent
   creation, Policy writes, owner credential borrowing, or Start-as-wake.
 
-Public HTTP and email channels are deferred P3 work and have no runtime or
-subcommand in this candidate. There is no separate settings App. Telegram
-webhooks are deferred. Linux/macOS first; other-platform support needs validation.
+Public HTTP and Telegram webhooks remain deferred. Email is opt-in, outbox-only
+and uses the same hub and relay; see [the email contract](EMAIL.md) for setup,
+member authentication and production blockers. There is no separate settings
+App. Linux/macOS first; other-platform support needs validation.
 
 ## Authentication and forwarding
 
@@ -1596,3 +1598,46 @@ App discovery and logout. The Proxy reserves `/api/auth/config` and
 `/api/auth/logout` even on wildcard App domains; those routes must not be used
 for hub operations. Dedicated-origin editing still requires a verified owner
 and the existing Origin/CSRF checks; embedded views remain read-only.
+
+## Next channel and migration work
+
+[Telegram migration](MIGRATION.md) describes the read-only inventory tool and
+cutover/rollback blockers. [Email channel contract](EMAIL.md) describes the
+planned scoped-member thread flow. Neither document enables a transport or
+authorizes a production migration.
+
+## Email outbox development slice (#159)
+
+Leave `email` absent to preserve the existing Telegram-only runtime. To test the
+new slice in an isolated development profile, a reviewed private hub config may
+include `"email":{"outbox_directory":"/absolute/private/email-outbox"}`. The
+leaf is exclusively created as 0700 when absent; ancestors must already exist,
+be trusted and outside source control. Existing private-directory/no-follow
+checks also apply on each publication. This is not a deployment instruction.
+There is **no production Proxy mail switch** in runtime configuration: unknown
+fields, including `email.mode`, fail closed. The Proxy sender remains an unused
+library helper until a later reviewed real-send increment.
+
+On the dedicated owner settings page, create the ordinary paused endpoint
+binding, then bind an exact address and current workspace human stable ID under
+Configure endpoint. Email and Telegram targets are mutually exclusive and cannot
+be changed within that generation. The owner explicitly asserts the address-to-
+human association; OAuth does not prove address ownership. Nonmembers cannot be
+bound for replies in this phase. Preview/resume keeps the existing operator gate,
+fresh Core pins, isolation declarations, revision checks and owner audit. The
+operator gate defaults off; a browser cannot turn it on. No old binding is
+migrated automatically.
+
+With explicit activation, fixed-counterpart Agent messages produce a private
+outbox notification with a fixed summary and `#email-thread=<id>` link. The
+bound member signs in using the existing Treer App OAuth flow or injected human
+identity, reads the thread and queues a text reply to the fixed Agent. The
+actual endpoint Agent remains the Core sender; human attribution is App-asserted.
+The UI says queued/outbox, never delivered by email. No incoming SMTP, webhook,
+nonmember login, magic-link credential or arbitrary recipient is supported.
+
+The complete migration procedure and its unresolved importer/reverse-journal
+blockers are in [MIGRATION.md](MIGRATION.md). Retained email plaintext, quotas,
+missing purge/TTL and private outbox reconciliation remain production blockers,
+detailed in [EMAIL.md](EMAIL.md). Never remove live SQLite rows or outbox files
+to bypass a capacity or ambiguous-send condition.

@@ -64,6 +64,12 @@ pub enum Command {
         operation: crate::recovery::Recovery,
         confirm: bool,
     },
+    BindEmail {
+        endpoint_id: String,
+        revision: i64,
+        contact: crate::email::Contact,
+        confirm: bool,
+    },
     BindTelegram {
         endpoint_id: String,
         revision: i64,
@@ -388,6 +394,26 @@ fn execute_with_activation<M: Mailbox + Directory, D: Directory>(
             )
             .map_err(map_hub)?;
             recovery_status(&hub, &endpoint_id, None)
+        }
+        Command::BindEmail {
+            endpoint_id,
+            revision,
+            contact,
+            confirm,
+        } => {
+            let contact = contact.normalized().map_err(|_| Failure::Invalid)?;
+            if !confirm || revision < 1 {
+                return Err(Failure::Invalid);
+            }
+            // This callback performs fresh Core directory I/O outside the state lock.
+            if !activation.email_enabled || !(activation.member_current)(&contact.member_id) {
+                return Err(Failure::Unavailable);
+            }
+            let mut hub = shared.lock().map_err(|_| Failure::Unavailable)?;
+            let now = check_owner(owner)?;
+            hub.bind_email_audited(&endpoint_id, revision, contact, owner.id(), now)
+                .map_err(|_| Failure::Conflict)?;
+            saved(&hub, &endpoint_id)
         }
         Command::BindTelegram {
             endpoint_id,

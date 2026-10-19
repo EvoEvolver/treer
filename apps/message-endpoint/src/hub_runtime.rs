@@ -51,6 +51,8 @@ pub struct Config {
     listen: SocketAddr,
     #[serde(default)]
     telegram_accounts: Vec<crate::telegram_workers::AccountConfig>,
+    #[serde(default)]
+    email: Option<crate::email_workers::Config>,
 }
 impl Config {
     pub fn load(
@@ -136,6 +138,24 @@ fn run_assembled(
         Store::open(&config.state_directory, Limits::default()).map_err(|_| Error::Storage)?;
     let mut initial = Hub::new(store, core.clone(), &config.hub_id, &config.workspace_id)
         .map_err(|_| Error::Storage)?;
+    let email_directory = Arc::new(
+        crate::email::proxy::Sender::new(&config.proxy_url, &config.service_id)
+            .map_err(|_| Error::Configuration)?,
+    );
+    let email_service = if let Some(email) = &config.email {
+        email.validate().map_err(|_| Error::Configuration)?;
+        crate::email::Queue::new(&mut initial.store).map_err(|_| Error::Storage)?;
+        let member = crate::owner_auth::MemberAuth::new(
+            &config.proxy_url,
+            &config.service_id,
+            &config.workspace_id,
+            &config.public_url,
+        )
+        .map_err(|_| Error::Configuration)?;
+        Some(member)
+    } else {
+        None
+    };
     let startup_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()
@@ -161,11 +181,59 @@ fn run_assembled(
         }
         .map_err(|_| Error::Runtime)?,
     ));
+    let email_workers = Arc::new(Mutex::new(if config.activation_enabled {
+        config
+            .email
+            .clone()
+            .map(|email| {
+                crate::email_workers::Workers::start(
+                    hub.clone(),
+                    core.clone(),
+                    email_directory.clone(),
+                    email,
+                    config.public_url.clone(),
+                )
+            })
+            .transpose()
+            .map_err(|_| Error::Runtime)?
+    } else {
+        None
+    }));
+    let email_http = email_service
+        .map(|auth| {
+            let (read, reply) = (hub.clone(), hub.clone());
+            crate::email_threads::Service::new(
+                auth,
+                &config.public_url,
+                Arc::new(move |member, id, now| {
+                    let mut h = read
+                        .lock()
+                        .map_err(|_| crate::email::Error::PrivateStorage)?;
+                    h.store
+                        .recheck_private_storage()
+                        .map_err(|_| crate::email::Error::PrivateStorage)?;
+                    crate::email::Queue::new(&mut h.store)?.thread(id, member, now)
+                }),
+                Arc::new(move |member, id, key, body, now| {
+                    let mut h = reply
+                        .lock()
+                        .map_err(|_| crate::email::Error::PrivateStorage)?;
+                    h.store
+                        .recheck_private_storage()
+                        .map_err(|_| crate::email::Error::PrivateStorage)?;
+                    crate::email::Queue::new(&mut h.store)?.reply(id, member, key, body, now)
+                }),
+            )
+        })
+        .transpose()
+        .map_err(|_| Error::Configuration)?;
     let token_service = Arc::new(
         crate::telegram_tokens::Service::new(config.telegram_accounts.clone())
             .map_err(|_| Error::Configuration)?,
     );
     let snapshot_tokens = token_service.clone();
+    let snapshot_email = email_workers.clone();
+    let email_configured = config.email.is_some();
     let activation_enabled = config.activation_enabled;
     let account_ready = telegram.lock().map_err(|_| Error::Runtime)?.readiness();
     let snapshot_telegram = telegram.clone();
@@ -190,6 +258,14 @@ fn run_assembled(
         status.last_handoff_failure = hub.last_core_handoff_failure().map_err(|_| ())?;
         let (audit_full, emergency_pause_bindings) = hub.owner_audit_capacity().map_err(|_| ())?;
         Ok(SettingsSnapshot {
+            email: if email_configured {
+                Some(crate::email_workers::Snapshot::read(
+                    &hub.store,
+                    snapshot_email.lock().map_err(|_| ())?.as_ref(),
+                )?)
+            } else {
+                None
+            },
             endpoints,
             workers: status,
             audit_full,
@@ -199,6 +275,7 @@ fn run_assembled(
             telegram_tokens: snapshot_tokens.snapshot().map_err(|_| ())?,
         })
     });
+    let member_core = core.clone();
     let mutation = Arc::new(crate::configuration::core_executor(
         hub.clone(),
         core,
@@ -206,6 +283,12 @@ fn run_assembled(
         crate::configuration::Activation {
             enabled: activation_enabled,
             account_ready,
+            email_enabled: email_configured,
+            member_current: Arc::new(move |id| {
+                email_directory
+                    .current_member(&member_core, id)
+                    .unwrap_or(false)
+            }),
         },
     ));
     let token_hub = hub.clone();
@@ -224,6 +307,10 @@ fn run_assembled(
                 include_str!("../dist/app.js"),
                 include_str!("../dist/app.css"),
             );
+        let settings = match email_http {
+            Some(email) => settings.with_email(Arc::new(email)),
+            None => settings,
+        };
         let settings = match &config.virtual_hostname {
             Some(host) => settings
                 .with_virtual_host(host)
@@ -249,8 +336,14 @@ fn run_assembled(
                 let workers = workers.clone();
                 let handoffs = handoffs.clone();
                 let telegram = telegram.clone();
+                let email_workers = email_workers.clone();
                 async move {
                     shutdown.await;
+                    if let Ok(email) = email_workers.lock() {
+                        if let Some(email) = email.as_ref() {
+                            email.request_stop();
+                        }
+                    }
                     if let Ok(w) = workers.lock() {
                         w.request_stop();
                     }
@@ -268,6 +361,11 @@ fn run_assembled(
     };
     let result = serve();
     // Stop only the threads owned by this process. No external signals/restarts.
+    if let Ok(mut email) = email_workers.lock() {
+        if let Some(email) = email.as_mut() {
+            email.stop();
+        }
+    }
     if let Ok(mut telegram) = telegram.lock() {
         telegram.stop();
     }
@@ -284,6 +382,14 @@ mod tests {
     use super::*;
     fn config() -> Config {
         serde_json::from_value(json!({"hub_id":"app_hub","workspace_id":"ws_test","service_id":"svc_hub","proxy_url":"https://proxy.example/","public_url":"https://hub.example/","access":"workspace","cli":"/private/cli","cli_sha256":"a".repeat(64),"state_directory":"/private/state"})).unwrap()
+    }
+    #[test]
+    fn email_defaults_absent_and_cannot_enable_a_proxy_transport() {
+        assert!(config().email.is_none());
+        assert!(serde_json::from_value::<crate::email_workers::Config>(
+            json!({"outbox_directory":"/private/outbox","mode":"proxy"})
+        )
+        .is_err());
     }
     #[test]
     fn runtime_requires_own_app_identity_private_access_and_loopback_listener() {

@@ -1,6 +1,8 @@
 //! Private settings HTTP boundary. No transport credentials or access tokens
 //! ever enter a response. Blocking Proxy calls hold a bounded admission permit,
 //! including after a disconnected caller cancels its async request.
+#[path = "email_threads.rs"]
+pub mod email_threads;
 use crate::{
     oauth::OAuthVault,
     owner_auth::{Error, Owner, OwnerAuth},
@@ -28,6 +30,7 @@ const MANUAL: &str = "# Treer message hub\n\nPrivate workspace channel settings 
 #[derive(Default, Serialize)]
 pub struct SettingsSnapshot {
     pub endpoints: Vec<EndpointSnapshot>,
+    pub email: Option<crate::email_workers::Snapshot>,
     pub activation_enabled: bool,
     pub workers: crate::scheduler::WorkerStatus,
     pub audit_full: bool,
@@ -138,6 +141,7 @@ pub struct Settings {
     snapshot: Arc<Snapshot>,
     mutation: Option<Arc<Mutation>>,
     token_mutation: Option<Arc<crate::telegram_tokens::Mutation>>,
+    email: Option<Arc<crate::email_threads::Service>>,
     slots: Arc<Semaphore>,
     writes: WriteGate,
     exports: WriteGate,
@@ -177,6 +181,7 @@ impl Settings {
             snapshot,
             mutation: None,
             token_mutation: None,
+            email: None,
             slots: Arc::new(Semaphore::new(16)),
             writes: WriteGate::default(),
             exports: WriteGate::default(),
@@ -225,6 +230,10 @@ impl Settings {
         self.stylesheet = stylesheet;
         self
     }
+    pub fn with_email(mut self, service: Arc<crate::email_threads::Service>) -> Self {
+        self.email = Some(service);
+        self
+    }
     pub fn router(self) -> Router {
         Router::new().fallback(handle).with_state(Arc::new(self))
     }
@@ -241,7 +250,9 @@ fn response(status: StatusCode, value: Value) -> Response {
 fn error(e: Error) -> Response {
     let status = match e {
         Error::Required | Error::InvalidIdentity => StatusCode::UNAUTHORIZED,
-        Error::OwnerRequired | Error::Csrf | Error::OAuthState => StatusCode::FORBIDDEN,
+        Error::OwnerRequired | Error::MemberRequired | Error::Csrf | Error::OAuthState => {
+            StatusCode::FORBIDDEN
+        }
         Error::RateLimited | Error::LoginCapacity => StatusCode::TOO_MANY_REQUESTS,
         Error::Proxy => StatusCode::SERVICE_UNAVAILABLE,
         Error::Configuration => StatusCode::INTERNAL_SERVER_ERROR,
@@ -377,6 +388,17 @@ async fn handle(
             StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
             "headers_too_large",
         ));
+    }
+    if parts.uri.path().starts_with("/api/email/") {
+        return match &app.email {
+            Some(service) => {
+                service
+                    .clone()
+                    .handle(peer, parts, body, &app.allowed_hosts)
+                    .await
+            }
+            None => secure(fixed(StatusCode::NOT_FOUND, "route_not_found")),
+        };
     }
     if parts.method == Method::POST
         && matches!(
@@ -962,6 +984,7 @@ mod tests {
         let value = snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                email: None,
                 endpoints: (0..20).map(|_| endpoint(4096)).collect(),
                 workers: Default::default(),
                 audit_full: false,
@@ -978,6 +1001,7 @@ mod tests {
         assert!(snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                email: None,
                 endpoints: (0..21).map(|_| endpoint(1)).collect(),
                 workers: Default::default(),
                 audit_full: false,
@@ -991,6 +1015,7 @@ mod tests {
         assert!(snapshot_value(
             "user_owner",
             SettingsSnapshot {
+                email: None,
                 endpoints: vec![endpoint(512 * 1024)],
                 workers: Default::default(),
                 audit_full: false,

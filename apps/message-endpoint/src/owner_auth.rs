@@ -19,6 +19,8 @@ pub enum Error {
     InvalidIdentity,
     #[error("current_human_owner_required")]
     OwnerRequired,
+    #[error("current_workspace_member_required")]
+    MemberRequired,
     #[error("owner_csrf_rejected")]
     Csrf,
     #[error("owner_proxy_unavailable")]
@@ -51,6 +53,89 @@ impl Owner {
         self.expires_at
     }
 }
+/// Verified current human member, intentionally distinct from management Owner.
+/// Constructed only by per-request verify_app plus current directory checks.
+pub struct Member {
+    id: String,
+    expires_at: i64,
+}
+impl Member {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+    pub(crate) fn expires_at(&self) -> i64 {
+        self.expires_at
+    }
+    #[cfg(test)]
+    pub(crate) fn synthetic(id: &str, expires_at: i64) -> Self {
+        Self {
+            id: id.into(),
+            expires_at,
+        }
+    }
+}
+/// Separate verifier and negative-cache/rate gate: owner denial must not poison
+/// a valid member's thread session. It never constructs an Owner capability.
+pub struct MemberAuth {
+    auth: OwnerAuth,
+}
+impl MemberAuth {
+    #[cfg(test)]
+    pub(crate) fn synthetic_client(auth: OwnerAuth) -> Self {
+        Self { auth }
+    }
+
+    pub(crate) fn oauth_client(&self) -> &OwnerAuth {
+        &self.auth
+    }
+    pub fn new(
+        proxy: &str,
+        service: &str,
+        workspace: &str,
+        public_url: &str,
+    ) -> Result<Self, Error> {
+        let mut auth = OwnerAuth::new(proxy, service, workspace, public_url)?;
+        auth.callback_path = "api/email/auth/callback";
+        Ok(Self { auth })
+    }
+    pub fn authenticate_from(
+        &self,
+        headers: Headers<'_>,
+        session: Option<&str>,
+        now: i64,
+        source: std::net::IpAddr,
+    ) -> Result<Member, Error> {
+        if now < 0 {
+            return Err(Error::InvalidIdentity);
+        }
+        let token = select_token(headers, session)?;
+        let hash = crate::verification_gate::token_hash(token);
+        let _permit = self.auth.gate.enter(source, Some(hash))?;
+        let result = self
+            .auth
+            .verify_human_token(token, now)
+            .and_then(|(human, role)| {
+                if !matches!(role.as_str(), "owner" | "member") {
+                    return Err(Error::MemberRequired);
+                }
+                Ok(Member {
+                    id: human.id,
+                    expires_at: human.expires_at,
+                })
+            });
+        if let Err(error) = &result {
+            self.auth.gate.remember_failure(hash, error.clone());
+        }
+        result
+    }
+    pub fn check_mutation(&self, headers: Headers<'_>) -> Result<(), Error> {
+        self.auth.check_mutation(headers)
+    }
+}
+struct Human {
+    id: String,
+    expires_at: i64,
+}
 pub struct OwnerAuth {
     client: Client,
     proxy: Url,
@@ -59,6 +144,7 @@ pub struct OwnerAuth {
     origins: BTreeSet<String>,
     public_url: Url,
     gate: crate::verification_gate::Gate,
+    callback_path: &'static str,
 }
 fn configured_url(value: &str) -> Result<Url, Error> {
     let url = Url::parse(value).map_err(|_| Error::Configuration)?;
@@ -180,6 +266,7 @@ impl OwnerAuth {
             origins,
             public_url: public,
             gate: crate::verification_gate::Gate::default(),
+            callback_path: "api/auth/callback",
         })
     }
     fn read(&self, response: Response) -> Result<Value, Error> {
@@ -238,6 +325,16 @@ impl OwnerAuth {
         result
     }
     fn verify_token(&self, token: &str, now: i64) -> Result<Owner, Error> {
+        let (human, role) = self.verify_human_token(token, now)?;
+        if role != "owner" {
+            return Err(Error::OwnerRequired);
+        }
+        Ok(Owner {
+            id: human.id,
+            expires_at: human.expires_at,
+        })
+    }
+    fn verify_human_token(&self, token: &str, now: i64) -> Result<(Human, String), Error> {
         let verify = self
             .proxy
             .join(".treer/apps/identity/verify")
@@ -288,18 +385,25 @@ impl OwnerAuth {
                     && p.get("kind").and_then(Value::as_str) == Some("human")
             })
             .collect::<Vec<_>>();
-        if matches.len() != 1 || matches[0].get("role").and_then(Value::as_str) != Some("owner") {
+        if matches.len() != 1 {
             return Err(Error::OwnerRequired);
         }
-        Ok(Owner {
-            id: id.into(),
-            expires_at: c["exp"].as_i64().ok_or(Error::InvalidIdentity)?,
-        })
+        let role = matches[0]
+            .get("role")
+            .and_then(Value::as_str)
+            .ok_or(Error::InvalidIdentity)?;
+        Ok((
+            Human {
+                id: id.into(),
+                expires_at: c["exp"].as_i64().ok_or(Error::InvalidIdentity)?,
+            },
+            role.into(),
+        ))
     }
     pub(crate) fn callback_url(&self) -> Result<String, Error> {
         Ok(self
             .public_url
-            .join("api/auth/callback")
+            .join(self.callback_path)
             .map_err(|_| Error::Configuration)?
             .into())
     }
@@ -820,6 +924,81 @@ mod tests {
         assert!(matches!(
             auth.authenticate(&[("X-Treer-Identity-Token", TOKEN)], None, NOW),
             Err(Error::InvalidIdentity)
+        ));
+        server.join().unwrap();
+    }
+    #[test]
+    fn member_auth_is_scoped_separately_and_checks_current_membership_every_request() {
+        let (auth, server) = fake(
+            vec![
+                claims(),
+                directory("member"),
+                claims(),
+                json!({"principals":[]}),
+            ],
+            TOKEN,
+        );
+        let members = MemberAuth { auth };
+        let source = "127.0.0.1".parse().unwrap();
+        let member = members
+            .authenticate_from(&[("X-Treer-Identity-Token", TOKEN)], None, NOW, source)
+            .unwrap();
+        assert_eq!(member.id(), "human_owner");
+        assert_eq!(member.expires_at(), NOW + 60);
+        assert!(members
+            .authenticate_from(&[("X-Treer-Identity-Token", TOKEN)], None, NOW, source)
+            .is_err());
+        server.join().unwrap();
+    }
+    #[test]
+    fn member_auth_never_falls_back_to_a_valid_cookie_after_invalid_injection() {
+        let mut inactive = claims();
+        inactive["active"] = json!(false);
+        let (auth, server) = fake(vec![inactive], TOKEN);
+        let members = MemberAuth { auth };
+        assert!(matches!(
+            members.authenticate_from(
+                &[("X-Treer-Identity-Token", TOKEN)],
+                Some("synthetic.cookie.signature"),
+                NOW,
+                "127.0.0.1".parse().unwrap()
+            ),
+            Err(Error::InvalidIdentity)
+        ));
+        server.join().unwrap();
+    }
+    #[test]
+    fn member_auth_rejects_foreign_audience_expiry_workspace_agents_and_unknown_roles() {
+        for (field, value) in [
+            ("service_id", json!("svc_other")),
+            ("workspace_id", json!("ws_other")),
+            ("exp", json!(NOW)),
+            ("principal_kind", json!("agent")),
+        ] {
+            let mut invalid = claims();
+            invalid["claims"][field] = value;
+            let (auth, server) = fake(vec![invalid], TOKEN);
+            let members = MemberAuth { auth };
+            assert!(members
+                .authenticate_from(
+                    &[("X-Treer-Identity-Token", TOKEN)],
+                    None,
+                    NOW,
+                    "127.0.0.1".parse().unwrap()
+                )
+                .is_err());
+            server.join().unwrap();
+        }
+        let (auth, server) = fake(vec![claims(), directory("guest")], TOKEN);
+        let members = MemberAuth { auth };
+        assert!(matches!(
+            members.authenticate_from(
+                &[("X-Treer-Identity-Token", TOKEN)],
+                None,
+                NOW,
+                "127.0.0.1".parse().unwrap()
+            ),
+            Err(Error::MemberRequired)
         ));
         server.join().unwrap();
     }

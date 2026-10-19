@@ -12,7 +12,9 @@ p=Path(__file__).parent
 own='ag_endpoint' if Path(__file__).name=='endpoint-cli' else 'app_hub'
 args=sys.argv[1:]
 db=sqlite3.connect(p/'core-fixture.sqlite3',timeout=2)
-if args[:3]==['agent','show','--'] and args[3] in ['ag_endpoint','ag_recipient']:
+if args[:3]==['token','create','svc_hub']:
+ print(json.dumps(dict(access_token='synthetic.app.signature',token_type='Bearer',audience='svc_hub',expires_in=300)))
+elif args[:3]==['agent','show','--'] and args[3] in ['ag_endpoint','ag_recipient']:
  print(json.dumps(dict(agent_id=args[3],workspace_id='ws_test',server_id='machine_fixture',kind='command',cwd='/private/fixture',status='running',path='/team/'+args[3])))
 elif args[:2]==['message','receive']:
  time.sleep(.05)
@@ -26,7 +28,7 @@ elif args[:2]==['message','send']:
  assert (own,to) in [('app_hub','ag_endpoint'),('ag_endpoint','app_hub'),('ag_endpoint','ag_recipient')]
  envelope=json.load(sys.stdin);key=next(a for a in args if a.startswith('--idempotency-key='))
  key=own+key
- db.execute('INSERT OR IGNORE INTO sent(key,payload,sender,recipient) VALUES(?,?,?,?)',(key,json.dumps(envelope),own,to))
+ db.execute('INSERT OR IGNORE INTO sent(key,payload,sender,recipient,contexts) VALUES(?,?,?,?,?)',(key,json.dumps(envelope),own,to,json.dumps([a.split('=',1)[1] for a in args if a.startswith('--context=')])))
  n=db.execute('SELECT id FROM sent WHERE key=?',(key,)).fetchone()[0]
  message=dict(message_id='msg_fixture_'+str(n),sender=dict(kind='agent',id=own),body=envelope['body'],context_ids=[a.split('=',1)[1] for a in args if a.startswith('--context=')])
  delivery=dict(delivery_id='del_fixture_'+str(n),recipient=dict(kind='agent',id=to),message=message)
@@ -36,28 +38,32 @@ elif args[:2]==['message','send']:
 else: sys.exit(1)
 '''); cli.chmod(0o700)
 relay_cli=root/'endpoint-cli';relay_cli.write_bytes(cli.read_bytes());relay_cli.chmod(0o700)
-db=sqlite3.connect(root/'core-fixture.sqlite3');db.executescript('CREATE TABLE inbox(id INTEGER PRIMARY KEY,delivery TEXT UNIQUE,payload TEXT,recipient TEXT NOT NULL,ack INTEGER DEFAULT 0);CREATE TABLE sent(id INTEGER PRIMARY KEY,key TEXT UNIQUE,payload TEXT,sender TEXT NOT NULL,recipient TEXT NOT NULL);');db.close()
-lock=threading.Lock();updates=[];sent=[];operations=[]
+db=sqlite3.connect(root/'core-fixture.sqlite3');db.executescript('CREATE TABLE inbox(id INTEGER PRIMARY KEY,delivery TEXT UNIQUE,payload TEXT,recipient TEXT NOT NULL,ack INTEGER DEFAULT 0);CREATE TABLE sent(id INTEGER PRIMARY KEY,key TEXT UNIQUE,payload TEXT,sender TEXT NOT NULL,recipient TEXT NOT NULL,contexts TEXT NOT NULL);');db.close()
+lock=threading.Lock();updates=[];sent=[];operations=[];member_revoked=False
 class Handler(BaseHTTPRequestHandler):
  def log_message(self,*_):pass
  def reply(self,value,status=200):
   body=json.dumps(value).encode();self.send_response(status);self.send_header('Content-Type','application/json');self.send_header('Content-Length',str(len(body)));self.end_headers();self.wfile.write(body)
  def do_GET(self):
-  if self.path=='/api/apps/svc_hub/directory':return self.reply(dict(principals=[dict(id='user_owner',kind='human',role='owner')]))
+  if self.path=='/api/apps/svc_hub/directory':return self.reply(dict(principals=[dict(id='user_owner',kind='human',role='owner')]+([] if member_revoked else [dict(id='user_member',kind='human',role='member')])))
   if self.path=='/fixture/status':
    with lock: result=dict(operations=list(operations),sent=list(sent))
    with sqlite3.connect(root/'core-fixture.sqlite3') as db:
     result['core_sent']=[json.loads(r[0]) for r in db.execute('SELECT payload FROM sent WHERE sender="app_hub" ORDER BY id')]
-    result['core_messages']=[dict(id='msg_fixture_'+str(r[0]),sender=r[1],recipient=r[2],envelope=json.loads(r[3])) for r in db.execute('SELECT id,sender,recipient,payload FROM sent ORDER BY id')]
+    result['core_messages']=[dict(id='msg_fixture_'+str(r[0]),sender=r[1],recipient=r[2],envelope=json.loads(r[3]),context_ids=json.loads(r[4])) for r in db.execute('SELECT id,sender,recipient,payload,contexts FROM sent ORDER BY id')]
     result['acked']=db.execute('SELECT COUNT(*) FROM inbox WHERE ack=1').fetchone()[0]
    return self.reply(result)
   return self.reply({},404)
  def do_POST(self):
+  global member_revoked
   size=int(self.headers.get('Content-Length','0'));assert size<1024*1024
   value=json.loads(self.rfile.read(size))
   if self.path=='/.treer/apps/identity/verify':
-   assert value==dict(token='synthetic.owner.token159',audience='svc_hub')
-   return self.reply(dict(active=True,claims=dict(sub='user_owner',principal_kind='human',workspace_id='ws_test',service_id='svc_hub',exp=int(time.time())+300)))
+   assert value.get('audience')=='svc_hub'
+   if value.get('token') not in ('synthetic.owner.token159','synthetic.member.token159'):return self.reply(dict(active=False))
+   return self.reply(dict(active=True,claims=dict(sub='user_member' if value['token']=='synthetic.member.token159' else 'user_owner',principal_kind='human',workspace_id='ws_test',service_id='svc_hub',exp=int(time.time())+300)))
+  if self.path=='/fixture/revoke-member':
+   member_revoked=bool(value['revoked']);return self.reply({})
   if self.path=='/fixture/update':
    with lock:updates.append(value)
    return self.reply({})

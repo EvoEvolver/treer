@@ -276,40 +276,8 @@ impl Store {
     }
 
     pub fn enqueue(&mut self, item: Inbound<'_>) -> Result<i64, Error> {
-        if !valid_id(item.external_id) || item.body.len() > super::protocol::MAX_BODY {
-            return Err(Error::Invalid);
-        }
         let transaction = self.db.transaction()?;
-        let recipient = available(&transaction, item.endpoint, item.generation)?;
-        if recipient != item.recipient {
-            return Err(Error::Unavailable);
-        }
-        let digest = Sha256::digest(item.body.as_bytes()).to_vec();
-        let previous = transaction.query_row(
-            "SELECT id,digest,recipient FROM inbound WHERE endpoint=?1 AND generation=?2 AND external_id=?3",
-            params![item.endpoint,item.generation,item.external_id],
-            |r| Ok((r.get::<_, i64>(0)?,r.get::<_, Vec<u8>>(1)?,r.get::<_, String>(2)?)),
-        ).optional()?;
-        if let Some((id, old_digest, old_recipient)) = previous {
-            if old_digest != digest || old_recipient != item.recipient {
-                return Err(Error::Conflict);
-            }
-            return Ok(id);
-        }
-        capacity(&transaction, self.limits, item.endpoint, item.body.len(), 1)?;
-        transaction.execute(
-            "INSERT INTO inbound(endpoint,generation,external_id,recipient,body,digest)
-             VALUES (?1,?2,?3,?4,?5,?6)",
-            params![
-                item.endpoint,
-                item.generation,
-                item.external_id,
-                item.recipient,
-                item.body,
-                digest
-            ],
-        )?;
-        let id = transaction.last_insert_rowid();
+        let id = enqueue_in(&transaction, self.limits, item)?;
         transaction.commit()?;
         Ok(id)
     }
@@ -418,6 +386,49 @@ impl Store {
         transaction.commit()?;
         Ok(())
     }
+}
+
+/// Compose durable transport metadata and the existing inbound queue in one
+/// transaction. All existing recipient, idempotency and capacity checks remain.
+pub(crate) fn enqueue_in(
+    transaction: &Transaction<'_>,
+    limits: Limits,
+    item: Inbound<'_>,
+) -> Result<i64, Error> {
+    if !valid_id(item.external_id) || item.body.len() > super::protocol::MAX_BODY {
+        return Err(Error::Invalid);
+    }
+    let recipient = available(transaction, item.endpoint, item.generation)?;
+    if recipient != item.recipient {
+        return Err(Error::Unavailable);
+    }
+    let digest = Sha256::digest(item.body.as_bytes()).to_vec();
+    let previous = transaction.query_row(
+            "SELECT id,digest,recipient FROM inbound WHERE endpoint=?1 AND generation=?2 AND external_id=?3",
+            params![item.endpoint,item.generation,item.external_id],
+            |r| Ok((r.get::<_, i64>(0)?,r.get::<_, Vec<u8>>(1)?,r.get::<_, String>(2)?)),
+        ).optional()?;
+    if let Some((id, old_digest, old_recipient)) = previous {
+        if old_digest != digest || old_recipient != item.recipient {
+            return Err(Error::Conflict);
+        }
+        return Ok(id);
+    }
+    capacity(transaction, limits, item.endpoint, item.body.len(), 1)?;
+    transaction.execute(
+        "INSERT INTO inbound(endpoint,generation,external_id,recipient,body,digest)
+             VALUES (?1,?2,?3,?4,?5,?6)",
+        params![
+            item.endpoint,
+            item.generation,
+            item.external_id,
+            item.recipient,
+            item.body,
+            digest
+        ],
+    )?;
+    let id = transaction.last_insert_rowid();
+    Ok(id)
 }
 
 pub(crate) fn valid_id(id: &str) -> bool {

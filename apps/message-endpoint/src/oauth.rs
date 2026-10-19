@@ -70,6 +70,43 @@ impl LoginSession {
         self.expires
     }
 }
+/// Separate in-memory member flows/sessions and fixed callback route. A member
+/// session is never accepted by management without its own fresh owner check.
+#[derive(Default)]
+pub struct MemberOAuthVault {
+    vault: OAuthVault,
+}
+impl MemberOAuthVault {
+    pub fn start_from(
+        &self,
+        auth: &crate::owner_auth::MemberAuth,
+        now: i64,
+        source: IpAddr,
+    ) -> Result<LoginStart, Error> {
+        self.vault.start_from(auth.oauth_client(), now, source)
+    }
+    pub fn finish(
+        &self,
+        auth: &crate::owner_auth::MemberAuth,
+        code: &str,
+        state: &str,
+        browser: &str,
+        now: i64,
+    ) -> Result<LoginSession, CallbackError> {
+        self.vault
+            .finish_verified(auth.oauth_client(), code, state, browser, now, |token| {
+                auth.authenticate_from(&[], Some(token), now, IpAddr::from([0, 0, 0, 0]))
+                    .map(|member| member.expires_at())
+            })
+    }
+    pub fn session_token(&self, raw: &str, now: i64) -> Result<Option<String>, Error> {
+        self.vault.session_token(raw, now)
+    }
+    pub fn logout(&self, raw: &str) -> Result<(), Error> {
+        self.vault.logout(raw)
+    }
+}
+
 fn hash(value: &str) -> [u8; 32] {
     Sha256::digest(value.as_bytes()).into()
 }
@@ -227,16 +264,28 @@ impl OAuthVault {
         browser: &str,
         now: i64,
     ) -> Result<LoginSession, CallbackError> {
+        self.finish_verified(auth, code, state, browser, now, |token| {
+            auth.authenticate(&[], Some(token), now)
+                .map(|owner| owner.expires_at())
+        })
+    }
+    fn finish_verified(
+        &self,
+        auth: &OwnerAuth,
+        code: &str,
+        state: &str,
+        browser: &str,
+        now: i64,
+        verify: impl FnOnce(&str) -> Result<i64, Error>,
+    ) -> Result<LoginSession, CallbackError> {
         let flow = self.consume(state, browser, now)?;
         let complete = || -> Result<LoginSession, Error> {
             if code.is_empty() || code.len() > 1024 || !code.bytes().all(|b| b.is_ascii_graphic()) {
                 return Err(Error::OAuthState);
             }
             let token = auth.exchange_code(code, &flow.verifier)?;
-            let owner = auth.authenticate(&[], Some(&token), now)?;
-            let expires = owner
-                .expires_at()
-                .min(now.checked_add(SESSION_TTL).ok_or(Error::OAuthState)?);
+            let expires =
+                verify(&token)?.min(now.checked_add(SESSION_TTL).ok_or(Error::OAuthState)?);
             let secret = random(48)?;
             let mut memory = self.state.lock().map_err(|_| Error::Proxy)?;
             memory.cleanup(now);
@@ -754,5 +803,55 @@ mod tests {
         assert!(error.clear_browser_cookie);
         assert!(vault.state.lock().unwrap().sessions.is_empty());
         assert!(vault.consume(&state, start.browser_secret(), NOW).is_err());
+    }
+    #[test]
+    fn member_oauth_uses_its_own_fixed_callback_and_pkce() {
+        let auth = crate::owner_auth::MemberAuth::new(
+            "https://proxy.example/",
+            "svc_hub",
+            "ws_test",
+            "https://hub.example/",
+        )
+        .unwrap();
+        let vault = MemberOAuthVault::default();
+        let start = vault
+            .start_from(&auth, NOW, "127.0.0.1".parse().unwrap())
+            .unwrap();
+        let values = query(&start);
+        assert_eq!(
+            values["redirect_uri"],
+            "https://hub.example/api/email/auth/callback"
+        );
+        assert_eq!(values["code_challenge_method"], "S256");
+        assert!(!start.location.contains(start.browser_secret()));
+        assert!(vault
+            .session_token(start.browser_secret(), NOW)
+            .unwrap()
+            .is_none());
+    }
+    #[test]
+    fn member_oauth_accepts_current_member_without_creating_owner_authority() {
+        let (auth, vault, start, server) = fake_proxy("member");
+        let auth = crate::owner_auth::MemberAuth::synthetic_client(auth);
+        let vault = MemberOAuthVault { vault };
+        let state = query(&start)["state"].clone();
+        let session = vault
+            .finish(&auth, "synthetic-code", &state, start.browser_secret(), NOW)
+            .unwrap();
+        assert_eq!(session.expires_at(), NOW + 120);
+        assert_ne!(session.cookie_secret(), "synthetic.oauth.signature");
+        assert!(vault
+            .session_token(session.cookie_secret(), NOW)
+            .unwrap()
+            .is_some());
+        assert!(vault
+            .finish(&auth, "synthetic-code", &state, start.browser_secret(), NOW)
+            .is_err());
+        vault.logout(session.cookie_secret()).unwrap();
+        assert!(vault
+            .session_token(session.cookie_secret(), NOW)
+            .unwrap()
+            .is_none());
+        server.join().unwrap();
     }
 }

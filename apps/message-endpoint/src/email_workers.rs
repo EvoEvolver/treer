@@ -1,0 +1,424 @@
+//! Opt-in outbox-only email runtime. No external mail transport is activated.
+//! All Core/directory calls and private file publication happen outside state.
+use crate::{
+    core::Core,
+    email::{self, proxy::Sender, Contact, Queue},
+    hub::{Directory, Readback},
+    relay::Mailbox,
+    scheduler::SharedHub,
+};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::HashSet,
+    path::PathBuf,
+    sync::{
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc,
+    },
+    thread::{self, JoinHandle},
+    time::{Duration, SystemTime, UNIX_EPOCH},
+};
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Config {
+    pub outbox_directory: PathBuf,
+}
+impl Config {
+    pub(crate) fn validate(&self) -> Result<(), ()> {
+        crate::private_store::open_directory(&self.outbox_directory, true)
+            .map(|_| ())
+            .map_err(|_| ())
+    }
+}
+#[derive(Default)]
+struct State {
+    stop: AtomicBool,
+    published: AtomicU64,
+    replied: AtomicU64,
+    failures: AtomicU64,
+}
+#[derive(Serialize)]
+pub struct Status {
+    pub mode: &'static str,
+    pub published_outbox: u64,
+    pub core_replies: u64,
+    pub failures: u64,
+    pub stopped: bool,
+}
+#[derive(Serialize)]
+pub struct Snapshot {
+    pub mode: &'static str,
+    pub worker: Option<Status>,
+    pub targets: Vec<Target>,
+    pub targets_truncated: bool,
+}
+#[derive(Serialize)]
+pub struct Target {
+    pub endpoint_id: String,
+    pub generation: i64,
+    pub address: String,
+    pub member_id: String,
+    pub revoked: bool,
+}
+impl Snapshot {
+    pub(crate) fn read(store: &crate::store::Store, worker: Option<&Workers>) -> Result<Self, ()> {
+        let mut q=store.db.prepare("SELECT t.endpoint,t.generation,t.address,t.member,t.revoked FROM email_targets t JOIN endpoints e ON e.id=t.endpoint AND e.generation=t.generation ORDER BY t.endpoint LIMIT 21").map_err(|_|())?;
+        let mut targets = q
+            .query_map([], |r| {
+                Ok(Target {
+                    endpoint_id: r.get(0)?,
+                    generation: r.get(1)?,
+                    address: r.get(2)?,
+                    member_id: r.get(3)?,
+                    revoked: r.get(4)?,
+                })
+            })
+            .map_err(|_| ())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| ())?;
+        let targets_truncated = targets.len() > 20;
+        targets.truncate(20);
+        Ok(Self {
+            mode: "outbox",
+            worker: worker.map(Workers::status),
+            targets,
+            targets_truncated,
+        })
+    }
+}
+pub struct Workers {
+    state: Arc<State>,
+    join: Option<JoinHandle<()>>,
+}
+fn clock() -> Result<i64, ()> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|v| i64::try_from(v.as_secs()).ok())
+        .ok_or(())
+}
+fn nonce() -> Result<String, ()> {
+    let mut b = [0; 32];
+    getrandom::fill(&mut b).map_err(|_| ())?;
+    Ok(b.iter().map(|b| format!("{b:02x}")).collect())
+}
+fn increment(n: &AtomicU64) {
+    let _ = n.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+        Some(v.saturating_add(1))
+    });
+}
+fn wait(s: &State) {
+    for _ in 0..20 {
+        if s.stop.load(Ordering::Acquire) {
+            break;
+        }
+        thread::sleep(Duration::from_millis(25));
+    }
+}
+impl Workers {
+    pub fn start(
+        hub: SharedHub<Core>,
+        core: Core,
+        directory: Arc<Sender>,
+        config: Config,
+        public_url: String,
+    ) -> std::io::Result<Self> {
+        config
+            .validate()
+            .map_err(|_| std::io::Error::other("email_private_outbox_unavailable"))?;
+        let state = Arc::new(State::default());
+        let shared = state.clone();
+        let join = thread::Builder::new()
+            .name("hub-email-supervisor".into())
+            .spawn(move || {
+                let mut started = HashSet::new();
+                let mut joins: Vec<JoinHandle<()>> = vec![];
+                while !shared.stop.load(Ordering::Acquire) {
+                    if joins.iter().any(JoinHandle::is_finished) {
+                        increment(&shared.failures);
+                        shared.stop.store(true, Ordering::Release);
+                        break;
+                    }
+                    let ids = hub
+                        .lock()
+                        .ok()
+                        .and_then(|h| h.binding_ids().ok())
+                        .unwrap_or_default();
+                    for id in ids {
+                        if started.contains(&id) {
+                            continue;
+                        }
+                        let (h, c, d, s, cfg, url) = (
+                            hub.clone(),
+                            core.clone(),
+                            directory.clone(),
+                            shared.clone(),
+                            config.clone(),
+                            public_url.clone(),
+                        );
+                        let endpoint = id.clone();
+                        match thread::Builder::new()
+                            .name("hub-email-endpoint".into())
+                            .spawn(move || {
+                                while !s.stop.load(Ordering::Acquire) {
+                                    if step(
+                                        &h,
+                                        &c,
+                                        &endpoint,
+                                        &cfg,
+                                        &url,
+                                        |member| d.current_member(&c, member).unwrap_or(false),
+                                        &s,
+                                    )
+                                    .is_err()
+                                    {
+                                        increment(&s.failures);
+                                    }
+                                    wait(&s);
+                                }
+                            }) {
+                            Ok(j) => {
+                                started.insert(id);
+                                joins.push(j);
+                            }
+                            Err(_) => {
+                                increment(&shared.failures);
+                                shared.stop.store(true, Ordering::Release);
+                                break;
+                            }
+                        }
+                    }
+                    wait(&shared);
+                }
+                for j in joins {
+                    if j.join().is_err() {
+                        increment(&shared.failures);
+                    }
+                }
+            })?;
+        Ok(Self {
+            state,
+            join: Some(join),
+        })
+    }
+    pub fn status(&self) -> Status {
+        Status {
+            mode: "outbox",
+            published_outbox: self.state.published.load(Ordering::Relaxed),
+            core_replies: self.state.replied.load(Ordering::Relaxed),
+            failures: self.state.failures.load(Ordering::Relaxed),
+            stopped: self.state.stop.load(Ordering::Acquire),
+        }
+    }
+    pub fn request_stop(&self) {
+        self.state.stop.store(true, Ordering::Release);
+    }
+    pub fn stop(&mut self) {
+        self.request_stop();
+        if let Some(j) = self.join.take() {
+            if j.join().is_err() {
+                increment(&self.state.failures);
+            }
+        }
+    }
+}
+impl Drop for Workers {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+fn refresh<M: Mailbox + Directory>(hub: &SharedHub<M>, core: &M, id: &str) -> Result<(), ()> {
+    let revision = hub
+        .lock()
+        .map_err(|_| ())?
+        .view(id)
+        .map_err(|_| ())?
+        .revision;
+    let requested_at = clock()?;
+    let observed = core.metadata(id).ok();
+    hub.lock()
+        .map_err(|_| ())?
+        .record_readback(
+            id,
+            revision,
+            Readback {
+                observed,
+                requested_at,
+            },
+            clock()?,
+        )
+        .map_err(|_| ())
+}
+fn fence<M: Mailbox + Directory>(
+    hub: &SharedHub<M>,
+    id: &str,
+    contact: &Contact,
+) -> Result<(), ()> {
+    let h = hub.lock().map_err(|_| ())?;
+    h.store.recheck_private_storage().map_err(|_| ())?;
+    h.active(id, clock()?).map_err(|_| ())?;
+    if h.blocked().map_err(|_| ())?
+        || email::contact(&h.store, id).map_err(|_| ())?.as_ref() != Some(contact)
+    {
+        return Err(());
+    }
+    Ok(())
+}
+fn step<M: Mailbox + Directory>(
+    hub: &SharedHub<M>,
+    core: &M,
+    id: &str,
+    config: &Config,
+    url: &str,
+    member: impl Fn(&str) -> bool,
+    state: &State,
+) -> Result<(), ()> {
+    let (contact, generation, work) = {
+        let mut h = hub.lock().map_err(|_| ())?;
+        let Some(contact) = email::contact(&h.store, id).map_err(|_| ())? else {
+            return Ok(());
+        };
+        let Ok(view) = h.active(id, clock()?) else {
+            return Ok(());
+        };
+        Queue::new(&mut h.store).map_err(|_| ())?;
+        let pending:bool=h.store.db.query_row("SELECT EXISTS(SELECT 1 FROM inbound WHERE endpoint=?1 AND generation=?2 AND pending=1) OR EXISTS(SELECT 1 FROM email_intents WHERE endpoint=?1 AND generation=?2 AND state=0 AND next_try<=?3)",rusqlite::params![id,view.binding.generation,clock()?],|r|r.get(0)).map_err(|_|())?;
+        let work = pending || !h.ready_outbound(id, clock()?).map_err(|_| ())?.is_empty();
+        (contact, view.binding.generation, work)
+    };
+    if !work || state.stop.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    if !member(&contact.member_id) {
+        return Err(());
+    }
+    refresh(hub, core, id)?;
+    fence(hub, id, &contact)?;
+    // Admit one reassembled Agent message. A frozen email intent is durable before
+    // the Core transfer can be completed; a replay checks the same payload digest.
+    let outbound = {
+        hub.lock()
+            .map_err(|_| ())?
+            .ready_outbound(id, clock()?)
+            .map_err(|_| ())?
+            .into_iter()
+            .next()
+    };
+    if let Some((transfer, envelope)) = outbound {
+        let mut h = hub.lock().map_err(|_| ())?;
+        let mut q = Queue::new(&mut h.store).map_err(|_| ())?;
+        let admitted = q.admit(id, generation, &envelope, clock()?);
+        match admitted {
+            Ok(_) => {
+                let crate::protocol::Envelope::Outbound { message_id, .. } = envelope else {
+                    return Err(());
+                };
+                let receipt = q.receipt(id, generation, &message_id).map_err(|_| ())?;
+                if receipt == Some(1) {
+                    h.store
+                        .finish_transfer(
+                            id,
+                            generation,
+                            crate::protocol::Direction::Outbound,
+                            &transfer,
+                            clock()?,
+                        )
+                        .map_err(|_| ())?;
+                } else if receipt == Some(2) {
+                    h.park_transport(
+                        id,
+                        generation,
+                        &transfer,
+                        crate::failures::FailureReason::TransportRetriesExhausted,
+                        clock()?,
+                    )
+                    .map_err(|_| ())?;
+                }
+            }
+            Err(email::Error::Invalid | email::Error::Denied | email::Error::Conflict) => {
+                h.park_transport(
+                    id,
+                    generation,
+                    &transfer,
+                    crate::failures::FailureReason::TransportRejected,
+                    clock()?,
+                )
+                .map_err(|_| ())?;
+            }
+            Err(_) => return Err(()),
+        }
+    }
+    let intent = {
+        let mut h = hub.lock().map_err(|_| ())?;
+        match Queue::new(&mut h.store)
+            .map_err(|_| ())?
+            .claim(id, generation, clock()?, &nonce()?)
+        {
+            Ok(v) => v,
+            Err(email::Error::Rate | email::Error::Lease) => None,
+            Err(_) => return Err(()),
+        }
+    };
+    if let Some(intent) = intent {
+        fence(hub, id, &contact)?;
+        let dispatch = {
+            let mut h = hub.lock().map_err(|_| ())?;
+            Queue::new(&mut h.store)
+                .map_err(|_| ())?
+                .dispatchable(&intent, clock()?)
+                .map_err(|_| ())?
+        };
+        if !dispatch || state.stop.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        let result = email::write_outbox(&intent, url, &config.outbox_directory);
+        let mut h = hub.lock().map_err(|_| ())?;
+        let mut q = Queue::new(&mut h.store).map_err(|_| ())?;
+        if result.is_ok() {
+            q.complete(&intent, email::Mode::Outbox).map_err(|_| ())?;
+            increment(&state.published);
+        } else {
+            q.failed(&intent, clock()?, false).map_err(|_| ())?;
+            return Err(());
+        }
+    }
+    let inbound = {
+        let mut h = hub.lock().map_err(|_| ())?;
+        h.prepare_email_forward(id, clock()?, &nonce()?)
+            .map_err(|_| ())?
+    };
+    if let Some(intent) = inbound {
+        let mut last = String::new();
+        for (key, body) in &intent.parts {
+            if state.stop.load(Ordering::Acquire) {
+                return Ok(());
+            }
+            // Revalidate a contact before each actual send. No state mutex spans I/O.
+            if !member(&contact.member_id) {
+                return Err(());
+            }
+            refresh(hub, core, id)?;
+            fence(hub, id, &contact)?;
+            let leased:bool=hub.lock().map_err(|_|())?.store.db.query_row("SELECT EXISTS(SELECT 1 FROM inbound WHERE id=?1 AND lease_token=?2 AND pending=1 AND lease_until>?3)",rusqlite::params![intent.job,intent.token,clock()?],|r|r.get(0)).map_err(|_|())?;
+            if !leased {
+                return Ok(());
+            }
+            match core.send(id, key, body, &[], None) {
+                Ok(v) => last = v,
+                Err(_) => {
+                    hub.lock()
+                        .map_err(|_| ())?
+                        .fail_telegram_forward(&intent, clock()?)
+                        .map_err(|_| ())?;
+                    return Err(());
+                }
+            }
+        }
+        hub.lock()
+            .map_err(|_| ())?
+            .complete_telegram_forward(&intent, &last)
+            .map_err(|_| ())?;
+        increment(&state.replied);
+    }
+    Ok(())
+}

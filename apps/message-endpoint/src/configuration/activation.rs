@@ -14,13 +14,48 @@ fn conflict(_guard: &str) -> Failure {
 }
 pub(crate) struct Activation {
     pub(crate) enabled: bool,
+    pub(crate) email_enabled: bool,
+    pub(crate) member_current: Arc<dyn Fn(&str) -> bool + Send + Sync>,
     pub(crate) account_ready: Arc<dyn Fn(&str) -> bool + Send + Sync>,
 }
 impl Default for Activation {
     fn default() -> Self {
         Self {
             enabled: false,
+            email_enabled: false,
+            member_current: Arc::new(|_| false),
             account_ready: Arc::new(|_| false),
+        }
+    }
+}
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum ResumeTarget {
+    Telegram(Target),
+    Email(EmailTarget),
+}
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct EmailTarget {
+    pub channel: EmailChannel,
+    pub contact: crate::email::Contact,
+}
+#[derive(Deserialize, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub enum EmailChannel {
+    Email,
+}
+impl Activation {
+    fn ready(&self, target: &ResumeTarget) -> bool {
+        match target {
+            ResumeTarget::Telegram(t) => (self.account_ready)(&t.account_id),
+            ResumeTarget::Email(_) => self.email_enabled,
+        }
+    }
+    fn member(&self, target: &ResumeTarget) -> bool {
+        match target {
+            ResumeTarget::Telegram(_) => true,
+            ResumeTarget::Email(t) => (self.member_current)(&t.contact.member_id),
         }
     }
 }
@@ -29,7 +64,7 @@ impl Default for Activation {
 pub struct ResumePreview {
     pins: Preview,
     revision: i64,
-    target: Target,
+    target: ResumeTarget,
     held_fragments: i64,
     oldest_held_at: Option<i64>,
     held_snapshot: String,
@@ -90,7 +125,15 @@ impl ResumeEvidence {
             && !self.reference.chars().any(reference_control)
     }
 }
-fn target<M: Mailbox + Directory>(hub: &Hub<M>, id: &str) -> Result<Target, Failure> {
+fn target<M: Mailbox + Directory>(hub: &Hub<M>, id: &str) -> Result<ResumeTarget, Failure> {
+    if let Some(contact) =
+        crate::email::contact(&hub.store, id).map_err(|_| Failure::Unavailable)?
+    {
+        return Ok(ResumeTarget::Email(EmailTarget {
+            channel: EmailChannel::Email,
+            contact,
+        }));
+    }
     let exists: bool = hub
         .store
         .db
@@ -114,6 +157,7 @@ fn target<M: Mailbox + Directory>(hub: &Hub<M>, id: &str) -> Result<Target, Fail
         .optional()
         .map_err(|_| Failure::Unavailable)?;
     serde_json::from_str(&definition.ok_or_else(|| conflict("target_absent"))?)
+        .map(ResumeTarget::Telegram)
         .map_err(|_| Failure::Unavailable)
 }
 fn backlog<M: Mailbox + Directory>(
@@ -233,7 +277,7 @@ pub(super) fn preview_resume<M: Mailbox + Directory, D: Directory>(
     activation: &Activation,
 ) -> Result<Outcome, Failure> {
     let (preview, _) = observe(shared, directory, workspace, owner, id)?;
-    let account_ready = (activation.account_ready)(&preview.target.account_id);
+    let account_ready = activation.ready(&preview.target) && activation.member(&preview.target);
     Ok(Outcome::ResumePreview {
         preview,
         activation_enabled: activation.enabled,
@@ -261,7 +305,10 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
         return Err(conflict("activation_disabled"));
     }
     let (current, readback) = observe(shared, directory, workspace, owner, &endpoint_id)?;
-    if current != expected || evidence.parked_count_ack != current.parked_transfers {
+    if current != expected
+        || evidence.parked_count_ack != current.parked_transfers
+        || !activation.member(&current.target)
+    {
         return Err(conflict("preview_changed"));
     }
     let discard_held = evidence.held_action == HeldAction::Discard;
@@ -283,7 +330,7 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
                 current.parked_transfers,
                 current.oldest_held_at,
             )
-        || !(activation.account_ready)(&current.target.account_id)
+        || !activation.ready(&current.target)
     {
         return Err(conflict("state_or_readiness_changed_before_commit"));
     }
@@ -363,6 +410,7 @@ mod tests {
             Activation {
                 enabled: true,
                 account_ready: Arc::new(|id| id == "bot_test"),
+                ..Activation::default()
             },
         )
     }
@@ -652,7 +700,11 @@ mod tests {
             Err(Failure::Conflict)
         ));
         let mut r = request(&s, &d, &o, &a);
-        r.expected.target.chat_id = -999;
+        if let ResumeTarget::Telegram(t) = &mut r.expected.target {
+            t.chat_id = -999;
+        } else {
+            panic!("expected Telegram");
+        }
         assert!(matches!(
             resume(&s, &d, "ws_test", &o, r, &a),
             Err(Failure::Conflict)
@@ -859,5 +911,91 @@ mod tests {
                 Err(Failure::Invalid)
             ));
         }
+    }
+    #[test]
+    fn email_binding_checks_membership_outside_state_and_commits_audit_with_revision() {
+        let (state, directory, owner, mut a) = setup();
+        {
+            let h = state.lock().unwrap();
+            h.store
+                .db
+                .execute("DELETE FROM telegram_targets", [])
+                .unwrap();
+        }
+        let original = state.lock().unwrap().view("ag_endpoint").unwrap().revision;
+        let contact = crate::email::Contact {
+            address: "PERSON@example.test".into(),
+            member_id: "human_member".into(),
+        };
+        let command = |revision| Command::BindEmail {
+            endpoint_id: "ag_endpoint".into(),
+            revision,
+            contact: contact.clone(),
+            confirm: true,
+        };
+        assert!(execute_with_activation(
+            &state,
+            &directory,
+            "ws_test",
+            &owner,
+            command(original),
+            &a
+        )
+        .is_err());
+        a.email_enabled = true;
+        let s = state.clone();
+        a.member_current = Arc::new(move |id| {
+            assert!(s.try_lock().is_ok(), "membership I/O held state");
+            id == "human_member"
+        });
+        execute_with_activation(&state, &directory, "ws_test", &owner, command(original), &a)
+            .unwrap();
+        let h = state.lock().unwrap();
+        assert_eq!(h.view("ag_endpoint").unwrap().revision, original + 1);
+        assert!(h.view("ag_endpoint").unwrap().paused);
+        assert_eq!(
+            crate::email::contact(&h.store, "ag_endpoint")
+                .unwrap()
+                .unwrap()
+                .address,
+            "person@example.test"
+        );
+        assert_eq!(h.owner_audit(None, 1).unwrap()[0].action, "bind_email");
+        drop(h);
+        assert!(execute_with_activation(
+            &state,
+            &directory,
+            "ws_test",
+            &owner,
+            command(original),
+            &a
+        )
+        .is_err());
+        assert!(execute_with_activation(
+            &state,
+            &directory,
+            "ws_test",
+            &owner,
+            command(original + 1),
+            &a
+        )
+        .is_err());
+        let telegram = crate::telegram::Target {
+            account_id: "bot_test".into(),
+            chat_id: -100,
+            topic_id: None,
+            allowed_senders: vec![42],
+        };
+        assert!(state
+            .lock()
+            .unwrap()
+            .bind_telegram_audited(
+                "ag_endpoint",
+                original + 1,
+                telegram,
+                owner.id(),
+                current_time().unwrap()
+            )
+            .is_err());
     }
 }
