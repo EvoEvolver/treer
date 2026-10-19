@@ -1310,7 +1310,23 @@ notice and lets the user choose between the shared-origin Proxy tunnel,
 labelled as such, and opening the Agent in a new tab; where the operator set
 `--agent-embed-fallback refuse` only the new tab is offered (the tunnel then
 answers `503 embedded_ui_requires_isolated_origin`). Mint errors and
-timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged. Embed
+timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged.
+Session reuse (#198): a Console that loads the bootstrap with `?reuse=1` lets
+the page call the check first; a `204` means a live embed session for this
+origin is already in the frame's partition, so the page loads the UI and posts
+`{treer_embed: "reused", nonce_hash}` instead of `ready` and no code is minted.
+The check therefore answers `204` only under the full request-path gate:
+session live for this host and kind, current membership, and the interface
+Policy pair for this Agent evaluated without recording a decision; any other
+state is the same `401` as "no session", so the check reveals nothing the UI
+request would not. Reuse changes no binding, expiry or revocation: the same
+cookie is presented, logout and membership removal end it, and the UI request
+and the socket re-check apply the gate again. Load-time measurement uses
+`Server-Timing` headers on the mint, bootstrap, session, check and the embedded
+UI's first response (per-step durations in milliseconds, no identifiers) and,
+for development Consoles only, `?timing=1` on the bootstrap URL, which makes the
+page attach its own Performance marks to its messages; neither flag reaches the
+Agent UI. Embed
 sessions are separate rows from standalone sessions: the token of one never
 authenticates through the other cookie. The request context is decided before
 any credential is read: for an ordinary request the embed cookie grants authority

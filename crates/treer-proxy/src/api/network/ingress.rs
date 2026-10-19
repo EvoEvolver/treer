@@ -497,11 +497,22 @@ async fn proxy_agent_interface_origin(
             "request carries both Content-Length and Transfer-Encoding",
         ));
     }
-    if let Some(served) =
-        serve_agent_embed_route(&auth, &config, &hostname, &agent_id, &mut request).await
+    if let Some(served) = serve_agent_embed_route(
+        &state,
+        &auth,
+        &policy,
+        &config,
+        &hostname,
+        &agent_id,
+        &mut request,
+    )
+    .await
     {
         return served;
     }
+    // Server-Timing for the embedded UI's first response (#198 step 1):
+    // durations only, attached below when the request used the embed cookie.
+    let mut server_timing = ServerTiming::start();
     if request.uri().path().starts_with("/.treer/") {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
@@ -561,6 +572,7 @@ async fn proxy_agent_interface_origin(
         };
         Some(user_id)
     };
+    server_timing.mark("auth");
     // Authenticated: existence and authority are decided now, per request.
     let (workspace_id, _server_id) = auth
         .agent_interface_target(&agent_id)
@@ -578,6 +590,7 @@ async fn proxy_agent_interface_origin(
         )
         .await?;
     }
+    server_timing.mark("policy");
     let interface = agent
         .interface
         .as_ref()
@@ -632,6 +645,7 @@ async fn proxy_agent_interface_origin(
         revalidation,
     )
     .await?;
+    server_timing.mark("tunnel");
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
         let headers = response.headers_mut();
         headers
@@ -642,6 +656,7 @@ async fn proxy_agent_interface_origin(
             .or_insert(HeaderValue::from_static("no-referrer"));
         if embedded {
             allow_console_frame_only(headers, &config.console_origin())?;
+            server_timing.apply(headers);
         }
     }
     Ok(response)

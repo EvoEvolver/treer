@@ -516,6 +516,15 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
     );
     assert!(response.headers().get(header::X_FRAME_OPTIONS).is_none());
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    // Load-time measurement (#198): durations only on the embedded response.
+    let timing = response.headers()["server-timing"].to_str().unwrap();
+    for name in ["auth;dur=", "policy;dur=", "tunnel;dur=", "total;dur="] {
+        assert!(timing.contains(name), "{timing}");
+    }
+    assert!(
+        !timing.contains(AGENT_ID) && !timing.contains("tok-") && !timing.contains("ies_"),
+        "{timing}"
+    );
     axum::body::to_bytes(response.into_body(), 64)
         .await
         .unwrap();
@@ -543,6 +552,10 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
         "default-src 'self'; frame-ancestors 'none'"
     );
     assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+    assert!(
+        response.headers().get("server-timing").is_none(),
+        "standalone responses carry no handshake timing"
+    );
     axum::body::to_bytes(response.into_body(), 64)
         .await
         .unwrap();
@@ -992,4 +1005,169 @@ async fn embed_capability_is_advertised_only_where_embed_sessions_can_work() {
     assert!(list
         .iter()
         .any(|c| c == treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN));
+}
+
+/// #198: the check behind session reuse answers 204 only under the full
+/// request-path gate, the bootstrap honours `reuse=1` / `timing=1` exactly, and
+/// every handshake response carries `Server-Timing` durations without ids.
+#[tokio::test]
+async fn embed_check_applies_the_interface_gate_and_bootstrap_flags_drive_reuse_and_timing() {
+    let fixture = agent_fixture().await;
+    let config = config(None);
+    // Mint and session responses carry per-step timings.
+    let (nonce, hash) = nonce_pair();
+    let minted = mint(&fixture, allow(), &config, Some("member"), AGENT_ID, &hash)
+        .await
+        .unwrap();
+    assert_eq!(minted.status(), StatusCode::OK);
+    let timing = minted.headers()["server-timing"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    for name in [
+        "membership;dur=",
+        "policy;dur=",
+        "ingress;dur=",
+        "code;dur=",
+        "total;dur=",
+    ] {
+        assert!(timing.contains(name), "{timing}");
+    }
+    assert!(
+        !timing.contains(AGENT_ID) && !timing.contains("tok-") && !timing.contains("ies_"),
+        "{timing}"
+    );
+    let body = axum::body::to_bytes(minted.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let code = serde_json::from_slice::<Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let redeemed = redeem(&fixture, &config, AGENT_HOST, &code, &nonce)
+        .await
+        .unwrap();
+    assert_eq!(redeemed.status(), StatusCode::NO_CONTENT);
+    let timing = redeemed.headers()["server-timing"].to_str().unwrap();
+    assert!(
+        timing.contains("consume;dur=") && timing.contains("total;dur="),
+        "{timing}"
+    );
+    let cookie = redeemed.headers()[header::SET_COOKIE]
+        .to_str()
+        .unwrap()
+        .split_once("; ")
+        .unwrap()
+        .0
+        .to_string();
+
+    // The check: 204 with the session and an allowing Policy, 401 (same code
+    // as "no session") when the interface gate denies this member.
+    let check_with = |policy: PolicyEngine, cookie: Option<String>| {
+        let fixture = &fixture;
+        let config = &config;
+        async move {
+            let mut request = Request::builder()
+                .uri("/.treer/embed/check")
+                .header(header::HOST, AGENT_HOST)
+                .header("sec-fetch-site", "same-origin");
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, cookie);
+            }
+            send(
+                fixture,
+                policy,
+                config,
+                request.body(Body::empty()).unwrap(),
+            )
+            .await
+        }
+    };
+    let ok = check_with(allow(), Some(cookie.clone())).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::NO_CONTENT);
+    let timing = ok.headers()["server-timing"].to_str().unwrap();
+    assert!(
+        timing.contains("session;dur=") && timing.contains("policy;dur="),
+        "{timing}"
+    );
+    assert_eq!(
+        error_of(check_with(deny(), Some(cookie.clone())).await).await,
+        (
+            StatusCode::UNAUTHORIZED,
+            "ingress_authentication_required".into()
+        )
+    );
+    assert_eq!(
+        error_of(check_with(allow(), None).await).await,
+        (
+            StatusCode::UNAUTHORIZED,
+            "ingress_authentication_required".into()
+        )
+    );
+    // Membership removal ends the check too (the session lookup folds it in).
+    sqlx::query("DELETE FROM organization_members WHERE user_id = 'member'")
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        error_of(check_with(allow(), Some(cookie.clone())).await).await,
+        (
+            StatusCode::UNAUTHORIZED,
+            "ingress_authentication_required".into()
+        )
+    );
+
+    // Bootstrap flags: exact `=1` values only, stripped before navigation, and
+    // the page carries a render timing.
+    for (query, reuse, timing_flag) in [
+        ("", false, false),
+        ("?reuse=1", true, false),
+        ("?timing=1&theme=dark", false, true),
+        ("?reuse=1&timing=1", true, true),
+        ("?reuse=2&timing=true", false, false),
+    ] {
+        let response = send(
+            &fixture,
+            allow(),
+            &config,
+            Request::builder()
+                .uri(format!("/.treer/embed{query}"))
+                .header(header::HOST, AGENT_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        let timing = response.headers()["server-timing"]
+            .to_str()
+            .unwrap()
+            .to_string();
+        assert!(
+            timing.contains("render;dur=") && timing.contains("total;dur="),
+            "{timing}"
+        );
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body.contains(&format!("var REUSE = {reuse};")),
+            "{query}: {body}"
+        );
+        assert!(
+            body.contains(&format!("var TIMING = {timing_flag};")),
+            "{query}: {body}"
+        );
+        assert!(
+            body.contains("params.delete(\"reuse\"); params.delete(\"timing\");"),
+            "{body}"
+        );
+        assert!(
+            body.contains("treer_embed: \"reused\", nonce_hash: hash"),
+            "{body}"
+        );
+        assert!(body.contains("/.treer/embed/check"), "{body}");
+        assert!(!body.contains(AGENT_ID), "{body}");
+    }
 }

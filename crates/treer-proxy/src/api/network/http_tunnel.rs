@@ -714,6 +714,32 @@ mod provenance_tests {
     }
 }
 
+/// The interface gate (`agent.output.read` and `agent.prompt` on the Agent)
+/// evaluated for a human without recording a Policy decision: the answer the
+/// request path would give, for re-checks and readiness probes (#194, #198).
+pub(in crate::api) async fn interface_gate_allows(
+    policy: &PolicyEngine,
+    workspace_id: &str,
+    user_id: &str,
+    agent: &AgentInfo,
+) -> Result<bool, ProtocolError> {
+    for action in [ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT] {
+        let request = PolicyRequest::new(
+            workspace_id,
+            PolicySubject::Human {
+                user_id: user_id.to_owned(),
+            },
+            action,
+            agent_policy_resource(agent),
+        );
+        let explanation = policy.explain_request(&request).await?;
+        if explanation.effective_decision != treer_protocol::PolicyEffect::Allow {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 /// For a human Console session on the Proxy-origin interface tunnel: the
 /// session, membership and the interface gate are re-checked while an
 /// upgraded socket lives (#194). Machine subjects keep their credential
@@ -933,22 +959,10 @@ impl UpgradeRevalidation {
             return membership;
         }
         if let Some((policy, agent)) = &self.agent_gate {
-            for action in [ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT] {
-                let request = PolicyRequest::new(
-                    &self.workspace_id,
-                    PolicySubject::Human {
-                        user_id: self.user_id.clone(),
-                    },
-                    action,
-                    agent_policy_resource(agent),
-                );
-                match policy.explain_request(&request).await {
-                    Ok(explanation)
-                        if explanation.effective_decision
-                            == treer_protocol::PolicyEffect::Allow => {}
-                    Ok(_) => return RevalidationOutcome::AccessRevoked,
-                    Err(_) => return RevalidationOutcome::Unavailable,
-                }
+            match interface_gate_allows(policy, &self.workspace_id, &self.user_id, agent).await {
+                Ok(true) => {}
+                Ok(false) => return RevalidationOutcome::AccessRevoked,
+                Err(_) => return RevalidationOutcome::Unavailable,
             }
         }
         RevalidationOutcome::Verified
