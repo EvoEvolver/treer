@@ -317,13 +317,45 @@ pub(in crate::api) async fn app_or_ingress_fallback(
     let method = request.method().clone();
     let path = request.uri().path().to_owned();
     drop(request);
-    serve_app(inner, &method, &path).await
+    let csp = console_csp(&inner.proxy_url, ingress.base_domain_if_configured());
+    serve_app(inner, &method, &path, &csp).await
+}
+
+/// The Console's `Content-Security-Policy` as served by the Proxy: the same
+/// `frame-src` the Worker and nginx hosts emit for the same inputs (#156
+/// incident 4890), so the embedded Agent frame on `https://ag-<id>.<apps
+/// domain>` is allowed wherever the Console is hosted, and only there.
+/// Without an apps domain the frame list stays `'self'` plus the Proxy origin.
+pub(crate) fn console_csp(proxy_url: &str, apps_domain: Option<&str>) -> String {
+    format!(
+        "{}; frame-ancestors 'none'; object-src 'none'; base-uri 'none'",
+        console_frame_src(proxy_url, apps_domain)
+    )
+}
+
+/// `frame-src 'self' <Proxy origin>[ https://*.<apps domain>]`: the wildcard
+/// is exactly one source, HTTPS only, directly under the configured apps base
+/// domain (CSP host wildcards match every label depth below it, which is the
+/// ingress domain itself; a sibling domain such as `apps2.example` is not a
+/// match). The nginx template and the Worker generate the same text.
+pub(crate) fn console_frame_src(proxy_url: &str, apps_domain: Option<&str>) -> String {
+    let proxy_origin = Url::parse(proxy_url)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| "'none'".to_string());
+    match apps_domain
+        .map(|domain| domain.trim_end_matches('.').to_ascii_lowercase())
+        .filter(|domain| !domain.is_empty() && !domain.contains(['/', ':', '*', ' ']))
+    {
+        Some(domain) => format!("frame-src 'self' {proxy_origin} https://*.{domain}"),
+        None => format!("frame-src 'self' {proxy_origin}"),
+    }
 }
 
 async fn serve_app(
     inner: &AppDistInner,
     method: &Method,
     path: &str,
+    csp: &str,
 ) -> Result<Response<Body>, ApiFailure> {
     if !matches!(*method, Method::GET | Method::HEAD) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
@@ -339,12 +371,14 @@ async fn serve_app(
             return Ok(with_headers(
                 json_response(json!({"service": "treer-app", "status": "ok"})),
                 "no-store",
+                csp,
             ))
         }
         "/config.json" => {
             return Ok(with_headers(
                 json_response(json!({"proxy_url": inner.proxy_url})),
                 "no-store",
+                csp,
             ))
         }
         _ => {}
@@ -362,7 +396,7 @@ async fn serve_app(
     response
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
-    Ok(with_headers(response, "no-cache"))
+    Ok(with_headers(response, "no-cache", csp))
 }
 
 /// A request path becomes a file only when every component is a plain name and
@@ -438,7 +472,11 @@ const CROSS_ORIGIN_OPENER_POLICY: header::HeaderName =
 
 /// The nginx template's header set, item for item; HTML documents also get
 /// `Cross-Origin-Opener-Policy: same-origin`.
-fn with_headers(mut response: Response<Body>, cache_control: &'static str) -> Response<Body> {
+fn with_headers(
+    mut response: Response<Body>,
+    cache_control: &'static str,
+    csp: &str,
+) -> Response<Body> {
     let html = response
         .headers()
         .get(header::CONTENT_TYPE)
@@ -454,10 +492,9 @@ fn with_headers(mut response: Response<Body>, cache_control: &'static str) -> Re
         headers.remove(CROSS_ORIGIN_OPENER_POLICY);
     }
     headers.insert(header::X_FRAME_OPTIONS, HeaderValue::from_static("DENY"));
-    headers.insert(
-        header::CONTENT_SECURITY_POLICY,
-        HeaderValue::from_static("frame-ancestors 'none'; object-src 'none'; base-uri 'none'"),
-    );
+    if let Ok(value) = HeaderValue::from_str(csp) {
+        headers.insert(header::CONTENT_SECURITY_POLICY, value);
+    }
     headers.insert(
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),

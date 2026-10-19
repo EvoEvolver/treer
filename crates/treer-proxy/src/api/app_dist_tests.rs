@@ -108,11 +108,17 @@ fn assert_opener_policy(headers: &HeaderMap, html: bool, what: &str) {
     }
 }
 
-fn assert_app_headers(headers: &HeaderMap, cache: &str) {
+fn assert_app_headers(headers: &HeaderMap, cache: &str, proxy_origin: &str) {
     assert_eq!(headers[header::X_FRAME_OPTIONS], "DENY");
+    // The fixture's apps domain is apps.treer.example, so the Console may frame
+    // itself, the Proxy and the Agent origins under that domain, and nothing
+    // else (#156 incident 4890).
     assert_eq!(
         headers[header::CONTENT_SECURITY_POLICY],
-        "frame-ancestors 'none'; object-src 'none'; base-uri 'none'"
+        format!(
+            "frame-src 'self' {proxy_origin} https://*.apps.treer.example; \
+             frame-ancestors 'none'; object-src 'none'; base-uri 'none'"
+        )
     );
     assert_eq!(headers[header::X_CONTENT_TYPE_OPTIONS], "nosniff");
     assert_eq!(headers[header::REFERRER_POLICY], "no-referrer");
@@ -133,7 +139,7 @@ async fn app_build_is_served_only_for_the_app_host_with_the_nginx_contract() {
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<title>treer</title>"));
     assert_eq!(headers[header::CONTENT_TYPE], "text/html; charset=utf-8");
-    assert_app_headers(&headers, "no-cache");
+    assert_app_headers(&headers, "no-cache", "https://proxy.treer.example");
     assert_opener_policy(&headers, true, "/");
     let (status, headers, body) = get(&app, "APP.treer.example.", "/assets/app.js").await;
     assert_eq!((status, body.as_str()), (StatusCode::OK, "console.log(1)"));
@@ -168,7 +174,7 @@ async fn app_build_is_served_only_for_the_app_host_with_the_nginx_contract() {
         serde_json::from_str::<Value>(&body).unwrap(),
         json!({"proxy_url": "https://proxy.treer.example/"})
     );
-    assert_app_headers(&headers, "no-store");
+    assert_app_headers(&headers, "no-store", "https://proxy.treer.example");
     assert_opener_policy(&headers, false, "/config.json");
     let (status, headers, body) = get(&app, "app.treer.example", "/health").await;
     assert_eq!(status, StatusCode::OK);
@@ -356,7 +362,7 @@ async fn same_origin_app_disables_embedded_interfaces_and_virtual_hosts() {
     let (status, headers, body) = get(&app, "treer.example", "/").await;
     assert_eq!(status, StatusCode::OK);
     assert!(body.contains("<title>treer</title>"));
-    assert_app_headers(&headers, "no-cache");
+    assert_app_headers(&headers, "no-cache", "https://treer.example");
     assert_opener_policy(&headers, true, "one-origin /");
     // One origin: Core routes and the Console both answer on it.
     let (status, _, _) = get(&app, "treer.example", "/api/health").await;
@@ -519,4 +525,59 @@ async fn same_site_isolation_rests_on_origin_checks_not_samesite() {
     );
     // (a) the same write from the Console origin is accepted with the cookie.
     assert_eq!(write(Some(console), cookie).await, StatusCode::OK);
+}
+
+#[test]
+fn console_frame_src_is_the_proxy_origin_plus_one_https_wildcard_under_the_apps_domain() {
+    use super::app_dist::{console_csp, console_frame_src};
+    // No apps domain: today's Worker value, fail closed.
+    assert_eq!(
+        console_frame_src("https://proxy.treer.example/", None),
+        "frame-src 'self' https://proxy.treer.example"
+    );
+    // With the apps domain: exactly one HTTPS wildcard source directly under it,
+    // lower-cased, no trailing dot, never a port, scheme or path.
+    assert_eq!(
+        console_frame_src("https://proxy.treer.example/", Some("Apps.Treer.Example.")),
+        "frame-src 'self' https://proxy.treer.example https://*.apps.treer.example"
+    );
+    assert_eq!(
+        console_frame_src(
+            "https://proxy.treer.example:8443/x",
+            Some("apps.treer.example")
+        ),
+        "frame-src 'self' https://proxy.treer.example:8443 https://*.apps.treer.example"
+    );
+    // Malformed domains fall back to the closed list rather than widening it.
+    for bad in [
+        "",
+        "*",
+        "apps.treer.example/evil",
+        "apps.treer.example:443",
+        "a b",
+    ] {
+        assert_eq!(
+            console_frame_src("https://proxy.treer.example/", Some(bad)),
+            "frame-src 'self' https://proxy.treer.example",
+            "{bad:?}"
+        );
+    }
+    // The generated source matches hosts under the apps domain only: CSP host
+    // wildcards match any label depth below the domain (that is the ingress
+    // domain itself), while a sibling domain is never a match.
+    let source = "https://*.apps.treer.example";
+    let suffix = &source["https://*".len()..];
+    assert!("ag-0123.apps.treer.example".ends_with(suffix));
+    assert!("x.y.apps.treer.example".ends_with(suffix));
+    assert!(!"ag-0123.apps2.treer.example".ends_with(suffix));
+    assert!(
+        !"apps.treer.example".ends_with(suffix),
+        "the apex itself is not framed"
+    );
+    assert!(!"evil-apps.treer.example".ends_with(suffix));
+    assert_eq!(
+        console_csp("https://proxy.treer.example/", Some("apps.treer.example")),
+        "frame-src 'self' https://proxy.treer.example https://*.apps.treer.example; \
+         frame-ancestors 'none'; object-src 'none'; base-uri 'none'"
+    );
 }
