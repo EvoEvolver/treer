@@ -497,15 +497,23 @@ async fn proxy_agent_interface_origin(
     }
     enforce_ingress_fetch_metadata(&request, &hostname, false)?;
     // An embed session (#156) is recognised by its own cookie; its token
-    // never authenticates through the standalone cookie or the reverse.
+    // never authenticates through the standalone cookie or the reverse. The
+    // embed cookie is honoured only for requests that can come from the
+    // embedded frame: a top-level document (Sec-Fetch-Dest: document) ignores
+    // it entirely, because a browser whose Console and apps domain share one
+    // site, or that ignores `Partitioned`, sends it on standalone visits too
+    // (canary acceptance 5118).
+    let top_level = fetch_dest(request.headers()).is_some_and(|dest| dest == "document");
     let mut embedded = false;
     let user_id = if auth.authentication_disabled() {
         None
     } else {
         let mut user_id = None;
-        if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
-            user_id = auth.authenticate_embed_session(&hostname, &token).await?;
-            embedded = user_id.is_some();
+        if !top_level {
+            if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
+                user_id = auth.authenticate_embed_session(&hostname, &token).await?;
+                embedded = user_id.is_some();
+            }
         }
         if user_id.is_none() {
             if let Some(token) = cookie_value(request.headers(), config.ingress_cookie_name()) {
@@ -523,13 +531,13 @@ async fn proxy_agent_interface_origin(
         };
         Some(user_id)
     };
-    // An embed session (security 4750 P2): a browser that ignores
-    // `Partitioned` keeps the cookie as a plain SameSite=None cookie, so the
-    // framed document's own requests are the only ones admitted: exactly
-    // `Sec-Fetch-Site: same-origin`; missing, none, same-site and cross-site
-    // are refused before the Agent is even resolved.
+    // Security 4750 P2, refined after 5118: a browser that stores the embed
+    // cookie unpartitioned must not be able to ride it from another page.
+    // Frame navigations are admitted (the response's frame-ancestors, set to
+    // the Console origin only, decides whether they render); everything else
+    // must prove it comes from the framed document itself.
     if embedded {
-        require_embed_same_origin(request.headers())?;
+        require_embed_request_from_frame(request.headers(), &hostname)?;
     }
     // Authenticated: existence and authority are decided now, per request.
     let (workspace_id, _server_id) = auth
@@ -602,19 +610,63 @@ async fn proxy_agent_interface_origin(
     Ok(response)
 }
 
-/// Embed-cookie requests must prove they come from the framed document
-/// itself: one `Sec-Fetch-Site` header equal to `same-origin`. A missing
-/// header is refused too, because without Fetch Metadata the cookie could be
-/// riding a cross-site request in a browser that stored it unpartitioned.
-pub(super) fn require_embed_same_origin(headers: &HeaderMap) -> Result<(), ApiFailure> {
-    let mut sites = headers.get_all("sec-fetch-site").iter();
-    match (sites.next(), sites.next()) {
-        (Some(site), None) if site == "same-origin" => Ok(()),
-        _ => Err(ApiFailure::forbidden(
+/// The single `Sec-Fetch-Dest` value, if the browser sent exactly one.
+pub(super) fn fetch_dest(headers: &HeaderMap) -> Option<&str> {
+    let mut dests = headers.get_all("sec-fetch-dest").iter();
+    match (dests.next(), dests.next()) {
+        (Some(dest), None) => dest.to_str().ok(),
+        _ => None,
+    }
+}
+
+/// Requests authenticated through the embed cookie must come from the
+/// embedded frame. Admitted: a navigation of the frame itself
+/// (`Sec-Fetch-Dest: iframe` or `frame`; rendering is then decided by the
+/// `frame-ancestors` the response carries), any request with exactly one
+/// `Sec-Fetch-Site: same-origin`, and a request whose `Origin` header is
+/// exactly this host (CORS fetches and WebSocket handshakes name their
+/// origin even where Fetch Metadata is absent). Everything else, including a
+/// request with no Fetch Metadata and no Origin, is refused: without them the
+/// cookie could be riding a cross-site request in a browser that stored it
+/// unpartitioned or that shares one site between the Console and the apps
+/// domain.
+pub(super) fn require_embed_request_from_frame(
+    headers: &HeaderMap,
+    hostname: &str,
+) -> Result<(), ApiFailure> {
+    let rejected = || {
+        ApiFailure::forbidden(
             "ingress_request_rejected",
             "embedded Agent interface requests must come from the embedded document itself",
-        )),
+        )
+    };
+    if matches!(fetch_dest(headers), Some("iframe") | Some("frame")) {
+        return Ok(());
     }
+    let mut sites = headers.get_all("sec-fetch-site").iter();
+    if let (Some(site), None) = (sites.next(), sites.next()) {
+        if site == "same-origin" {
+            return Ok(());
+        }
+    }
+    let mut origins = headers.get_all(header::ORIGIN).iter();
+    if let (Some(origin), None) = (origins.next(), origins.next()) {
+        let matches = origin
+            .to_str()
+            .ok()
+            .and_then(|value| url::Url::parse(value).ok())
+            .is_some_and(|url| {
+                url.scheme() == "https"
+                    && url.port().is_none()
+                    && url
+                        .host_str()
+                        .is_some_and(|host| host.eq_ignore_ascii_case(hostname))
+            });
+        if matches {
+            return Ok(());
+        }
+    }
+    Err(rejected())
 }
 
 /// Same-site sibling defence for every ingress host (#143 Phase 2 V4): a

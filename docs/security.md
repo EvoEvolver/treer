@@ -1302,14 +1302,23 @@ labelled as such, and opening the Agent in a new tab; where the operator set
 answers `503 embedded_ui_requires_isolated_origin`). Mint errors and
 timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged. Embed
 sessions are separate rows from standalone sessions: the token of one never
-authenticates through the other cookie. A request that authenticates through
-the embed cookie is served only with exactly one `Sec-Fetch-Site: same-origin`
-header (the framed document's own navigations, fetches and subresources);
-missing, `none`, `same-site` and `cross-site` are refused with
-`403 ingress_request_rejected`. This is what protects a browser that accepts
-third-party cookies but ignores `Partitioned`: it stores the embed cookie as a
-plain `SameSite=None` cookie and the check step passes, yet no cross-site page
-can use it, because such requests never carry `same-origin`. Responses to
+authenticates through the other cookie. The embed cookie is honoured only for
+requests that can come from the embedded frame: a top-level document request
+(`Sec-Fetch-Dest: document`) ignores it and is served as a standalone visit
+(standalone cookie or the authorize redirect), because a browser whose Console
+and apps domain share one site, or that ignores `Partitioned`, sends the embed
+cookie on standalone visits too. A request authenticated through the embed
+cookie is then served only when it is a navigation of the frame itself
+(`Sec-Fetch-Dest: iframe` or `frame`; whether it renders is decided by the
+response's `frame-ancestors`, which names the Console origin only), or carries
+exactly one `Sec-Fetch-Site: same-origin`, or carries an `Origin` header equal
+to this Agent host (CORS fetches and WebSocket handshakes). Anything else,
+including a request without Fetch Metadata and without `Origin`, is refused
+with `403 ingress_request_rejected`. This is what protects a browser that
+accepts third-party cookies but ignores `Partitioned`: it stores the embed
+cookie as a plain `SameSite=None` cookie and the check step passes, yet a
+cross-site page can neither read the frame it embeds nor make the Agent origin
+serve its own fetches. Responses to
 requests carrying the embed cookie get `frame-ancestors` replaced with the
 Console origin and `X-Frame-Options` removed; standalone sessions keep the
 Agent's CSP untouched. Membership is re-checked on every request and Console

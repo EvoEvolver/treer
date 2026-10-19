@@ -615,15 +615,23 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
         .await,
         (StatusCode::FORBIDDEN, "policy_denied".into())
     );
-    // Security 4750 P2: with a valid embed cookie, only the framed document's
-    // own requests (exactly one Sec-Fetch-Site: same-origin) are served; a
-    // browser that stored the cookie unpartitioned cannot ride it cross-site.
-    for sites in [
-        vec![],
-        vec!["none"],
-        vec!["same-site"],
-        vec!["cross-site"],
-        vec!["same-origin", "same-origin"],
+    // Security 4750 P2, refined after the canary acceptance 5118: with a
+    // valid embed cookie, non-navigation requests are served only when they
+    // prove they come from the framed document (exactly one Sec-Fetch-Site:
+    // same-origin, or an Origin equal to this host); a browser that stored the
+    // cookie unpartitioned cannot ride it from another page.
+    for (sites, origin) in [
+        (vec![], None),
+        (vec!["none"], None),
+        (vec!["same-site"], None),
+        (vec!["cross-site"], None),
+        (vec!["same-origin", "same-origin"], None),
+        (vec![], Some("https://evil.example")),
+        (
+            vec!["cross-site"],
+            Some(&*format!("https://x.{AGENT_HOST}")),
+        ),
+        (vec![], Some(&*format!("http://{AGENT_HOST}"))),
     ] {
         let mut request = Request::builder()
             .uri("/")
@@ -631,6 +639,9 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
             .header(header::COOKIE, &embed);
         for site in &sites {
             request = request.header("sec-fetch-site", *site);
+        }
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
         }
         assert_eq!(
             error_of(
@@ -644,9 +655,108 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
             )
             .await,
             (StatusCode::FORBIDDEN, "ingress_request_rejected".into()),
-            "{sites:?}"
+            "{sites:?} {origin:?}"
         );
     }
+    // Admitted embedded requests: the frame's own navigation (any site value;
+    // frame-ancestors decides rendering), a same-origin fetch, and a request
+    // naming this host as its Origin without Fetch Metadata (WebSocket
+    // handshakes and CORS fetches in browsers that omit Sec-Fetch-Site).
+    for (dest, site, origin) in [
+        (Some("iframe"), Some("cross-site"), None),
+        (Some("iframe"), Some("same-site"), None),
+        (Some("frame"), None, None),
+        (Some("empty"), Some("same-origin"), None),
+        (None, None, Some(&*format!("https://{AGENT_HOST}"))),
+        (
+            None,
+            None,
+            Some(&*format!("https://{}", AGENT_HOST.to_ascii_uppercase())),
+        ),
+    ] {
+        let mut request = Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, &embed);
+        if let Some(dest) = dest {
+            request = request.header("sec-fetch-dest", dest);
+        }
+        if let Some(site) = site {
+            request = request.header("sec-fetch-site", site);
+        }
+        if let Some(origin) = origin {
+            request = request.header(header::ORIGIN, origin);
+        }
+        let response = send(
+            &fixture,
+            allow(),
+            &config,
+            request.body(Body::empty()).unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "{dest:?} {site:?} {origin:?}"
+        );
+        assert_eq!(
+            response.headers()[header::CONTENT_SECURITY_POLICY],
+            format!("default-src 'self'; frame-ancestors {CONSOLE}"),
+            "embedded responses are framed by the Console only"
+        );
+        axum::body::to_bytes(response.into_body(), 64)
+            .await
+            .unwrap();
+    }
+    // A top-level document ignores the embed cookie: alone it is an
+    // unauthenticated standalone visit (authorize redirect, never 403), and
+    // next to the standalone cookie it is the standalone session with the
+    // Agent's own framing policy, even though the browser sent both cookies
+    // (same-site Console and apps domain, or Partitioned ignored).
+    let response = send(
+        &fixture,
+        allow(),
+        &config,
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, &embed)
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "document")
+            .header("sec-fetch-site", "cross-site")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::SEE_OTHER);
+    let response = send(
+        &fixture,
+        allow(),
+        &config,
+        Request::builder()
+            .uri("/")
+            .header(header::HOST, AGENT_HOST)
+            .header(header::COOKIE, format!("{embed}; {standalone}"))
+            .header("sec-fetch-mode", "navigate")
+            .header("sec-fetch-dest", "document")
+            .header("sec-fetch-site", "none")
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()[header::CONTENT_SECURITY_POLICY],
+        "default-src 'self'; frame-ancestors 'none'",
+        "a standalone visit keeps the Agent's CSP even when the embed cookie rides along"
+    );
+    assert_eq!(response.headers()[header::X_FRAME_OPTIONS], "DENY");
+    axum::body::to_bytes(response.into_body(), 64)
+        .await
+        .unwrap();
     // The standalone session is not subject to that rule for safe requests.
     let response = send(
         &fixture,
