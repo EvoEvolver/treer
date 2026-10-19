@@ -13,11 +13,13 @@ export async function testHistoryPages(browser, base, screenshots, pageName) {
   for(const lang of ['en','zh']) {
     const context=await browser.newContext({viewport:{width:390,height:844}});
     try {
-      const page=await context.newPage();let socket,olderReads=0;
+      const page=await context.newPage();let socket,olderReads=0,requests=0;
       await page.routeWebSocket('**/ws',ws=>{socket=ws;});
       await page.route('**/api/state',route=>route.fulfill({json:latest}));
       await page.route('**/api/history/older',async route=>{
         const body=route.request().postDataJSON();
+        requests++;
+        if(requests===2){await route.fulfill({status:429,json:{error:{message:'history_page_busy'}}});return;}
         assert.equal(body.cursor,olderReads?'opaque:32':'opaque:64');olderReads++;
         await route.fulfill({json:{...latest,history:{limit:50,page:true,cursor:olderReads===1?'opaque:32':null,totalTurns:150},thread:{...latest.thread,hasOlderItems:olderReads===1,turns:[turn('old-'+olderReads,'Earlier page '+olderReads)]}}});
       });
@@ -31,6 +33,10 @@ export async function testHistoryPages(browser, base, screenshots, pageName) {
       socket.send(JSON.stringify({...latest,type:'state'}));
       await expect(page.locator('.chat')).toContainText('Earlier page 1');
       await older.click();
+      await expect(page.getByRole('alert')).toContainText('history_page_busy');
+      await page.waitForTimeout(2100);
+      assert.equal(requests,2,'a busy history response must not trigger automatic retries');
+      await older.click();
       await expect(page.locator('.chat')).toContainText('Earlier page 2');
       await expect(page.locator('.chat')).not.toContainText('Earlier page 1');
       const back=page.getByRole('button',{name:latestName,exact:true});
@@ -41,6 +47,7 @@ export async function testHistoryPages(browser, base, screenshots, pageName) {
       await expect(page.locator('#thread')).toBeFocused();
       await page.screenshot({path:screenshots+'/history-page-'+lang+'.png'});
       assert.equal(olderReads,2);
+      assert.equal(requests,3);
     } finally {await context.close();}
   }
 }

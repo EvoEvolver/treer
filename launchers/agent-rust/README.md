@@ -42,6 +42,14 @@ per history turn and 4 MiB for other decoded values. Duplicate keys and malforme
 discarded values are refused. Over-cap frames poison the transport with
 `line_too_large`; shape/value/deadline errors have distinct fixed reasons.
 Content-free `historyScan` diagnostics contain only bytes, turns, nodes and time.
+Selected windows share `Arc<Value>` allocations; overlap does not deep-copy turns.
+The reader permits four registered selections plus the recent window: each holds
+at most 16 MiB serialized content / 500k nodes. Additional current-turn, active
+and reconciliation references are also bounded, but these serialized bounds do
+not equal heap bytes (Value/map/string allocations add overhead). Materializing
+the one response disposes other ranges before unwrapping the shared values.
+The runtime normally has one older-range scan plus one observer target; the
+256 MiB regression threshold is measured evidence, not an analytic OS RSS limit.
 The eight-entry event queue remains separate. A 530-turn, roughly 50 MiB fixture
 checks recent history, on-demand older reads and the next turn under a 256 MiB
 launcher RSS regression ceiling; exactly 256 MiB passes and +1 byte is refused.
@@ -104,6 +112,12 @@ serialized turn content (excluding the outer array separators). Each turn
 replacement is counted without allocating a second serialized history and is
 admitted atomically. Oldest finished turns are evicted until the window fits;
 active turns, durable receipts/acks, goals and retry identity are not evicted.
+Observer reads additionally select the current reconciliation target by internal
+turn ID, even after it becomes terminal outside the suffix. That target counts
+against the same window budgets; missing completion is never inferred as success
+and never automatically redispatched. Requested older pages restore attested
+local user input only for turn IDs actually present in that page, within its
+admission budget; they never synthesize evicted turns outside the requested page.
 An individual turn that cannot fit preserves the previous transcript,
 persists the dispatch fence, stops the directly owned provider/process group,
 rejects further mutations, and leaves state and receipt reads available.

@@ -19,12 +19,17 @@ for await (const line of createInterface({ input: process.stdin })) {
       {id:`answer-${n}`,type:'agentMessage',text:'x'.repeat(96*1024)},
     ]}));
     if(process.env.HISTORY_LARGE_ACTIVE==='1')result.thread.turns[0].status='inProgress';
+    if(process.env.HISTORY_PROJECTION_OLD==='1')result.thread.turns[430]={id:'history-1',status:'completed',items:[]};
+    next=Math.max(next,530);
   }
   if (request.method === 'thread/resume' && process.env.HISTORY_MALFORMED_OLD === '1') {
     const turns=Array.from({length:60},(_,n)=>({id:`old-${n}`,status:'completed',items:[]}));
     // The malformed value is outside the retained last-50 window.
     console.log(JSON.stringify({id:request.id,result:{thread:{id:threadId,turns}}}).replace('"old-0"','"old-0",INVALID'));
     continue;
+  }
+  if(request.method==='thread/read'&&process.env.HISTORY_RECONCILE_OLD==='1') {
+    result.thread.turns=[{id:'history-1',status:'completed',items:[]},...Array.from({length:80},(_,n)=>({id:`later-${n}`,status:'completed',items:[]}))];
   }
   if (request.method === 'thread/resume' && process.env.HISTORY_FRAME_BYTES) {
     const target=Number(process.env.HISTORY_FRAME_BYTES);
@@ -48,6 +53,10 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (request.method === 'turn/start') {
     const id = `history-${++next}`;
     result = { turn: { id } };
+    if(process.env.HISTORY_RECONCILE_OLD==='1') {
+      if(process.env.HISTORY_FRAME_LOG)appendFileSync(process.env.HISTORY_FRAME_LOG,JSON.stringify({method:request.method,bytes:Buffer.byteLength(JSON.stringify({id:request.id,result}))})+'\n');
+      console.log(JSON.stringify({id:request.id,result}));continue;
+    }
     if (process.env.HISTORY_DELTA === '1') {
       setTimeout(() => console.log(JSON.stringify({method:'item/started',params:{threadId,turnId:id,item:{id:'stream',type:'agentMessage',text:''}}})),20);
       let remaining=10;

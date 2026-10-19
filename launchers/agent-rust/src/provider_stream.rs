@@ -12,7 +12,12 @@ use tokio::io::{AsyncRead, AsyncReadExt};
 pub const FRAME_BYTES: usize = 256 * 1024 * 1024;
 pub const WINDOW_BYTES: usize = 16 * 1024 * 1024;
 pub const WINDOW_TURNS: usize = 50;
-pub type Selections = Arc<Mutex<HashMap<u64, (usize, usize)>>>;
+#[derive(Clone, Default)]
+pub struct Selection {
+    pub range: Option<(usize, usize)>,
+    pub target: Option<String>,
+}
+pub type Selections = Arc<Mutex<HashMap<u64, Selection>>>;
 type Result<T> = std::result::Result<T, &'static str>;
 type Parsing<'a> = Pin<Box<dyn Future<Output = Result<Value>> + Send + 'a>>;
 
@@ -31,11 +36,12 @@ pub struct Reader<R> {
     windows: HashMap<u64, Window>,
     recent: Window,
     total: usize,
-    active: Option<Value>,
+    active: Option<Arc<Value>>,
+    targets: HashMap<u64, Arc<Value>>,
 }
 #[derive(Default)]
 struct Window {
-    values: VecDeque<Value>,
+    values: VecDeque<Arc<Value>>,
     charges: VecDeque<(usize, usize)>,
     bytes: usize,
     nodes: usize,
@@ -49,7 +55,7 @@ pub(crate) fn shape_nodes(value: &Value) -> usize {
     }
 }
 impl Window {
-    fn push(&mut self, value: Value, bytes: usize, index: usize) -> Result<()> {
+    fn push(&mut self, value: Arc<Value>, bytes: usize, index: usize) -> Result<()> {
         if bytes > WINDOW_BYTES {
             return Err("provider_value_too_large");
         }
@@ -88,6 +94,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             recent: Window::default(),
             total: 0,
             active: None,
+            targets: HashMap::new(),
         }
     }
     async fn peek(&mut self) -> Result<Option<u8>> {
@@ -106,13 +113,17 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
     }
     async fn byte(&mut self) -> Result<u8> {
         let byte = self.peek().await?.ok_or("invalid_json")?;
-        self.pos += 1;
-        self.count += 1;
+        self.consume(1)?;
+        Ok(byte)
+    }
+    fn consume(&mut self, bytes: usize) -> Result<()> {
+        self.pos += bytes;
+        self.count += bytes;
         if self.count > FRAME_BYTES {
             return Err("line_too_large");
         }
         if !self.in_history {
-            self.outside += 1;
+            self.outside += bytes;
         }
         if self.outside > 4 * 1024 * 1024
             || self
@@ -121,7 +132,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         {
             return Err("provider_value_too_large");
         }
-        Ok(byte)
+        Ok(())
     }
     async fn spaces(&mut self) -> Result<()> {
         while matches!(self.peek().await?, Some(b' ' | b'\t' | b'\r')) {
@@ -136,6 +147,24 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         let mut bytes = vec![b'"'];
         let mut escape = false;
         loop {
+            // Copy ordinary string spans from the read buffer in chunks;
+            // reserve per-byte parsing for quotes, escapes and control bytes.
+            // Wire/value budgets are checked before extending the allocation.
+            if !escape && self.peek().await?.is_some() {
+                let begin = self.pos;
+                let plain = self.buffer[begin..self.end]
+                    .iter()
+                    .take_while(|b| **b >= 0x20 && **b != b'"' && **b != b'\\')
+                    .count();
+                if plain > 0 {
+                    self.consume(plain)?;
+                    if bytes.len() + plain > limit {
+                        return Err("provider_value_too_large");
+                    }
+                    bytes.extend_from_slice(&self.buffer[begin..begin + plain]);
+                    continue;
+                }
+            }
             let byte = self.byte().await?;
             if byte == b'\n' {
                 return Err("invalid_json");
@@ -162,6 +191,9 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 return Err("provider_json_limit");
             }
             self.spaces().await?;
+            if path == ["result", "thread", "turns"] && self.peek().await? != Some(b'[') {
+                return Err("provider_json_limit");
+            }
             match self.peek().await?.ok_or("invalid_json")? {
                 b'"' => Ok(Value::String(self.string(WINDOW_BYTES).await?)),
                 b'{' => {
@@ -247,14 +279,16 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         if selections.len() > 4 {
             return Err("provider_json_limit");
         }
-        for (&id, &(start, _)) in &selections {
-            self.windows.insert(
-                id,
-                Window {
-                    start,
-                    ..Window::default()
-                },
-            );
+        for (&id, selection) in &selections {
+            if let Some((start, _)) = selection.range {
+                self.windows.insert(
+                    id,
+                    Window {
+                        start,
+                        ..Window::default()
+                    },
+                );
+            }
         }
         if self.peek().await? == Some(b']') {
             self.byte().await?;
@@ -275,14 +309,26 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             let bytes = serde_json::to_vec(&value)
                 .map_err(|_| "invalid_json")?
                 .len();
+            let value = Arc::new(value);
             if value["status"] == "inProgress" {
                 if self.active.is_some() {
                     return Err("provider_json_limit");
                 }
                 self.active = Some(value.clone());
             }
-            for (&id, &(start, end)) in &selections {
-                if self.total >= start && self.total < end {
+            for (&id, selection) in &selections {
+                if selection
+                    .target
+                    .as_deref()
+                    .is_some_and(|target| value["id"] == target)
+                    && self.targets.insert(id, value.clone()).is_some()
+                {
+                    return Err("provider_json_limit");
+                }
+                if selection
+                    .range
+                    .is_some_and(|(start, end)| self.total >= start && self.total < end)
+                {
                     self.windows
                         .entry(id)
                         .or_default()
@@ -325,6 +371,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         self.recent = Window::default();
         self.total = 0;
         self.active = None;
+        self.targets.clear();
         self.spaces().await?;
         if self.peek().await?.is_none() {
             return Ok(None);
@@ -347,11 +394,12 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 .unwrap_or_else(|| std::mem::take(&mut self.recent));
             if !selected {
                 if let Some(active) = self
-                    .active
-                    .take()
+                    .targets
+                    .remove(&id)
+                    .or_else(|| self.active.take())
                     .filter(|active| !window.values.iter().any(|t| t["id"] == active["id"]))
                 {
-                    let size = serde_json::to_vec(&active)
+                    let size = serde_json::to_vec(&*active)
                         .map_err(|_| "invalid_json")?
                         .len();
                     let nodes = shape_nodes(&active);
@@ -374,7 +422,19 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                     window.values.push_front(active);
                 }
             }
-            value["result"]["thread"]["turns"] = Value::Array(window.values.into_iter().collect());
+            // Other selection ranges share the same turn allocations. Drop
+            // them before materializing the one response for this RPC.
+            self.windows.clear();
+            self.targets.clear();
+            self.active = None;
+            self.recent = Window::default();
+            value["result"]["thread"]["turns"] = Value::Array(
+                window
+                    .values
+                    .into_iter()
+                    .map(|v| Arc::try_unwrap(v).unwrap_or_else(|v| (*v).clone()))
+                    .collect(),
+            );
             value["result"]["treerHistory"] = serde_json::json!({"total":self.total,"start":window.start,"frameBytes":self.count,"nodeCount":self.total_nodes,"elapsedMs":started.elapsed().as_millis()});
         }
         Ok(Some(value))
@@ -388,7 +448,13 @@ mod tests {
     #[tokio::test]
     async fn windows_are_selected_even_if_result_precedes_response_id() {
         let selections = Selections::default();
-        selections.lock().unwrap().insert(7, (10, 20));
+        selections.lock().unwrap().insert(
+            7,
+            Selection {
+                range: Some((10, 20)),
+                target: None,
+            },
+        );
         let turns = (0..100)
             .map(|n| json!({"id":format!("t{n}"),"items":[]}))
             .collect::<Vec<_>>();
@@ -468,5 +534,135 @@ mod tests {
         assert_eq!(kept.len(), 50);
         assert_eq!(kept[0]["id"], "active");
         assert_eq!(kept[49]["id"], "59");
+    }
+
+    #[tokio::test]
+    async fn completed_reconciliation_target_is_kept_within_the_window_budget() {
+        let selections = Selections::default();
+        selections.lock().unwrap().insert(
+            7,
+            Selection {
+                range: None,
+                target: Some("target".into()),
+            },
+        );
+        let mut turns = vec![json!({"id":"target","status":"completed"})];
+        turns.extend((0..80).map(|n| json!({"id":format!("later-{n}"),"status":"completed"})));
+        let bytes =
+            serde_json::to_vec(&json!({"id":7,"result":{"thread":{"turns":turns}}})).unwrap();
+        let result = Reader::new(bytes.as_slice(), selections)
+            .next()
+            .await
+            .unwrap()
+            .unwrap();
+        let kept = result["result"]["thread"]["turns"].as_array().unwrap();
+        assert_eq!(kept.len(), 50);
+        assert_eq!(kept[0]["id"], "target");
+        assert_eq!(kept[49]["id"], "later-79");
+        assert!(shape_nodes(&result["result"]["thread"]["turns"]) < 500_000);
+    }
+
+    #[tokio::test]
+    async fn differential_json_grammar_matches_serde_and_never_accepts_rejected_mutations() {
+        fn random(seed: &mut u64) -> u64 {
+            *seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            *seed
+        }
+        fn document(seed: &mut u64, depth: usize) -> Value {
+            match random(seed) % if depth > 3 { 4 } else { 6 } {
+                0 => Value::Null,
+                1 => json!(random(seed).is_multiple_of(2)),
+                2 => json!((random(seed) % 100_000) as i64 - 50_000),
+                3 => json!(format!("unicode 🦀 中文 \\ \" \n {}", random(seed))),
+                4 => Value::Array(
+                    (0..random(seed) % 5)
+                        .map(|_| document(seed, depth + 1))
+                        .collect(),
+                ),
+                _ => Value::Object(
+                    (0..random(seed) % 5)
+                        .map(|n| (format!("key{n}"), document(seed, depth + 1)))
+                        .collect(),
+                ),
+            }
+        }
+        let mut seed = 158;
+        for size in 8180..8200 {
+            let value = json!({"text":format!("{}中🦀\\\"\nend","x".repeat(size))});
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert_eq!(
+                Reader::new(bytes.as_slice(), Selections::default())
+                    .next()
+                    .await
+                    .unwrap(),
+                Some(value)
+            );
+        }
+        for _ in 0..500 {
+            let value = document(&mut seed, 0);
+            let bytes = serde_json::to_vec(&value).unwrap();
+            assert_eq!(
+                Reader::new(bytes.as_slice(), Selections::default())
+                    .next()
+                    .await
+                    .unwrap(),
+                Some(value)
+            );
+            for end in [0, bytes.len() / 2, bytes.len().saturating_sub(1)] {
+                let short = &bytes[..end];
+                if serde_json::from_slice::<Value>(short).is_err() {
+                    assert!(!matches!(
+                        Reader::new(short, Selections::default()).next().await,
+                        Ok(Some(_))
+                    ));
+                }
+            }
+            let mut mutated = bytes;
+            let index = (random(&mut seed) as usize) % mutated.len();
+            mutated[index] = b'!';
+            if serde_json::from_slice::<Value>(&mutated).is_err() {
+                assert!(!matches!(
+                    Reader::new(mutated.as_slice(), Selections::default())
+                        .next()
+                        .await,
+                    Ok(Some(_))
+                ));
+            }
+        }
+        for invalid in [
+            "\"raw\u{1}control\"",
+            "\"bad\\q\"",
+            "\"\\ud800\"",
+            "01",
+            "1.",
+            "1e+",
+            "true false",
+            r#"{"result":{"thread":{"turns":[],"turns":[]}}}"#,
+        ] {
+            assert!(!matches!(
+                Reader::new(invalid.as_bytes(), Selections::default())
+                    .next()
+                    .await,
+                Ok(Some(_))
+            ));
+        }
+        let elsewhere = json!({"params":{"turns":[1,2]},"turns":[3,4]});
+        let bytes = serde_json::to_vec(&elsewhere).unwrap();
+        assert_eq!(
+            Reader::new(bytes.as_slice(), Selections::default())
+                .next()
+                .await
+                .unwrap(),
+            Some(elsewhere)
+        );
+        for invalid in [
+            r#"{"result":{"thread":{"turns":null}}}"#,
+            r#"{"result":{"thread":{"turns":{}}}}"#,
+        ] {
+            assert!(Reader::new(invalid.as_bytes(), Selections::default())
+                .next()
+                .await
+                .is_err());
+        }
     }
 }

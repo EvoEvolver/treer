@@ -219,9 +219,10 @@ pub fn spawn(config: Config) -> Result<Handle> {
         let observer = AbortTask(tokio::spawn(async move {
             while let Some(thread) = observe_rx.recv().await {
                 let result = observer_rpc
-                    .request(
+                    .request_target(
                         "thread/read",
-                        json!({"threadId":thread,"includeTurns":true}),
+                        json!({"threadId":thread["threadId"],"includeTurns":true}),
+                        thread["targetTurnId"].as_str().map(str::to_owned),
                     )
                     .await;
                 if observed_tx.send(result).await.is_err() {
@@ -251,7 +252,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
                     }
                     if rt.drain().await.is_err() { eprintln!("Rust spike: queue dispatch failed; retained"); }
                     if !observation_pending && !rt.dispatch_blocked && rt.thread["activeTurnId"].is_string() {
-                        observation_pending = observe_tx.try_send(rt.thread["id"].clone()).is_ok();
+                        observation_pending = observe_tx.try_send(json!({"threadId":rt.thread["id"],"targetTurnId":rt.thread["activeTurnId"]})).is_ok();
                     }
                     if !rt.history_failed && !notification_pending {
                         if let Some(job) = rt.next_notification() {
@@ -586,8 +587,7 @@ impl Runtime {
                 if turns.is_empty() {bail!("history_page_unavailable");}
                 let start=result["treerHistory"]["start"].as_u64().ok_or_else(||anyhow!("history_page_unavailable"))? as usize;
                 if start>=end || turns.len()>50 || result["treerHistory"]["total"].as_u64().unwrap_or(0)<end as u64 {bail!("history_page_unavailable");}
-                let mut mapped=Transcript::default();
-                for turn in turns {mapped.insert(model::turn(turn)).map_err(|_|anyhow!("history_page_unavailable"))?;}
+                let mapped=self.projected(turns.iter().map(model::turn).collect(),false).map_err(|_|anyhow!("history_page_unavailable"))?;
                 // Mapping may expand a provider value. Never silently return a
                 // shortened page with the original cursor and lose the gap.
                 if mapped.dropped!=0 {bail!("history_page_unavailable");}

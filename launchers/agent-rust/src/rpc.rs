@@ -181,10 +181,13 @@ impl Rpc {
         }
     }
 
-    pub async fn request(&self, method: &str, params: Value) -> Result<Value> {
-        self.request_selected(method, params, None).await
-    }
     pub async fn request_selected(&self, method: &str, params: Value, selection: Option<(usize,usize)>) -> Result<Value> {
+        self.request_history(method,params,selection.map(|range|crate::provider_stream::Selection{range:Some(range),target:None})).await
+    }
+    pub async fn request_target(&self, method: &str, params: Value, target: Option<String>) -> Result<Value> {
+        self.request_history(method,params,target.map(|target|crate::provider_stream::Selection{range:None,target:Some(target)})).await
+    }
+    async fn request_history(&self, method: &str, params: Value, selection: Option<crate::provider_stream::Selection>) -> Result<Value> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         if let Some(selection)=selection {self.selections.lock().unwrap().insert(id,selection);}
         let (tx, rx) = oneshot::channel();

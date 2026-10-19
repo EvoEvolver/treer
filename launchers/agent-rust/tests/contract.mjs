@@ -224,14 +224,34 @@ test('invalid provider turn identity blocks dispatch without echoing provider co
   assert.throws(()=>process.kill(pid,0),{code:'ESRCH'});
 });
 
+test('terminal reconciliation selects an old target by ID without a completion notification or duplicate dispatch',{skip:useNode,timeout:15000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_RECONCILE_OLD:'1',HISTORY_FRAME_LOG:'frames.jsonl'});
+  const receipt=await s.post({text:'attested local input omitted by provider',operation_id:'old-reconciliation'}).then(r=>r.json());
+  const result=await until(()=>fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
+  assert.equal(result.submission.turn_id,'history-1');
+  const state=await fetch(s.base+'/api/state').then(r=>r.json());
+  assert.equal(state.thread.status,'idle');assert.ok(state.thread.turns.length<=50);
+  assert.ok(Buffer.byteLength(JSON.stringify(state.thread.turns))<16*1024*1024);
+  assert.ok(state.thread.turns.flatMap(t=>t.items).some(i=>i.kind==='userMessage'&&i.text==='attested local input omitted by provider'));
+  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.ok(frames.some(f=>f.method==='thread/read'));
+  assert.equal(frames.filter(f=>f.method==='turn/start').length,1,'no automatic redispatch');
+  const retry=await s.post({text:'attested local input omitted by provider',operation_id:'old-reconciliation'});
+  assert.equal(retry.status,202);
+  const after=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(after.filter(f=>f.method==='turn/start').length,1);
+});
+
 test('streamed 50 MiB resume retains a recent window, fetches older pages on demand and completes the next turn',{skip:useNode,timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
+  const originalReceipt=await s.post({text:'local text belongs only to this requested old turn',operation_id:'old-page-projection'}).then(r=>r.json());
+  await until(()=>fetch(s.base+'/v1/submissions/'+originalReceipt.submission.id,{headers:s.headers}).then(r=>r.json()),x=>x.submission?.state==='done');
   const exit=once(s.child,'exit');s.child.kill('SIGTERM');await exit;
   let peak=0,pid=null,busy=false;
   const sample=setInterval(async()=>{if(!pid||busy)return;busy=true;try{peak=Math.max(peak,await rssKiB(pid));}catch{}finally{busy=false;}},25);
   t.after(()=>clearInterval(sample));
   // s.launch records children before readiness; watch only our sealed child.
-  const launch=s.launch({HISTORY_LARGE_RESUME:'1'},false);
+  const launch=s.launch({HISTORY_LARGE_RESUME:'1',HISTORY_PROJECTION_OLD:'1'},false);
   const restarted=await launch;pid=restarted.child.pid;
   await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.ready===true,45000);
   const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
@@ -249,11 +269,12 @@ test('streamed 50 MiB resume retains a recent window, fetches older pages on dem
   const concurrent=await fetch(restarted.base+'/api/history/older',{method:'POST',body:JSON.stringify({cursor})});
   assert.equal(concurrent.status,429);
   const page=await (await older).json();
-  assert.equal(page.thread.turns[0].id,'old-430');assert.equal(page.thread.turns.length,50);
+  assert.equal(page.thread.turns[0].id,'history-1');assert.equal(page.thread.turns.length,50);
+  assert.ok(page.thread.turns[0].items.some(i=>i.kind==='userMessage'&&i.text==='local text belongs only to this requested old turn'&&i.submissionId===originalReceipt.submission.id));
   assert.equal(page.history.page,true);
   assert.ok(page.history.cursor!==cursor);
   assert.ok(peak<256*1024,`launcher peak ${peak} KiB must stay below256 MiB`);
-  t.diagnostic(JSON.stringify({peakLauncherRssKiB:peak,frameBytes:frames.find(x=>x.method==='thread/resume').bytes}));
+  t.diagnostic(JSON.stringify({peakLauncherRssKiB:peak,frameBytes:frames.find(x=>x.method==='thread/resume').bytes,historyScan:state.runtime.provider.historyScan,settledRssKiB:await rssKiB(pid)}));
   const receipt=await fetch(restarted.base+'/v1/prompts',{method:'POST',headers:s.headers,body:JSON.stringify({text:'after large resume',operation_id:'after-large-resume'})});
   assert.equal(receipt.status,202);
   const accepted=await receipt.json();
@@ -268,7 +289,7 @@ for(const extra of [0,1])test('streaming frame256 MiB boundary +'+extra,{skip:us
   const restarted=await s.launch({HISTORY_FRAME_BYTES:String(256*1024*1024+extra),HISTORY_FRAME_LOG:'over-limit-frames.jsonl'},false);
   const deadline=Date.now()+90000;let state;
   while(Date.now()<deadline){state=await fetch(restarted.base+'/api/state').then(r=>r.json());if(state.ready||state.runtime?.cleanup?.providerExit==='confirmed')break;await new Promise(r=>setTimeout(r,100));}
-  if(!extra){assert.equal(state.ready,true);assert.equal(state.runtime.provider.transport,'open');return;}
+  if(!extra){assert.equal(state.ready,true);assert.equal(state.runtime.provider.transport,'open');t.diagnostic(JSON.stringify({historyScan:state.runtime.provider.historyScan,settledRssKiB:await rssKiB(restarted.child.pid)}));return;}
   assert.equal(state.ready,false);
   assert.equal(state.runtime.provider.transport,'line_too_large');
   assert.match(state.runtime.error,/Codex startup failed/);
