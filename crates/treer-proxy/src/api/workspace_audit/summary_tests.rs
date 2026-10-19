@@ -938,3 +938,43 @@ fn dotted_literals(line: &str) -> Vec<String> {
     }
     out
 }
+
+/// More distinct action names than the cap is a closed failure, never a
+/// partial document (security note b on daad71fe).
+#[tokio::test]
+async fn audit_summary_refuses_more_action_groups_than_the_cap() {
+    let auth = fixture().await;
+    let now = Utc::now();
+    sqlx::query(
+        "INSERT INTO organization_audit_events(event_id, organization_id, workspace_id, occurred_at, actor_kind, actor_id, source, action, outcome, resource_kind, resource_id, workspace_origin_id) \
+         SELECT 'aud_many_' || i, 'org_a', 'a', $1, 'user', 'owner', 'test', 'synthetic.action_' || i, 'succeeded', 'workspace', 'a', 'a' \
+         FROM generate_series(1, $2) i",
+    )
+    .bind(now.to_rfc3339())
+    .bind(crate::audit::summary::ACTION_GROUPS_CAP as i32 + 1)
+    .execute(&auth.pool())
+    .await
+    .unwrap();
+    let router = test_router(&auth, PolicyEngine::allow_all());
+    let result = response(
+        router.clone(),
+        "/api/workspaces/a/audit-summary",
+        Some("owner"),
+    )
+    .await;
+    assert_eq!(result.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        body(result).await["error"]["code"],
+        "audit_summary_unavailable"
+    );
+    // One group fewer is served in full.
+    sqlx::query("DELETE FROM organization_audit_events WHERE event_id = 'aud_many_1'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    let ok = body(response(router, "/api/workspaces/a/audit-summary", Some("owner")).await).await;
+    assert_eq!(
+        ok["totals"]["events"],
+        crate::audit::summary::ACTION_GROUPS_CAP
+    );
+}

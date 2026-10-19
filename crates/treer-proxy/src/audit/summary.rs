@@ -17,6 +17,8 @@ use treer_protocol::{
 pub(crate) const MAX_RANGE_DAYS: i64 = 180;
 /// Most buckets one response may carry (31 days of hours).
 pub(crate) const MAX_BUCKETS: i64 = 744;
+/// Distinct (action, outcome) groups one summary may carry (security note b).
+pub(crate) const ACTION_GROUPS_CAP: i64 = 4096;
 const TOP_N: i64 = 20;
 const NOTABLE_LIMIT: i64 = 100;
 const NOTABLE_PER_ACTION: i64 = 20;
@@ -257,11 +259,19 @@ pub(crate) async fn summarize(
         .bind(sqlx::query(&format!(
             "SELECT e.action, e.outcome, COUNT(*) AS events, \
              (extract(epoch FROM MIN(e.occurred_at_ts))*1000000)::BIGINT AS oldest \
-             {} GROUP BY e.action, e.outcome",
+             {} GROUP BY e.action, e.outcome LIMIT $14",
             scope_sql("")
         )))
+        .bind(ACTION_GROUPS_CAP + 1)
         .fetch_all(&mut *tx)
         .await?;
+    // Action names are server constants, so this never trips today; it keeps
+    // a future dynamic name from growing the bound arrays without limit.
+    if rows.len() as i64 > ACTION_GROUPS_CAP {
+        return Err(sqlx::Error::Protocol(
+            "audit summary action group cap exceeded".into(),
+        ));
+    }
     let mut map = ActionMap {
         actions: Vec::new(),
         categories: Vec::new(),

@@ -904,6 +904,14 @@ whose stored instant cannot be parsed are marked and stay out of summaries
 (they remain in the event feed). `audit_backfill_failed` warnings mean the
 worker is retrying.
 
+Deploying this schema builds the `organization_audit_events_workspace_time`
+index at Proxy startup, which blocks audit writes for the build's duration
+(seconds for the canary's roughly 70,000 rows; check `SELECT count(*) FROM
+organization_audit_events` on larger databases and build the index ahead of
+time if the write pause matters). The columns, trigger and index are additive:
+rolling the Proxy back leaves them in place and an older Proxy ignores them.
+Display names in summaries are the current names, not the names at event time.
+
 Retention starts at 180 days for every organization audit kind, including
 security-sensitive events. Set Proxy `--audit-retention-days DAYS` or
 `TREER_AUDIT_RETENTION_DAYS` (30..3650) to explicitly update the shared database

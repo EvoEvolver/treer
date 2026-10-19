@@ -221,7 +221,10 @@ BEGIN
 EXCEPTION WHEN OTHERS THEN
     RETURN NULL;
 END;
-$$ LANGUAGE plpgsql IMMUTABLE;
+-- STABLE, not IMMUTABLE: a text to timestamptz cast of a value without an
+-- offset depends on the session time zone; recorded values carry one, and the
+-- function is not used in an index.
+$$ LANGUAGE plpgsql STABLE;
 CREATE OR REPLACE FUNCTION treer_audit_fill_instant() RETURNS TRIGGER AS $$
 BEGIN
     IF NEW.occurred_at_ts IS NULL THEN
