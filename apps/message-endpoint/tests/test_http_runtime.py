@@ -13,6 +13,29 @@ from http_fixture import TOKEN, fixture
 BINARY = (Path(sys.argv.pop(1)).resolve() if __name__ == '__main__'
           else Path(__file__).resolve().parents[3] / 'target/debug/treer-message-hub')
 class Runtime(unittest.TestCase):
+    def test_live_sqlite_close_then_api_write_survives_clean_stop_and_fresh_process(self):
+        for external in (False, True):
+            with self.subTest(external=external), fixture(BINARY,seed=external) as f:
+                headers={'X-Treer-Identity-Token':TOKEN,'Origin':'https://hub.example','X-Endpoint-Request':'1','Content-Type':'application/json'}
+                def call(value):
+                    status,_,body=f['request']('/api/configuration',headers,'POST',json.dumps(value))
+                    self.assertEqual(status,200,body)
+                    return json.loads(body)
+                command={'action':'preview_create','endpoint_id':'ag_new','generation':1,'recipient':'ag_recipient'}
+                expected=call(command)['preview']
+                call({**command,'action':'create','expected':expected,'confirm':True})
+                # The fixture already seeded and closed an external SQLite writer.
+                # A second connection must see committed API state and must not
+                # make subsequent hub writes disappear when that connection closes.
+                if external:
+                    db=sqlite3.connect(f['state']/'hub.sqlite3')
+                    self.assertEqual(db.execute("SELECT count(*) FROM hub_owner_audit WHERE endpoint='ag_new'").fetchone()[0],1)
+                    db.close()
+                call({'action':'pause','endpoint_id':'ag_new','revision':1,'confirm':True})
+                f['stop']()
+                script="import sqlite3,sys; d=sqlite3.connect(sys.argv[1]); assert d.execute(\"SELECT count(*) FROM hub_owner_audit WHERE endpoint='ag_new'\").fetchone()[0]==2; assert d.execute(\"SELECT revision FROM hub_bindings WHERE endpoint='ag_new'\").fetchone()[0]==2; d.close()"
+                subprocess.run([sys.executable,'-I','-c',script,str(f['state']/'hub.sqlite3')],env={'HOME':str(f['root']),'PATH':'/usr/bin:/bin'},check=True,timeout=10)
+
     def test_token_handler_auth_csrf_strict_body_quota_remove_and_no_persistence(self):
         secret='12345:ABCDEFGHIJKLMNOPQRSTUVWXYZ_23456789'
         with fixture(BINARY,tokens=True) as f:

@@ -72,7 +72,7 @@ def server(handler):
         thread.join(timeout=3)
 
 @contextlib.contextmanager
-def fixture(binary, editable=False, activation=False, tokens=False, email=False):
+def fixture(binary, editable=False, activation=False, tokens=False, email=False, seed=True):
     with tempfile.TemporaryDirectory(prefix='endpoint-http-fixture-') as temp, server(Proxy) as proxy:
         root = Path(temp).resolve()
         root.chmod(0o700)
@@ -92,6 +92,11 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False)
         environment = {'HOME':str(root),'TMPDIR':str(root),'PATH':'/usr/bin:/bin:/usr/sbin:/sbin','TREER_AGENT_ID':'app_hub','TREER_WORKSPACE_ID':'ws_test'}
         captured_stderr = []
         process = subprocess.Popen([str(binary),'--config',str(config)],env=environment,stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
+        def stop():
+            if process.poll() is None:
+                process.send_signal(signal.SIGINT)
+                try:process.wait(timeout=20)
+                except subprocess.TimeoutExpired:process.kill();process.wait(timeout=3)
         def request(path, headers=None, method='GET', body=None):
             connection = http.client.HTTPConnection('127.0.0.1',port,timeout=3)
             try:
@@ -111,16 +116,17 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False)
                     time.sleep(.05)
             else:
                 raise AssertionError('fixture hub did not listen')
-            db=sqlite3.connect(root/'state/hub.sqlite3')
-            binding={'endpoint_id':'ag_demo','generation':1,'recipient':'ag_recipient','expected_path':'/team/ag_demo' if email else LONG_PATH,'expected_cwd':'/private/fixture','expected_server_id':'machine_fixture'}
-            db.execute('INSERT INTO endpoints(id,generation,recipient,paused) VALUES(?,?,?,1)',('ag_demo',1,'ag_recipient'))
-            db.execute('INSERT INTO hub_bindings(endpoint,definition) VALUES(?,?)',('ag_demo',json.dumps(binding)))
-            if email:
-                db.execute("UPDATE endpoints SET paused=0 WHERE id='ag_demo'")
-                db.execute("INSERT INTO email_targets(endpoint,generation,address,member) VALUES('ag_demo',1,'person@example.test','user_member')")
-                db.execute("INSERT INTO email_threads VALUES(?,'ag_demo',1,'ag_recipient','person@example.test','user_member')",(THREAD,))
-                db.execute("INSERT INTO email_messages VALUES(?,'msg_browser','<script>window.PWNED=1</script> & confidential text','fixture_digest',?)",(THREAD,int(time.time())))
-            db.commit();db.close()
+            if seed:
+                db=sqlite3.connect(root/'state/hub.sqlite3')
+                binding={'endpoint_id':'ag_demo','generation':1,'recipient':'ag_recipient','expected_path':'/team/ag_demo' if email else LONG_PATH,'expected_cwd':'/private/fixture','expected_server_id':'machine_fixture'}
+                db.execute('INSERT INTO endpoints(id,generation,recipient,paused) VALUES(?,?,?,1)',('ag_demo',1,'ag_recipient'))
+                db.execute('INSERT INTO hub_bindings(endpoint,definition) VALUES(?,?)',('ag_demo',json.dumps(binding)))
+                if email:
+                    db.execute("UPDATE endpoints SET paused=0 WHERE id='ag_demo'")
+                    db.execute("INSERT INTO email_targets(endpoint,generation,address,member) VALUES('ag_demo',1,'person@example.test','user_member')")
+                    db.execute("INSERT INTO email_threads VALUES(?,'ag_demo',1,'ag_recipient','person@example.test','user_member')",(THREAD,))
+                    db.execute("INSERT INTO email_messages VALUES(?,'msg_browser','<script>window.PWNED=1</script> & confidential text','fixture_digest',?)",(THREAD,int(time.time())))
+                db.commit();db.close()
             def forward_handler(embedded):
                 class Forward(Quiet):
                     def do_GET(self):
@@ -145,12 +151,9 @@ def fixture(binary, editable=False, activation=False, tokens=False, email=False)
                         self.end_headers();self.wfile.write(body)
                 return Forward
             with server(forward_handler(False)) as wildcard, server(forward_handler(True)) as embedded:
-                yield {'url':f'http://127.0.0.1:{port}/','wildcard':f'http://127.0.0.1:{wildcard.server_port}/','embedded':f'http://127.0.0.1:{embedded.server_port}/console','prefix':PREFIX,'request':request,'pid':process.pid,'state':root/'state','root':root,'stderr':captured_stderr,'proxy':proxy,'auditdb':root/'state/management-audit/hub.sqlite3'}
+                yield {'url':f'http://127.0.0.1:{port}/','wildcard':f'http://127.0.0.1:{wildcard.server_port}/','embedded':f'http://127.0.0.1:{embedded.server_port}/console','prefix':PREFIX,'request':request,'pid':process.pid,'stop':stop,'state':root/'state','root':root,'stderr':captured_stderr,'proxy':proxy,'auditdb':root/'state/management-audit/hub.sqlite3'}
         finally:
-            if process.poll() is None:
-                process.send_signal(signal.SIGINT)
-                try:process.wait(timeout=20)
-                except subprocess.TimeoutExpired:process.kill();process.wait(timeout=3)
+            stop()
             if process.stderr:
                 captured_stderr.append(process.stderr.read())
                 process.stderr.close()

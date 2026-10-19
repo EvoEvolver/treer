@@ -4,7 +4,6 @@ use rusqlite::{Connection, OpenFlags};
 use rustix::fd::OwnedFd;
 use rustix::fs::{self, AtFlags, FileType, FlockOperation, Mode, OFlags};
 use rustix::io::Errno;
-use std::ffi::OsStr;
 use std::path::{Component, Path};
 
 pub(crate) struct PrivateFiles {
@@ -112,6 +111,10 @@ fn private_file(directory: &OwnedFd, name: &str) -> Result<OwnedFd, Error> {
 
 pub(crate) fn check_file(file: &OwnedFd) -> Result<(), Error> {
     let metadata = denied(fs::fstat(file))?;
+    check_file_metadata(&metadata)
+}
+
+fn check_file_metadata(metadata: &fs::Stat) -> Result<(), Error> {
     if FileType::from_raw_mode(metadata.st_mode) != FileType::RegularFile
         || metadata.st_uid != rustix::process::geteuid().as_raw()
         || metadata.st_mode & 0o7777 != 0o600
@@ -163,13 +166,8 @@ pub(crate) fn enable_wal(db: &Connection, path: &Path) -> Result<(), Error> {
     denied(db.execute_batch("PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;"))?;
     let directory = open_directory(path, false)?;
     for name in ["hub.sqlite3", "hub.sqlite3-wal", "hub.sqlite3-shm"] {
-        let file = denied(fs::openat(
-            &directory,
-            OsStr::new(name),
-            OFlags::RDWR | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
-            Mode::empty(),
-        ))?;
-        check_file(&file)?;
+        let metadata = denied(fs::statat(&directory, name, AtFlags::SYMLINK_NOFOLLOW))?;
+        check_file_metadata(&metadata)?;
     }
     denied(fs::fsync(&directory))?;
     Ok(())
@@ -185,13 +183,11 @@ pub(crate) fn recheck(files: &PrivateFiles) -> Result<(), Error> {
         "hub.sqlite3-shm",
         "hub.sqlite3-journal",
     ] {
-        match fs::openat(
-            &files._directory,
-            name,
-            OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK | OFlags::NOCTTY,
-            Mode::empty(),
-        ) {
-            Ok(file) => check_file(&file)?,
+        // Never open/close a live SQLite file just to inspect permissions:
+        // closing ANY descriptor for an inode releases this process's POSIX
+        // record locks on that inode, including SQLite's database/SHM locks.
+        match fs::statat(&files._directory, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(metadata) => check_file_metadata(&metadata)?,
             Err(Errno::NOENT)
                 if name.ends_with("-wal")
                     || name.ends_with("-shm")
@@ -317,6 +313,48 @@ mod tests {
         assert!(store.recheck_private_storage().is_err());
         // Detection must not silently repair the changed mode.
         assert_eq!(stdfs::metadata(shm).unwrap().mode() & 0o7777, 0o644);
+    }
+
+    #[test]
+    fn sqlite_shared_lock_survives_open_and_periodic_metadata_checks() {
+        let (_temporary, path) = fixture();
+        let mut store = Store::open(&path, Limits::default()).unwrap();
+        store.register_paused("ag_before", 1, "ag_target").unwrap();
+        for _ in 0..3 {
+            // Probe in a separate process: POSIX locks are process-wide. WAL
+            // connections retain a database SHARED lock until connection close.
+            let result = Command::new("/usr/bin/python3")
+                .env_clear()
+                .args(["-I", "-c", "import fcntl,sys\nwith open(sys.argv[1], 'r+b') as f:\n try: fcntl.lockf(f, fcntl.LOCK_EX | fcntl.LOCK_NB, 510, 0x40000002)\n except BlockingIOError: sys.exit(0)\n sys.exit(1)"])
+                .arg(path.join("hub.sqlite3"))
+                .output()
+                .unwrap();
+            assert!(result.status.success(), "SQLite shared lock was lost");
+            store.recheck_private_storage().unwrap();
+        }
+        store.register_paused("ag_after", 1, "ag_target").unwrap();
+        drop(store);
+        let reopened = Store::open(&path, Limits::default()).unwrap();
+        assert_eq!(
+            reopened
+                .db
+                .query_row("SELECT count(*) FROM endpoints", [], |r| r.get::<_, i64>(0))
+                .unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn periodic_metadata_check_rejects_replaced_sidecar_symlink() {
+        let (_temporary, path) = fixture();
+        let store = Store::open(&path, Limits::default()).unwrap();
+        let shm = path.join("hub.sqlite3-shm");
+        let target = path.join("untouched");
+        stdfs::write(&target, b"not SQLite").unwrap();
+        stdfs::remove_file(&shm).unwrap();
+        symlink(&target, &shm).unwrap();
+        assert!(store.recheck_private_storage().is_err());
+        assert_eq!(stdfs::read(target).unwrap(), b"not SQLite");
     }
 
     #[test]

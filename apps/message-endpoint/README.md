@@ -291,6 +291,13 @@ lock and SQLite sidecar files are exclusively created at 0600; existing files
 must be regular, single-link, 0600 and owned by the effective UID. A lifetime
 nonblocking lock excludes another cooperating hub writer. SQLite opens the
 database with NOFOLLOW, uses WAL/FULL synchronization and checks sidecar permissions.
+After SQLite opens, permission checks use no-follow metadata queries rather than
+opening and closing database/sidecar descriptors: closing an unrelated descriptor
+can release SQLite's process-wide POSIX record locks and invalidate live WAL
+coordination. Regression checks preserve those locks and verify committed audit
+rows after external fixture connections close and a fresh process reopens state.
+This does not authorize live manual edits or live file-copy backups; use the
+stopped-App backup procedure below.
 Closing the store explicitly unlocks after SQLite closes, so a forked CLI child's
 inherited descriptor cannot keep the writer lock alive until exec/exit. A
 regression holds that shared descriptor in a private child while reopening;
