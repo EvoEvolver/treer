@@ -251,7 +251,7 @@ impl IngressConfig {
     /// Embed sessions need a wildcard base domain for the `ag-` origins and
     /// HTTPS, because their cookie is `Partitioned` + `SameSite=None`, which
     /// browsers accept only with `Secure`.
-    pub(in crate::api) fn embed_available(&self) -> bool {
+    pub(crate) fn embed_available(&self) -> bool {
         self.base_domain.is_some()
             && self
                 .public_url

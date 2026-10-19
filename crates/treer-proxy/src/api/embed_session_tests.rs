@@ -711,3 +711,41 @@ fn the_tunnel_fallback_can_be_refused_only_where_embed_sessions_exist() {
     );
     assert!("maybe".parse::<EmbedFallback>().is_err());
 }
+
+#[tokio::test]
+async fn embed_capability_is_advertised_only_where_embed_sessions_can_work() {
+    let fixture = agent_fixture().await;
+    let embed = treer_protocol::CAPABILITY_AGENT_INTERFACE_EMBED;
+    let capabilities = |value: Value| -> Vec<String> {
+        value["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c.as_str().unwrap().to_string())
+            .collect()
+    };
+    // HTTPS wildcard ingress domain: advertised.
+    let Json(value) = crate::auth::oauth_config(
+        Extension(fixture.auth.clone()),
+        Some(Extension(config(None))),
+    )
+    .await;
+    assert!(capabilities(value).iter().any(|c| c == embed));
+    // Plain HTTP ingress domain, or no ingress configuration at all: absent, so
+    // the Console keeps the legacy frame instead of refusing (incident 4890).
+    let plain = IngressConfig::new(
+        Some(Url::parse("http://apps.treer.example/").unwrap()),
+        &Url::parse("https://proxy.treer.example/").unwrap(),
+        &Url::parse(CONSOLE).unwrap(),
+    )
+    .unwrap();
+    let Json(value) =
+        crate::auth::oauth_config(Extension(fixture.auth.clone()), Some(Extension(plain))).await;
+    assert!(!capabilities(value).iter().any(|c| c == embed));
+    let Json(value) = crate::auth::oauth_config(Extension(fixture.auth.clone()), None).await;
+    let list = capabilities(value);
+    assert!(!list.iter().any(|c| c == embed));
+    assert!(list
+        .iter()
+        .any(|c| c == treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN));
+}
