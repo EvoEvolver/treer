@@ -316,6 +316,29 @@ never produces success, automatic replay, cleanup or acceptance of a new job.
 Production parent ACL policy, the storage adapter and these fault tests remain
 unimplemented; the hosted running-image fixture does not establish them.
 
+The subsequent private `cfg(test)` module `update_record_order` models only
+marker-first ordering in memory. Opaque records carry synthetic enrollment/job
+bindings, a nonzero revision and 1-65,536 bytes; the independent marker binds
+the exact bytes with SHA-256. Replacement requires the entire expected previous
+record, an unchanged binding and a checked revision increment. It models ten
+acknowledged boundaries (create, write, sync, publish, readback for the marker,
+then the receipt) and injects interruption before and after each one. Tests
+check the retained names/values, the marker/receipt mismatch interval and that
+the same worker cannot retry after uncertainty, even when both published values
+already agree. Additional cases reject stale/same-revision modified receipts,
+wrong bindings, missing markers, oversize/empty records and revision overflow
+without starting publication. A consistently restored marker and receipt is
+explicitly undetectable, as required by the threat model.
+
+These are synthetic acknowledgments, not real sync/readback calls. The sticky
+uncertainty bit is volatile worker state, not a persistent recovery fence.
+Inspection yields record consistency only; it cannot authorize a new job,
+establish completion/health/quiescence or recover after a restart. Bytes are
+opaque and bindings are supplied separately: this is not a schema parser and
+does not establish that serialized fields match the binding. Windows schema
+discrimination, Unix-reader refusal, native marker storage, enrollment
+provisioning and fault tests against actual file APIs remain separate work.
+
 `treer-platform/src/windows_update_layout.rs` now exercises only the per-image
 table as a private, test-only pure model on all platforms. Its tests cover
 both sides of every rename intent, direct restoration after failed publication,

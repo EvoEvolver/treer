@@ -29,6 +29,8 @@ mod update_binding;
 #[cfg(test)]
 mod update_deadline;
 #[cfg(test)]
+mod update_record_order;
+#[cfg(test)]
 mod update_registration;
 #[cfg(test)]
 mod windows_update_layout;
