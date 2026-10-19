@@ -178,6 +178,41 @@ the native reply/receipt implementation in a separate frozen change. No automati
 post-traffic rollback is available; keep containment and manual reconciliation
 explicit until a reverse journal is implemented and reviewed.
 
+### Stage 2A: scoped receipt wire contract (not runtime-enabled)
+
+`src/telegram_receipts.rs` defines the first local contract slice. There is no
+runtime dispatcher, HTTP endpoint, sender, mapping table, capability negotiation
+or production activation wired to it yet. Runtime support must come back for
+review before deployment; exporting the Rust module advertises no live capability.
+
+- Capability/protocol string: `treer.telegram.app-asserted-receipts.v1`.
+  Mixed/older peers must explicitly negotiate it before receipt-dependent use;
+  no fallback to fragment Core IDs or inferred support from version strings.
+- Strict JSON, at most 4096 bytes, no duplicate/unknown fields. Verification is
+  the single enum value `app_asserted`; `core_verified` is rejected. The future
+  UI label is always “not independently verified”. No bodies or credentials.
+- Scope includes account ID, chat ID, optional topic ID, endpoint stable ID,
+  generation and fixed-recipient stable ID. The handoff also binds job ID,
+  payload SHA-256 and original native message ID. The final Core message ID is
+  asserted by the relay, not independently read or proven by the hub.
+- The caller supplies expected scope/job/digest/native ID from the existing
+  binding and durable handoff, not the receipt. The actual sender is read from
+  the outer Core envelope; it must equal the pinned endpoint. Parse only after
+  that Core envelope has passed existing mailbox sender routing.
+- Parsing does not create a mapping or change acknowledgement state. Future
+  storage must make exact replay a no-op and changed final ID a conflict before
+  ack, preserve binding/generation boundaries and enforce retention/quotas.
+- Resolving a reply never grants context visibility. Core must still reject a
+  parent unreadable by the sending relay. For pre-cutover/unknown native replies,
+  use an explicit history-unavailable failure; do not silently drop the context.
+  Unreadable-context and mixed-peer integration tests remain pending runtime work.
+
+Synthetic conformance tests cover exact-scope success, cross-chat/topic/account/
+endpoint/generation/recipient and wrong-sender refusal, job/digest/native-ID
+conflicts, invalid Core ID, false verification upgrade, unknown protocol/fields,
+duplicate JSON and oversize rejection. These establish only parser boundaries,
+not native threading, durable delivery or a completed migration rehearsal.
+
 ### Security gates still required before a production decision
 
 - **Token rotation (leader 5796/5798):** required now because the old production

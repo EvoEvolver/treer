@@ -66,3 +66,6 @@ pub use settings_http::email_threads;
 
 #[cfg(all(unix, feature = "hub"))]
 pub mod email_workers;
+
+// Stage-2 contract; no runtime dispatch or migration activation yet.
+pub mod telegram_receipts;
