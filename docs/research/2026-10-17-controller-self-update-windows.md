@@ -82,6 +82,10 @@ receipt exists until an explicit operator recovery action classifies it.
 Retain private backups and failed copies until an operator reviews the receipt
 and explicitly selects exact files for cleanup; there is no silent rotation.
 Status/logs never disclose startup content, credentials, artifact URLs or argv.
+For failure recovery, an operator must classify the unfinished attempt and move
+its evidence aside within private storage before authorizing another attempt;
+never silently delete or overwrite it. Explicit cleanup remains a separate
+operator decision on exact paths.
 
 Implementation increments toward the first `win_native` run:
 
@@ -118,6 +122,16 @@ is bounded to 128 MiB before copying and during a 64 KiB-buffer stream. The
 copied bytes are hashed, synced and read back through the same destination
 handle; the returned handle disallows other writers/deletion. Failed evidence
 is preserved and cannot be overwritten by retrying with a corrected digest.
+The existing-parent/source DACL helper only reads security information and
+rejects foreign mutation grants; it does not change existing permissions or
+exclude foreign read grants. Newly created attempt/candidate objects instead
+receive the stricter protected owner/SYSTEM-only descriptor at creation.
+
+The deterministic attempt names are test inputs only. W2 must generate the
+128-bit name suffix from the operating system random source inside the trusted
+coordinator, expose no caller-selected name in the production command, and test
+that caller-supplied names cannot select or adopt an attempt. A syntactically
+valid name alone does not establish freshness or authorize execution.
 
 Native fixture tests cover an independent source offset, copy checksum failure,
 existing directory/file refusal, oversized source refusal before candidate

@@ -158,6 +158,9 @@ fn sid_text(sid: PSID) -> io::Result<String> {
     String::from_utf16(unsafe { std::slice::from_raw_parts(text, length) }).map_err(|_| denied())
 }
 
+// Verification only: never changes an existing object's owner or DACL. Foreign
+// read grants are permitted; foreign mutation grants are refused. Newly created
+// private objects receive the stricter owner/SYSTEM descriptor at creation.
 fn private_owner_dacl(file: &File, owner_sid: &str) -> io::Result<()> {
     let mut owner = ptr::null_mut();
     let mut acl = ptr::null_mut();
