@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import sys
@@ -101,6 +102,34 @@ class RefsTest(unittest.TestCase):
         self.comment(self.issue(), f'#{self.target}')
         after = self.store.show(self.target)['issue']
         self.assertEqual((before['version'], before['updated_at'], before['status']), (after['version'], after['updated_at'], after['status']))
+
+    def test_a_rebuild_keeps_the_real_author_of_a_changed_text(self):
+        source = self.issue(A, description='nothing yet')
+        self.edit(source, {'description': f'now mentions #{self.target}'}, H)
+        with sqlite3.connect(self.path) as db:
+            db.execute('DELETE FROM refs_meta'); db.execute('DELETE FROM issue_refs')
+        again = Store(self.path, clock=lambda: self.now)
+        link = again.show(self.target)['referenced_by'][0]
+        self.assertEqual((link['source'], link['author']), ('description', 'usr_h'), 'not credited to the creator')
+        with sqlite3.connect(self.path) as db:            # the stored text no longer matches the events: unknown, not the creator
+            data = json.loads(db.execute('SELECT data FROM issues WHERE id=?', (source,)).fetchone()[0])
+            data['description'] = f'edited outside the app #{self.target}'
+            db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(data), source)); db.execute('DELETE FROM refs_meta')
+        self.assertEqual(Store(self.path, clock=lambda: self.now).show(self.target)['referenced_by'][0]['author'], 'unknown')
+
+    def test_the_backlink_read_is_bounded_in_sql(self):
+        for _ in range(120):
+            self.issue(description=f'#{self.target}')
+        hub = self.issue()
+        for _ in range(150):
+            self.comment(hub, f'#{self.target}')
+        shown = self.store.show(self.target)
+        self.assertEqual(len(shown['referenced_by']), refs.MAX_REFERENCED_BY)
+        with sqlite3.connect(self.path) as db:
+            db.row_factory = sqlite3.Row
+            rows = db.execute('SELECT r.from_issue FROM issue_refs r JOIN (SELECT from_issue, MAX(rowid) AS latest FROM issue_refs WHERE to_issue=? GROUP BY from_issue) g ON r.rowid=g.latest', (self.target,)).fetchall()
+        self.assertEqual(len({r[0] for r in rows}), len(rows), 'one row per referencing issue comes out of SQL, before the limit')
+        self.assertEqual([l['issue']['id'] for l in shown['referenced_by']].count(hub), 1, 'the hub with 150 comments is one entry, not 150')
 
     def test_derivation_from_stored_text_is_idempotent(self):
         source = self.issue(description=f'#{self.target}')

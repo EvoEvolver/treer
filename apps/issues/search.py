@@ -42,8 +42,14 @@ def ensure(db):
         db.execute('DELETE FROM search_meta')
 
 
+def label_code(label):
+    """One label as stored/queried in the filter column: lower case, with the delimiter and the escape character encoded,
+    so labels containing '|' cannot combine into a false match."""
+    return label.lower().replace('%', '%25').replace('|', '%7C')
+
+
 def labels_key(issue):
-    return '|' + '|'.join(sorted(l.lower() for l in issue.get('labels') or [])) + '|'
+    return '|' + '|'.join(sorted(label_code(l) for l in issue.get('labels') or [])) + '|'
 
 
 def sync_filters(db, issue):
@@ -85,6 +91,22 @@ def stamp_epoch(value):
     return datetime.fromisoformat(value.replace('Z', '+00:00')).timestamp()
 
 
+def writers(issue, events):
+    """{'title'|'description': (author, at)}: whoever last CHANGED the field, replayed from the create/update events (actor +
+    changes) in id order. If the stored text is not what the events say, or nobody is found, the author is '' (unknown) -
+    never the creator by default."""
+    current, writer = {}, {}
+    for data in events:
+        if data.get('kind') in ('create', 'update'):
+            for kind in ('title', 'description'):
+                if kind in (data.get('changes') or {}) and data['changes'][kind] != current.get(kind):
+                    current[kind] = data['changes'][kind]
+                    writer[kind] = (data.get('actor', ''), stamp_epoch(data['at']))
+    created = stamp_epoch(issue['created_at']) if issue.get('created_at') else 0
+    return {kind: (writer[kind] if kind in writer and current.get(kind) == issue.get(kind) else ('', writer[kind][1] if kind in writer else created))
+            for kind in ('title', 'description')}
+
+
 def rebuild_if_needed(db, clock=time.time):
     """Idempotent (re)index from the issues and their comments, bounded in time: if it cannot finish, nothing is
     committed, the index stays marked incomplete and search answers 503 until a later start completes it."""
@@ -98,19 +120,9 @@ def rebuild_if_needed(db, clock=time.time):
         issue = json.loads(row['data'])
         issue_id = row['id']
         events = [(e['id'], json.loads(e['data'])) for e in db.execute('SELECT id,data FROM activity WHERE issue_id=? ORDER BY id', (issue_id,)).fetchall()]
-        # Whoever last CHANGED a title or description wrote it: replay the create/update events (actor + changes) and keep the
-        # last actor whose change altered the value. Not determinable -> no author (shown as "unknown"), never the creator by default.
-        current, writer = {}, {}
-        for _, data in events:
-            if data.get('kind') in ('create', 'update'):
-                for kind in ('title', 'description'):
-                    if kind in (data.get('changes') or {}) and data['changes'][kind] != current.get(kind):
-                        current[kind] = data['changes'][kind]
-                        writer[kind] = (data.get('actor', ''), stamp_epoch(data['at']))
+        found = writers(issue, [data for _, data in events])
         for kind in ('title', 'description'):
-            author, at = writer.get(kind, ('', stamp_epoch(issue['created_at']) if issue.get('created_at') else 0))
-            if current.get(kind) != issue.get(kind):
-                author = ''                                  # the stored text is not what the events say: attribution unknown
+            author, at = found[kind]
             put(db, issue_id, kind, 0, author, at, issue.get(kind) or '', issue)
         for event_id, data in events:
             if data.get('kind') == 'comment':
@@ -175,7 +187,7 @@ def search(db, items, params, limit):
     if params.get('assignee'):
         clauses.append('AND d.assignee = ?'); args.append(params['assignee'])
     if params.get('label'):
-        clauses.append("AND d.labels LIKE ? ESCAPE '\\'"); args.append('%|' + like_escape(params['label'].lower()) + '|%')
+        clauses.append("AND d.labels LIKE ? ESCAPE '\\'"); args.append('%|' + like_escape(label_code(params['label'])) + '|%')
     if params.get('from') is not None:
         clauses.append('AND d.at >= ?'); args.append(params['from'])
     if params.get('to') is not None:

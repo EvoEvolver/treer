@@ -46,7 +46,7 @@ def on_write(db, action, issue, before, event, event_id, actor, now, exists):
         put(db, issue['id'], 'comment', event_id, actor['id'], now, '\n'.join(p for p in (event.get('title'), event.get('body')) if p), exists)
 
 
-def rebuild_if_needed(db, stamp_epoch):
+def rebuild_if_needed(db, stamp_epoch, writers):
     """Idempotent derivation of every reference from the stored issues and comments (first start after the upgrade)."""
     marker = db.execute("SELECT value FROM refs_meta WHERE key='version'").fetchone()
     if marker and marker[0] == '1':
@@ -57,20 +57,23 @@ def rebuild_if_needed(db, stamp_epoch):
     db.execute('DELETE FROM issue_refs')
     for row in db.execute('SELECT id,data FROM issues ORDER BY id').fetchall():
         issue = json.loads(row['data'])
-        at = stamp_epoch(issue['created_at']) if issue.get('created_at') else 0
-        put(db, row['id'], 'title', 0, issue.get('creator', ''), at, issue.get('title') or '', exists)
-        put(db, row['id'], 'description', 0, issue.get('creator', ''), at, issue.get('description') or '', exists)
-        for event in db.execute('SELECT id,data FROM activity WHERE issue_id=? ORDER BY id', (row['id'],)).fetchall():
-            data = json.loads(event['data'])
+        events = [(e['id'], json.loads(e['data'])) for e in db.execute('SELECT id,data FROM activity WHERE issue_id=? ORDER BY id', (row['id'],)).fetchall()]
+        found = writers(issue, [data for _, data in events])
+        for kind in ('title', 'description'):
+            author, at = found[kind]
+            put(db, row['id'], kind, 0, author, at, issue.get(kind) or '', exists)
+        for event_id, data in events:
             if data.get('kind') == 'comment':
-                put(db, row['id'], 'comment', event['id'], data.get('actor', ''), stamp_epoch(data['at']), '\n'.join(p for p in (data.get('title'), data.get('body')) if p), exists)
+                put(db, row['id'], 'comment', event_id, data.get('actor', ''), stamp_epoch(data['at']), '\n'.join(p for p in (data.get('title'), data.get('body')) if p), exists)
     db.execute("INSERT OR REPLACE INTO refs_meta(key,value) VALUES('version','1')")
 
 
 def referenced_by(db, issue_id, items):
     """Issues that mention #issue_id, newest first, one entry per referencing issue (its latest reference), at most 50.
     Titles are other principals' text: cut to a fixed length and meant to be shown as plain text."""
-    rows = db.execute('SELECT from_issue,source,event_id,author,at FROM issue_refs WHERE to_issue=? ORDER BY at DESC, rowid DESC', (issue_id,)).fetchall()
+    rows = db.execute('SELECT r.from_issue, r.source, r.event_id, r.author, r.at FROM issue_refs r JOIN '
+                      '(SELECT from_issue, MAX(rowid) AS latest FROM issue_refs WHERE to_issue=? GROUP BY from_issue) g ON r.rowid = g.latest '
+                      'ORDER BY r.at DESC, r.rowid DESC LIMIT ?', (issue_id, MAX_REFERENCED_BY)).fetchall()
     out, seen = [], set()
     for row in rows:
         issue = items.get(row['from_issue'])
@@ -79,7 +82,7 @@ def referenced_by(db, issue_id, items):
         seen.add(issue['id'])
         title = ' '.join((issue['title'] or '').split())
         out.append({'issue': {'id': issue['id'], 'title': title if len(title) <= TITLE_CHARS else title[:TITLE_CHARS - 1] + '…', 'status': issue['status']},
-                    'source': row['source'], 'event_id': row['event_id'] or None, 'author': row['author'], 'at': row['at']})
+                    'source': row['source'], 'event_id': row['event_id'] or None, 'author': row['author'] or 'unknown', 'at': row['at']})
         if len(out) >= MAX_REFERENCED_BY:
             break
     return out

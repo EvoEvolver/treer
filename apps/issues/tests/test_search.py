@@ -229,6 +229,16 @@ class SecurityReviewTest(SearchBase):
         self.edit(issue, {'status': 'note'}, H)
         self.assertEqual(self.ids('moving', status='note'), [issue])
 
+    def test_labels_with_the_delimiter_cannot_combine_into_a_false_match(self):
+        piped = self.issue(A, title='needle one', labels=['a|b'])
+        pair = self.issue(A, title='needle two', labels=['a', 'b'])
+        self.assertEqual(self.ids('needle', label='a|b'), [piped])
+        self.assertEqual(self.ids('needle', label='a'), [pair])
+        self.assertEqual(self.ids('needle', label='b'), [pair])
+        weird = self.issue(A, title='needle three', labels=['100%', 'x_y'])
+        self.assertEqual(self.ids('needle', label='100%'), [weird]); self.assertEqual(self.ids('needle', label='x_y'), [weird])
+        self.assertEqual(self.ids('needle', label='x'), [])
+
     def test_a_slow_scan_is_interrupted_and_all_short_queries_are_tightened(self):
         for n in range(40):
             self.issue(A, title=f'filler {n}', description='x' * 400)

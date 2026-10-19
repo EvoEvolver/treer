@@ -111,7 +111,7 @@ class Store:
             with self.connect() as db:
                 fulltext.ensure(db)
                 refs.ensure(db)
-                refs.rebuild_if_needed(db, fulltext.stamp_epoch)
+                refs.rebuild_if_needed(db, fulltext.stamp_epoch, fulltext.writers)
                 self.search_ready = fulltext.rebuild_if_needed(db)
         except Error as exc:
             print('Issues search index could not be built in time; search answers 503 until a later start finishes it', file=sys.stderr, flush=True)
