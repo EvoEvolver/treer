@@ -27,6 +27,8 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
   let failCancel = false;
   let outputFormat = "text";
   let failOutput = false;
+  let failClear = false;
+  const clears = [];
   const malicious = '<img src=x onerror="window.controlsXSS=true">';
   let sequence = 0;
   const wss = new WebSocketServer({ noServer: true });
@@ -60,6 +62,14 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
         // Mutations can acknowledge without returning a full state snapshot.
         res.writeHead(204);
         return res.end();
+      }
+      if (path === "api/tasks/clear-finished" && req.method === "POST") {
+        if (failClear) return json({ error: { message: "Clear transport failed" } }, 503);
+        const removed = state.backgroundTasks.filter((task) => task.status !== "running").length;
+        clears.push(removed);
+        state.backgroundTasks = state.backgroundTasks.filter((task) => task.status === "running");
+        broadcast();
+        return json({ ...state, removed });
       }
       if (path.startsWith("api/tasks/")) {
         outputReads.push({ path, tail: url.searchParams.get("tail") });
@@ -236,6 +246,42 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     await failed.getByRole("button", { name: "Refresh output" }).click();
     await expect(failed.locator(".field-error")).toHaveCount(0);
     await page.screenshot({ path: join(screenshots, "controls-ui-tasks.png") });
+
+    // Clear finished tasks (#184): confirmation first, a failure keeps the records, success removes finished ones only.
+    const savedTasks = state.backgroundTasks;
+    const at = new Date().toISOString();
+    setState({ backgroundTasks: [
+      { id: "r1", kind: "shell", description: "Still running", status: "running", startedAt: at, endedAt: null, exitCode: null, summary: null },
+      { id: "c1", kind: "shell", description: "Finished one", status: "completed", startedAt: at, endedAt: at, exitCode: 0, summary: null },
+      { id: "f1", kind: "agent", description: "Finished two", status: "failed", startedAt: at, endedAt: at, exitCode: 1, summary: null },
+    ] });
+    await expect(page.locator(".task")).toHaveCount(3);
+    const clearButton = page.getByRole("button", { name: "Clear finished tasks", exact: true });
+    await expect(clearButton).toBeVisible();
+    const clearBox = await clearButton.boundingBox();
+    assert.ok(clearBox && clearBox.height >= 44 && clearBox.width >= 44, `clear button is ${clearBox?.width}x${clearBox?.height}`);
+    await clearButton.click();
+    const confirm = page.getByRole("group", { name: "Clear finished tasks" });
+    await expect(confirm).toContainText("Remove 2 finished task records");
+    await expect(confirm).toContainText("Running tasks and their saved output are not affected");
+    for (const control of await confirm.getByRole("button").all()) { const box = await control.boundingBox(); assert.ok(box && box.height >= 44, "confirmation controls are at least 44px tall"); }
+    await confirm.getByRole("button", { name: "Keep" }).click();
+    await expect(confirm).toHaveCount(0);
+    assert.equal(clears.length, 0, "Keep sends nothing");
+    await expect(page.locator(".task")).toHaveCount(3);
+    failClear = true;
+    await clearButton.click();
+    await confirm.getByRole("button", { name: "Clear", exact: true }).click();
+    await expect(page.locator(".tasks-foot .field-error")).toContainText("Could not clear finished tasks");
+    await expect(page.locator(".task")).toHaveCount(3);
+    failClear = false;
+    await confirm.getByRole("button", { name: "Clear", exact: true }).click();
+    await expect(page.locator(".task")).toHaveCount(1);
+    await expect(page.locator(".task-running")).toContainText("Still running");
+    assert.deepEqual(clears, [2]);
+    await expect(clearButton).toHaveCount(0);
+    await page.screenshot({ path: join(screenshots, "controls-ui-tasks-cleared.png") });
+    setState({ backgroundTasks: savedTasks });
     await page.getByRole("button", { name: "Close background tasks" }).click();
 
     // Goal: editor failure keeps the form, then success; metrics, pause/resume, budget removal.
@@ -380,9 +426,9 @@ export async function testRuntimeControlsUi(browser, screenshots, pageName = "in
     assert.equal(prompts.at(-1).prompt, "touch queued");
     assert.equal(await page.evaluate(() => window.controlsXSS), undefined);
     assert.deepEqual(await page.evaluate(() => window.__violations.filter((directive) => directive !== "script-src-attr")), []);
-    // The only console errors are the browser logging this fixture's six deliberate 503 responses.
+    // The only console errors are the browser logging this fixture's seven deliberate 503 responses.
     assert.deepEqual(errors.filter((message) => !/status of 503/.test(message)), []);
-    assert.equal(errors.length, 6);
+    assert.equal(errors.length, 7);
     console.log("React UI runtime controls mock checks passed (tasks / queue / goal, 1440px and 390px).");
   } finally {
     await context.close();

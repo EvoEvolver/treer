@@ -62,9 +62,38 @@ function Card({ task, panelOpen }: { task: BackgroundTask; panelOpen: boolean })
   );
 }
 
+/** "Clear finished tasks": removes only the launcher's finished records after a confirmation; running tasks and output files stay. */
+function ClearFinished({ count }: { count: number }) {
+  const { actions } = useStore();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => { if (count === 0) setConfirming(false); }, [count]);
+  if (count === 0) return null;
+  const clear = async () => {
+    setBusy(true);
+    const failure = await actions.clearFinishedTasks();
+    setBusy(false);
+    if (failure) setError(t("tasks.clearFailed", { message: failure })); else { setError(null); setConfirming(false); }
+  };
+  return (
+    <footer className="tasks-foot">
+      {confirming ? (
+        <div className="goal-confirm" role="group" aria-label={t("tasks.clearFinished")}>
+          <span>{t("tasks.clearQuestion", { count })}</span>
+          <button type="button" className="btn danger tasks-btn" disabled={busy} onClick={() => void clear()} autoFocus>{t("tasks.clearConfirm")}</button>
+          <button type="button" className="btn tasks-btn" onClick={() => { setConfirming(false); setError(null); }}>{t("tasks.clearKeep")}</button>
+        </div>
+      ) : <button type="button" className="btn tasks-btn" onClick={() => setConfirming(true)}>{t("tasks.clearFinished")}</button>}
+      {error && <p className="field-error" role="status">{error}</p>}
+    </footer>
+  );
+}
+
 export function TasksPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { state } = useStore();
   const tasks = state.snapshot?.backgroundTasks ?? [];
+  const finished = tasks.filter((task) => task.status !== "running").length;
   const close = useCallback(onClose, [onClose]);
   return (
     <aside className="panel tasks" id="tasks" aria-label={t("tasks.title")} hidden={!open} onKeyDown={(event) => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.preventDefault(); close(); } }}>
@@ -73,6 +102,7 @@ export function TasksPanel({ open, onClose }: { open: boolean; onClose: () => vo
         {tasks.length === 0 && <p className="tasks-empty">{t("tasks.empty")}</p>}
         {tasks.map((task) => <Card key={task.id} task={task} panelOpen={open} />)}
       </div>
+      <ClearFinished count={finished} />
     </aside>
   );
 }

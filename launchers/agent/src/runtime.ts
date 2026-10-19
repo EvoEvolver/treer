@@ -67,6 +67,8 @@ export interface HarnessRuntime extends EventEmitter {
   exportSession?(): Promise<SessionBundle>;
   /** Restore separately; does not change/restart the currently running session. */
   importSession?(bundle: SessionBundle, options: SessionImportOptions): Promise<ImportedSession>;
+  /** Drops finished background-task records (#184); returns how many. Harnesses without background tasks omit it. */
+  clearFinishedTasks?(): number;
   snapshot(historyLimit?: number): RuntimeSnapshot;
 }
 

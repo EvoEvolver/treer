@@ -420,6 +420,11 @@ const server = createServer({ requestTimeout: 300_000, headersTimeout: 60_000 },
       send(response, removed ? 200 : 404, removed ? statePayload() : { error: "Queued prompt not found" });
       return;
     }
+    if (path === "/api/tasks/clear-finished" && method === "POST") {
+      if (!runtime.clearFinishedTasks) { send(response, 404, { error: "Background tasks are not supported by this harness" }); return; }
+      const removed = runtime.clearFinishedTasks();
+      send(response, 200, { ...statePayload(), removed }); return;
+    }
     const taskMatch = /^\/api\/tasks\/([^/]+)\/output$/.exec(path);
     if (taskMatch && method === "GET") {
       const task = runtime.snapshot().backgroundTasks.find((entry) => entry.id === decodeURIComponent(taskMatch[1]));

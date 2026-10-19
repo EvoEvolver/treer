@@ -84,6 +84,7 @@ export interface Actions {
   /** Goal mutations resolve to an error message, or null on success; callers decide where to show it. */
   putGoal(input: GoalInput): Promise<string | null>;
   clearGoal(): Promise<string | null>;
+  clearFinishedTasks(): Promise<string | null>;
   reconcileGoal(): Promise<void>;
   retryGoalDelivery(id: string): Promise<void>;
 }
@@ -219,6 +220,13 @@ export function StoreProvider({ children }: { children: ReactNode }) {
         return null;
       } catch (error) { return (error as Error).message; }
       finally { dispatch({ type: "goalBusy", value: false }); }
+    },
+    async clearFinishedTasks() {
+      try {
+        const payload = await request<Snapshot>("api/tasks/clear-finished", { method: "POST", body: "{}" });
+        dispatch({ type: "snapshot", snapshot: await asSnapshot(payload), source: "http" });
+        return null;
+      } catch (error) { return (error as Error).message; }
     },
     async reconcileGoal() {
       try {

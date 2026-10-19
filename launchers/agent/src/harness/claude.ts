@@ -9,6 +9,7 @@ import { readGoalState, writeGoalState } from "../goal-storage.js";
 import { homedir, tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline";
+import { clearFinishedTasks, pruneFinishedTasks } from "../task-retention.js";
 import { mapPlanSteps, mapReasoningEffort, type BackgroundTask, type Goal, type GoalUpdate, type HistoryItem, type ModelOption, type TurnDto } from "../model.js";
 import { GoalError, GoalGuard } from "../goals.js";
 import { withHistoryLimit, type HarnessImage, type HarnessInfo, type HarnessRuntime, type ThreadState } from "../runtime.js";
@@ -78,6 +79,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
   private pendingGoalExit: Goal | null = null;
   private goalMutating = false;
   private goalPoll?: ReturnType<typeof setInterval>;
+  private taskPrune?: ReturnType<typeof setInterval>;
   private goalPolling = false;
   private messageTokens = new Map<string, number>();
   private queryTokens = 0;
@@ -208,6 +210,9 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
         void this.refreshGoalHistory().catch((error) => this.emit("log", `Goal monitor: ${error instanceof Error ? error.message : "read failed"}`)).finally(() => { this.goalPolling = false; });
       }, 500);
       this.goalPoll.unref();
+      // Age-based retention must also run while no task event arrives.
+      this.taskPrune = setInterval(() => { if (pruneFinishedTasks(this.tasks)) this.publish(); }, 60_000);
+      this.taskPrune.unref();
       const models = Array.isArray(initialized.models) ? initialized.models : [];
       // Alias values (sonnet) and system/init's actual model IDs differ. Use
       // Claude's own resolution, never a locally pinned model-version table.
@@ -457,6 +462,7 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
 
   async stop() {
     if (this.goalPoll) clearInterval(this.goalPoll);
+    if (this.taskPrune) clearInterval(this.taskPrune);
     if (this.deferredRetry) clearTimeout(this.deferredRetry);
     this.stopping = true;
     this.emit("goal-command-error", new Error("Claude stopped"));
@@ -646,8 +652,14 @@ export class ClaudeRuntime extends EventEmitter implements HarnessRuntime {
     };
     if (event.subtype === "background_tasks_changed" && Array.isArray(event.tasks)) for (const task of event.tasks) update(record(task));
     else update(event);
-    const finished = [...this.tasks.values()].filter((task) => task.status !== "running").sort((a, b) => (a.endedAt ?? "").localeCompare(b.endedAt ?? ""));
-    for (const task of finished.slice(0, Math.max(0, finished.length - 100))) this.tasks.delete(task.id);
+    pruneFinishedTasks(this.tasks);
+  }
+
+  /** Drops every finished task record (never a running one, never the task itself or its output); returns how many. */
+  clearFinishedTasks(): number {
+    const removed = clearFinishedTasks(this.tasks);
+    if (removed) this.publish();
+    return removed;
   }
 
   private handle(event: RecordValue) {

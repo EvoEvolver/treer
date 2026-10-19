@@ -109,15 +109,19 @@ test("resume maps JSONL user/assistant/tools without stdout replay; missing/reje
   assert.equal(loadThreadId(stateFile), previousId);
 });
 
-test("completed tasks are bounded to 100; running tasks survive pruning", async () => {
+test("finished tasks are bounded to the 20 most recent; running tasks survive pruning; clearing drops only finished records", async () => {
   const claude = runtime(temp());
   try {
     await claude.start(); await claude.prompt("many-tasks");
     await until(() => claude.snapshot().thread?.status === "idle");
     const tasks = claude.snapshot().backgroundTasks;
-    assert.equal(tasks.length, 101);
+    assert.equal(tasks.length, 21);
     assert.equal(tasks.find((task) => task.id === "still-running")?.status, "running");
-    assert.ok(!tasks.some((task) => task.id === "t0"));
+    assert.ok(!tasks.some((task) => task.id === "t0" || task.id === "t84"));
+    assert.ok(tasks.some((task) => task.id === "t85") && tasks.some((task) => task.id === "t104"), "the newest arrivals are the ones kept");
+    assert.equal(claude.clearFinishedTasks(), 20);
+    assert.deepEqual(claude.snapshot().backgroundTasks.map((task) => task.id), ["still-running"]);
+    assert.equal(claude.clearFinishedTasks(), 0);
   } finally { await claude.stop(); }
 });
 

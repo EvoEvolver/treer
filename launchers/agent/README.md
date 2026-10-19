@@ -508,8 +508,13 @@ does not interrupt an executing tool or guarantee immediate token-level changes.
 Use explicit interrupt to cancel; queue mode always waits for the turn's `result`.
 
 Background task state comes from `background_tasks_changed`, `task_started`,
-`task_updated`, and `task_notification`. All running tasks and the most recent
-100 finished tasks stay visible; none are restored after restart. Task outputs
+`task_updated`, and `task_notification`. Retention (#184, `src/task-retention.ts`): running
+tasks are never pruned; finished tasks (completed, failed, stopped) keep only the 20 most
+recent and drop any finished more than 24 hours ago, on every task update and on a
+one-minute tick, so the record map stays bounded however many tasks a long session
+starts. Pruning removes only the launcher's record: it never stops a task and never
+touches the task's output file. `POST /api/tasks/clear-finished` (the panel's **Clear
+finished tasks** button) removes every finished record at once. None are restored after restart. Task outputs
 are read only from the working directory or this session's Claude task-output
 directory under the local temporary roots (`claude-<uid>/<encoded cwd>/<session>/tasks`).
 Model choices come from Claude's initialize response, including its
@@ -706,8 +711,10 @@ keyboard focus on desktop, reached with ArrowRight from the row, always visible 
 the file straight to disk from `GET /v1/files/download` (files only, no folder/zip
 download yet). When the harness reports background tasks, the Tasks panel shows each
 task's status, duration, exit code and summary; expanding a task loads its output tail
-and a running task refreshes every three seconds while open. On phones the two panels
-share one full-screen slot.
+and a running task refreshes every three seconds while open. **Clear finished tasks**
+(shown when any finished record exists; 44px target) asks for confirmation, then removes
+only the finished records from the list; running tasks and saved output files are not
+affected. On phones the two panels share one full-screen slot.
 
 The additional read-only JSON routes are:
 
@@ -1032,6 +1039,8 @@ and summary can be null. `GET /api/tasks/:id/output?tail=65536` returns
 positive byte count capped at 64 KiB; unregistered task IDs return 404. Reads
 must remain in the adapter's trusted output roots, reject external symlinks and
 non-regular files, and never accept an output path from a client.
+`POST /api/tasks/clear-finished` answers `{...state, removed}` (404 when the harness has no
+background tasks) and drops only finished records.
 
 ## Add a harness adapter
 
