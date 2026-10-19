@@ -1086,6 +1086,36 @@ post-store interference remain native test requirements, as do all custody and
 durable-publication conditions above. Hosted execution of this codec increment
 is pending; Windows cross-target lint alone is compilation evidence.
 
+The following private `composition/native_binding.rs` increment connects that
+codec to live disposable collision acquisitions. It obtains the u64 volume
+serial and all 128 file-id bits using `GetFileInformationByHandleEx(FileIdInfo)`
+on retained image and attempt-directory handles, refusing zero/all-ones values.
+It fixes image identities and independent expected length/digest before
+acquisition. The synthetic attempt identifier is SHA-256 over the explicit
+`test-only-native-attempt-v1` domain, volume and directory file id; the synthetic
+predecessor is a domain-separated fixed fixture-head digest. These constructors
+exist only under the Windows test module, not in a production adapter.
+The expected binding has no caller-provided status: a zero placeholder must
+remain zero, and the serialized status comes solely from the retained actual
+Failure. For this occupied-slot fixture only, that status must be
+`ERROR_ALREADY_EXISTS`; this is not a production operation error allowlist.
+The store retains the exact composition/failure and the read-back evidence pin.
+Consumption compares a separately allocated expected binding, populated with
+the retained actual status, and rechecks old custody plus full file ids before
+and after the read. Every verification attempt spends its private in-memory
+latch, including read-hook refusal, context mismatch and sink refusal.
+
+Three tests exercise both operations, Controller/Cli selectors, context
+substitution, foreign failures, coincident statuses from distinct operations,
+wrong-status bytes, attempted external evidence write/delete, retained-handle
+rename after read, and non-renewable store/acquisition/consumption. The read-hook
+error is synthetic, not an actual ReadFile failure. Both real occupied-slot
+operations produce the same error; no distinct-error native fixture is claimed.
+The final sink is still just an in-memory test counter. No native state is
+reconstructed after process death; committed-head acquisition, durable
+consume/CAS, production health, rollback actor and W4 remain absent. Exact-SHA
+hosted 2022/2025 execution is required before accepting this native increment.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual

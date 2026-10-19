@@ -7,26 +7,26 @@ const PREDECESSOR: &[u8; 8] = b"PREDE001";
 const LENGTH: usize = 225;
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-struct Image {
+pub(super) struct Image {
     // FILE_ID_INFO: 64-bit VolumeSerialNumber and all 128 FileId bits.
     // Never a path or the older BY_HANDLE_FILE_INFORMATION file index.
-    volume: u64,
-    file: [u8; 16],
-    size: u64,
-    hash: [u8; 32],
+    pub(super) volume: u64,
+    pub(super) file: [u8; 16],
+    pub(super) size: u64,
+    pub(super) hash: [u8; 32],
 }
 
 #[derive(Clone, PartialEq, Eq, Debug)]
-struct Record {
-    attempt: [u8; 32],
-    predecessor: [u8; 32],
-    component: u8, // 1 Controller, 2 Cli; independent of image role.
-    role: u8,      // 1 Old, 2 New.
-    operation: u8, // 1 MoveOld, 2 Publish.
-    revision: u64,
-    source: Image,
-    target: Image,
-    status: u32,
+pub(super) struct Record {
+    pub(super) attempt: [u8; 32],
+    pub(super) predecessor: [u8; 32],
+    pub(super) component: u8, // 1 Controller, 2 Cli; independent of image role.
+    pub(super) role: u8,      // 1 Old, 2 New.
+    pub(super) operation: u8, // 1 MoveOld, 2 Publish.
+    pub(super) revision: u64,
+    pub(super) source: Image,
+    pub(super) target: Image,
+    pub(super) status: u32,
 }
 
 fn identifier<const N: usize>(value: &[u8; N]) -> bool {
@@ -56,7 +56,7 @@ impl Record {
             && (self.source.volume, self.source.file) != (self.target.volume, self.target.file)
     }
 
-    fn encode(&self) -> Option<Vec<u8>> {
+    pub(super) fn encode(&self) -> Option<Vec<u8>> {
         if !self.valid() {
             return None;
         }
@@ -124,7 +124,7 @@ fn parse(mut input: &[u8]) -> Option<Record> {
 // Equality is deliberately allocation-independent, but is only a data check.
 // A future verifier must ALSO compare against the retained actual native error
 // and check live custody. An arbitrary expected Record confers no trust.
-fn matches_expected(bytes: &[u8], expected: &Record) -> bool {
+pub(super) fn matches_expected(bytes: &[u8], expected: &Record) -> bool {
     parse(bytes).as_ref() == Some(expected)
 }
 

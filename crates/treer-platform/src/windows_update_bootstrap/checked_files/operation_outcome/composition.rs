@@ -1,6 +1,8 @@
 //! Private native-fixture composition. No Controller conversion or publication.
 use super::*;
 
+mod native_binding;
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Role {
     Old,
