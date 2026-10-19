@@ -50,6 +50,14 @@ test("native Claude HTTP/WS state, queue deletion, AIS compatibility and bounded
     assert.equal((await fetch(base + "/api/tasks/missing/output")).status, 404);
     assert.equal((await fetch(base + "/api/tasks/task1/output?tail=-1")).status, 400);
     assert.equal((await fetch(base + "/v1/transcript?limit=100").then((response) => response.json())).page_count, 2);
+    // Clearing finished tasks removes only launcher records: the response and the state agree, and a cleared id is gone.
+    const before = (await state()).backgroundTasks.filter((task: any) => task.status !== "running").length;
+    assert.ok(before >= 1);
+    const cleared = await post("/api/tasks/clear-finished", {}).then((response) => response.json());
+    assert.equal(cleared.removed, before);
+    assert.ok(cleared.backgroundTasks.every((task: any) => task.status === "running"));
+    assert.equal((await fetch(base + "/api/tasks/task1/output")).status, 404);
+    assert.equal((await post("/api/tasks/clear-finished", {}).then((response) => response.json())).removed, 0);
   } finally {
     socket?.terminate();
     const exited = child.exitCode === null ? new Promise((done) => child.once("exit", done)) : Promise.resolve();

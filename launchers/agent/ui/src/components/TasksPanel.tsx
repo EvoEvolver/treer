@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { fetchRaw } from "../api";
 import { t, type MessageKey } from "../i18n";
 import { useNow } from "../lib/clock";
@@ -62,17 +62,71 @@ function Card({ task, panelOpen }: { task: BackgroundTask; panelOpen: boolean })
   );
 }
 
+/**
+ * "Clear finished tasks": removes only the launcher's finished records after a confirmation; running tasks and output
+ * files stay. Focus never falls to <body>: Keep and Escape return to the trigger, and when the footer disappears
+ * (cleared here, or the last finished record aged out) focus moves to the panel's Close button.
+ */
+function ClearFinished({ count, restoreFocus }: { count: number; restoreFocus: () => void }) {
+  const { actions } = useStore();
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const footer = useRef<HTMLElement>(null);
+  const hadFocus = useRef(false);
+  // Remember whether focus is inside the footer so its removal (success, or records aging out) can hand focus on.
+  useEffect(() => {
+    const track = () => { hadFocus.current = Boolean(footer.current?.contains(document.activeElement)); };
+    document.addEventListener("focusin", track);
+    return () => document.removeEventListener("focusin", track);
+  });
+  const previous = useRef(count);
+  useEffect(() => {
+    const was = previous.current; previous.current = count;
+    if (count !== 0) return;
+    setConfirming(false);
+    // Only when the footer just disappeared under the user's focus; never on mount or while focus is elsewhere.
+    if (was > 0 && hadFocus.current) restoreFocus();
+  }, [count, restoreFocus]);
+  if (count === 0) return null;
+  const cancel = () => { setConfirming(false); setError(null); requestAnimationFrame(() => trigger.current?.focus()); };
+  // aria-disabled, not disabled: a disabled button drops keyboard focus to <body> while the request runs.
+  const clear = async () => {
+    setBusy(true);
+    const failure = await actions.clearFinishedTasks();
+    setBusy(false);
+    if (failure) setError(t("tasks.clearFailed", { message: failure })); else { setError(null); setConfirming(false); }
+  };
+  return (
+    <footer className="tasks-foot" ref={footer}>
+      {confirming ? (
+        <div className="goal-confirm" role="group" aria-label={t("tasks.clearFinished")} onKeyDown={(event) => { if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); cancel(); } }}>
+          <span>{t("tasks.clearQuestion", { count })}</span>
+          <button type="button" className="btn danger tasks-btn" aria-disabled={busy} onClick={() => { if (!busy) void clear(); }} autoFocus>{t("tasks.clearConfirm")}</button>
+          <button type="button" className="btn tasks-btn" onClick={cancel}>{t("tasks.clearKeep")}</button>
+        </div>
+      ) : <button type="button" className="btn tasks-btn" ref={trigger} onClick={() => setConfirming(true)}>{t("tasks.clearFinished")}</button>}
+      {error && <p className="field-error" role="alert">{error}</p>}
+    </footer>
+  );
+}
+
 export function TasksPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
   const { state } = useStore();
   const tasks = state.snapshot?.backgroundTasks ?? [];
+  const finished = tasks.filter((task) => task.status !== "running").length;
   const close = useCallback(onClose, [onClose]);
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const focusClose = useCallback(() => closeButton.current?.focus(), []);
   return (
     <aside className="panel tasks" id="tasks" aria-label={t("tasks.title")} hidden={!open} onKeyDown={(event) => { if (event.key === "Escape" && !document.querySelector("dialog[open]")) { event.preventDefault(); close(); } }}>
-      <header className="ph"><h2>{t("tasks.title")}</h2><button type="button" className="xbtn" aria-label={t("tasks.close")} onClick={close}><Icon name="close" /></button></header>
+      <header className="ph"><h2>{t("tasks.title")}</h2><button type="button" className="xbtn" ref={closeButton} aria-label={t("tasks.close")} onClick={close}><Icon name="close" /></button></header>
       <div className="tlist">
         {tasks.length === 0 && <p className="tasks-empty">{t("tasks.empty")}</p>}
         {tasks.map((task) => <Card key={task.id} task={task} panelOpen={open} />)}
       </div>
+      <ClearFinished count={finished} restoreFocus={focusClose} />
     </aside>
   );
 }
