@@ -142,6 +142,16 @@ attackers remain outside the boundary. Hosted Windows execution is required;
 cross-target clippy only establishes compilation. The next W1 slice must add
 checked rename/backup/reverse-rollback behavior and receipt-state handling.
 
+Hosted run 39208522339 exercised W1a commit
+`116986d5b2cd51151a09dcda7d7d2dd109e2de24` on Server 2022 and 2025: each
+reported 39 platform library tests passed, zero failed, two ignored, including
+all three new native checked-copy/attempt tests. The separately launched
+`native_owner_round_trip` passed on each runner outside the ambient runner Job.
+These are disposable native fixtures, not a production update or `win_native`
+acceptance. The later `2d3be41a` changes only comments and documentation; it was
+not the hosted checkout. Release retained the raw log under
+`.treer/releases/boot-111-116986d5/run.log` (Issues #111, event 5177).
+
 ## Historical bounded breakaway probe
 
 First deliver a standalone native Rust diagnostic helper, separate from updater
