@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from auth import Error
+import hierarchy
 import refs
 import search as fulltext
 from notify import (ASK_PER_AUTHOR, HOURLY, HOURLY_ISSUES, HOURLY_WINDOW, POLICY_MODES, WINDOW, notice_for, parse_intent,
@@ -63,6 +64,7 @@ def ident(value):
 class Store:
     def __init__(self, path, clock=time.time, leader_agent=None, release_agent=None):
         self.path, self.clock = str(path), clock
+        self.link_hits = {}
         self.release_agent = release_agent     # only THIS Agent's comments can raise a 'looks shipped' signal; unset: the feature is off
         self.leader_agent = leader_agent       # stable ID that `leader` and `user` in waiting_on resolve to (unset: those values are refused)
         os.umask(0o077)
@@ -109,6 +111,8 @@ class Store:
         self.search_ready = False
         try:
             with self.connect() as db:
+                hierarchy.ensure(db)
+                hierarchy.migrate(db, fulltext.stamp_epoch)
                 fulltext.ensure(db)
                 refs.ensure(db)
                 refs.rebuild_if_needed(db, fulltext.stamp_epoch, fulltext.writers)
@@ -128,8 +132,9 @@ class Store:
             db.close()
 
     def all(self, db):
-        return {row['id']: self.normal(dict(json.loads(row['data']), id=row['id']))
-                for row in db.execute('SELECT id,data FROM issues')}
+        items = hierarchy.Items((row['id'], self.normal(dict(json.loads(row['data']), id=row['id'])))
+                                for row in db.execute('SELECT id,data FROM issues'))
+        return hierarchy.attach(db, items)
 
     @staticmethod
     def normal(issue):
@@ -163,15 +168,10 @@ class Store:
 
     def view(self, issue, items):
         result = dict(issue, claim=self.active_claim(issue))
-        descendants = []
-        pending = [issue['id']]
-        while pending:
-            parent = pending.pop()
-            children = [i for i in items.values() if i['parent_id'] == parent]
-            descendants.extend(children)
-            pending.extend(i['id'] for i in children)
+        below, truncated = hierarchy.descendants(items, issue['id'])      # each descendant once, however many paths lead to it
+        descendants = [items[n] for n in below]
         counted = [i for i in descendants if i['status'] != 'note']      # notes are memory, not work: they do not count in rollups
-        result['progress'] = {'total': len(counted),
+        result['progress'] = {'total': len(counted), 'truncated': truncated,
             'completed': sum(i['status'] in ('done', 'closed') for i in counted),
             'by_status': {s: sum(i['status'] == s for i in counted) for s in STATUSES}}
         result['unresolved_dependencies'] = [i for i in issue['blocked_by'] if items[i]['status'] not in RESOLVED]
@@ -205,7 +205,7 @@ class Store:
                     parent = int(value) if value not in ('', 'null') else None
                 except (ValueError, TypeError):
                     fail('invalid_id', 'Invalid parent ID')
-                result = [i for i in result if i['parent_id'] == parent]
+                result = [i for i in result if (parent in i['parent_ids'] if parent is not None else not i['parent_ids'])]
             else:
                 result = [i for i in result if i[key] == value]
         return {'issues': [self.view(i, items) for i in result[offset:offset+limit]],
@@ -241,8 +241,8 @@ class Store:
             rows = db.execute('SELECT id,data FROM activity WHERE issue_id=? ORDER BY id DESC LIMIT ? OFFSET ?',
                               (issue_id, limit+1, offset)).fetchall()
             referenced = refs.referenced_by(db, issue_id, items)
-        return {'issue': issue, 'referenced_by': referenced, 'children': [self.view(i, items) for i in items.values() if i['parent_id'] == issue_id][:100],
-                'children_total': sum(i['parent_id'] == issue_id for i in items.values()),
+        return {'issue': issue, 'referenced_by': referenced, 'children': [self.view(items[n], items) for n in items.kids.get(issue_id, ())][:100],
+                'children_total': len(items.kids.get(issue_id, ())),
                 'activity': [(self.titles_only if titles else (lambda e: e))(dict(json.loads(r['data']), id=r['id'])) for r in rows[:limit]],
                 'next_activity_offset': offset+limit if len(rows)>limit else None}
 
@@ -287,7 +287,7 @@ class Store:
         with self.connect() as db:
             items = self.all(db)
         self.get(items, issue_id)
-        children = [i for i in items.values() if i['parent_id'] == issue_id]
+        children = [items[n] for n in items.kids.get(issue_id, ())]
         return {'issues': [self.view(i, items) for i in children[offset:offset+limit]],
                 'total': len(children), 'next_offset': offset+limit if offset+limit<len(children) else None}
 
@@ -318,15 +318,6 @@ class Store:
                     fail('leader_unconfigured', 'This Issues App has no leader Agent configured, so waiting_on leader/user is unavailable')
             elif waiting not in {p['id'] for p in directory if p.get('kind') == 'agent'}:
                 fail('invalid_field', 'waiting_on must be an Agent from the directory, leader or user')
-        parent = issue['parent_id']
-        if parent is not None:
-            ident(parent)
-            seen = {issue['id']}
-            while parent is not None:
-                if parent in seen:
-                    fail('hierarchy_cycle', 'Parent hierarchy would cycle')
-                seen.add(parent)
-                parent = self.get(items, parent)['parent_id']
         dependencies = issue['blocked_by']
         if not isinstance(dependencies, list) or len(dependencies)>50:
             fail('invalid_field', 'blocked_by must be a list of at most 50 IDs')
@@ -373,20 +364,110 @@ class Store:
             issue['progress_reason'] = reason
             issue['progress_resets'] = issue.get('progress_resets', 0) + 1
 
+    LINKS_PER_MINUTE = 30
+
+    def rate_links(self, principal, now, weight=1):
+        """Relation changes are limited per principal (a sliding minute), counted per link ADDED (removing links is free, so a
+        full set can always be cleared), so one request that adds 50 links costs 50 and no one can churn other people's hierarchies."""
+        hits = [t for t in self.link_hits.get(principal, []) if now - t < 60]
+        if len(hits) + weight > self.LINKS_PER_MINUTE:
+            self.link_hits[principal] = hits
+            fail('rate_limited', f'At most {self.LINKS_PER_MINUTE} parent/child changes per minute', 429)
+        hits.extend([now] * weight)
+        self.link_hits[principal] = hits
+        if len(self.link_hits) > 1000:
+            self.link_hits = {k: v for k, v in self.link_hits.items() if v and now - v[-1] < 60}
+
+    @staticmethod
+    def wanted_parents(body):
+        """The parent set a request asks for: `parent_ids` (a list) or the legacy `parent_id` (an ID or null); None if neither."""
+        if 'parent_id' in body and 'parent_ids' in body:
+            fail('invalid_field', 'Send parent_ids or parent_id, not both')
+        if 'parent_ids' in body:
+            return body['parent_ids']
+        if 'parent_id' in body:
+            if body['parent_id'] is None:
+                return []
+            ident(body['parent_id'])
+            return [body['parent_id']]
+        return None
+
+    @staticmethod
+    def link_event(db, issue_id, kind, other, actor_id, now, other_role=None):
+        role = other_role or 'child'
+        db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps({
+            'actor': actor_id, 'kind': kind, 'at': stamp(now),
+            'summary': (f'Child #{other} linked' if kind == 'link' else f'Child #{other} unlinked') if role == 'child'
+                       else (f'Linked under #{other}' if kind == 'link' else f'Unlinked from #{other}'),
+            'changes': {role: other}, 'notification': {'status': 'not_requested'}})))
+
+    def link_children(self, parent_id, body, actor):
+        """POST /v1/issues/ID/children {add:[…], remove:[…]}: attach EXISTING issues under this one (or detach them). Adding needs
+        edit rights on the PARENT (you are arranging your own summary issue) and changes nothing about the child but its
+        relation; removing needs edit rights on the parent or on the child, so a child's owner can always take it out. Every
+        change leaves a trace in both issues' activity."""
+        fields(body, ('add', 'remove'))
+        lists = {}
+        for key in ('add', 'remove'):
+            value = body.get(key, [])
+            if not isinstance(value, list) or len(value) > hierarchy.MAX_CHILDREN or any(type(v) is not int or v < 1 for v in value):
+                fail('invalid_field', f'{key} must be a list of at most {hierarchy.MAX_CHILDREN} issue IDs')
+            lists[key] = list(dict.fromkeys(value))
+        if not lists['add'] and not lists['remove']:
+            fail('invalid_field', 'Nothing to add or remove')
+        with self.connect() as db:
+            db.execute('BEGIN IMMEDIATE')
+            now = self.clock()
+            items = self.all(db)
+            parent = self.get(items, parent_id)
+            if lists['add']:
+                claim = self.active_claim(parent)
+                if claim and claim['holder'] != actor['id']:
+                    fail('claim_owned', 'Another principal holds the active lease', 409)
+                if not self.editable(parent, actor):
+                    fail('forbidden', 'Only someone who may edit the parent can attach children to it', 403)
+            self.rate_links(actor['id'], now, len(lists['add']))
+            for child_id in lists['add']:
+                child = self.get(items, child_id)
+                if parent_id in child['parent_ids']:
+                    continue                                                     # already linked: idempotent
+                hierarchy.check_parents(child_id, [*child['parent_ids'], parent_id], items, fail)
+                hierarchy.write(db, child_id, child['parent_ids'], [*child['parent_ids'], parent_id], actor['id'], now)
+                self.link_event(db, parent_id, 'link', child_id, actor['id'], now)
+                self.link_event(db, child_id, 'link', parent_id, actor['id'], now, 'parent')
+                items = self.all(db)
+                parent = items[parent_id]
+            for child_id in lists['remove']:
+                child = self.get(items, child_id)
+                if parent_id not in child['parent_ids']:
+                    continue
+                if not (self.editable(parent, actor) or self.editable(child, actor)):
+                    fail('forbidden', 'Only someone who may edit the parent or the child can remove the link', 403)
+                hierarchy.write(db, child_id, child['parent_ids'], [p for p in child['parent_ids'] if p != parent_id], actor['id'], now)
+                self.link_event(db, parent_id, 'unlink', child_id, actor['id'], now)
+                self.link_event(db, child_id, 'unlink', parent_id, actor['id'], now, 'parent')
+                items = self.all(db)
+        return self.show(parent_id)
+
     def mutate(self, issue_id, action, body, actor, directory, paths=None):
-        allowed = ('title', 'description', 'status', 'priority', 'labels', 'assignee', 'parent_id', 'blocked_by', 'waiting_on')
+        allowed = ('title', 'description', 'status', 'priority', 'labels', 'assignee', 'parent_id', 'parent_ids', 'blocked_by', 'waiting_on')
         fields(body, allowed if action == 'create' else (*allowed, 'version') if action == 'update'
                else ('body', 'title') if action == 'comment' else ('action', 'seconds'))
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             now = self.clock()
             items = self.all(db)
+            new_parents = self.wanted_parents(body) if action in ('create', 'update') else None      # None: not touching the relations
             if action == 'create':
                 issue = dict(title='', description='', status='open', priority='normal', labels=[],
-                             assignee=None, parent_id=None, blocked_by=[], creator=actor['id'], waiting_on=None,
+                             assignee=None, blocked_by=[], creator=actor['id'], waiting_on=None,
                              created_at=stamp(now), updated_at=stamp(now), version=0, claim=None, rv=0, progress_at=stamp(now), **{'id': -1})
-                issue.update(body)
+                issue.update({k: v for k, v in body.items() if k not in ('parent_id', 'parent_ids')})
+                issue['parent_ids'], issue['parent_id'] = [], None
                 self.validate(issue, items, directory)
+                if new_parents:
+                    hierarchy.check_parents(None, new_parents, items, fail)
+                    self.rate_links(actor['id'], now, len(new_parents))
                 issue_id = db.execute('INSERT INTO issues(data) VALUES(?)', ('{}',)).lastrowid
                 issue['id'] = issue_id
                 old_assignee = None
@@ -404,7 +485,10 @@ class Store:
                         fail('forbidden', 'Only creator, assignee or human admin may edit', 403)
                     if 'version' in body and (type(body['version']) is not int or body['version'] != issue['version']):
                         fail('version_conflict', 'Reload the issue before editing', 409)
-                    issue.update({k: v for k, v in body.items() if k != 'version'})
+                    issue.update({k: v for k, v in body.items() if k not in ('version', 'parent_id', 'parent_ids')})
+                    if new_parents is not None and new_parents != issue['parent_ids']:
+                        hierarchy.check_parents(issue_id, new_parents, items, fail)
+                        self.rate_links(actor['id'], now, len(set(new_parents) - set(issue['parent_ids'])))
                     if issue['status'] != 'blocked' and 'waiting_on' not in body:
                         issue['waiting_on'] = None          # leaving blocked ends the wait; the assignee is responsible again
                     self.validate(issue, items, directory)
@@ -434,7 +518,16 @@ class Store:
                     summary = 'Lease ' + operation
                 else:
                     fail('route_not_found', 'Unknown action', 404)
-            changed = {k for k, v in body.items() if k not in ('version', 'body') and before.get(k) != v} if action == 'update' else set()
+            changed = {k for k, v in body.items() if k not in ('version', 'body', 'parent_id', 'parent_ids') and before.get(k) != v} if action == 'update' else set()
+            link_events = []
+            if new_parents is not None:
+                old_parents = [] if action == 'create' else before['parent_ids']
+                if new_parents != old_parents:
+                    added, removed = hierarchy.write(db, issue_id, old_parents, new_parents, actor['id'], now)
+                    issue['parent_ids'], issue['parent_id'] = list(new_parents), (new_parents[0] if new_parents else None)
+                    if action == 'update':
+                        changed.add('parent_ids')
+                    link_events = [('link', p) for p in added] + [('unlink', p) for p in removed]
             if action == 'comment':
                 mention_text, earlier = body['body'], ''
             elif action in ('create', 'update'):
@@ -457,6 +550,8 @@ class Store:
             event = {'actor': actor['id'], 'kind': action, 'at': stamp(now), 'summary': summary,
                      'changes': {k: v for k, v in body.items() if k != 'body'} if action in ('create', 'update') else {},
                      'notification': {'status': 'pending' if action in ('create', 'update', 'comment') else 'not_requested'}}
+            if link_events:
+                event['changes'] = {**{k: v for k, v in event['changes'].items() if k not in ('parent_id', 'parent_ids')}, 'parent_ids': issue['parent_ids']}
             if action == 'comment':
                 event['body'] = body['body']
                 if body.get('title') is not None:
@@ -470,12 +565,14 @@ class Store:
                         event['intent_note'] = note
             if mentions:
                 event['mentions'] = mentions
-            db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(issue), issue_id))
+            db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps({k: v for k, v in issue.items() if k not in ('parent_id', 'parent_ids')}), issue_id))
             if action == 'comment' and self.release_agent and actor['id'] == self.release_agent:
                 sha8 = shipped_sha(body.get('title'))
                 if sha8 and issue['status'] not in RESOLVED and (issue.get('assignee') or '').startswith('ag_'):
                     db.execute('INSERT OR IGNORE INTO shipped_signals(issue_id,sha8,created_at) VALUES(?,?,?)', (issue_id, sha8, now))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
+            for kind, parent in link_events:        # the other end sees it too: a trace in the parent's activity (who, when, which child)
+                self.link_event(db, parent, kind, issue_id, actor['id'], now)
             fulltext.on_write(db, action, issue, before, event, event_id, actor, now)
             known = {r[0] for r in db.execute('SELECT id FROM issues')}
             refs.on_write(db, action, issue, before, event, event_id, actor, now, known.__contains__)
@@ -688,17 +785,19 @@ class Store:
                 db.execute('INSERT OR REPLACE INTO reminder_backoff(issue_id,assignee,version,interval,next_due,count) VALUES(?,?,?,?,?,0)',
                            (issue_id, recipient, version, first, max(now, start + first)))
 
-    def shipped_pending(self):
+    def shipped_pending(self, skip_labels=()):
         """(issue ID, sha8, assignee) of recorded 'looks shipped' signals not yet delivered. Signals for issues that were
         resolved or lost their Agent assignee in the meantime are settled without a message."""
         with self.connect() as db:
             rows = db.execute('SELECT issue_id,sha8 FROM shipped_signals WHERE sent_at IS NULL ORDER BY created_at,issue_id').fetchall()
             items = self.all(db)
+        skip = {label.lower() for label in skip_labels}
         out = []
         for row in rows:
             issue = items.get(row['issue_id'])
             assignee = issue['assignee'] if issue else None
-            out.append((row['issue_id'], row['sha8'], assignee if issue and issue['status'] not in RESOLVED and (assignee or '').startswith('ag_') else None))
+            kept = issue and issue['status'] not in RESOLVED and (assignee or '').startswith('ag_') and not skip & {l.lower() for l in issue['labels']}
+            out.append((row['issue_id'], row['sha8'], assignee if kept else None))
         return out
 
     def shipped_done(self, pairs, now):

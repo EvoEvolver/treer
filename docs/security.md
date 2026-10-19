@@ -1310,7 +1310,27 @@ notice and lets the user choose between the shared-origin Proxy tunnel,
 labelled as such, and opening the Agent in a new tab; where the operator set
 `--agent-embed-fallback refuse` only the new tab is offered (the tunnel then
 answers `503 embedded_ui_requires_isolated_origin`). Mint errors and
-timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged. Embed
+timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged.
+Session reuse (#198): a Console that loads the bootstrap with `?reuse=1` (a
+capability hint that changes no authorization decision) receives a version-2
+`ready` with the nonce hash, answers with a probe that carries only type,
+version and the echoed hash, and the page then calls the check on its own
+origin; a `204` means a live embed session for this origin is already in the
+frame's partition, so the page loads the UI and posts `reused` with the same
+hash and no code is minted; any other answer makes it post `mint` and the
+handoff runs as before. The page honours one probe, only from its parent at
+the configured Console origin and with its own hash; the Console runs a
+one-way state machine bound to the first hash and never mints twice. The check
+answers `204` only under the full request-path gate: session live for this
+host and kind, current membership, and the interface Policy pair for this
+Agent evaluated without recording a decision; every other state is the same
+`401` as "no session" with no reason, so the check reveals nothing the UI
+request would not, and no party caches a positive answer. Reuse changes no
+binding, expiry or revocation: the same cookie is presented, logout and
+membership removal end it, and the UI request and the socket re-check apply
+the gate again. Handshake and UI responses carry no `Server-Timing`; load-time
+measurement is a development-only, fixture-only runner on the Console side.
+Agent UI. Embed
 sessions are separate rows from standalone sessions: the token of one never
 authenticates through the other cookie. The request context is decided before
 any credential is read: for an ordinary request the embed cookie grants authority

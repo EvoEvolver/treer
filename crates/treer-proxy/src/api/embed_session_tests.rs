@@ -516,6 +516,8 @@ async fn embed_sessions_are_framed_by_the_console_only_and_standalone_sessions_a
     );
     assert!(response.headers().get(header::X_FRAME_OPTIONS).is_none());
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    // No timing headers on handshake or UI responses (security 5530).
+    assert!(response.headers().get("server-timing").is_none());
     axum::body::to_bytes(response.into_body(), 64)
         .await
         .unwrap();
@@ -992,4 +994,159 @@ async fn embed_capability_is_advertised_only_where_embed_sessions_can_work() {
     assert!(list
         .iter()
         .any(|c| c == treer_protocol::CAPABILITY_AGENT_INTERFACE_ORIGIN));
+}
+
+/// #198: the check behind session reuse answers 204 only under the full
+/// request-path gate (same 401 otherwise), and the bootstrap speaks the
+/// version-2 handshake only when the Console hints `reuse=1`.
+#[tokio::test]
+async fn embed_check_applies_the_interface_gate_and_reuse_hint_selects_the_v2_handshake() {
+    let fixture = agent_fixture().await;
+    let config = config(None);
+    let cookie = establish_embed_session(&fixture, &config, "member").await;
+    // No timing headers anywhere on the handshake (security 5530).
+    let (nonce, hash) = nonce_pair();
+    let minted = mint(&fixture, allow(), &config, Some("owner"), AGENT_ID, &hash)
+        .await
+        .unwrap();
+    assert!(minted.headers().get("server-timing").is_none());
+    let body = axum::body::to_bytes(minted.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let code = serde_json::from_slice::<Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let redeemed = redeem(&fixture, &config, AGENT_HOST, &code, &nonce)
+        .await
+        .unwrap();
+    assert_eq!(redeemed.status(), StatusCode::NO_CONTENT);
+    assert!(redeemed.headers().get("server-timing").is_none());
+
+    // The check: 204 with a live session and an allowing Policy; the same 401
+    // as "no session" when the interface gate denies, when there is no cookie,
+    // and when membership is gone. Never a reason, never a body.
+    let check_with = |policy: PolicyEngine, cookie: Option<String>| {
+        let fixture = &fixture;
+        let config = &config;
+        async move {
+            let mut request = Request::builder()
+                .uri("/.treer/embed/check")
+                .header(header::HOST, AGENT_HOST)
+                .header("sec-fetch-site", "same-origin");
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, cookie);
+            }
+            send(
+                fixture,
+                policy,
+                config,
+                request.body(Body::empty()).unwrap(),
+            )
+            .await
+        }
+    };
+    let ok = check_with(allow(), Some(cookie.clone())).await.unwrap();
+    assert_eq!(ok.status(), StatusCode::NO_CONTENT);
+    assert_eq!(ok.headers()[header::CACHE_CONTROL], "no-store");
+    assert!(ok.headers().get("server-timing").is_none());
+    let refused = (
+        StatusCode::UNAUTHORIZED,
+        "ingress_authentication_required".to_string(),
+    );
+    assert_eq!(
+        error_of(check_with(deny(), Some(cookie.clone())).await).await,
+        refused
+    );
+    assert_eq!(error_of(check_with(allow(), None).await).await, refused);
+    // One cause at a time, each on its own session: Policy deny (above),
+    // expiry, server-side logout, membership removal.
+    let expired = establish_embed_session(&fixture, &config, "owner").await;
+    sqlx::query("UPDATE ingress_sessions SET expires_at = '2000-01-01T00:00:00Z' WHERE token = $1")
+        .bind(expired.split_once('=').unwrap().1)
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        error_of(check_with(allow(), Some(expired)).await).await,
+        refused
+    );
+    let logged_out = establish_embed_session(&fixture, &config, "owner").await;
+    assert_eq!(
+        check_with(allow(), Some(logged_out.clone()))
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::NO_CONTENT
+    );
+    fixture.auth.logout("tok-owner").await.unwrap();
+    assert_eq!(
+        error_of(check_with(allow(), Some(logged_out)).await).await,
+        refused
+    );
+    sqlx::query("DELETE FROM organization_members WHERE user_id = 'member'")
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        error_of(check_with(allow(), Some(cookie)).await).await,
+        refused
+    );
+
+    // The bootstrap: `reuse=1` exactly selects the version-2 ready and enables
+    // the probe handling; anything else keeps the two-field ready. The hint
+    // is stripped before the UI navigation and nothing about the Agent leaks.
+    for (query, reuse) in [
+        ("", false),
+        ("?reuse=1", true),
+        ("?reuse=1&theme=dark", true),
+        ("?reuse=2", false),
+        ("?reuse=true", false),
+        ("?theme=dark&reuse=1", true),
+    ] {
+        let response = send(
+            &fixture,
+            allow(),
+            &config,
+            Request::builder()
+                .uri(format!("/.treer/embed{query}"))
+                .header(header::HOST, AGENT_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "{query}");
+        assert!(response.headers().get("server-timing").is_none());
+        let body = axum::body::to_bytes(response.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let v2 = [
+            "post({ treer_embed: \"ready\", version: 2, nonce_hash: hash });",
+            "data.treer_embed === \"probe\" && data.version === 2 && data.nonce_hash === hash && Object.keys(data).length === 3",
+            "post({ treer_embed: \"reused\", version: 2, nonce_hash: hash }); navigate();",
+            "post({ treer_embed: \"mint\", version: 2, nonce_hash: hash });",
+        ];
+        for needle in v2 {
+            assert_eq!(body.contains(needle), reuse, "{query}: {needle}\n{body}");
+        }
+        // An old Console's page carries no version-2 code at all.
+        assert_eq!(body.contains("version"), reuse, "{query}");
+        assert_eq!(body.contains("probe"), reuse, "{query}");
+        assert_eq!(body.contains("reused"), reuse, "{query}");
+        assert_eq!(
+            body.contains("post({ treer_embed: \"ready\", nonce_hash: hash });"),
+            !reuse,
+            "{query}"
+        );
+        for needle in [
+            "params.delete(\"reuse\");",
+            "/.treer/embed/check",
+            "if (hash) message.nonce_hash = hash;",
+        ] {
+            assert!(body.contains(needle), "{query}: missing {needle}\n{body}");
+        }
+        assert!(!body.contains(AGENT_ID), "{body}");
+    }
 }

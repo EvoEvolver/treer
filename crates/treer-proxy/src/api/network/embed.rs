@@ -149,7 +149,9 @@ const EMBED_BODY_LIMIT: usize = 4 * 1024;
 /// is a fixed page, and session and check answer the same generic failure
 /// for an unknown Agent, a wrong code and a wrong nonce.
 pub(in crate::api) async fn serve_agent_embed_route(
+    state: &AppState,
     auth: &AuthStore,
+    policy: &PolicyEngine,
     config: &IngressConfig,
     hostname: &str,
     agent_id: &str,
@@ -167,9 +169,26 @@ pub(in crate::api) async fn serve_agent_embed_route(
         // held there would make the gateway's future !Send (Body is !Sync).
         let method = request.method().clone();
         let headers = request.headers().clone();
-        return Some(check_embed_session(auth, config, hostname, &method, &headers).await);
+        return Some(
+            check_embed_session(
+                state, auth, policy, config, hostname, agent_id, &method, &headers,
+            )
+            .await,
+        );
     }
     None
+}
+
+/// `reuse=1` on the bootstrap URL (#198): a non-secret capability hint that
+/// the Console speaks the version-2 handshake (ready, probe, mint or reused).
+/// It changes no authorization decision and is stripped before the Agent UI
+/// is loaded. Exactly `reuse=1`; any other value is the version-1 flow.
+fn bootstrap_flag(request: &Request<Body>, name: &str) -> bool {
+    request
+        .uri()
+        .query()
+        .map(|query| query.split('&').any(|pair| pair == format!("{name}=1")))
+        .unwrap_or(false)
 }
 
 fn no_store(response: &mut Response) {
@@ -202,6 +221,30 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     let script_nonce = Uuid::new_v4().simple().to_string();
     let console_js = serde_json::to_string(&console)
         .map_err(|error| ApiFailure::internal("encode_error", &error.to_string()))?;
+    // The version-2 handshake is rendered only for a Console that asked for
+    // it (security 5554 condition 2): an old Console's page carries no probe
+    // handling and no v2 message at all.
+    let reuse = bootstrap_flag(request, "reuse");
+    let v2_probe = if reuse {
+        r#"      // Version 2 (#198): the Console answers ready with a probe; this page
+      // decides once, on its own origin, whether a live embed session exists
+      // (the Proxy applies the full request gate) and reports reused or mint.
+      if (!probed && data.treer_embed === "probe" && data.version === 2 && data.nonce_hash === hash && Object.keys(data).length === 3) {
+        probed = true;
+        checkSession().then(function (r) {
+          if (done) return;
+          if (r.status === 204) { clearTimeout(timer); post({ treer_embed: "reused", version: 2, nonce_hash: hash }); navigate(); }
+          else post({ treer_embed: "mint", version: 2, nonce_hash: hash });
+        }).catch(function () { if (!done) post({ treer_embed: "mint", version: 2, nonce_hash: hash }); });
+      }"#
+    } else {
+        ""
+    };
+    let announce = if reuse {
+        r#"var probed = false; post({ treer_embed: "ready", version: 2, nonce_hash: hash });"#
+    } else {
+        r#"post({ treer_embed: "ready", nonce_hash: hash });"#
+    };
     let html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Treer</title></head><body>
 <script nonce="{script_nonce}">
@@ -210,6 +253,10 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
   var parentWindow = window.parent;
   var done = false;
   var hash = null;
+  var params = new URLSearchParams(window.location.search);
+  params.delete("reuse");
+  var next = "/" + (params.toString() ? "?" + params.toString() : "");
+  function post(message) {{ try {{ parentWindow.postMessage(message, CONSOLE); }} catch (e) {{}} }}
   // A failure report carries the nonce hash once it exists: the Agent
   // document that later replaces this page shares window and origin but never
   // learned the hash, so the Console accepts a post-ready failure only with it.
@@ -217,8 +264,11 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     if (done) return; done = true;
     var message = {{ treer_embed: kind }};
     if (hash) message.nonce_hash = hash;
-    try {{ parentWindow.postMessage(message, CONSOLE); }} catch (e) {{}}
+    post(message);
   }}
+  function fromConsole(event) {{ return !done && event.origin === CONSOLE && event.source === parentWindow && event.data && typeof event.data === "object"; }}
+  function navigate() {{ done = true; window.location.replace(next); }}
+  function checkSession() {{ return fetch("/.treer/embed/check", {{ credentials: "include", redirect: "manual", cache: "no-store" }}); }}
   if (window.top === window || !window.crypto || !window.crypto.subtle) {{ report("cookies_blocked"); return; }}
   var bytes = new Uint8Array(32); window.crypto.getRandomValues(bytes);
   var nonce = Array.prototype.map.call(bytes, function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
@@ -226,17 +276,20 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     hash = Array.prototype.map.call(new Uint8Array(digest), function (b) {{ return ("0" + b.toString(16)).slice(-2); }}).join("");
     var timer = setTimeout(function () {{ report("cookies_blocked"); }}, 15000);
     window.addEventListener("message", function (event) {{
-      if (done || event.origin !== CONSOLE || event.source !== parentWindow) return;
+      if (!fromConsole(event)) return;
       var data = event.data;
-      if (!data || data.treer_embed !== "code" || typeof data.code !== "string") return;
-      clearTimeout(timer);
-      fetch("/.treer/embed/session", {{ method: "POST", credentials: "include", redirect: "manual",
-        headers: {{ "content-type": "application/json" }}, body: JSON.stringify({{ code: data.code, nonce: nonce }}) }})
-      .then(function (r) {{ if (r.status !== 204) throw new Error("session"); return fetch("/.treer/embed/check", {{ credentials: "include", redirect: "manual", cache: "no-store" }}); }})
-      .then(function (r) {{ if (r.status !== 204) throw new Error("check"); done = true; window.location.replace("/" + window.location.search); }})
-      .catch(function () {{ report("cookies_blocked"); }});
+      if (data.treer_embed === "code" && typeof data.code === "string") {{
+        clearTimeout(timer);
+        fetch("/.treer/embed/session", {{ method: "POST", credentials: "include", redirect: "manual",
+          headers: {{ "content-type": "application/json" }}, body: JSON.stringify({{ code: data.code, nonce: nonce }}) }})
+        .then(function (r) {{ if (r.status !== 204) throw new Error("session"); return checkSession(); }})
+        .then(function (r) {{ if (r.status !== 204) throw new Error("check"); navigate(); }})
+        .catch(function () {{ report("cookies_blocked"); }});
+        return;
+      }}
+{v2_probe}
     }});
-    parentWindow.postMessage({{ treer_embed: "ready", nonce_hash: hash }}, CONSOLE);
+    {announce}
   }}).catch(function () {{ report("cookies_blocked"); }});
 }})();
 </script></body></html>"#
@@ -306,12 +359,20 @@ async fn open_embed_session(
 }
 
 /// `GET /.treer/embed/check`: 204 when the request carries a live embed
-/// session for this host, else 401; the bootstrap uses it to prove the
-/// partitioned cookie is actually sent back before loading the Agent UI.
+/// session for this host whose user still passes the interface gate for this
+/// Agent, else 401. The bootstrap uses it to prove the partitioned cookie is
+/// actually sent back before loading the Agent UI, and (#198 step 2) to decide
+/// whether an existing session can be reused without a mint, so a 204 must
+/// mean the UI request itself will be authorized: session (host, kind,
+/// expiry), membership, and the Policy pair evaluated without recording.
+#[allow(clippy::too_many_arguments)]
 async fn check_embed_session(
+    state: &AppState,
     auth: &AuthStore,
+    policy: &PolicyEngine,
     config: &IngressConfig,
     hostname: &str,
+    agent_id: &str,
     method: &Method,
     headers: &HeaderMap,
 ) -> Result<Response, ApiFailure> {
@@ -322,11 +383,25 @@ async fn check_embed_session(
         Some(token) => auth.authenticate_embed_session(hostname, &token).await?,
         None => None,
     };
-    if user.is_none() {
-        return Err(ApiFailure::unauthorized(
+    let no_session = || {
+        ApiFailure::unauthorized(
             "ingress_authentication_required",
             "no embed session for this origin",
-        ));
+        )
+    };
+    let Some(user_id) = user else {
+        return Err(no_session());
+    };
+    // The same answer for "no session" and "no longer allowed": the check
+    // reveals nothing the UI request would not.
+    let Some((workspace_id, _server_id)) = auth.agent_interface_target(agent_id).await? else {
+        return Err(no_session());
+    };
+    let Ok(agent) = state.resolve_agent(&workspace_id, agent_id).await else {
+        return Err(no_session());
+    };
+    if !interface_gate_allows(policy, &workspace_id, &user_id, &agent).await? {
+        return Err(no_session());
     }
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;

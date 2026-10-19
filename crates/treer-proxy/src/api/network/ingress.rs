@@ -497,8 +497,16 @@ async fn proxy_agent_interface_origin(
             "request carries both Content-Length and Transfer-Encoding",
         ));
     }
-    if let Some(served) =
-        serve_agent_embed_route(&auth, &config, &hostname, &agent_id, &mut request).await
+    if let Some(served) = serve_agent_embed_route(
+        &state,
+        &auth,
+        &policy,
+        &config,
+        &hostname,
+        &agent_id,
+        &mut request,
+    )
+    .await
     {
         return served;
     }
