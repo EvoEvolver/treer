@@ -700,6 +700,72 @@ cover chunked input, endless input, exact cap and failure at each read boundary.
 This establishes portable transport bounds only, not private-handle identity,
 attempt custody, native source acquisition or a bound on fixture construction.
 
+#### Next native fixture: fixed private evidence slot (proposed)
+
+Implement this below `windows_update_bootstrap::checked_files`, confined to
+the existing disposable `Attempt` fixture on local NTFS. Do not reuse
+`replace_record`: its retained readers deliberately permit delete sharing for
+replacement. Reason evidence instead needs one immutable, exclusively created
+slot and a retained read handle that denies writes and deletion. No installation
+path, Controller caller, reason verifier constructor or rollback actor is added.
+
+The proposed private API is `Attempt::store_evidence(bytes, expected_digest,
+fault) -> EvidencePin`. The fixed filename is `reason.evidence`; there is no
+caller filename, source selector, overwrite or replacement mode. The input is
+opaque fixture bytes, not an authenticated observation. Reject empty or larger
+than 8192 bytes and a digest mismatch before creating anything. A successful
+result borrows its live `Attempt`, retains the read handle and verified identity,
+and exposes neither Clone/serde nor an owned raw handle. It is storage custody
+only: no conversion to the Controller's verified-reason value is provided.
+
+1. Recheck the retained attempt directory's protected owner/SYSTEM-only ACL,
+   current path identity and local NTFS boundary, retaining its ancestor pins.
+   Derive the one fixed slot from that pinned directory, never receipt data.
+2. Create with `CREATE_NEW`, a protected owner/SYSTEM-only descriptor present
+   at creation, non-inheritable handle and OPEN_REPARSE_POINT. Reject an
+   existing file, link, directory or uncertain lookup without repair or removal.
+   Retain read/write access only for this preparation phase and allow at most
+   read sharing. Write the exact bounded bytes, sync, and read back through this
+   same handle. Verify regular-file attributes, single link, volume/file ID,
+   private ACL, exact size and expected hash. A failed operation leaves the
+   attempt unusable and preserves whatever evidence was created.
+3. Record the verified identity, close the writer, then reopen read-only with
+   FILE_SHARE_READ only. Recheck directory binding, final fixed path, identity,
+   single link, attributes and ACL. Read at most observed length plus one into
+   a fixed allocation (maximum 8193), require exact EOF and compare bytes/hash.
+   Recheck identity/size/ACL after reading. A replaced object, open writer,
+   changed bytes, sharing conflict or failed readback refuses the result.
+   The close/reopen gap is not an atomic handle downgrade: identity and content
+   checks detect substitution, and the final share mode excludes surviving
+   writers/deleters. It is not isolation from a malicious same-user process
+   capable of changing ACLs or injecting into the owner.
+4. Return the retained read pin only after all checks. A second store always
+   refuses, including identical bytes. An error never retries, deletes, chooses
+   another slot, relaxes sharing or claims durable publication. Loss of the
+   `Attempt` or read pin ends custody; reopening after restart cannot recreate
+   it. The caller must retain the pin through the entry publication lifetime.
+
+Use fixed fault stages after creation, after sync and after writer close to
+test preservation and no reusable result. A narrow readback seam may inject
+I/O/truncation failure; report it as injection rather than an observed OS
+failure. Fixture success proves sync/readback behavior on the tested OS, not
+power-loss durability, protected head storage or an authenticated failure.
+
+Hosted acceptance must run the exact SHA on Server 2022 and 2025: ordinary
+tests plus explicit native evidence tests for the 1-byte/8192-byte boundaries,
+zero/8193 refusal before creation, wrong digest, duplicate store, restrictive
+ACL/non-inheritance, write/delete/replacement denial while pinned, preserved
+bytes after injected failures and refusal to retry. Attempt-local fixtures may
+also inject a replacement during the writer-close seam and must observe
+identity/content rejection. Cleanup is explicit test-owned cleanup after all
+handles close; error paths never remove retained evidence themselves.
+
+This proposal needs security review before the native fixture is implemented.
+It does not enable W2/W3 transaction publication or W4 activation; authenticated
+observation acquisition, external head, durable consumption and health/actor
+ownership remain separate contracts. A real win_native installation run still
+requires the leader's coordination at its approved milestone.
+
 For the future private evidence store, the proposed readers are the owning OS
 user and SYSTEM only. Keep referenced evidence read-only through terminal state
 and for at least seven days afterwards, then require an explicit reviewed
