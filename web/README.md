@@ -965,3 +965,8 @@ open a workload or toggle a folder. Drag/drop and roving keyboard navigation
 remain on the existing tree items. Links defer dragging to the row rather than
 starting a native URL drag. The desktop tree reserves 12px on its right so the
 sidebar resize handle cannot intercept the painted row edge.
+
+A concealed tree actions button ignores pointer events until hover, focus or
+its open state reveals it; coarse pointers always show its 44px target. The
+indentation guide outside a nested row is hierarchy spacing, not part of that
+row's painted target.

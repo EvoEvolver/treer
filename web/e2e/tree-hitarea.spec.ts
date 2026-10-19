@@ -86,11 +86,13 @@ for (const width of [1360, 390]) for (const theme of ['light', 'dark']) {
       await expect(row.locator('[data-tree-primary] a,[data-tree-primary] button')).toHaveCount(0)
       const menu = row.locator('[data-tree-actions]')
       if (width === 390) expect((await bounds(menu)).height).toBeGreaterThanOrEqual(44)
+      await row.hover()
       await menu.click()
       await expect(page.getByRole('menu')).toBeVisible()
       await page.keyboard.press('Escape')
     }
     const parent = item(page, 'Parent')
+    await folderRow(page, 'Parent').hover()
     await folderRow(page, 'Parent').locator('[data-tree-actions]').click()
     await expect(page.getByRole('menu')).toBeVisible()
     await page.keyboard.press('Escape')
@@ -99,7 +101,13 @@ for (const width of [1360, 390]) for (const theme of ['light', 'dark']) {
     // Evidence has synthetic fixture data only, outside the repository.
     await page.addStyleTag({ content: '[role=tree] [data-tree-primary]{outline:1px solid currentColor;outline-offset:-1px}' })
     const dir = process.env.TREE_HITAREA_SHOTS
-    if (dir) { await mkdir(dir, { recursive: true }); await page.screenshot({ path: `${dir}/${width}-${theme}-${lang}.png` }) }
+    if (dir) {
+      await mkdir(dir, { recursive: true })
+      await page.screenshot({ path: `${dir}/${width}-${theme}-${lang}.png` })
+      await item(page, 'Alpha').locator('[data-tree-primary]').focus()
+      await item(page, 'Alpha').hover()
+      await page.screenshot({ path: `${dir}/${width}-${theme}-${lang}-hover-focus.png` })
+    }
   })
 }
 test('Tree full-row primary keeps keyboard navigation, native links and drag targets', async ({ page }) => {
@@ -132,4 +140,38 @@ test('Tree full-row primary keeps keyboard navigation, native links and drag tar
   await page.mouse.up()
   await expect.poll(() => moves.length).toBe(1)
   expect(moves[0]).toMatchObject({ folder_id: 'empty' })
+})
+
+test('Tree hidden menus do not intercept taps and coarse-pointer menus stay visible', async ({ page, browser, browserName }) => {
+  await setup(page)
+  const beta = item(page, 'Beta')
+  const menu = beta.locator('[data-tree-actions]')
+  await page.locator('[data-tree-primary]').first().focus()
+  await page.mouse.move(800, 800)
+  await expect(menu).toHaveCSS('opacity', '0')
+  await expect(menu).toHaveCSS('pointer-events', 'none')
+  await beta.hover()
+  await expect(menu).toHaveCSS('opacity', '1')
+  await expect(menu).toHaveCSS('pointer-events', 'auto')
+  await menu.click()
+  await expect(page.getByRole('menu')).toBeVisible()
+  await page.keyboard.press('Escape')
+  // Firefox has no Playwright touch emulation; its fine-pointer path above is real.
+  if (browserName === 'firefox') return
+  const context = await browser.newContext({ baseURL: new URL(page.url()).origin, viewport: { width: 390, height: 900 }, hasTouch: true })
+  try {
+    const touch = await context.newPage()
+    await setup(touch, 390)
+    expect(await touch.evaluate(() => matchMedia('(pointer: coarse)').matches)).toBe(true)
+    const row = item(touch, 'Beta')
+    const actions = row.locator('[data-tree-actions]')
+    await expect(actions).toHaveCSS('opacity', '1')
+    await expect(actions).toHaveCSS('pointer-events', 'auto')
+    const b = await bounds(row)
+    await touch.touchscreen.tap(b.x + b.width - 1, b.y + b.height / 2)
+    await expect(touch.locator('#workspace-panel-tab-2')).toBeVisible()
+    await showTree(touch)
+    await actions.tap()
+    await expect(touch.getByRole('menu')).toBeVisible()
+  } finally { await context.close() }
 })
