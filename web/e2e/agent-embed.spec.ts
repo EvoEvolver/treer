@@ -6,7 +6,7 @@ import { fixture, gotoWorkspace, open, switchTab } from './fixtures/workspace-ta
 const id = 'ag_0123456789abcdef0123456789abcdef'
 const origin = 'https://ag-0123456789abcdef0123456789abcdef.agents.example.test'
 const hash = 'a'.repeat(64), code = 'iec_v1_' + 'b'.repeat(64)
-async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'success', strict = false, realBootstrap = false, mintWait?: Promise<void>, enforceHeaders = false) {
+async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'success', strict = false, realBootstrap = false, mintWait?: Promise<void>, enforceHeaders = false, navigationWait?: Promise<void>) {
   const live = await fixture(page, { 'tab-1': origin+'/' }, { 'tab-1': id })
   await page.route('**/api/auth/config', r => r.fulfill({ json: { capabilities: ['agent.interface-origin.v1', 'agent.interface-embed.v1'] } }))
   let mints = 0, probes = 0, delivered = 0, mintedHash = ''
@@ -20,7 +20,8 @@ async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'succe
     probes++
     return strict ? r.fulfill({ status: 503, json: { error: { code: 'embedded_ui_requires_isolated_origin' } } }) : r.fulfill({ contentType: 'text/html', body: '<h1>Compatibility interface</h1>' })
   })
-  await page.route(origin+'/**', r => {
+  await page.route(origin+'/**', async r => {
+    if (navigationWait && new URL(r.request().url()).pathname === '/.treer/embed') await navigationWait
     const target = JSON.stringify(new URL(page.url()).origin)
     if (realBootstrap && new URL(r.request().url()).pathname === '/.treer/embed') {
       // Execute the actual Core bootstrap, not a second implementation of it.
@@ -253,4 +254,37 @@ for (const badOrigin of [
   await gotoWorkspace(page); await open(page, 'Alpha')
   await expect(page.getByRole('alert')).toContainText('Cannot')
   await expect(page.locator('iframe')).toHaveCount(0)
+})
+
+
+test('theme messages wait for iframe navigation and still follow later theme changes', async ({ page }) => {
+  const errors: string[] = []
+  page.on('console', message => { if (message.type() === 'error' || /postMessage|target origin/i.test(message.text())) errors.push(message.text()) })
+  page.on('pageerror', error => errors.push(error.message))
+  let release!: () => void
+  const navigation = new Promise<void>(resolve => { release = resolve })
+  try {
+    await setup(page, 'manual', false, false, undefined, false, navigation)
+    // Keep the iframe at its initial Console-origin about:blank through effects
+    // and a theme change. Neither may post to the future Agent origin yet.
+    const setTheme = async (value: 'dark' | 'light') => page.evaluate(async theme => {
+      const module = await import('/src/lib/theme.ts')
+      module.persistTheme(theme)
+    }, value)
+    await setTheme('dark')
+    await page.waitForTimeout(200)
+    expect(errors).toEqual([])
+    release()
+    await expect.poll(() => page.frames().some(frame => frame.url().startsWith(origin))).toBe(true)
+    const child = page.frames().find(frame => frame.url().startsWith(origin))!
+    await child.evaluate(() => {
+      document.body.innerHTML = '<output></output>'
+      addEventListener('message', event => {
+        if (event.data?.type === 'treer:embed-theme') document.querySelector('output')!.textContent = event.data.theme
+      })
+    })
+    await setTheme('light')
+    await expect(child.locator('output')).toHaveText('light')
+    expect(errors).toEqual([])
+  } finally { release() }
 })
