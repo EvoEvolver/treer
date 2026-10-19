@@ -911,6 +911,9 @@ organization_audit_events` on larger databases and build the index ahead of
 time if the write pause matters). The columns, trigger and index are additive:
 rolling the Proxy back leaves them in place and an older Proxy ignores them.
 Display names in summaries are the current names, not the names at event time.
+Stored instants are rounded to the microsecond; summary ranges are half-open on
+that typed instant and the event feed filters on the same stored values, so an
+event within one microsecond of a range boundary may fall on either side of it.
 
 Retention starts at 180 days for every organization audit kind, including
 security-sensitive events. Set Proxy `--audit-retention-days DAYS` or

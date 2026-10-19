@@ -821,6 +821,36 @@ async fn audit_instant_trigger_and_backfill_touch_only_the_typed_column() {
         before, after,
         "backfill changed a column other than the typed instant"
     );
+
+    // Trigger-filled and backfilled rows with the same text get the same
+    // typed instant (same total parse function), including nanosecond text.
+    sqlx::query(
+        "INSERT INTO organization_audit_events(event_id, organization_id, workspace_id, occurred_at, actor_kind, source, action, outcome, resource_kind, resource_id) \
+         SELECT 'aud_nanos_legacy', 'org_a', 'a', occurred_at, 'system', 'test', 'agent.created', 'succeeded', 'agent', 'ag_1' \
+         FROM organization_audit_events WHERE event_id = 'aud_nanos'",
+    )
+    .execute(&auth.pool())
+    .await
+    .unwrap();
+    sqlx::query("UPDATE organization_audit_events SET occurred_at_ts = NULL WHERE event_id = 'aud_nanos_legacy'")
+        .execute(&auth.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        crate::audit::maintenance::backfill_batch(&auth.pool())
+            .await
+            .unwrap(),
+        1
+    );
+    let same: bool = sqlx::query_scalar(
+        "SELECT a.occurred_at_ts = b.occurred_at_ts AND a.occurred_at = b.occurred_at \
+         FROM organization_audit_events a, organization_audit_events b \
+         WHERE a.event_id = 'aud_nanos' AND b.event_id = 'aud_nanos_legacy'",
+    )
+    .fetch_one(&auth.pool())
+    .await
+    .unwrap();
+    assert!(same, "trigger and backfill disagree on the same text");
 }
 
 /// The range scan can use the workspace/time index: with sequential scans
