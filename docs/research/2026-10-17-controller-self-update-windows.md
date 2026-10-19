@@ -333,6 +333,14 @@ even when all health inputs claim success. It never reads/writes a receipt or
 marker, grants recovery authority, or implements a production command. Native
 storage/identity and fault-injection tests remain necessary.
 
+Health evidence must also belong to the durable transaction state: prepared and
+activating accept no health records; core-healthy accepts only new-health;
+complete requires new/final-health and refuses old-health; rollback substeps and
+rolled-back refuse final-health. Rollback may retain new-health evidence, and
+rolled-back still requires old-health. The pure model enumerates all eight flag
+combinations for each state on otherwise valid layouts. Stray evidence is a
+conflict, not ignored metadata that might conceal a reordered receipt write.
+
 ### W1a: private directory and checked-copy fixture
 
 `windows_update_bootstrap/checked_files.rs` is private under `cfg(windows, test)`.

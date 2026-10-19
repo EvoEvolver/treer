@@ -87,6 +87,21 @@ fn inspect_pair(
     final_health_recorded: bool,
     old_health_recorded: bool,
 ) -> PairInspection {
+    let evidence_belongs = match transaction {
+        Transaction::Prepared | Transaction::Activating => {
+            !new_health_recorded && !final_health_recorded && !old_health_recorded
+        }
+        Transaction::CoreHealthy | Transaction::Complete => {
+            !old_health_recorded
+                && (!final_health_recorded || matches!(transaction, Transaction::Complete))
+        }
+        Transaction::RollbackCli | Transaction::RollbackController | Transaction::RolledBack => {
+            !final_health_recorded
+        }
+    };
+    if !evidence_belongs {
+        return PairInspection::Conflict;
+    }
     let c = inspect(controller.step, controller.slots);
     let l = inspect(cli.step, cli.slots);
     if c == Inspection::Conflict || l == Inspection::Conflict {
@@ -136,6 +151,51 @@ fn inspect_pair(
 }
 
 #[test]
+fn stray_health_records_cannot_hide_a_reordered_receipt_write() {
+    use Object::{Absent, New, Old};
+    use Transaction::*;
+    let original = Image {
+        step: Step::Original,
+        slots: [Old, New, Absent],
+    };
+    let published = Image {
+        step: Step::Published,
+        slots: [New, Absent, Old],
+    };
+    let restored = Image {
+        step: Step::Restored,
+        ..original
+    };
+    // Bit positions are new/final/old health. Enumerate all eight possibilities
+    // against otherwise valid layouts, including retained new-health evidence
+    // during rollback. Old-health evidence cannot coexist with Complete.
+    for (tx, controller, cli, accepted) in [
+        (Prepared, original, original, &[0][..]),
+        (Activating, published, original, &[0][..]),
+        (CoreHealthy, published, original, &[1][..]),
+        (Complete, published, published, &[3][..]),
+        (RollbackCli, published, restored, &[0, 1, 4, 5][..]),
+        (RollbackController, restored, restored, &[0, 1, 4, 5][..]),
+        (RolledBack, restored, restored, &[4, 5][..]),
+    ] {
+        for flags in 0..8 {
+            let result = inspect_pair(
+                tx,
+                controller,
+                cli,
+                flags & 1 != 0,
+                flags & 2 != 0,
+                flags & 4 != 0,
+            );
+            assert_eq!(
+                result == PairInspection::Consistent,
+                accepted.contains(&flags)
+            );
+        }
+    }
+}
+
+#[test]
 fn cross_image_order_and_health_evidence_are_independent_of_matching_files() {
     use Object::{Absent, New, Old};
     use PairInspection::{Conflict, Consistent};
@@ -172,7 +232,7 @@ fn cross_image_order_and_health_evidence_are_independent_of_matching_files() {
     }
     for tx in [Prepared, Activating] {
         assert_eq!(
-            inspect_pair(tx, published, published, true, true, true),
+            inspect_pair(tx, published, published, false, false, false),
             Conflict
         );
     }
@@ -185,7 +245,7 @@ fn cross_image_order_and_health_evidence_are_independent_of_matching_files() {
         Conflict
     );
     assert_eq!(
-        inspect_pair(RollbackController, restored, published, true, true, true),
+        inspect_pair(RollbackController, restored, published, true, false, false),
         Conflict
     );
     assert_eq!(
@@ -234,14 +294,17 @@ fn cross_image_checks_cannot_hide_an_unreadable_or_impossible_image() {
         Transaction::RolledBack,
     ] {
         for bad in [damaged, impossible] {
-            assert_eq!(
-                inspect_pair(tx, bad, original, true, true, true),
-                PairInspection::Conflict
-            );
-            assert_eq!(
-                inspect_pair(tx, original, bad, true, true, true),
-                PairInspection::Conflict
-            );
+            for flags in 0..8 {
+                let (new, final_health, old) = (flags & 1 != 0, flags & 2 != 0, flags & 4 != 0);
+                assert_eq!(
+                    inspect_pair(tx, bad, original, new, final_health, old),
+                    PairInspection::Conflict
+                );
+                assert_eq!(
+                    inspect_pair(tx, original, bad, new, final_health, old),
+                    PairInspection::Conflict
+                );
+            }
         }
     }
 }
