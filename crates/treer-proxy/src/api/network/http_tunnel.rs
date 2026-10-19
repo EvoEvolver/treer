@@ -86,6 +86,8 @@ pub(in crate::api) async fn proxy_virtual_network_host(
         "virtual host",
         TrafficClass::VirtualHost,
         None,
+        // Virtual-host tunnels carry no browser session of their own (#194).
+        None,
     )
     .await
 }
@@ -260,6 +262,7 @@ async fn interface_ui_subject(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::api) async fn proxy_agent_interface_ui_root(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     Extension(browser): Extension<BrowserAccess>,
     Extension(bootstrap): Extension<BootstrapConfig>,
@@ -283,8 +286,23 @@ pub(in crate::api) async fn proxy_agent_interface_ui_root(
     .await?;
     let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
     require_agent_interface_access(&policy, &workspace_id, &subject, &agent).await?;
-    let mut response =
-        proxy_agent_interface_ui(state, workspace_id, agent_id, String::new(), request).await?;
+    let revalidation = console_upgrade_revalidation(
+        &auth,
+        &policy,
+        session.as_deref(),
+        &subject,
+        &workspace_id,
+        &agent,
+    );
+    let mut response = proxy_agent_interface_ui(
+        state,
+        workspace_id,
+        agent_id,
+        String::new(),
+        request,
+        revalidation,
+    )
+    .await?;
     crate::api::app_ui::allow_control_plane_frame(response.headers_mut(), &browser)?;
     Ok(response)
 }
@@ -292,6 +310,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui_root(
 #[allow(clippy::too_many_arguments)]
 pub(in crate::api) async fn proxy_agent_interface_ui_path(
     State(state): State<AppState>,
+    Extension(auth): Extension<AuthStore>,
     Extension(policy): Extension<PolicyEngine>,
     Extension(browser): Extension<BrowserAccess>,
     Extension(bootstrap): Extension<BootstrapConfig>,
@@ -315,8 +334,17 @@ pub(in crate::api) async fn proxy_agent_interface_ui_path(
     .await?;
     let agent = state.resolve_agent(&workspace_id, &agent_id).await?;
     require_agent_interface_access(&policy, &workspace_id, &subject, &agent).await?;
+    let revalidation = console_upgrade_revalidation(
+        &auth,
+        &policy,
+        session.as_deref(),
+        &subject,
+        &workspace_id,
+        &agent,
+    );
     let mut response =
-        proxy_agent_interface_ui(state, workspace_id, agent_id, path, request).await?;
+        proxy_agent_interface_ui(state, workspace_id, agent_id, path, request, revalidation)
+            .await?;
     crate::api::app_ui::allow_control_plane_frame(response.headers_mut(), &browser)?;
     Ok(response)
 }
@@ -327,6 +355,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui(
     target: String,
     path: String,
     mut request: Request<Body>,
+    revalidation: Option<UpgradeRevalidation>,
 ) -> Result<Response, ApiFailure> {
     let agent = state.resolve_agent(&workspace_id, &target).await?;
     let interface = agent
@@ -366,6 +395,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui(
         "Agent Interface UI",
         TrafficClass::AgentInterface,
         None,
+        revalidation,
     )
     .await
 }
@@ -383,6 +413,7 @@ pub(in crate::api) async fn tunnel_http_request(
     route_kind: &'static str,
     traffic_class: TrafficClass,
     upgrade_permit: Option<std::sync::Arc<crate::ingress_guard::Permit>>,
+    revalidation: Option<UpgradeRevalidation>,
 ) -> Result<Response, ApiFailure> {
     let stream = state
         .open_browser_network_stream(
@@ -427,7 +458,14 @@ pub(in crate::api) async fn tunnel_http_request(
             let Ok(target) = target.await else { return };
             let mut downstream = TokioIo::new(downstream);
             let mut target = TokioIo::new(target);
-            let _ = tokio::io::copy_bidirectional(&mut downstream, &mut target).await;
+            match revalidation {
+                None => {
+                    let _ = tokio::io::copy_bidirectional(&mut downstream, &mut target).await;
+                }
+                Some(revalidation) => {
+                    relay_with_revalidation(&mut downstream, &mut target, revalidation).await;
+                }
+            }
         });
     }
     let (parts, body) = response.into_parts();
@@ -674,4 +712,317 @@ mod provenance_tests {
                 .any(|name| treer_protocol::is_treer_header_name(name.as_str())));
         }
     }
+}
+
+/// For a human Console session on the Proxy-origin interface tunnel: the
+/// session, membership and the interface gate are re-checked while an
+/// upgraded socket lives (#194). Machine subjects keep their credential
+/// semantics and are not re-checked here.
+fn console_upgrade_revalidation(
+    auth: &AuthStore,
+    policy: &PolicyEngine,
+    session: Option<&CurrentSession>,
+    subject: &PolicySubject,
+    workspace_id: &str,
+    agent: &AgentInfo,
+) -> Option<UpgradeRevalidation> {
+    let (PolicySubject::Human { user_id }, Some(session)) = (subject, session) else {
+        return None;
+    };
+    Some(
+        UpgradeRevalidation::console(auth.clone(), &session.token, workspace_id, user_id)
+            .with_agent_gate(policy.clone(), agent.clone()),
+    )
+}
+
+/// How often an upgraded tunnel re-checks the browser authority behind it
+/// (#194), plus a per-socket jitter so N sockets spread their lookups.
+pub(in crate::api) const TUNNEL_REVALIDATE_INTERVAL: Duration = Duration::from_secs(30);
+pub(in crate::api) const TUNNEL_REVALIDATE_JITTER: Duration = Duration::from_secs(5);
+/// Consecutive checks that may fail on database errors before the socket is
+/// closed anyway (about 90 s of unverified authority).
+pub(in crate::api) const TUNNEL_UNVERIFIED_MAX_CHECKS: u32 = 3;
+/// Close codes: the same as the events stream for session and membership.
+pub(in crate::api) const TUNNEL_CLOSE_SESSION_ENDED: u16 = 4401;
+pub(in crate::api) const TUNNEL_CLOSE_ACCESS_REVOKED: u16 = 4403;
+pub(in crate::api) const TUNNEL_CLOSE_UNVERIFIED: u16 = 1011;
+/// Writing the close frame and shutting a half down never blocks the task
+/// longer than this.
+const TUNNEL_CLOSE_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+
+static TUNNEL_REVALIDATE_INTERVAL_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(TUNNEL_REVALIDATE_INTERVAL.as_millis() as u64);
+static TUNNEL_REVALIDATE_JITTER_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(TUNNEL_REVALIDATE_JITTER.as_millis() as u64);
+
+fn tunnel_revalidate_interval() -> Duration {
+    Duration::from_millis(TUNNEL_REVALIDATE_INTERVAL_MS.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+fn tunnel_revalidate_jitter() -> Duration {
+    let max = TUNNEL_REVALIDATE_JITTER_MS.load(std::sync::atomic::Ordering::Relaxed);
+    if max == 0 {
+        return Duration::ZERO;
+    }
+    Duration::from_millis(rand::Rng::gen_range(&mut rand::thread_rng(), 0..=max))
+}
+
+/// Tests shrink the window; production never changes it.
+#[cfg(test)]
+pub(in crate::api) fn set_tunnel_revalidation_for_test(interval: Duration, jitter: Duration) {
+    TUNNEL_REVALIDATE_INTERVAL_MS.store(
+        interval.as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+    TUNNEL_REVALIDATE_JITTER_MS.store(
+        jitter.as_millis() as u64,
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// The browser session that authorized an upgraded tunnel, re-checked while
+/// the socket lives (#194): the same lookups as the HTTP path (ingress or
+/// embed session by hostname, token and kind; or the Console session), then
+/// current workspace membership, then the interface gate without recording
+/// a Policy decision. Holds the session token for the life of the socket, so
+/// it is never printed: `Debug` shows the kind and the ids only.
+pub(in crate::api) struct UpgradeRevalidation {
+    auth: AuthStore,
+    session: RevalidatedSession,
+    workspace_id: String,
+    user_id: String,
+    agent_gate: Option<(PolicyEngine, AgentInfo)>,
+}
+
+enum RevalidatedSession {
+    Ingress {
+        hostname: String,
+        token: String,
+        embed: bool,
+    },
+    Console {
+        token: String,
+    },
+}
+
+impl std::fmt::Debug for UpgradeRevalidation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let kind = match &self.session {
+            RevalidatedSession::Ingress { embed: true, .. } => "embed",
+            RevalidatedSession::Ingress { embed: false, .. } => "ingress",
+            RevalidatedSession::Console { .. } => "console",
+        };
+        f.debug_struct("UpgradeRevalidation")
+            .field("session", &kind)
+            .field("workspace_id", &self.workspace_id)
+            .field("user_id", &self.user_id)
+            .field(
+                "agent_id",
+                &self
+                    .agent_gate
+                    .as_ref()
+                    .map(|(_, agent)| agent.agent_id.as_str()),
+            )
+            .finish_non_exhaustive()
+    }
+}
+
+/// Result of one re-check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(in crate::api) enum RevalidationOutcome {
+    /// Everything the HTTP path would require still holds.
+    Verified,
+    /// The session is gone, expired, or belongs to someone else.
+    SessionEnded,
+    /// Membership or the interface gate no longer allows this user.
+    AccessRevoked,
+    /// A database or Policy-store error: nothing is granted, retried next tick.
+    Unavailable,
+}
+
+impl UpgradeRevalidation {
+    pub(in crate::api) fn ingress(
+        auth: AuthStore,
+        hostname: &str,
+        token: &str,
+        embed: bool,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Self {
+        Self {
+            auth,
+            session: RevalidatedSession::Ingress {
+                hostname: hostname.to_owned(),
+                token: token.to_owned(),
+                embed,
+            },
+            workspace_id: workspace_id.to_owned(),
+            user_id: user_id.to_owned(),
+            agent_gate: None,
+        }
+    }
+
+    pub(in crate::api) fn console(
+        auth: AuthStore,
+        token: &str,
+        workspace_id: &str,
+        user_id: &str,
+    ) -> Self {
+        Self {
+            auth,
+            session: RevalidatedSession::Console {
+                token: token.to_owned(),
+            },
+            workspace_id: workspace_id.to_owned(),
+            user_id: user_id.to_owned(),
+            agent_gate: None,
+        }
+    }
+
+    /// Also re-evaluate the Agent interface gate (`agent.output.read` and
+    /// `agent.prompt`) for this user, without recording a Policy decision.
+    pub(in crate::api) fn with_agent_gate(
+        mut self,
+        policy: PolicyEngine,
+        agent: AgentInfo,
+    ) -> Self {
+        self.agent_gate = Some((policy, agent));
+        self
+    }
+
+    pub(in crate::api) async fn check(&self) -> RevalidationOutcome {
+        let session = match &self.session {
+            RevalidatedSession::Ingress {
+                hostname,
+                token,
+                embed,
+            } => {
+                self.auth
+                    .authenticate_ingress_session_kind(hostname, token, *embed)
+                    .await
+            }
+            RevalidatedSession::Console { token } => self
+                .auth
+                .revalidate_session(token)
+                .await
+                .map(|current| current.map(|current| current.user_id)),
+        };
+        let membership = match self
+            .auth
+            .require_workspace_member(&self.workspace_id, &self.user_id)
+            .await
+        {
+            Ok(()) => RevalidationOutcome::Verified,
+            Err(error) if error.code() == "database_error" => RevalidationOutcome::Unavailable,
+            Err(_) => RevalidationOutcome::AccessRevoked,
+        };
+        match session {
+            Ok(Some(user_id)) if user_id == self.user_id => {}
+            // The ingress lookup already folds membership in and answers
+            // "no session" for a former member; name the real reason.
+            Ok(_) if membership == RevalidationOutcome::AccessRevoked => {
+                return RevalidationOutcome::AccessRevoked
+            }
+            Ok(_) => return RevalidationOutcome::SessionEnded,
+            Err(error) if error.code() == "database_error" => {
+                return RevalidationOutcome::Unavailable
+            }
+            Err(_) => return RevalidationOutcome::SessionEnded,
+        }
+        if membership != RevalidationOutcome::Verified {
+            return membership;
+        }
+        if let Some((policy, agent)) = &self.agent_gate {
+            for action in [ACTION_AGENT_OUTPUT_READ, ACTION_AGENT_PROMPT] {
+                let request = PolicyRequest::new(
+                    &self.workspace_id,
+                    PolicySubject::Human {
+                        user_id: self.user_id.clone(),
+                    },
+                    action,
+                    agent_policy_resource(agent),
+                );
+                match policy.explain_request(&request).await {
+                    Ok(explanation)
+                        if explanation.effective_decision
+                            == treer_protocol::PolicyEffect::Allow => {}
+                    Ok(_) => return RevalidationOutcome::AccessRevoked,
+                    Err(_) => return RevalidationOutcome::Unavailable,
+                }
+            }
+        }
+        RevalidationOutcome::Verified
+    }
+}
+
+/// An unmasked server close frame: FIN + opcode 8, two-byte code, short
+/// ASCII reason.
+pub(in crate::api) fn websocket_close_frame(code: u16, reason: &str) -> Vec<u8> {
+    let reason = &reason.as_bytes()[..reason.len().min(123)];
+    let mut frame = Vec::with_capacity(4 + reason.len());
+    frame.push(0x88);
+    frame.push((2 + reason.len()) as u8);
+    frame.extend_from_slice(&code.to_be_bytes());
+    frame.extend_from_slice(reason);
+    frame
+}
+
+/// Relays the upgraded bytes until either side closes or a re-check fails;
+/// then sends a close frame to the browser and shuts both halves down, so the
+/// Agent or App stops receiving as well. The relay is byte-level: when the
+/// target was mid-frame the browser sees a protocol error instead of the code.
+/// Either way the socket is gone within one interval of the revocation.
+async fn relay_with_revalidation<D, T>(
+    downstream: &mut D,
+    target: &mut T,
+    revalidation: UpgradeRevalidation,
+) where
+    D: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use tokio::io::AsyncWriteExt;
+    let code = {
+        let relay = tokio::io::copy_bidirectional(downstream, target);
+        tokio::pin!(relay);
+        let mut due =
+            tokio::time::Instant::now() + tunnel_revalidate_interval() + tunnel_revalidate_jitter();
+        let mut unverified = 0_u32;
+        loop {
+            tokio::select! {
+                _ = &mut relay => return,
+                _ = tokio::time::sleep_until(due) => {
+                    match revalidation.check().await {
+                        RevalidationOutcome::Verified => unverified = 0,
+                        RevalidationOutcome::Unavailable => {
+                            unverified += 1;
+                            tracing::warn!(
+                                revalidation = ?revalidation,
+                                unverified,
+                                "tunnel session re-check failed; keeping the socket until the next check"
+                            );
+                            if unverified >= TUNNEL_UNVERIFIED_MAX_CHECKS {
+                                break TUNNEL_CLOSE_UNVERIFIED;
+                            }
+                        }
+                        RevalidationOutcome::SessionEnded => break TUNNEL_CLOSE_SESSION_ENDED,
+                        RevalidationOutcome::AccessRevoked => break TUNNEL_CLOSE_ACCESS_REVOKED,
+                    }
+                    due = tokio::time::Instant::now()
+                        + tunnel_revalidate_interval()
+                        + tunnel_revalidate_jitter();
+                }
+            }
+        }
+    };
+    let reason = match code {
+        TUNNEL_CLOSE_SESSION_ENDED => "session ended",
+        TUNNEL_CLOSE_ACCESS_REVOKED => "access revoked",
+        _ => "unverified",
+    };
+    tracing::info!(revalidation = ?revalidation, code, "closing tunnelled socket");
+    let frame = websocket_close_frame(code, reason);
+    let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, downstream.write_all(&frame)).await;
+    let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, downstream.shutdown()).await;
+    let _ = tokio::time::timeout(TUNNEL_CLOSE_WRITE_TIMEOUT, target.shutdown()).await;
+    drop(revalidation);
 }

@@ -102,7 +102,11 @@ async fn redeem(
 }
 
 /// Mint and redeem for `user`; returns the embed cookie pair.
-async fn establish_embed_session(fixture: &Fixture, config: &IngressConfig, user: &str) -> String {
+pub(super) async fn establish_embed_session(
+    fixture: &Fixture,
+    config: &IngressConfig,
+    user: &str,
+) -> String {
     let (code, nonce) = minted_code(fixture, config, user).await;
     let response = redeem(fixture, config, AGENT_HOST, &code, &nonce)
         .await

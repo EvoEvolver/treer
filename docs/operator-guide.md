@@ -1003,6 +1003,17 @@ domain separate registrable domains where possible; see
 [the security model](security.md#embed-sessions) for why. Supported browsers
 for the embedded path: Chrome and Edge 114+, Firefox 141+, Safari 26.2.
 
+WebSockets tunnelled through an Agent origin, a workspace App host or the
+Proxy-origin interface tunnel are re-checked every 30 seconds (plus up to
+5 seconds of jitter): a socket whose session ended (logout, 12-hour expiry) is
+closed with WebSocket code 4401, one whose membership or Agent interface
+permission was revoked with 4403, within about 36 seconds. During a database
+outage the Proxy keeps sockets for three failed checks (about 120 seconds) and
+then closes them with 1011; `tunnel session re-check failed` warnings show the
+retries. Public and Bearer-token upgrades are not re-checked. The Agent or App
+side of the socket is closed as well, so a UI that reconnects after 4401/4403
+gets the ordinary authorize redirect or 401 instead of a new socket.
+
 ## Serving the browser App from the Proxy
 
 `TREER_APP_DIST_DIR` (or `--app-dist-dir`) makes the Proxy serve the web App

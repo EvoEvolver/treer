@@ -1556,7 +1556,7 @@ impl AuthStore {
             .await
     }
 
-    async fn authenticate_ingress_session_kind(
+    pub(crate) async fn authenticate_ingress_session_kind(
         &self,
         hostname: &str,
         token: &str,

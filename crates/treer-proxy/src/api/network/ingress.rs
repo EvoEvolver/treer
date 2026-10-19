@@ -293,6 +293,9 @@ pub(in crate::api) async fn proxy_service_ingress(
     }
 
     let mut identity_token = None;
+    // Upgraded sockets authorized by a browser session are re-checked while
+    // they live (#194); public and Bearer upgrades are not.
+    let mut revalidation = None;
     if resolved.ingress.access == ServiceIngressAccess::Workspace && !auth.authentication_disabled()
     {
         if let Some(token) = ingress_bearer_token(request.headers())? {
@@ -310,8 +313,8 @@ pub(in crate::api) async fn proxy_service_ingress(
             identity_token = Some(token.to_string());
         } else {
             let session = cookie_value(request.headers(), config.ingress_cookie_name());
-            let user_id = match session {
-                Some(token) => auth.authenticate_ingress_session(&hostname, &token).await?,
+            let user_id = match &session {
+                Some(token) => auth.authenticate_ingress_session(&hostname, token).await?,
                 None => None,
             };
             let Some(user_id) = user_id else {
@@ -333,6 +336,18 @@ pub(in crate::api) async fn proxy_service_ingress(
                 )
                 .await?,
             );
+            if upgraded {
+                revalidation = session.map(|token| {
+                    UpgradeRevalidation::ingress(
+                        auth.clone(),
+                        &hostname,
+                        &token,
+                        false,
+                        &resolved.ingress.workspace_id,
+                        &user_id,
+                    )
+                });
+            }
         }
     }
 
@@ -390,6 +405,7 @@ pub(in crate::api) async fn proxy_service_ingress(
         "service ingress",
         TrafficClass::ServiceIngress,
         permit.clone(),
+        revalidation,
     );
     let response = match tokio::time::timeout(
         Duration::from_secs(u64::from(limits.response_timeout_secs)),
@@ -510,6 +526,9 @@ async fn proxy_agent_interface_origin(
     let upgraded = request.headers().contains_key(header::UPGRADE);
     let embed_context = embed_cookie_context(request.headers(), upgraded, &config, &hostname)?;
     let mut embedded = false;
+    // The cookie that authorized this request, kept only to re-check an
+    // upgraded socket while it lives (#194).
+    let mut session_token = None;
     let user_id = if auth.authentication_disabled() {
         None
     } else {
@@ -518,11 +537,17 @@ async fn proxy_agent_interface_origin(
             if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
                 user_id = auth.authenticate_embed_session(&hostname, &token).await?;
                 embedded = user_id.is_some();
+                if embedded {
+                    session_token = Some(token);
+                }
             }
         }
         if user_id.is_none() {
             if let Some(token) = cookie_value(request.headers(), config.ingress_cookie_name()) {
                 user_id = auth.authenticate_ingress_session(&hostname, &token).await?;
+                if user_id.is_some() {
+                    session_token = Some(token);
+                }
             }
         }
         let Some(user_id) = user_id else {
@@ -578,6 +603,20 @@ async fn proxy_agent_interface_origin(
     *request.version_mut() = Version::HTTP_11;
     let upgraded = request.headers().contains_key(header::UPGRADE);
     sanitize_agent_interface_headers(request.headers_mut(), upgraded, &agent.agent_id, interface)?;
+    let revalidation = match (&user_id, session_token) {
+        (Some(user_id), Some(token)) if upgraded => Some(
+            UpgradeRevalidation::ingress(
+                auth.clone(),
+                &hostname,
+                &token,
+                embedded,
+                &workspace_id,
+                user_id,
+            )
+            .with_agent_gate(policy.clone(), agent.clone()),
+        ),
+        _ => None,
+    };
     let mut response = tunnel_http_request(
         state,
         &workspace_id,
@@ -590,6 +629,7 @@ async fn proxy_agent_interface_origin(
         "Agent interface origin",
         TrafficClass::AgentInterface,
         None,
+        revalidation,
     )
     .await?;
     if response.status() != StatusCode::SWITCHING_PROTOCOLS {
