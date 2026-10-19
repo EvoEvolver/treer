@@ -163,6 +163,13 @@ identity checks, exclusive ownership and mutation fencing remain prerequisites
 for a future native caller. Same-size in-place changes are not detected by the
 length checks; the independent pair digest check is still mandatory. No I/O
 deadline or power-loss durability guarantee is provided by this adapter.
+The native caller must read through the same handle that passed NTFS, ACL and
+identity checks, without reopening by path, and deny write/delete sharing for
+the complete read and digest interval. Compute the digest over the exact returned
+bytes, never a second read. The local fixed-disk NTFS assumption must be checked
+by the native caller, including refusal of pipes/devices; `is_file` alone is not
+that native admission check. The random `create_new` shared-temp opener is a
+disposable test fixture only, not the production private-record opener.
 Portable tests cover every truncated length, mutation of every header byte,
 wrong kind/endianness, overflowing declared length and the exact total cap.
 On Unix, a disposable real `Journal` is given a Windows receipt with a sibling
