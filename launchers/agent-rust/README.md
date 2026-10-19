@@ -559,6 +559,10 @@ must still inventory the actual tree and verify no descendants remain.
 
 ## Remaining port and review work
 
+For the leader-run apps-dev switch authorized in #158 decision 5559, see the
+[target-specific runbook](ops/APPS-DEV-SWITCH.md) and its read-only frozen-source
+eligibility checker. This supplement does not authorize other agent switches.
+
 Before any disposable managed run, Core/security review this first checkpoint
 and the exact experiment command. Before any team-Agent switch, both a full
 security review and the leader's decision are required. No team switch is part
