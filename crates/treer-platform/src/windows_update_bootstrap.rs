@@ -928,6 +928,103 @@ mod tests {
     }
 
     #[test]
+    fn native_checked_rename_keeps_identity_and_reverses_activation() {
+        use checked_files::{Attempt, Slot};
+        let fixture = PrivateImage::new();
+        let name = "attempt-00000000000000000000000000000004";
+        let path = fixture.directory.join(name);
+        let attempt = Attempt::create(&fixture.directory, name).unwrap();
+        let source = open_pinned(&fixture.path, false).unwrap();
+        let expected = digest(&source).unwrap();
+        let old = attempt.copy_for_rename(&source, expected).unwrap();
+        let old_id = identity(&old).unwrap();
+        attempt
+            .rename_checked(&old, Slot::Candidate, Slot::Active, expected)
+            .unwrap();
+        let new = attempt.copy_for_rename(&source, expected).unwrap();
+        let new_id = identity(&new).unwrap();
+        assert_ne!(old_id, new_id);
+        attempt
+            .rename_checked(&old, Slot::Active, Slot::Backup, expected)
+            .unwrap();
+        attempt
+            .rename_checked(&new, Slot::Candidate, Slot::Active, expected)
+            .unwrap();
+        assert_eq!(identity(&old).unwrap(), old_id);
+        assert_eq!(identity(&new).unwrap(), new_id);
+        // Reverse a completed activation without dropping either verified pin.
+        attempt
+            .rename_checked(&new, Slot::Active, Slot::Candidate, expected)
+            .unwrap();
+        attempt
+            .rename_checked(&old, Slot::Backup, Slot::Active, expected)
+            .unwrap();
+        assert!(final_path(&old).unwrap().ends_with("controller.exe"));
+        assert!(final_path(&new).unwrap().ends_with("candidate.exe"));
+        assert!(OpenOptions::new()
+            .write(true)
+            .open(path.join("controller.exe"))
+            .is_err());
+        drop((old, new, source, attempt));
+        std::fs::remove_file(path.join("controller.exe")).unwrap();
+        std::fs::remove_file(path.join("candidate.exe")).unwrap();
+        std::fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
+    fn native_checked_rename_refuses_collision_and_restores_backup_after_failure() {
+        use checked_files::{Attempt, Slot};
+        let fixture = PrivateImage::new();
+        let name = "attempt-00000000000000000000000000000005";
+        let path = fixture.directory.join(name);
+        let attempt = Attempt::create(&fixture.directory, name).unwrap();
+        let source = open_pinned(&fixture.path, false).unwrap();
+        let expected = digest(&source).unwrap();
+        let old = attempt.copy_for_rename(&source, expected).unwrap();
+        attempt
+            .rename_checked(&old, Slot::Candidate, Slot::Active, expected)
+            .unwrap();
+        let new = attempt.copy_for_rename(&source, expected).unwrap();
+        // Existing active object cannot be overwritten or mistaken for candidate.
+        assert!(attempt
+            .rename_checked(&new, Slot::Candidate, Slot::Active, expected)
+            .is_err());
+        assert!(attempt
+            .rename_checked(&new, Slot::Active, Slot::Backup, expected)
+            .is_err());
+        attempt
+            .rename_checked(&old, Slot::Active, Slot::Backup, expected)
+            .unwrap();
+        let mut wrong = expected;
+        wrong[0] ^= 1;
+        assert!(attempt
+            .rename_checked(&new, Slot::Candidate, Slot::Active, wrong)
+            .is_err());
+        // A second-rename collision also preserves both source objects. Recovery
+        // must refuse while the destination is occupied, never delete it.
+        std::fs::create_dir(path.join("controller.exe")).unwrap();
+        assert!(attempt
+            .rename_checked(&new, Slot::Candidate, Slot::Active, expected)
+            .is_err());
+        assert!(attempt
+            .rename_checked(&old, Slot::Backup, Slot::Active, expected)
+            .is_err());
+        assert!(path.join("controller.exe").is_dir());
+        assert!(final_path(&new).unwrap().ends_with("candidate.exe"));
+        assert!(final_path(&old).unwrap().ends_with("controller.prev.exe"));
+        // Remove only the exact empty directory created by this test injection.
+        std::fs::remove_dir(path.join("controller.exe")).unwrap();
+        attempt
+            .rename_checked(&old, Slot::Backup, Slot::Active, expected)
+            .unwrap();
+        assert!(final_path(&old).unwrap().ends_with("controller.exe"));
+        drop((old, new, source, attempt));
+        std::fs::remove_file(path.join("controller.exe")).unwrap();
+        std::fs::remove_file(path.join("candidate.exe")).unwrap();
+        std::fs::remove_dir(path).unwrap();
+    }
+
+    #[test]
     fn native_attempt_refuses_unsafe_names_and_foreign_parent_writers() {
         let fixture = PrivateImage::new();
         for name in [

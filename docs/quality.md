@@ -12,7 +12,13 @@ unsafe names/foreign parent writers, independent source offsets, handle
 inheritance and write/rename sharing denial. Cross-compilation does not execute
 these Windows behaviors; hosted Windows results must be recorded separately.
 No installed-state read, publication, service restart or updater command is
-wired by this fixture. Rename/backup/rollback and receipts remain subsequent work.
+wired by this fixture. A subsequent native rename fixture uses the same verified
+object with read/DELETE access to move between three fixed attempt-local slots,
+never replacing an occupied destination. Two new Windows tests cover identity
+across activation/reverse rollback and second-rename failure with preserved
+candidate/backup and collision refusal. These new tests await hosted execution;
+the earlier W1a hosted run does not cover them. Durable receipt/recovery states
+and production installation remain subsequent work.
 
 ### Windows self-update registration model
 

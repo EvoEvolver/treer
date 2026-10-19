@@ -1,5 +1,6 @@
 //! W1a native fixture: private attempt creation and bounded, read-back checked
-//! copies. No installed destination, rename, process, receipt or public caller.
+//! copies plus W1b fixed-slot rename fixtures. No installed destination, process,
+//! receipt or public caller.
 use super::*;
 use std::io::{Seek, SeekFrom, Write};
 use windows_sys::Win32::System::WindowsProgramming::FS_PERSISTENT_ACLS;
@@ -8,6 +9,23 @@ pub(super) struct Attempt {
     path: PathBuf,
     directory: File,
     _parents: Vec<File>,
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum Slot {
+    Candidate,
+    Active,
+    Backup,
+}
+
+impl Slot {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Candidate => "candidate.exe",
+            Self::Active => "controller.exe",
+            Self::Backup => "controller.prev.exe",
+        }
+    }
 }
 
 fn descriptor(owner: &str) -> io::Result<SecurityAllocation> {
@@ -105,6 +123,16 @@ impl Attempt {
     }
 
     pub(super) fn copy(&self, source: &File, expected: [u8; 32]) -> io::Result<File> {
+        self.copy_inner(source, expected, false)
+    }
+
+    // Only the disposable rename fixture gets DELETE access, on the same
+    // checked object. The W1a read-only copy contract remains unchanged.
+    pub(super) fn copy_for_rename(&self, source: &File, expected: [u8; 32]) -> io::Result<File> {
+        self.copy_inner(source, expected, true)
+    }
+
+    fn copy_inner(&self, source: &File, expected: [u8; 32], rename: bool) -> io::Result<File> {
         let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
         private_owner_dacl(&self.directory, &owner)?;
         if identity(&open_pinned(&self.path, true)?)? != identity(&self.directory)? {
@@ -133,7 +161,7 @@ impl Attempt {
         let raw = unsafe {
             CreateFileW(
                 wide(path.as_os_str()).as_ptr(),
-                GENERIC_READ | GENERIC_WRITE,
+                GENERIC_READ | GENERIC_WRITE | if rename { DELETE } else { 0 },
                 FILE_SHARE_READ,
                 &attributes,
                 CREATE_NEW,
@@ -183,7 +211,7 @@ impl Attempt {
                 output.as_raw_handle(),
                 GetCurrentProcess(),
                 &mut readonly,
-                FILE_GENERIC_READ,
+                FILE_GENERIC_READ | if rename { DELETE } else { 0 },
                 0,
                 0,
             )
@@ -193,5 +221,63 @@ impl Attempt {
             return Err(denied());
         }
         Ok(readonly)
+    }
+
+    // Move only one of this attempt's fixed slots, by the verified handle.
+    // Never replace an existing name. No installed path, process or receipt is
+    // involved; a sequence of these calls is NOT a crash-atomic transaction.
+    pub(super) fn rename_checked(
+        &self,
+        file: &File,
+        from: Slot,
+        to: Slot,
+        expected: [u8; 32],
+    ) -> io::Result<()> {
+        let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
+        private_owner_dacl(&self.directory, &owner)?;
+        private_owner_dacl(file, &owner)?;
+        let directory = final_path(&self.directory)?;
+        let before = identity(file)?;
+        if final_path(file)? != directory.join(from.name())
+            || before.2 != 1
+            || before.3 & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0
+        {
+            return Err(denied());
+        }
+        let mut reader = file;
+        reader.seek(SeekFrom::Start(0)).map_err(|_| denied())?;
+        let actual = digest(file)?;
+        reader.seek(SeekFrom::Start(0)).map_err(|_| denied())?;
+        if actual != expected {
+            return Err(denied());
+        }
+        // Relative fixed name resolves against the retained directory handle,
+        // not cwd or caller text. usize storage supplies struct alignment.
+        let name = wide(OsStr::new(to.name()));
+        let bytes = mem::offset_of!(FILE_RENAME_INFO, FileName) + name.len() * 2;
+        let mut storage = vec![0usize; bytes.div_ceil(mem::size_of::<usize>())];
+        let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+        unsafe {
+            (*info).Anonymous.ReplaceIfExists = false;
+            (*info).RootDirectory = self.directory.as_raw_handle();
+            (*info).FileNameLength = ((name.len() - 1) * 2) as u32;
+            ptr::copy_nonoverlapping(
+                name.as_ptr(),
+                ptr::addr_of_mut!((*info).FileName).cast(),
+                name.len(),
+            );
+        }
+        check(unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle(),
+                FileRenameInfo,
+                info.cast(),
+                bytes as u32,
+            )
+        })?;
+        if identity(file)? != before || final_path(file)? != directory.join(to.name()) {
+            return Err(denied());
+        }
+        Ok(())
     }
 }

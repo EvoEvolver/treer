@@ -152,6 +152,35 @@ acceptance. The later `2d3be41a` changes only comments and documentation; it was
 not the hosted checkout. Release retained the raw log under
 `.treer/releases/boot-111-116986d5/run.log` (Issues #111, event 5177).
 
+### W1b first slice: retained-handle rename and reverse-rollback fixtures
+
+The test-only checked-file module now also creates a verified copy whose retained
+read handle has DELETE access for renaming, without write access or write/delete
+sharing. The original W1a read-only copy API is unchanged. Rename accepts only
+three fixed slots inside the retained attempt directory: `candidate.exe`,
+`controller.exe`, and `controller.prev.exe`. It rechecks owner/DACL, file identity,
+single-link/non-reparse status, current slot and SHA-256 before calling
+`SetFileInformationByHandle(FileRenameInfo)` against the same file handle and the
+retained destination-directory handle. ReplaceIfExists is false. It verifies
+identity and final slot afterwards. Caller paths, external install destinations,
+and replacement of occupied destinations are unsupported.
+
+Two native tests cover a successful two-copy activation and its reverse with
+both handles held, wrong source slot/hash, occupied destination refusal, a failed
+second rename, and backup restoration after removing the exact test-owned empty
+collision directory. Recovery itself refuses an occupied destination, preserving
+both images rather than deleting evidence. The fixture explicitly retains the
+failure until that test injection is removed; this is not automatic recovery.
+These calls do not yet persist a receipt, make the multi-rename sequence atomic,
+establish power-loss durability, or update a running installed executable. Hosted
+Windows execution of this new slice is pending; W1a's hosted result above does
+not cover it. Receipt states and recovery classification remain the next slice.
+
+Before W2 chooses the production parent directory, specify its required ACL and
+installer creation policy. The current verifier refuses Administrators mutation
+grants as foreign writes, so the disposable private-parent tests do not establish
+compatibility with a default Windows service-data directory (security event 5182).
+
 ## Historical bounded breakaway probe
 
 First deliver a standalone native Rust diagnostic helper, separate from updater
