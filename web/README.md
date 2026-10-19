@@ -910,6 +910,14 @@ Playwright checkout's `web/package.json`), `EMBED_CONSOLE_URL`,
 small diagnostic outside a full gate and coordinate with the fixture operator
 to avoid overlapping mint bursts.
 
+`EMBED_ALLOWED_HOST_SUFFIXES` is also required: an explicit comma-separated
+allowlist of fixture DNS suffixes with at least three labels (for example
+`canary.apps.treer.ai`). Only an `ag-<32 hex digits>` host directly below one
+of these suffixes is accepted. The operator still verifies the disposable
+fixture identity; the host guard cannot distinguish users on the same domain.
+The report includes the executed runner's SHA-256 and exact deployed SHA;
+release pins that hash with the measurement evidence.
+
 Each pair launches a fresh browser and opens the fixture twice in one context.
 “Cold” means browser-process/context cold, not flushed OS DNS or upstream
 caches; “warm” retains that context's cookie jar and connection pool. Timing

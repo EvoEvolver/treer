@@ -1,7 +1,8 @@
 // Local, opt-in diagnostic for #198. No application telemetry or response mocking.
 // Configuration and session files are supplied by the canary fixture operator.
 import { createRequire } from 'node:module'
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
+import { createHash } from 'node:crypto'
 
 const need = (key) => process.env[key] || (() => { throw new Error(`Missing ${key}`) })()
 const { chromium, firefox, webkit } = createRequire(need('EMBED_PLAYWRIGHT_FROM'))('playwright')
@@ -10,12 +11,19 @@ const proxyOrigin = new URL(need('EMBED_PROXY_URL')).origin
 const agentUrl = new URL(need('EMBED_AGENT_URL'))
 const agentOrigin = new URL(need('EMBED_AGENT_ORIGIN')).origin
 if (agentUrl.origin !== consoleOrigin || !agentOrigin.startsWith('https://')) throw new Error('Invalid fixture origins')
+const suffixes = need('EMBED_ALLOWED_HOST_SUFFIXES').split(',')
+if (suffixes.some((s) => s.split('.').length < 3 || s.length > 253 || !s.split('.').every((label) => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label)))) throw new Error('Invalid fixture host allowlist')
+const agentHost = new URL(agentOrigin).hostname
+if (!suffixes.some((s) => agentHost.endsWith(`.${s}`) && /^ag-[0-9a-f]{32}$/.test(agentHost.slice(0, -(s.length + 1))))) throw new Error('Agent host is outside the fixture allowlist')
+const deployedSha = need('EMBED_DEPLOYED_SHA')
+if (!/^[0-9a-f]{40}$/.test(deployedSha)) throw new Error('Invalid deployed SHA')
 const engines = (process.env.EMBED_ENGINES || 'chromium,firefox,webkit').split(',')
 const pairs = Number(process.env.EMBED_PAIRS || 3)
 if (!Number.isInteger(pairs) || pairs < 1 || pairs > 5) throw new Error('EMBED_PAIRS must be 1..5')
 const stages = new Set(['frame-created', 'bootstrap-script', 'bootstrap-loaded', 'ready-received', 'code-received', 'ui-first-paint', 'ui-first-contentful-paint'])
 const report = {
-  schema: 1, deployed_sha: need('EMBED_DEPLOYED_SHA'),
+  schema: 1, deployed_sha: deployedSha,
+  runner_sha256: createHash('sha256').update(readFileSync(new URL(import.meta.url))).digest('hex'),
   caveats: ['Cold means a fresh browser process/context; OS DNS and upstream caches are not flushed.',
     'Warm reload reuses the same context, cookie jar and connection pool.',
     'Injected fixed-label marks are local measurement only; paint entries may be unavailable in an engine.',
