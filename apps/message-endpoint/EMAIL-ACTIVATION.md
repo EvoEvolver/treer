@@ -36,17 +36,40 @@ Real Proxy mode never reads provider secrets: use only the hub runtime's own App
 service token and existing configured Proxy URL. Browser/API management cannot
 change mode, origin, credentials, real-recipient restriction or allowlist.
 
-Before dispatch require the fixed real recipient plus an explicit configured
-`TREER_EMAIL_ALLOWLIST` match; empty/unmatched allowlist disables real dispatch.
+At **binding admission and dispatch**, require the fixed real recipient plus an
+explicit configured `TREER_EMAIL_ALLOWLIST` match; empty/unmatched allowlist
+disables real-mode binding and dispatch. The human settings executor and Agent
+API share this gate: an unapproved `bind_email` address is refused with a fixed,
+audited `email_recipient_not_allowed` code, without storing the attempted address
+in audit. Fake/outbox tests use synthetic configured recipients; they do not
+weaken the live fixed-recipient restriction.
 Never infer permission from a stored address or OAuth alone. Existing Proxy Core
 admission allows a verified organization member OR an allowlist match, so its
 allowlist is not an unconditional second gate. The App must keep its own strict
 intersection; this proposal does not widen the Core route or require a Core edit.
 All tests use synthetic allowlists and fake/outbox transport.
 
-Freeze one durable notification representation/key across retries. A result
-labelled `sent` by the current Proxy means provider acceptance, not mailbox
-arrival or human reading. The App must not present it as delivered/read.
+Freeze the **exact serialized notification payload and key together** before
+any dispatch: recipient, subject, fixed summary, public thread URL and all other
+bytes are immutable. A changed URL, contact, template or configuration cannot
+silently reuse that key with new bytes, resend completed outbox work, or resolve
+an uncertain attempt. Hold a pending configuration mismatch for reconciliation;
+do not create a fresh key as an automatic workaround. A result labelled `sent`
+by the current Proxy means provider acceptance, not mailbox arrival or human
+reading. The App must not present it as delivered/read.
+
+Keep the existing fixed template and **fixed one-line summary**, not a summary
+extracted from Agent/external message text. No author-controlled text enters a
+mail header or notification summary. Assert bounded length, no CR/LF/control
+characters, no markup and no URL except the configured thread link. Tests feed
+header-injection strings, markup and attacker URLs through message content and
+confirm the outgoing notification bytes stay fixed.
+
+Email resume remains behind the operator activation gate, which neither the
+Agent API nor browser management can flip. Any verified workspace Agent may
+manage bindings under #159's accepted model, but may not enable real transport,
+change its allowlist or bypass that gate. A manager-asserted contact/member
+association is not proof of mailbox ownership.
 
 ### Uncertain send outcomes
 
@@ -56,18 +79,43 @@ or crash between external acceptance and the `sent` update can be ambiguous.
 The existing App helper collapses several cases into `Retry`. Therefore the
 current code does **not** guarantee exactly-once external email.
 
-Before enabling real sends, classify results explicitly:
+Before enabling real sends, use this conservative persisted outcome model:
 
-- Definite no-send admission failure (wrong recipient/member/pins/allowlist,
-  missing sender configuration) never emits mail; fixed status explains recovery.
-- Definitive rate/in-progress responses retain the same immutable key and obey
-  bounded backoff; an in-progress response is not proof of acceptance or failure.
-- Unknown provider outcome, timeout after dispatch, malformed success or lost
-  response enters an operator-visible bounded uncertain state. Do not blindly
-  call the provider again under a new key or treat it as successful. Review the
-  exact retry/reconciliation contract with Core; no receipt body/error leaks.
-- Outbox publication success remains `published_outbox`, never provider acceptance.
-  Changing mode must not resend completed outbox rows as real notifications.
+| State/outcome | Meaning and next action |
+| --- | --- |
+| `prepared` | Frozen payload/key; no dispatch started. Local validation, token mint or fence refusal with no POST is definite no-send. Hold/refuse or retry only after the local condition is resolved. |
+| `dispatching` | Reserve uncertainty capacity and persist this state **before** POST. A crash/restart in this state becomes `uncertain`, even if the network operation might not have started. Never recover it by another POST. |
+| `retry_wait` | Only a recognized first-attempt rate admission rejection with a proven no-provider-call contract and no prior ambiguity may back off under bounded attempts using the frozen bytes/key. HTTP 429 alone is insufficient evidence. |
+| `uncertain` | First `email_in_progress`, network timeout/error after dispatch, 5xx, `email_delivery_failed`, `email_storage_failed`, malformed/truncated/oversized success, unknown post-dispatch result or recovered `dispatching`. Persist and reconcile; **no automatic POST**, with either the same or a new key. |
+| `provider_accepted` | Valid `sent` response/cached prior success. Provider acceptance only; never delivered/read. Persist completion before retiring work. |
+| `rejected` | Definite pre-dispatch admission refusal, with no previous ambiguous attempt; fixed reason only. A later refusal cannot override an earlier uncertain result. |
+| `published_outbox` | Local outbox publication only. Mode change never converts this terminal state into a real send. |
+
+Core's `email_in_progress` is not a safe-retry signal: it protects a recent
+`sending` reservation for only 60 seconds. A stale `sending` or `failed` record
+can call the provider again with the **same key** while the original operation
+may have accepted mail or still be running. The route supplies no independent
+outcome query or provider-idempotency guarantee. Never use POST as a status
+probe. Uncertainty is sticky across time (including beyond 60 seconds), restart,
+configuration change, subsequent 429/refusal, or a stale/failed Core reservation.
+Separate operator reconciliation requires a reviewed outcome decision; it is
+not a hidden retry button or permission to discard the row.
+
+Proposed hard uncertainty budget: **32 reserved-or-uncertain rows per binding,
+640 globally**, within the existing stricter byte/count admission limits. Reserve
+capacity transactionally before each POST so an ambiguous response always has a
+slot. Owner settings show pending/uncertain counts and the fixed containment
+reason, never response bodies or credentials. At a cap, hold new notifications
+and pause that binding before another dispatch; do not drop, acknowledge away,
+expire, overwrite or retry uncertain rows to free capacity. Other bindings retain
+their independent limits. Successful/definitely rejected attempts release their
+reservation; only explicit reviewed reconciliation can retire an uncertain row.
+
+Fake-clock tests must cover ambiguity followed by >60 seconds, `in_progress`,
+stale/failed reservation responses, 429, URL/configuration change, and restart:
+**zero second external send** in every such case. Also cover a crash immediately
+before POST/after acceptance/before local completion, exact frozen payload/key,
+reservation saturation and owner-visible counts. No test calls the real provider.
 
 No request for a new Core API is made by this plan. If the existing route cannot
 provide enough outcome classification, first retain uncertain work for manual
@@ -89,15 +137,27 @@ capability would be separate Core-owned work, not guessed by this App.
 3. Finish recovery/retention requirements before sustained use: bounded uncertain
    queue, explicit operator reconciliation, byte/count limits and private outbox
    reconciliation; specify purge/TTL semantics without deleting pending work.
-4. Run desktop/390px, light/dark, dedicated/wildcard/embedded browser matrix:
+4. Verify thread links are single-purpose and contain no query-borne credentials.
+   Thread IDs remain unguessable random identifiers, never bearer authorization.
+   An unauthenticated/no-current-member-session read reveals no thread existence
+   or content; uniformly require authentication before lookup. Current-member
+   verification and immutable member/thread scope still apply after login.
+   Run desktop/390px, light/dark, dedicated/wildcard/embedded browser matrix:
    current member reads/replies, other member/owner denied, invalid identity never
    falls back to cookie, OAuth state single-use/nonce/PKCE, bad Origin/Fetch
    Metadata refused, relative assets/API routes, text-only malicious content.
    Obtain deployed-header acceptance under a separate authorized fixture rollout.
 5. Freeze exact SHA with App gate and Core/security review. Only then request
-   one separate deployment/activation and real-send authorization. Evidence must
-   include recipient/count, mode, acceptance status, retry/reconciliation result,
-   member reply received by fixed Agent, negative scope checks and containment.
+   one separate deployment/activation and real-send authorization. The proposed
+   first real-send budget is **at most 3 messages**, not an open-ended smoke loop;
+   authorization must name the exact binary SHA-256 and configuration SHA-256,
+   fixed recipient and allowlist-value hash (never credentials). Any unexpected
+   status stops the run. Pause the binding through the API afterwards and record
+   the resulting revision. Use an isolated email fixture/state directory: **never
+   enable real mode in the sandbox hub carrying the Telegram test state**.
+   Evidence must include authorized/attempted/accepted/uncertain counts, mode,
+   retry/reconciliation result, member reply received by the fixed Agent,
+   negative scope checks and containment. This proposal itself authorizes none.
 
 ## Rollback and containment
 
