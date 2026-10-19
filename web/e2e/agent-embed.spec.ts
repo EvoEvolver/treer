@@ -6,10 +6,10 @@ import { fixture, gotoWorkspace, open, switchTab } from './fixtures/workspace-ta
 const id = 'ag_0123456789abcdef0123456789abcdef'
 const origin = 'https://ag-0123456789abcdef0123456789abcdef.agents.example.test'
 const hash = 'a'.repeat(64), code = 'iec_v1_' + 'b'.repeat(64)
-async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'success', strict = false, realBootstrap = false, mintWait?: Promise<void>, enforceHeaders = false, navigationWait?: Promise<void>) {
+async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'success', strict = false, realBootstrap: boolean | 'reuse-cold' | 'reuse-warm' = false, mintWait?: Promise<void>, enforceHeaders = false, navigationWait?: Promise<void>) {
   const live = await fixture(page, { 'tab-1': origin+'/' }, { 'tab-1': id })
   await page.route('**/api/auth/config', r => r.fulfill({ json: { capabilities: ['agent.interface-origin.v1', 'agent.interface-embed.v1'] } }))
-  let mints = 0, probes = 0, delivered = 0, mintedHash = ''
+  let mints = 0, probes = 0, delivered = 0, checks = 0, mintedHash = ''
   await page.route('**/interface/embed-authorization', async r => {
     mints++; mintedHash = r.request().postDataJSON().browser_nonce_hash
     if (!realBootstrap) expect(mintedHash).toBe(hash)
@@ -27,7 +27,14 @@ async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'succe
       // Execute the actual Core bootstrap, not a second implementation of it.
       const source = readFileSync('../crates/treer-proxy/src/api/network/embed.rs', 'utf8')
       const template = source.match(/r#"(<!doctype html>[\s\S]*?)"#/i)![1]
-      const body = template.replaceAll('{console_js}', target).replaceAll('{script_nonce}', 'synthetic-nonce').replaceAll('{{', '{').replaceAll('}}', '}')
+      const v2 = typeof realBootstrap === 'string'
+      const probe = source.match(/let v2_probe = if reuse \{\s*r#"([\s\S]*?)"#/)?.[1] ?? ''
+      const announcement = source.match(/let announce = if reuse \{\s*r#"([\s\S]*?)"#\s*\} else \{\s*r#"([\s\S]*?)"#/)
+      if (v2) { expect(probe).not.toBe(''); expect(announcement).not.toBeNull() }
+      const body = template.replaceAll('{console_js}', target).replaceAll('{script_nonce}', 'synthetic-nonce')
+        .replaceAll('{v2_probe}', v2 ? probe : '')
+        .replaceAll('{announce}', announcement?.[v2 ? 1 : 2] ?? '')
+        .replaceAll('{{', '{').replaceAll('}}', '}')
       return r.fulfill({ contentType: 'text/html', body })
     }
     if (new URL(r.request().url()).pathname !== '/.treer/embed') return r.fulfill({ contentType: 'text/html', body: `<h1>Isolated interface</h1><textarea aria-label="Draft"></textarea><script>
@@ -53,7 +60,11 @@ async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'succe
       delivered++
       return r.fulfill({ status: 204 })
     })
-    await page.route(origin+'/.treer/embed/check', r => r.fulfill({ status: mode === 'blocked' ? 401 : 204 }))
+    await page.route(origin+'/.treer/embed/check', r => {
+      checks++
+      const valid = mode !== 'blocked' && (realBootstrap === 'reuse-warm' || delivered > 0)
+      return r.fulfill({ status: valid ? 204 : 401 })
+    })
   }
   if (enforceHeaders) {
     await page.route('**/config.json', r => r.fulfill({ json: { proxy_url: 'http://127.0.0.1:' + (process.env.PW_PORT ?? '4173') } }))
@@ -71,7 +82,7 @@ async function setup(page: Page, mode: 'success' | 'blocked' | 'manual' = 'succe
   }
   await gotoWorkspace(page); await open(page, 'Alpha')
   await expect(page.locator('iframe[title="/Alpha interface"]')).toHaveAttribute('src', /\.treer\/embed/)
-  return { live, mints: () => mints, probes: () => probes, delivered: () => delivered }
+  return { live, mints: () => mints, probes: () => probes, delivered: () => delivered, checks: () => checks }
 }
 async function send(page: Page, data: unknown) {
   await expect.poll(() => page.frames().some(f => f.url().startsWith(origin))).toBe(true)
@@ -227,6 +238,18 @@ for (const mode of ['success', 'blocked'] as const) test(`actual Core bootstrap:
     await expect(page.locator('iframe')).toHaveCount(0)
   }
   expect(s.mints()).toBe(1); expect(s.delivered()).toBe(1)
+})
+
+for (const scenario of ['reuse-cold', 'reuse-warm', 'cookies-blocked'] as const) test(`actual Core v2 bootstrap: ${scenario}`, async ({ page }) => {
+  const blocked = scenario === 'cookies-blocked'
+  const s = await setup(page, blocked ? 'blocked' : 'success', false, scenario === 'reuse-warm' ? 'reuse-warm' : 'reuse-cold')
+  if (blocked) {
+    await expect(page.getByRole('button', { name: 'Load compatibility view (shared origin)' })).toBeVisible()
+    await expect(page.locator('iframe')).toHaveCount(0)
+  } else await expect(page.frameLocator('iframe').getByRole('heading')).toHaveText('Isolated interface')
+  expect(s.mints()).toBe(scenario === 'reuse-warm' ? 0 : 1)
+  expect(s.delivered()).toBe(scenario === 'reuse-warm' ? 0 : 1)
+  expect(s.checks()).toBe(scenario === 'reuse-warm' ? 1 : 2)
 })
 
 test('mint reply with another origin fails closed', async ({ page }) => {
