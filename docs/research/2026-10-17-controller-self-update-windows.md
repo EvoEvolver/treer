@@ -406,6 +406,11 @@ Record the verified reason with the successor revision, but never let a bare
 receipt field or its deserialization construct that authorization. Neither the
 reason verifier nor that channel exists; the current entry guard validates no
 downgrade reason and cannot authorize a downgrade.
+The deadline owner must be the independent pinned rollback actor or its
+supervisor, not the Controller process whose health it judges: a dead or hung
+Controller cannot reliably run its own deadline monitor. The constructed reason
+must bind the job, the relevant revision and the time source used. This names
+the required actor role, not an existing executable or implemented clock proof.
 
 The proposed continuation graph is below. It is not yet implemented; no row
 authorizes execution. Both claims must match the same fresh current observation
@@ -431,6 +436,22 @@ Complete and RolledBack are terminal. Every classifier-consistent rollback
 tuple must mechanically map to one graph edge or an explicit diagnostic stop;
 until that proof and graph exist, the existing coverage test continues to
 classify all rollback phases as diagnosis only.
+
+After restoration, starting and verifying the old Controller is an operation
+outside this record graph. A crash or restart between Restored and RolledBack
+leaves the durable state Restored with the original layout; it does not imply
+health success. Old-health evidence must bind the restored image hash and the
+start time of the process actually started from that restored object, excluding
+any process predating restoration. No cached pre-restore observation or other
+evidence may authorize RolledBack. The no-move Original exit likewise requires
+fresh health of the verified old-image process; it cannot borrow historical
+new-Controller health.
+
+RolledBack must carry or reference the verified entry reason from the entry
+revision, preserving its chain of custody rather than inventing a new reason
+at completion. It is terminal for that job ID. A later attempt requires a new
+job; the rolled-back job must never automatically retry the same candidate.
+The reason reference and health verifier remain unimplemented format/API gates.
 
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
