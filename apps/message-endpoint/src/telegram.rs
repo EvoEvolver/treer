@@ -147,7 +147,6 @@ impl<M: Mailbox + Directory> Hub<M> {
         self.telegram_schema()?;
         let text = serde_json::to_string(&target).map_err(|_| Error::Invalid)?;
         let tx = self.store.db.transaction()?;
-        crate::owner_actions::record(&tx, audit, "bind_telegram", endpoint, revision)?;
         tx.execute(
             "INSERT OR IGNORE INTO telegram_accounts(account,offset) VALUES(?1,0)",
             [&target.account_id],
@@ -157,6 +156,7 @@ impl<M: Mailbox + Directory> Hub<M> {
             "UPDATE hub_bindings SET revision=revision+1 WHERE endpoint=?1",
             [endpoint],
         )?;
+        crate::owner_actions::record(&tx, audit, "bind_telegram", endpoint, revision)?;
         tx.commit()?;
         Ok(())
     }
