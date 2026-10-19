@@ -242,6 +242,47 @@ test('terminal reconciliation selects an old target by ID without a completion n
   assert.equal(after.filter(f=>f.method==='turn/start').length,1);
 });
 
+for(const rich of [false,true])test('provider user echo is projected once'+(rich?' after787-turn resume and node-rich live notification':''),{skip:useNode,timeout:60000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_ECHO_USER:'1',...(rich?{HISTORY_LIVE_SHAPE:'8000',AGENT_UI_SESSION_ID:'synthetic-history'}:{})});
+  const initial=await fetch(s.base+'/api/state').then(r=>r.json());
+  if(rich){assert.equal(initial.history.totalTurns,787);assert.equal(initial.thread.turns.length,50);assert.ok(initial.runtime.provider.historyScan.frameBytes>45*1024*1024);}
+  const r=await s.post({text:'read-only synthetic question',operation_id:'native-echo'}).then(r=>r.json());
+  let maxUsers=0;
+  const final=await until(async()=>{const state=await fetch(s.base+'/api/state').then(r=>r.json());const turn=state.thread.turns.find(t=>t.id.startsWith('history-'));maxUsers=Math.max(maxUsers,turn?.items.filter(i=>i.kind==='userMessage').length??0);return state;},x=>x.runtime.state==='blocked'||x.thread.turns.some(t=>t.id.startsWith('history-')&&t.status==='completed'));
+  assert.notEqual(final.runtime.state,'blocked',JSON.stringify(final.runtime.provider));
+  const turn=final.thread.turns.find(t=>t.items.some(i=>i.submissionId===r.submission.id));
+  assert.equal(turn.items.filter(i=>i.kind==='userMessage').length,1);
+  assert.equal(maxUsers,1,'native user item lifecycle never duplicates the local projection');
+  assert.equal(turn.items.find(i=>i.kind==='userMessage').submissionId,r.submission.id);
+  const retry=await s.post({text:'read-only synthetic question',operation_id:'native-echo'}).then(r=>r.json());assert.equal(retry.duplicate,true);
+  assert.ok(final.thread.turns.length<=50);assert.ok(Buffer.byteLength(JSON.stringify(final.thread.turns))<=16*1024*1024);
+  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(frames.filter(f=>f.method==='turn/start').length,1,'the echo and retry never dispatch a second turn');
+  const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));assert.equal(journal.records.length,1);
+  assert.equal((await fetch(s.base+'/v1/submissions/'+r.submission.id,{headers:s.headers}).then(r=>r.json())).submission.state,'done');
+});
+
+test('live node overflow reports a fixed frame category and keeps uncertain work fenced',{skip:useNode,timeout:60000},async t=>{
+  const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl',HISTORY_LIVE_SHAPE:'80000',AGENT_UI_SESSION_ID:'synthetic-history'});
+  const receipt=await s.post({text:'synthetic accepted input',operation_id:'shape-overflow'}).then(r=>r.json());
+  const state=await until(()=>fetch(s.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
+  assert.equal(state.runtime.provider.transport,'provider_json_limit');
+  const failure=state.runtime.provider.frameFailure;
+  assert.equal(failure.limitKind,'nodes');assert.equal(failure.frameKind,'item/completed');
+  assert.ok(failure.shapeNodes>500000);assert.ok(failure.outsideBytes<16*1024*1024);assert.equal(failure.inHistory,false);
+  assert.ok(!JSON.stringify(failure).includes('synthetic accepted input'));
+  const journal=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(journal.dispatchBlocked,true,JSON.stringify({error:state.runtime.error,ready:state.ready,logs:s.logs(),journal}));
+  assert.equal(journal.records.length,1);
+  assert.equal(journal.records[0].submission.id,receipt.submission.id);
+  assert.ok((await s.post({text:'synthetic accepted input',operation_id:'shape-overflow'})).status>=400);
+  const exited=once(s.child,'exit');s.child.kill('SIGTERM');await exited;
+  const restarted=await s.launch({},false);
+  await until(()=>fetch(restarted.base+'/api/state').then(r=>r.json()),x=>x.runtime.state==='blocked');
+  const frames=(await readFile(join(s.root,'cwd/frames.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+  assert.equal(frames.filter(f=>f.method==='turn/start').length,1,'restart never resends uncertain work');
+});
+
 test('streamed 50 MiB resume retains a recent window, fetches older pages on demand and completes the next turn',{skip:useNode,timeout:60000},async t=>{
   const s=await fixture(t,{CODEX_BIN:resolve(import.meta.dirname,'fixtures/history-provider.mjs'),HISTORY_PID_FILE:'provider.pid',HISTORY_FRAME_LOG:'frames.jsonl'});
   const originalReceipt=await s.post({text:'local text belongs only to this requested old turn',operation_id:'old-page-projection'}).then(r=>r.json());

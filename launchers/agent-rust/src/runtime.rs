@@ -241,10 +241,10 @@ pub fn spawn(config: Config) -> Result<Handle> {
                 },
                 event = rt.events.recv(), if !rt.history_failed => match event {
                     Some(event) => {
-                        if event["method"] == "spike/provider-exit" { rt.ready = false; rt.thread["status"] = json!("error"); rt.thread["lastError"] = json!("Codex disconnected"); rt.publish(); break; }
+                        if event["method"] == "spike/provider-exit" { let _ = rt.stop_for_transport_error(); break; }
                         if rt.event(event).await.is_err() { eprintln!("Rust spike: provider event failed"); }
                     }
-                    None => break,
+                    None => { let _ = rt.stop_for_transport_error(); break; },
                 },
                 _ = tick.tick() => {
                     if !rt.history_failed && rt.goals.edits.iter().any(|e| !e.sent && e.error.is_null()) && rt.flush_goals().await.is_err() {
@@ -538,6 +538,15 @@ impl Runtime {
                 continue;
             };
             let item_id = format!("submission-{submission_id}");
+            // A local projection can precede the native item/started echo.
+            // Replace that projection with one native occurrence, rather than
+            // keeping both. Consume at most one native occurrence per receipt;
+            // identical accepted steer inputs remain distinct submissions.
+            let local = items.iter().position(|item| item["kind"] == "userMessage" && item["submissionId"] == record.submission["id"]);
+            let native = items.iter().position(|item| item["kind"] == "userMessage" && item["text"] == record.text && !item["submissionId"].is_string());
+            if let (Some(local), Some(_)) = (local, native) {
+                items.remove(local);
+            }
             let existing = items.iter().position(|item| {
                 item["kind"] == "userMessage"
                     && item["text"] == record.text

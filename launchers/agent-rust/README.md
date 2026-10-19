@@ -37,11 +37,26 @@ Provider JSON-RPC frames are streamed through an 8 KiB read buffer with a
 256 MiB wire-byte ceiling and a 60-second frame deadline after the first byte.
 `result.thread.turns` is validated one turn at a time, including discarded old
 turns; the complete frame is never buffered. Limits are depth 32, 100,000 scanned
-turns, 500,000 nodes per turn/retained window, 50,000 non-history nodes, 16 MiB
-per history turn and 4 MiB for other decoded values. Duplicate keys and malformed
+turns, 500,000 nodes per turn/retained window, 16 MiB
+per history turn, with separate non-history frame budgets below. Duplicate keys and malformed
 discarded values are refused. Over-cap frames poison the transport with
 `line_too_large`; shape/value/deadline errors have distinct fixed reasons.
 Content-free `historyScan` diagnostics contain only bytes, turns, nodes and time.
+Frame classes have separate bounds: history metadata and control notifications
+remain 4 MiB / 50,000 nodes; allow-listed turn/item notifications (including
+supported deltas) and other RPC responses allow 16 MiB / 500,000 nodes. This fits
+a 5 MiB tool output plus 8,000 structured entries in the 787-turn resume fixture,
+without raising the control budget. All classes retain depth32, per-string16MiB
+and whole-frame256MiB bounds. A late root method uses only a bounded provisional
+16MiB/500,000-node envelope; its final class is checked before delivery.
+`frameFailure` records numeric bytes/nodes/depth/counts, booleans, a fixed
+notification category and fixed limit category (never raw method, IDs or text).
+This distinguishes depth, nodes, duplicate keys, malformed history and history
+selection bounds that previously all appeared as `provider_json_limit`.
+Accepted user projections merge with one native echo across item lifecycle
+events; matching identical text does not collapse distinct receipt IDs.
+Provider exit also persists the transport-failure fence before the runtime
+exits; accepted uncertain receipts remain durable and are not replayed on restart.
 Selected windows share `Arc<Value>` allocations; overlap does not deep-copy turns.
 The reader permits four registered selections plus the recent window: each holds
 at most 16 MiB serialized content / 500k nodes. Additional current-turn, active

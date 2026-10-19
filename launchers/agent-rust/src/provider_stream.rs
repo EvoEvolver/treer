@@ -38,6 +38,11 @@ pub struct Reader<R> {
     total: usize,
     active: Option<Arc<Value>>,
     targets: HashMap<u64, Arc<Value>>,
+    max_depth: usize,
+    frame_kind: &'static str,
+    limit_kind: &'static str,
+    outside_nodes: usize,
+    history_seen: bool,
 }
 #[derive(Default)]
 struct Window {
@@ -95,7 +100,34 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             total: 0,
             active: None,
             targets: HashMap::new(),
+            max_depth: 0,
+            frame_kind: "responseOrUnknown",
+            limit_kind: "none",
+            outside_nodes: 0,
+            history_seen: false,
         }
+    }
+    fn shape_limit(&mut self, kind: &'static str) -> &'static str {
+        self.limit_kind = kind;
+        "provider_json_limit"
+    }
+    pub fn diagnostic(&self) -> Value {
+        serde_json::json!({"frameBytes":self.count,"outsideBytes":self.outside,"nodeCount":self.total_nodes,"shapeNodes":self.nodes,"outsideNodes":self.outside_nodes,"maxDepth":self.max_depth,"turnCount":self.total,"inHistory":self.in_history,"frameKind":self.frame_kind,"limitKind":self.limit_kind})
+    }
+    fn outside_budget(&self) -> (usize,usize) {
+        // Until the root method is read, use a bounded provisional envelope.
+        // A late control method is rechecked before any frame is returned.
+        if self.history_seen || matches!(self.frame_kind,"other"|"thread/tokenUsage/updated") {
+            (4*1024*1024,50_000)
+        } else {
+            (WINDOW_BYTES,500_000)
+        }
+    }
+    fn check_outside(&mut self) -> Result<()> {
+        let (bytes,nodes)=self.outside_budget();
+        if self.outside>bytes {self.limit_kind="outsideBytes";return Err("provider_value_too_large");}
+        if self.outside_nodes>nodes {return Err(self.shape_limit("nodes"));}
+        Ok(())
     }
     async fn peek(&mut self) -> Result<Option<u8>> {
         if self.pos == self.end {
@@ -120,16 +152,18 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         self.pos += bytes;
         self.count += bytes;
         if self.count > FRAME_BYTES {
+            self.limit_kind = "frameBytes";
             return Err("line_too_large");
         }
         if !self.in_history {
             self.outside += bytes;
         }
-        if self.outside > 4 * 1024 * 1024
-            || self
+        self.check_outside()?;
+        if self
                 .turn_begin
                 .is_some_and(|start| self.count - start > WINDOW_BYTES)
         {
+            self.limit_kind = "turnBytes";
             return Err("provider_value_too_large");
         }
         Ok(())
@@ -159,6 +193,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                 if plain > 0 {
                     self.consume(plain)?;
                     if bytes.len() + plain > limit {
+                        self.limit_kind = "stringBytes";
                         return Err("provider_value_too_large");
                     }
                     bytes.extend_from_slice(&self.buffer[begin..begin + plain]);
@@ -171,6 +206,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             }
             bytes.push(byte);
             if bytes.len() > limit {
+                self.limit_kind = "stringBytes";
                 return Err("provider_value_too_large");
             }
             if byte == b'"' && !escape {
@@ -182,17 +218,19 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
     }
     fn value<'a>(&'a mut self, depth: usize, path: Vec<String>) -> Parsing<'a> {
         Box::pin(async move {
+            self.max_depth = self.max_depth.max(depth);
             if depth > 32 {
-                return Err("provider_json_limit");
+                return Err(self.shape_limit("depth"));
             }
             self.nodes += 1;
             self.total_nodes += 1;
-            if self.nodes > if self.in_history { 500_000 } else { 50_000 } {
-                return Err("provider_json_limit");
+            if !self.in_history {self.outside_nodes+=1;self.check_outside()?;}
+            if self.nodes > 500_000 {
+                return Err(self.shape_limit("nodes"));
             }
             self.spaces().await?;
             if path == ["result", "thread", "turns"] && self.peek().await? != Some(b'[') {
-                return Err("provider_json_limit");
+                return Err(self.shape_limit("historyShape"));
             }
             match self.peek().await?.ok_or("invalid_json")? {
                 b'"' => Ok(Value::String(self.string(WINDOW_BYTES).await?)),
@@ -208,10 +246,11 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                         self.spaces().await?;
                         let key = self.string(4096).await?;
                         if values.contains_key(&key) {
-                            return Err("provider_json_limit");
+                            return Err(self.shape_limit("duplicateKey"));
                         }
                         self.nodes += 1;
                         self.total_nodes += 1;
+                        if !self.in_history {self.outside_nodes+=1;self.check_outside()?;}
                         self.spaces().await?;
                         if self.byte().await? != b':' {
                             return Err("invalid_json");
@@ -219,6 +258,22 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                         let mut child = path.clone();
                         child.push(key.clone());
                         let value = self.value(depth + 1, child).await?;
+                        if path.is_empty() && key == "method" {
+                            self.frame_kind = match value.as_str() {
+                                Some("turn/started") => "turn/started",
+                                Some("turn/completed") => "turn/completed",
+                                Some("item/started") => "item/started",
+                                Some("item/completed") => "item/completed",
+                                Some("turn/plan/updated") => "turn/plan/updated",
+                                Some("item/agentMessage/delta") => "item/agentMessage/delta",
+                                Some("item/reasoning/textDelta") => "item/reasoning/textDelta",
+                                Some("item/reasoning/summaryTextDelta") => "item/reasoning/summaryTextDelta",
+                                Some("item/commandExecution/outputDelta") => "item/commandExecution/outputDelta",
+                                Some("thread/tokenUsage/updated") => "thread/tokenUsage/updated",
+                                _ => "other",
+                            };
+                            self.check_outside()?;
+                        }
                         values.insert(key, value);
                         self.spaces().await?;
                         match self.byte().await? {
@@ -244,6 +299,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                     loop {
                         values.push(self.value(depth + 1, path.clone()).await?);
                         if self.count - begin > WINDOW_BYTES {
+                            self.limit_kind = "arrayBytes";
                             return Err("provider_value_too_large");
                         }
                         self.spaces().await?;
@@ -272,12 +328,14 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         })
     }
     async fn turns(&mut self, depth: usize) -> Result<Value> {
+        self.history_seen = true;
+        self.check_outside()?;
         self.in_history = true;
         self.byte().await?;
         self.spaces().await?;
         let selections = self.selections.lock().unwrap().clone();
         if selections.len() > 4 {
-            return Err("provider_json_limit");
+            return Err(self.shape_limit("selectionCount"));
         }
         for (&id, selection) in &selections {
             if let Some((start, _)) = selection.range {
@@ -312,7 +370,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             let value = Arc::new(value);
             if value["status"] == "inProgress" {
                 if self.active.is_some() {
-                    return Err("provider_json_limit");
+                    return Err(self.shape_limit("multipleActiveTurns"));
                 }
                 self.active = Some(value.clone());
             }
@@ -323,7 +381,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                     .is_some_and(|target| value["id"] == target)
                     && self.targets.insert(id, value.clone()).is_some()
                 {
-                    return Err("provider_json_limit");
+                    return Err(self.shape_limit("duplicateTarget"));
                 }
                 if selection
                     .range
@@ -338,7 +396,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             self.recent.push(value, bytes, self.total)?;
             self.total += 1;
             if self.total > 100_000 {
-                return Err("provider_json_limit");
+                return Err(self.shape_limit("turnCount"));
             }
             self.spaces().await?;
             match self.byte().await? {
@@ -355,9 +413,10 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         if self.peek().await?.is_none() {
             return Ok(None);
         }
-        tokio::time::timeout(std::time::Duration::from_secs(60), self.frame())
-            .await
-            .map_err(|_| "provider_frame_timeout")?
+        match tokio::time::timeout(std::time::Duration::from_secs(60), self.frame()).await {
+            Ok(result) => result,
+            Err(_) => { self.limit_kind = "frameDeadline"; Err("provider_frame_timeout") },
+        }
     }
     async fn frame(&mut self) -> Result<Option<Value>> {
         let started = std::time::Instant::now();
@@ -372,11 +431,17 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         self.total = 0;
         self.active = None;
         self.targets.clear();
+        self.max_depth = 0;
+        self.frame_kind = "responseOrUnknown";
+        self.limit_kind = "none";
+        self.outside_nodes = 0;
+        self.history_seen = false;
         self.spaces().await?;
         if self.peek().await?.is_none() {
             return Ok(None);
         }
         let mut value = self.value(0, Vec::new()).await?;
+        self.check_outside()?;
         self.spaces().await?;
         match self.peek().await? {
             Some(b'\n') => {
@@ -445,6 +510,40 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[tokio::test]
+    async fn bounded_live_tool_shapes_and_content_free_failure_diagnostics() {
+        for count in [8_000, 80_000] {
+            let bytes = serde_json::to_vec(&json!({"method":"item/completed","params":{"item":{"content":vec![json!({"a":[0,1,2],"b":true});count]}}})).unwrap();
+            assert!(bytes.len() < 4 * 1024 * 1024);
+            let mut reader = Reader::new(bytes.as_slice(), Selections::default());
+            let result = reader.next().await;
+            if count == 8_000 {
+                assert!(result.unwrap().is_some());
+                assert!(reader.diagnostic()["nodeCount"].as_u64().unwrap() > 50_000);
+            } else {
+                assert_eq!(result.unwrap_err(), "provider_json_limit");
+                let diagnostic = reader.diagnostic();
+                assert_eq!(diagnostic["limitKind"], "nodes");
+                assert_eq!(diagnostic["frameKind"], "item/completed");
+                assert!(diagnostic["shapeNodes"].as_u64().unwrap() > 500_000);
+                assert!(diagnostic["frameBytes"].as_u64().unwrap() < 4 * 1024 * 1024);
+            }
+        }
+        let bytes = format!("{{\"method\":\"SYNTHETIC_SECRET\",\"params\":{}0{}}}", "[".repeat(40), "]".repeat(40));
+        let mut reader = Reader::new(bytes.as_bytes(), Selections::default());
+        assert_eq!(reader.next().await.unwrap_err(), "provider_json_limit");
+        assert_eq!(reader.diagnostic()["limitKind"], "depth");
+        assert!(!reader.diagnostic().to_string().contains("SYNTHETIC_SECRET"));
+        for late in [false,true] {
+            let payload=serde_json::to_string(&vec![json!({"a":[0,1,2],"b":true});8_000]).unwrap();
+            let bytes=if late {format!("{{\"params\":{payload},\"method\":\"secret-control\"}}")}
+                else {format!("{{\"method\":\"secret-control\",\"params\":{payload}}}")};
+            let mut reader=Reader::new(bytes.as_bytes(),Selections::default());
+            assert_eq!(reader.next().await.unwrap_err(),"provider_json_limit");
+            assert_eq!(reader.diagnostic()["frameKind"],"other");
+            assert_eq!(reader.diagnostic()["limitKind"],"nodes");
+        }
+    }
     #[tokio::test]
     async fn windows_are_selected_even_if_result_precedes_response_id() {
         let selections = Selections::default();

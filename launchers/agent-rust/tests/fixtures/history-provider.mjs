@@ -22,6 +22,10 @@ for await (const line of createInterface({ input: process.stdin })) {
     if(process.env.HISTORY_PROJECTION_OLD==='1')result.thread.turns[430]={id:'history-1',status:'completed',items:[]};
     next=Math.max(next,530);
   }
+  if (['thread/resume','thread/read'].includes(request.method) && process.env.HISTORY_LIVE_SHAPE) {
+    result.thread.turns=Array.from({length:787},(_,n)=>({id:`old-${n}`,status:'completed',items:[{id:`answer-${n}`,type:'agentMessage',text:'x'.repeat(64*1024)}]}));
+    next=Math.max(next,787);
+  }
   if (request.method === 'thread/resume' && process.env.HISTORY_MALFORMED_OLD === '1') {
     const turns=Array.from({length:60},(_,n)=>({id:`old-${n}`,status:'completed',items:[]}));
     // The malformed value is outside the retained last-50 window.
@@ -53,6 +57,21 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (request.method === 'turn/start') {
     const id = `history-${++next}`;
     result = { turn: { id } };
+    if(process.env.HISTORY_LIVE_SHAPE || process.env.HISTORY_ECHO_USER==='1') {
+      const user={id:`native-user-${id}`,type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
+      const rich={id:`tool-${id}`,type:'dynamicToolCall',tool:'synthetic',output:process.env.HISTORY_LIVE_SHAPE?'x'.repeat(5*1024*1024):'',content:Array.from({length:Number(process.env.HISTORY_LIVE_SHAPE)||1},()=>({a:[0,1,2],b:true}))};
+      setTimeout(async()=>{
+        for(const event of [
+          {method:'turn/started',params:{threadId,turn:{id,status:'inProgress',items:[user]}}},
+          {method:'item/started',params:{threadId,turnId:id,item:user}},
+          {method:'item/completed',params:{threadId,turnId:id,item:rich}},
+          {method:'item/completed',params:{threadId,turnId:id,item:user}},
+          {method:'turn/completed',params:{threadId,turn:{id,status:'completed',items:[user,rich,{id:`answer-${id}`,type:'agentMessage',text:'done'}]}}},
+        ]){console.log(JSON.stringify(event));await new Promise(resolve=>setTimeout(resolve,100));}
+      },30);
+      if(process.env.HISTORY_FRAME_LOG)appendFileSync(process.env.HISTORY_FRAME_LOG,JSON.stringify({method:request.method,bytes:Buffer.byteLength(JSON.stringify({id:request.id,result}))})+'\n');
+      console.log(JSON.stringify({id:request.id,result}));continue;
+    }
     if(process.env.HISTORY_RECONCILE_OLD==='1') {
       if(process.env.HISTORY_FRAME_LOG)appendFileSync(process.env.HISTORY_FRAME_LOG,JSON.stringify({method:request.method,bytes:Buffer.byteLength(JSON.stringify({id:request.id,result}))})+'\n');
       console.log(JSON.stringify({id:request.id,result}));continue;

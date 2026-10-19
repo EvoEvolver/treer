@@ -115,7 +115,10 @@ impl Rpc {
             let reason = loop {
                 let line = match lines.next().await {
                     Ok(Some(message)) => message,
-                    Err(reason) => break reason,
+                    Err(reason) => {
+                        reader_rpc.diagnostics.lock().unwrap()["frameFailure"] = lines.diagnostic();
+                        break reason;
+                    },
                     Ok(None) => break "stdout_eof",
                 };
                 let mut message = line;
