@@ -176,10 +176,32 @@ impl<M: Mailbox + Directory> Hub<M> {
         Ok(())
     }
     pub(crate) fn telegram_schema(&self) -> Result<(), crate::store::Error> {
+        // One atomic schema step classifies all preexisting unpinned rows as
+        // legacy, including never-leased and terminal rows. Only an AFTER INSERT
+        // trigger installed in this same step grants fresh-job provenance.
+        let migration = rusqlite::Transaction::new_unchecked(
+            &self.store.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        migration.execute_batch("CREATE TABLE IF NOT EXISTS telegram_handoff_modes(job INTEGER PRIMARY KEY REFERENCES inbound(id) ON DELETE CASCADE,mode TEXT NOT NULL CHECK(mode IN ('legacy','receipt')));
+        CREATE TABLE IF NOT EXISTS telegram_handoff_eligible(job INTEGER PRIMARY KEY REFERENCES inbound(id) ON DELETE CASCADE);
+        CREATE TABLE IF NOT EXISTS telegram_handoff_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=1));
+        INSERT OR IGNORE INTO telegram_handoff_modes(job,mode) SELECT id,'legacy' FROM inbound WHERE NOT EXISTS(SELECT 1 FROM telegram_handoff_schema WHERE singleton=1);
+        CREATE TRIGGER IF NOT EXISTS telegram_handoff_new_job AFTER INSERT ON inbound BEGIN INSERT INTO telegram_handoff_eligible(job) VALUES(NEW.id); END;
+        INSERT INTO telegram_handoff_schema(singleton,version) SELECT 1,1 WHERE NOT EXISTS(SELECT 1 FROM telegram_handoff_schema WHERE singleton=1);
+        ")?;
+        let version: i64 = migration.query_row(
+            "SELECT version FROM telegram_handoff_schema WHERE singleton=1",
+            [],
+            |r| r.get(0),
+        )?;
+        if version != 1 {
+            return Err(crate::store::Error::PrivateStorage);
+        }
+        migration.commit()?;
         self.store.db.execute_batch("CREATE TABLE IF NOT EXISTS telegram_accounts(account TEXT PRIMARY KEY,offset INTEGER NOT NULL,ignored INTEGER NOT NULL DEFAULT 0);
         CREATE TABLE IF NOT EXISTS telegram_targets(endpoint TEXT PRIMARY KEY REFERENCES endpoints(id),account TEXT NOT NULL REFERENCES telegram_accounts(account),chat INTEGER NOT NULL,topic INTEGER NOT NULL,definition TEXT NOT NULL,UNIQUE(account,chat,topic));
         CREATE TABLE IF NOT EXISTS telegram_sources(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,external_id TEXT NOT NULL,source TEXT NOT NULL,PRIMARY KEY(endpoint,generation,external_id));
-        CREATE TABLE IF NOT EXISTS telegram_handoff_modes(job INTEGER PRIMARY KEY REFERENCES inbound(id) ON DELETE CASCADE,mode TEXT NOT NULL CHECK(mode IN ('legacy','receipt')));
         CREATE TABLE IF NOT EXISTS telegram_chunks(endpoint TEXT NOT NULL,generation INTEGER NOT NULL,transfer TEXT NOT NULL,part INTEGER NOT NULL,digest BLOB NOT NULL,message_id INTEGER,attempts INTEGER NOT NULL DEFAULT 0,lease_token TEXT,lease_until INTEGER,next_attempt INTEGER NOT NULL DEFAULT 0,failure_class INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(endpoint,generation,transfer,part));")?;
         let columns = self
             .store
@@ -340,8 +362,8 @@ impl<M: Mailbox + Directory> Hub<M> {
             return Err(HubError::FailureBudget.into());
         }
         let view = self.active(endpoint, now)?;
-        // Pin the choice before leasing or exposing any frames. A preexisting
-        // lease without a mode is historical legacy work, never an upgrade.
+        // Pin the choice before leasing or exposing any frames. Missing
+        // history never authorizes receipt mode without fresh-job provenance.
         // A crash between this commit and lease simply retains the same mode.
         let selected = self.store.db.query_row(
             "SELECT id,lease_token IS NOT NULL FROM inbound WHERE endpoint=?1 AND generation=?2 AND pending=1 ORDER BY id LIMIT 1",
@@ -351,22 +373,43 @@ impl<M: Mailbox + Directory> Hub<M> {
         let Some((job_id, previously_leased)) = selected else {
             return Ok(None);
         };
-        self.store.db.execute(
-            "INSERT OR IGNORE INTO telegram_handoff_modes(job,mode) VALUES(?1,?2)",
-            params![
-                job_id,
-                if previously_leased {
-                    CompletionMode::Legacy.as_str()
-                } else {
-                    mode.as_str()
-                }
-            ],
-        )?;
-        let pinned: String = self.store.db.query_row(
-            "SELECT mode FROM telegram_handoff_modes WHERE job=?1",
+        let tx = self
+            .store
+            .db
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT mode FROM telegram_handoff_modes WHERE job=?1",
+                [job_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let pinned = if let Some(existing) = existing {
+            existing
+        } else {
+            let eligible: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM telegram_handoff_eligible WHERE job=?1)",
+                [job_id],
+                |r| r.get(0),
+            )?;
+            let selected = if eligible && !previously_leased {
+                mode
+            } else {
+                CompletionMode::Legacy
+            };
+            tx.execute(
+                "INSERT INTO telegram_handoff_modes(job,mode) VALUES(?1,?2)",
+                params![job_id, selected.as_str()],
+            )?;
+            selected.as_str().to_owned()
+        };
+        // Consumed provenance cannot later reauthorize a mode switch, even if
+        // mode history is lost. Absence of either record never means eligible.
+        tx.execute(
+            "DELETE FROM telegram_handoff_eligible WHERE job=?1",
             [job_id],
-            |r| r.get(0),
         )?;
+        tx.commit()?;
         if pinned != mode.as_str() {
             return Err(Error::Conflict);
         }
@@ -1010,6 +1053,160 @@ mod tests {
                     .query_row("SELECT core_id FROM inbound", [], |r| r.get::<_, String>(0))
                     .unwrap(),
                 "msg_final"
+            );
+        }
+    }
+    #[test]
+    fn mode_migration_failure_rolls_back_backfill_trigger_and_marker() {
+        let (mut h, _) = fixture(Limits::default());
+        h.admit_telegram("bot_test", vec![update(1)], NOW).unwrap();
+        h.store.db.execute_batch("DROP TRIGGER telegram_handoff_new_job; DROP TABLE telegram_handoff_eligible; DROP TABLE telegram_handoff_modes; DROP TABLE telegram_handoff_schema; CREATE TABLE telegram_handoff_schema(singleton INTEGER PRIMARY KEY CHECK(singleton=1),version INTEGER NOT NULL CHECK(version=999));").unwrap();
+        assert!(h.telegram_schema().is_err());
+        assert!(h.store.db.is_autocommit());
+        assert_eq!(h.store.db.query_row("SELECT count(*) FROM sqlite_schema WHERE name IN ('telegram_handoff_modes','telegram_handoff_eligible','telegram_handoff_new_job')",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(
+            h.store
+                .db
+                .query_row("SELECT count(*) FROM telegram_handoff_schema", [], |r| r
+                    .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+        assert_eq!(
+            h.store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM inbound WHERE lease_token IS NULL AND pending=1",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            1
+        );
+    }
+    #[test]
+    fn old_schema_reopen_pins_unleased_leased_and_terminal_jobs_legacy() {
+        use std::os::unix::fs::PermissionsExt;
+        for state in ["unleased", "leased", "terminal"] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().canonicalize().unwrap().join("state");
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            {
+                let (mut h, _) = fixture_store(Store::open(&path, Limits::default()).unwrap());
+                h.admit_telegram("bot_test", vec![update(1)], NOW).unwrap();
+                if state != "unleased" {
+                    let intent = h
+                        .prepare_telegram_forward("ag_endpoint", NOW, &"a".repeat(64))
+                        .unwrap()
+                        .unwrap();
+                    if state == "terminal" {
+                        h.complete_telegram_forward(&intent, "msg_legacy").unwrap();
+                    }
+                }
+                // Remove exactly the new schema to model a pre-mode database,
+                // leaving actual durable inbound/lease/completion state intact.
+                h.store.db.execute_batch("DROP TRIGGER telegram_handoff_new_job; DROP TABLE telegram_handoff_eligible; DROP TABLE telegram_handoff_modes; DROP TABLE telegram_handoff_schema;").unwrap();
+            }
+            let mut h = Hub::new(
+                Store::open(&path, Limits::default()).unwrap(),
+                Fake::default(),
+                "app_hub",
+                "ws",
+            )
+            .unwrap();
+            let before: (Option<String>, bool, Option<String>) = h
+                .store
+                .db
+                .query_row("SELECT lease_token,pending,core_id FROM inbound", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .unwrap();
+            let attempt = h.prepare_telegram_forward_mode(
+                "ag_endpoint",
+                NOW,
+                &"b".repeat(64),
+                CompletionMode::Receipt,
+            );
+            if state == "terminal" {
+                assert!(attempt.unwrap().is_none());
+            } else {
+                assert!(attempt.is_err());
+            }
+            let after: (Option<String>, bool, Option<String>) = h
+                .store
+                .db
+                .query_row("SELECT lease_token,pending,core_id FROM inbound", [], |r| {
+                    Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+                })
+                .unwrap();
+            assert_eq!(after, before);
+            assert_eq!(
+                h.store
+                    .db
+                    .query_row("SELECT mode FROM telegram_handoff_modes", [], |r| r
+                        .get::<_, String>(0))
+                    .unwrap(),
+                "legacy"
+            );
+            assert_eq!(
+                h.store
+                    .db
+                    .query_row("SELECT count(*) FROM telegram_handoff_eligible", [], |r| {
+                        r.get::<_, i64>(0)
+                    })
+                    .unwrap(),
+                0
+            );
+        }
+    }
+    #[test]
+    fn fresh_job_provenance_survives_reopen_but_missing_provenance_is_legacy() {
+        use std::os::unix::fs::PermissionsExt;
+        for remove_provenance in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().canonicalize().unwrap().join("state");
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            {
+                let (mut h, _) = fixture_store(Store::open(&path, Limits::default()).unwrap());
+                h.admit_telegram("bot_test", vec![update(1)], NOW).unwrap();
+                if remove_provenance {
+                    h.store
+                        .db
+                        .execute("DELETE FROM telegram_handoff_eligible", [])
+                        .unwrap();
+                }
+            }
+            let mut h = Hub::new(
+                Store::open(&path, Limits::default()).unwrap(),
+                Fake::default(),
+                "app_hub",
+                "ws",
+            )
+            .unwrap();
+            let result = h.prepare_telegram_forward_mode(
+                "ag_endpoint",
+                NOW,
+                &"a".repeat(64),
+                CompletionMode::Receipt,
+            );
+            if remove_provenance {
+                assert!(result.is_err());
+            } else {
+                assert!(result.unwrap().is_some());
+            }
+            assert_eq!(
+                h.store
+                    .db
+                    .query_row("SELECT mode FROM telegram_handoff_modes", [], |r| r
+                        .get::<_, String>(0))
+                    .unwrap(),
+                if remove_provenance {
+                    "legacy"
+                } else {
+                    "receipt"
+                }
             );
         }
     }

@@ -281,8 +281,16 @@ future negotiated receipt mode. Core workers do **not** call it yet. Existing
 basic transport still uses its legacy fragment-handoff completion; that path
 is now durably exclusive with receipt mode. A bounded per-inbound-job mode row
 is pinned before the lease/frame preparation; the mode never changes on retry.
-Missing historical mode rows count as legacy at completion, and a previously
-leased job without a pin cannot be upgraded to receipt mode. Both completion
+An atomic one-time schema step backfills every existing unpinned inbound row
+(including never-leased, leased and terminal jobs) as legacy. Existing explicit
+mode pins remain immutable. In that same step a trigger starts recording fresh-job
+provenance for future inserts. Only this explicit durable provenance can authorize
+initial mode selection; absence of history or provenance always means legacy.
+Provenance survives restart until consumed by a mode pin; a previously leased job
+still cannot upgrade. Schema initialization never reclassifies fresh jobs on reopen. A future importer
+must explicitly pin imported historical jobs as legacy and consume their fresh-row
+provenance in the import transaction; insertion time alone does not make historical
+transport work eligible for negotiation. Both completion
 paths reject the other mode even after terminal completion or store reopening.
 The mode row is removed with its inbound job, never retained as unbounded history.
 Only internal development preparation can select receipt mode until runtime
