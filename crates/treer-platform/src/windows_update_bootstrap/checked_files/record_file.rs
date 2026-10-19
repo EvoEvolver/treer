@@ -14,17 +14,34 @@ pub(crate) enum RecordFault {
     AfterPublish,
 }
 
+// Fixed stage plus numeric code only. Zero denotes a semantic refusal or an
+// upstream verifier that intentionally erased the OS code; never GetLastError
+// after unrelated checks, and never format the error or private record bytes.
+fn failure(stage: &'static str, error: io::Error) -> io::Error {
+    eprintln!(
+        "record_fixture stage={stage} win32={}",
+        error.raw_os_error().unwrap_or(0)
+    );
+    denied()
+}
+
+fn at<T>(stage: &'static str, result: io::Result<T>) -> io::Result<T> {
+    result.map_err(|error| failure(stage, error))
+}
+
 fn read_record(mut file: &File) -> io::Result<Vec<u8>> {
-    let (_, _, links, flags) = identity(file)?;
+    let (_, _, links, flags) = at("read_identity", identity(file))?;
     if links != 1 || flags & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
-        return Err(denied());
+        return Err(failure("read_type_or_links", denied()));
     }
-    file.seek(SeekFrom::Start(0))?;
+    at("read_seek", file.seek(SeekFrom::Start(0)))?;
     let mut bytes = Vec::new();
-    file.take((RECORD_LIMIT + 1) as u64)
-        .read_to_end(&mut bytes)?;
+    at(
+        "read_bytes",
+        file.take((RECORD_LIMIT + 1) as u64).read_to_end(&mut bytes),
+    )?;
     if bytes.is_empty() || bytes.len() > RECORD_LIMIT {
-        return Err(denied());
+        return Err(failure("read_bound", denied()));
     }
     Ok(bytes)
 }
@@ -40,14 +57,20 @@ impl Attempt {
         fault: RecordFault,
     ) -> io::Result<File> {
         if bytes.is_empty() || bytes.len() > RECORD_LIMIT {
-            return Err(denied());
+            return Err(failure("input_bound", denied()));
         }
-        let owner = crate::windows::current_user_sid().map_err(|_| denied())?;
-        protected_private_acl(&self.directory, &owner)?;
-        if identity(&open_pinned(&self.path, true)?)? != identity(&self.directory)? {
-            return Err(denied());
+        let owner = at("current_owner", crate::windows::current_user_sid())?;
+        at(
+            "directory_acl",
+            protected_private_acl(&self.directory, &owner),
+        )?;
+        let current = at("directory_open", open_pinned(&self.path, true))?;
+        if at("directory_current_identity", identity(&current))?
+            != at("directory_retained_identity", identity(&self.directory))?
+        {
+            return Err(failure("directory_binding", denied()));
         }
-        let directory = final_path(&self.directory)?;
+        let directory = at("directory_path", final_path(&self.directory))?;
         let target = directory.join("receipt.json");
         let temporary = directory.join("receipt.next");
         let open = || {
@@ -63,20 +86,26 @@ impl Attempt {
                     Ok(())
                 }
                 (Ok(actual), Some(expected)) => {
-                    protected_private_acl(&actual, &owner)?;
-                    protected_private_acl(expected, &owner)?;
-                    if identity(&actual)? != identity(expected)?
-                        || read_record(&actual)? != read_record(expected)?
+                    at("prior_current_acl", protected_private_acl(&actual, &owner))?;
+                    at(
+                        "prior_expected_acl",
+                        protected_private_acl(expected, &owner),
+                    )?;
+                    if at("prior_current_identity", identity(&actual))?
+                        != at("prior_expected_identity", identity(expected))?
+                        || at("prior_current_bytes", read_record(&actual))?
+                            != at("prior_expected_bytes", read_record(expected))?
                     {
-                        return Err(denied());
+                        return Err(failure("prior_mismatch", denied()));
                     }
                     Ok(())
                 }
-                _ => Err(denied()),
+                (Err(error), _) => Err(failure("prior_open", error)),
+                (Ok(_), None) => Err(failure("unexpected_prior", denied())),
             }
         };
-        validate_previous()?;
-        let security = descriptor(&owner)?;
+        at("prior_before_stage", validate_previous())?;
+        let security = at("stage_descriptor", descriptor(&owner))?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: security.0,
@@ -94,20 +123,21 @@ impl Attempt {
             )
         };
         if raw == INVALID_HANDLE_VALUE {
-            return Err(denied());
+            let error = io::Error::last_os_error();
+            return Err(failure("stage_create", error));
         }
         let mut staged = unsafe { File::from_raw_handle(raw) };
-        staged.write_all(bytes)?;
-        staged.sync_all()?;
-        protected_private_acl(&staged, &owner)?;
-        if read_record(&staged)? != bytes {
-            return Err(denied());
+        at("stage_write", staged.write_all(bytes))?;
+        at("stage_sync", staged.sync_all())?;
+        at("stage_acl", protected_private_acl(&staged, &owner))?;
+        if at("stage_readback", read_record(&staged))? != bytes {
+            return Err(failure("stage_bytes_mismatch", denied()));
         }
-        let staged_identity = identity(&staged)?;
+        let staged_identity = at("stage_identity", identity(&staged))?;
         if fault == RecordFault::BeforePublish {
-            return Err(denied());
+            return Err(failure("injected_before_publish", denied()));
         }
-        validate_previous()?;
+        at("prior_before_publish", validate_previous())?;
         // Extended rename supplies the documented open-reader replacement
         // semantics. Ordinary FileRenameInfo failed with retained old readers
         // on hosted Server 2022/2025. No delete-first or legacy fallback.
@@ -140,30 +170,31 @@ impl Attempt {
             )
         };
         if renamed == 0 {
-            let code = unsafe { GetLastError() };
-            eprintln!("record_fixture stage=rename_ex win32={code}");
-            return Err(denied());
+            let error = io::Error::last_os_error();
+            return Err(failure("rename_ex", error));
         }
         if fault == RecordFault::AfterPublish {
-            return Err(denied());
+            return Err(failure("injected_after_publish", denied()));
         }
-        if identity(&staged)? != staged_identity || final_path(&staged)? != target {
-            return Err(denied());
+        if at("published_identity", identity(&staged))? != staged_identity
+            || at("published_path", final_path(&staged))? != target
+        {
+            return Err(failure("published_binding", denied()));
         }
-        protected_private_acl(&staged, &owner)?;
-        if read_record(&staged)? != bytes {
-            return Err(denied());
+        at("published_acl", protected_private_acl(&staged, &owner))?;
+        if at("published_readback", read_record(&staged))? != bytes {
+            return Err(failure("published_bytes_mismatch", denied()));
         }
         // Close the write FILE_OBJECT before returning a fresh read pin. A
         // reduced DuplicateHandle would still retain its write-sharing record.
         drop(staged);
-        let installed = open()?;
-        if identity(&installed)? != staged_identity {
-            return Err(denied());
+        let installed = at("installed_open", open())?;
+        if at("installed_identity", identity(&installed))? != staged_identity {
+            return Err(failure("installed_identity_mismatch", denied()));
         }
-        protected_private_acl(&installed, &owner)?;
-        if read_record(&installed)? != bytes {
-            return Err(denied());
+        at("installed_acl", protected_private_acl(&installed, &owner))?;
+        if at("installed_readback", read_record(&installed))? != bytes {
+            return Err(failure("installed_bytes_mismatch", denied()));
         }
         Ok(installed)
     }

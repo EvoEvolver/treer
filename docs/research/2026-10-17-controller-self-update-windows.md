@@ -391,7 +391,7 @@ retain the old or new record respectively; complete staged evidence is retained
 on pre-publication/native-sharing refusal and blocks silent retry. Tests cover
 the 64 KiB boundary and oversize/empty refusal before temporary creation, stale
 previous-handle refusal, old-reader retention, both injected boundaries and a
-real delete-sharing conflict. Hosted native execution is pending. These tests
+real delete-sharing conflict. These tests
 do not establish schema validation, revision/marker ordering, child quiescence,
 production ACL provisioning or power-loss durability. No production journal or
 recovery command uses this primitive.
@@ -404,9 +404,29 @@ the successor uses `FileRenameInfoEx` with replace/POSIX flags when a previous
 record is expected, and zero flags for initial creation. Microsoft's
 [rename contract](https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information)
 documents that POSIX replacement preserves existing handles while new opens
-resolve to the replacement. This is the failure hypothesis, pending exact-SHA
-native confirmation; no runtime PASS is claimed. A failed native call now logs
-only the fixed `rename_ex` stage and numeric Win32 code. There is no ordinary
+resolve to the replacement. The flags contract is gated at Windows 10 RS1
+(version 1607) in the SDK; the updater's initial supported server floor is
+Server 2022, with Server 2022/2025 as the measured targets. Production wiring
+must refuse unsupported builds or unavailable extended-rename semantics before
+replacement, never substitute ordinary rename. Earlier systems are not validated
+by these fixtures.
+
+Exact successor `3ef57b6a` passed hosted run 39223838525 on Server 2022 (20348)
+and Server 2025 (26100). Core read the raw log
+`.treer/releases/boot-111-3ef57b6a/run.log`: each image reports both record tests
+passing, full platform library 49 passed/0 failed/4 ignored, earlier observer
+and rename tests passing, and outside-Job owner round trip and running-image
+tests passing with zero exit codes. The single `rename_ex` Win32 32 line per
+filtered run is the intentional non-delete-sharing reader refusal. This accepts
+the disposable opaque-record fixture only; the earlier failed run remains
+evidence under its original SHA.
+
+The subsequent diagnostic delta logs fixed stages and numeric Win32 codes at
+each record validation and I/O refusal, without paths, SIDs or record contents.
+Code zero denotes a semantic refusal or an upstream verifier that intentionally
+discarded the native error; it does not mean OS success. Native-call errors are
+captured immediately. This diagnostic delta is separate from the hosted SHA
+above and needs its own execution evidence. There is no ordinary
 rename, delete-first or sharing-check bypass fallback. The delete-sharing
 blocker assertion remains unchanged. A separate observed concurrent fixture
 directory collision is addressed by OS-random selectors instead of timestamps;
