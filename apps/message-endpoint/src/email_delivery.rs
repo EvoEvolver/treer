@@ -6,6 +6,8 @@ use sha2::{Digest, Sha256};
 
 const PER_BINDING: i64 = 32;
 const GLOBAL: i64 = 640;
+// Core token mint (15s) + HTTP request (20s) + scheduling margin (10s).
+const MIN_RESERVATION_LEASE: i64 = 45;
 
 pub(super) fn schema(db: &Connection) -> Result<(), Error> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS email_dispatch(
@@ -212,6 +214,9 @@ impl Queue<'_> {
         Ok(())
     }
     /// Reserves capacity and freezes dispatch state BEFORE returning any bytes.
+    /// Requires at least 45 seconds on the current lease under the same write
+    /// transaction. Insufficient budget returns no attempt or reservation.
+    /// Caller must pass a fresh time, then reread the clock after token mint.
     /// A commit failure returns no attempt; do not POST or acknowledge work.
     pub fn begin_proxy_delivery(
         &mut self,
@@ -228,6 +233,14 @@ impl Queue<'_> {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         current(&tx, intent, now)?;
+        let lease_until: i64 = tx.query_row(
+            "SELECT lease_until FROM email_intents WHERE id=?1",
+            [&intent.id],
+            |r| r.get(0),
+        )?;
+        if lease_until.saturating_sub(now) < MIN_RESERVATION_LEASE {
+            return Err(Error::Lease);
+        }
         let payload: Vec<u8> = tx.query_row("SELECT payload FROM email_dispatch WHERE id=?1 AND endpoint=?2 AND generation=?3 AND state='prepared'",
             params![intent.id,intent.endpoint,intent.generation], |r|r.get(0)).optional()?.ok_or(Error::Denied)?;
         if payload != expected {
@@ -356,6 +369,49 @@ mod tests {
             payload: a.payload.clone(),
         }
     }
+    #[test]
+    fn reservation_requires_45_seconds_without_changing_insufficient_claims() {
+        for now in [61, 76, 77, 120, 121, 122] {
+            let mut store = Store::memory(Limits::default()).unwrap();
+            setup(&mut store);
+            let mut q = Queue::new(&mut store).unwrap();
+            let i = intent(&mut q, 1); // Claim expires at 121.
+            q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+            let before: (i64, i64, i64, String, i64) = q.store.db.query_row(
+                "SELECT state,attempts,next_try,nonce,lease_until FROM email_intents WHERE id=?1",
+                [&i.id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+            ).unwrap();
+            let result = q.begin_proxy_delivery(&i, URL, now);
+            let status = q.proxy_delivery_status("ag_email").unwrap();
+            if now <= 76 {
+                assert!(result.is_ok(), "45 seconds inclusive must admit");
+                assert_eq!(status.dispatching, 1);
+                assert_eq!(status.prepared, 0);
+            } else {
+                assert!(matches!(result, Err(Error::Lease)));
+                assert_eq!(status.dispatching, 0);
+                assert_eq!(status.uncertain, 0);
+                assert_eq!(status.prepared, 1);
+                assert!(!reserved(&q.store.db, &i.id).unwrap());
+            }
+            let after: (i64, i64, i64, String, i64) = q.store.db.query_row(
+                "SELECT state,attempts,next_try,nonce,lease_until FROM email_intents WHERE id=?1",
+                [&i.id], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+            ).unwrap();
+            assert_eq!(before, after);
+            if now == 77 {
+                // A fresh claim after expiry can use the same frozen intent;
+                // admission refusal did not turn this into an uncertain send.
+                let fresh = q
+                    .claim_proxy("ag_email", 1, 122, &"e".repeat(64))
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(fresh.id, i.id);
+                assert!(q.begin_proxy_delivery(&fresh, URL, 122).is_ok());
+            }
+        }
+    }
+
     #[test]
     fn journal_positive_fence_rechecks_current_scope_bytes_and_lifecycle() {
         for change in [
@@ -599,48 +655,61 @@ print(json.dumps({'access_token':'synthetic.app.signature','token_type':'Bearer'
     }
     #[cfg(feature = "hub")]
     #[test]
-    fn post_mint_journal_fence_observes_pause_during_fake_cli() {
+    fn post_mint_journal_fence_observes_pause_or_fresh_clock_expiry_during_fake_cli() {
         use crate::{core::Core, email::proxy::Sender};
         use std::{net::TcpListener, os::unix::fs::PermissionsExt};
-        let temp = tempfile::tempdir().unwrap();
-        let path = temp.path().canonicalize().unwrap().join("state");
-        let mut store = Store::open(&path, Limits::default()).unwrap();
-        setup(&mut store);
-        let mut q = Queue::new(&mut store).unwrap();
-        let i = intent(&mut q, 1);
-        q.prepare_proxy_delivery(&i, URL, 61).unwrap();
-        let a = q.begin_proxy_delivery(&i, URL, 61).unwrap();
-        assert!(q.proxy_dispatchable(&i, URL, 61).unwrap());
-        let database = path.join("hub.sqlite3");
-        let exe = temp.path().join("fake-treer");
-        std::fs::write(&exe, format!(r#"#!/usr/bin/python3
+        for expiry in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let path = temp.path().canonicalize().unwrap().join("state");
+            let mut store = Store::open(&path, Limits::default()).unwrap();
+            setup(&mut store);
+            let mut q = Queue::new(&mut store).unwrap();
+            let i = intent(&mut q, 1);
+            q.prepare_proxy_delivery(&i, URL, 61).unwrap();
+            let a = q.begin_proxy_delivery(&i, URL, 61).unwrap();
+            assert!(q.proxy_dispatchable(&i, URL, 61).unwrap());
+            let database = path.join("hub.sqlite3");
+            let clock = temp.path().canonicalize().unwrap().join("clock");
+            let exe = temp.path().join("fake-treer");
+            let expire = if expiry { "True" } else { "False" };
+            std::fs::write(&exe, format!(r#"#!/usr/bin/python3
 import json,sqlite3,sys
+from pathlib import Path
 assert sys.argv[1:]==['token','create','svc_hub','--json']
 db=sqlite3.connect({database:?},timeout=1)
-db.execute('UPDATE endpoints SET paused=1')
+if {expire}: Path({clock:?}).write_text('122')
+else:
+    db.execute('UPDATE endpoints SET paused=1')
+    Path({clock:?}).write_text('61')
 db.commit()
 db.close()
 print(json.dumps({{'access_token':'synthetic.app.signature','token_type':'Bearer','audience':'svc_hub','expires_in':300}}))
 "#)).unwrap();
-        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let core = Core::new(&exe, "app_own").unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let sender = Sender::new(
-            &format!("http://{}/", listener.local_addr().unwrap()),
-            "svc_hub",
-        )
-        .unwrap();
-        sender
-            .send_committed(&core, a, || q.proxy_dispatch_allowed(&i, URL, 61))
-            .commit(&mut q)
+            std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let core = Core::new(&exe, "app_own").unwrap();
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let sender = Sender::new(
+                &format!("http://{}/", listener.local_addr().unwrap()),
+                "svc_hub",
+            )
             .unwrap();
-        assert_eq!(state(&q, &i.id), "uncertain");
-        assert_eq!(q.proxy_delivery_status("ag_email").unwrap().uncertain, 1);
-        listener.set_nonblocking(true).unwrap();
-        assert_eq!(
-            listener.accept().unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
+            sender
+                .send_committed(&core, a, || {
+                    // The fake CLI publishes time only during token mint. A captured
+                    // pre-mint 61 would wrongly authorize the expired lease.
+                    let now: i64 = std::fs::read_to_string(&clock).unwrap().parse().unwrap();
+                    q.proxy_dispatch_allowed(&i, URL, now)
+                })
+                .commit(&mut q)
+                .unwrap();
+            assert_eq!(state(&q, &i.id), "uncertain");
+            assert_eq!(q.proxy_delivery_status("ag_email").unwrap().uncertain, 1);
+            listener.set_nonblocking(true).unwrap();
+            assert_eq!(
+                listener.accept().unwrap_err().kind(),
+                std::io::ErrorKind::WouldBlock
+            );
+        }
     }
     #[cfg(feature = "hub")]
     #[test]

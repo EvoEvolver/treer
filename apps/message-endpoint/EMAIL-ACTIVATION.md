@@ -99,12 +99,21 @@ only binding-local pressure, with separate authentication and masking tests.
 Lease expiry during token mint is an explicitly accepted conservative cost:
 the fence refuses POST and the reservation stays uncertain. Current claims last
 60 seconds, the Core CLI call is capped at 15 seconds and the HTTP request at
-20 seconds. The future worker should require at least 45 seconds of remaining
-lease before reservation (those two budgets plus 10 seconds margin), check the
-current clock again after mint and hold without reserving if the budget is
-insufficient. That admission budget is not implemented by these primitives;
-the positive fence already rejects an expired lease. Acceptance after a request
-has started remains recordable after expiry, as the journal completion requires.
+20 seconds. `begin_proxy_delivery` now requires at least 45 seconds of remaining
+lease inside its reservation transaction (those two budgets plus 10 seconds
+margin); 44 seconds is refused with the prepared row and claim unchanged, no
+attempt returned and no uncertainty slot reserved. An expired prepared claim can
+be reclaimed with its frozen bytes intact. These helpers still require a fresh
+caller-supplied time; they do not start a worker or sample the runtime clock.
+
+The future worker must reread its wall clock or use a monotonic elapsed-time
+budget after token mint and pass that fresh time into the positive fence. A
+synthetic mint-time clock-advance regression demonstrates this callback ordering:
+the pre-mint lease passes, the callback observes expiry, no HTTP connection occurs
+and the committed reservation becomes uncertain. The separate mint-time pause
+regression also remains. The assembled worker and runtime clock wiring are not
+implemented. Acceptance after a request has started remains recordable after
+expiry, as the journal completion requires.
 
 `Sender::send_committed` is a separate, currently unused assembly primitive. It
 consumes the opaque committed attempt, mints this App's service token, rechecks
