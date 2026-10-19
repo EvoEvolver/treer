@@ -184,6 +184,84 @@ class IndexTest(SearchBase):
         self.assertTrue(Store(self.path, clock=lambda: self.now).search_ready, 'the next start finishes the job')
 
 
+class SecurityReviewTest(SearchBase):
+    def test_a_rebuild_keeps_the_real_authors_of_changed_text(self):
+        issue = self.issue(A, title='Original title', description='Original description')
+        self.edit(issue, {'description': 'Rewritten by an admin'}, H)
+        self.edit(issue, {'title': 'Renamed by the creator'}, A)
+        self.comment(issue, 'a remark', B)
+        with sqlite3.connect(self.path) as db:
+            db.execute('DELETE FROM search_meta')
+        again = Store(self.path, clock=lambda: self.now)
+        by_kind = {r['match']['kind']: r['match']['author'] for q in ('Rewritten', 'Renamed', 'remark') for r in again.search(dict(q=q))['results']}
+        self.assertEqual(by_kind, {'description': 'usr_h', 'title': 'ag_a', 'comment': 'ag_b'}, 'not everything is credited to the creator')
+
+    def test_text_whose_writer_cannot_be_determined_is_marked_unknown_not_credited_to_the_creator(self):
+        issue = self.issue(A, title='Plain', description='as written')
+        with sqlite3.connect(self.path) as db:             # the stored text no longer matches what the events say
+            data = json.loads(db.execute('SELECT data FROM issues WHERE id=?', (issue,)).fetchone()[0])
+            data['description'] = 'altered outside the app'
+            db.execute('UPDATE issues SET data=? WHERE id=?', (json.dumps(data), issue)); db.execute('DELETE FROM search_meta')
+        hit = Store(self.path, clock=lambda: self.now).search(dict(q='altered outside'))['results'][0]
+        self.assertEqual(hit['match']['author'], 'unknown')
+
+    def test_filters_apply_before_the_candidate_cap_and_truncation_is_reported(self):
+        original = fulltext.CANDIDATES
+        fulltext.CANDIDATES = 10
+        try:
+            for n in range(25):
+                self.issue(A, title=f'common thing {n}', assignee='ag_a', labels=['bulk'])
+            rare = self.issue(B, title='common rare one', assignee='ag_b', labels=['rare'], status='blocked')
+            plain = self.store.search(dict(q='common', limit=50))
+            self.assertTrue(plain['truncated'], 'the response says when the candidate cap cut the list')
+            for params in ({'status': 'blocked'}, {'assignee': 'ag_b'}, {'label': 'RARE'}, {'author': 'ag_b'}):
+                result = self.store.search(dict(q='common', **params))
+                self.assertEqual([r['issue']['id'] for r in result['results']], [rare], params)
+                self.assertFalse(result['truncated'])
+        finally:
+            fulltext.CANDIDATES = original
+
+    def test_filter_columns_follow_later_changes_to_the_issue(self):
+        issue = self.issue(A, title='moving target', assignee='ag_a', labels=['one'])
+        self.edit(issue, {'status': 'blocked', 'assignee': 'ag_b', 'labels': ['two']}, H)
+        self.assertEqual(self.ids('moving', status='blocked', assignee='ag_b', label='two'), [issue])
+        self.assertEqual(self.ids('moving', assignee='ag_a'), []); self.assertEqual(self.ids('moving', label='one'), [])
+        self.edit(issue, {'status': 'note'}, H)
+        self.assertEqual(self.ids('moving', status='note'), [issue])
+
+    def test_a_slow_scan_is_interrupted_and_all_short_queries_are_tightened(self):
+        for n in range(40):
+            self.issue(A, title=f'filler {n}', description='x' * 400)
+        saved = (fulltext.QUERY_SECONDS, fulltext.PROGRESS_STEPS)
+        fulltext.QUERY_SECONDS, fulltext.PROGRESS_STEPS = -1, 1
+        try:
+            with self.assertRaises(Error) as caught:
+                self.store.search(dict(q='zz'))
+        finally:
+            fulltext.QUERY_SECONDS, fulltext.PROGRESS_STEPS = saved
+        self.assertEqual((caught.exception.status, caught.exception.code), (503, 'search_timeout'))
+        for q in ('a b c', '数 据 库', 'xy za bc'):
+            if all(len(t) < 3 for t in q.split()):
+                with self.assertRaises(Error) as caught:
+                    self.store.search(dict(q=q))
+                self.assertEqual(caught.exception.status, 400, q)
+        self.store.search(dict(q='ab cd'))
+
+    def test_an_unfinished_rebuild_leaves_the_index_untouched(self):
+        self.issue(A, title='kept text')
+        with sqlite3.connect(self.path) as db:
+            before = db.execute('SELECT COUNT(*) FROM search_docs').fetchone()[0]
+            db.execute('DELETE FROM search_meta')
+        original, fulltext.REBUILD_SECONDS = fulltext.REBUILD_SECONDS, -1
+        try:
+            Store(self.path, clock=lambda: self.now)
+        finally:
+            fulltext.REBUILD_SECONDS = original
+        with sqlite3.connect(self.path) as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM search_docs').fetchone()[0], before, 'the half-built rebuild was rolled back')
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM search_meta').fetchone()[0], 0, 'and the index is still marked incomplete')
+
+
 class RateLimitTest(SearchBase):
     def test_per_principal_limit(self):
         app = Application(self.store)

@@ -274,10 +274,12 @@ class Store:
         clean['to'] = fulltext.parse_date(params['to'], end=True) if 'to' in params else None
         if clean['from'] is not None and clean['to'] is not None and clean['from'] > clean['to']:
             fail('invalid_field', 'from is after to')
+        if not any(len(t) >= 3 for t in clean['q'].split()) and len(clean['q'].split()) > fulltext.MAX_SHORT_ONLY_TERMS:
+            fail('invalid_field', f'a query of only one- and two-character words may have at most {fulltext.MAX_SHORT_ONLY_TERMS} of them')
         with self.connect() as db:
             items = self.all(db)
-            results = fulltext.search(db, items, clean, limit)
-        return {'results': results, 'count': len(results), 'limit': limit, 'candidate_cap': fulltext.CANDIDATES}
+            results, truncated = fulltext.search(db, items, clean, limit)
+        return {'results': results, 'count': len(results), 'limit': limit, 'candidate_cap': fulltext.CANDIDATES, 'truncated': truncated}
 
     def children(self, issue_id, offset=0, limit=50):
         if offset < 0 or not 1 <= limit <= 100:
