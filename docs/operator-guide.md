@@ -1067,6 +1067,18 @@ allows the user for this Agent (evaluated without recording a decision), and
 request path would refuse. Without the hint the page sends the two-field
 `ready` and an old Console mints as before; the hint is stripped before the
 Agent UI is loaded. Handshake responses carry no timing headers.
+Prewarm (`agent.interface-embed-prewarm.v1`): a Console may start the handoff
+in a hidden frame when the user dwells on a Tree row, minting with
+`purpose: "prewarm"`. Those codes redeem into 10-minute sessions, are limited
+to 6 per user per minute (429 `embed_rate_limited`) and are audited as
+`agent.interface.embed.prewarmed` (ordinary opens as
+`agent.interface.embed.minted`), so the audit feed and summary tell hovers from
+opens. The hidden frame uses the bootstrap with `?reuse=1&prewarm=1`, which
+never loads Agent HTML and reports `warmed` or `warm_failed`; the real click
+reuses the short session and the Proxy rotates it into a normal 12-hour
+session on that first document load (the old cookie stays valid until its own
+expiry). At most 8 live embed sessions per user and Agent are kept, unused
+prewarm sessions being evicted first.
 `TREER_AGENT_EMBED_FALLBACK=refuse` (`--agent-embed-fallback refuse`) closes
 that fallback: the tunnel answers `503 embedded_ui_requires_isolated_origin`
 and the Console offers "open in new tab" only. Every Console host (Proxy `app_dist`, Worker, nginx) must send the same

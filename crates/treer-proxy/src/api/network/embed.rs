@@ -45,6 +45,16 @@ pub(in crate::api) async fn mint_agent_interface_embed(
             "browser_nonce_hash must be a 64-character lowercase hex digest",
         ));
     }
+    let prewarm = match request.purpose.as_deref() {
+        None | Some("open") => false,
+        Some("prewarm") => true,
+        Some(_) => {
+            return Err(ApiFailure::bad_request(
+                "invalid_request",
+                "purpose must be \"open\" or \"prewarm\"",
+            ))
+        }
+    };
     // A signed-in non-member gets the same answer as an unknown id (#164 a).
     auth.require_workspace_member(&workspace_id, &session.user_id)
         .await
@@ -88,6 +98,24 @@ pub(in crate::api) async fn mint_agent_interface_embed(
     // Minting is bounded per user (security 4750 P3-A): the Agent page in the
     // frame can replay 'ready' and have the Console ask again; it gains no
     // authority, so the bound only keeps the table and the traffic finite.
+    // Prewarm mints have their own, authoritative per-user budget (#198,
+    // security 5595): the Console's hover limit is a courtesy, this is the
+    // bound. Checked before the general gate so a refused prewarm does not
+    // consume an ordinary mint.
+    if prewarm
+        && !state.upload_gate().allow(
+            &format!("embed-prewarm:{}", session.user_id),
+            EMBED_PREWARM_MINTS_PER_USER_PER_MINUTE,
+        )
+    {
+        return Err(ApiFailure {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            error: ProtocolError::new(
+                "embed_rate_limited",
+                "too many embed authorizations for this user; retry in a minute",
+            ),
+        });
+    }
     if !state.upload_gate().allow(
         &format!("embed-mint:{}", session.user_id),
         EMBED_MINTS_PER_USER_PER_MINUTE,
@@ -112,8 +140,33 @@ pub(in crate::api) async fn mint_agent_interface_embed(
             &session.user_id,
             &agent.agent_id,
             &request.browser_nonce_hash,
+            prewarm,
         )
         .await?;
+    // Every mint is audited (#198, security 5583 (5)); the action name tells a
+    // hover from an open so a consumer never reads a prewarm as an access.
+    // Best effort: the mint stands even if the audit write fails.
+    if let Err(error) = crate::audit::record_workspace(
+        &auth.pool(),
+        crate::audit::NewWorkspaceAuditEvent {
+            workspace_id: &workspace_id,
+            actor_kind: "user",
+            actor_id: Some(&session.user_id),
+            action: if prewarm {
+                "agent.interface.embed.prewarmed"
+            } else {
+                "agent.interface.embed.minted"
+            },
+            resource_kind: "agent",
+            resource_id: &agent.agent_id,
+            resource_name: None,
+            payload: json!({}),
+        },
+    )
+    .await
+    {
+        tracing::warn!(%error, "embed mint audit write failed");
+    }
     let mut response = Json(json!({
         "code": code,
         "origin": origin.trim_end_matches('/'),
@@ -129,6 +182,11 @@ pub(in crate::api) async fn mint_agent_interface_embed(
 #[derive(Debug, serde::Deserialize)]
 pub(in crate::api) struct EmbedAuthorizationRequest {
     pub browser_nonce_hash: String,
+    /// `"open"` (default) or `"prewarm"` (#198 step 3): a prewarm code
+    /// redeems into a 10-minute session and counts against its own budget. A
+    /// client that lies can only shorten its own session.
+    #[serde(default)]
+    pub purpose: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -138,6 +196,8 @@ struct EmbedSessionRequest {
 }
 
 const EMBED_MINTS_PER_USER_PER_MINUTE: usize = 30;
+/// Prewarm mints per user per minute across every tab and device (#198).
+const EMBED_PREWARM_MINTS_PER_USER_PER_MINUTE: usize = 6;
 const EMBED_OUTSTANDING_CODES_PER_USER: i64 = 8;
 const EMBED_BOOTSTRAP_PATH: &str = "/.treer/embed";
 const EMBED_SESSION_PATH: &str = "/.treer/embed/session";
@@ -225,7 +285,22 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     // it (security 5554 condition 2): an old Console's page carries no probe
     // handling and no v2 message at all.
     let reuse = bootstrap_flag(request, "reuse");
-    let v2_probe = if reuse {
+    // Prewarm (#198 step 3, security 5583): only together with reuse=1 and
+    // rendered server side, so a page without both flags carries no prewarm
+    // text. Its only effect: the page never navigates; a 204 check ends in
+    // the terminal `warmed`, any failure in the quiet `warm_failed`.
+    let prewarm = reuse && bootstrap_flag(request, "prewarm");
+    let v2_probe = if prewarm {
+        r#"      // Version 2 prewarm: probe, then check or mint, but never navigate.
+      if (!probed && data.treer_embed === "probe" && data.version === 2 && data.nonce_hash === hash && Object.keys(data).length === 3) {
+        probed = true;
+        checkSession().then(function (r) {
+          if (done) return;
+          if (r.status === 204) { clearTimeout(timer); finish(); }
+          else post({ treer_embed: "mint", version: 2, nonce_hash: hash });
+        }).catch(function () { if (!done) post({ treer_embed: "mint", version: 2, nonce_hash: hash }); });
+      }"#
+    } else if reuse {
         r#"      // Version 2 (#198): the Console answers ready with a probe; this page
       // decides once, on its own origin, whether a live embed session exists
       // (the Proxy applies the full request gate) and reports reused or mint.
@@ -233,7 +308,7 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
         probed = true;
         checkSession().then(function (r) {
           if (done) return;
-          if (r.status === 204) { clearTimeout(timer); post({ treer_embed: "reused", version: 2, nonce_hash: hash }); navigate(); }
+          if (r.status === 204) { clearTimeout(timer); post({ treer_embed: "reused", version: 2, nonce_hash: hash }); finish(); }
           else post({ treer_embed: "mint", version: 2, nonce_hash: hash });
         }).catch(function () { if (!done) post({ treer_embed: "mint", version: 2, nonce_hash: hash }); });
       }"#
@@ -245,6 +320,20 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
     } else {
         r#"post({ treer_embed: "ready", nonce_hash: hash });"#
     };
+    // The terminal step after a verified session: load the UI, or (prewarm)
+    // report `warmed` and stop. The failure report: the hash-bound
+    // `cookies_blocked`, or (prewarm) the quiet `warm_failed`.
+    let finish = if prewarm {
+        r#"done = true; post({ treer_embed: "warmed", version: 2, nonce_hash: hash });"#
+    } else {
+        r#"done = true; window.location.replace(next);"#
+    };
+    let fail_report = if prewarm {
+        r#"var message = { treer_embed: "warm_failed", version: 2, nonce_hash: hash };"#
+    } else {
+        r#"var message = { treer_embed: kind };
+    if (hash) message.nonce_hash = hash;"#
+    };
     let html = format!(
         r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><title>Treer</title></head><body>
 <script nonce="{script_nonce}">
@@ -254,7 +343,7 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
   var done = false;
   var hash = null;
   var params = new URLSearchParams(window.location.search);
-  params.delete("reuse");
+  params.delete("reuse"); params.delete("prewarm");
   var next = "/" + (params.toString() ? "?" + params.toString() : "");
   function post(message) {{ try {{ parentWindow.postMessage(message, CONSOLE); }} catch (e) {{}} }}
   // A failure report carries the nonce hash once it exists: the Agent
@@ -262,12 +351,11 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
   // learned the hash, so the Console accepts a post-ready failure only with it.
   function report(kind) {{
     if (done) return; done = true;
-    var message = {{ treer_embed: kind }};
-    if (hash) message.nonce_hash = hash;
+    {fail_report}
     post(message);
   }}
   function fromConsole(event) {{ return !done && event.origin === CONSOLE && event.source === parentWindow && event.data && typeof event.data === "object"; }}
-  function navigate() {{ done = true; window.location.replace(next); }}
+  function finish() {{ {finish} }}
   function checkSession() {{ return fetch("/.treer/embed/check", {{ credentials: "include", redirect: "manual", cache: "no-store" }}); }}
   if (window.top === window || !window.crypto || !window.crypto.subtle) {{ report("cookies_blocked"); return; }}
   var bytes = new Uint8Array(32); window.crypto.getRandomValues(bytes);
@@ -283,7 +371,7 @@ fn bootstrap_page(config: &IngressConfig, request: &Request<Body>) -> Result<Res
         fetch("/.treer/embed/session", {{ method: "POST", credentials: "include", redirect: "manual",
           headers: {{ "content-type": "application/json" }}, body: JSON.stringify({{ code: data.code, nonce: nonce }}) }})
         .then(function (r) {{ if (r.status !== 204) throw new Error("session"); return checkSession(); }})
-        .then(function (r) {{ if (r.status !== 204) throw new Error("check"); navigate(); }})
+        .then(function (r) {{ if (r.status !== 204) throw new Error("check"); finish(); }})
         .catch(function () {{ report("cookies_blocked"); }});
         return;
       }}
@@ -340,22 +428,30 @@ async fn open_embed_session(
     if parsed.code.len() > 128 || !auth::valid_ingress_nonce(&parsed.nonce) {
         return Err(auth::invalid_ingress_authorization().into());
     }
-    let token = auth
+    let issued = auth
         .consume_embed_auth_code(hostname, agent_id, &parsed.code, &parsed.nonce)
         .await?;
     let mut response = Response::new(Body::empty());
     *response.status_mut() = StatusCode::NO_CONTENT;
     response.headers_mut().insert(
         header::SET_COOKIE,
-        HeaderValue::from_str(&format!(
-            "{}={token}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned; Max-Age={}",
-            config.embed_cookie_name(),
-            12 * 60 * 60,
-        ))
-        .map_err(|error| ApiFailure::internal("cookie_error", &error.to_string()))?,
+        embed_cookie_header(config, &issued.token, issued.max_age_seconds)?,
     );
     no_store(&mut response);
     Ok(response)
+}
+
+/// The partitioned embed cookie for `token` with the given lifetime.
+pub(in crate::api) fn embed_cookie_header(
+    config: &IngressConfig,
+    token: &str,
+    max_age_seconds: i64,
+) -> Result<HeaderValue, ApiFailure> {
+    HeaderValue::from_str(&format!(
+        "{}={token}; Path=/; Secure; HttpOnly; SameSite=None; Partitioned; Max-Age={max_age_seconds}",
+        config.embed_cookie_name(),
+    ))
+    .map_err(|error| ApiFailure::internal("cookie_error", &error.to_string()))
 }
 
 /// `GET /.treer/embed/check`: 204 when the request carries a live embed
@@ -379,15 +475,23 @@ async fn check_embed_session(
     if !matches!(*method, Method::GET | Method::HEAD) {
         return Err(ApiFailure::not_found("route_not_found", "route not found"));
     }
-    let user = match cookie_value(headers, config.embed_cookie_name()) {
-        Some(token) => auth.authenticate_embed_session(hostname, &token).await?,
-        None => None,
-    };
     let no_session = || {
         ApiFailure::unauthorized(
             "ingress_authentication_required",
             "no embed session for this origin",
         )
+    };
+    // The same cookie-context rule as the UI request (security 5580): the
+    // embed cookie counts only for a request that provably comes from the
+    // framed document itself (exactly one `Sec-Fetch-Site: same-origin`).
+    // The bootstrap's own fetch is same-origin; any other context gets the
+    // same 401 as "no session", so a 204 is never an oracle for a foreign page.
+    if !super::ingress::embed_cookie_context(headers, false, config, hostname)? {
+        return Err(no_session());
+    }
+    let user = match cookie_value(headers, config.embed_cookie_name()) {
+        Some(token) => auth.authenticate_embed_session(hostname, &token).await?,
+        None => None,
     };
     let Some(user_id) = user else {
         return Err(no_session());
