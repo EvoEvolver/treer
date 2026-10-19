@@ -357,7 +357,15 @@ slot. A foreign read grant is refused under this private-attempt policy too.
 Its native regression observes equal-hash/different-ID originals and candidates
 through the actual rename gap, publication and reverse restoration, injects a
 third equal-hash object, an exclusive-reader conflict, foreign read ACL and an
-occupied directory. Hosted Server 2022/2025 execution is pending. Observation
+occupied directory. Hosted run 39220955841 checked exact code commit
+`0b17854c1f49c5892d901a824b480327a260c94f` on Server 2022 and 2025. Each
+reported the observer test alone 1 passed/0 failed (`OBSERVER_EXIT=0`), rename
+tests 2 passed/0 failed, and full platform library 47 passed/0 failed/4 ignored.
+The separately CIM-launched outside-Job owner round trip and running-image
+rename each reported 1 passed/0 failed, exit 0 and their raw-result marker true.
+Raw log: `.treer/releases/boot-111-0b17854c/run.log` (Issues #111, event 5332).
+These are disposable fixture results, not installed/live or `win_native`
+acceptance. Observation
 returns labels and drops its read pins; it is not an atomic multi-file snapshot
 or mutation authority. Production use still needs lock/quiescence enforcement,
 persisted authenticated records and marker binding, installation-specific ACL
