@@ -34,8 +34,10 @@ The smallest complete transaction is:
    before interpreting it. Download Controller and CLI only, verify their hashes
    and reported versions, and refuse redirects, URL credentials and ambient
    proxies. Preserve the PowerShell bounds (8 KiB manifest, 256 MiB per artifact)
-   or document a deliberate stricter refusal. Select the existing Rust 128 MiB
-   bound, checked before allocation and during streaming. Local retained Windows
+   and match the per-artifact 256 MiB bound for Windows Controller/CLI downloads
+   (leader5245). The inert Rust image/copy verifier uses that same bound, checked
+   from metadata before copying and during streaming; its buffer stays 64 KiB.
+   Local retained Windows
    artifacts at `169259f` measure 20,885,504 bytes (Controller) and 5,185,024 bytes
    (CLI); these are historical size evidence, not the next candidate. W3 must
    record sizes of its exact frozen artifacts and refuse an oversized candidate.
@@ -118,7 +120,8 @@ NTFS volume with persistent ACLs and a parent with no foreign writers, creates a
 new attempt directory with a protected current-user/SYSTEM DACL at creation,
 and refuses an existing attempt. Its fixed candidate file is CREATE_NEW with
 the same DACL and a non-inherited handle. A separately reopened pinned source
-is bounded to 128 MiB before copying and during a 64 KiB-buffer stream. The
+is bounded to 256 MiB before copying and during a 64 KiB-buffer stream
+(updated from 128 MiB by leader5245). The
 copied bytes are hashed, synced and read back through the same destination
 handle; the returned handle disallows other writers/deletion. Failed evidence
 is preserved and cannot be overwritten by retrying with a corrected digest.
@@ -437,7 +440,8 @@ Downstream crates cannot call it until directory trust and the daemon-owned
 handoff have been reviewed and accepted. It
 pins a non-reparse local fixed-drive NTFS image and every ancestor without delete sharing,
 refuses hardlinks/alternate data streams, checks the expected SHA256 and bounds
-the image to 128 MiB. The expected digest's authenticity,
+the image to 256 MiB under leader5245 (the earlier hosted slices used 128 MiB).
+The expected digest's authenticity,
 selected installation/enrollment and provenance of the old Controller copy must
 come from a future trusted preparation coordinator; this adapter cannot prove
 them from a path/hash supplied by a caller. It does not use a downloaded image

@@ -36,7 +36,9 @@ use windows_sys::Win32::{
     },
 };
 
-const IMAGE_LIMIT: u64 = 128 * 1024 * 1024;
+// Match the Windows PowerShell updater's per-artifact cap (leader5245).
+// Copying and digest verification remain streamed through bounded buffers.
+const IMAGE_LIMIT: u64 = 256 * 1024 * 1024;
 const CONNECT_BUDGET: Duration = Duration::from_secs(5);
 const CLEANUP_MS: u32 = 5_000;
 

@@ -5,7 +5,7 @@
 The private Windows-only `windows_update_bootstrap::checked_files` fixture
 creates new current-user/SYSTEM-only attempt directories and candidate files
 with their DACLs at creation. It pins local NTFS directory ancestors and source
-identity, streams at most 128 MiB through a 64 KiB buffer, hashes the copied
+identity, streams at most 256 MiB through a 64 KiB buffer, hashes the copied
 bytes and syncs/read-back checks the same destination handle. Native tests cover
 checksum failure with retained evidence, existing-object and oversize refusal,
 unsafe names/foreign parent writers, independent source offsets, handle
