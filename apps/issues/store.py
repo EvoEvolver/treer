@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from auth import Error
+import refs
 import search as fulltext
 from notify import (ASK_PER_AUTHOR, HOURLY, HOURLY_ISSUES, HOURLY_WINDOW, POLICY_MODES, WINDOW, notice_for, parse_intent,
                     recipients_for, resolve_mentions, unresolved_mentions)
@@ -109,6 +110,8 @@ class Store:
         try:
             with self.connect() as db:
                 fulltext.ensure(db)
+                refs.ensure(db)
+                refs.rebuild_if_needed(db, fulltext.stamp_epoch)
                 self.search_ready = fulltext.rebuild_if_needed(db)
         except Error as exc:
             print('Issues search index could not be built in time; search answers 503 until a later start finishes it', file=sys.stderr, flush=True)
@@ -237,7 +240,8 @@ class Store:
             issue = self.view(self.get(items, issue_id), items)
             rows = db.execute('SELECT id,data FROM activity WHERE issue_id=? ORDER BY id DESC LIMIT ? OFFSET ?',
                               (issue_id, limit+1, offset)).fetchall()
-        return {'issue': issue, 'children': [self.view(i, items) for i in items.values() if i['parent_id'] == issue_id][:100],
+            referenced = refs.referenced_by(db, issue_id, items)
+        return {'issue': issue, 'referenced_by': referenced, 'children': [self.view(i, items) for i in items.values() if i['parent_id'] == issue_id][:100],
                 'children_total': sum(i['parent_id'] == issue_id for i in items.values()),
                 'activity': [(self.titles_only if titles else (lambda e: e))(dict(json.loads(r['data']), id=r['id'])) for r in rows[:limit]],
                 'next_activity_offset': offset+limit if len(rows)>limit else None}
@@ -471,6 +475,8 @@ class Store:
                     db.execute('INSERT OR IGNORE INTO shipped_signals(issue_id,sha8,created_at) VALUES(?,?,?)', (issue_id, sha8, now))
             event_id = db.execute('INSERT INTO activity(issue_id,data) VALUES(?,?)', (issue_id, json.dumps(event))).lastrowid
             fulltext.on_write(db, action, issue, before, event, event_id, actor, now)
+            known = {r[0] for r in db.execute('SELECT id FROM issues')}
+            refs.on_write(db, action, issue, before, event, event_id, actor, now, known.__contains__)
             names = {p['id']: p.get('name', p['id']) for p in directory}
             notice = notice_for(action, actor, before, issue, changed, mentions, names, body.get('title') if action == 'comment' else None)
             recipients = recipients_for(action, issue, old_assignee, changed, mentions, actor['id']) if notice else []

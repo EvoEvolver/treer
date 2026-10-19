@@ -421,6 +421,17 @@ The index is written in the same transaction as the text (there is no way to edi
 rebuilt idempotently from the issues and comments on start when its version marker is missing (within 20 seconds, otherwise
 nothing is committed and search answers 503 until a later start finishes it) and is covered by the database backup.
 
+## References (#186)
+
+A standalone `#123` in a title, description or comment links to issue 123, which then lists the issue under **Referenced by**
+(`referenced_by` in `GET /v1/issues/ID`): newest first, one entry per referencing issue (its latest reference, with the
+kind of text and who wrote it), at most 50, the title cut to 80 characters and shown as plain text. `#N` must stand alone (not
+`a#12`, `#12x`, `/#12`, `&#12`), name an existing issue, and not be the issue itself; one text links at most 20 issues. The
+references of a text are replaced when that title or description changes and are written in the same transaction as the text; they
+are derived again from the stored text on the first start after the upgrade. Links only: no notification, and nothing about the
+referenced issue changes (not its version, status or activity). Anyone who can comment can create a backlink on any issue, which
+is why every entry shows its author.
+
 ## Notes (#186)
 
 `note` is a status beside `done` and `closed`: a knowledge or memory entry rather than work. A note gets no reminders (not

@@ -143,6 +143,17 @@ export function IssueDetail({ result, startEdit }: { result: IssueDetailResult; 
         {claim && <button type="button" disabled={busy} onClick={() => lease("release")}>Release lease</button>}
       </div>
       {claim && <p className="meta">Lease: {displayName(people, claim.holder)} until {new Date(claim.expires_at).toLocaleString()}</p>}
+      {(result.referenced_by?.length ?? 0) > 0 && (
+        <>
+          <h3>Referenced by · {result.referenced_by!.length}</h3>
+          <ul className="backlinks">
+            {result.referenced_by!.map((link) => (
+              <li key={link.issue.id}><IssueLink id={link.issue.id} /> <span className="text">{link.issue.title}</span>
+                <span className="meta"> · in its {link.source} by {displayName(people, link.author)}</span></li>
+            ))}
+          </ul>
+        </>
+      )}
       <h3>Children · {issue.progress.completed}/{issue.progress.total} descendants complete</h3>
       <Children key={"c" + issue.version} id={id} first={result} />
       <h3>Comments &amp; activity</h3>
