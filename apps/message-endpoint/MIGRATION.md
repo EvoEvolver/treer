@@ -580,8 +580,10 @@ Proposed durable representation and limits:
   outer Core message ID. Canonical length framing covers every scope, job,
   fragments digest, native ID and asserted final ID, so altered valid assertions
   cannot silently become the same disposition. Store no body or raw receipt.
-- Reference the existing inbound job and stable endpoint with integer foreign
-  keys; store first-seen time, an unacked/acked state and bounded conflict flag.
+- Reference the existing declared AUTOINCREMENT inbound job key; obtain the
+  binding from that protected parent and its existing declared endpoint text key.
+  Never use implicit rowids or add a second mutable copy of binding identity.
+  Store first-seen time, an unacked/acked state and bounded conflict flag.
   Fixed-size digest blobs and scalar fields have a checked logical payload
   ceiling of 256 bytes per row. Enforce 32 rows per stable binding across all
   generations and 256 globally (64 KiB logical payload); SQLite page/index/WAL
@@ -601,13 +603,17 @@ unacked row; retry repeats the same disposition and ack without another count.
 A lost ack response likewise retains the row. Confirmation must never attach to
 a replacement row or a conflicting receipt.
 
-Prune only acked rows, oldest first, when capacity is needed, retaining at least
+Prune only acked rows by a stored AUTOINCREMENT ordinal, not timestamps or implicit
+rowids, when capacity is needed, retaining at least
 eight acked rows per binding. Never evict an unacked row, including during
 endpoint retirement, job cleanup or generation changes. Proposed foreign keys
 reject parent deletion while unacked children exist; an explicit guarded cleanup
 may delete acked children together with their retired parent. Owner conflict
 recovery must confirm acknowledgement or retain the hold, not silently delete an
-unacked key. If pruning cannot admit a row, commit an owner-visible full-ledger
+unacked key. Floors across sufficiently many bindings can exhaust global capacity;
+accept that availability cost without bypassing either limit or evicting another
+binding's rows. Conflict and full holds are single bounded fields per binding,
+cleared only through audited owner recovery. If pruning cannot admit a row, commit an owner-visible full-ledger
 hold and pause the binding without incrementing the mismatch counter or acking
 the incoming delivery. No receipt caller can evict another binding's rows.
 
@@ -630,3 +636,17 @@ no per-binding receive filter: bounded scheduling/backoff and audited owner
 recovery still need implementation and review before a full ledger can be safely
 contained without starving other bindings. This proposal alone cannot establish
 that containment or authorize receipt-mode activation.
+
+The first inert schema increment implements only the table and SQLite integrity
+constraints, with no production initializer or writer caller. It uses the
+declared inbound key and restrictive FK, protects referenced parent identity
+against updates, and stores two 32-byte digests and five integer scalars (104
+logical bytes per row, excluding SQLite overhead). SQL enforces hash types and
+widths, scalar states, immutable disposition identity and both capacity limits.
+Its declared AUTOINCREMENT ordinal remains monotonic across clock steps and
+deleted maxima. Tests cover initialization over existing history, repeated
+initialization, VACUUM, restrictive deletion, parent/child identity changes,
+invalid hashes/states, multi-generation and global caps, and ordinal ordering.
+The floor, acked-only cleanup API, admission digest construction, counter/hold
+transaction, confirmed-ack marker and concurrency/rollback behavior are not yet
+implemented. Raw SQL in unit fixtures is not a receipt admission interface.
