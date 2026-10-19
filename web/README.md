@@ -956,3 +956,12 @@ refusal. After UI load all handshake controls are ignored. Tab visibility and
 appearance updates do not run the handshake again; scope/interface changes
 replace the frame and cancel its pending requests as before.
 After a successful `reused` outcome every later control is ignored immediately.
+
+Tree row hit targets cover the entire painted row, including vertical padding
+and the empty right edge. Agent/App rows keep their native workload links;
+folder buttons cover their own row without swallowing descendants. The actions
+button overlays reserved right-side space as a sibling, so menu clicks do not
+open a workload or toggle a folder. Drag/drop and roving keyboard navigation
+remain on the existing tree items. Links defer dragging to the row rather than
+starting a native URL drag. The desktop tree reserves 12px on its right so the
+sidebar resize handle cannot intercept the painted row edge.
