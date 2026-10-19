@@ -1,5 +1,6 @@
 //! Inert terminal-mismatch ledger schema. No runtime caller or ACK authority.
-//! Receipt admission, confirmed-ACK marking and owner recovery are separate work.
+//! Local admission lives in telegram_disposition_admission; counter/hold
+//! composition, confirmed-ACK marking and owner recovery remain separate work.
 use crate::store::{Error, Store};
 
 pub const PER_BINDING_ROWS: i64 = 32;

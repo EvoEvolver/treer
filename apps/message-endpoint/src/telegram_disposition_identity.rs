@@ -16,6 +16,7 @@ pub struct Identity {
     endpoint: String,
     generation: i64,
     recipient: String,
+    asserted_final: String,
 }
 
 fn framed_hash(domain: &[u8], fields: &[&[u8]]) -> [u8; 32] {
@@ -84,6 +85,7 @@ impl Identity {
             endpoint: receipt.scope.endpoint_id,
             generation: receipt.scope.generation,
             recipient: receipt.scope.recipient_id,
+            asserted_final: receipt.final_core_message_id,
         })
     }
 
@@ -91,6 +93,25 @@ impl Identity {
     /// No caller receives an ACK capability from this storage projection.
     pub fn parent(&self) -> (i64, &str, i64, &str) {
         (self.job, &self.endpoint, self.generation, &self.recipient)
+    }
+
+    pub(crate) fn asserted_final(&self) -> &str {
+        &self.asserted_final
+    }
+
+    #[cfg(test)]
+    pub(crate) fn fixture(job: i64, endpoint: &str, generation: i64, key: u16, digest: u8) -> Self {
+        let mut delivery_key = [0; 32];
+        delivery_key[..2].copy_from_slice(&key.to_be_bytes());
+        Self {
+            delivery_key,
+            receipt_digest: [digest; 32],
+            job,
+            endpoint: endpoint.into(),
+            generation,
+            recipient: "ag_recipient".into(),
+            asserted_final: "msg_other".into(),
+        }
     }
 
     /// Fixed-width storage projection only; do not expose through logs/status.

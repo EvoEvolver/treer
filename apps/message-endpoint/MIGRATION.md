@@ -647,9 +647,10 @@ Its declared AUTOINCREMENT ordinal remains monotonic across clock steps and
 deleted maxima. Tests cover initialization over existing history, repeated
 initialization, VACUUM, restrictive deletion, parent/child identity changes,
 invalid hashes/states, multi-generation and global caps, and ordinal ordering.
-The floor, acked-only cleanup API, admission digest construction, counter/hold
-transaction, confirmed-ack marker and concurrency/rollback behavior are not yet
-implemented. Raw SQL in unit fixtures is not a receipt admission interface.
+At this schema stage the floor, acked-only cleanup API, admission identity,
+counter/hold transaction and confirmed-ack marker were still pending; the later
+increments below describe the implemented subsets. Raw SQL in unit fixtures is
+not a receipt admission interface.
 
 Before this schema is initialized in a runtime store, generic terminal retention
 must skip any inbound parent referenced by the ledger (acked or unacked), just
@@ -695,3 +696,19 @@ deliberate encoding versioning and ledger migration, not silent rehashing of old
 deliveries. Delivery-key stability across Core versions assumes redelivery keeps
 the original opaque delivery ID. A changed delivery ID is a new ledger key and
 may count again; the at-least-once accounting limitation also covers that case.
+
+The next inert increment adds `telegram_disposition_admission::record_in_transaction`,
+a local storage primitive with no runtime caller or ACK authority. It requires
+an enclosing IMMEDIATE transaction, schema version 1 and a strictly parsed sealed
+identity. It rechecks the exact durable parent tuple, terminal state and unequal
+final ID. Equal key/digest/parent replays do not insert; a changed identity latches
+the existing bounded conflict flag without replacing the row. Capacity cleanup
+removes only the incoming binding's oldest acked, non-conflicting row when more
+than eight such rows remain, in the same transaction as insertion. Unacked and
+conflicting rows remain pinned, including across generations; global fullness
+never authorizes eviction from another binding. Any SQL error requires rollback
+of the enclosing transaction. This helper deliberately does not commit, increment
+the mismatch counter, write owner recovery holds, validate current hub/binding or
+handoff mode, or acknowledge. Those checks and effects must be assembled in the
+authoritative completion transaction before *any* result can permit ACK. The
+confirmed-ACK marker, owner recovery and scheduler remain unimplemented.
