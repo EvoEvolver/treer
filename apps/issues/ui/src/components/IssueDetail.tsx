@@ -120,8 +120,19 @@ export function IssueDetail({ result, startEdit }: { result: IssueDetailResult; 
         <PickerField text="Assignee">
           <AssigneePicker value={issue.assignee ?? ""} disabled={busy || !allowed} onChange={(assignee) => patch({ assignee: assignee || null })} />
         </PickerField>
+        {issue.status === "blocked" && (
+          <Field text="Waiting on">
+            <select aria-label="Waiting on" value={issue.waiting_on ?? ""} disabled={busy || !allowed} onChange={(e) => patch({ waiting_on: e.target.value || null })}>
+              <option value="">Nobody in particular</option>
+              <option value="leader">The leader</option><option value="user">The user</option>
+              {people.filter((p) => p.kind === "agent").map((p) => <option key={p.id} value={p.id}>{displayName(people, p.id)}</option>)}
+            </select>
+          </Field>
+        )}
         <Select<Priority> text="Priority" values={PRIORITIES} value={issue.priority} disabled={busy || !allowed} onChange={(priority) => patch({ priority })} />
       </div>
+      {issue.waiting_on && <p className="meta">Waiting on {issue.waiting_on === "leader" ? "the leader" : issue.waiting_on === "user" ? "the user" : displayName(people, issue.waiting_on)}
+        {issue.waiting_by ? ` · set by ${displayName(people, issue.waiting_by)}` : ""}{issue.waiting_at ? ` on ${new Date(issue.waiting_at).toLocaleString()}` : ""}</p>}
       <p className="description">{issue.description || "No description."}</p>
       <div>{issue.labels.map((l) => <span key={l} className="tag">{l}</span>)}</div>
       {issue.blocked_by.length > 0 && (

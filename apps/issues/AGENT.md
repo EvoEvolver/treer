@@ -37,6 +37,8 @@ chmod +x /tmp/issues
 /tmp/issues assign 1 ag_STABLE_ID_FROM_DIRECTORY
 /tmp/issues status 1 in_progress
 /tmp/issues comment 1 'Reproduced; investigating compiler output.' --title 'Reproduced on main'
+/tmp/issues stale --hours 4          # unresolved issues nobody is moving, oldest first; pick one up when you are idle
+/tmp/issues wait 1 ag_STABLE_ID       # blocked on that Agent (or leader / user); reminders then go to them; `wait 1 none` blocks with nobody in particular
 /tmp/issues show 1 --titles          # comments as title (or a 160-char excerpt when untitled) + body_bytes
 /tmp/issues activity 1 42            # read one comment's full text when its title is not enough
 /tmp/issues claim 1 --seconds 900
@@ -108,6 +110,7 @@ All successful data responses and errors are JSON. Errors use
 | --- | --- | --- |
 | GET `/v1/me` | — | principal, notification note |
 | GET `/v1/directory` | — | principals (stable human/Agent IDs) |
+| GET `/v1/stale` | hours=4 (1..720), limit=50, offset=0 | issues without progress (responsible Agent, waiting_on, stale_hours), total, next_offset |
 | GET `/v1/issues` | status, assignee, label, parent_id, limit=50, offset=0 | issues, total, next_offset |
 | GET `/v1/issues/ID` | limit=50, offset=0 (activity paging), comments=full\|titles | issue, children, activity, next_activity_offset (`comments=titles`: comments carry `title` or an `excerpt` (untitled ones, first 160 chars on one line) and `body_bytes`, no text) |
 | GET `/v1/issues/ID/activity/EVENT` | — | event (one activity entry in full, comment text included) |

@@ -4,6 +4,7 @@ import { Help } from "./components/Help";
 import { IssueDetail } from "./components/IssueDetail";
 import { IssueForm } from "./components/IssueForm";
 import { IssueList, layout, type View } from "./components/IssueList";
+import { StaleList } from "./components/StaleList";
 import { AssigneePicker } from "./components/Picker";
 import { Ctx, type AppContext } from "./context";
 import { COLLAPSED_BY_DEFAULT, STATUSES, canEdit, issueFromHash, NOT_ALLOWED } from "./lib";
@@ -14,6 +15,7 @@ const NAV = {
   "nav-needs": { title: "Needs me", glyph: "◈", status: "", mine: true, unresolved: true, view: "list" },
   "nav-mine": { title: "Assigned to me", glyph: "◎", status: "", mine: true, unresolved: false, view: "list" },
   "nav-active": { title: "In progress", glyph: "◐", status: "in_progress", mine: false, unresolved: false, view: "list" },
+  "nav-stale": { title: "Stale", glyph: "◌", status: "", mine: false, unresolved: true, view: "stale" },
   "nav-tree": { title: "Hierarchy", glyph: "⌥", status: "", mine: false, unresolved: false, view: "tree" },
 } as const;
 type NavId = keyof typeof NAV;
@@ -246,8 +248,8 @@ export function App() {
           </div>
           <div className="workspace">
             <section id="collection" aria-label="Issue list">
-              <div id="list"><IssueList visible={visible} view={view} collapsed={collapsed} toggle={toggleGroup} filterStatus={filters.status} route={route} focusId={focusId} /></div>
-              <button id="more" type="button" hidden={!hasMore} onClick={() => run(() => load(false))}>Load more</button>
+              <div id="list">{view === "stale" ? <StaleList /> : <IssueList visible={visible} view={view} collapsed={collapsed} toggle={toggleGroup} filterStatus={filters.status} route={route} focusId={focusId} />}</div>
+              <button id="more" type="button" hidden={!hasMore || view === "stale"} onClick={() => run(() => load(false))}>Load more</button>
             </section>
             <section id="detail" aria-label="Issue detail">{pane}</section>
           </div>
