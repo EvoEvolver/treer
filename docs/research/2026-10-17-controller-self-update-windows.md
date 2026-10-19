@@ -459,6 +459,56 @@ real-machine validation. Native publication and authenticated
 process binding remain subsequent authority-reviewed work. This is not a stable
 on-disk format.
 
+### Native clock-source checkpoint (2026-10-19)
+
+The accepted coherent-acquisition model (`5bfd9a69`, issue comments 4828,
+4834 and 4839) does not settle the boot-source contract. The next native
+experiment must distinguish an observed OS value from a supported security
+guarantee. A successful hosted query cannot by itself establish freshness after
+reboot, Fast Startup, hibernation or VM restore.
+
+Microsoft's [Windows time documentation](https://learn.microsoft.com/en-us/windows/win32/sysinfo/windows-time)
+states that Win32 `GetTickCount64` elapsed time includes sleep and hibernation.
+Keep using the actual Win32 function for the proposed tick source; this statement
+is about that API, not a similarly named managed-runtime property. A hosted
+elapsed-time test still does not exercise a machine power transition.
+
+The candidate `NtQuerySystemInformation` boot-environment query needs a separate
+compatibility and trust review before implementation. Microsoft's
+[function contract](https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-ntquerysysteminformation)
+warns that the function and returned structures are internal and can change,
+requires dynamic resolution, and does not document a boot-environment identifier
+contract in its listed information classes. This is not evidence that no query
+exists; it means the reviewed public contract does not yet justify treating a
+candidate GUID as the model's trustworthy boot identity. Do not copy an inferred
+class number or structure layout into the updater as a supported ABI. Likewise,
+the [BCD identifiers](https://learn.microsoft.com/en-us/windows-hardware/drivers/devtest/boot-options-identifiers)
+identify boot configuration entries; `{current}` identifies the running loader
+entry, not a documented fresh identifier for every kernel boot. Neither a BCD
+entry nor wall-clock boot-time arithmetic is an approved fallback.
+
+The proposed next deliverable is a private, test-only capability experiment,
+after review of its exact API/ABI and failure behavior. It must acquire each
+sample locally as boot-before, Win32 tick, boot-after; require matching nonzero
+boot values; retain only the verifier's sample; and refuse unavailable APIs,
+failed statuses, unexpected lengths, mixed identities and clock regression
+without fallback or budget renewal. Two independently started fixture processes
+must agree during the observed session. Output should report only fixed result
+codes and equality/elapsed observations, not a persistent machine identifier.
+No registration publication, process authority, installer, installed-state read
+or production caller belongs in that experiment.
+
+Hosted Server 2022/2025 runs can establish availability and ordinary
+cross-process agreement on their exact builds. They cannot approve reboot,
+suspend/hibernate, Fast Startup or VM snapshot semantics. Before those tests,
+post an `[action-leader]` request with the frozen helper/hash, exact dedicated
+machine, supported transition and recovery procedure; no reboot, power-setting
+change or snapshot operation is implied by the current task. If a trustworthy
+boot source cannot be established, keep native registration unavailable rather
+than weakening the boot binding. Live verifier-owned process/image observations,
+exclusive registration publication and once-only consumption remain separate
+uncompleted requirements.
+
 The first implementation substep is the private `cfg(test)` model in
 `crates/treer-platform/src/update_deadline.rs`: a fixed five-second window,
 independent reader validation, original-owner expiry ceiling and permanently
