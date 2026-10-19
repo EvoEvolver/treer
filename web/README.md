@@ -959,9 +959,12 @@ Only a Proxy advertising `agent.interface-embed-prewarm.v1` can receive a hidden
 prewarm bootstrap. Existing embed capability alone does not enable it: older
 Proxies would ignore the prewarm hint and load Agent HTML in the background.
 A 400 ms mouse hover or deliberate Tab focus on an accessible, online Tree
-Agent may start the bootstrap; arrow navigation, touch hover emulation, hidden
+Agent may start the bootstrap; dragging with a mouse button held, arrow
+navigation, touch hover emulation, hidden
 documents, Save-Data, Apps, and workloads already open in a tab are excluded.
-There are at most two concurrent attempts per workspace, a 60 s per-Agent
+There are at most two concurrent attempts per workspace, ten hidden bootstrap
+starts per minute per account in the current Console document (even without
+a mint), a 60 s per-Agent
 cooldown, and six background mint attempts per minute per authenticated account
 in the current Console document. The Proxy must also enforce the purpose-specific six/minute limit per user
 across tabs and devices, alongside its unchanged global 30/minute and

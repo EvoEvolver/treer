@@ -3,13 +3,16 @@ import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { fixture } from './fixtures/workspace-tabs'
 
-const ids = Array.from({ length: 7 }, (_, i) => `ag_${(i + 1).toString(16).padStart(32, '0')}`)
+const ids = Array.from({ length: 11 }, (_, i) => `ag_${(i + 1).toString(16).padStart(32, '0')}`)
 const origins = ids.map(id => `https://ag-${id.slice(3)}.agents.example.test`)
 const hash = 'a'.repeat(64), code = 'iec_v1_' + 'b'.repeat(64)
-async function setup(page: Page, options: { capability?: boolean; quiet?: boolean; denied?: boolean; holdMint?: Promise<void> } = {}) {
+async function setup(page: Page, options: { capability?: boolean; quiet?: boolean; denied?: boolean; holdMint?: Promise<void>; many?: boolean } = {}) {
   await page.clock.install()
   const live = await fixture(page, Object.fromEntries(origins.slice(0, 6).map((origin, i) => [`tab-${i + 1}`, origin])), Object.fromEntries(ids.slice(0, 6).map((id, i) => [`tab-${i + 1}`, id])))
-  live.snapshot().agents.push({ ...live.snapshot().agents[1], agent_id: ids[6], name: 'Eta', path: '/Eta', interface: { ...live.snapshot().agents[1].interface!, instance_id: 'ui-eta', origin_url: origins[6] } })
+  for (const [offset, name] of ['Eta', ...(options.many ? ['Theta', 'Iota', 'Kappa', 'Lambda'] : [])].entries()) {
+    const index = offset + 6
+    live.snapshot().agents.push({ ...live.snapshot().agents[1], agent_id: ids[index], name, path: `/${name}`, interface: { ...live.snapshot().agents[1].interface!, instance_id: `ui-${name}`, origin_url: origins[index] } })
+  }
   await page.route('**/api/auth/config', r => r.fulfill({ json: { capabilities: ['agent.interface-origin.v1', 'agent.interface-embed.v1', ...(options.capability === false ? [] : ['agent.interface-embed-prewarm.v1'])] } }))
   const minted: string[] = [], foreground: string[] = [], ui: string[] = [], bootstraps: string[] = [], warmed = new Set<string>()
   await page.route('**/interface/embed-authorization', async r => {
@@ -88,6 +91,50 @@ test('prewarm skips touch hover emulation', async ({ page }) => {
   await hover(page, 'Alpha'); expect(s.bootstraps).toHaveLength(0)
 })
 
+test('dragging across Tree rows never starts prewarm', async ({ page }) => {
+  const s = await setup(page, { quiet: true })
+  for (const name of ['Alpha', 'Beta', 'Gamma']) {
+    await row(page, name).dispatchEvent('pointerover', { pointerType: 'mouse', buttons: 1 })
+    await page.clock.runFor(500)
+    await row(page, name).dispatchEvent('pointerout', { pointerType: 'mouse', buttons: 1 })
+  }
+  expect(s.bootstraps).toHaveLength(0)
+  await expect(page.locator('iframe[aria-hidden="true"]')).toHaveCount(0)
+})
+
+test('rapid Tab and Shift+Tab stops do not warm; pointer focus is not keyboard intent', async ({ page }) => {
+  const s = await setup(page, { quiet: true })
+  for (const [key, name] of [['Tab', 'Alpha'], ['Shift+Tab', 'Beta'], ['Tab', 'Gamma']]) {
+    await page.keyboard.press(key)
+    await row(page, name).getByRole('link').focus()
+    await page.clock.runFor(150)
+  }
+  await row(page, 'Delta').dispatchEvent('pointerdown', { pointerType: 'mouse', buttons: 1 })
+  await row(page, 'Delta').getByRole('link').focus()
+  await page.clock.runFor(500)
+  expect(s.bootstraps).toHaveLength(0)
+  await page.keyboard.press('Tab')
+  await row(page, 'Epsilon').getByRole('link').focus()
+  await page.clock.runFor(401)
+  await expect(page.locator('iframe[aria-hidden="true"]')).toHaveCount(1)
+})
+
+test('click during a pending prewarm cancels its code and starts the normal foreground handshake', async ({ page }) => {
+  let release!: () => void
+  const held = new Promise<void>(resolve => { release = resolve })
+  const s = await setup(page, { holdMint: held })
+  await hover(page, 'Alpha')
+  await expect.poll(() => s.minted.length).toBe(1)
+  await row(page, 'Alpha').getByRole('link').click()
+  await expect(page.locator('iframe[aria-hidden="true"]')).toHaveCount(0)
+  await expect.poll(() => s.foreground.length).toBe(1)
+  expect(s.ui).toHaveLength(0)
+  release()
+  await expect(page.frameLocator('iframe[title="/Alpha interface"]').getByRole('heading')).toHaveText('Agent interface')
+  expect(s.ui).toEqual([ids[0]])
+  expect(s.minted).toHaveLength(1); expect(s.foreground).toHaveLength(1)
+})
+
 test('prewarm skips an already-open tab', async ({ page }) => {
   const s = await setup(page)
   await row(page, 'Alpha').getByRole('link').click()
@@ -164,13 +211,37 @@ test('prewarm source/hash/state checks isolate two concurrent frames and clear t
   }
   await row(page, 'Gamma').dispatchEvent('pointerover', { pointerType: 'mouse' }); await page.clock.runFor(401)
   expect(s.bootstraps).toHaveLength(2)
-  await report(page, 0, 'warmed'); await report(page, 0, 'mint'); await report(page, 0, 'reused')
+  await report(page, 0, 'warmed'); await report(page, 0, 'mint'); await report(page, 0, 'reused'); await report(page, 0, 'warm_failed')
   expect(s.minted).toHaveLength(0)
+  await expect(frames).toHaveCount(2)
   await report(page, 0, 'ready')
+  for (const kind of ['warmed', 'mint', 'warm_failed']) {
+    await page.evaluate(({ hash, origin, kind }) => {
+      const source = document.querySelectorAll<HTMLIFrameElement>('iframe[aria-hidden="true"]')[1].contentWindow
+      const event = new MessageEvent('message', { origin, data: { treer_embed: kind, version: 2, nonce_hash: hash } })
+      Object.defineProperty(event, 'source', { value: source }); dispatchEvent(event)
+    }, { hash, origin: origins[0], kind })
+    const other = page.frames().find(frame => frame.url().startsWith(origins[0]))!
+    await other.evaluate(({ target, hash, kind }) => parent.postMessage({ treer_embed: kind, version: 2, nonce_hash: hash, extra: true }, target), { target: new URL(page.url()).origin, hash, kind })
+  }
+  await expect(frames).toHaveCount(2)
   await page.evaluate(hash => dispatchEvent(new MessageEvent('message', { origin: 'https://ag-00000000000000000000000000000001.agents.example.test', source: window, data: { treer_embed: 'mint', version: 2, nonce_hash: hash } })), hash)
-  await report(page, 0, 'mint', 'c'.repeat(64)); expect(s.minted).toHaveLength(0)
+  for (const kind of ['warmed', 'mint', 'warm_failed']) await report(page, 0, kind, 'c'.repeat(64))
+  await expect(frames).toHaveCount(2); expect(s.minted).toHaveLength(0)
+  await page.evaluate(() => {
+    (window as unknown as { removedPrewarmSource: Window | null }).removedPrewarmSource = document.querySelector<HTMLIFrameElement>('iframe[aria-hidden="true"]')!.contentWindow
+  })
   await row(page, 'Alpha').dispatchEvent('pointerout')
   await expect(frames).toHaveCount(1)
+  await page.evaluate(({ hash, origin }) => {
+    const old = window as unknown as { removedPrewarmSource?: Window | null }
+    // WebKit rejects detached WindowProxy in the constructor; retain its exact
+    // identity on a synthetic late event without crossing Playwright's serializer.
+    const event = new MessageEvent('message', { origin, data: { treer_embed: 'mint', version: 2, nonce_hash: hash } })
+    Object.defineProperty(event, 'source', { value: old.removedPrewarmSource })
+    dispatchEvent(event); delete old.removedPrewarmSource
+  }, { hash, origin: origins[0] })
+  expect(s.minted).toHaveLength(0)
   await report(page, 1, 'ready'); await report(page, 1, 'mint')
   await expect.poll(() => s.minted.length).toBe(1)
   await expect(frames).toHaveCount(0)
@@ -197,6 +268,22 @@ test('prewarm respects six background mints per minute and never retries automat
   await expect(page.locator('iframe[aria-hidden="true"]')).toHaveCount(0)
   expect(s.minted).toHaveLength(6)
   await page.clock.fastForward(60_001); expect(s.minted).toHaveLength(6)
+})
+
+test('a hover sweep is capped at ten hidden frame starts per minute independently of minting', async ({ page }) => {
+  const s = await setup(page, { quiet: true, many: true })
+  for (const [index, name] of ['Alpha', 'Beta', 'Gamma', 'Delta', 'Epsilon', 'Zeta', 'Eta', 'Theta', 'Iota', 'Kappa'].entries()) {
+    await row(page, name).dispatchEvent('pointerover', { pointerType: 'mouse' }); await page.clock.runFor(401)
+    await expect.poll(() => s.bootstraps.length).toBe(index + 1)
+    await row(page, name).dispatchEvent('pointerout')
+  }
+  await row(page, 'Lambda').dispatchEvent('pointerover', { pointerType: 'mouse' }); await page.clock.runFor(401)
+  expect(s.bootstraps).toHaveLength(10); expect(s.minted).toHaveLength(0)
+  await expect(page.locator('iframe[aria-hidden="true"]')).toHaveCount(0)
+  await row(page, 'Lambda').dispatchEvent('pointerout')
+  await page.clock.fastForward(60_001)
+  await row(page, 'Lambda').dispatchEvent('pointerover', { pointerType: 'mouse' }); await page.clock.runFor(401)
+  await expect.poll(() => s.bootstraps.length).toBe(11)
 })
 
 for (const [width, theme, locale] of [[1360, 'light', 'en'], [1360, 'dark', 'zh'], [390, 'light', 'zh'], [390, 'dark', 'en']] as const) {

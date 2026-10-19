@@ -8,6 +8,7 @@ type Controls = { enter: (id: string, intent: Intent) => void; leave: (id: strin
 // enforces its authoritative per-user limits across tabs and machines.
 const budgets = new Map<string, number[]>()
 const cooldowns = new Map<string, number>()
+const frameStarts = new Map<string, number[]>()
 
 export function useAgentEmbedPrewarm(userId: string | undefined, workspaceId: string | null, enabled: boolean, targets: PrewarmTarget[], openIds: string[]) {
   const controls = useRef<Controls | null>(null)
@@ -45,6 +46,10 @@ export function useAgentEmbedPrewarm(userId: string | undefined, workspaceId: st
     function start(id: string, target: PrewarmTarget, key: string) {
       const attempt = attempts.get(id)
       if (!attempt || !allowed()) { remove(id); return }
+      const now = Date.now(), recentStarts = (frameStarts.get(userId!) ?? []).filter(at => now - at < 60_000)
+      if (recentStarts.length >= 10) { remove(id); return }
+      recentStarts.push(now); frameStarts.set(userId!, recentStarts)
+      while (frameStarts.size > 16) frameStarts.delete(frameStarts.keys().next().value!)
       // Any attempted bootstrap has a cooldown, including a failure/cancel.
       cooldowns.set(key, Date.now() + 60_000)
       for (const [entry, until] of cooldowns) if (until <= Date.now()) cooldowns.delete(entry)
