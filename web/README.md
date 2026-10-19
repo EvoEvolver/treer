@@ -847,3 +847,10 @@ See the operator guide for temporary-file visibility, expiry and server quotas.
 Iframe appearance hints are included in the initial URL. Exact-origin theme
 messages start after that iframe loads, and continue on later theme changes;
 new iframe instances wait for their own load event.
+
+
+On phones, opening the Tree while a deep link is still waiting for workspace
+inventory takes precedence over automatic terminal display. Once inventory
+arrives, the linked workload remains selected, but the Tree stays open until
+the user explicitly opens a workload. A delayed-inventory browser test covers
+this startup ordering.
