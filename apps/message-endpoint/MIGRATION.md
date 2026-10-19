@@ -558,3 +558,75 @@ Production remains on the legacy completion path until the mixed-mode dispatcher
 capability negotiation, bounded conflict recovery and assembled-worker
 commit-before-ack crash tests are reviewed. The dispatcher must receive sealed
 values through this Core path rather than re-wrap generic `Mailbox::receive` data.
+
+### Proposed terminal mismatch ledger (review required; not implemented)
+
+Issues #203 decisions 6059 and 6062 replace the final no-ack design with a
+durably recorded discard. The current `d2eaecb4` no-ack intermediate remains
+unactivated. This proposal changes neither workers nor acknowledgement behavior.
+
+After all existing authenticated workspace/principal, generation, mode and
+receipt checks, compare the asserted final ID with durable `inbound.core_id`.
+Equal terminal receipts remain benign `IgnoredTerminal` replays without mapping
+resurrection. A mismatch uses a distinct `TerminalMismatch` disposition; it never
+changes the completed job, final ID or reply mappings.
+
+Proposed durable representation and limits:
+
+- Key by SHA-256 of the authenticated opaque Core delivery ID, domain-separated
+  and length-framed with workspace and hub identity. Hashing is a storage key,
+  not authentication; provenance still comes only from the sealed delivery.
+- Store a separate SHA-256 identity digest of the strictly parsed receipt and
+  outer Core message ID. Canonical length framing covers every scope, job,
+  fragments digest, native ID and asserted final ID, so altered valid assertions
+  cannot silently become the same disposition. Store no body or raw receipt.
+- Reference the existing inbound job and stable endpoint with integer foreign
+  keys; store first-seen time, an unacked/acked state and bounded conflict flag.
+  Fixed-size digest blobs and scalar fields have a checked logical payload
+  ceiling of 256 bytes per row. Enforce 32 rows per stable binding across all
+  generations and 256 globally (64 KiB logical payload); SQLite page/index/WAL
+  overhead is additional and this is not a physical database-size guarantee.
+- In one IMMEDIATE transaction insert the unacked disposition and increment the
+  saturating terminal-mismatch counter once. Existing key plus equal digest
+  returns the stored disposition with no increment. A different digest cannot
+  overwrite or acknowledge it: commit a bounded conflict flag and owner recovery
+  hold, then return an error. Failed COMMIT always means zero acknowledgement.
+
+Only a committed `TerminalMismatch` permits `commit_and_ack` to call Core with
+the original delivery ID and its existing deterministic operation key, outside
+the hub mutex. `Core::ack` already requires that ID in the acknowledged or
+already-acknowledged response list. Only that successful return permits a second
+short transaction to mark the exact key/digest acked. Failure to mark retains an
+unacked row; retry repeats the same disposition and ack without another count.
+A lost ack response likewise retains the row. Confirmation must never attach to
+a replacement row or a conflicting receipt.
+
+Prune only acked rows, oldest first, when capacity is needed, retaining at least
+eight acked rows per binding. Never evict an unacked row, including during
+endpoint retirement, job cleanup or generation changes. Proposed foreign keys
+reject parent deletion while unacked children exist; an explicit guarded cleanup
+may delete acked children together with their retired parent. Owner conflict
+recovery must confirm acknowledgement or retain the hold, not silently delete an
+unacked key. If pruning cannot admit a row, commit an owner-visible full-ledger
+hold and pause the binding without incrementing the mismatch counter or acking
+the incoming delivery. No receipt caller can evict another binding's rows.
+
+Counter deduplication holds only while a key is retained. After confirmed-acked
+records are pruned, an unexpected Core redelivery can count again; the aggregate
+counter is therefore at-least-once and saturating, not perpetual exactly-once
+accounting. Preserve existing historical attempt counts and document that mixed
+provenance rather than relabeling them as distinct deliveries. Retired jobs have
+no receipt authority: orphan replays fail closed, never recreate mappings.
+Owner-only visibility exposes masked counts, saturation, conflict and capacity
+flags; no IDs, digests, bodies or token data enter status responses or logs.
+
+Required local tests cover same receipt after restart without double counting;
+changed digest refusal; retained and evicted mappings; failed disposition and
+ack-marker COMMITs; ack failure and lost reply; per-binding/global full holds;
+acked-only pruning and floor; parent deletion guards and retirement; and process
+death on both sides of the disposition COMMIT. Real Core confirmed-ack replay
+behavior remains a separate pre-activation rehearsal. The workspace mailbox has
+no per-binding receive filter: bounded scheduling/backoff and audited owner
+recovery still need implementation and review before a full ledger can be safely
+contained without starving other bindings. This proposal alone cannot establish
+that containment or authorize receipt-mode activation.
