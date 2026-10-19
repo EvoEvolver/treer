@@ -843,3 +843,7 @@ lowercase hex characters (Core currently generates 64). A rejected begin handle
 that still matches the Controller's bounded identifier syntax gets a scoped
 best-effort abort; unsafe strings are never used as request paths.
 See the operator guide for temporary-file visibility, expiry and server quotas.
+
+Iframe appearance hints are included in the initial URL. Exact-origin theme
+messages start after that iframe loads, and continue on later theme changes;
+new iframe instances wait for their own load event.

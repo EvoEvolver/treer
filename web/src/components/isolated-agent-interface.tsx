@@ -40,12 +40,15 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
   title: string; theme: Theme; pending?: boolean
 }) {
   const frame = useRef<HTMLIFrameElement>(null)
+  const loadedFrame = useRef<HTMLIFrameElement | null>(null)
   const noticeRegion = useRef<HTMLDivElement>(null)
   const loaded = useRef<() => void>(() => {})
   const [phase, setPhase] = useState<Phase>(origin ? 'bootstrap' : 'unavailable')
   // Appearance is an initial public hint; later changes use exact-origin messages.
   const bootstrap = useMemo(() => origin ? withEmbedTheme(new URL('/.treer/embed', origin).href, theme, readEmbedAppearance()) : null, [origin]) // eslint-disable-line react-hooks/exhaustive-deps
-  useEffect(() => { postEmbedTheme(frame.current, theme, readEmbedAppearance()) }, [theme])
+  // The initial about:blank document still has the Console origin. Initial
+  // appearance travels in src; send messages only to a frame that has loaded.
+  useEffect(() => { if (frame.current && loadedFrame.current === frame.current) postEmbedTheme(frame.current, theme, readEmbedAppearance()) }, [theme])
   useLayoutEffect(() => { if (phase === 'compatibility') noticeRegion.current?.focus() }, [phase])
   useLayoutEffect(() => {
     if (!origin || pending) return
@@ -110,6 +113,6 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
       {!pending && origin && <a href={origin} target="_blank" rel="noopener noreferrer" className="font-medium inline-flex min-h-11 items-center rounded-sm underline outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('app.open_in_new_tab')}</a>}
       {phase === 'offer-compatibility' && <button type="button" onClick={() => setPhase('compatibility')} className="-ml-2 inline-flex min-h-11 items-center rounded-sm px-2 underline outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('surface.embed_load_compatibility')}</button>}
     </div>}
-    {!pending && !error && phase !== 'checking-fallback' && phase !== 'offer-compatibility' && src && <iframe ref={frame} src={src} title={title} className="block min-h-0 w-full flex-1 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onLoad={() => { postEmbedTheme(frame.current, theme, readEmbedAppearance()); loaded.current() }} />}
+    {!pending && !error && phase !== 'checking-fallback' && phase !== 'offer-compatibility' && src && <iframe ref={frame} src={src} title={title} className="block min-h-0 w-full flex-1 border-0 bg-background" style={{ colorScheme: theme }} sandbox="allow-scripts allow-forms allow-same-origin allow-modals allow-downloads allow-popups allow-popups-to-escape-sandbox" onLoad={() => { loadedFrame.current = frame.current; postEmbedTheme(frame.current, theme, readEmbedAppearance()); loaded.current() }} />}
   </div>
 }
