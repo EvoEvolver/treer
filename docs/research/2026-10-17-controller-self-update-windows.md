@@ -806,6 +806,70 @@ This is a retention proposal, not an implemented timer, quota, deletion or new
 cleanup authority. Checked storage, sync/readback, authenticated acquisition,
 durable single-use publication and production wiring remain separate gates.
 
+#### Next acquisition slice: native operation outcome (proposed, test-only)
+
+The hosted evidence-pin fixture is accepted as storage custody. Its bytes are
+still caller-supplied: storing and hashing a claimed failure does not establish
+that the failure occurred. The next slice should capture the result inside the
+disposable checked rename fixture, before any evidence encoding. Keep it under
+`cfg(all(windows, test))`, with no installed paths, Controller adapter, rollback
+execution, head publication or recovery entry point.
+
+Today `rename_checked` returns a fixed-stage `io::Error` and prints a numeric
+Win32 error immediately after a failed `SetFileInformationByHandle`. Neither
+that error's `PermissionDenied` kind nor the printed line is a reason source.
+Do not parse diagnostics, accept a caller-supplied error code, or turn every
+`Err` into an operation-failed observation. Introduce an internal outcome type
+whose constructors remain inside the checked operation boundary:
+
+| Captured outcome | Meaning | Eligible for a failure observation in this fixture |
+| --- | --- | --- |
+| Precondition refused | ACL, source binding, digest or preparation failed before the native rename | No; diagnose and stop |
+| Native call failed | The one checked native rename returned failure; capture `GetLastError` immediately | Only after unchanged-layout verification below |
+| Native call succeeded, postcheck refused | Rename returned success but object/path verification failed | No; state is uncertain, diagnose and stop |
+| Verified success | Native rename and all postchecks succeeded | No failure observation |
+
+The acquisition function borrows the same live disposable `Attempt` and retains
+the checked source handle. Bind a private, non-Clone, non-serializable outcome
+to that attempt, source object identity/hash and fixed from/to slots. The
+operation selects the slots before calling Windows; no evidence file, receipt
+or caller error label selects them afterwards. A local invocation latch must
+be consumed before the native call; a second invocation on that acquisition
+object refuses even if the first fails. This is in-memory fixture ordering,
+not a durable attempt latch or proof of production installation ownership.
+
+A failed native return alone does not prove that the intended old layout is
+intact. Before minting a fixture observation, reobserve the retained source
+identity, content and source slot, plus the destination's expected state using
+the existing checked-slot rules. An unreadable destination is not absence.
+Any change or uncertainty yields no observation and preserves all objects.
+For the deterministic negative fixture, hold a test-owned destination object
+at the fixed target slot, attempt the non-replacing rename once, and prove
+both objects remain the same after refusal. This deliberately blocked operation
+is a native test result, not evidence of a real updater failure. Do not assume
+one Win32 error number across OS versions; require native failure with a
+captured nonzero status and verified unchanged objects.
+
+Only the captured eligible result may produce bounded fixture evidence bytes
+and pass them to the fixed `reason.evidence` store. The resulting composite
+borrows the operation outcome and the evidence pin; it cannot be reconstructed
+from file bytes, a digest, a numeric status or a reopened path. A storage error
+returns no composite and never reruns the rename. Production job bindings,
+intent revisions and predecessor-head authority are not supplied by this
+fixture, so it must not construct the Controller's `VerifiedReason` or claim
+an authenticated production rollback reason.
+
+Acceptance on exact-SHA hosted Server 2022/2025 must cover verified success
+without a failure value, an occupied-target native refusal with unchanged
+identities/bytes, precondition refusal without entering the native call,
+injected post-success verification refusal without a failure value, a second
+acquisition refusal, and evidence-store failure without a retry or path-read
+fallback. Report injected failures separately from observed Windows failures.
+The existing evidence-pin, rename, observer and running-image fixtures remain
+regressions. Security review precedes implementation of this new outcome
+boundary. Durable consumption/CAS, actual operation-intent binding, health
+authentication, actor ownership and W4 authorization remain separate gates.
+
 For a future adapter, diagnose-and-stop must latch a fixed reason and refuse
 all new update jobs, including after restart. Clearing that latch requires a
 protected human-authorization channel, which does not exist yet. No manual
