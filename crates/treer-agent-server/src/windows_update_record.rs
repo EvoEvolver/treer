@@ -1557,6 +1557,50 @@ fn rollback_record_edges_require_actual_results_and_exact_health_claims() {
     terminal.transaction = RolledBack;
     terminal.old_health_recorded = true;
     trace.push((terminal, [original, original]));
+    // Independently select the shorter branches instead of deriving them from
+    // next_rollback_claim. Preserve an untouched CLI as Original at handoff.
+    let mut untouched_cli = trace[3..].to_vec();
+    for (claim, _) in &mut untouched_cli {
+        claim.cli_step = Original;
+    }
+    let mut no_move = fixture().state;
+    no_move.transaction = RollbackController;
+    let mut no_move_terminal = no_move.clone();
+    no_move_terminal.transaction = RolledBack;
+    no_move_terminal.old_health_recorded = true;
+    let no_move_trace = vec![
+        (no_move, [original, original]),
+        (no_move_terminal, [original, original]),
+    ];
+    let mut cli_already_restored = no_move_trace.clone();
+    for (claim, _) in &mut cli_already_restored {
+        claim.cli_step = Restored;
+    }
+    let traces = [
+        trace.clone(),
+        untouched_cli,
+        trace[2..].to_vec(), // Direct CLI gap restoration.
+        trace[6..].to_vec(), // Direct Controller gap restoration.
+        no_move_trace,
+        cli_already_restored,
+    ];
+    for branch in traces {
+        for historical_new_health in [false, true] {
+            let mut branch = branch.clone();
+            for (claim, slots) in &mut branch {
+                claim.new_health_recorded = historical_new_health;
+                assert_eq!(
+                    inspect_claim(claim, slots[0], slots[1]),
+                    layout::PairInspection::Consistent
+                );
+            }
+            assert_rollback_record_trace(&branch);
+        }
+    }
+}
+
+fn assert_rollback_record_trace(trace: &[(ClaimedState, [[layout::Object; 3]; 2])]) {
+    use layout::Object::{Unknown, Unreadable};
     for (i, (old, _)) in trace.iter().enumerate() {
         let mut fields = fixture();
         fields.state = old.clone();

@@ -444,13 +444,17 @@ stop class must occur. A missing edge cannot hide as an unclassified stop even
 if both the implementation and the edge table omit it.
 An intent still awaiting its result has a structural
 next claim but cannot record it until a real post-operation observation also
-satisfies the successor claim. A separate nine-state RL/RC/terminal trace checks
-all ordered pairs, health changes and uncertain slots against the record guard.
+satisfies the successor claim. Record-guard traces check all ordered pairs,
+health changes and uncertain slots for six branches: the full nine-state
+RL/RC/terminal chain, an untouched CLI handoff, direct CLI gap restoration,
+direct Controller gap restoration, and no-move Controller exits with the CLI
+untouched or already restored. Every branch is exercised with historical new
+health both false and true, and every claim is independently layout-checked.
 The older exit-inventory test remains conservative and classifies rollback
 phases as diagnosis only; it is not the continuation selector. No executable
-adapter uses either model. Original/no-move and historical-new-health=false
-branches are covered structurally; full record traces for those branches,
-verified reason custody and typed old-health evidence remain separate gates.
+adapter uses either model. Verified reason custody and typed old-health
+evidence remain separate gates; these synthetic record-pair tests do not prove
+a durable multi-revision publication sequence or authentic process health.
 
 After restoration, starting and verifying the old Controller is an operation
 outside this record graph. A crash or restart between Restored and RolledBack
