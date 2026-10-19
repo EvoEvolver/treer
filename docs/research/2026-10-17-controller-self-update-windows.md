@@ -127,6 +127,12 @@ Windows layout discriminator before accepting Windows records; an old Unix
 reader must refuse it rather than interpreting a Windows rename as atomic.
 Whether this becomes a new schema version or a tagged publication model must
 be settled when the common model is separated from the Unix storage adapter.
+The current inert ordering model proposes both: version 2 plus an explicit
+Windows two-rename layout, present independently in the marker and receipt.
+The model checks the marker header before inspecting receipt content. These
+typed fields are not yet a serialized schema; the existing Unix version-1
+reader is unchanged. The subsequent schema increment must exercise the actual
+Unix reader refusing Windows bytes, including a Windows marker presented alone.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
@@ -307,6 +313,13 @@ This detects accidental restoration of an older receipt while the marker
 survives; it cannot detect a consistent rollback of both files or resist a
 same-account actor rewriting them. A hash chain alone would not detect removal
 of its latest links, so it is not a replacement for the independent marker.
+Before W4, admission also needs a separately held expected job/revision anchor
+outside this pair, to detect an accidentally restored directory or snapshot.
+No existing Controller/Proxy field is assumed to provide that guarantee. Its
+storage owner, enrollment binding and restart behavior must receive a separate
+design review; missing, stale or unavailable anchor evidence must block
+admission. This does not authorize new Proxy state or claim resistance to a
+same-account actor rolling back or rewriting all anchors.
 Native tests must exercise each pre/post-rename boundary, receipt replacement
 failure, equal-digest/different-object images, conflicting occupied slots and
 lost restart/health acknowledgements; also truncated/oversize/unknown-field,
@@ -329,6 +342,12 @@ already agree. Additional cases reject stale/same-revision modified receipts,
 wrong bindings, missing markers, oversize/empty records and revision overflow
 without starting publication. A consistently restored marker and receipt is
 explicitly undetectable, as required by the threat model.
+The marker additionally carries the proposed version/layout header. Tests
+reject a mismatched marker header even with matching binding, revision and
+digest. A further injected corruption flips one bit of the staged marker
+digest: publication preserves those corrupted bytes, marker readback returns
+its specific mismatch, receipt staging never begins and the worker remains
+uncertain with retries refused.
 
 These are synthetic acknowledgments, not real sync/readback calls. The sticky
 uncertainty bit is volatile worker state, not a persistent recovery fence.
@@ -338,6 +357,18 @@ opaque and bindings are supplied separately: this is not a schema parser and
 does not establish that serialized fields match the binding. Windows schema
 discrimination, Unix-reader refusal, native marker storage, enrollment
 provisioning and fault tests against actual file APIs remain separate work.
+
+For the real adapter, each modeled file-sync acknowledgment must correspond to
+a successful [`FlushFileBuffers`](https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-flushfilebuffers)
+on the retained writable staged file, followed by exact readback/identity/ACL
+checks; publication uses the reviewed handle-based POSIX-semantics rename.
+Neither a successful file flush nor readback is presented as an acknowledged
+parent-directory metadata flush. No equivalent parent-directory flush is
+implemented or validated here, and an administrative volume-wide flush is
+outside this user-mode updater's scope. Therefore ordering can be tested under
+process interruption, but durable rename ordering across power loss remains
+unproved. A future adapter must report uncertainty rather than label that gap
+as synced; W3 evidence must distinguish process interruption from power loss.
 
 `treer-platform/src/windows_update_layout.rs` now exercises only the per-image
 table as a private, test-only pure model on all platforms. Its tests cover

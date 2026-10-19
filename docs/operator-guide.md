@@ -371,6 +371,15 @@ or alter running services to bypass this check. The supported filesystem table
 and container-default caveats are in the
 [self-update plan](research/2026-10-16-controller-self-update.md).
 
+The Windows Rust self-update parity implementation is still inert and has no
+production recovery command. If a future attempt reserves a newer installation
+marker but fails before publishing its matching receipt, that attempt remains
+blocked: do not retry, delete the marker or copy back an older receipt to clear
+it. Preserve both records and staged evidence for inspection. Recovery remains
+unavailable until a protected human-authorization channel is implemented;
+neither a command-line acknowledgment nor matching file hashes grants recovery
+authority. See the [Windows parity plan](research/2026-10-17-controller-self-update-windows.md).
+
 Open the web UI, select a workspace, and choose **Add machine**. The dialog
 separates installation from workspace enrollment. The installation command is
 public and reusable:

@@ -7,6 +7,23 @@ const LIMIT: usize = 64 * 1024;
 type Refusal = &'static str;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Layout {
+    UnixAtomic,
+    WindowsTwoRename,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Header {
+    schema_version: u32,
+    layout: Layout,
+}
+
+const WINDOWS: Header = Header {
+    schema_version: 2,
+    layout: Layout::WindowsTwoRename,
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Binding {
     enrollment: [u8; 16],
     job: [u8; 16],
@@ -14,6 +31,7 @@ struct Binding {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Record {
+    header: Header,
     binding: Binding,
     revision: u64,
     bytes: Vec<u8>,
@@ -21,7 +39,8 @@ struct Record {
 
 impl Record {
     fn validate(&self) -> Result<(), Refusal> {
-        if self.binding.enrollment == [0; 16]
+        if self.header != WINDOWS
+            || self.binding.enrollment == [0; 16]
             || self.binding.job == [0; 16]
             || self.revision == 0
             || self.bytes.is_empty()
@@ -37,6 +56,7 @@ impl Record {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Marker {
+    header: Header,
     binding: Binding,
     revision: u64,
     digest: [u8; 32],
@@ -45,6 +65,7 @@ struct Marker {
 impl Marker {
     fn for_record(record: &Record) -> Self {
         Self {
+            header: record.header,
             binding: record.binding,
             revision: record.revision,
             digest: Sha256::digest(&record.bytes).into(),
@@ -96,9 +117,12 @@ impl Store {
     // Only consistency inspection. Matching records do not prove quiescence,
     // transaction completion, health or permission to admit another job.
     fn inspect(&self, expected: Binding) -> Result<&Record, Refusal> {
+        let marker = self.marker.as_ref().ok_or("missing_marker")?;
+        if marker.header != WINDOWS {
+            return Err("unsupported_marker_header");
+        }
         let record = self.receipt.as_ref().ok_or("missing_receipt")?;
         record.validate()?;
-        let marker = self.marker.as_ref().ok_or("missing_marker")?;
         if record.binding != expected || marker != &Marker::for_record(record) {
             return Err("record_marker_mismatch");
         }
@@ -125,6 +149,16 @@ impl Store {
         next: &Record,
         stop: Option<(Boundary, bool)>, // false: before boundary; true: after
     ) -> Result<(), Refusal> {
+        self.replace_inner(previous, next, stop, false)
+    }
+
+    fn replace_inner(
+        &mut self,
+        previous: &Record,
+        next: &Record,
+        stop: Option<(Boundary, bool)>,
+        corrupt_staged_marker: bool,
+    ) -> Result<(), Refusal> {
         if self.current(previous.binding)? != previous {
             return Err("unexpected_previous_record");
         }
@@ -143,7 +177,13 @@ impl Store {
             }
             match boundary {
                 Boundary::MarkerCreate => self.marker_temporary = true,
-                Boundary::MarkerWrite => self.marker_staged = Some(Marker::for_record(next)),
+                Boundary::MarkerWrite => {
+                    let mut marker = Marker::for_record(next);
+                    if corrupt_staged_marker {
+                        marker.digest[0] ^= 1;
+                    }
+                    self.marker_staged = Some(marker);
+                }
                 Boundary::MarkerPublish => {
                     self.marker = self.marker_staged.take();
                     self.marker_temporary = false;
@@ -178,6 +218,7 @@ impl Store {
 
 fn fixture() -> (Store, Record, Record) {
     let previous = Record {
+        header: WINDOWS,
         binding: Binding {
             enrollment: [1; 16],
             job: [2; 16],
@@ -303,6 +344,20 @@ fn invalid_or_unexpected_records_do_not_start_publication() {
     let (store, previous, next) = fixture();
     let mut cases = vec![
         Record {
+            header: Header {
+                schema_version: 1,
+                layout: Layout::UnixAtomic,
+            },
+            ..next.clone()
+        },
+        Record {
+            header: Header {
+                schema_version: 3,
+                ..WINDOWS
+            },
+            ..next.clone()
+        },
+        Record {
             revision: 1,
             ..next.clone()
         },
@@ -367,4 +422,42 @@ fn invalid_or_unexpected_records_do_not_start_publication() {
     let snapshot = overflow.clone();
     assert!(overflow.replace(&maximum, &next, None).is_err());
     assert_eq!(overflow, snapshot);
+}
+
+#[test]
+fn corrupted_marker_readback_stops_before_receipt_and_keeps_uncertainty() {
+    let (mut store, previous, next) = fixture();
+    assert_eq!(
+        store.replace_inner(&previous, &next, None, true),
+        Err("marker_readback_mismatch")
+    );
+    assert_eq!(store.trace, ORDER[..4]);
+    assert_eq!(store.receipt, Some(previous.clone()));
+    let mut corrupted = Marker::for_record(&next);
+    corrupted.digest[0] ^= 1;
+    assert_eq!(store.marker, Some(corrupted));
+    assert!(!store.receipt_temporary);
+    assert!(store.receipt_staged.is_none());
+    assert!(store.uncertain);
+    assert!(store.inspect(previous.binding).is_err());
+    let snapshot = store.clone();
+    assert!(store.replace(&previous, &next, None).is_err());
+    assert_eq!(store, snapshot);
+}
+
+#[test]
+fn marker_header_is_independent_of_matching_digest_and_revision() {
+    let (mut store, previous, _) = fixture();
+    let marker = store.marker.as_mut().unwrap();
+    marker.header.layout = Layout::UnixAtomic;
+    assert!(store.inspect(previous.binding).is_err());
+    store.receipt = None;
+    assert_eq!(
+        store.inspect(previous.binding),
+        Err("unsupported_marker_header")
+    );
+    store.receipt = Some(previous.clone());
+    store.marker = Some(Marker::for_record(&previous));
+    store.marker.as_mut().unwrap().header.schema_version = 1;
+    assert!(store.inspect(previous.binding).is_err());
 }
