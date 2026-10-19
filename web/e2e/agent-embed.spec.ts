@@ -78,6 +78,73 @@ async function send(page: Page, data: unknown) {
   const frame = page.frames().find(f => f.url().startsWith(origin))!
   await frame.evaluate(({ data, target }) => parent.postMessage(data, target), { data, target: new URL(page.url()).origin })
 }
+
+test('v2 reuse probes once, skips mint and ignores Agent controls after navigation', async ({ page }) => {
+  const s = await setup(page, 'manual')
+  const child = page.frames().find(f => f.url().startsWith(origin))!
+  await child.evaluate(() => {
+    document.body.innerHTML = '<output aria-label="probe"></output>'
+    addEventListener('message', event => {
+      if (event.data?.treer_embed === 'probe') document.querySelector('output')!.textContent = JSON.stringify(event.data)
+    })
+  })
+  await send(page, { treer_embed: 'ready', version: 2, nonce_hash: hash })
+  await expect(child.getByLabel('probe')).toHaveText(JSON.stringify({ treer_embed: 'probe', version: 2, nonce_hash: hash }))
+  expect(s.mints()).toBe(0)
+  await send(page, { treer_embed: 'reused', version: 2, nonce_hash: hash })
+  await child.goto(origin + '/')
+  await expect(page.frameLocator('iframe').getByRole('heading')).toHaveText('Isolated interface')
+  await expect(page.getByText('Checking interface isolation…', { exact: true })).toHaveCount(0)
+  await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash })
+  await send(page, { treer_embed: 'ready', version: 2, nonce_hash: hash })
+  await send(page, { treer_embed: 'cookies_blocked', nonce_hash: hash })
+  await expect(page.getByRole('alert')).toHaveCount(0)
+  expect(s.mints()).toBe(0); expect(s.probes()).toBe(0)
+})
+
+test('v2 outcomes require the first ready hash, exact shape and assigned source', async ({ page }) => {
+  const s = await setup(page, 'manual')
+  await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash }) // unsolicited
+  await send(page, { treer_embed: 'ready', version: 3, nonce_hash: hash })
+  await send(page, { treer_embed: 'ready', version: 2, nonce_hash: hash })
+  await page.evaluate(({ origin, hash }) => {
+    window.dispatchEvent(new MessageEvent('message', { origin, source: window, data: { treer_embed: 'mint', version: 2, nonce_hash: hash } }))
+  }, { origin, hash })
+  await send(page, { treer_embed: 'mint', version: 2, nonce_hash: 'c'.repeat(64) })
+  await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash, extra: true })
+  await send(page, { treer_embed: 'ready', version: 2, nonce_hash: 'c'.repeat(64) })
+  expect(s.mints()).toBe(0)
+  await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash })
+  await expect.poll(s.delivered).toBe(1)
+  await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash })
+  await send(page, { treer_embed: 'reused', version: 2, nonce_hash: hash })
+  await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash })
+  expect(s.mints()).toBe(1)
+})
+
+test('v2 failed reuse mints once and retains bound cookie-failure compatibility choice', async ({ page }) => {
+  const s = await setup(page, 'manual')
+  await send(page, { treer_embed: 'ready', version: 2, nonce_hash: hash })
+  await send(page, { treer_embed: 'mint', version: 2, nonce_hash: hash })
+  await expect.poll(s.delivered).toBe(1)
+  await send(page, { treer_embed: 'cookies_blocked', nonce_hash: hash })
+  await expect(page.getByRole('button', { name: 'Load compatibility view (shared origin)' })).toBeVisible()
+  expect(s.mints()).toBe(1); expect(s.probes()).toBe(1)
+})
+
+test('v2 outcome after timeout cannot mint or reopen the frame', async ({ page }) => {
+  await page.clock.install()
+  const s = await setup(page, 'manual')
+  await send(page, { treer_embed: 'ready', version: 2, nonce_hash: hash })
+  const child = page.frames().find(f => f.url().startsWith(origin))!
+  await page.clock.fastForward(21_000)
+  await expect(page.getByRole('alert')).toContainText('did not load in time')
+  await page.evaluate(({ origin, hash }) => {
+    window.dispatchEvent(new MessageEvent('message', { origin, data: { treer_embed: 'mint', version: 2, nonce_hash: hash } }))
+  }, { origin, hash })
+  expect(child.isDetached()).toBe(true)
+  expect(s.mints()).toBe(0); expect(s.delivered()).toBe(0)
+})
 test('isolated Agent retains draft and cannot force a shared-origin downgrade', async ({ page }) => {
   await page.clock.install()
   const s = await setup(page), ui = page.frameLocator('iframe[title="/Alpha interface"]')

@@ -45,7 +45,7 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
   const loaded = useRef<() => void>(() => {})
   const [phase, setPhase] = useState<Phase>(origin ? 'bootstrap' : 'unavailable')
   // Appearance is an initial public hint; later changes use exact-origin messages.
-  const bootstrap = useMemo(() => origin ? withEmbedTheme(new URL('/.treer/embed', origin).href, theme, readEmbedAppearance()) : null, [origin]) // eslint-disable-line react-hooks/exhaustive-deps
+  const bootstrap = useMemo(() => origin ? withEmbedTheme(new URL('/.treer/embed?reuse=1', origin).href, theme, readEmbedAppearance()) : null, [origin]) // eslint-disable-line react-hooks/exhaustive-deps
   // The initial about:blank document still has the Console origin. Initial
   // appearance travels in src; send messages only to a frame that has loaded.
   useEffect(() => { if (frame.current && loadedFrame.current === frame.current) postEmbedTheme(frame.current, theme, readEmbedAppearance()) }, [theme])
@@ -54,6 +54,7 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
     if (!origin || pending) return
     const expectedOrigin = new URL(origin).origin
     let active = true, ended = false, acceptedHash: string | undefined, sent = false, loads = 0
+    let handshake: 'awaiting-ready' | 'awaiting-outcome' | 'minting' | 'settled' = 'awaiting-ready'
     const deadline = Date.now() + 20_000
     const mint = new AbortController(), fallback = new AbortController()
     let fallbackTimer: ReturnType<typeof setTimeout> | undefined
@@ -71,6 +72,20 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
       } catch { if (active && !fallback.signal.aborted) setPhase('unavailable') }
       finally { clearTimeout(fallbackTimer) }
     }
+    const requestCode = (source: MessageEventSource) => {
+      // Advance before the request, so duplicate outcomes cannot mint twice.
+      handshake = 'minting'
+      void api<{ code: string; origin: string; expires_in: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/interface/embed-authorization`, {
+        method: 'POST', body: JSON.stringify({ browser_nonce_hash: acceptedHash }), cache: 'no-store', redirect: 'error', signal: mint.signal,
+      }).then((result) => {
+        if (!active || ended || mint.signal.aborted || Date.now() >= deadline || source !== frame.current?.contentWindow) return
+        if (result.origin !== expectedOrigin || typeof result.code !== 'string' || !/^iec_v1_[0-9a-f]{64}$/.test(result.code) || !Number.isFinite(result.expires_in) || result.expires_in <= 0 || result.expires_in > 30) { unavailable(); return }
+        handshake = 'settled'
+        sent = true
+        // No code in a URL, storage, DOM attribute, error string or log.
+        frame.current!.contentWindow!.postMessage({ treer_embed: 'code', code: result.code }, expectedOrigin)
+      }).catch(() => { if (!mint.signal.aborted) unavailable() })
+    }
     const receive = (event: MessageEvent) => {
       if (!active || ended || event.origin !== expectedOrigin || event.source !== frame.current?.contentWindow || Date.now() >= deadline) return
       const data: unknown = event.data
@@ -82,17 +97,25 @@ export function IsolatedAgentInterface({ workspaceId, agentId, origin, fallbackU
         if (acceptedHash ? Object.keys(message).length === 2 && message.nonce_hash === acceptedHash : Object.keys(message).length === 1) void compatibility()
         return
       }
-      if (acceptedHash || message.treer_embed !== 'ready' || Object.keys(message).length !== 2 || typeof message.nonce_hash !== 'string' || !/^[0-9a-f]{64}$/.test(message.nonce_hash)) return
+      if (handshake === 'awaiting-outcome') {
+        if (Object.keys(message).length !== 3 || message.version !== 2 || message.nonce_hash !== acceptedHash) return
+        if (message.treer_embed === 'mint') requestCode(event.source!)
+        else if (message.treer_embed === 'reused') {
+          handshake = 'settled'
+          sent = true
+          // The UI request still authorizes freshly. This only clears its notice.
+          if (loads >= 2) { stop(); setPhase('framed') }
+        }
+        return
+      }
+      if (handshake !== 'awaiting-ready' || message.treer_embed !== 'ready' || typeof message.nonce_hash !== 'string' || !/^[0-9a-f]{64}$/.test(message.nonce_hash)) return
+      const v2 = Object.keys(message).length === 3 && message.version === 2
+      if (!v2 && Object.keys(message).length !== 2) return
       acceptedHash = message.nonce_hash
-      void api<{ code: string; origin: string; expires_in: number }>(`/api/workspaces/${encodeURIComponent(workspaceId)}/agents/${encodeURIComponent(agentId)}/interface/embed-authorization`, {
-        method: 'POST', body: JSON.stringify({ browser_nonce_hash: message.nonce_hash }), cache: 'no-store', redirect: 'error', signal: mint.signal,
-      }).then((result) => {
-        if (!active || ended || mint.signal.aborted || Date.now() >= deadline || event.source !== frame.current?.contentWindow) return
-        if (result.origin !== expectedOrigin || typeof result.code !== 'string' || !/^iec_v1_[0-9a-f]{64}$/.test(result.code) || !Number.isFinite(result.expires_in) || result.expires_in <= 0 || result.expires_in > 30) { unavailable(); return }
-        sent = true
-        // No code in a URL, storage, DOM attribute, error string or log.
-        frame.current!.contentWindow!.postMessage({ treer_embed: 'code', code: result.code }, expectedOrigin)
-      }).catch(() => { if (!mint.signal.aborted) unavailable() })
+      if (v2) {
+        handshake = 'awaiting-outcome'
+        frame.current!.contentWindow!.postMessage({ treer_embed: 'probe', version: 2, nonce_hash: acceptedHash }, expectedOrigin)
+      } else requestCode(event.source!) // An older bootstrap keeps its original flow.
     }
     loaded.current = () => {
       loads++

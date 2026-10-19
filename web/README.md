@@ -935,3 +935,18 @@ status codes and numeric offsets/durations only. It omits URLs, request bodies,
 headers, cookies, codes, nonce/hash values and workspace/user/Agent IDs. No
 session reuse or hover prewarming is enabled by this diagnostic. Real-browser
 acceptance remains required before shipping subsequent handshake changes.
+
+The Console hints `reuse=1` when opening the Proxy-owned bootstrap; it never
+loads the Agent UI directly from the Console origin or caches an authorization
+decision. A version-2 bootstrap announces `ready` with its nonce hash and
+`version: 2`. The Console binds that first hash and replies with `probe` carrying
+the same hash/version. Only one matching `mint` or `reused` outcome is accepted
+from the exact frame window and Agent origin. A `mint` outcome runs the existing
+nonce-bound code handoff once; `reused` only changes the loading notice, while
+the UI request still enforces authorization. Old two-field `ready` messages
+continue to mint immediately. Unknown versions and replayed outcomes are
+ignored. The existing nonce-bound `cookies_blocked` failure remains accepted
+until the UI loads, preserving the explicit compatibility choice or operator
+refusal. After UI load all handshake controls are ignored. Tab visibility and
+appearance updates do not run the handshake again; scope/interface changes
+replace the frame and cancel its pending requests as before.
