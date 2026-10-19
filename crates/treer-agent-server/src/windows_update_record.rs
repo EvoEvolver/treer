@@ -119,7 +119,7 @@ struct Marker {
     receipt_sha256: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Provenance {
     release_sha: String,
@@ -127,7 +127,7 @@ struct Provenance {
     sums_sha256: String,
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum AclPolicy {
     OwnerSystemProtected,
@@ -136,13 +136,13 @@ enum AclPolicy {
 // This draft deliberately matches the native adapter's NTFS-only boundary.
 // The label is not evidence: a future observer must verify the filesystem
 // through its pinned volume handle before trusting the BY_HANDLE identity.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum Filesystem {
     Ntfs,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Object {
     filesystem: Filesystem,
@@ -171,14 +171,14 @@ impl Object {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Image {
     old: Object,
     new: Object,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Images {
     // Fixed keys, no caller-controlled paths or array of duplicate image names.
@@ -245,6 +245,43 @@ fn parse_pair(receipt: &[u8], marker: &[u8], expected: &Binding) -> Result<Draft
         return Err("invalid_receipt_fields");
     }
     Ok(fields)
+}
+
+// An independently supplied expected head in this model only. There is no
+// implemented protected source, durable storage, restart ownership or CAS.
+struct ExpectedHead {
+    binding: Binding,
+    receipt_sha256: String,
+}
+
+// Partial successor guard, NOT state-transition acceptance. Both pairs must
+// parse, the predecessor must match the separately supplied exact-byte head,
+// and only revision/state claims may vary. A later graph/evidence check must
+// still refuse invalid state changes; this grants no publication authority.
+fn check_successor_fields(
+    previous: (&[u8], &[u8]),
+    candidate: (&[u8], &[u8]),
+    head: &ExpectedHead,
+) -> Result<DraftFields, Refusal> {
+    if !head.binding.valid()
+        || !hex(&head.receipt_sha256, 64)
+        || previous.0.len() > crate::windows_update_envelope::LIMIT
+        || digest(previous.0) != head.receipt_sha256
+    {
+        return Err("predecessor_head_mismatch");
+    }
+    let old = parse_pair(previous.0, previous.1, &head.binding)?;
+    let mut next_binding = head.binding.clone();
+    next_binding.revision = head
+        .binding
+        .revision
+        .checked_add(1)
+        .ok_or("revision_exhausted")?;
+    let next = parse_pair(candidate.0, candidate.1, &next_binding)?;
+    if next.provenance != old.provenance || next.images != old.images {
+        return Err("transaction_fields_changed");
+    }
+    Ok(next)
 }
 
 fn fixture() -> DraftFields {
@@ -704,4 +741,145 @@ fn claimed_state_rejects_missing_unknown_duplicate_and_mistyped_fields() {
     assert!(serde_json::from_str::<serde_json::Value>(&duplicate).is_ok());
     let (receipt, marker) = envelopes(duplicate.as_bytes(), &fields.binding);
     assert!(parse_pair(&receipt, &marker, &fields.binding).is_err());
+}
+
+#[test]
+fn successor_fields_require_exact_predecessor_and_one_revision_step() {
+    let old = fixture();
+    let (old_receipt, old_marker) = envelopes(&serde_json::to_vec(&old).unwrap(), &old.binding);
+    let head = ExpectedHead {
+        binding: old.binding.clone(),
+        receipt_sha256: digest(&old_receipt),
+    };
+    let mut next = old.clone();
+    next.binding.revision += 1;
+    let (receipt, marker) = envelopes(&serde_json::to_vec(&next).unwrap(), &next.binding);
+    assert!(
+        check_successor_fields((&old_receipt, &old_marker), (&receipt, &marker), &head).is_ok()
+    );
+    // There is deliberately no phase-graph acceptance yet: unchanged state
+    // claims at the next revision pass only this partial field guard.
+    for revision in [0, 1, 3, u64::MAX] {
+        next.binding.revision = revision;
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&next).unwrap(), &next.binding);
+        assert!(
+            check_successor_fields((&old_receipt, &old_marker), (&receipt, &marker), &head)
+                .is_err()
+        );
+    }
+    let mut changed_prior = old.clone();
+    changed_prior.provenance.release_sha = "e".repeat(40);
+    let (other_receipt, other_marker) = envelopes(
+        &serde_json::to_vec(&changed_prior).unwrap(),
+        &changed_prior.binding,
+    );
+    assert_eq!(
+        check_successor_fields((&other_receipt, &other_marker), (&receipt, &marker), &head)
+            .unwrap_err(),
+        "predecessor_head_mismatch"
+    );
+    assert!(check_successor_fields((&old_receipt, &[]), (&receipt, &marker), &head).is_err());
+    let mut exhausted = old;
+    exhausted.binding.revision = u64::MAX;
+    let (full_receipt, full_marker) =
+        envelopes(&serde_json::to_vec(&exhausted).unwrap(), &exhausted.binding);
+    let exhausted_head = ExpectedHead {
+        binding: exhausted.binding.clone(),
+        receipt_sha256: digest(&full_receipt),
+    };
+    assert_eq!(
+        check_successor_fields(
+            (&full_receipt, &full_marker),
+            (&receipt, &marker),
+            &exhausted_head
+        )
+        .unwrap_err(),
+        "revision_exhausted"
+    );
+    // Replacing both pairs AND the synthetic head remains possible in this
+    // model. Passing this check therefore does not establish head freshness.
+    let other_head = ExpectedHead {
+        binding: changed_prior.binding.clone(),
+        receipt_sha256: digest(&other_receipt),
+    };
+    changed_prior.binding.revision += 1;
+    let (other_next, other_next_marker) = envelopes(
+        &serde_json::to_vec(&changed_prior).unwrap(),
+        &changed_prior.binding,
+    );
+    assert!(check_successor_fields(
+        (&other_receipt, &other_marker),
+        (&other_next, &other_next_marker),
+        &other_head
+    )
+    .is_ok());
+}
+
+#[test]
+fn successor_fields_refuse_valid_but_retargeted_provenance_or_image_records() {
+    let old = fixture();
+    let (old_receipt, old_marker) = envelopes(&serde_json::to_vec(&old).unwrap(), &old.binding);
+    let head = ExpectedHead {
+        binding: old.binding.clone(),
+        receipt_sha256: digest(&old_receipt),
+    };
+    let mut next = old.clone();
+    next.binding.revision += 1;
+    let value = serde_json::to_value(&next).unwrap();
+    let mut mutations = vec![
+        (
+            "/provenance/release_sha".to_owned(),
+            serde_json::json!("e".repeat(40)),
+        ),
+        (
+            "/provenance/artifact_source_sha".to_owned(),
+            serde_json::json!("f".repeat(40)),
+        ),
+        (
+            "/provenance/sums_sha256".to_owned(),
+            serde_json::json!("e".repeat(64)),
+        ),
+    ];
+    for image in ["controller", "cli"] {
+        for version in ["old", "new"] {
+            for (field, replacement) in [
+                ("volume_serial", serde_json::json!(8)),
+                ("file_id", serde_json::json!(99)),
+                ("bytes", serde_json::json!(124)),
+                ("sha256", serde_json::json!("e".repeat(64))),
+                ("attributes", serde_json::json!(0x01)),
+            ] {
+                mutations.push((format!("/images/{image}/{version}/{field}"), replacement));
+            }
+        }
+    }
+    for (pointer, replacement) in mutations {
+        let mut changed = value.clone();
+        *changed.pointer_mut(&pointer).unwrap() = replacement;
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&changed).unwrap(), &next.binding);
+        // Every changed record is valid by itself; this is predecessor
+        // immutability rejection, not a malformed-field or pair-digest error.
+        assert!(parse_pair(&receipt, &marker, &next.binding).is_ok());
+        assert_eq!(
+            check_successor_fields((&old_receipt, &old_marker), (&receipt, &marker), &head)
+                .unwrap_err(),
+            "transaction_fields_changed",
+            "{pointer}"
+        );
+    }
+    for (field, replacement) in [
+        ("workspace_id", "ws_other"),
+        ("server_id", "srv_other"),
+        ("job_id", "22222222-2222-4222-8222-222222222222"),
+    ] {
+        let mut changed = value.clone();
+        changed["binding"][field] = replacement.into();
+        let changed: DraftFields = serde_json::from_value(changed).unwrap();
+        let (receipt, marker) = envelopes(&serde_json::to_vec(&changed).unwrap(), &changed.binding);
+        assert!(parse_pair(&receipt, &marker, &changed.binding).is_ok());
+        assert!(
+            check_successor_fields((&old_receipt, &old_marker), (&receipt, &marker), &head)
+                .is_err()
+        );
+    }
 }

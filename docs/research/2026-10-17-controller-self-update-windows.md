@@ -249,6 +249,19 @@ It must be tied to the pair-external durable anchor decision: an internally
 consistent old pair replay is still accepted by the current layer. No monotone
 revision or replay-protection claim is made until that external ownership and
 restart contract exists and is verified.
+The subsequent test-only `check_successor_fields` is only a partial predecessor
+guard: both record pairs must pass the envelope/digest/field parser; the previous
+receipt bytes must match a separately supplied expected-head digest and binding;
+the candidate revision must be exactly checked `previous + 1`; and provenance
+plus all four image records must remain identical. Job/workspace/server retargets,
+revision skips/replays/overflow and otherwise valid image/provenance changes
+refuse. The expected head is synthetic, with no protected storage, restart
+ownership or atomic compare-and-swap implementation. Tests explicitly show that
+replacing both pairs and the synthetic head can pass: this is not replay
+protection. The guard also permits an unchanged claimed state at the next
+revision; it does not validate phase edges or health evidence, authorize a
+publication or make the `Consistent` result mean complete. Those additional
+checks and integration with the marker-first publisher remain separate work.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
