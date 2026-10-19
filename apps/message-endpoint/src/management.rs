@@ -49,7 +49,15 @@ pub(crate) fn mask(value: &mut serde_json::Value) {
             for (key, v) in o.iter_mut() {
                 if matches!(
                     key.as_str(),
-                    "chat_id" | "topic_id" | "allowed_senders" | "address" | "chat" | "topic"
+                    "chat_id"
+                        | "topic_id"
+                        | "allowed_senders"
+                        | "address"
+                        | "chat"
+                        | "topic"
+                        | "bot_id"
+                        | "expected_bot_id"
+                        | "verified_bot_id"
                 ) {
                     *v = serde_json::json!(format!(
                         "masked:{:x}",

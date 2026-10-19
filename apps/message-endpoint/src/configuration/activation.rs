@@ -344,7 +344,7 @@ pub(super) fn resume<M: Mailbox + Directory, D: Directory>(
     }
     let discard_held = evidence.held_action == HeldAction::Discard;
     let evidence=serde_json::to_string(&serde_json::json!({
-        "kind":"owner_declaration_not_attestation", "profile_reviewed":true,"isolation":evidence.isolation,
+        "kind":if owner.kind()=="agent" {"agent_declaration_not_attestation"}else{"owner_declaration_not_attestation"}, "principal_kind":owner.kind(), "profile_reviewed":true,"isolation":evidence.isolation,
         "reference":evidence.reference,"pins_sha256":format!("{:x}",Sha256::digest(serde_json::to_vec(&current.pins).map_err(|_|Failure::Invalid)?)),
         "target":current.target,"held_action":evidence.held_action,"held_fragments":current.held_fragments,"oldest_held_at":current.oldest_held_at,"held_snapshot":current.held_snapshot,"parked_count_ack":evidence.parked_count_ack
     })).map_err(|_|Failure::Invalid)?;

@@ -79,3 +79,5 @@ class AgentBindings(unittest.TestCase):
             self.assertEqual(statuses[:20],[200]*20)
             self.assertEqual(statuses[20:],[429]*4)
             self.assertEqual(f['proxy'].verify_requests,20)
+            with sqlite3.connect(f['state']/'hub.sqlite3') as db:
+                self.assertEqual(db.execute('SELECT count(*) FROM hub_management_requests WHERE status=429').fetchone()[0],4)

@@ -383,6 +383,39 @@ async fn handle(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
 ) -> Response {
+    if request.method() != Method::GET || request.uri().path() != "/api/settings" {
+        return handle_inner(State(app), ConnectInfo(peer), request).await;
+    }
+    let mut nonce = [0u8; 16];
+    if getrandom::fill(&mut nonce).is_err() {
+        return secure(error(Error::Proxy));
+    }
+    let id: String = nonce.iter().map(|v| format!("{v:02x}")).collect();
+    if let Some(audit) = &app.management_audit {
+        if audit(&id, None, 102).is_err() {
+            return secure(error(Error::Proxy));
+        }
+    }
+    let mut response = handle_inner(State(app.clone()), ConnectInfo(peer), request).await;
+    if let Some(audit) = &app.management_audit {
+        // No body/header identity is logged. A refused read has no authenticated
+        // mutation actor; mutations record their verified principal separately.
+        if audit(&id, None, response.status().as_u16()).is_err() {
+            response = secure(error(Error::Proxy));
+        }
+    }
+    if let Ok(value) = HeaderValue::from_str(&id) {
+        response
+            .headers_mut()
+            .insert("x-endpoint-request-id", value);
+    }
+    response
+}
+async fn handle_inner(
+    State(app): State<Arc<Settings>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: axum::extract::Request,
+) -> Response {
     let (parts, body) = request.into_parts();
     if parts.headers.len() > 128
         || parts
@@ -504,6 +537,20 @@ fn owner_for_mutation(
         .map(|s| app.vault.session_token(s, now))
         .transpose()?
         .flatten();
+    let browser_context = values.iter().any(|(key, _)| {
+        key.eq_ignore_ascii_case("cookie")
+            || key.eq_ignore_ascii_case("origin")
+            || key.to_ascii_lowercase().starts_with("sec-fetch-")
+    });
+    let explicit_identity = values.iter().any(|(key, _)| {
+        key.eq_ignore_ascii_case("x-treer-identity-token")
+            || key.eq_ignore_ascii_case("authorization")
+    });
+    // Reject browser CSRF and unauthenticated unsafe requests cheaply, before
+    // Proxy verification. Cookie-free explicit Agents retain their API path.
+    if browser_context || (!explicit_identity && token.is_none()) {
+        app.auth.check_mutation(&values)?;
+    }
     if token_only {
         app.auth.check_mutation(&values)?;
         return app
