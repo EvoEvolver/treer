@@ -1317,7 +1317,11 @@ matters because a browser whose Console and apps domain share one site (the
 partition key is the site, not the origin), or that ignores `Partitioned`,
 sends the embed cookie on standalone visits too. The same rule stops a page on
 one Agent origin, framed by the Console, from spending the embed cookie on a
-sibling Agent origin: that request is same-site, so the cookie is ignored. Responses to
+sibling Agent origin: that request is same-site, so the cookie is ignored.
+A tunnelled WebSocket, standalone or embedded, is authenticated once at the
+upgrade: an open socket outlives Console logout, workspace membership removal
+and the 12-hour session expiry until either side closes it (follow-up #194
+adds periodic re-validation and server-side closing). Responses to
 requests carrying the embed cookie get `frame-ancestors` replaced with the
 Console origin and `X-Frame-Options` removed; standalone sessions keep the
 Agent's CSP untouched. Membership is re-checked on every request and Console
