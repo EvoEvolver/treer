@@ -347,7 +347,8 @@ anti-framing, MIME and referrer headers, but its static shell does not have the
 Worker's nonce-based script restriction. These changes require a normal release;
 source inspection and local Wrangler tests do not verify deployed Canary headers.
 
-App/Agent Interface iframes remain trusted code with Proxy-origin user authority.
+Managed App and legacy/compatibility Agent iframes remain trusted code with
+Proxy-origin user authority. Isolated Agent embedding is described below.
 Their sandbox is not a tenant or user-session security boundary. See the
 [security review](../docs/research/2026-10-12-security-web.md).
 Embedded Agent/App interfaces may open ordinary top-level browser pages using
@@ -645,8 +646,8 @@ Console `embed_origin` for the launcher parent-message check. These hints grant 
 Proxy session cookies remain required; an unauthenticated or cross-site-cookie-blocked request must fail closed,
 never fall back to a URL token. The launcher top-level response must retain its restrictive Permissions-Policy,
 Referrer-Policy and CSP through the Proxy tunnel. Top-level pages do not have the iframe sandbox restrictions;
-the standalone page and embedded page share the same origin and authority. This remains trusted workspace UI
-on the Proxy origin, pending per-Agent origin isolation. Deployments rejected by Core's separate-origin check
+legacy standalone and embedded pages share the same origin and authority. This
+legacy path remains trusted workspace UI on the Proxy origin. Deployments rejected by Core's separate-origin check
 return `503 embedded_ui_requires_separate_app_origin` at this route, including top-level navigation; opening
 a new tab cannot bypass this restriction. After the user opens an online Agent, Console performs a bounded, read-only probe of its fixed
 interface root (no appearance query). Results are scoped per user/workspace/Proxy/Agent, cached in
@@ -656,6 +657,39 @@ probe finishes, or on an unrelated error, the normal standalone URL remains. The
 redirects, execute UI bytes, or retry. This is a navigation fallback only: returning to Console does not
 restore a refused embedded UI. No token fallback is attempted; Core's embedded-UI origin and frame
 policies remain authoritative.
+
+### Isolated embedded Agent interfaces
+
+With `agent.interface-embed.v1`, Console loads the Proxy-owned `/.treer/embed`
+bootstrap on the Agent origin from the authenticated inventory. It accepts one
+strict ready message per assigned iframe source (exact origin and WindowProxy,
+64-character nonce hash), then mints a 30-second authorization and posts the code
+only to that origin. The code stays out of URLs, storage, DOM attributes and logs.
+The bootstrap redeems it for a host-only partitioned session and replaces itself
+with the Agent UI. The existing sandbox grants are unchanged. Tab hiding and
+appearance changes preserve the frame; reload, interface replacement, origin
+revocation and workspace/account changes cancel its handshake. The handshake
+and UI-load deadline is 20 seconds, including hidden tabs; a slow or backgrounded
+load that misses it fails closed with a timeout message and can be retried by
+reloading the tab. A successfully loaded frame stays mounted while hidden.
+
+A cookie failure must match the accepted bootstrap hash within the handshake
+window. It never automatically switches to the shared-origin Proxy tunnel: after
+a bounded read-only probe confirms the deployment permits it, a visible notice
+requires the user to choose **Load compatibility view (shared origin)**. With
+`TREER_AGENT_EMBED_FALLBACK=refuse`, only the safe standalone link is offered.
+Permission errors, malformed replies, unknown capabilities and timeouts fail
+closed. Older Proxies with a successful config lacking the capability (or config
+404) retain their legacy embedding behavior.
+
+Partitioned cookies are keyed by the top-level **site**, not origin; they do not
+isolate same-site Console and Apps by themselves. Core's host-only cookie,
+Fetch Metadata checks and exact Console framing policy remain required.
+Managed Apps are outside this Agent-only handshake and keep their Proxy-origin
+tunnel, with a visible shared-origin notice; a later App contract is required.
+Browser tests exercise genuine cross-origin frames with synthetic mint/bootstrap
+responses. They verify the Console contract, not live partitioned-cookie support
+or the Core's authorization/revocation implementation.
 
 Creating an Agent from Overview starts at the workspace root and shows no Tree folder hint.
 Creating from a folder in the Tree shows that folder’s full path and reserves placement there.

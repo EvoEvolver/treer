@@ -11,6 +11,8 @@ pub(super) use ingress::*;
 mod http_tunnel;
 mod ingress_body;
 pub(super) use http_tunnel::*;
+mod embed;
+pub(super) use embed::*;
 mod agent_services;
 pub(super) use agent_services::*;
 mod streams;

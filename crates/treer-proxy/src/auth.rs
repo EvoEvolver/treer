@@ -48,6 +48,9 @@ const MACHINE_ENROLLMENT_TTL_MINUTES: i64 = 10;
 const AGENT_CREDENTIAL_CACHE_TTL: StdDuration = StdDuration::from_secs(5);
 const INGRESS_AUTH_CODE_TTL_MINUTES: i64 = 5;
 const INGRESS_SESSION_TTL_HOURS: i64 = 12;
+/// Embed codes (#156) travel Console -> iframe -> Agent origin within one
+/// page load; 30 seconds covers slow networks and nothing more.
+const INGRESS_EMBED_CODE_TTL_SECONDS: i64 = 30;
 const APP_OAUTH_CODE_TTL_MINUTES: i64 = 5;
 const MAX_LAUNCH_PROFILE_DESCRIPTION_CHARS: usize = 1_000;
 const MAX_LAUNCH_PROFILE_COMMAND_BYTES: usize = 4_096;

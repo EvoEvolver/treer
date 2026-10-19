@@ -118,6 +118,9 @@ pub(super) enum Upstream {
     Delayed(Duration),
     /// Open the stream but never answer.
     Silent,
+    /// Answer with this raw response head (status line and headers, each
+    /// line `\r\n`-terminated, no blank line) and the body `ok`.
+    Head(&'static str),
 }
 
 /// Fake machine side of the tunnel: serves every stream the Proxy opens.
@@ -172,16 +175,21 @@ pub(super) fn upstream(
                     let stream_id = frame.stream_id.clone();
                     let state = state.clone();
                     let respond = async move {
-                        match mode {
+                        let head = match mode {
                             Upstream::Silent => return,
-                            Upstream::Delayed(delay) => tokio::time::sleep(delay).await,
-                            Upstream::Immediate => {}
-                        }
+                            Upstream::Delayed(delay) => {
+                                tokio::time::sleep(delay).await;
+                                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n"
+                            }
+                            Upstream::Immediate => {
+                                "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n"
+                            }
+                            Upstream::Head(head) => head,
+                        };
                         for (kind, payload) in [
                             (
                                 NetworkBinaryKind::Data,
-                                b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok"
-                                    .to_vec(),
+                                format!("{head}\r\nok").into_bytes(),
                             ),
                             (NetworkBinaryKind::HalfClose, vec![]),
                         ] {

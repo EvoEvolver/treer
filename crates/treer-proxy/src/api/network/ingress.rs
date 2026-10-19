@@ -473,9 +473,6 @@ async fn proxy_agent_interface_origin(
         )
         .await;
     }
-    if request.uri().path().starts_with("/.treer/") {
-        return Err(ApiFailure::not_found("route_not_found", "route not found"));
-    }
     if request.headers().contains_key(header::CONTENT_LENGTH)
         && request.headers().contains_key(header::TRANSFER_ENCODING)
     {
@@ -484,6 +481,14 @@ async fn proxy_agent_interface_origin(
             "request carries both Content-Length and Transfer-Encoding",
         ));
     }
+    if let Some(served) =
+        serve_agent_embed_route(&auth, &config, &hostname, &agent_id, &mut request).await
+    {
+        return served;
+    }
+    if request.uri().path().starts_with("/.treer/") {
+        return Err(ApiFailure::not_found("route_not_found", "route not found"));
+    }
     if ingress_bearer_token(request.headers())?.is_some() {
         return Err(ApiFailure::unauthorized(
             "ingress_authentication_required",
@@ -491,14 +496,22 @@ async fn proxy_agent_interface_origin(
         ));
     }
     enforce_ingress_fetch_metadata(&request, &hostname, false)?;
+    // An embed session (#156) is recognised by its own cookie; its token
+    // never authenticates through the standalone cookie or the reverse.
+    let mut embedded = false;
     let user_id = if auth.authentication_disabled() {
         None
     } else {
-        let session = cookie_value(request.headers(), config.ingress_cookie_name());
-        let user_id = match session {
-            Some(token) => auth.authenticate_ingress_session(&hostname, &token).await?,
-            None => None,
-        };
+        let mut user_id = None;
+        if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
+            user_id = auth.authenticate_embed_session(&hostname, &token).await?;
+            embedded = user_id.is_some();
+        }
+        if user_id.is_none() {
+            if let Some(token) = cookie_value(request.headers(), config.ingress_cookie_name()) {
+                user_id = auth.authenticate_ingress_session(&hostname, &token).await?;
+            }
+        }
         let Some(user_id) = user_id else {
             require_ingress_navigation(request.headers())?;
             return redirect_to_ingress_authorization(
@@ -510,6 +523,14 @@ async fn proxy_agent_interface_origin(
         };
         Some(user_id)
     };
+    // An embed session (security 4750 P2): a browser that ignores
+    // `Partitioned` keeps the cookie as a plain SameSite=None cookie, so the
+    // framed document's own requests are the only ones admitted: exactly
+    // `Sec-Fetch-Site: same-origin`; missing, none, same-site and cross-site
+    // are refused before the Agent is even resolved.
+    if embedded {
+        require_embed_same_origin(request.headers())?;
+    }
     // Authenticated: existence and authority are decided now, per request.
     let (workspace_id, _server_id) = auth
         .agent_interface_target(&agent_id)
@@ -574,8 +595,26 @@ async fn proxy_agent_interface_origin(
         headers
             .entry(header::REFERRER_POLICY)
             .or_insert(HeaderValue::from_static("no-referrer"));
+        if embedded {
+            allow_console_frame_only(headers, &config.console_origin())?;
+        }
     }
     Ok(response)
+}
+
+/// Embed-cookie requests must prove they come from the framed document
+/// itself: one `Sec-Fetch-Site` header equal to `same-origin`. A missing
+/// header is refused too, because without Fetch Metadata the cookie could be
+/// riding a cross-site request in a browser that stored it unpartitioned.
+pub(super) fn require_embed_same_origin(headers: &HeaderMap) -> Result<(), ApiFailure> {
+    let mut sites = headers.get_all("sec-fetch-site").iter();
+    match (sites.next(), sites.next()) {
+        (Some(site), None) if site == "same-origin" => Ok(()),
+        _ => Err(ApiFailure::forbidden(
+            "ingress_request_rejected",
+            "embedded Agent interface requests must come from the embedded document itself",
+        )),
+    }
 }
 
 /// Same-site sibling defence for every ingress host (#143 Phase 2 V4): a
@@ -584,7 +623,7 @@ async fn proxy_agent_interface_origin(
 /// upgrade's `Origin` must be this host. Workspace hosts, whose cookie carries
 /// authority, also refuse cross-site; public hosts are internet APIs and keep
 /// accepting cross-site under their own CORS, refusing only same-site.
-fn enforce_ingress_fetch_metadata(
+pub(super) fn enforce_ingress_fetch_metadata(
     request: &Request<Body>,
     hostname: &str,
     public: bool,

@@ -659,6 +659,11 @@ CREATE TABLE IF NOT EXISTS ingress_sessions (
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS ingress_sessions_expiry ON ingress_sessions(expires_at);
+-- Embed sessions (#156): a code minted by the Console for its iframe is bound
+-- to one Agent and redeemed on the Agent origin for a partitioned session.
+ALTER TABLE ingress_browser_auth_codes ADD COLUMN IF NOT EXISTS embed BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE ingress_browser_auth_codes ADD COLUMN IF NOT EXISTS agent_id TEXT;
+ALTER TABLE ingress_sessions ADD COLUMN IF NOT EXISTS embed BOOLEAN NOT NULL DEFAULT FALSE;
 
 CREATE TABLE IF NOT EXISTS app_oauth_codes (
     code_hash TEXT PRIMARY KEY,

@@ -263,6 +263,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui_root(
     Extension(policy): Extension<PolicyEngine>,
     Extension(browser): Extension<BrowserAccess>,
     Extension(bootstrap): Extension<BootstrapConfig>,
+    Extension(ingress): Extension<IngressConfig>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     Path((workspace_id, agent_id)): Path<(String, String)>,
@@ -270,6 +271,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui_root(
 ) -> Result<Response, ApiFailure> {
     // App content must never run on the Console's origin (#132).
     bootstrap.app_dist().require_embedding_allowed()?;
+    require_tunnel_fallback_allowed(&ingress)?;
     browser.validate_tunnel_if_present(request.headers())?;
     let subject = interface_ui_subject(
         &state,
@@ -293,6 +295,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui_path(
     Extension(policy): Extension<PolicyEngine>,
     Extension(browser): Extension<BrowserAccess>,
     Extension(bootstrap): Extension<BootstrapConfig>,
+    Extension(ingress): Extension<IngressConfig>,
     session: Option<Extension<CurrentSession>>,
     machine: Option<Extension<MachineSession>>,
     Path((workspace_id, agent_id, path)): Path<(String, String, String)>,
@@ -300,6 +303,7 @@ pub(in crate::api) async fn proxy_agent_interface_ui_path(
 ) -> Result<Response, ApiFailure> {
     // App content must never run on the Console's origin (#132).
     bootstrap.app_dist().require_embedding_allowed()?;
+    require_tunnel_fallback_allowed(&ingress)?;
     browser.validate_tunnel_if_present(request.headers())?;
     let subject = interface_ui_subject(
         &state,

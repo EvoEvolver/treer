@@ -72,7 +72,8 @@ function WorkspaceAppContent() {
   const [pendingInviteCheckedFor, setPendingInviteCheckedFor] = useState<string | null>(null)
   const preview = firstRunTourMode() === "preview"
   const [user, setUser] = useState<User | null | undefined>(preview ? PREVIEW_USER : undefined)
-  const agentOriginMode = useAgentOriginCapability(user?.user_id, preview)
+  const agentCapabilities = useAgentOriginCapability(user?.user_id, preview)
+  const agentOriginMode = agentCapabilities.mode
   const pendingInviteChecked = preview || pendingInvite !== null || Boolean(user && pendingInviteCheckedFor === user.user_id)
   const [organizations, setOrganizations] = useState<Organization[]>(preview ? [PREVIEW_ORG] : [])
   const [organizationId, setOrganizationId] = useState<string | null>(preview ? PREVIEW_ORG.organization_id : null)
@@ -1077,7 +1078,7 @@ function WorkspaceAppContent() {
             const app = apps.find((entry) => (entry.runtime_agent_id ?? entry.app_id) === tab.id)
             const machine = snapshot?.servers.find((entry) => entry.server_id === label.agent.server_id)
             return <div key={`${workspaceId}:${tab.id}`} id={`workspace-panel-${tab.id}`} role="tabpanel" aria-labelledby={isMobile ? undefined : `workspace-tab-${tab.id}`} aria-label={isMobile ? label.path : undefined} hidden={!visible} className="absolute inset-0 min-h-0 overflow-hidden">
-              {tab.live ? <WorkloadSurface ref={visible ? terminalPaneRef : undefined} workspaceId={workspaceId} agent={label.agent} app={app} machine={machine} path={label.path} tab={tab} visible={visible} mobile={isMobile && mobileTerminalOpen} theme={theme} ctrlArmed={ctrlArmed} transformInput={transformTerminalInput} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} onCopy={copy} onLogs={(logs) => setShowWorkloadLogs(logs)} /> : <div className="grid size-full place-content-center gap-3 p-6 text-center"><p className="text-sm font-medium">{t("app.page_unloaded")}</p><p className="max-w-sm text-xs text-muted-foreground">{t("app.this_browser_page_was_unloaded")}</p><Button onClick={() => showAgentTerminal(tab.id)}>{t("app.reload_tab")}</Button></div>}
+              {tab.live ? <WorkloadSurface ref={visible ? terminalPaneRef : undefined} workspaceId={workspaceId} agent={label.agent} app={app} machine={machine} path={label.path} tab={tab} embedMode={agentCapabilities.embed} embedOrigin={agentOriginMode === "isolated" ? agentOwnUrls.get(tab.id) : undefined} visible={visible} mobile={isMobile && mobileTerminalOpen} theme={theme} ctrlArmed={ctrlArmed} transformInput={transformTerminalInput} onToggleCtrl={() => setCtrlModifier(!ctrlArmedRef.current)} onCopy={copy} onLogs={(logs) => setShowWorkloadLogs(logs)} /> : <div className="grid size-full place-content-center gap-3 p-6 text-center"><p className="text-sm font-medium">{t("app.page_unloaded")}</p><p className="max-w-sm text-xs text-muted-foreground">{t("app.this_browser_page_was_unloaded")}</p><Button onClick={() => showAgentTerminal(tab.id)}>{t("app.reload_tab")}</Button></div>}
             </div>
           })}
         </div>
