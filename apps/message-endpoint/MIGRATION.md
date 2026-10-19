@@ -142,13 +142,14 @@ is not production activation permission.
    Future independent receipt checking is separate Core work, scoped to an
    authorized exact relationship/message ID, body-free, rate limited and audited,
    with no out-of-scope existence oracle.
-2. **Explicit history decision.** Security prefers an owner-approved
-   **new-context cutoff** for the first migration. This loses historical native
+2. **Chosen history boundary.** Leader decision 5777 selected a
+   **new-context cutoff** for this migration. This loses historical native
    reply continuity and must name that loss in the owner's release authorization.
    Preserve old IDs/authors and old read-only history; an old native reply must
    return a fixed actionable history-unavailable result, not silently become a
-   top-level message. Leader explicitly excluded a continuity grant from this task. Any later
-   request for one would be separately designed by Core. No App-created grant, impersonation or body copying.
+   top-level message. Leader explicitly excluded a continuity grant from this
+   task. Any later request for one would be separately designed by Core, outside
+   this migration. No App-created grant, impersonation or body copying.
 3. **Existing-identity drain report.** No new status route is needed solely for
    this migration. After owner/release disables old admission and fences senders
    (redirect them or restrict their Policy access to the old bridge), run a
