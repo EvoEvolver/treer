@@ -1302,14 +1302,29 @@ labelled as such, and opening the Agent in a new tab; where the operator set
 answers `503 embedded_ui_requires_isolated_origin`). Mint errors and
 timeouts lead to the same notice, never to an automatic downgrade. Codes are never logged. Embed
 sessions are separate rows from standalone sessions: the token of one never
-authenticates through the other cookie. A request that authenticates through
-the embed cookie is served only with exactly one `Sec-Fetch-Site: same-origin`
-header (the framed document's own navigations, fetches and subresources);
-missing, `none`, `same-site` and `cross-site` are refused with
-`403 ingress_request_rejected`. This is what protects a browser that accepts
-third-party cookies but ignores `Partitioned`: it stores the embed cookie as a
-plain `SameSite=None` cookie and the check step passes, yet no cross-site page
-can use it, because such requests never carry `same-origin`. Responses to
+authenticates through the other cookie. The request context is decided before
+any credential is read: for an ordinary request the embed cookie grants authority
+only with exactly one `Sec-Fetch-Site: same-origin`; for an upgrade it
+additionally requires exactly one `Origin` header byte-equal to this Agent
+origin in every case, and `Sec-Fetch-Site` may be absent only on a real WebSocket
+upgrade (`Upgrade: websocket` with `Connection: upgrade`), because Chromium sends
+no Fetch Metadata on an iframe's same-origin handshake. In every other context
+(`none`, `same-site`, `cross-site`, a missing header on an ordinary request,
+duplicated headers, any other or missing `Origin` on an upgrade, any other
+`Upgrade` value) the embed cookie is treated as absent
+and the request takes the standalone path: the standalone cookie if the browser
+sent one, else the authorize redirect for a navigation or
+`401 invalid_ingress_authorization`. An unusable embed cookie therefore never
+turns into a `403` for a request a standalone cookie would authorize, which
+matters because a browser whose Console and apps domain share one site (the
+partition key is the site, not the origin), or that ignores `Partitioned`,
+sends the embed cookie on standalone visits too. The same rule stops a page on
+one Agent origin, framed by the Console, from spending the embed cookie on a
+sibling Agent origin: that request is same-site, so the cookie is ignored.
+A tunnelled WebSocket, standalone or embedded, is authenticated once at the
+upgrade: an open socket outlives Console logout, workspace membership removal
+and the 12-hour session expiry until either side closes it (follow-up #194
+adds periodic re-validation and server-side closing). Responses to
 requests carrying the embed cookie get `frame-ancestors` replaced with the
 Console origin and `X-Frame-Options` removed; standalone sessions keep the
 Agent's CSP untouched. Membership is re-checked on every request and Console

@@ -496,16 +496,29 @@ async fn proxy_agent_interface_origin(
         ));
     }
     enforce_ingress_fetch_metadata(&request, &hostname, false)?;
-    // An embed session (#156) is recognised by its own cookie; its token
-    // never authenticates through the standalone cookie or the reverse.
+    // Embed sessions (#156, security 5125/5129): decide the request context
+    // first, then pick credentials. The embed cookie grants authority only
+    // when the request provably comes from the framed document itself:
+    // exactly one `Sec-Fetch-Site: same-origin`, or, for a WebSocket upgrade
+    // only, no Fetch Metadata but exactly one `Origin` byte-equal to this
+    // Agent origin (Chromium sends Origin without Sec-Fetch-* on an iframe's
+    // same-origin handshake). In every other context the embed cookie is
+    // treated as absent and the request takes the standalone path, so a
+    // browser whose Console and apps domain share one site, or that ignores
+    // `Partitioned`, still gets standalone pages and never a 403 for a request
+    // a standalone cookie would authorize.
+    let upgraded = request.headers().contains_key(header::UPGRADE);
+    let embed_context = embed_cookie_context(request.headers(), upgraded, &config, &hostname)?;
     let mut embedded = false;
     let user_id = if auth.authentication_disabled() {
         None
     } else {
         let mut user_id = None;
-        if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
-            user_id = auth.authenticate_embed_session(&hostname, &token).await?;
-            embedded = user_id.is_some();
+        if embed_context {
+            if let Some(token) = cookie_value(request.headers(), config.embed_cookie_name()) {
+                user_id = auth.authenticate_embed_session(&hostname, &token).await?;
+                embedded = user_id.is_some();
+            }
         }
         if user_id.is_none() {
             if let Some(token) = cookie_value(request.headers(), config.ingress_cookie_name()) {
@@ -523,14 +536,6 @@ async fn proxy_agent_interface_origin(
         };
         Some(user_id)
     };
-    // An embed session (security 4750 P2): a browser that ignores
-    // `Partitioned` keeps the cookie as a plain SameSite=None cookie, so the
-    // framed document's own requests are the only ones admitted: exactly
-    // `Sec-Fetch-Site: same-origin`; missing, none, same-site and cross-site
-    // are refused before the Agent is even resolved.
-    if embedded {
-        require_embed_same_origin(request.headers())?;
-    }
     // Authenticated: existence and authority are decided now, per request.
     let (workspace_id, _server_id) = auth
         .agent_interface_target(&agent_id)
@@ -602,19 +607,64 @@ async fn proxy_agent_interface_origin(
     Ok(response)
 }
 
-/// Embed-cookie requests must prove they come from the framed document
-/// itself: one `Sec-Fetch-Site` header equal to `same-origin`. A missing
-/// header is refused too, because without Fetch Metadata the cookie could be
-/// riding a cross-site request in a browser that stored it unpartitioned.
-pub(super) fn require_embed_same_origin(headers: &HeaderMap) -> Result<(), ApiFailure> {
-    let mut sites = headers.get_all("sec-fetch-site").iter();
-    match (sites.next(), sites.next()) {
-        (Some(site), None) if site == "same-origin" => Ok(()),
-        _ => Err(ApiFailure::forbidden(
-            "ingress_request_rejected",
-            "embedded Agent interface requests must come from the embedded document itself",
-        )),
+/// Whether a request on an Agent origin may use the embed cookie at all
+/// (security 5125/5129/5165). Ordinary requests: exactly one
+/// `Sec-Fetch-Site: same-origin`, nothing else. Upgrades: exactly one `Origin`
+/// header byte-equal to this Agent origin is required in every case, and
+/// `Sec-Fetch-Site`, when present, must be exactly one `same-origin`; the
+/// header may be absent only on a real WebSocket upgrade (`Upgrade: websocket`
+/// with a `Connection` header containing `upgrade`), because Chromium sends no
+/// Fetch Metadata on an iframe's same-origin handshake. `none`, `same-site`,
+/// `cross-site`, duplicated headers, any other Origin and any other Upgrade
+/// value all answer `false`: the cookie is then ignored, never an error.
+pub(super) fn embed_cookie_context(
+    headers: &HeaderMap,
+    upgraded: bool,
+    config: &IngressConfig,
+    hostname: &str,
+) -> Result<bool, ApiFailure> {
+    let sites: Vec<&HeaderValue> = headers.get_all("sec-fetch-site").iter().collect();
+    let same_origin_site = match sites.as_slice() {
+        [site] => Some(*site == "same-origin"),
+        [] => None,
+        _ => return Ok(false),
+    };
+    if !upgraded {
+        return Ok(same_origin_site == Some(true));
     }
+    let origins: Vec<&HeaderValue> = headers.get_all(header::ORIGIN).iter().collect();
+    let [origin] = origins.as_slice() else {
+        return Ok(false);
+    };
+    let expected = config
+        .url_for_hostname(hostname)?
+        .origin()
+        .ascii_serialization();
+    if origin.as_bytes() != expected.as_bytes() {
+        return Ok(false);
+    }
+    match same_origin_site {
+        Some(ok) => Ok(ok),
+        None => Ok(is_websocket_upgrade(headers)),
+    }
+}
+
+/// `Upgrade: websocket` (case-insensitive) with a `Connection` header whose
+/// comma-separated tokens include `upgrade`; any other upgrade (h2c, a bare
+/// `Upgrade` header) is not a WebSocket handshake.
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    let websocket = headers
+        .get(header::UPGRADE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket"));
+    let connection_upgrade = headers.get_all(header::CONNECTION).iter().any(|value| {
+        value.to_str().is_ok_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case("upgrade"))
+        })
+    });
+    websocket && connection_upgrade
 }
 
 /// Same-site sibling defence for every ingress host (#143 Phase 2 V4): a
