@@ -58,7 +58,7 @@ const positions = (width: number, height: number) => [
   { x: width * .65, y: height / 2 },
 ]
 for (const width of [1360, 390]) for (const theme of ['light', 'dark']) {
-  test(`Tree hit area fills folder Agent App rows ${width} ${theme}`, async ({ page }) => {
+  test(`Tree hit area fills folder rows ${width} ${theme}`, async ({ page }) => {
     const lang = theme === 'dark' ? 'zh' : 'en'
     await setup(page, width, theme, lang)
     for (const name of ['Parent', 'Child with a long folder name', 'Empty']) {
@@ -74,7 +74,20 @@ for (const width of [1360, 390]) for (const theme of ['light', 'dark']) {
       // Leave ancestors expanded for the next depth.
       if (await item(page, name).getAttribute('aria-expanded') !== 'true') await row.locator('[data-tree-primary]').click()
     }
-    for (const [name, id] of [['Beta', 'tab-2'], ['Alpha', 'tab-1'], ['Archive', 'tab-7']]) {
+    const parent = item(page, 'Parent')
+    await folderRow(page, 'Parent').hover()
+    await folderRow(page, 'Parent').locator('[data-tree-actions]').click()
+    await expect(page.getByRole('menu')).toBeVisible()
+    await page.keyboard.press('Escape')
+    await expect(parent).toHaveAttribute('aria-expanded', 'true')
+    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
+  })
+  for (const [name, id] of [['Beta', 'tab-2'], ['Alpha', 'tab-1'], ['Archive', 'tab-7']]) {
+    test(`Tree hit area fills ${name} row ${width} ${theme}`, async ({ page }) => {
+      const lang = theme === 'dark' ? 'zh' : 'en'
+      await setup(page, width, theme, lang)
+      await folderRow(page, 'Parent').locator('[data-tree-primary]').click()
+      await folderRow(page, 'Child with a long folder name').locator('[data-tree-primary]').click()
       const row = item(page, name)
       await fullPrimary(row)
       const b = await bounds(row)
@@ -90,25 +103,18 @@ for (const width of [1360, 390]) for (const theme of ['light', 'dark']) {
       await menu.click()
       await expect(page.getByRole('menu')).toBeVisible()
       await page.keyboard.press('Escape')
-    }
-    const parent = item(page, 'Parent')
-    await folderRow(page, 'Parent').hover()
-    await folderRow(page, 'Parent').locator('[data-tree-actions]').click()
-    await expect(page.getByRole('menu')).toBeVisible()
-    await page.keyboard.press('Escape')
-    await expect(parent).toHaveAttribute('aria-expanded', 'true')
-    await expect.poll(() => page.evaluate(() => document.documentElement.scrollWidth <= innerWidth)).toBe(true)
-    // Evidence has synthetic fixture data only, outside the repository.
-    await page.addStyleTag({ content: '[role=tree] [data-tree-primary]{outline:1px solid currentColor;outline-offset:-1px}' })
-    const dir = process.env.TREE_HITAREA_SHOTS
-    if (dir) {
-      await mkdir(dir, { recursive: true })
-      await page.screenshot({ path: `${dir}/${width}-${theme}-${lang}.png` })
-      await item(page, 'Alpha').locator('[data-tree-primary]').focus()
-      await item(page, 'Alpha').hover()
-      await page.screenshot({ path: `${dir}/${width}-${theme}-${lang}-hover-focus.png` })
-    }
-  })
+      // Evidence has synthetic fixture data only, outside the repository.
+      await page.addStyleTag({ content: '[role=tree] [data-tree-primary]{outline:1px solid currentColor;outline-offset:-1px}' })
+      const dir = process.env.TREE_HITAREA_SHOTS
+      if (dir) {
+        await mkdir(dir, { recursive: true })
+        await page.screenshot({ path: `${dir}/${name}-${width}-${theme}-${lang}.png` })
+        await item(page, 'Alpha').locator('[data-tree-primary]').focus()
+        await item(page, 'Alpha').hover()
+        await page.screenshot({ path: `${dir}/${name}-${width}-${theme}-${lang}-hover-focus.png` })
+      }
+    })
+  }
 }
 test('Tree full-row primary keeps keyboard navigation, native links and drag targets', async ({ page }) => {
   const { moves } = await setup(page)
