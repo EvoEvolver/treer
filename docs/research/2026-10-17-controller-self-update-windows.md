@@ -660,10 +660,13 @@ fields. A future native source must acquire these identities and completed
 failure observations independently; the synthetic constructor authenticates
 nothing. Human abort remains refused. Deadline observations use the original
 context budget without renewal, and source failures never select a fallback.
-Operation failures compare the independently supplied intent revision: an
-intent-state predecessor uses its own revision, while a subsequent result-state
-predecessor refers back one revision to that intent. Merely substituting the
-latest result revision cannot relabel it as the original operation intent.
+Operation failures compare the independently supplied intent revision against
+the intent-state predecessor's own revision. Only `move_old` at
+`move_old_intent` and `publish` at `publish_intent` are accepted. A result-state
+predecessor (`old_moved` or `published`) cannot turn a failed postcheck into an
+operation-failure reason. The former `verify_image` stage is refused by schema;
+relabeling it as either remaining stage also refuses. Post-success uncertainty
+must diagnose and stop rather than authorize rollback.
 
 The inert health-failure vocabulary uses this explicit requirement table:
 
@@ -837,12 +840,20 @@ or caller error label selects them afterwards. A local invocation latch must
 be consumed before the native call; a second invocation on that acquisition
 object refuses even if the first fails. This is in-memory fixture ordering,
 not a durable attempt latch or proof of production installation ownership.
+Derive the failure stage from the operation's selected slot transition and
+step, never a supplied label. Represent the captured native status only as a
+bounded unsigned integer, not an OS error string.
 
 A failed native return alone does not prove that the intended old layout is
 intact. Before minting a fixture observation, reobserve the retained source
 identity, content and source slot, plus the destination's expected state using
 the existing checked-slot rules. An unreadable destination is not absence.
 Any change or uncertainty yields no observation and preserves all objects.
+Hold the same retained handles and sharing restrictions through both the
+native call and re-observation: deny source write/delete sharing and retain
+the test-owned destination pin. Add an injected interference case between the
+failed return and re-observation that must produce no observation; injection
+must be explicit and must not weaken the ordinary acquisition path's pins.
 For the deterministic negative fixture, hold a test-owned destination object
 at the fixed target slot, attempt the non-replacing rename once, and prove
 both objects remain the same after refusal. This deliberately blocked operation

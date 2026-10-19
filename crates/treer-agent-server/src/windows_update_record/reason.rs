@@ -75,7 +75,6 @@ enum ImageRole {
 enum FailureStage {
     MoveOld,
     Publish,
-    VerifyImage,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -200,14 +199,11 @@ fn verify<'a>(
         intent == context.operation_intent_revision
             && (match step {
                 MoveOldIntent | PublishIntent => intent.checked_add(1),
-                OldMoved | Published => intent.checked_add(2),
                 _ => None,
             }) == Some(context.binding.revision)
             && matches!(
                 (step, stage),
-                (MoveOldIntent, FailureStage::MoveOld)
-                    | (PublishIntent, FailureStage::Publish)
-                    | (OldMoved | Published, FailureStage::VerifyImage)
+                (MoveOldIntent, FailureStage::MoveOld) | (PublishIntent, FailureStage::Publish)
             )
     };
     let valid = match (&observation.kind, &observation.event) {
@@ -725,8 +721,6 @@ fn independent_reason_operation_results_keep_the_original_intent_revision() {
     for (step, stage, slots, intent_revision) in [
         (MoveOldIntent, FailureStage::MoveOld, [Old, New, Absent], 10),
         (PublishIntent, FailureStage::Publish, [Absent, New, Old], 10),
-        (OldMoved, FailureStage::VerifyImage, [Absent, New, Old], 9),
-        (Published, FailureStage::VerifyImage, [New, Absent, Old], 9),
     ] {
         let live = live_attempt();
         let kind = ReasonKind::ControllerActivationFailed;
@@ -750,6 +744,55 @@ fn independent_reason_operation_results_keep_the_original_intent_revision() {
                 claimed_revision == intent_revision,
                 "{step:?}"
             );
+        }
+    }
+}
+
+#[test]
+fn independent_reason_post_move_uncertainty_never_authorizes_rollback() {
+    use layout::{Object::*, Step::*};
+    for kind in [
+        ReasonKind::ControllerActivationFailed,
+        ReasonKind::CliActivationFailed,
+    ] {
+        for (step, slots) in [
+            (OldMoved, [Absent, New, Old]),
+            (Published, [New, Absent, Old]),
+        ] {
+            let live = live_attempt();
+            let (mut context, _, _) = entry_fixture(&live, kind);
+            let image = if kind == ReasonKind::ControllerActivationFailed {
+                context.prior.controller_step = step;
+                context.slots[0] = slots;
+                ImageRole::Controller
+            } else {
+                context.prior.cli_step = step;
+                context.slots[1] = slots;
+                ImageRole::Cli
+            };
+            context.operation_intent_revision = 9;
+            for stage in ["verify_image", "move_old", "publish"] {
+                let event = Event::OperationFailed {
+                    image,
+                    stage: FailureStage::Publish,
+                    intent_revision: 9,
+                };
+                let mut value = serde_json::to_value(observation(&context, kind, event)).unwrap();
+                value["event"]["stage"] = serde_json::json!(stage);
+                let (reference, mut source) =
+                    evidence(&context, kind, serde_json::to_vec(&value).unwrap());
+                assert_eq!(
+                    verify(&context, &reference, &mut source).err(),
+                    Some(if stage == "verify_image" {
+                        "reason_evidence_schema"
+                    } else {
+                        "reason_semantics_mismatch"
+                    }),
+                    "{kind:?}/{step:?}/{stage}"
+                );
+                assert_eq!(source.reads, 1);
+                assert!(!live.entered.get());
+            }
         }
     }
 }
