@@ -650,3 +650,24 @@ invalid hashes/states, multi-generation and global caps, and ordinal ordering.
 The floor, acked-only cleanup API, admission digest construction, counter/hold
 transaction, confirmed-ack marker and concurrency/rollback behavior are not yet
 implemented. Raw SQL in unit fixtures is not a receipt admission interface.
+
+Before this schema is initialized in a runtime store, generic terminal retention
+must skip any inbound parent referenced by the ledger (acked or unacked), just
+as it skips retained email replies. That guard is now conditional on the ledger
+table existing, so pre-ledger stores continue to work and one retained parent
+cannot abort cleanup for unrelated bindings/channels. Only a separately reviewed
+acked-child cleanup may release those parents. Regression coverage includes both
+child states alongside an unrelated prunable job, then explicit synthetic
+acked-child removal followed by normal parent retention.
+
+A singleton schema marker records version 1; unknown versions fail initialization
+without modifying the ledger. The initial unactivated schema without a marker
+is adopted as version 1. Future cap/floor/trigger changes require an explicit
+versioned migration, not `CREATE TRIGGER IF NOT EXISTS` alone. A regression checks
+the stored capacity trigger against both Rust cap constants. The marker is one
+bounded auxiliary record, not a per-delivery log.
+
+Once ledger rows exist, rollback to a pre-ledger binary is unsupported: its old
+retention statement can hit the restrictive foreign key and abort cleanup for
+all bindings. Contain with the ledger-aware binary and preserve the private store;
+do not disable foreign keys or delete unacked children to enable downgrade.

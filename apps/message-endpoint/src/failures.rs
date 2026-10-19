@@ -165,11 +165,23 @@ impl Store {
                     [],
                     |r| r.get(0),
                 )?;
-            let guard = if email_replies {
-                " AND NOT EXISTS(SELECT 1 FROM email_replies r WHERE r.job=inbound.id)"
-            } else {
-                ""
-            };
+            let mut guard = String::new();
+            if email_replies {
+                guard.push_str(
+                    " AND NOT EXISTS(SELECT 1 FROM email_replies r WHERE r.job=inbound.id)",
+                );
+            }
+            let terminal_dispositions: bool = table == "inbound"
+                && transaction.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='telegram_terminal_dispositions')",
+                    [],
+                    |r| r.get(0),
+                )?;
+            // Both acked and unacked children retain their authoritative parent.
+            // Explicit reviewed ledger cleanup owns removing acked children.
+            if terminal_dispositions {
+                guard.push_str(" AND NOT EXISTS(SELECT 1 FROM telegram_terminal_dispositions d WHERE d.job=inbound.id)");
+            }
             removed += transaction.execute(
                 &format!("DELETE FROM {table} WHERE pending=0 AND terminal_at<=?1{guard}"),
                 [before],

@@ -16,6 +16,20 @@ pub fn initialize(store: &mut Store) -> Result<(), Error> {
     store.recheck_private_storage()?;
     let tx = store.db.transaction()?;
     tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS telegram_terminal_disposition_schema(
+         singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+         version INTEGER NOT NULL CHECK(typeof(version)='integer' AND version>0));
+         INSERT OR IGNORE INTO telegram_terminal_disposition_schema(singleton,version) VALUES(1,1);",
+    )?;
+    let version: i64 = tx.query_row(
+        "SELECT version FROM telegram_terminal_disposition_schema WHERE singleton=1",
+        [],
+        |r| r.get(0),
+    )?;
+    if version != 1 {
+        return Err(Error::Invalid);
+    }
+    tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS telegram_terminal_dispositions(
           ordinal INTEGER PRIMARY KEY AUTOINCREMENT,
           delivery_key BLOB NOT NULL UNIQUE
@@ -57,6 +71,84 @@ mod tests {
     use super::*;
     use crate::store::Limits;
     use rusqlite::params;
+
+    #[test]
+    fn version_and_capacity_trigger_match_the_declared_contract() {
+        let mut s = Store::memory(Limits::default()).unwrap();
+        initialize(&mut s).unwrap();
+        let sql: String =
+            s.db.query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='telegram_terminal_dispositions_cap'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(sql.contains(&format!(")>={GLOBAL_ROWS} OR")));
+        assert!(sql.contains(&format!(")>={PER_BINDING_ROWS}\n")));
+        s.db.execute(
+            "UPDATE telegram_terminal_disposition_schema SET version=2",
+            [],
+        )
+        .unwrap();
+        assert!(initialize(&mut s).is_err());
+        let version: i64 =
+            s.db.query_row(
+                "SELECT version FROM telegram_terminal_disposition_schema",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+    }
+
+    #[test]
+    fn retention_skips_all_ledger_parents_without_blocking_unrelated_rows() {
+        let mut s = Store::memory(Limits::default()).unwrap();
+        initialize(&mut s).unwrap();
+        let unacked = parent(&s, 1, 1);
+        let acked = parent(&s, 2, 1);
+        let unrelated = parent(&s, 3, 1);
+        insert(&s, unacked, 1, 0).unwrap();
+        insert(&s, acked, 2, 0).unwrap();
+        s.db.execute(
+            "UPDATE telegram_terminal_dispositions SET acked=1 WHERE job=?1",
+            [acked],
+        )
+        .unwrap();
+        s.db.execute("UPDATE inbound SET terminal_at=1", [])
+            .unwrap();
+        assert_eq!(
+            s.prune_completed(crate::transfers::TOMBSTONE_TTL + 1)
+                .unwrap(),
+            1
+        );
+        let ids: Vec<i64> =
+            s.db.prepare("SELECT id FROM inbound ORDER BY id")
+                .unwrap()
+                .query_map([], |r| r.get(0))
+                .unwrap()
+                .collect::<Result<_, _>>()
+                .unwrap();
+        assert_eq!(ids, vec![unacked, acked]);
+        assert!(!ids.contains(&unrelated));
+        // Synthetic explicit acked-child cleanup, not a production cleanup API.
+        s.db.execute(
+            "DELETE FROM telegram_terminal_dispositions WHERE job=?1 AND acked=1",
+            [acked],
+        )
+        .unwrap();
+        assert_eq!(
+            s.prune_completed(crate::transfers::TOMBSTONE_TTL + 1)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            s.db.query_row("SELECT count(*) FROM inbound WHERE id=?1", [unacked], |r| r
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
 
     fn parent(s: &Store, binding: i64, generation: i64) -> i64 {
         let endpoint = format!("endpoint_{binding}");
