@@ -240,8 +240,17 @@ read/DELETE operation handle derived from the pin, with the existing checked
 rename pre/postconditions. There is no close-and-reopen by pathname and no
 interval where ordinary write opens are permitted. Owner ACL override, hostile
 same-user code and privileged bypass remain outside this private fixture's
-claim. The W1a copy API and static rename fixtures are unchanged. This is not
-yet a reviewed ACL policy for existing installed files.
+claim. If an owner nevertheless opens a write-capable handle in the ACL-only
+interval, the subsequent execution pin excludes write sharing and must refuse
+while that handle remains open; a write completed and closed before the pin
+exists is detected by the digest check performed after acquiring the pin.
+Thus content acceptance relies on the final pin and its re-hash, not merely
+the failed write-open probe. The W1a copy API and static rename fixtures are
+unchanged. This is not yet a reviewed ACL policy for existing installed files.
+The production candidate needs the same separation from its old write-open
+object so the Host can execute the new Controller while the supervisor retains
+a no-write-sharing pin. Its ACL transition must follow the eventual installed
+directory policy, which remains part of the open production-parent ACL decision.
 
 The child connects to the existing current-user/SYSTEM-only local pipe; the
 parent checks its kernel PID and requires a ready byte. It renames the retained
