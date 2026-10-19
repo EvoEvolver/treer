@@ -45,6 +45,18 @@ owned-child cleanup, without a service, production directory ACL, Host Job
 integration or real `win_native` update. Durable receipt/recovery states
 and production installation remain subsequent work.
 
+The inert receipt parser reuses the platform publication classifier through a
+`cfg(test)` path include in the Controller. Changes or moves to
+`crates/treer-platform/src/windows_update_layout.rs` must also run the focused
+Controller tests, not just the platform library, so the include and serialized
+state mappings are compiled. Use a private Cargo target directory for both:
+`cargo test --locked -p treer-platform windows_update_layout` and
+`cargo test --locked -p treer-agent-server --bin treer-agent-server windows_update_`.
+Keep the include inside `cfg(test)` when reorganizing the source. These checks
+cover draft syntax, pair consistency and separately supplied synthetic layout
+observations; they do not authenticate health, enforce prior-to-next transitions
+or a pair-external replay anchor, or establish production Windows readiness.
+
 ### Windows self-update registration model
 
 This historical model is not a prerequisite for the Windows PowerShell-parity

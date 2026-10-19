@@ -237,6 +237,18 @@ a prior-to-next state transition, proves completion or authorizes mutation.
 Actual health evidence, archive disposition, transition validation and integration
 with the marker-first model still require separate increments. No production
 reader, file I/O adapter or recovery command uses these parsed fields.
+Before a production reader may rely on health, each flag must be replaced by an
+evidence reference bound to the observed image identity/hash and receipt revision,
+and checked against an independently authenticated observation from the new
+process. A digest or reference manufactured only by the receipt writer is not
+sufficient; the authenticated channel and evidence ownership still need a
+separate design/review. `Consistent` must never become an alias for complete.
+Transition validation must jointly check the prior receipt, the exact next
+revision and an allowed phase/step edge (including explicit rollback edges).
+It must be tied to the pair-external durable anchor decision: an internally
+consistent old pair replay is still accepted by the current layer. No monotone
+revision or replay-protection claim is made until that external ownership and
+restart contract exists and is verified.
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
