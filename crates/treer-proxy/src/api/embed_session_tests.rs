@@ -1602,9 +1602,114 @@ async fn prewarm_sessions_are_short_budgeted_capped_rotated_and_audited() {
         );
     }
 
+    // The rotated grace row stays outside the cap for later inserts too
+    // (security 5625 (1)): another open at cap evicts the oldest NORMAL row,
+    // never the grace row, and a hover is refused because eight normal rows
+    // remain.
+    normals.push(
+        establish_embed_session_with_purpose(&fixture, &config, "owner", None)
+            .await
+            .0,
+    );
+    assert_eq!(live("owner").await, (9, 0), "grace row + eight normals");
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&oldest_warm)).await,
+        StatusCode::NO_CONTENT,
+        "grace row survives a later insert at cap"
+    );
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&normals[0])).await,
+        StatusCode::UNAUTHORIZED,
+        "the oldest normal row went instead"
+    );
+    assert_eq!(
+        check(&fixture, &config, AGENT_HOST, Some(&normals[1])).await,
+        StatusCode::NO_CONTENT
+    );
+    sqlx::query("UPDATE ingress_browser_auth_codes SET used_at = '2000-01-01T00:00:00Z' WHERE used_at IS NULL")
+        .execute(&fixture.auth.pool())
+        .await
+        .unwrap();
+    let (nonce, hash) = nonce_pair();
+    let minted = mint_with_purpose(
+        &fixture,
+        allow(),
+        &config,
+        Some("owner"),
+        AGENT_ID,
+        &hash,
+        Some("prewarm"),
+    )
+    .await
+    .unwrap();
+    let body = axum::body::to_bytes(minted.into_body(), 64 * 1024)
+        .await
+        .unwrap();
+    let code = serde_json::from_slice::<Value>(&body).unwrap()["code"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let (status, _) = error_of(redeem(&fixture, &config, AGENT_HOST, &code, &nonce).await).await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "hover refused at a cap of normals"
+    );
+    assert_eq!(live("owner").await, (9, 0));
+
     // Logout removes prewarm sessions like any other.
     fixture.auth.logout("tok-owner").await.unwrap();
     assert_eq!(live("owner").await, (0, 0));
+}
+
+/// #198 (security 5618 item 4): concurrent exchanges for one (user, Agent)
+/// serialize on the pair lock, so the cap is a real bound, never briefly 8+n.
+#[tokio::test]
+async fn concurrent_embed_exchanges_never_exceed_the_cap() {
+    let fixture = agent_fixture().await;
+    let config = config(None);
+    // Six live normal sessions, then eight codes redeemed at the same time.
+    for _ in 0..6 {
+        establish_embed_session_with_purpose(&fixture, &config, "member", None).await;
+        sqlx::query("UPDATE ingress_browser_auth_codes SET used_at = '2000-01-01T00:00:00Z' WHERE used_at IS NULL")
+            .execute(&fixture.auth.pool())
+            .await
+            .unwrap();
+    }
+    let mut codes = Vec::new();
+    for _ in 0..8 {
+        let (nonce, hash) = nonce_pair();
+        let minted = mint(&fixture, allow(), &config, Some("member"), AGENT_ID, &hash)
+            .await
+            .unwrap();
+        assert_eq!(minted.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(minted.into_body(), 64 * 1024)
+            .await
+            .unwrap();
+        let code = serde_json::from_slice::<Value>(&body).unwrap()["code"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        codes.push((code, nonce));
+    }
+    let results = futures_util::future::join_all(
+        codes
+            .iter()
+            .map(|(code, nonce)| redeem(&fixture, &config, AGENT_HOST, code, nonce)),
+    )
+    .await;
+    assert!(results.iter().all(|r| r
+        .as_ref()
+        .map(|r| r.status() == StatusCode::NO_CONTENT)
+        .unwrap_or(false)));
+    let live: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM ingress_sessions WHERE user_id = 'member' AND embed = TRUE AND expires_at > $1 AND NOT rotated",
+    )
+    .bind(Utc::now().to_rfc3339())
+    .fetch_one(&fixture.auth.pool())
+    .await
+    .unwrap();
+    assert_eq!(live, 8, "fourteen inserts, eight survive");
 }
 
 /// #198 step 3: the prewarm bootstrap exists only with both flags, never
