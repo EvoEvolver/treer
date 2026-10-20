@@ -1056,6 +1056,7 @@ mod tests {
     #[derive(Default)]
     struct BlockedBot {
         block_verification: bool,
+        poll_calls: AtomicU64,
         inner: FakeBot,
         entered: AtomicBool,
         released: AtomicBool,
@@ -1081,6 +1082,7 @@ mod tests {
             self.inner.verify()
         }
         fn poll(&self, _: i64) -> Result<Vec<Update>, Error> {
+            self.poll_calls.fetch_add(1, Ordering::Relaxed);
             assert!(
                 !self.block_verification,
                 "stopped verification must not poll"
@@ -1274,6 +1276,10 @@ mod tests {
         TelegramWorkers::stop_shared(&workers).unwrap();
         // Joining both workers is the boundary; no transport thread survives it.
         let status = workers.lock().unwrap().status();
+        // Account::protect catches mock panics; assert invocation and failure
+        // counts in the parent so a protected panic cannot hide a bad path.
+        assert_eq!(slow.poll_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(status[0].failures, 0);
         assert_eq!(status[0].sent_chunks, 0);
         assert_eq!(status[0].admitted_batches, 0);
         assert!(slow.inner.sent.lock().unwrap().is_empty());
