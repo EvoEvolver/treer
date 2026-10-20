@@ -5,6 +5,12 @@ capability, routes, grants, collector or runtime behavior yet. This refines the
 [proposal](2026-10-20-machine-monitoring.md) following security 6602/6606 and UI
 6604/6605. Implementations must validate these invariants before dispatch,
 before serialization and before drawing; serde types alone do not enforce them.
+The Rust `MachineMetricsResponse::parse_bounded` now caps the raw bytes before
+decoding and validates request/machine binding, finite values, time/age, units,
+series/device membership, bucket boundaries/counts/coverage and current memory
+pairs. Source callers use `validate` before serialization. Neither is wired into
+a live route yet. The browser still needs its own equivalent validator. These
+checks establish internal wire consistency, not truthful machine measurements.
 
 ## Authorization and local boundary decisions
 
@@ -126,6 +132,11 @@ URLs or state text; model names are plain text and fixed enum labels are UI-owne
 ## Synthetic presentation examples
 
 These describe wire states for mocks, not live samples or native validation.
+Executable JSON examples for all six cases are emitted to stdout by
+`cargo run -p treer-protocol --example machine_metrics_fixtures`; the example
+reads no machine data and stores nothing. Its tests round-trip all cases through
+the bounded parser and reject independently mutated binding/time/value/count/
+device/capacity inputs, over-limit frames and truncated JSON.
 
 | Case | Per-series current | Selected-range points | Required presentation |
 | --- | --- | --- | --- |

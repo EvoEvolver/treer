@@ -3,6 +3,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+mod validation;
+pub use validation::MachineMetricsValidationError;
+
 pub const CAPABILITY_MACHINE_METRICS: &str = "machine.metrics.v1";
 pub const MACHINE_METRICS_MAX_RANGE_MS: i64 = 86_400_000;
 pub const MACHINE_METRICS_MAX_POINTS: u16 = 720;
@@ -33,7 +36,7 @@ impl MachineMetricsQuery {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MachineMetricStatus {
     Ok,
@@ -49,7 +52,7 @@ pub enum MachineMetricStatus {
     Disabled,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MachineMetricKind {
     CpuUtilization,
