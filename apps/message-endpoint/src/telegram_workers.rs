@@ -1055,6 +1055,7 @@ mod tests {
     }
     #[derive(Default)]
     struct BlockedBot {
+        block_verification: bool,
         inner: FakeBot,
         entered: AtomicBool,
         released: AtomicBool,
@@ -1066,9 +1067,24 @@ mod tests {
     }
     impl AccountTransport for BlockedBot {
         fn verify(&self) -> Result<(), Error> {
+            if self.block_verification {
+                self.entered.store(true, Ordering::Release);
+                let deadline = Instant::now() + Duration::from_secs(3);
+                while !self.released.load(Ordering::Acquire) {
+                    assert!(
+                        Instant::now() < deadline,
+                        "verification fixture not released"
+                    );
+                    thread::sleep(Duration::from_millis(2));
+                }
+            }
             self.inner.verify()
         }
         fn poll(&self, _: i64) -> Result<Vec<Update>, Error> {
+            assert!(
+                !self.block_verification,
+                "stopped verification must not poll"
+            );
             self.entered.store(true, Ordering::Release);
             let deadline = Instant::now() + Duration::from_secs(3);
             while !self.released.load(Ordering::Acquire) {
@@ -1212,6 +1228,56 @@ mod tests {
         TelegramWorkers::stop_shared(&workers).unwrap();
         assert_eq!(workers.lock().unwrap().status()[0].admitted_batches, 0);
         assert_eq!(workers.lock().unwrap().status()[0].sent_chunks, 0);
+    }
+    #[test]
+    fn drain_before_verification_preserves_unsent_pending_outbound_work() {
+        let state = fixture();
+        let slow = Arc::new(BlockedBot {
+            block_verification: true,
+            ..BlockedBot::default()
+        });
+        let pending = || {
+            state
+                .lock()
+                .unwrap()
+                .store
+                .db
+                .query_row(
+                    "SELECT count(*) FROM transfers WHERE endpoint='ag_endpoint' AND state=1",
+                    [],
+                    |r| r.get::<_, i64>(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(pending(), 1);
+        let workers = Arc::new(Mutex::new(
+            TelegramWorkers::start(
+                state.clone(),
+                vec![Account::new("bot_fixture".into(), 12345, slow.clone())],
+            )
+            .unwrap(),
+        ));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !slow.entered.load(Ordering::Acquire) {
+            assert!(Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(2));
+        }
+        // Verification is blocked: the queued message demonstrably exists and
+        // is unsent when stop is requested, independent of sender scheduling.
+        assert!(slow.inner.sent.lock().unwrap().is_empty());
+        assert_eq!(pending(), 1);
+        assert!(
+            TelegramWorkers::stop_shared_with_timeout(&workers, Duration::from_millis(10)).is_err()
+        );
+        assert!(!workers.lock().unwrap().readiness()("bot_fixture"));
+        slow.released.store(true, Ordering::Release);
+        TelegramWorkers::stop_shared(&workers).unwrap();
+        // Joining both workers is the boundary; no transport thread survives it.
+        let status = workers.lock().unwrap().status();
+        assert_eq!(status[0].sent_chunks, 0);
+        assert_eq!(status[0].admitted_batches, 0);
+        assert!(slow.inner.sent.lock().unwrap().is_empty());
+        assert_eq!(pending(), 1);
     }
     #[test]
     fn drain_preserves_send_completed_before_stop_without_admitting_blocked_poll() {
