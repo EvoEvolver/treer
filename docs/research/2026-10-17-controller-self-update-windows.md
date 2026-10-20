@@ -1613,6 +1613,65 @@ invisible rewrite-and-restore or production replay fence. Continuation
 integration remains separate work. All new Windows assertions require exact-SHA
 hosted execution; no production locking or replay/CAS claim follows.
 
+#### Next inert composition: bind the decision before the private sink
+
+The same-bytes gap replacement fixture `b279e51d` passed hosted run
+39367207855 on Server 2022/2025: read-pin three, ordinary 93 passed/four ignored
+(Core 6479 and security 6475 independently read raw logs). The next slice should
+compose the accepted codec, exclusive writer and restrictive read pin with the
+retained-head/native-failure fixture. This is a design contract for review, not
+permission to wire a Controller adapter or perform a rollback.
+
+The existing `BoundStored::consume` callback runs after evidence read but before
+its exact context comparison. It must not be reused as a decision-publication
+hook in that order. The composed private path must first spend the in-memory
+evidence latch, validate the retained head and live operation binding, read the
+strict context evidence and match every field against the independently supplied
+fixture expectations plus the retained actual failure. Only after this match
+may it build or create a decision. Any earlier error must leave the sink at zero
+and create no decision file. Existing read-failure and ACL-loss assertions must
+continue to hold after adjusting the private callback order.
+
+Build the 177-byte decision from separate sources: explicit synthetic fixture
+lifetime (not a real supervisor lifetime); the pre-acquisition binding's attempt,
+component, role, operation and revision; the validated retained head's original
+full identity and exact digest; the digest of the just-validated 225-byte context;
+and the retained native failure status. Never accept these expected values from
+an existing decision. A narrow private head-snapshot accessor, if needed, must
+validate the live head and its expected bytes before returning identity/digest.
+This snapshot is fixture data, not a standalone authority or restart constructor.
+Codec field visibility must stay inside the Windows test-only checked-files
+boundary; no public record-to-capability conversion is introduced.
+
+Under the same borrowed `FixtureLock`, exclusively create the decision, sync,
+close the writer and perform the already reviewed restrictive read-pin
+transition. Revalidate that pin, the retained head, operation binding and context
+evidence after the transition, immediately before the sink. Keep the decision
+pin alive for the entire synchronous private sink invocation. The sink receives
+no pathname, parsed record, token or continuation capability; it only increments
+the existing test counter. Sink refusal or any write/read-back/revalidation
+failure spends the same in-memory attempt and preserves whatever decision bytes
+exist. A complete existing decision must refuse creation without reaching the
+sink; dropping guards must not delete it or make the same evidence fresh.
+
+Initial composed assertions should cover both move-old and publish collisions:
+one successful sink visit with exact independently assembled decision bytes and
+write/delete exclusion while the pin lives; a second invocation refused with
+the sink unchanged; pre-existing complete and partial decisions preserved with
+zero sink visits; injected failure after decision creation preserving the burn
+file and spending the evidence; and post-transition head/context custody refusal
+with zero sink visits. A flag must prove each injected boundary was reached.
+Retain existing actual ReadFile-error and ACL-loss coverage. Review the exact
+test matrix before implementation; exact-SHA hosted native execution is required
+afterward, and compile-only checks cannot establish the composition.
+
+This adds no durable consume-plus-head transaction, external deletion/replay
+fence, independently committed production expectations, authenticated health,
+real installation lock or real supervisor lifetime. A fresh process remains
+diagnose-and-stop regardless of decision-file presence. Process death, actual
+sync failure, invisible rewrite-and-restore and power-loss durability remain
+unproven. Conditions 5976 and leader-held W4 are unchanged.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
