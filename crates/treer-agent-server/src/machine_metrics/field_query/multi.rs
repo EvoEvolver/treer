@@ -8,7 +8,7 @@ use treer_protocol::{
 
 /// Aggregate entry cap across all requested fields, independent of viewers.
 /// This bounds entries, not allocator overhead or process RSS.
-pub const MAX_INDEX_ACQUISITIONS: usize = 262_144;
+pub const MAX_INDEX_ACQUISITIONS: usize = 32_768;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FieldKey {

@@ -3,7 +3,7 @@ use super::*;
 
 /// Candidate device churn is an availability bound, independent of the
 /// eventual response's 100-series bound. No eviction on exhaustion.
-pub(super) const MAX_CANDIDATE_FIELDS: usize = 4096;
+pub(super) const MAX_CANDIDATE_FIELDS: usize = 256;
 
 pub(super) struct AcquisitionIndex {
     keys: HashMap<FieldKey, usize>,
@@ -202,8 +202,9 @@ mod tests {
         // workload synchronous; run this exact test in its own test process.
         assert_eq!(
             (MAX_INDEX_ACQUISITIONS, MAX_RECORDS, MAX_CANDIDATE_FIELDS),
-            (262_144, 17_280, 4096)
+            (32_768, 17_280, 256)
         );
+        assert_eq!(crate::machine_metrics::history::MAX_BYTES, 4 * 1024 * 1024);
         for field_count in [32, MAX_CANDIDATE_FIELDS] {
             let measured = allocation_counter::measure(|| {
                 let mut index = AcquisitionIndex::new(MAX_INDEX_ACQUISITIONS);
@@ -221,7 +222,7 @@ mod tests {
             assert_eq!(measured.bytes_current, 0);
             assert_eq!(measured.count_current, 0);
             // Regression ceiling for this prerequisite, not a runtime promise.
-            assert!(measured.bytes_max < 64 * 1024 * 1024);
+            assert!(measured.bytes_max < 8 * 1024 * 1024);
             println!("candidate_index_measured fields={field_count} peak_live_bytes={} total_allocated_bytes={} final_live_bytes={}", measured.bytes_max, measured.bytes_total, measured.bytes_current);
         }
     }

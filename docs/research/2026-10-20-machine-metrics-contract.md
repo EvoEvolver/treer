@@ -1,5 +1,13 @@
 # Machine metrics typed contract checkpoint (#220 / #221)
 
+Current memory authority is leader decision 7083: engineering target 1 GiB RAM
+(not an enrollment minimum), steady metrics heap target 8 MiB, incremental
+complete-query peak 16 MiB, and aggregate charged metrics memory ceiling 32 MiB.
+The resident staging ring is now 4 MiB and the candidate index is limited to
+32768 acquisitions / 256 fields. Historical measurements below at 64 MiB ring,
+262144 acquisitions and 4096 fields are superseded, not approved runtime budgets.
+These smaller local caps do not implement aggregate charging or global admission.
+
 Status: draft models in `treer-protocol/src/machine_metrics.rs`, no advertised
 capability, routes, grants, collector or runtime behavior yet. This refines the
 [proposal](2026-10-20-machine-monitoring.md) following security 6602/6606 and UI
@@ -215,7 +223,9 @@ hardware exists, Web #221 and UI review remain required for parent completion.
 
 The Controller's `machine_metrics::history` module now provides a single-owner,
 in-memory ring for validated current-only frames. It bounds serialized payloads
-to 17,280 records, 64 MiB total and 64 KiB per record; smaller limits are allowed.
+to 17,280 records, 4 MiB resident payload and 64 KiB per record; smaller limits
+are allowed. The initial 64 MiB resident allowance was superseded by decision7083;
+a future disk cap must not be confused with this resident payload cap.
 Append, read and explicit maintenance evict observations older than 24 hours by
 either wall or monotonic age. The future collector must call maintenance without
 viewers and before serving after wake. No missed samples are backfilled.
@@ -456,7 +466,7 @@ replace their historical successes, failed attempts retain their own status,
 and cached frames cannot fill gaps or increase status counts. Empty/missing
 fields produce empty partial buckets. Repeated reads create no identities.
 
-The reader visits at most the ring's 17,280 records/64 MiB serialized envelope
+The reader visits at most the ring's 17,280 records/4 MiB serialized envelope
 budget, bounds each decode at 64 KiB and keeps at most 17,280 unique requested
 acquisitions. Its result carries the current epoch and whether maintenance
 reset it. This is an internal single-field result, not the public response;
@@ -475,7 +485,7 @@ implementation. The full assembler must obtain bounded immutable retained
 bytes or an append-maintained field index under a short access window, then do
 the expensive work independently so viewers cannot stall sampling or cleanup.
 Snapshot copies and indexes need explicit aggregate memory budgets as well as
-the existing ring cap; a 64 MiB allowance cannot be multiplied without a bound
+the existing ring cap; a 4 MiB allowance cannot be multiplied without a bound
 by concurrent viewers.
 
 The runtime query boundary must enforce per-principal and per-machine admission
@@ -522,8 +532,8 @@ available for staging tests; they are not the runtime query path.
 Each History instance admits at most one detached view, using an atomic busy
 flag shared with its non-Clone reservation. A second view returns SnapshotBusy.
 Dropping the first view clears its frame references before releasing admission,
-including during worker unwinding. Thus the live 64 MiB serialized ring can
-coexist with at most one old view retaining at most another 64 MiB, plus bounded
+including during worker unwinding. Thus the live 4 MiB serialized ring can
+coexist with at most one old view retaining at most another 4 MiB, plus bounded
 record/reference metadata. This is a serialized-payload bound, not an RSS cap:
 decoded models, aggregation maps and returned buckets have separate allocations.
 The view requires mutable access for queries, preventing simultaneous queries
@@ -565,7 +575,7 @@ field. Only original observations, never stale current projections, enter the
 existing aggregation/coalescing path. Unrequested fields are frame-validated
 but are not cross-frame indexed by this helper.
 
-The temporary index is bounded at 262,144 unique acquisitions across all
+The temporary index is bounded at 32,768 unique acquisitions across all
 requested fields, with at most 17,280 per field. A cap hit returns IndexLimit,
 not partial statistics, eviction or an automatic retry. This deliberate staging
 limit may refuse dense full-day/many-GPU data even when the serialized ring
@@ -946,7 +956,7 @@ that appear unrequested: a later frame may discover that GPU in range. Use a
 single bounded identity index keyed by (epoch, tick), carrying the original
 FieldKey and Observation. Repeated identities must match BOTH key and
 observation, including references outside the requested range. Bound unique
-indexed acquisitions by MAX_INDEX_ACQUISITIONS (262144) and each field by
+indexed acquisitions by MAX_INDEX_ACQUISITIONS (32768) and each field by
 MAX_RECORDS (17280), checking before insertion. Candidate keys and counters
 must also be bounded by the acquisition cap; do not create an unbounded map
 from out-of-range device churn. Exceeding this staging budget refuses the
@@ -992,8 +1002,8 @@ It does not claim a memory reduction over the previous explicit-plan query,
 which already indexed by request position. It provides that representation
 for future incrementally discovered fields without per-acquisition Strings.
 
-The existing aggregate 262144 and per-field 17280 acquisition caps remain.
-An additional 4096 distinct-candidate-field cap bounds retained device churn
+The current aggregate cap is 32768 and the per-field cap remains 17280.
+An additional 256 distinct-candidate-field cap bounds retained device churn
 before cloning keys; exhaustion is IndexLimit, without eviction or partial
 output. The current explicit-plan path still selects at most 100 fields;
 the larger candidate cap is a prerequisite for automatic discovery, not a
@@ -1002,7 +1012,7 @@ at capacity, while key/value conflicts remain ConflictingAcquisition even
 when the budget is full. Regrouping consumes the index, but the backing hash
 table allocation may coexist with the output vectors until draining ends.
 
-A local 64-bit debug capacity-payload measurement at 262144 acquisitions
+A historical pre-budget 64-bit debug capacity-payload measurement at 262144 acquisitions
 reports 458752 map capacity, 33030144 bytes of entry payload and up to
 12582912 bytes of output Observation payload. With 32 GPU field keys, the
 key table plus owned string capacities add 4288 bytes. A second max-churn
@@ -1020,7 +1030,7 @@ index byte policy remain open before runtime integration; do not relabel the
 capacity-payload test as closing that part of security review.
 
 Tests exercise exact duplicate/conflict behavior at capacity, whole-index and
-per-field exhaustion, 4096-field churn refusal, cancelled regrouping, and the
+per-field exhaustion, 256-field churn refusal, cancelled regrouping, and the
 32-field/max-churn capacity measurements. The automatic single-decode discovery
 algorithm, unknown-current pre-scan refusal and its decode counter are still
 unimplemented. Existing explicit-plan queries retain their prior field filter.
@@ -1043,7 +1053,8 @@ Reproduce in an isolated test invocation:
 cargo test -p treer-agent-server --bin treer-agent-server --features metrics-allocation-measurement exact_index_measured_live_heap_peak -- --nocapture --test-threads=1
 ```
 
-Local 64-bit macOS debug results at 262144 acquisitions:
+Historical bf747103 64-bit macOS debug results at 262144 acquisitions
+(superseded by decision7083 and the reduced-cap measurements below):
 
 | Candidate fields | Peak live allocation bytes | Total allocation bytes | Final live bytes |
 | --- | ---: | ---: | ---: |
@@ -1054,12 +1065,12 @@ These measurements include index/key/counter growth, transient temporary key
 strings, hash-table growth overlap, selected-key construction and consuming
 regrouping (up to 100 selected fields). The peak exceeds the earlier capacity
 estimate: map growth holds old and new tables concurrently. The test asserts
-zero final allocations and a 64 MiB peak regression ceiling for this workload,
+zero final allocations and originally used a 64 MiB peak regression ceiling,
 not an enforced runtime byte limit. The larger measured case leaves 9068456
 bytes below that ceiling on this build; compiler/allocator/platform changes
 require a fresh measurement rather than treating that margin as portable.
 
-One detached view per History allows this index to coexist with up to 64 MiB
+The rejected pre-budget design allowed this index to coexist with up to 64 MiB
 of retained payload: those two measured/retained contributions alone can reach
 125149272 bytes (about 119.4 MiB), excluding decoded frames, snapshot metadata,
 encoder/output and allocator overhead. This admission is per History instance,
@@ -1068,3 +1079,54 @@ does NOT decode a frame, populate a complete ring, aggregate buckets or encode
 an automatic response. Combined peak measurement with a decoded frame and the
 eventual complete assembler remains open before runtime routes; these results
 close only the index/regroup measurement gap, not the entire memory review.
+
+### Decision7083: budget-aligned staging limits (inert)
+
+The initial ring/index footprint is not accepted. The engineering target is a
+1 GiB machine, without creating a Treer enrollment minimum. Smaller machines
+must refuse metrics gracefully rather than compromise heartbeat or lifecycle.
+The owner's targets are 8 MiB steady metrics heap, 16 MiB incremental complete
+query peak and a 32 MiB hard aggregate charged ceiling across collection, ALL
+histories/views, active/queued queries, encoding and in-flight responses. Margin
+for allocator overhead and RSS must be demonstrated, not inferred from the
+allocation counter. At most one history assembly may run globally per machine;
+the current per-History flag does not satisfy that requirement. Bound and expire
+the wait queue and retain credits until workers and response buffers drop.
+Authorization remains independent per user; admission/coalescing permits no
+unauthorized result sharing or new acquisition pipeline for latest reads.
+
+As a first staging reduction, resident MAX_BYTES is 4 MiB (formerly 64 MiB),
+MAX_INDEX_ACQUISITIONS is 32768 (formerly 262144), and MAX_CANDIDATE_FIELDS is
+256 (formerly 4096). MAX_RECORDS remains 17280 and wire limits stay unchanged.
+Growth is demand-driven; no worst-case preallocation is added. Ring capacity
+eviction continues to set truthful truncation/partial flags. Index or candidate
+exhaustion refuses the whole response before insertion, without trimming the
+series/inventory or returning zeros. These availability limits mean the current
+explicit-plan staging reader can refuse dense full-day data even on CPU/RAM.
+It is not the intended complete 24h runtime implementation; bounded disk windows
+and streaming/incremental aggregation still need to replace the resident scan.
+The planned 64 MiB local disk allowance is not a resident-memory allowance.
+
+Reduced-cap local index/regroup measurement (same opt-in test and limitations):
+
+| Candidate fields | Peak live allocation bytes | Total allocation bytes | Final live bytes |
+| --- | ---: | ---: | ---: |
+| 32 | 7181208 | 15086904 | 0 |
+| 256 | 7215704 | 14198672 | 0 |
+
+The isolated index regression ceiling is now 8 MiB, leaving 1172904 bytes in
+the larger measured case. That local margin is not the complete-query budget
+margin. The live ring can still coexist with a retired snapshot (4 MiB each),
+and independently constructed Histories can still multiply allocations: global
+credits, complete-query accounting and the 32 MiB ceiling are NOT implemented.
+No budget compliance or runtime readiness is claimed from these reductions.
+
+Before runtime wiring, measure the actual complete assembler including decoded
+frames, scratch/aggregation, encoding and queued/slow-reader buffers; report
+isolated-process baseline/RSS delta with conservative margin for realistic
+CPU/RAM plus 1-8 NVIDIA GPU 24h workloads and adversarial caps. Exercise multiple
+History handles, cancellation/disconnect and native-driver scratch without
+blocking heartbeat. Keep advisory measurement opt-in and isolated in CI/release.
+Machine-local disk-only history, no central/browser persistence and no metric
+body logging remain required. Any API/refusal change needs Web/security review;
+native performance and deployed/browser #221 acceptance remain pending.

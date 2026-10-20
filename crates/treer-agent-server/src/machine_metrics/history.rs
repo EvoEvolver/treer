@@ -11,7 +11,9 @@ use std::sync::{
 use treer_protocol::{MachineMetricsResponse, MACHINE_METRICS_MAX_RANGE_MS};
 
 pub const MAX_RECORDS: usize = 17_280;
-pub const MAX_BYTES: usize = 64 * 1024 * 1024;
+// Resident staging payload only. A future 64 MiB disk journal must stream
+// bounded windows; it must not restore the old 64 MiB resident ring.
+pub const MAX_BYTES: usize = 4 * 1024 * 1024;
 pub const MAX_RECORD_BYTES: usize = 64 * 1024;
 const CLOCK_TOLERANCE_MS: i64 = 10_000;
 
