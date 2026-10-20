@@ -193,6 +193,11 @@ validator to accept a response rejected by the other.
 | Removed GPU | device_absent, value=null; descriptor present=false | old GPU key has retained earlier buckets | historical card retained, no new index substitution |
 | New collector | warming_up CPU / no observation=null timestamps | points=[], retained_from=null | no samples; CPU warming label; no zero line |
 | Stale field | stale, value=null, old sampled_at, age_ms=20000 | independent retained points | stale current label; no newer global timestamp substitution |
+| Fractional age boundary | generated at a whole second +100us, CPU sampled 200us earlier, age_ms=0 | unchanged historical points | floor the exact nonnegative difference; do not subtract two truncated millisecond timestamps |
+
+Timestamps may carry submillisecond precision. Check ordering before flooring a
+duration: even a sample 200 microseconds in the future is invalid with age_ms=0.
+The shared generator now emits seven cases, including this fractional boundary.
 
 Web accepts only a fully validated, size-bounded response. Abort/reset on
 machine/range change, unmount, logout/session change or offline; pause hidden

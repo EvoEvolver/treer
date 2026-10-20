@@ -234,7 +234,7 @@ impl MachineMetricCurrent {
         match (self.sampled_at, self.age_ms) {
             (Some(at), Some(age)) => {
                 let delta = generated.signed_duration_since(at).num_milliseconds();
-                require(delta >= 0 && age == delta as u64)?;
+                require(at <= generated && delta >= 0 && age == delta as u64)?;
                 if self.status == MachineMetricStatus::Ok {
                     require(age <= MACHINE_METRICS_STALE_AFTER_MS)?;
                 }

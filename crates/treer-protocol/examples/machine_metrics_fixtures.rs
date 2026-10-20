@@ -126,6 +126,11 @@ fn examples() -> Vec<(&'static str, MachineMetricsResponse)> {
         sampled_at: Some(stale.generated_at - Duration::seconds(20)),
         age_ms: Some(20_000),
     };
+    let mut fractional = healthy.clone();
+    fractional.generated_at += Duration::microseconds(100);
+    fractional.series[0].current.sampled_at =
+        Some(fractional.generated_at - Duration::microseconds(200));
+    fractional.series[0].current.age_ms = Some(0);
     vec![
         ("healthy", healthy),
         ("partial_gap", gap),
@@ -133,6 +138,7 @@ fn examples() -> Vec<(&'static str, MachineMetricsResponse)> {
         ("removed_gpu", removed),
         ("empty_new_collector", empty),
         ("stale_gpu_field", stale),
+        ("fractional_age_boundary", fractional),
     ]
 }
 
@@ -155,7 +161,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_six_synthetic_states_pass_bounded_validation() {
+    fn all_synthetic_states_pass_bounded_validation() {
         let (query, _) = base();
         for (_, response) in examples() {
             let bytes = serde_json::to_vec(&response).unwrap();
@@ -213,6 +219,10 @@ mod tests {
             Box::new(|r| r.series[0].current.age_ms = Some(20_000)),
             Box::new(|r| {
                 r.series[0].current.sampled_at = Some(r.generated_at + Duration::seconds(1))
+            }),
+            Box::new(|r| {
+                r.series[0].current.sampled_at = Some(r.generated_at + Duration::microseconds(200));
+                r.series[0].current.age_ms = Some(0);
             }),
             Box::new(|r| r.series[0].points[0].valid_count = 13),
             Box::new(|r| r.series[0].points[0].status_counts[0].count = u32::MAX),
