@@ -1596,9 +1596,22 @@ process-death or sync-failure evidence, nor detection of an invisible rewrite
 that restores its bytes before reopen. The successful transition test requires
 real write/delete sharing errors 32 while the read pin lives and released
 access 0 afterwards, with the unchanged burn file still refusing creation.
-Actual replacement-identity interference in this transition and integration
-with a continuation remain separate work. All new Windows assertions require
-exact-SHA hosted execution; no production locking or replay/CAS claim follows.
+The read-pin transition `093e55c4` passed hosted run 39365180780 on Server
+2022/2025 (two pin tests, ordinary 92 passed/four ignored; Core 6461 and security
+6460 independently read the raw logs).
+
+The next test performs a real same-bytes replacement during the close/reopen
+callback: rename the original to a private fixture-only archive name, create
+and validate a separate protected `consume.intent`, then close its writer.
+Keeping the original file alive prevents file-ID recycling. The original
+transition must refuse the new full identity even though both objects contain
+the exact same valid 177 bytes. Both objects and their bytes must remain intact,
+the fixture lock must remain valid, exclusive creation must still refuse, and
+no reason evidence may appear. This is deterministic same-process interference
+inside the existing private test hook, not a concurrent adversary, crash,
+invisible rewrite-and-restore or production replay fence. Continuation
+integration remains separate work. All new Windows assertions require exact-SHA
+hosted execution; no production locking or replay/CAS claim follows.
 
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.

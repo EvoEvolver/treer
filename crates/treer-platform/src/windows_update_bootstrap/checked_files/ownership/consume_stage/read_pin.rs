@@ -146,3 +146,53 @@ fn native_consume_pin_refuses_gap_mutation_and_interruption() {
         std::fs::remove_dir(path).unwrap();
     }
 }
+
+#[test]
+fn native_consume_pin_refuses_same_bytes_gap_replacement() {
+    let fixture = super::super::super::super::tests::PrivateImage::new();
+    let attempt = Attempt::create(
+        &fixture.directory,
+        "attempt-00000000000000000000000000000074",
+    )
+    .unwrap();
+    let ownership = FixtureLock::acquire(&attempt, true).unwrap();
+    let bytes = consume_record::fixture_bytes();
+    let path = attempt.path.join("consume.intent");
+    let original_path = attempt.path.join("consume.original");
+    let stage = Stage::create(&ownership, &bytes, false).unwrap();
+    let original_object = stage.object;
+    let replacement_ready = std::cell::Cell::new(false);
+    assert!(stage
+        .into_read_pin(|| {
+            // Keep the original object alive under a different name, so its
+            // identity cannot be recycled for the same-bytes replacement.
+            std::fs::rename(&path, &original_path)?;
+            let replacement = Stage::create(&ownership, &bytes, false)?;
+            assert_ne!(replacement.object, original_object);
+            replacement.validate()?;
+            drop(replacement);
+            replacement_ready.set(true);
+            Ok(())
+        })
+        .is_err());
+    assert!(replacement_ready.get());
+    let original = probe(&original_path, GENERIC_READ).unwrap();
+    let replacement = probe(&path, GENERIC_READ).unwrap();
+    assert_eq!(full_identity(&original).unwrap(), original_object);
+    assert_ne!(full_identity(&replacement).unwrap(), original_object);
+    assert_eq!(read_bytes(&original).unwrap(), bytes);
+    assert_eq!(read_bytes(&replacement).unwrap(), bytes);
+    ownership.validate().unwrap();
+    assert!(Stage::create(&ownership, &bytes, false).is_err());
+    assert!(!attempt.path.join("reason.evidence").exists());
+    eprintln!("consume_pin_fixture stage=GapReplacement refused=1 original_preserved=1 replacement_preserved=1");
+    drop(original);
+    drop(replacement);
+    drop(ownership);
+    std::fs::remove_file(original_path).unwrap();
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(attempt.path.join("fixture.lock")).unwrap();
+    let path = attempt.path.clone();
+    drop(attempt);
+    std::fs::remove_dir(path).unwrap();
+}
