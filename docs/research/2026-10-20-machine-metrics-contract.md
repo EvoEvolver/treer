@@ -205,3 +205,20 @@ en/zh, light/dark, 390px, keyboard/touch and an accessible bounded values table.
 The models do not satisfy helper/IPC, retention, authorization or performance
 acceptance. Native three-platform measurements, actual NVIDIA measurement when
 hardware exists, Web #221 and UI review remain required for parent completion.
+
+## Local history staging checkpoint (not connected)
+
+The Controller's `machine_metrics::history` module now provides a single-owner,
+in-memory ring for validated current-only frames. It bounds serialized payloads
+to 17,280 records, 64 MiB total and 64 KiB per record; smaller limits are allowed.
+Append, read and explicit maintenance evict observations older than 24 hours by
+either wall or monotonic age. The future collector must call maintenance without
+viewers and before serving after wake. No missed samples are backfilled.
+
+A backwards wall clock, reset monotonic clock, or divergence exceeding 10 seconds
+clears the ring and marks a truncated epoch. A new ring starts empty. These are
+in-memory semantics, not proof of restart recovery or periodic cleanup: no timer,
+collector startup, journal, IPC or public query invokes this module yet. The
+future disk adapter must separately bound metadata and temporary files, validate
+corruption and permissions, and reconcile clock epochs before exposing history.
+Serialized-byte bounds are not a process RSS claim. Aggregation remains pending.

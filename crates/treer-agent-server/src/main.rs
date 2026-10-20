@@ -7,6 +7,7 @@ mod interface_cache;
 mod launcher;
 mod local_api;
 mod machine_file_transfer;
+pub mod machine_metrics;
 mod machine_upload;
 mod network;
 mod private_state;
