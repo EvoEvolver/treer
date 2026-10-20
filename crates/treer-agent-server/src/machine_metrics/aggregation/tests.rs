@@ -151,6 +151,7 @@ fn input_budget_applies_even_to_out_of_range_observations() {
 
 #[test]
 fn generated_boundaries_pass_shared_wire_validation() {
+    use sha2::{Digest, Sha256};
     use treer_protocol::*;
     #[derive(serde::Deserialize)]
     struct Vectors {
@@ -167,11 +168,15 @@ fn generated_boundaries_pass_shared_wire_validation() {
         bucket_width_ms: u64,
         expected_counts: Vec<u32>,
     }
-    let data: Vectors = serde_json::from_str(include_str!(concat!(
+    let vectors = include_str!(concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/../../docs/fixtures/machine-metrics-span-vectors.json"
-    )))
-    .unwrap();
+    ));
+    assert_eq!(
+        format!("{:x}", Sha256::digest(vectors.as_bytes())),
+        "851cdd7bfb7362ac4c5755a73f9442a577552751228b7ed39c935f150df6ed9b"
+    );
+    let data: Vectors = serde_json::from_str(vectors).unwrap();
     assert_eq!(data.schema, 1);
     assert_eq!(data.sample_interval_ms, MACHINE_METRICS_SAMPLE_INTERVAL_MS);
     assert_eq!(data.vectors.len(), 6);
