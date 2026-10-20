@@ -1442,6 +1442,68 @@ the inert composition. Exact-SHA hosted tests on both Windows images must
 confirm the actual ACL transition and zero-sink/spent assertions before this
 slice is accepted; successful cross-target lint alone cannot prove them.
 
+#### Next boundary: write-ahead consumption decision (design only)
+
+The fixture head checklist is accepted through `cfdb53da` (hosted run
+39358295439, Core 6384, security 6381). Actual ACL-custody loss before/after
+evidence read is accepted through `341fc476` (hosted run 39358825446, Core
+6392, security 6391); `8fab7160` changes comments/docs only. Neither replaces
+the in-memory consumption latch with a durable decision. The next independent
+format review must precede a decision writer or Controller adapter.
+
+Propose one immutable fixed `consume.intent` file inside the already pinned
+attempt directory, separate from the head and `reason.evidence`. Creation is
+exclusive, never replace, append, truncate, delete-and-retry or open-existing
+as permission to consume. The proposed binary record is exactly 145 bytes:
+
+| Offset | Bytes | Meaning |
+| --- | --- | --- |
+| 0 | 8 | ASCII `TRCONS01`, distinct from head/context/pipe domains |
+| 8 | 2 | Little-endian total length, exactly 145 |
+| 10 | 32 | Independently committed attempt-directory binding |
+| 42 | 24 | Retained predecessor head full volume-u64/file-id-128 identity |
+| 66 | 32 | SHA-256 of the exact retained predecessor head bytes |
+| 98 | 32 | SHA-256 of the exact retained 225-byte context evidence |
+| 130 | 3 | Component, image role, operation selectors |
+| 133 | 8 | Nonzero committed intent revision, little-endian |
+| 141 | 4 | Actual retained nonzero Win32 failure status, little-endian |
+
+Use the existing identifier/selector/role-operation rules. Digest bytes have
+no reserved sentinel; a valid digest is not authority. The evidence digest
+transitively binds both full image identities, lengths and hashes, but only
+after the separately pinned strict context decoder and retained actual failure
+match all independently committed expectations. A successful parse never
+constructs an accepted/consumed token. Component and revision must originate in
+the prior committed intent, not a caller's failure classification or a fresh
+observation. This format remains a proposal, not an implemented file contract.
+
+The intended live ordering under one supervisor-owned installation/enrollment
+lock lifetime is: validate committed head and retained failure/evidence; spend
+the in-memory attempt; exclusively create the complete private decision; sync,
+close its writer and retain a restrictive read-back pin; revalidate exact
+identity/bytes/ACL and all custody; only then permit one private continuation.
+Any error after starting decision creation refuses continuation and preserves
+all records, including partial files. The lock order and real supervisor entry
+still need their own implementation review; the disposable `FixtureLock` does
+not satisfy this production requirement.
+
+Every interruption from decision creation through continuation and subsequent
+head publication is diagnose-and-stop on a new process. An existing decision
+is a burned attempt even if its bytes are complete and valid; a missing,
+truncated, malformed or conflicting decision never grants restart authority.
+The new process cannot infer that continuation did or did not run from this
+file. A decision that reached read-back is not proof of survival across power
+loss. No atomic consume-plus-head CAS, automatic retry/recovery, or completed
+update claim follows from this write-ahead shape. A separate committed-head
+publication protocol must resolve that boundary before production wiring.
+
+First implement only the strict codec with an independent literal golden
+vector, all truncations/trailing data and cross-domain refusals, every bound
+field mismatch and invalid selector/identity/revision/status coverage. Then
+review the private native decision writer, interrupted-stage fixtures and
+read-back/write-sharing tests separately. The existing native head fixture
+results cannot stand in for that evidence. W4 remains leader-held.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
