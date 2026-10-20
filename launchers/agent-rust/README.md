@@ -41,13 +41,29 @@ turns, 500,000 nodes per turn/retained window, 16 MiB
 per history turn, with separate non-history frame budgets below. Duplicate keys and malformed
 discarded values are refused. Over-cap frames poison the transport with
 `line_too_large`; shape/value/deadline errors have distinct fixed reasons.
-Content-free `historyScan` diagnostics contain only bytes, turns, nodes and time.
+Content-free `historyScan` diagnostics contain bytes, turns, nodes and time.
 They also report fixed-category `threadStatus` and numeric
 `staleInProgressCount`. Only responses matched to an outstanding full
 `thread/resume`, or `thread/read` with `includeTurns: true`, without a request
 cursor/limit can normalize stale historical `inProgress` statuses. Explicit
 pagination markers, duplicate/empty turn IDs and descending supplied numeric
-`startedAt` values are refused. Full-history API array order is chronological,
+`startedAt` values are refused whenever a candidate would be reinterpreted.
+With zero `inProgress` candidates, history passes only through the ordinary
+bounded projection; no status is rewritten or normalization authority granted.
+Both success and failure include `historyAuthority`: numeric `invalidIds`,
+`duplicateIds`, `decreasingTimestamps`, `nonIntegerTimestamps`, boolean
+`identityValid`, `orderValid`, `fullHistoryRequest`, `normalizationRequired`,
+`normalizationApplied`,
+recognized `threadStatus`, and at most 16 fixed schema `paginationMarkers`
+names (scope/key only, no values). All reset per frame. An invalid predicate on
+a zero-candidate frame is a latent refusal on any later frame with a candidate;
+startup success does not validate that later path. Duplicate completed IDs do
+not bypass the existing terminal-reopen fence. `totalTurns` counts observed
+turns, and `hasOlderItems`/cursor describe the scanned projection's retained
+suffix; for a paged or unordered zero-candidate frame they do not establish a
+complete provider history or validated chronological order. The sanitized
+#158/7167 incident proves zero candidates, not which predicate failed.
+For candidate normalization, full-history API array order is chronological,
 as interpreted by the Node adapter; nullable/missing timestamps do not supply an
 independent ordering proof. The wire has no continuous turn sequence or declared
 total: silent producer omissions without a pagination marker cannot be detected.

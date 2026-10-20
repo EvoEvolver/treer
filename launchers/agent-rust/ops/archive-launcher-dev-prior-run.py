@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Leader-only launcher-dev stopped-agent preservation step for #158/7101.
+"""Leader-only launcher-dev stopped-agent preservation step for #158/7167.
 Adapted from reviewed #158/5011+5012 helper; successor review required.
 No data is removed. Never use --undo after a fresh import has begun.
 """
@@ -13,7 +13,7 @@ from pathlib import Path
 import stat
 
 ROOT = Path('/Users/dooms/.local/state/treer/agent-private/srv_9452d9fd5db447d3b242dd66c7689594/ag_cfc9d39a455d48d4995faf3d314adf08')
-AUDIT = Path('/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-3')
+AUDIT = Path('/Users/dooms/.local/state/treer/switch-evidence/launcher-dev-active-history-attempt-4')
 ARCHIVE = AUDIT / 'prior-run'
 REQUIRED = ['rust-spike.json', 'node-backup-v1', '.node-backup-restored']
 OPTIONAL = ['rust-journal-history', 'rust-images', 'rust-provider-stderr.log']

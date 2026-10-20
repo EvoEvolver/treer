@@ -39,11 +39,12 @@ for await (const line of createInterface({ input: process.stdin })) {
       const mode=process.env.HISTORY_STALE_INVALID;
       result.thread.turns=result.thread.turns.slice(0,60);
       if(mode.startsWith('missing'))delete result.thread.status;
-      if(mode==='missingZero'||mode==='missingOne') {
+      if(mode==='missingZero'||mode==='missingOne'||mode==='unknownZero'||mode==='activeZero') {
         for(const turn of result.thread.turns)turn.status='completed';
         if(mode==='missingOne')result.thread.turns[0].status='inProgress';
       }
-      if(mode==='unknown')result.thread.status.type='unknown';
+      if(mode==='unknown'||mode==='unknownZero')result.thread.status.type='unknown';
+      if(mode==='activeZero')result.thread.status.type='active';
       if(mode==='paged')result.thread.nextCursor='synthetic-next';
       if(mode==='duplicate')result.thread.turns[51].id='old-0';
       if(mode==='reordered')result.thread.turns[51].startedAt=-1;
@@ -56,6 +57,21 @@ for await (const line of createInterface({ input: process.stdin })) {
     // The malformed value is outside the retained last-50 window.
     console.log(JSON.stringify({id:request.id,result:{thread:{id:threadId,turns}}}).replace('"old-0"','"old-0",INVALID'));
     continue;
+  }
+  if (['thread/resume','thread/read'].includes(request.method) && process.env.HISTORY_AUTHORITY_CASE) {
+    const [fault, candidates] = process.env.HISTORY_AUTHORITY_CASE.split(':');
+    // Entirely synthetic metadata, shaped like a resumed producer response.
+    // Invalid metadata is outside the recent window as well as inside it.
+    result.thread.turns=Array.from({length:60},(_,n)=>({id:`synthetic-${n}`,status:'completed',startedAt:n,items:[]}));
+    if(candidates==='one')result.thread.turns[59].status='inProgress';
+    result.thread.status={type:'idle'};
+    const old=result.thread.turns[0];
+    if(fault==='invalidId')delete old.id;
+    if(fault==='duplicateId')old.id='synthetic-59';
+    if(fault==='decreasing')result.thread.turns[1].startedAt=-1;
+    if(fault==='nonInteger')old.startedAt='PRIVATE_TIMESTAMP_VALUE';
+    if(fault==='paged')result.turnsBackwardsCursor='PRIVATE_CURSOR_VALUE';
+    if(currentTurn)result.thread.turns.push(currentTurn);
   }
   if(request.method==='thread/read'&&process.env.HISTORY_RECONCILE_OLD==='1') {
     result.thread.turns=[{id:'history-1',status:'completed',items:[]},...Array.from({length:80},(_,n)=>({id:`later-${n}`,status:'completed',items:[]}))];
@@ -92,6 +108,9 @@ for await (const line of createInterface({ input: process.stdin })) {
   if (request.method === 'turn/start') {
     const id = `history-${++next}`;
     result = { turn: { id } };
+    if(process.env.HISTORY_AUTHORITY_REOPEN==='1') {
+      console.log(JSON.stringify({method:'turn/started',params:{threadId,turn:{id:'synthetic-59',status:'inProgress',items:[]}}}));
+    }
     if(process.env.HISTORY_STALE_SNAPSHOT==='1') {
       const user={id:`native-user-${id}`,type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
       currentTurn={id,status:'inProgress',items:[user]};

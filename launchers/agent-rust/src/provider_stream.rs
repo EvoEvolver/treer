@@ -50,6 +50,14 @@ pub struct Reader<R> {
     history_identity_valid: bool,
     history_order_valid: bool,
     last_started: Option<i64>,
+    invalid_ids: usize,
+    duplicate_ids: usize,
+    decreasing_timestamps: usize,
+    non_integer_timestamps: usize,
+    pagination_markers: Vec<String>,
+    full_history: bool,
+    history_status: &'static str,
+    normalization_applied: bool,
 }
 #[derive(Default)]
 struct Window {
@@ -118,6 +126,14 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             history_identity_valid: true,
             history_order_valid: true,
             last_started: None,
+            invalid_ids: 0,
+            duplicate_ids: 0,
+            decreasing_timestamps: 0,
+            non_integer_timestamps: 0,
+            pagination_markers: Vec::new(),
+            full_history: false,
+            history_status: "missing",
+            normalization_applied: false,
         }
     }
     fn shape_limit(&mut self, kind: &'static str) -> &'static str {
@@ -125,7 +141,17 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         "provider_json_limit"
     }
     pub fn diagnostic(&self) -> Value {
-        serde_json::json!({"frameBytes":self.count,"outsideBytes":self.outside,"nodeCount":self.total_nodes,"shapeNodes":self.nodes,"outsideNodes":self.outside_nodes,"maxDepth":self.max_depth,"turnCount":self.total,"inHistory":self.in_history,"frameKind":self.frame_kind,"limitKind":self.limit_kind,"inProgressCount":self.active_count})
+        serde_json::json!({"frameBytes":self.count,"outsideBytes":self.outside,"nodeCount":self.total_nodes,"shapeNodes":self.nodes,"outsideNodes":self.outside_nodes,"maxDepth":self.max_depth,"turnCount":self.total,"inHistory":self.in_history,"frameKind":self.frame_kind,"limitKind":self.limit_kind,"inProgressCount":self.active_count,"historyAuthority":self.authority_diagnostic()})
+    }
+    fn authority_diagnostic(&self) -> Value {
+        // Only counts, booleans and fixed schema names; never IDs, timestamp
+        // values, cursor contents or arbitrary producer keys.
+        serde_json::json!({"invalidIds":self.invalid_ids,"duplicateIds":self.duplicate_ids,
+            "decreasingTimestamps":self.decreasing_timestamps,"nonIntegerTimestamps":self.non_integer_timestamps,
+            "identityValid":self.history_identity_valid,"orderValid":self.history_order_valid,
+            "paginationMarkers":self.pagination_markers,"fullHistoryRequest":self.full_history,
+            "threadStatus":self.history_status,"normalizationRequired":self.active_count>0,
+            "normalizationApplied":self.normalization_applied})
     }
     fn outside_budget(&self) -> (usize,usize) {
         // Until the root method is read, use a bounded provisional envelope.
@@ -390,19 +416,25 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             if let Some(id) = value["id"].as_str().filter(|s| !s.is_empty()) {
                 if !self.history_ids.insert(Sha256::digest(id.as_bytes()).into()) {
                     self.history_identity_valid = false;
+                    self.duplicate_ids += 1;
                 }
             } else {
                 self.history_identity_valid = false;
+                self.invalid_ids += 1;
             }
             if !value["startedAt"].is_null() {
                 match value["startedAt"].as_i64() {
                     Some(started) => {
                         if self.last_started.is_some_and(|last| started < last) {
                             self.history_order_valid = false;
+                            self.decreasing_timestamps += 1;
                         }
                         self.last_started = Some(started);
                     }
-                    None => self.history_order_valid = false,
+                    None => {
+                        self.history_order_valid = false;
+                        self.non_integer_timestamps += 1;
+                    },
                 }
             }
             if value["status"] == "inProgress" {
@@ -478,6 +510,14 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
         self.history_identity_valid = true;
         self.history_order_valid = true;
         self.last_started = None;
+        self.invalid_ids = 0;
+        self.duplicate_ids = 0;
+        self.decreasing_timestamps = 0;
+        self.non_integer_timestamps = 0;
+        self.pagination_markers.clear();
+        self.full_history = false;
+        self.history_status = "missing";
+        self.normalization_applied = false;
         self.spaces().await?;
         if self.peek().await?.is_none() {
             return Ok(None);
@@ -502,16 +542,28 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
             };
             let full_history = self.selections.lock().unwrap()
                 .get(&value["id"].as_u64().unwrap_or(0)).is_some_and(|s| s.full_history);
-            let paged = ["nextCursor", "next_cursor", "cursor", "previousCursor", "turnsBackwardsCursor", "itemsBackwardsCursor", "initialTurnsPage"]
-                .iter().any(|key| !value["result"][key].is_null() || !value["result"]["thread"][key].is_null())
-                || value["result"]["thread"]["hasMore"] == true || value["result"]["hasMore"] == true;
-            let normalize = full_history && !paged && matches!(status, Some("idle" | "active"));
-            if full_history && (!self.history_identity_valid || !self.history_order_valid || paged) {
+            self.full_history = full_history;
+            self.history_status = match status {Some("idle")=>"idle",Some("active")=>"active",None=>"missing",_=>"other"};
+            for (scope, object) in [("result", &value["result"]), ("thread", &value["result"]["thread"])] {
+                for key in ["nextCursor", "next_cursor", "cursor", "previousCursor", "turnsBackwardsCursor", "itemsBackwardsCursor", "initialTurnsPage", "hasMore"] {
+                    if if key == "hasMore" { object[key] == true } else { !object[key].is_null() } {
+                        self.pagination_markers.push(format!("{scope}.{key}"));
+                    }
+                }
+            }
+            let paged = !self.pagination_markers.is_empty();
+            // Authority is needed to reinterpret inProgress, not to pass
+            // completed history through the ordinary bounded projection.
+            // Zero candidates grants no ordering/completeness authority; the
+            // runtime still requires explicit idle status before dispatch.
+            let normalize = full_history && self.active_count > 0 && !paged && matches!(status, Some("idle" | "active"));
+            if full_history && self.active_count > 0 && (!self.history_identity_valid || !self.history_order_valid || paged) {
                 return Err(self.shape_limit("historyAuthority"));
             }
             if !normalize && self.active_count > 1 {
                 return Err(self.shape_limit("multipleActiveTurns"));
             }
+            self.normalization_applied = normalize;
             let newest_active = self.active_index + 1 == self.total;
             let live_id = if normalize {
                 if status == Some("active") && newest_active {
@@ -585,6 +637,7 @@ impl<R: AsyncRead + Unpin + Send> Reader<R> {
                     .collect(),
             );
             value["result"]["treerHistory"] = serde_json::json!({"total":self.total,"start":window.start,"frameBytes":self.count,"nodeCount":self.total_nodes,"elapsedMs":started.elapsed().as_millis(),"staleInProgressCount":if normalize {self.active_count-usize::from(live_id.is_some())} else {0},"threadStatus":match status {Some("idle")=>"idle",Some("active")=>"active",None=>"missing",_=>"other"}});
+            value["result"]["treerHistory"]["historyAuthority"] = self.authority_diagnostic();
         }
         Ok(Some(value))
     }
@@ -623,6 +676,99 @@ mod tests {
             let mut reader = Reader::new(wire.as_slice(), Selections::default());
             assert_eq!(reader.next().await.unwrap_err(), "provider_json_limit");
             assert_eq!(reader.diagnostic()["limitKind"], "multipleActiveTurns");
+        }
+    }
+    #[tokio::test]
+    async fn history_authority_predicates_only_gate_reinterpretation() {
+        for fault in ["missingId", "emptyId", "numberId", "duplicateId", "descending", "float", "string", "null", "absent"] {
+            for candidates in [false, true] {
+                for late in [false, true] {
+                    let mut turns = json!([
+                        {"id":"PRIVATE_FIRST_ID","status":"completed","startedAt":10},
+                        {"id":"PRIVATE_SECOND_ID","status":"completed","startedAt":20}
+                    ]);
+                    if candidates { turns[1]["status"] = json!("inProgress"); }
+                    match fault {
+                        "missingId" => { turns[0].as_object_mut().unwrap().remove("id"); },
+                        "emptyId" => turns[0]["id"] = json!(""),
+                        "numberId" => turns[0]["id"] = json!(10),
+                        "duplicateId" => turns[0]["id"] = json!("PRIVATE_SECOND_ID"),
+                        "descending" => turns[1]["startedAt"] = json!(9),
+                        "float" => turns[0]["startedAt"] = json!(1.25),
+                        "string" => turns[0]["startedAt"] = json!("PRIVATE_TIMESTAMP"),
+                        "null" => turns[0]["startedAt"] = Value::Null,
+                        "absent" => { turns[0].as_object_mut().unwrap().remove("startedAt"); },
+                        _ => unreachable!(),
+                    }
+                    let metadata = "\"status\":{\"type\":\"idle\"}";
+                    let thread = if late { format!("\"turns\":{turns},{metadata}") }
+                        else { format!("{metadata},\"turns\":{turns}") };
+                    let wire = format!("{{\"id\":1,\"result\":{{\"thread\":{{{thread}}}}}}}\n");
+                    let selections = Selections::default();
+                    selections.lock().unwrap().insert(1, Selection { full_history:true, ..Default::default() });
+                    let mut reader = Reader::new(wire.as_bytes(), selections);
+                    let valid = matches!(fault, "null"|"absent");
+                    let result = reader.next().await;
+                    assert_eq!(result.is_err(), candidates && !valid, "{fault} candidates={candidates}");
+                    let diagnostic = reader.diagnostic();
+                    let authority = &diagnostic["historyAuthority"];
+                    assert_eq!(authority["normalizationRequired"], candidates);
+                    assert_eq!(authority["normalizationApplied"], candidates && valid);
+                    assert_eq!(authority["invalidIds"], usize::from(matches!(fault,"missingId"|"emptyId"|"numberId")));
+                    assert_eq!(authority["duplicateIds"], usize::from(fault=="duplicateId"));
+                    assert_eq!(authority["decreasingTimestamps"], usize::from(fault=="descending"));
+                    assert_eq!(authority["nonIntegerTimestamps"], usize::from(matches!(fault,"float"|"string")));
+                    assert!(!diagnostic.to_string().contains("PRIVATE_"));
+                    if let Ok(Some(value)) = result {
+                        assert_eq!(value["result"]["thread"]["turns"][1]["status"], if candidates {"interrupted"} else {"completed"});
+                    }
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn history_authority_marker_diagnostics_are_fixed_and_reset_per_frame() {
+        for scope in ["result", "thread"] {
+            for key in ["nextCursor", "next_cursor", "cursor", "previousCursor", "turnsBackwardsCursor", "itemsBackwardsCursor", "initialTurnsPage", "hasMore"] {
+                for candidates in [false, true] {
+                    let mut value = json!({"id":1,"result":{"thread":{"status":{"type":"idle"},"turns":[{"id":"PRIVATE_ID","status":if candidates {"inProgress"} else {"completed"}}]}}});
+                    let object = if scope == "thread" { &mut value["result"]["thread"] } else { &mut value["result"] };
+                    object[key] = if key=="hasMore" {json!(true)} else {json!("PRIVATE_CURSOR")};
+                    let wire = format!("{value}\n{{\"id\":2,\"result\":{{}}}}\n");
+                    let selections = Selections::default();
+                    selections.lock().unwrap().insert(1, Selection { full_history:true, ..Default::default() });
+                    let mut reader = Reader::new(wire.as_bytes(), selections);
+                    assert_eq!(reader.next().await.is_err(), candidates);
+                    let diagnostic = reader.diagnostic();
+                    assert_eq!(diagnostic["historyAuthority"]["paginationMarkers"],json!([format!("{scope}.{key}")]));
+                    assert!(!diagnostic.to_string().contains("PRIVATE_"));
+                    if !candidates {
+                        reader.next().await.unwrap();
+                        let diagnostic = reader.diagnostic();
+                        assert_eq!(diagnostic["historyAuthority"]["paginationMarkers"],json!([]));
+                        assert_eq!(diagnostic["historyAuthority"]["fullHistoryRequest"],false);
+                        assert_eq!(diagnostic["historyAuthority"]["threadStatus"],"missing");
+                    }
+                }
+            }
+        }
+    }
+    #[tokio::test]
+    async fn projection_only_does_not_weaken_target_or_request_authority() {
+        let wire = br#"{"id":1,"result":{"thread":{"status":{"type":"idle"},"turns":[{"id":"same","status":"completed"},{"id":"same","status":"completed"}]}}}"#;
+        let selections = Selections::default();
+        selections.lock().unwrap().insert(1, Selection { full_history:true, target:Some("same".into()), ..Default::default() });
+        let mut reader = Reader::new(wire.as_slice(), selections);
+        assert_eq!(reader.next().await.unwrap_err(),"provider_json_limit");
+        assert_eq!(reader.diagnostic()["limitKind"],"duplicateTarget");
+        for candidates in [false,true] {
+            // A response without matched full-request authority does not
+            // acquire it from the mere presence of an idle status.
+            let wire = serde_json::to_vec(&json!({"id":1,"result":{"thread":{"status":{"type":"idle"},"turns":[{"id":"one","status":if candidates {"inProgress"} else {"completed"}}]}}})).unwrap();
+            let mut reader = Reader::new(wire.as_slice(),Selections::default());
+            let value=reader.next().await.unwrap().unwrap();
+            assert_eq!(value["result"]["thread"]["turns"][0]["status"],if candidates {"inProgress"} else {"completed"});
+            assert_eq!(reader.diagnostic()["historyAuthority"]["normalizationApplied"],false);
         }
     }
     #[tokio::test]
