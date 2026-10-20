@@ -184,3 +184,91 @@ fn native_head_pin_refuses_invalid_or_existing_initial_head() {
     drop(attempt);
     std::fs::remove_dir(path).unwrap();
 }
+
+#[test]
+fn native_head_pin_refuses_same_bytes_replacement_snapshot() {
+    replacement_snapshot(false);
+}
+
+#[test]
+fn native_head_pin_refuses_advanced_head_snapshot() {
+    replacement_snapshot(true);
+}
+
+// Deliberately release the real pin before replacing the file. This is a
+// validator fault fixture, NOT a way to recover custody or advance a live pin.
+fn replacement_snapshot(advance: bool) {
+    let fixture = super::super::super::tests::PrivateImage::new();
+    let attempt = Attempt::create(
+        &fixture.directory,
+        "attempt-00000000000000000000000000000068",
+    )
+    .unwrap();
+    let ownership = FixtureLock::acquire(&attempt, true).unwrap();
+    let bytes = head_record::fixture_bytes();
+    let pin = ownership.publish_head(&bytes).unwrap();
+    let original = pin.object;
+    drop(pin);
+    let path = attempt.path.join("receipt.json");
+    // Keep the old object alive under a delete-sharing reader so Windows
+    // cannot recycle its file ID while creating the replacement.
+    let old = OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+        .open(&path)
+        .unwrap();
+    assert_eq!(full_identity(&old).unwrap(), original);
+    let mut next = bytes.clone();
+    if advance {
+        // The existing head codec fixes revision at offset 45, u64 LE.
+        next[45..53].copy_from_slice(&8u64.to_le_bytes());
+    }
+    assert!(head_record::valid_bytes(&next));
+    let published = attempt
+        .replace_record(&next, Some(&old), RecordFault::None)
+        .unwrap();
+    let replacement = full_identity(&published).unwrap();
+    assert_ne!(replacement, original);
+    assert_eq!(read_head(&published).unwrap(), next);
+    drop(published);
+    drop(old);
+    // Inject only the reopened handle into a stale in-memory snapshot. This
+    // aggregate is constructed solely inside this negative test, never by an
+    // API that a fresh process could call to mint a HeadPin.
+    let mut stale = HeadPin {
+        ownership: &ownership,
+        file: open_head(&path).unwrap(),
+        object: original,
+        bytes: bytes.clone(),
+    };
+    assert!(stale.validate().is_err());
+    assert!(stale.digest_for(&attempt, &bytes).is_err());
+    if advance {
+        // Even an injected matching new object ID cannot bless old bytes:
+        // the independently retained predecessor must not follow the head.
+        stale.object = replacement;
+        assert!(stale.validate().is_err());
+        assert!(stale.digest_for(&attempt, &bytes).is_err());
+    }
+    assert_eq!(full_identity(&stale.file).unwrap(), replacement);
+    assert_eq!(read_head(&stale.file).unwrap(), next);
+    assert!(!attempt.path.join("reason.evidence").exists());
+    assert!(!attempt.path.join("receipt.next").exists());
+    eprintln!(
+        "head_snapshot_fixture stage={} refused=1",
+        if advance {
+            "AdvancedBytes"
+        } else {
+            "SameBytesNewObject"
+        }
+    );
+    drop(stale);
+    ownership.validate().unwrap();
+    drop(ownership);
+    std::fs::remove_file(path).unwrap();
+    std::fs::remove_file(attempt.path.join("fixture.lock")).unwrap();
+    let path = attempt.path.clone();
+    drop(attempt);
+    std::fs::remove_dir(path).unwrap();
+}

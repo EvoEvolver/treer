@@ -1370,6 +1370,31 @@ The older operation fixtures still explicitly use their synthetic predecessor;
 this partial fixture adds no production adapter, recovery or durable consume.
 The cooperative publish-to-pin gap and leader-held W4 boundary remain unchanged.
 
+The partial composition `c7b84cd5` passed exact hosted run 39353008966 on
+Server 2022/2025: retained-head 2, operation 17 and ordinary 81 tests passed,
+four ignored, with earlier native regressions preserved. Core 6345 and
+security 6344 independently read the raw logs; this accepts only the partial
+inert composition, not the complete predecessor boundary.
+
+The next two negative validator fixtures deliberately drop the restrictive
+head pin, retain the old object through a delete-sharing reader, and use the
+existing native record replacement helper under the same cooperative lock.
+Keeping that old reader alive prevents ID reuse while the replacement is
+created. They prove that a real same-byte replacement has a different full
+object identity and a revision-8 replacement has changed bytes. They then
+inject a reopened handle into a stale in-memory snapshot solely inside the
+negative test: validation and digest extraction must refuse. For the revision
+case, even injecting the new object identity must still refuse the old bytes.
+No reason evidence is created and the complete replacement remains intact.
+
+These are fault-injection tests of stale-snapshot refusal after real native
+replacement, not replacement while a restrictive pin lives, a supported
+committed-head advancement API, or a constructor that recovers authority.
+The previous live-pin tests prove competing write/delete access is excluded.
+Fresh-process diagnose-only, end-to-end refusal during evidence consumption,
+and actual committed-head advancement remain acceptance work. Exact-SHA
+hosted Windows execution is required for these two new validator tests.
+
 Reject unknown fields, unsupported versions, invalid transitions, duplicate
 image records and a workspace/server/job binding mismatch before any mutation.
 
