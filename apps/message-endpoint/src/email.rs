@@ -10,6 +10,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+#[path = "email_abandon.rs"]
+mod abandon;
+
 #[path = "email_delivery.rs"]
 pub mod delivery;
 #[path = "email_proxy.rs"]

@@ -63,8 +63,9 @@ have never entered this journal.
   60-second window.
 
 These are storage primitives, not an authenticated management/reconciliation
-API or a persistent worker assembly. There is no owner resolution/delete/retry
-operation yet, and no production caller creates journal attempts. There is no
+API or a persistent worker assembly. There is no owner resolution/delete/retry HTTP
+operation yet, and no production caller creates journal attempts. The local
+prepared-only abandonment primitive is described below. There is no
 automatic uncertain-row expiry, slot clearing or implicit resume. Fresh Core
 pins/member checks, the strict live allowlist, activation fencing, HTTP transport
 using frozen bytes, truthful UI, audited owner reconciliation, process-kill and
@@ -443,3 +444,58 @@ outbox receipts as unsent real work, reset keys, lose reply scopes or resend a
 possibly accepted provider request. Prior to first real traffic a stopped-state
 backup restore can be rehearsed with fakes; after traffic prefer containment and
 reviewed reconciliation. No automatic post-send rollback is claimed.
+
+
+## Prepared-only audited abandonment (not an HTTP API)
+
+`Hub::abandon_prepared_email_audited_now` is a local management primitive. A future
+human-owner route must verify current owner authority, CSRF, explicit confirmation
+of the exact intent and revision before calling; there is no HTTP or Agent route
+in this increment. It does not authenticate the supplied actor on its own.
+
+Time is sampled after acquiring the IMMEDIATE write lock; explicit-time entry
+points exist only in tests. An IMMEDIATE transaction checks the exact current paused binding, its revision
+and generation, the journal's `prepared` state, its stored nonce/lease, and an unfinished intent without
+a completed mode. It records the verified caller's actor and exact intent ID, previous state and old/new revision in
+the existing owner audit, marks the intent parked with `mode=proxy_abandoned`,
+clears its nonce/lease, and increments the binding revision atomically. The
+journal remains prepared with its original frozen payload; the terminal intent
+is the retained tombstone. Masked status separates abandoned items from prepared
+work. This is abandonment, not successful delivery or payload deletion.
+
+Repeating the same intent/revision abandonment command is idempotent: no extra
+audit or revision bump. A previously claimed Intent cannot reserve dispatch after abandonment, even
+after binding resume, lease expiry or reopen. If reservation committed first,
+`dispatching`, `uncertain` and `provider_accepted` are all refused; no reservation
+is released, no uncertainty is resolved and nothing is retried. Audit failure or
+a #217 pathname-drift veto rolls back the intent, audit and revision together.
+Full audit capacity fails closed; ordinary pause containment remains available.
+
+Synthetic persistent-store tests cover these states, stale scope/revision,
+active binding refusal, old claims after reopen, audit/intent SQL failures and
+real commit-hook rollback/sticky refusal on database pathname drift. No Core
+command, HTTP request or provider send is executed by these tests. The primitive
+does not purge retained payload or conversation data, or supply the still-needed
+audited owner reconciliation for uncertain outcomes. Real-send activation,
+worker assembly and browser acceptance remain separate pending work.
+
+The race tests use two actual SQLite connections and barrier-controlled write
+transactions. A busy handler observes real lock contention before release; both
+reservation-first and abandonment-first orderings are checked. The worker test
+connection uses a test-only in-memory Store wrapper for the real second
+connection, not a second cooperating App or process ownership claim. The normal
+owner Store retains its real #217 commit hook. Separate parent/child tests use
+SIGKILL before and after the abandonment COMMIT, inspect committed state from an
+independent readonly connection, verify exact child signal/reaping, and reopen
+with no partial audit/revision/intent state. This is a local crash test, not
+worker assembly or production authorization.
+
+Abandoned prepared items never held a dispatch reservation and release none;
+other uncertain reservations remain counted unchanged. Their retained payload
+is excluded from status/audit projections and sendable/prepared counts, but must
+still consume the shared 4096-byte-per-payload and total email byte/count quotas:
+removing that storage accounting would permit unbounded retention. The next
+retention slice's first purge target is these abandoned payloads, via explicit
+owner-triggered purge while retaining minimal dedupe tombstones; sustained
+production remains blocked on that separately reviewed operation. No indefinite
+production retention or payload-purge implementation is claimed here.

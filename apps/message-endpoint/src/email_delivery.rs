@@ -88,6 +88,7 @@ pub enum Outcome {
 #[derive(serde::Serialize)]
 pub struct DispatchStatus {
     pub prepared: i64,
+    pub abandoned: i64,
     pub dispatching: i64,
     pub uncertain: i64,
     pub provider_accepted: i64,
@@ -186,8 +187,8 @@ impl Queue<'_> {
         if !exists {
             return Err(Error::Denied);
         }
-        let (prepared,dispatching,uncertain,provider_accepted): (i64,i64,i64,i64) = tx.query_row(
-            "SELECT coalesce(sum(state='prepared'),0),coalesce(sum(state='dispatching'),0),coalesce(sum(state='uncertain'),0),coalesce(sum(state='provider_accepted'),0) FROM email_dispatch WHERE endpoint=?1", [endpoint], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)))?;
+        let (prepared,abandoned,dispatching,uncertain,provider_accepted): (i64,i64,i64,i64,i64) = tx.query_row(
+            "SELECT coalesce(sum(d.state='prepared' AND i.mode IS NULL),0),coalesce(sum(i.state=2 AND i.mode='proxy_abandoned'),0),coalesce(sum(d.state='dispatching'),0),coalesce(sum(d.state='uncertain'),0),coalesce(sum(d.state='provider_accepted'),0) FROM email_dispatch d JOIN email_intents i ON i.id=d.id WHERE d.endpoint=?1", [endpoint], |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)))?;
         let global: i64 = tx.query_row(
             "SELECT count(*) FROM email_dispatch WHERE state IN ('dispatching','uncertain')",
             [],
@@ -199,6 +200,7 @@ impl Queue<'_> {
             .map_err(|_| Error::PrivateStorage)?;
         Ok(DispatchStatus {
             prepared,
+            abandoned,
             dispatching,
             uncertain,
             provider_accepted,
@@ -247,7 +249,7 @@ impl Queue<'_> {
     /// Test-only explicit-time seam; production uses begin_proxy_delivery_now.
     /// A commit failure returns no attempt; do not POST or acknowledge work.
     #[cfg(test)]
-    fn begin_proxy_delivery(
+    pub(super) fn begin_proxy_delivery(
         &mut self,
         intent: &Intent,
         url: &str,
@@ -651,7 +653,7 @@ mod tests {
         let status = serde_json::to_value(q.proxy_delivery_status("ag_email").unwrap()).unwrap();
         assert_eq!(
             status,
-            serde_json::json!({"prepared":0,"dispatching":1,"uncertain":0,"provider_accepted":0,"at_capacity":false})
+            serde_json::json!({"prepared":0,"abandoned":0,"dispatching":1,"uncertain":0,"provider_accepted":0,"at_capacity":false})
         );
         assert!(q.proxy_delivery_status("ag_missing").is_err());
         let database = path.join("hub.sqlite3");
