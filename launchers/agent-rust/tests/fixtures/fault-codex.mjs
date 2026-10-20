@@ -42,6 +42,51 @@ for await(const line of readline.createInterface({input:process.stdin})) {
   },150);
   if(request.method==='turn/start') {
     const turn={id:'fault-'+(++started),status:'inProgress',items:[]};turns.push(turn);
+    if(mode?.startsWith('final-')) {
+      const finalMode=mode.replace('final-observer-','final-');
+      const observer=mode==='final-observer'||mode.startsWith('final-observer-');
+      const user={id:'native-user',type:'userMessage',content:[{type:'text',text:request.params.input[0].text}]};
+      const tool={id:'synthetic-command',type:'commandExecution',command:'synthetic public-file checksum',status:'completed',aggregatedOutput:'synthetic bytes=42 sha256=fixture-only'};
+      const answer={id:'synthetic-answer',type:'agentMessage',text:'synthetic answer'};
+      if(finalMode==='final-bound')tool.aggregatedOutput='x'.repeat(9*1024*1024);
+      turn.items=[user];emit('turn/started',{turn});
+      emit('item/started',{turnId:turn.id,item:user});
+      emit('item/started',{turnId:turn.id,item:{...tool,status:'inProgress',aggregatedOutput:''}});
+      emit('item/completed',{turnId:turn.id,item:tool});
+      // Hold the completed tool live before a nonempty partial final snapshot.
+      // IDs/text are synthetic; neither this fixture nor the command accesses
+      // any actual provider or file content.
+      setTimeout(()=>{
+        turn.status='completed';
+        turn.items=finalMode==='final-full'?[user,tool,answer]:[user,answer];
+        if(finalMode==='final-empty')turn.items=[];
+        if(finalMode==='final-forward')turn.items=[user,{...tool,aggregatedOutput:tool.aggregatedOutput+' appended'},answer];
+        if(finalMode==='final-kind')turn.items=[user,{...answer,id:tool.id}];
+        if(finalMode==='final-order')turn.items=[tool,user,answer];
+        if(finalMode==='final-item-status')turn.items=[user,{...tool,status:'inProgress'},answer];
+        if(finalMode==='final-output')turn.items=[user,{...tool,aggregatedOutput:'conflicting output'},answer];
+        if(finalMode==='final-duplicate')turn.items=[user,answer,answer];
+        if(finalMode==='final-empty-id')turn.items=[user,{...answer,id:''}];
+        if(finalMode==='final-missing-id')turn.items=[user,{type:'agentMessage',text:'no identity'}];
+        if(finalMode==='final-id-type')turn.items=[user,{...answer,id:42}];
+        if(finalMode==='final-id-mismatch') {
+          emit('item/completed',{turnId:turn.id,item:answer});
+          turn.items=[user,{...answer,id:'different-answer-id'}];
+        }
+        if(finalMode==='final-bound')turn.items=[user,{...answer,text:'y'.repeat(9*1024*1024)}];
+        if(finalMode==='final-other-turn')turn.id='other-final-turn';
+        if(!observer) {
+          emit('turn/completed',{turn});
+          // Duplicate summaries must not duplicate retained output; an
+          // incompatible terminal outcome must still fence after receipt DONE.
+          if(finalMode==='final-terminal')turn.status='failed';
+          if(finalMode==='final-terminal-error')turn.error={message:'different error'};
+          if(['final-event','final-terminal','final-terminal-error'].includes(finalMode))setTimeout(()=>emit('turn/completed',{turn}),100);
+        }
+      },700);
+      result={turn:{id:turn.id}};
+      console.log(JSON.stringify({id:request.id,result}));continue;
+    }
     if(mode==='stdin-stall') {
       process.stdin.pause();
       // Replies mirror these bounded permissions, filling the unread stdin

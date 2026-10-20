@@ -116,6 +116,23 @@ This distinguishes depth, nodes, duplicate keys, malformed history and history
 selection bounds that previously all appeared as `provider_json_limit`.
 Accepted user projections merge with one native echo across item lifecycle
 events; matching identical text does not collapse distinct receipt IDs.
+Final event and observer summaries retain already observed same-turn items even
+when a nonempty final item list omits them. Stable provider IDs (1–256 UTF-8
+bytes), or existing receipt-owned user identities, match once; display fallback
+IDs never confer merge identity. Old-only items keep their order. Between shared
+anchors, old-only items precede snapshot-only items; reversed shared anchors,
+duplicate/invalid IDs, kind changes, terminal status/error conflicts and apparent
+same-text messages with differing IDs refuse with a content-free fence. The
+existing receipt-owned user-echo canonicalization remains the only text-based
+exception. Completed command output survives an omitted/empty same-ID output;
+nonempty output may only remain equal or append. The merged candidate passes
+the existing byte/node/window admission before receipts settle. Refusal retains
+the previously accepted turn and uncertain receipt, with no automatic replay.
+`runtime.provider.finalProjection` reports only latest-attempt numeric
+`retainedOnly`, `sameIdUpdates`, `conflicts`, `refusals`; no content or IDs.
+This union is a retained-window projection, not full-history authority or a new
+durable tool archive: after restart/eviction the provider must supply old items.
+See the [leader-only Rust update plan](ops/TOOL-RETENTION-UPDATE.md).
 Provider exit also persists the transport-failure fence before the runtime
 exits; accepted uncertain receipts remain durable and are not replayed on restart.
 If publication fails, the launcher emits the fixed `checkpoint_failure=1`

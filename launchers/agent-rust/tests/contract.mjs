@@ -49,6 +49,9 @@ async function fixture(t, extra={}, controllerOptions={}) {
   const portFile=join(root,'port');
   const env=hermeticEnv({ HOME:root, CODEX_HOME:join(root,'codex'), AGENT_UI_CWD:cwd, AGENT_UI_PUBLIC_DIR:join(nodeRoot,'public'), AGENT_UI_PORT_FILE:portFile, AGENT_UI_PORT:'0', TREER_AGENT_ID:'ag_contract', TREER_WORKLOAD_CREDENTIAL:'fixture-only', TREER_AGENT_SERVER_URL:controller.url, TREER_AGENT_PRIVATE_STATE_DIR:state, AGENT_UI_INSTANCE_ID:'contract-instance', AGENT_UI_MESSAGE_WATCH:'0', CODEX_BIN:join(nodeRoot,'tests/fake-codex.mjs'), FAKE_CODEX_RELAY_RECOVERY:'1', ...extra });
   env.RUST_SPIKE_CLI_LOG=join(root,'registration.json');
+  // A managed Rust author may inherit registration=1; only the explicit
+  // registration fixture may opt in, never the rest of this sealed suite.
+  env.RUST_SPIKE_REGISTER=extra.RUST_SPIKE_REGISTER??'0';
   env.RUST_SPIKE_PROVIDER_LOG=join(root,'provider.jsonl');
   env.FAKE_CODEX_CALLS=env.RUST_SPIKE_PROVIDER_LOG;
   if(useNode&&process.env.NODE_LAUNCHER_RUNTIME){env.AGENT_UI_APP_ROOT=dirname(process.env.NODE_LAUNCHER_RUNTIME);env.AGENT_UI_PUBLIC_DIR=join(env.AGENT_UI_APP_ROOT,'public');}
@@ -1026,6 +1029,45 @@ test('Rust journal restart never replays an uncertain turn and preserves queued 
 
 const faultEnv=mode=>({CODEX_BIN:process.execPath,RUST_SPIKE_CODEX_ARGS:JSON.stringify([resolve(import.meta.dirname,'fixtures/fault-codex.mjs')]),RUST_SPIKE_FAULT:mode});
 const providerCalls=async s=>(await readFile(join(s.root,'provider.jsonl'),'utf8')).trim().split('\n').map(JSON.parse);
+for(const mode of ['event','observer','other-turn','terminal','terminal-error',...['full','empty','forward','kind','order','item-status','output','duplicate','empty-id','missing-id','id-type','id-mismatch','bound'].flatMap(m=>[m,'observer-'+m])])test('Rust final snapshot retains observed tool or refuses conflict: '+mode,{skip:useNode,timeout:25000},async t=>{
+  const scenario=mode.replace(/^observer-/,''),observer=mode==='observer'||mode.startsWith('observer-');
+  const s=await fixture(t,faultEnv('final-'+mode));
+  const receipt=await s.post({text:'synthetic read-only observation',operation_id:'final-retention'}).then(r=>r.json());
+  const read=()=>fetch(s.base+'/api/state').then(r=>r.json());
+  const live=await until(read,x=>x.thread.turns.some(t=>t.items.some(i=>i.id==='synthetic-command'&&i.status==='completed')));
+  const turnId=live.thread.turns.find(t=>t.items.some(i=>i.id==='synthetic-command')).id;
+  const failure=!['event','observer','full','empty','forward'].includes(scenario);
+  let state=await until(read,x=>failure?x.runtime.state==='blocked':x.thread.turns.some(t=>t.id===turnId&&t.status==='completed'));
+  await new Promise(r=>setTimeout(r,350)); // observe duplicate final event too
+  state=await read();
+  const turn=state.thread.turns.find(t=>t.id===turnId);
+  const tools=turn.items.filter(i=>i.id==='synthetic-command');
+  assert.equal(tools.length,1);assert.equal(tools[0].kind,'commandExecution');assert.equal(tools[0].status,'completed');
+  assert.equal(tools[0].detailText,scenario==='bound'?'x'.repeat(9*1024*1024):'synthetic bytes=42 sha256=fixture-only'+(scenario==='forward'?' appended':''));
+  const submission=await fetch(s.base+'/v1/submissions/'+receipt.submission.id,{headers:s.headers}).then(r=>r.json());
+  const saved=JSON.parse(await readFile(join(s.state,'rust-spike.json'),'utf8'));
+  assert.equal(saved.records.find(r=>r.operation==='final-retention').submission.state,submission.submission.state);
+  if(failure) {
+    assert.equal(state.runtime.state,'blocked');assert.equal(state.ready,false);
+    assert.match(state.runtime.error,scenario==='bound'?/history limit/:/Conflicting provider final snapshot/);
+    assert.equal(submission.submission.state,scenario.startsWith('terminal')?'done':'running');
+    assert.equal(turn.status,scenario.startsWith('terminal')?'completed':'inProgress','refused snapshot cannot replace accepted projection');
+    assert.equal(state.runtime.provider.finalProjection.refusals,1);
+  } else {
+    assert.equal(state.runtime.state,'idle');assert.equal(state.runtime.provider.transport,'open');
+    assert.equal(submission.submission.state,'done');
+    assert.deepEqual(turn.items.map(i=>i.kind),scenario==='empty'?['userMessage','commandExecution']:['userMessage','commandExecution','agentMessage']);
+    assert.deepEqual(turn.items.map(i=>i.transcriptOrder),scenario==='empty'?[0,1]:[0,1,2]);
+    assert.equal(turn.items[0].submissionId,receipt.submission.id);
+    const transcript=await fetch(s.base+'/v1/transcript',{headers:s.headers}).then(r=>r.json());
+    const entries=transcript.entries.filter(i=>i.id==='synthetic-command');
+    assert.equal(entries.length,1);assert.equal(entries[0].kind,'commandExecution');
+    assert.equal(entries[0].content,'synthetic public-file checksum'); // compact AIS omits detailText by contract
+    if(observer)assert.ok((await providerCalls(s)).some(c=>c.method==='thread/read'));
+    assert.equal(state.runtime.provider.finalProjection.refusals,0);
+  }
+  assert.equal((await providerCalls(s)).filter(c=>c.method==='turn/start').length,1);
+});
 test('Rust observes an explicit terminal accepted turn without a completion event',{skip:useNode},async t=>{
   const s=await fixture(t,faultEnv('observe'));
   const receipt=await s.post({text:'observe only',operation_id:'observe'}).then(r=>r.json());

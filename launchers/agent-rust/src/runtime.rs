@@ -96,6 +96,7 @@ struct Runtime {
     last_disk_snapshot: Option<std::time::Instant>,
     disk_history_status: &'static str,
     provider_exit: &'static str,
+    final_projection: Value,
     records: VecDeque<Record>,
     dispatch_blocked: bool,
     goals: Goals,
@@ -166,6 +167,7 @@ pub fn spawn(config: Config) -> Result<Handle> {
         last_disk_snapshot: None,
         disk_history_status: "not_requested",
         provider_exit: "not_requested",
+        final_projection: Value::Null,
         records: VecDeque::new(),
         dispatch_blocked: false,
         goals: Goals::default(),
@@ -526,6 +528,7 @@ impl Runtime {
         snapshot["thread"]["hasOlderItems"]=json!(start>0);
         snapshot["history"]=json!({"limit":50,"totalTurns":self.history_total,"cursor":if start>0 {Some(format!("{}:{start:x}",self.history_nonce))}else{None}});
         snapshot["runtime"]["provider"] = self.rpc.diagnostics();
+        snapshot["runtime"]["provider"]["finalProjection"] = self.final_projection.clone();
         snapshot["runtime"]["journalHistory"] = json!({"state":self.disk_history_status,"diskLimitBytes":crate::disk_history::DISK_LIMIT,"sampleIntervalSeconds":300});
         self.changed.send_replace(Arc::new(snapshot));
     }
@@ -1199,7 +1202,12 @@ impl Runtime {
         if self.history_failed {
             return Ok(());
         }
+        let completing = event["method"] == "turn/completed";
         let result = self.apply_event(event).await;
+        if completing && result.is_err() {
+            self.final_projection["refusals"] = json!(1);
+            self.final_projection["conflicts"] = json!(usize::from(result.as_ref().is_err_and(|e| e.is::<model::InvalidFinalSnapshot>())));
+        }
         if self.rpc.failed() {
             self.stop_for_transport_error()?;
         }
@@ -1213,6 +1221,11 @@ impl Runtime {
             .is_err_and(|error| error.is::<InvalidTurnIdentity>())
         {
             self.stop_for_history_error(InvalidTurnIdentity.to_string())?;
+        } else if result
+            .as_ref()
+            .is_err_and(|error| error.is::<model::InvalidFinalSnapshot>())
+        {
+            self.stop_for_history_error(model::InvalidFinalSnapshot.to_string())?;
         }
         result
     }
@@ -1273,13 +1286,16 @@ impl Runtime {
                 self.thread["activeTurnId"] = p["turn"]["id"].clone();
             }
             "turn/completed" => {
+                self.final_projection = json!({"retainedOnly":0,"sameIdUpdates":0,"conflicts":0,"refusals":0});
                 let turn_id = p["turn"]["id"].clone();
-                let mut turn = model::turn(&p["turn"]);
-                if turn["items"].as_array().is_some_and(Vec::is_empty) {
-                    if let Some(old) = self.turns.iter().find(|t| t["id"] == turn_id) {
-                        turn["items"] = old["items"].clone();
-                    }
+                if self.thread["activeTurnId"].is_string() && self.thread["activeTurnId"] != turn_id {
+                    return Err(model::InvalidFinalSnapshot.into());
                 }
+                let projected = self.projected(vec![model::final_turn(&p["turn"])?], false)?;
+                let mut turn = projected.first().ok_or(HistoryLimit)?.clone();
+                let counts = if let Some(old) = self.turns.iter().find(|t| t["id"] == turn_id) {
+                    model::retain_final_items(old, &mut turn)?
+                } else { (0, 0) };
                 let status = if turn["status"] == "failed" {
                     "failed"
                 } else if turn["status"] == "interrupted" {
@@ -1297,6 +1313,8 @@ impl Runtime {
                     .map(|s| preview(s, 2048));
                 let error = turn["error"].clone();
                 self.upsert_turn(turn)?;
+                self.final_projection["retainedOnly"] = json!(counts.0);
+                self.final_projection["sameIdUpdates"] = json!(counts.1);
                 for record in &mut self.records {
                     if record.submission["turn_id"] == turn_id
                         && record.submission["state"] == "running"
