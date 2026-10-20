@@ -1,6 +1,52 @@
 use super::*;
 use chrono::{DateTime, Duration};
 
+#[test]
+fn expiration_validates_clocks_first_and_never_relabels_or_repeats_retirement() {
+    let mut cache = FieldCache::new(7);
+    cache
+        .record(
+            clock(0),
+            MachineMetricKind::CpuUtilization,
+            None,
+            MachineMetricStatus::Ok,
+            Some(12.0),
+        )
+        .unwrap();
+    let day = MACHINE_METRICS_MAX_RANGE_MS as u64;
+    let uncertain = Clock {
+        wall: clock(day + 1).wall,
+        monotonic_ms: 1,
+    };
+    assert_eq!(
+        cache.retire_expired(uncertain),
+        Err(CacheError::ClockReversed)
+    );
+    assert_eq!(cache.fields.len(), 1);
+    assert_eq!(cache.retire_expired(clock(day)), Ok(0));
+    let fractional = Clock {
+        wall: clock(day).wall + Duration::nanoseconds(1),
+        monotonic_ms: day,
+    };
+    assert_eq!(cache.retire_expired(fractional), Ok(1));
+    assert_eq!(cache.retire_expired(fractional), Ok(0));
+    assert!(cache.snapshot(fractional).unwrap().is_empty());
+    cache
+        .record(
+            clock(day + 1),
+            MachineMetricKind::CpuUtilization,
+            None,
+            MachineMetricStatus::Ok,
+            Some(12.0),
+        )
+        .unwrap();
+    let fresh = cache.snapshot(clock(day + 1)).unwrap();
+    assert_eq!(
+        (fresh[0].observation.epoch, fresh[0].observation.tick),
+        (7, 1)
+    );
+}
+
 fn clock(ms: u64) -> Clock {
     Clock {
         wall: DateTime::from_timestamp(1_792_500_000, 0).unwrap()

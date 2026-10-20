@@ -25,6 +25,66 @@ fn record(state: &mut CollectorState, clock: Clock, value: f64) -> bool {
 }
 
 #[test]
+fn expired_static_field_retires_without_wedging_append_or_relabeling_fresh_fields() {
+    let mut state = state();
+    record(&mut state, clock(0, 0), 12.0);
+    state
+        .record(
+            clock(0, 0),
+            MachineMetricKind::RamTotal,
+            None,
+            MachineMetricStatus::Ok,
+            Some(1024.0),
+        )
+        .unwrap();
+    let day = 86_400_000;
+    assert_eq!(
+        state.snapshot(clock(day, day as u64)).unwrap().fields.len(),
+        2
+    );
+    record(&mut state, clock(day, day as u64), 25.0);
+    let snapshot = state.snapshot(clock(day + 1, day as u64 + 1)).unwrap();
+    assert!(!snapshot.reset);
+    assert_eq!(snapshot.epoch, 0);
+    assert_eq!(snapshot.fields.len(), 1);
+    assert_eq!(snapshot.fields[0].observation.tick, 2);
+    assert_eq!(snapshot.fields[0].current.value, Some(25.0));
+    assert_eq!(state.expired_field_count(), 1);
+    assert_eq!(state.expired_field_count(), 1);
+    let sample = frame(&mut state, clock(day + 1, day as u64 + 1));
+    assert_eq!(
+        sample.series[3].current.status,
+        MachineMetricStatus::WarmingUp
+    );
+    assert_eq!(sample.series[3].current.sampled_at, None);
+    state
+        .append_frame(clock(day + 1, day as u64 + 1), &sample)
+        .unwrap();
+    assert_eq!(state.history.record_count(), 1);
+    assert_eq!(state.expired_field_count(), 1);
+    // A fresh read of the same capacity is a new acquisition, not cache reuse.
+    state
+        .record(
+            clock(day + 2, day as u64 + 2),
+            MachineMetricKind::RamTotal,
+            None,
+            MachineMetricStatus::Ok,
+            Some(1024.0),
+        )
+        .unwrap();
+    let fresh = state.snapshot(clock(day + 2, day as u64 + 2)).unwrap();
+    let ram = fresh
+        .fields
+        .iter()
+        .find(|field| field.kind == MachineMetricKind::RamTotal)
+        .unwrap();
+    assert_eq!(ram.observation.tick, 3);
+    assert_eq!(ram.current.age_ms, Some(0));
+    assert_eq!(ram.current.value, Some(1024.0));
+    assert_eq!(state.expired_field_count(), 1);
+}
+
+#[test]
 fn stored_frames_preserve_cached_identity_and_original_value_after_staleness() {
     use crate::machine_metrics::stored_frame::StoredFrame;
     let mut state = state();

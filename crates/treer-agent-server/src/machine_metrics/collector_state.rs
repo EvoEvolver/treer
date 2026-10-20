@@ -42,6 +42,7 @@ pub struct CollectorState {
     cache: FieldCache,
     epoch: u64,
     last_reset_cause: Option<ResetCause>,
+    expired_fields: u64,
 }
 
 impl CollectorState {
@@ -51,6 +52,7 @@ impl CollectorState {
             cache: FieldCache::new(0),
             epoch: 0,
             last_reset_cause: None,
+            expired_fields: 0,
         })
     }
 
@@ -84,19 +86,27 @@ impl CollectorState {
         }
     }
 
+    /// Instance-local, saturating count of expired fields retired by maintenance.
+    /// Contains no keys, samples or clock values; reading it has no side effects.
+    pub fn expired_field_count(&self) -> u64 {
+        self.expired_fields
+    }
+
     /// Also the maintenance entry point for ticks with no completed capture.
     /// Cache-only accumulated clock drift invalidates history as well.
     pub fn snapshot(&mut self, clock: Clock) -> Result<Snapshot, StateError> {
         let mut reset = self.synchronize(clock)?;
-        let fields = match self.cache.snapshot(clock) {
-            Ok(fields) => fields,
+        let retired = match self.cache.retire_expired(clock) {
+            Ok(retired) => retired,
             Err(CacheError::ClockReversed) => {
                 self.invalidate(clock, ResetCause::FieldClock)?;
                 reset = true;
-                Vec::new()
+                0
             }
             Err(error) => return Err(StateError::Cache(error)),
         };
+        self.expired_fields = self.expired_fields.saturating_add(retired as u64);
+        let fields = self.cache.snapshot(clock).map_err(StateError::Cache)?;
         Ok(Snapshot {
             epoch: self.epoch,
             reset,

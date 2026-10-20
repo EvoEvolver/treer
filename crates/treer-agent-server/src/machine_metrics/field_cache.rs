@@ -3,7 +3,7 @@ use super::{aggregation::Observation, history::Clock};
 use std::collections::HashMap;
 use treer_protocol::{
     MachineMetricCurrent, MachineMetricKind, MachineMetricStatus, MachineMetricUnit,
-    MACHINE_METRICS_MAX_SERIES, MACHINE_METRICS_STALE_AFTER_MS,
+    MACHINE_METRICS_MAX_RANGE_MS, MACHINE_METRICS_MAX_SERIES, MACHINE_METRICS_STALE_AFTER_MS,
 };
 
 #[derive(Debug, PartialEq, Eq)]
@@ -184,6 +184,21 @@ impl FieldCache {
         }
         fields.sort_by(|a, b| (a.kind as u8, &a.gpu_id).cmp(&(b.kind as u8, &b.gpu_id)));
         Ok(fields)
+    }
+
+    /// Collector maintenance only. Validate ALL clocks before deleting any
+    /// field, so expiry cannot conceal clock uncertainty or partly mutate on
+    /// failure. Retirement neither creates observations nor resets their tick.
+    pub(super) fn retire_expired(&mut self, now: Clock) -> Result<usize, CacheError> {
+        self.snapshot(now)?;
+        let before = self.fields.len();
+        self.fields.retain(|_, entry| {
+            now.wall.signed_duration_since(entry.clock.wall)
+                <= chrono::Duration::milliseconds(MACHINE_METRICS_MAX_RANGE_MS)
+                && now.monotonic_ms - entry.clock.monotonic_ms
+                    <= MACHINE_METRICS_MAX_RANGE_MS as u64
+        });
+        Ok(before - self.fields.len())
     }
 }
 

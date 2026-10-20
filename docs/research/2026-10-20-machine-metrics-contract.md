@@ -350,8 +350,9 @@ Maintenance checks every record's earliest acquisition, as well as frame
 monotonic age. A new frame cannot extend an old cached acquisition's retention:
 if any acquisition expires, the whole frame is dropped without a capacity-loss
 truncation flag. This conservative policy may shorten useful coverage. It does
-not discard a current field from FieldCache; a future collector must replace or
-retire expired fields before it can append another frame containing them.
+not itself discard a current field from FieldCache. CollectorState maintenance
+now retires expired cache fields as described below, before further snapshot
+projection or frame admission.
 
 Collector contract: every acquired field, including RAM/VRAM capacities and
 other apparently static values, must be freshly re-acquired within each
@@ -361,7 +362,9 @@ acquisition and identity; copying its old cache entry with a new timestamp is
 not. Retire removed-device fields when fresh acquisition is no longer possible;
 the future inventory/response adapter still owes the removed-GPU semantics.
 The collector must prevent one unrefreshed field from indefinitely refusing
-otherwise healthy appends. This retirement behavior is not implemented yet.
+otherwise healthy appends. The expiry fallback is implemented below; timely
+hardware re-acquisition and explicit removed-device retirement remain collector
+and inventory integration work.
 
 Expiry drops the whole stored frame, including other still-fresh fields; the
 query assembler must not assume partial salvage from an expired envelope.
@@ -373,3 +376,31 @@ The format is internal in-memory staging, not a public metrics response,
 authenticated integrity proof, restart/boot identity, checksum or file recovery
 format. No filesystem journal, query deduplication/assembly, collection task or
 route is enabled by this increment.
+
+## Expired current-field retirement checkpoint (not connected)
+
+CollectorState maintenance validates every cached acquisition clock before
+retiring anything. Clock uncertainty resets the shared epoch as before; it
+cannot be hidden by first deleting an old field. With valid clocks, a field
+older than 24 hours by either wall or monotonic time is removed from FieldCache;
+exactly 24 hours is retained, and even a submillisecond excess expires. This
+runs on the state entry points, including maintenance with no new acquisition,
+before current projection and frame admission. The runtime timer that must
+invoke it without viewers is still not connected.
+
+A retired key has no observation, value, age or timestamp. The existing
+assembler admission rule permits only canonical empty warming_up for that key;
+expiry does not manufacture a failed acquisition or refresh the old value.
+Fresh fields keep their original identities, epochs do not change for ordinary
+expiry, and a later actual acquisition can record the same hardware value with
+a new increasing tick. Expired fields cannot indefinitely block healthy frame
+appends. Already staged envelopes still expire as whole frames under History's
+independent retention checks; this change does not salvage their other fields.
+
+`expired_field_count()` is a pure read of an instance-local saturating count of
+expired fields removed by maintenance. Its name is the fixed diagnostic
+category; no field identifiers, values or clocks are exposed. Repeated reads
+and subsequent maintenance of an already retired key do not increment it.
+This is not a durable counter, log or health endpoint. Removed-GPU presentation,
+batch acquisition, query assembly, journal, singleton IPC, Policy and runtime
+sampling remain unfinished.
