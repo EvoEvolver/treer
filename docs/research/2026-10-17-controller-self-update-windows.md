@@ -1894,6 +1894,9 @@ The injection flag is set after that mutation succeeds. Operation binding still
 passes, but the retained-head check must refuse before the pin can be returned
 to the consumer or the sink. This is actual scoped private-fixture ACL loss,
 not data corruption, a native ReadFile error, or ACL mutation exclusion.
+The hook records both check results independently, without early `?` returns;
+post-call assertions require binding success and retained refusal before their
+measured results are printed. An earlier binding failure cannot satisfy this row.
 
 After refusal, restore and explicitly revalidate head custody, preserve head
 bytes/full identity, complete decision bytes/full identity and context evidence,

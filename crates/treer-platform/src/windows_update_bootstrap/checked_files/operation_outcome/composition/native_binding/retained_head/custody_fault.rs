@@ -147,6 +147,8 @@ fn native_operation_decision_pin_refuses_post_transition_head_acl_loss() {
         let path = fixture.attempt.path.join("consume.intent");
         let injected = Cell::new(false);
         let decision_id = Cell::new(None);
+        let binding_ok = Cell::new(false);
+        let retained_refused = Cell::new(false);
         let mut expected = None;
         let mut sink = Sink {
             on_accept: Some(Box::new(|_| panic!("head ACL fault reached sink"))),
@@ -168,11 +170,19 @@ fn native_operation_decision_pin_refuses_post_transition_head_acl_loss() {
             injected.set(true);
             // The operation binding still passes; retained-head custody alone
             // must refuse after the decision transitioned successfully.
-            retained.binding.check(&composition)?;
-            retained.check(&composition)?;
-            Ok(pin)
+            binding_ok.set(retained.binding.check(&composition).is_ok());
+            retained_refused.set(retained.check(&composition).is_err());
+            Err::<(), _>(denied())
         });
         assert!(injected.get());
+        assert!(
+            binding_ok.get(),
+            "operation binding must pass after head ACL loss"
+        );
+        assert!(
+            retained_refused.get(),
+            "retained head check must refuse ACL loss"
+        );
         assert!(result.is_err());
         assert_eq!(sink.accepted, 0);
         assert!(stored.spent.get());
@@ -192,7 +202,7 @@ fn native_operation_decision_pin_refuses_post_transition_head_acl_loss() {
             .is_err());
         assert!(ownership.pin_decision(&expected).is_err());
         assert_eq!(std::fs::read(&path).unwrap(), expected);
-        eprintln!("decision_head_acl_fixture operation={} injected=1 pin_validated=1 binding=ok retained=refused restored=1 sink=0 spent=1 bytes={} head_identity=unchanged decision_identity=unchanged post_write=0 retry=refused", if operation == Operation::MoveOld { "MoveOld" } else { "Publish" }, expected.len());
+        eprintln!("decision_head_acl_fixture operation={} injected=1 pin_validated=1 binding={} retained={} restored=1 sink=0 spent=1 bytes={} head_identity=unchanged decision_identity=unchanged post_write=0 retry=refused", if operation == Operation::MoveOld { "MoveOld" } else { "Publish" }, if binding_ok.get() {"ok"} else {"failed"}, if retained_refused.get() {"refused"} else {"accepted"}, expected.len());
         drop(sink);
         drop(fault);
         drop(stored);
