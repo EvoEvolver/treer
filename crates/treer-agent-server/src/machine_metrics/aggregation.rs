@@ -2,8 +2,9 @@
 use chrono::{DateTime, Duration, Utc};
 use std::collections::{HashMap, HashSet};
 use treer_protocol::{
-    MachineMetricBucket, MachineMetricStatus, MachineMetricStatusCount, MachineMetricUnit,
-    MachineMetricsQuery, MACHINE_METRICS_SAMPLE_INTERVAL_MS,
+    machine_metrics_expected_samples, MachineMetricBucket, MachineMetricStatus,
+    MachineMetricStatusCount, MachineMetricUnit, MachineMetricsQuery,
+    MACHINE_METRICS_SAMPLE_INTERVAL_MS,
 };
 
 /// One actual field acquisition, not a cached value repeated on every tick.
@@ -60,15 +61,10 @@ pub fn aggregate_cancellable(
     if !query.valid_at(now) {
         return Err(AggregationError::InvalidQuery);
     }
-    // valid_at bounds the positive span to 24 h, safely within i64 nanos.
-    let span_ns = query
-        .to
-        .signed_duration_since(query.from)
-        .num_nanoseconds()
-        .ok_or(AggregationError::InvalidQuery)? as u64;
+    let slots = machine_metrics_expected_samples(query.to.signed_duration_since(query.from))
+        .ok_or(AggregationError::InvalidQuery)?;
     let interval = MACHINE_METRICS_SAMPLE_INTERVAL_MS;
-    let interval_ns = interval * 1_000_000;
-    let width_ms = span_ns.div_ceil(u64::from(query.max_points) * interval_ns) * interval;
+    let width_ms = u64::from(slots).div_ceil(u64::from(query.max_points)) * interval;
     let mut points = Vec::new();
     let mut start = query.from;
     while start < query.to {
@@ -77,17 +73,12 @@ pub fn aggregate_cancellable(
             .checked_add_signed(Duration::milliseconds(width_ms as i64))
             .unwrap_or(query.to)
             .min(query.to);
-        let expected = end
-            .signed_duration_since(start)
-            .num_nanoseconds()
+        let expected = machine_metrics_expected_samples(end.signed_duration_since(start))
             .ok_or(AggregationError::InvalidQuery)?;
-        if expected < 1 {
-            return Err(AggregationError::InvalidQuery);
-        }
         points.push(MachineMetricBucket {
             from: start,
             to: end,
-            expected_count: (expected as u64).div_ceil(interval_ns) as u32,
+            expected_count: expected,
             valid_count: 0,
             status_counts: Vec::new(),
             first_sample_at: None,

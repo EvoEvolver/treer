@@ -17,6 +17,18 @@ pub const MACHINE_METRICS_MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 pub const MACHINE_METRICS_SAMPLE_INTERVAL_MS: u64 = 5000;
 pub const MACHINE_METRICS_STALE_AFTER_MS: u64 = 15_000;
 
+/// Exact ceiling of a positive, at-most-24-hour span in five-second slots.
+/// Fractional tails count as a slot; invalid or overflowing spans refuse.
+pub fn machine_metrics_expected_samples(span: chrono::Duration) -> Option<u32> {
+    if span <= chrono::Duration::zero()
+        || span > chrono::Duration::milliseconds(MACHINE_METRICS_MAX_RANGE_MS)
+    {
+        return None;
+    }
+    let nanos = span.num_nanoseconds()? as u64;
+    Some(nanos.div_ceil(MACHINE_METRICS_SAMPLE_INTERVAL_MS * 1_000_000) as u32)
+}
+
 /// Both timestamps are resolved explicitly by the API before Controller
 /// dispatch. Unknown query parameters must not silently alter the defaults.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -164,6 +176,29 @@ pub struct MachineMetricsResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn machine_metrics_expected_samples_refuses_invalid_spans() {
+        for span in [
+            chrono::Duration::zero(),
+            chrono::Duration::nanoseconds(-1),
+            chrono::Duration::milliseconds(MACHINE_METRICS_MAX_RANGE_MS)
+                + chrono::Duration::nanoseconds(1),
+            chrono::Duration::MAX,
+        ] {
+            assert_eq!(machine_metrics_expected_samples(span), None);
+        }
+        assert_eq!(
+            machine_metrics_expected_samples(chrono::Duration::nanoseconds(1)),
+            Some(1)
+        );
+        assert_eq!(
+            machine_metrics_expected_samples(chrono::Duration::milliseconds(
+                MACHINE_METRICS_MAX_RANGE_MS
+            )),
+            Some(17280)
+        );
+    }
 
     #[test]
     fn machine_metrics_query_enforces_exact_range_and_point_bounds() {

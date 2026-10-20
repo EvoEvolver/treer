@@ -152,16 +152,34 @@ fn input_budget_applies_even_to_out_of_range_observations() {
 #[test]
 fn generated_boundaries_pass_shared_wire_validation() {
     use treer_protocol::*;
-    for (nanos, max_points) in [
-        (1, 1),
-        (999_999, 1),
-        (5_000_000_001, 1),
-        (5_000_000_001, 2),
-        (11_000_000_001, 2),
-        (86_400_000_000_000, 720),
-    ] {
+    #[derive(serde::Deserialize)]
+    struct Vectors {
+        schema: u8,
+        from: DateTime<Utc>,
+        sample_interval_ms: u64,
+        vectors: Vec<Vector>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Vector {
+        name: String,
+        span_ns: String,
+        max_points: u16,
+        bucket_width_ms: u64,
+        expected_counts: Vec<u32>,
+    }
+    let data: Vectors = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../docs/fixtures/machine-metrics-span-vectors.json"
+    )))
+    .unwrap();
+    assert_eq!(data.schema, 1);
+    assert_eq!(data.sample_interval_ms, MACHINE_METRICS_SAMPLE_INTERVAL_MS);
+    assert_eq!(data.vectors.len(), 6);
+    for vector in data.vectors {
+        let nanos: i64 = vector.span_ns.parse().unwrap();
+        let max_points = vector.max_points;
         let mut q = query(1, max_points);
-        q.from += Duration::nanoseconds(100_001);
+        q.from = data.from;
         q.to = q.from + Duration::nanoseconds(nanos);
         let mut width = 0;
         let series = [
@@ -215,24 +233,28 @@ fn generated_boundaries_pass_shared_wire_validation() {
         response.validate(&q, "fixture-machine", q.to).unwrap();
         let wire = serde_json::to_vec(&response).unwrap();
         MachineMetricsResponse::parse_bounded(&wire, &q, "fixture-machine", q.to).unwrap();
-        let expected = (nanos as u64).div_ceil(5_000_000_000);
+        assert_eq!(width, vector.bucket_width_ms, "{}", vector.name);
         assert_eq!(
             response.series[0]
                 .points
                 .iter()
-                .map(|point| u64::from(point.expected_count))
-                .sum::<u64>(),
-            expected
+                .map(|point| point.expected_count)
+                .collect::<Vec<_>>(),
+            vector.expected_counts,
+            "{}",
+            vector.name
         );
         assert_eq!(response.series[0].points.last().unwrap().to, q.to);
         assert!(response.series[0].points.len() <= usize::from(max_points));
         // A consumer must reject the old floor-to-ms count for a fractional
         // tail; accepting the source output alone could hide shared rounding.
-        if nanos % 5_000_000_000 == 1 {
-            let last = response.series[0].points.last_mut().unwrap();
-            last.expected_count -= 1;
-            assert!(response.validate(&q, "fixture-machine", q.to).is_err());
-        }
+        let last = response.series[0].points.last_mut().unwrap();
+        last.expected_count -= 1;
+        assert!(
+            response.validate(&q, "fixture-machine", q.to).is_err(),
+            "{}",
+            vector.name
+        );
     }
 }
 

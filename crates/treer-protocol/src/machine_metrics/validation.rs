@@ -159,7 +159,7 @@ impl MachineMetricsResponse {
                         && bucket.from == other.from
                         && bucket.to == other.to,
                 )?;
-                bucket.validate(series.unit, self.sample_interval_ms)?;
+                bucket.validate(series.unit)?;
                 if let Some(first) = bucket.first_sample_at {
                     require(
                         self.generated_at.signed_duration_since(first)
@@ -290,14 +290,11 @@ impl MachineMetricCurrent {
 }
 
 impl MachineMetricBucket {
-    fn validate(&self, unit: MachineMetricUnit, interval: u64) -> Result<()> {
-        let span = self
-            .to
-            .signed_duration_since(self.from)
-            .num_nanoseconds()
-            .ok_or(MachineMetricsValidationError)?;
-        require(span > 0)?;
-        let expected = (span as u64).div_ceil(interval * 1_000_000);
+    fn validate(&self, unit: MachineMetricUnit) -> Result<()> {
+        let expected = u64::from(
+            machine_metrics_expected_samples(self.to.signed_duration_since(self.from))
+                .ok_or(MachineMetricsValidationError)?,
+        );
         require(u64::from(self.expected_count) == expected)?;
         let mut observed = 0u64;
         let mut valid = 0;

@@ -783,6 +783,20 @@ successor must use the same exact nanosecond ceiling rule and cover these
 vectors before the Core/Web union is eligible for activation; no compatibility
 or browser PASS is claimed by the source-only change.
 
+The Web successor 0427fbef supplies the identical six fixed-answer vectors in
+docs/fixtures/machine-metrics-span-vectors.json (SHA256
+851cdd7bfb7362ac4c5755a73f9442a577552751228b7ed39c935f150df6ed9b).
+Rust producer/shared-validator controls now read that exact file, assert every
+width and expected-count list, accept bounded serialized responses and reject
+a decremented final expected_count in every case. The protocol's bounded
+machine_metrics_expected_samples helper is the single Rust nanosecond ceiling
+rule for aggregation width/counts and response validation, preventing internal
+rounding drift. Web's parser change uses BigInt arithmetic; Core inspected that
+source change but has not run a browser/full Web gate. Its reported offline
+checks are not browser compatibility evidence, and the exclusive Release window
+must be respected. Union/activation remains pending that evidence and the other
+source/runtime holds.
+
 Tests distinguish historical and current names for the same id, preserve a
 current-only device outside its historical acquisition range, retain an absent
 historical device after a successful empty enumeration, and keep failed/stale
