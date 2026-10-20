@@ -269,3 +269,27 @@ assemble responses: the caller still owes total-series/serialized response
 budgets, per-range retention/truncation, removed-GPU inventory union, fresh
 per-field current values, epoch handling and final shared-response validation.
 No collection task, ring reader, IPC, routing or persistence calls it yet.
+
+## Field acquisition state checkpoint (not connected)
+
+`machine_metrics::field_cache` keeps at most 100 current fields per collector
+instance without implicit eviction. Only `record`, representing an actual
+completed acquisition or failed attempt, assigns an (epoch, tick) identity and
+timestamp. Reads never refresh either. Each field requires increasing wall and
+monotonic acquisition time within an epoch. Epoch changes clear cached fields
+without resetting the sequence; invalid updates, capacity refusal and sequence
+exhaustion preserve existing fields and do not allocate an identity.
+
+Snapshots compute per-field wire age and hide successful values older than
+15 seconds as stale/null while preserving the original acquisition value and
+identity for history. A new failed attempt replaces the current success with
+an unavailable value; the read projection cannot be recorded as a new stale
+acquisition. Clock reversal or disagreement above the ring's 10-second tolerance
+refuses the snapshot until the collector handles epoch uncertainty.
+
+This is state arithmetic, not proof of actual hardware sampling. The future
+collector must call record only after real acquisition and coordinate epochs;
+paired RAM/VRAM refreshes still need consistent batch assembly. The History
+frame format does not yet carry these per-field identities. Its adapter must
+preserve them through serialization and deduplicate cached references before
+aggregation. This cache adds no sampler, timer, journal, IPC, API or capability.
