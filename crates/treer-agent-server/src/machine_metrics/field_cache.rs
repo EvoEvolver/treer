@@ -22,6 +22,7 @@ struct Key {
     gpu_id: Option<String>,
 }
 
+#[derive(Clone)]
 struct Entry {
     clock: Clock,
     observation: Observation,
@@ -35,8 +36,17 @@ pub struct FieldSnapshot {
     pub current: MachineMetricCurrent,
 }
 
+#[derive(Clone, Copy)]
+pub(super) struct FieldUpdate<'a> {
+    pub kind: MachineMetricKind,
+    pub gpu_id: Option<&'a str>,
+    pub status: MachineMetricStatus,
+    pub value: Option<f64>,
+}
+
 /// One instance per collector. At most 100 fields; tick identifies real capture
 /// completions, not reads or outer-frame serialization. No implicit eviction.
+#[derive(Clone)]
 pub struct FieldCache {
     epoch: u64,
     next_tick: u64,
@@ -44,6 +54,33 @@ pub struct FieldCache {
 }
 
 impl FieldCache {
+    /// Bounded transaction: all fields receive the same completion clock, but
+    /// distinct acquisition ticks. Any failure preserves the original cache
+    /// and sequence, including failure on the final field.
+    pub(super) fn record_batch(
+        &mut self,
+        clock: Clock,
+        updates: &[FieldUpdate<'_>],
+    ) -> Result<(), CacheError> {
+        if updates.is_empty() || updates.len() > MACHINE_METRICS_MAX_SERIES {
+            return Err(CacheError::InvalidField);
+        }
+        let mut keys = std::collections::HashSet::new();
+        for field in updates {
+            if field.gpu_id.is_some_and(|id| id.len() != 64)
+                || !keys.insert((field.kind, field.gpu_id))
+            {
+                return Err(CacheError::InvalidField);
+            }
+        }
+        let mut staged = self.clone(); // At most 100 bounded keys/entries.
+        for field in updates {
+            staged.record(clock, field.kind, field.gpu_id, field.status, field.value)?;
+        }
+        *self = staged;
+        Ok(())
+    }
+
     pub fn new(epoch: u64) -> Self {
         Self {
             epoch,

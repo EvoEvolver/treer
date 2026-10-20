@@ -12,6 +12,158 @@ fn state() -> CollectorState {
     CollectorState::new("machine".into(), Limits::default()).unwrap()
 }
 
+#[test]
+fn ram_batch_keeps_capacity_arithmetic_time_and_failure_status_consistent() {
+    let mut state = state();
+    state
+        .record_ram(clock(0, 0), MachineMetricStatus::Ok, Some((100, 40)))
+        .unwrap();
+    let snapshot = state.snapshot(clock(0, 0)).unwrap();
+    assert_eq!(snapshot.fields.len(), 3);
+    assert!(snapshot
+        .fields
+        .iter()
+        .all(|f| f.current.sampled_at == Some(clock(0, 0).wall)));
+    let values: std::collections::HashMap<_, _> = snapshot
+        .fields
+        .iter()
+        .map(|f| (f.kind, f.current.value))
+        .collect();
+    assert_eq!(values[&MachineMetricKind::RamUsed], Some(60.0));
+    assert_eq!(values[&MachineMetricKind::RamAvailable], Some(40.0));
+    assert_eq!(values[&MachineMetricKind::RamTotal], Some(100.0));
+    let valid = frame(&mut state, clock(0, 0));
+    state.append_frame(clock(0, 0), &valid).unwrap();
+    for reading in [Some((100, 101)), Some((u64::MAX, 0)), None] {
+        assert_eq!(
+            state.record_ram(clock(5000, 5000), MachineMetricStatus::Ok, reading),
+            Err(StateError::Cache(CacheError::InvalidObservation))
+        );
+    }
+    let unchanged = state.snapshot(clock(5000, 5000)).unwrap();
+    assert_eq!(
+        unchanged
+            .fields
+            .iter()
+            .map(|f| f.observation)
+            .collect::<Vec<_>>(),
+        snapshot
+            .fields
+            .iter()
+            .map(|f| f.observation)
+            .collect::<Vec<_>>()
+    );
+    state
+        .record_ram(
+            clock(5000, 5000),
+            MachineMetricStatus::CollectionFailed,
+            None,
+        )
+        .unwrap();
+    let failed = state.snapshot(clock(5000, 5000)).unwrap();
+    assert!(failed.fields.iter().all(|f| f.current.status
+        == MachineMetricStatus::CollectionFailed
+        && f.current.value.is_none()
+        && f.current.sampled_at == Some(clock(5000, 5000).wall)
+        && f.observation.tick >= 3));
+    let valid = frame(&mut state, clock(5000, 5000));
+    state.append_frame(clock(5000, 5000), &valid).unwrap();
+    assert!(state
+        .record_ram(clock(5000, 5000), MachineMetricStatus::Ok, Some((200, 80)))
+        .unwrap());
+    let retried = state.snapshot(clock(5000, 5000)).unwrap();
+    assert_eq!(retried.epoch, 1);
+    assert_eq!(retried.fields.len(), 3);
+    assert!(retried.fields.iter().all(|f| f.observation.epoch == 1
+        && (6..=8).contains(&f.observation.tick)
+        && f.current.status == MachineMetricStatus::Ok));
+    assert_eq!(state.reset_diagnostics().count, 1);
+    assert_eq!(state.history.record_count(), 0);
+}
+
+#[test]
+fn vram_batch_is_atomic_and_independent_of_utilization_failure() {
+    let mut state = state();
+    let gpu = "a".repeat(64);
+    state
+        .record(
+            clock(0, 0),
+            MachineMetricKind::GpuUtilization,
+            Some(&gpu),
+            MachineMetricStatus::TimedOut,
+            None,
+        )
+        .unwrap();
+    state
+        .record_vram(clock(0, 0), &gpu, MachineMetricStatus::Ok, Some((100, 60)))
+        .unwrap();
+    let fields = state.snapshot(clock(0, 0)).unwrap().fields;
+    assert_eq!(fields.len(), 3);
+    assert_eq!(fields[0].current.status, MachineMetricStatus::TimedOut);
+    assert_eq!(fields[1].current.value, Some(60.0));
+    assert_eq!(fields[2].current.value, Some(100.0));
+    assert!(fields
+        .iter()
+        .all(|f| f.current.sampled_at == Some(clock(0, 0).wall)));
+    let valid = gpu_frame(&mut state, clock(0, 0), &gpu);
+    state.append_frame(clock(0, 0), &valid).unwrap();
+    assert_eq!(
+        state.record_vram(
+            clock(5000, 5000),
+            &gpu,
+            MachineMetricStatus::Ok,
+            Some((100, 101))
+        ),
+        Err(StateError::Cache(CacheError::InvalidObservation))
+    );
+    state
+        .record_vram(
+            clock(5000, 5000),
+            &gpu,
+            MachineMetricStatus::UnsupportedMetric,
+            None,
+        )
+        .unwrap();
+    let fields = state.snapshot(clock(5000, 5000)).unwrap().fields;
+    assert_eq!(fields[0].observation.tick, 0);
+    assert!(fields[1..].iter().all(
+        |f| f.current.status == MachineMetricStatus::UnsupportedMetric
+            && f.current.value.is_none()
+            && f.current.sampled_at == Some(clock(5000, 5000).wall)
+    ));
+    assert_eq!(
+        (fields[1].observation.tick, fields[2].observation.tick),
+        (4, 3)
+    );
+    let valid = gpu_frame(&mut state, clock(5000, 5000), &gpu);
+    state.append_frame(clock(5000, 5000), &valid).unwrap();
+}
+
+fn gpu_frame(state: &mut CollectorState, clock: Clock, gpu: &str) -> MachineMetricsResponse {
+    use treer_protocol::*;
+    let mut sample = frame(state, clock);
+    sample.gpus.push(MachineMetricsGpu {
+        id: gpu.into(),
+        name: "Test GPU".into(),
+        present: true,
+    });
+    sample.gpu_status = MachineMetricStatus::Ok;
+    for field in state.snapshot(clock).unwrap().fields {
+        sample.series.push(MachineMetricSeries {
+            kind: field.kind,
+            gpu_id: field.gpu_id,
+            unit: if field.kind == MachineMetricKind::GpuUtilization {
+                MachineMetricUnit::Percent
+            } else {
+                MachineMetricUnit::Bytes
+            },
+            current: field.current,
+            points: vec![],
+        });
+    }
+    sample
+}
+
 fn record(state: &mut CollectorState, clock: Clock, value: f64) -> bool {
     state
         .record(

@@ -2,6 +2,108 @@ use super::*;
 use chrono::{DateTime, Duration};
 
 #[test]
+fn batch_failure_preserves_all_values_and_sequence_even_on_last_field() {
+    let mut cache = FieldCache::new(0);
+    let updates = [
+        FieldUpdate {
+            kind: MachineMetricKind::RamTotal,
+            gpu_id: None,
+            status: MachineMetricStatus::Ok,
+            value: Some(100.0),
+        },
+        FieldUpdate {
+            kind: MachineMetricKind::RamAvailable,
+            gpu_id: None,
+            status: MachineMetricStatus::Ok,
+            value: Some(50.0),
+        },
+        FieldUpdate {
+            kind: MachineMetricKind::RamUsed,
+            gpu_id: None,
+            status: MachineMetricStatus::Ok,
+            value: Some(50.0),
+        },
+    ];
+    cache.record_batch(clock(0), &updates).unwrap();
+    let before: Vec<_> = cache
+        .snapshot(clock(0))
+        .unwrap()
+        .into_iter()
+        .map(|f| f.observation)
+        .collect();
+    let mut invalid = updates;
+    invalid[0].value = Some(200.0);
+    invalid[2].value = Some(f64::NAN);
+    assert_eq!(
+        cache.record_batch(clock(5000), &invalid),
+        Err(CacheError::InvalidObservation)
+    );
+    assert_eq!(cache.next_tick, 3);
+    assert_eq!(
+        cache
+            .snapshot(clock(5000))
+            .unwrap()
+            .into_iter()
+            .map(|f| f.observation)
+            .collect::<Vec<_>>(),
+        before
+    );
+    assert_eq!(
+        cache.record_batch(clock(5000), &[updates[0], updates[0]]),
+        Err(CacheError::InvalidField)
+    );
+    assert_eq!(
+        cache.record_batch(clock(5000), &[]),
+        Err(CacheError::InvalidField)
+    );
+    assert_eq!(
+        cache.record_batch(
+            clock(5000),
+            &vec![updates[0]; MACHINE_METRICS_MAX_SERIES + 1]
+        ),
+        Err(CacheError::InvalidField)
+    );
+    cache.next_tick = u64::MAX - 1;
+    assert_eq!(
+        cache.record_batch(clock(5000), &updates[..2]),
+        Err(CacheError::SequenceExhausted)
+    );
+    assert_eq!(cache.next_tick, u64::MAX - 1);
+    assert_eq!(
+        cache
+            .snapshot(clock(5000))
+            .unwrap()
+            .into_iter()
+            .map(|f| f.observation)
+            .collect::<Vec<_>>(),
+        before
+    );
+
+    let mut full = FieldCache::new(0);
+    for index in 0..99 {
+        full.record(
+            clock(0),
+            MachineMetricKind::GpuUtilization,
+            Some(&format!("{index:064x}")),
+            MachineMetricStatus::Ok,
+            Some(1.0),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        full.record_batch(clock(5000), &updates),
+        Err(CacheError::Capacity)
+    );
+    assert_eq!(full.fields.len(), 99);
+    assert_eq!(full.next_tick, 99);
+    assert!(full
+        .snapshot(clock(5000))
+        .unwrap()
+        .iter()
+        .all(|f| f.kind == MachineMetricKind::GpuUtilization));
+}
+
+#[test]
 fn expiration_validates_clocks_first_and_never_relabels_or_repeats_retirement() {
     let mut cache = FieldCache::new(7);
     cache

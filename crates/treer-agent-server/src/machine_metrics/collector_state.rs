@@ -1,7 +1,7 @@
 //! Inert collector state boundary. Owns both clocks' invalidation domain;
 //! it does not collect hardware samples or expose a query route.
 use super::{
-    field_cache::{CacheError, FieldCache, FieldSnapshot},
+    field_cache::{CacheError, FieldCache, FieldSnapshot, FieldUpdate},
     history::{Clock, History, HistoryError, Limits},
 };
 use treer_protocol::{MachineMetricKind, MachineMetricStatus, MachineMetricsResponse};
@@ -126,18 +126,97 @@ impl CollectorState {
         status: MachineMetricStatus,
         value: Option<f64>,
     ) -> Result<bool, StateError> {
+        self.record_batch(
+            clock,
+            &[FieldUpdate {
+                kind,
+                gpu_id,
+                status,
+                value,
+            }],
+        )
+    }
+
+    fn record_batch(
+        &mut self,
+        clock: Clock,
+        updates: &[FieldUpdate<'_>],
+    ) -> Result<bool, StateError> {
         let mut reset = self.snapshot(clock)?.reset;
-        match self.cache.record(clock, kind, gpu_id, status, value) {
+        match self.cache.record_batch(clock, updates) {
             Err(CacheError::ClockReversed) => {
                 self.invalidate(clock, ResetCause::AcquisitionClock)?;
                 reset = true;
                 self.cache
-                    .record(clock, kind, gpu_id, status, value)
+                    .record_batch(clock, updates)
                     .map_err(StateError::Cache)?;
             }
             result => result.map_err(StateError::Cache)?,
         }
         Ok(reset)
+    }
+
+    /// One completed RAM acquisition: (total bytes, available bytes).
+    /// All three fields become unavailable together if this attempt failed.
+    pub fn record_ram(
+        &mut self,
+        clock: Clock,
+        status: MachineMetricStatus,
+        reading: Option<(u64, u64)>,
+    ) -> Result<bool, StateError> {
+        let values = memory_values(status, reading)?;
+        self.record_batch(
+            clock,
+            &[
+                FieldUpdate {
+                    kind: MachineMetricKind::RamTotal,
+                    gpu_id: None,
+                    status,
+                    value: values.map(|(total, _)| total),
+                },
+                FieldUpdate {
+                    kind: MachineMetricKind::RamAvailable,
+                    gpu_id: None,
+                    status,
+                    value: values.map(|(_, available)| available),
+                },
+                FieldUpdate {
+                    kind: MachineMetricKind::RamUsed,
+                    gpu_id: None,
+                    status,
+                    value: values.map(|(total, available)| total - available),
+                },
+            ],
+        )
+    }
+
+    /// One completed GPU memory acquisition: (total bytes, used bytes).
+    /// Utilization is an independent acquisition with an independent status.
+    pub fn record_vram(
+        &mut self,
+        clock: Clock,
+        gpu_id: &str,
+        status: MachineMetricStatus,
+        reading: Option<(u64, u64)>,
+    ) -> Result<bool, StateError> {
+        let values = memory_values(status, reading)?;
+        self.record_batch(
+            clock,
+            &[
+                FieldUpdate {
+                    kind: MachineMetricKind::GpuMemoryTotal,
+                    gpu_id: Some(gpu_id),
+                    status,
+                    value: values.map(|(total, _)| total),
+                },
+                FieldUpdate {
+                    kind: MachineMetricKind::GpuMemoryUsed,
+                    gpu_id: Some(gpu_id),
+                    status,
+                    value: values.map(|(_, used)| used),
+                },
+            ],
+        )
     }
 
     /// Refuse pre-reset or caller-invented current fields before staging a
@@ -170,6 +249,25 @@ impl CollectorState {
             .push_with_fields(clock, frame, &snapshot.fields)
             .map_err(StateError::History)?;
         Ok(snapshot.reset)
+    }
+}
+
+fn memory_values(
+    status: MachineMetricStatus,
+    reading: Option<(u64, u64)>,
+) -> Result<Option<(f64, f64)>, StateError> {
+    match (status, reading) {
+        (MachineMetricStatus::Ok, Some((total, part)))
+            if part <= total && total <= 9_007_199_254_740_991 =>
+        {
+            Ok(Some((total as f64, part as f64)))
+        }
+        (status, None)
+            if status != MachineMetricStatus::Ok && status != MachineMetricStatus::Stale =>
+        {
+            Ok(None)
+        }
+        _ => Err(StateError::Cache(CacheError::InvalidObservation)),
     }
 }
 

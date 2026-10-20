@@ -289,7 +289,7 @@ refuses the snapshot until the collector handles epoch uncertainty.
 
 This is state arithmetic, not proof of actual hardware sampling. The future
 collector must call record only after real acquisition and coordinate epochs;
-paired RAM/VRAM refreshes still need consistent batch assembly. The History
+actual RAM/VRAM collection must use the atomic batch helpers described below. The History
 frame format now carries these per-field identities through the local staging
 envelope described below. A query adapter must still deduplicate cached
 references before aggregation. This cache adds no sampler, timer, journal,
@@ -312,7 +312,7 @@ projection, allowing canonical empty warming_up fields when absent. It refuses
 caller-invented or pre-reset values before staging, then runs the existing full
 frame validator. This is an inert state boundary, not a sampler or response
 assembler. The bounded local staging encoding below preserves original
-per-field identities; the outer frame tick cannot replace them. Paired acquisitions, removed-GPU
+per-field identities; the outer frame tick cannot replace them. Hardware acquisition, removed-GPU
 inventory, per-range epoch/partial flags, journal integration, singleton IPC,
 authorization and routes remain unfinished. No runtime capability is enabled.
 
@@ -402,5 +402,34 @@ expired fields removed by maintenance. Its name is the fixed diagnostic
 category; no field identifiers, values or clocks are exposed. Repeated reads
 and subsequent maintenance of an already retired key do not increment it.
 This is not a durable counter, log or health endpoint. Removed-GPU presentation,
-batch acquisition, query assembly, journal, singleton IPC, Policy and runtime
+hardware acquisition, query assembly, journal, singleton IPC, Policy and runtime
 sampling remain unfinished.
+
+## Atomic memory acquisition state checkpoint (not connected)
+
+FieldCache now supports a bounded transaction of at most 100 unique field keys.
+It validates batch shape, stages updates in a bounded cache clone, and commits
+only when every update succeeds. Invalid values, duplicate keys, capacity,
+clock conflicts or sequence exhaustion preserve all prior fields and ticks.
+Each field gets its own increasing acquisition identity with the same collector
+completion clock; there is no shared field identity or externally supplied
+acquisition tick.
+
+CollectorState provides `record_ram` for one (total, available) byte reading,
+deriving used = total - available, and `record_vram` for one GPU's (total, used)
+byte reading. Both reject out-of-capacity or inexact wire-integer inputs before
+state maintenance. An Ok attempt requires values; a failed attempt requires
+none and atomically replaces every field in that memory group with the same
+failure status and completion timestamp. GPU utilization remains independent:
+unsupported GPU memory must not erase a valid utilization or replace its age.
+Stale is still a read projection and cannot represent a new attempt.
+
+The coordinator synchronizes clocks/expiry first. A conflicting batch clock
+conservatively invalidates both state components once and retries the entire
+batch in the new epoch. That safety maintenance can mutate state independently
+of the batch, as before; the acquisition transaction itself never partly
+publishes fields or consumes identities on failure. The one-field entry point
+uses the same transaction path. Future RAM/NVML adapters must use these grouped
+entry points for memory readings and stamp the collector's completion clock;
+these helpers do not prove simultaneous native hardware reads, collect memory,
+manage GPU inventory or start a timer. No runtime/API is enabled.
