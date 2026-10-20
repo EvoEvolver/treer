@@ -3,6 +3,12 @@
 Status: proposed contract for Core, Web and Security review. This document does
 not add routes, advertise a capability, or enable machine updates. The owner
 request is issue #222; #111 remains the updater and native acceptance boundary.
+The matching inert wire models live in `treer_protocol::controller_update`.
+They reject extra fields during decoding and provide explicit `validate()`
+methods for shape/outcome consistency. Future adapters must call validation
+after bounded decoding, then independently verify authorization, catalog trust,
+token binding and native evidence. Model validation supplies none of that
+authority and cannot attest to a health check or signed receipt.
 
 ## Existing implementation boundary
 
@@ -33,6 +39,9 @@ Proposed capability: `machine.controller-update.v1`, separately advertised by
 Proxy and by a supported Controller. Unknown or absent capability refuses the
 mutation, irrespective of version strings. Existing GET discovery must remain
 available while the Controller is offline or replaced by an older binary.
+Advertisement is per platform: no native acceptance for that platform means
+no capability there, even if the shared types compile. Discovery precedes
+capability gating in the UI, so a durable operation never disappears offline.
 
 All routes below are human-session routes under
 `/api/workspaces/{ws}/machines/{machine}/controller-update`. Require current
@@ -63,7 +72,10 @@ prepare. Confirm is sent once by the UI, even if its response is lost.
 
 Wire fields below are the minimum proposed shapes, not existing API promises.
 All timestamps are UTC RFC3339 strings. IDs are opaque bounded strings; job and
-operation selectors are canonical non-nil UUIDs, never filesystem paths.
+operation selectors are canonical CSPRNG-generated v4 UUIDs, never filesystem
+paths. Enforce a unique operation ID constraint, binding scope immutably to that
+ID. An expired or abandoned preview ID can never be rebound to another target,
+session or machine, including after cleanup.
 
 `Identity`:
 
@@ -92,6 +104,12 @@ the first implementation can simply omit aliases. Same-version, downgrade,
 unknown ordering, mismatched platform or unavailable current identity cannot
 mint a token. Labels are untrusted plain text, bounded to 128 UTF-8 bytes.
 Permission refusal is HTTP 403, not an empty catalog that looks unsupported.
+Catalog bytes change only through a reviewed Proxy release, not a runtime fetch.
+`catalog_revision` is a positive monotonic integer no greater than 2^53-1; persist
+the accepted revision floor so an older release cannot silently roll it back.
+An older Proxy with a catalog below the floor refuses new preparation; existing
+operation lookup remains available. Current identity has no semantic-version
+claim: display its short release SHA as "Build", with full identity in details.
 
 `Preview`:
 
@@ -157,6 +175,11 @@ For the same authenticated creator/session and still-authorized scope, an
 already-consumed token returns its existing operation without dispatching again.
 This bounded consumed-token mapping is observation, not reusable authority;
 fresh tokens expire as usual. A replay in another scope/session is refused.
+The consumed-token lookup expires 420 seconds after original preparation (TTL
+plus five minutes); it never extends the 120-second acceptance deadline. After
+lookup expiry, refuse the token and use authenticated GET discovery. Foreign
+and nonexistent operation IDs have the same 404 response/code and query path;
+the busy boolean has the same membership/Policy authorization as discovery.
 Two different previews racing for one machine cannot both claim the slot.
 
 The mutation slot must also exclude a provider CLI install. Integrate the claim
@@ -166,6 +189,14 @@ Unconfirmed, partial and rollback-failed updates retain the conflict claim until
 explicit, validated recovery proves ownership safely resolved. Timeout or
 retention expiry cannot free it. Definitive failures also have a 60-second
 per-machine cooldown before a new prepare. There is no UI retry for ambiguity.
+Recovery is a separate explicit operator action outside this browser API,
+audited with operator identity, job and evidence category. It must prove the
+old worker cannot mutate, reconcile installation locks/journal/publications,
+validate active artifact identity and health, and obtain the matching durable
+native recovery result before releasing the Proxy claim. A job-not-found report
+or database edit alone is insufficient. This operator recovery path is not yet
+implemented in #111; its absence blocks production enablement, not continued
+model/UI development. Do not add an ad-hoc clear-slot endpoint here.
 
 ## Restart-safe observation and retention
 
@@ -176,6 +207,10 @@ the existing job after restart; it must not invent a new job from an online bit.
 Reject receipt identity mismatch, revision regression, conflicting equal
 revisions or invalid phase transitions. A later authenticated valid report can
 resolve `unconfirmed`; only that path can clear its claim when safe.
+After a dispatcher dies between acceptance commit and send, reconciliation
+queries the selected Controller for that exact job UUID without dispatch. A
+not-found result waits within the report grace, then becomes unconfirmed and
+keeps the claim. It is never proof that sending is safe or required.
 
 Success requires the matching whole-update `Complete` receipt, target artifact
 identity and correlated updater health evidence. `RolledBack` needs validated
@@ -221,3 +256,5 @@ install/update slot races, lost POST response, death before/after dispatch,
 Proxy/Controller restart, missing/regressing/conflicting receipts, health or
 identity mismatch, partial/rollback-failed results and GET-only browser recovery.
 The existing installer browser and Proxy regression checks remain required.
+Stale-current tests must exercise the prepare-to-confirm window at the Proxy
+and the confirm-to-mutation window under Controller updater locks separately.
