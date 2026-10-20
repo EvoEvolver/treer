@@ -1717,6 +1717,67 @@ cover operation, role, component, revision, head identity/digest, context digest
 and actual failure status, with spent evidence, zero sink and no decision file.
 Those decision-composition checks remain pending until their code lands.
 
+##### Proposed first decision-pin composition test matrix (inert)
+
+The guard-lifetime and binding/reread-custody preparatory fixtures at e3e393b5
+passed exact hosted run 39425785096 on Server 2022/2025 (operation 24, ordinary
+100 passed/four ignored; Core 6934 and security 6933 independently read the raw
+log). They created no decision file. The following matrix is the next review
+input, not a claim that decision composition has been implemented or tested.
+
+Keep the composition below the existing Windows-test-only checked-files
+boundary. Add one private fixture adapter which borrows the original
+FixtureLock, uses the existing Stage CREATE_NEW/write/sync/read-back path and
+returns its existing restrictive ReadPin. Stage and its raw file stay private;
+only the adapter, opaque read-pin type and validate method need checked-files
+visibility. There must be no constructor from an existing pathname or parsed
+decision. This visibility change and a non-test compilation check are part of
+the reviewed diff, not a new production interface.
+
+The native fixture retains the head before acquiring the real collision result.
+After the first exact context match, build the decision using decision_data's
+independent sources and compare against independently assembled 177-byte wire
+expectations before creating anything. Within that matched hook, exclusively
+create and transition the decision, validate its pin, and revalidate the retained
+head and operation binding. Return an owned guard containing the pin; the
+existing consume_with_guard then performs the context reread/digest comparison
+and final binding check before the synchronous sink. The opaque pin must stay
+alive throughout that sink and drop on every result, including unwinding.
+No callback may supply a path, expected identity or replacement decision bytes
+to the adapter. The synthetic lifetime remains explicitly fixture-only.
+
+Run every row for both MoveOld and Publish with fresh attempts. Use separate
+tests whose names do not contain native_operation_retained_head_, preserving
+that existing four-test filter. Test counts and exact raw marker expectations
+must be published with the implementation SHA, rather than guessed here.
+
+| Case | Required observation and preserved state |
+| --- | --- |
+| Accepted sink | Compare all 177 bytes independently; inside the actual sink, native GENERIC_WRITE and DELETE opens each fail with sharing violation 32; accept exactly once. After return both opens succeed, bytes/full identity unchanged, evidence spent and a second invocation never enters its hook. |
+| Refused sink | Pin transition and its validation are reached, sink accepted count stays zero, guard closes, both access probes succeed afterward, complete decision bytes remain and spent retry is refused. Do not claim an on_accept observer ran on this path. |
+| Injected sink panic | Prove the actual sink observer ran with write/delete 32 before injecting a caught panic; after unwind verify released access, unchanged bytes and spent retry refusal. Only this labelled panic is expected. |
+| Pre-existing complete decision | Seed a separate exact valid decision under the same ownership before consumption, close it, retain its full identity and bytes; CREATE_NEW must refuse without replacing it or entering the sink, and evidence remains spent. |
+| Pre-existing partial decision | Seed exactly 17 bytes through the existing interrupted-stage fixture path; preserve full identity and all 17 bytes after refusal and retry; never complete, delete or reinterpret it as fresh authority. |
+| Failure after decision creation | Explicit flag proves create/read-back was reached before an injected refusal; preserve the full decision, zero sink, spent retry and released handles. Label it an injected refusal, not an OS sync failure or process death. |
+| Replaced complete decision during transition gap | Keep the original object alive under another fixed fixture name, create a separate same-bytes object at the slot, prove distinct full identities; transition refuses and preserves both objects/bytes with zero sink and spent retry. No invisible rewrite-and-restore or concurrent-adversary claim. |
+| Post-transition head custody failure | Flag after successful decision pin validation, use the existing scoped ACL-loss fixture on the head, and recheck it before returning the guard; restore the ACL and preserve decision/head bytes, zero sink, spent retry. |
+| Post-transition evidence custody failure | Flag after decision pin validation, remove evidence ACL protection with the existing scoped fixture, then let the consumer's reread refuse with validated=false/read_calls=0; restore ACL and preserve evidence/decision bytes, zero sink and spent retry. This is not a native ReadFile error. |
+
+Reuse the independent decision_data field-mismatch table before creation and
+assert no decision file for every mismatch. Preserve the earlier actual
+ReadFile-error and guard-failure tests unchanged in operation and ordinary
+hosted groups; those earlier first-read errors do not prove a guarded second
+ReadFile failure. Guard observation inside the consumer's reread/checkpoints,
+guarded digest mismatch and actual second-ReadFile failure remain explicit
+gaps; neither a success-path decision pin nor a custody refusal closes them.
+
+Each fault must prove its injection boundary was reached before accepting a
+refusal as evidence. Drop guards before fixture cleanup, verify preserved bytes
+and identities before removing only the fixture-owned files, and surface cleanup
+failures. No fixture result grants restart recovery, replay/CAS, a production
+supervisor lifetime, Controller adapter, installation mutation or W4 authority.
+Exact-SHA dual-Windows raw logs are required before accepting the implementation.
+
 The first preparatory code slice only reorders `BoundStored::consume`: spend,
 binding check, evidence read, exact expected-context comparison, callback,
 post-callback binding check, sink. Its existing ten foreign-binding controls
