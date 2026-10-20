@@ -874,3 +874,13 @@ both inconsistent directions. This tightens acceptance without changing wire
 fields. Frozen Web fe324023 predates this converse rule; Web must implement and
 verify the same rejection before a Core/Web union can be accepted. Its existing
 component evidence remains valid for its recorded commit and earlier rules.
+
+Web successor 7a607c8a and the Rust bounded-response test now consume identical
+docs/fixtures/machine-metrics-presence-vectors.json bytes, with SHA256
+85273f78b68942c49a04c51aa3c62ccbfaa7c2827acd79585dc4ee429d21bbc9
+asserted before parsing. Its schema-one eight fixed answers explicitly specify
+the descriptor presence and all three GPU statuses: two accepted cases and six
+single-field inconsistent cases. Rust uses those literal answers rather than
+recomputing expected results from its validator. Web's production parser is
+unchanged from d7287501; its successor browser/full gates and new freeze remain
+pending. Shared vectors alone do not establish browser or runtime acceptance.

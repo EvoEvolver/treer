@@ -1,0 +1,85 @@
+{
+  "schema": 1,
+  "vectors": [
+    {
+      "name": "present/warming_up",
+      "present": true,
+      "statuses": {
+        "gpu_utilization": "warming_up",
+        "gpu_memory_used": "warming_up",
+        "gpu_memory_total": "warming_up"
+      },
+      "accepted": true
+    },
+    {
+      "name": "present/device_absent/gpu_utilization",
+      "present": true,
+      "statuses": {
+        "gpu_utilization": "device_absent",
+        "gpu_memory_used": "warming_up",
+        "gpu_memory_total": "warming_up"
+      },
+      "accepted": false
+    },
+    {
+      "name": "present/device_absent/gpu_memory_used",
+      "present": true,
+      "statuses": {
+        "gpu_utilization": "warming_up",
+        "gpu_memory_used": "device_absent",
+        "gpu_memory_total": "warming_up"
+      },
+      "accepted": false
+    },
+    {
+      "name": "present/device_absent/gpu_memory_total",
+      "present": true,
+      "statuses": {
+        "gpu_utilization": "warming_up",
+        "gpu_memory_used": "warming_up",
+        "gpu_memory_total": "device_absent"
+      },
+      "accepted": false
+    },
+    {
+      "name": "absent/device_absent",
+      "present": false,
+      "statuses": {
+        "gpu_utilization": "device_absent",
+        "gpu_memory_used": "device_absent",
+        "gpu_memory_total": "device_absent"
+      },
+      "accepted": true
+    },
+    {
+      "name": "absent/warming_up/gpu_utilization",
+      "present": false,
+      "statuses": {
+        "gpu_utilization": "warming_up",
+        "gpu_memory_used": "device_absent",
+        "gpu_memory_total": "device_absent"
+      },
+      "accepted": false
+    },
+    {
+      "name": "absent/warming_up/gpu_memory_used",
+      "present": false,
+      "statuses": {
+        "gpu_utilization": "device_absent",
+        "gpu_memory_used": "warming_up",
+        "gpu_memory_total": "device_absent"
+      },
+      "accepted": false
+    },
+    {
+      "name": "absent/warming_up/gpu_memory_total",
+      "present": false,
+      "statuses": {
+        "gpu_utilization": "device_absent",
+        "gpu_memory_used": "device_absent",
+        "gpu_memory_total": "warming_up"
+      },
+      "accepted": false
+    }
+  ]
+}

@@ -299,23 +299,46 @@ mod tests {
             )
             .is_ok()
         };
-        assert!(valid(&response));
-        // Every GPU kind must enforce the converse, not only utilization.
-        for index in 4..7 {
-            response.series[index].current.status = MachineMetricStatus::DeviceAbsent;
-            assert!(!valid(&response));
-            response.series[index].current.status = MachineMetricStatus::WarmingUp;
+        use sha2::{Digest, Sha256};
+        let bytes = include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/fixtures/machine-metrics-presence-vectors.json"
+        ));
+        assert_eq!(
+            format!("{:x}", Sha256::digest(bytes)),
+            "85273f78b68942c49a04c51aa3c62ccbfaa7c2827acd79585dc4ee429d21bbc9"
+        );
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Vectors {
+            schema: u8,
+            vectors: Vec<Vector>,
         }
-        response.gpus[0].present = false;
-        response.gpu_status = MachineMetricStatus::NoDevice;
-        for series in &mut response.series[4..] {
-            series.current.status = MachineMetricStatus::DeviceAbsent;
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Vector {
+            name: String,
+            present: bool,
+            statuses: std::collections::BTreeMap<String, MachineMetricStatus>,
+            accepted: bool,
         }
-        assert!(valid(&response));
-        for index in 4..7 {
-            response.series[index].current.status = MachineMetricStatus::WarmingUp;
-            assert!(!valid(&response));
-            response.series[index].current.status = MachineMetricStatus::DeviceAbsent;
+        let vectors: Vectors = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(vectors.schema, 1);
+        assert_eq!(vectors.vectors.len(), 8);
+        assert_eq!(vectors.vectors.iter().filter(|v| v.accepted).count(), 2);
+        for vector in vectors.vectors {
+            response.gpus[0].present = vector.present;
+            response.gpu_status = if vector.present {
+                MachineMetricStatus::Ok
+            } else {
+                MachineMetricStatus::NoDevice
+            };
+            assert_eq!(vector.statuses.len(), 3);
+            for series in &mut response.series[4..] {
+                let key = serde_json::to_value(series.kind).unwrap();
+                series.current.status = vector.statuses[key.as_str().unwrap()];
+            }
+            assert_eq!(valid(&response), vector.accepted, "{}", vector.name);
         }
     }
 
